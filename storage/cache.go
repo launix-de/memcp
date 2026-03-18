@@ -44,9 +44,11 @@ const (
 	numEvictableTypes                      // sentinel for array sizing
 )
 
-// evictableFactors maps EvictableType → rebuild cost factor.
-// Higher factor = more protected = lower evictionScore.
-var evictableFactors = [numEvictableTypes]int64{1, 20, 1, 10, 1, 1}
+// evictableWeights maps EvictableType → eviction weight.
+// Higher weight = higher evictionScore = evicted sooner.
+// Low weight = more protected (expensive to rebuild).
+//                                         TempCol Shard Index TempKT CacheEntry StringDict
+var evictableWeights = [numEvictableTypes]int64{20, 1, 2, 10, 5, 20}
 
 var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry", "StringDict"}
 
@@ -54,7 +56,7 @@ type softItem struct {
 	pointer       any
 	size          int64
 	evictType     EvictableType
-	evictionScore int64 // = size / factor (static, max-heap key)
+	evictionScore int64 // = size * weight (static, max-heap key); higher = evicted sooner
 	cleanup       func(pointer any, freedByType *[numEvictableTypes]int64) bool
 	getLastUsed   func(pointer any) time.Time
 	getScore      func(pointer any) float64 // optional type-specific telemetry
@@ -239,12 +241,12 @@ func (cm *CacheManager) AddItem(
 	if cm.stopped.Load() {
 		return
 	}
-	factor := evictableFactors[evictType]
+	weight := evictableWeights[evictType]
 	item := &softItem{
 		pointer:       pointer,
 		size:          size,
 		evictType:     evictType,
-		evictionScore: size / factor,
+		evictionScore: size * weight,
 		cleanup:       cleanup,
 		getLastUsed:   getLastUsed,
 		getScore:      getScore,
@@ -270,12 +272,12 @@ func (cm *CacheManager) AddItemEx(
 	if cm.opChan == nil || cm.stopped.Load() {
 		return
 	}
-	factor := evictableFactors[evictType]
+	weight := evictableWeights[evictType]
 	item := &softItem{
 		pointer:       pointer,
 		size:          size,
 		evictType:     evictType,
-		evictionScore: size / factor,
+		evictionScore: size * weight,
 		cleanup:       cleanup,
 		getLastUsed:   getLastUsed,
 		getScore:      getScore,
@@ -539,7 +541,7 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 	scm.AdjustMemStats(delta)
 	cm.sizeByType[item.evictType] += delta
 	item.size += delta
-	item.evictionScore = item.size / evictableFactors[item.evictType]
+	item.evictionScore = item.size * evictableWeights[item.evictType]
 	if item.heapIndex >= 0 {
 		heap.Fix(&cm.h, item.heapIndex)
 	}
@@ -585,7 +587,8 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 	}
 	candidates = alive
 
-	// score dynamically
+	// score dynamically: age * evictionScore, reduced by telemetry
+	// high dynamicScore = old + large + unimportant → evict first
 	now := time.Now()
 	for _, c := range candidates {
 		age := now.Sub(c.getLastUsed(c.pointer)).Seconds()
@@ -593,8 +596,7 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		if c.getScore != nil {
 			telemetry = c.getScore(c.pointer)
 		}
-		c.dynamicScore = age - telemetry*telemetryWeight
-		// high dynamicScore = old + unimportant → evict
+		c.dynamicScore = age*float64(c.evictionScore) - telemetry*telemetryWeight
 	}
 
 	// sort by dynamicScore (worst first)

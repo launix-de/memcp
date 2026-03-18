@@ -927,7 +927,5 @@ func skipListLastUsed(ptr any) time.Time {
 }
 
 func skipListGetScore(ptr any) float64 {
-	// 1/100 of index score: evict skip lists before evicting the whole index
-	e := ptr.(*skipListCacheEntry)
-	return e.index.Savings * 0.01
+	return 1 // minimal telemetry protection; index has Savings (2+) so skip lists evicted first
 }
