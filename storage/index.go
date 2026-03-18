@@ -633,12 +633,10 @@ start_scan:
 		return
 	}
 	snapMainIndexes := s.mainIndexes
-	var snapDeltaBtree *btree.BTreeG[indexPair]
-	if s.deltaBtree != nil {
-		// Clone under the index lock so scans can iterate a stable delta snapshot
-		// while concurrent inserts keep mutating the live tree.
-		snapDeltaBtree = s.deltaBtree.Clone()
-	}
+	// No clone needed: the shard's RLock (held by caller) prevents concurrent
+	// inserts from modifying deltaBtree. The index mutex protects against
+	// eviction only; the btree data is stable under RLock.
+	snapDeltaBtree := s.deltaBtree
 	isNative := s.Native
 	s.mu.Unlock()
 
