@@ -452,16 +452,16 @@ test_cases:
         - id: 10
         - id: 13
 
-  # --- Cross-check ---
-  - name: "Cross-check LIKE vs total"
+  # --- Cross-check alternating ---
+  - name: "Cross-check alternating LIKE vs total"
     sql: |
       SELECT
-        (SELECT COUNT(*) FROM ft_large WHERE name LIKE '%laus%') AS like_cnt,
-        (SELECT COUNT(*) FROM ft_large) AS total
+        (SELECT COUNT(*) FROM ft_alternating WHERE name LIKE '%Person%') AS like_cnt,
+        (SELECT COUNT(*) FROM ft_alternating) AS total
     expect:
       rows: 1
       data:
-        - like_cnt: 5
+        - like_cnt: 3333
           total: 10000
 
 cleanup:
