@@ -1403,6 +1403,18 @@ WHAT IT MUST NOT DO:
 								) false)
 								false))
 							(define use_materialize (or subquery_has_window unsupported_groups))
+							/* Window-function LIMIT pushdown */
+							(define mat_limit nil)
+							(if subquery_has_window (begin
+								(define _check_wf_limit (lambda (cond) (match cond
+									'('<= '('get_column _ _ col _) n) (if (and (not (nil? (get_assoc fields2 col))) (not (equal? (extract_window_funcs (get_assoc fields2 col)) '())))
+										(set mat_limit n) nil)
+									'('< '('get_column _ _ col _) n) (if (and (not (nil? (get_assoc fields2 col))) (not (equal? (extract_window_funcs (get_assoc fields2 col)) '())))
+										(set mat_limit (- n 1)) nil)
+									'('and a b) (begin (_check_wf_limit a) (_check_wf_limit b))
+									nil)))
+								(_check_wf_limit condition)
+							))
 							/* if groups2 had only pass-through stages (no GROUP/HAVING/LIMIT/OFFSET), strip them for flattening */
 							(if (and groups2_present (not unsupported_groups))
 								(set groups2 nil))
@@ -1415,10 +1427,25 @@ WHAT IT MUST NOT DO:
 										(list (quote set) rows_sym (list (quote newsession)))
 										(list rows_sym "rows" '())
 										(list (quote set) resultrow_sym (symbol "resultrow"))
-										(list (quote set) (symbol "resultrow")
-											(list (quote lambda) (list (symbol "item"))
-												(list rows_sym "rows"
-													(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+										(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
+										(if (nil? mat_limit)
+											/* no limit */
+											(list (quote set) (symbol "resultrow")
+												(list (quote lambda) (list (symbol "item"))
+													(list rows_sym "rows"
+														(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+											)
+											/* with limit: stop collecting after mat_limit rows */
+											(list (quote begin)
+												(list (quote set) cnt_sym 0)
+												(list (quote set) (symbol "resultrow")
+													(list (quote lambda) (list (symbol "item"))
+														(list (quote if) (list (quote <) cnt_sym mat_limit)
+															(list (quote begin)
+																(list (quote set) cnt_sym (list (quote +) cnt_sym 1))
+																(list rows_sym "rows"
+																	(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+															nil))))
 										)
 										(build_queryplan_term subquery)
 										(list (quote set) (symbol "resultrow") resultrow_sym)
