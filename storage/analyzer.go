@@ -16,7 +16,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "sort"
 import "github.com/carli2/hybridsort"
 import "strings"
 import "github.com/launix-de/memcp/scm"
@@ -446,7 +445,7 @@ func reorderByFrequency(bounds boundaries, t *table) {
 	for _, b := range bounds {
 		t.bumpColFreq(b.col)
 	}
-	sort.SliceStable(bounds, func(i, j int) bool {
+	hybridsort.SliceStable(bounds, func(i, j int) bool {
 		iEq := boundaryIsPoint(bounds[i])
 		jEq := boundaryIsPoint(bounds[j])
 		if iEq != jEq {
