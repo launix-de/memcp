@@ -787,7 +787,7 @@ func init() {
 			DeclarationParameter{"condition...", "any", "condition to evaluate", nil},
 			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true", nil},
 			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false", nil},
-		}, "returntype", nil, true, false, nil,
+		}, "returntype", nil, true, false, &TypeDescriptor{Optimize: optimizeIf},
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{

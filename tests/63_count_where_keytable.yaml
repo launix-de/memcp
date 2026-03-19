@@ -1,0 +1,81 @@
+# COUNT(*) with WHERE conditions exercises the keytable code path
+# (.table:(1) keytable for global aggregates).
+# Regression test for a race where keytable eviction + concurrent
+# re-creation could leave the shard without the key column "1".
+
+metadata:
+  version: "1.0"
+  description: "COUNT(*) with WHERE conditions on keytable"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ckw_features"
+  - sql: |
+      CREATE TABLE ckw_features (
+        uid INT, form TEXT, subid TEXT, k TEXT, v TEXT
+      )
+  - sql: |
+      INSERT INTO ckw_features VALUES
+        (1, 'form_a', 'sub1', 'collapsed', 'true'),
+        (1, 'form_a', 'sub2', 'collapsed', 'false'),
+        (NULL, 'form_a', 'sub1', 'collapsed', 'true'),
+        (NULL, 'form_a', 'sub1', 'expanded', 'true'),
+        (2, 'form_b', 'sub1', 'collapsed', 'true'),
+        (NULL, 'form_b', 'sub1', 'collapsed', 'false')
+
+test_cases:
+
+  # Global COUNT(*) — no GROUP BY, keytable key is constant 1
+  # Global COUNT(*) — no GROUP BY, keytable key is constant 1
+  - name: "COUNT(*) no WHERE"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features"
+    expect:
+      rows: 1
+      data:
+        - c: 6
+
+  - name: "COUNT(*) with single WHERE"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features WHERE form = 'form_a'"
+    expect:
+      rows: 1
+      data:
+        - c: 4
+
+  - name: "COUNT(*) with multi-condition WHERE using IS NULL"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features WHERE uid IS NULL AND form = 'form_a' AND subid = 'sub1' AND k = 'collapsed'"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+  - name: "COUNT(*) with = NULL returns zero (SQL standard)"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features WHERE uid = NULL AND form = 'form_a' AND subid = 'sub1' AND k = 'collapsed'"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+  - name: "COUNT(*) with WHERE returning zero"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features WHERE uid IS NULL AND form = 'nonexistent'"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+  # Run the same query again to exercise the keytable reuse path
+  - name: "COUNT(*) reuse keytable"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features WHERE uid IS NULL AND form = 'form_a' AND subid = 'sub1' AND k = 'collapsed'"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+  # Different WHERE on same table — adds a new computed column to the same keytable
+  - name: "COUNT(*) different WHERE same keytable"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features WHERE uid IS NULL AND form = 'form_b' AND subid = 'sub1' AND k = 'collapsed'"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ckw_features"
