@@ -139,8 +139,8 @@ restart:
 						}
 					}
 					symStr := string(sym)
-					if strings.Contains(symStr, ".") && !strings.Contains(symStr, ":") {
-						suffix := ":" + symStr
+					if strings.Contains(symStr, ".") && !strings.Contains(symStr, "\x00") {
+						suffix := "\x00" + symStr
 						for env := en.Outer; env != nil; env = env.Outer {
 							for key, val := range env.Vars {
 								if strings.HasSuffix(string(key), suffix) {

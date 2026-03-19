@@ -153,7 +153,7 @@ func tokenize(source, s string) []Scmer {
 	line := 1
 	col := 0
 
-	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t")
+	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t", "\\0", "\x00")
 	state := 0
 	startToken := 0
 	result := make([]Scmer, 0)

@@ -1,0 +1,73 @@
+# Column names containing colons must not collide with the internal
+# null-byte alias separator used by derived table flattening.
+
+metadata:
+  version: "1.0"
+  description: "Column names with colons in derived tables"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ccn_parent"
+  - sql: "DROP TABLE IF EXISTS ccn_child"
+  - sql: |
+      CREATE TABLE ccn_parent (
+        ID INT PRIMARY KEY,
+        name TEXT
+      )
+  - sql: |
+      CREATE TABLE ccn_child (
+        ID INT PRIMARY KEY,
+        `dynamic:parent` INT,
+        `dynamic:time` INT,
+        val TEXT
+      )
+  - sql: |
+      INSERT INTO ccn_parent VALUES (1, 'alpha'), (2, 'beta')
+  - sql: |
+      INSERT INTO ccn_child VALUES
+        (1, 1, 100, 'old'),
+        (2, 1, 200, 'new'),
+        (3, 2, 100, 'only')
+
+test_cases:
+
+  - name: "direct select with colon column"
+    sql: "SELECT `dynamic:parent`, val FROM ccn_child WHERE `dynamic:parent` = 1 ORDER BY `dynamic:time`"
+    expect:
+      rows: 2
+
+  - name: "derived table with colon column"
+    sql: "SELECT t.* FROM (SELECT `dynamic:parent`, val FROM ccn_child) t WHERE t.`dynamic:parent` = 2"
+    expect:
+      rows: 1
+      data:
+        - dynamic:parent: 2
+          val: "only"
+
+  - name: "correlated subselect with colon column"
+    sql: |
+      SELECT p.name,
+        (SELECT c.val FROM ccn_child c WHERE c.`dynamic:parent` = p.ID ORDER BY c.`dynamic:time` DESC LIMIT 1) AS latest
+      FROM ccn_parent p ORDER BY p.ID
+    expect:
+      rows: 2
+      data:
+        - name: "alpha"
+          latest: "new"
+        - name: "beta"
+          latest: "only"
+
+  - name: "COUNT with colon column in WHERE"
+    sql: "SELECT COUNT(*) AS c FROM ccn_child WHERE `dynamic:parent` = 1"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
+  - name: "JOIN on colon column"
+    sql: "SELECT p.name, c.val FROM ccn_parent p JOIN ccn_child c ON c.`dynamic:parent` = p.ID ORDER BY c.ID"
+    expect:
+      rows: 3
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ccn_child"
+  - sql: "DROP TABLE IF EXISTS ccn_parent"

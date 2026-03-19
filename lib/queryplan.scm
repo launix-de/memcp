@@ -235,7 +235,7 @@ to avoid matching outer tables which would break scope resolution. */
 			(define resolved_alias (if (nil? alias_)
 				/* unqualified: search non-prefixed aliases only (local tables) */
 				(reduce_assoc all_schemas (lambda (a alias cols)
-					(if (and (equal? (replace (string alias) ":" "") (string alias))
+					(if (and (equal? (replace (string alias) "\0" "") (string alias))
 						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 						alias a)) nil)
 				/* qualified: search all schemas including outer */
@@ -1327,15 +1327,15 @@ WHAT IT MUST NOT DO:
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
 									/* resolve unqualified column against inner schemas2; must match exactly one table.
-									Skip aliases that contain ':' — those are prefixed from flattened derived tables
+									Skip aliases that contain \0 (null byte) — those are prefixed from flattened derived tables
 									and should not participate in unqualified column resolution. */
 									(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
-										(if (and (equal? (replace alias ":" "") alias)
+										(if (and (equal? (replace alias "\0" "") alias)
 											(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 											(cons alias acc)
 											acc)) '()))
 									(match matches
-										(cons only '()) '('get_column (concat id ":" only) ti col ci)
+										(cons only '()) '('get_column (concat id "\0" only) ti col ci)
 										'() (begin
 											/* column not in schemas2 - check if it's a SELECT alias in fields2 */
 											(if (nil? (fields2 col))
@@ -1347,14 +1347,14 @@ WHAT IT MUST NOT DO:
 										(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 									)
 								)
-								'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+								'((symbol get_column) alias_ ti col ci) '('get_column (concat id "\0" alias_) ti col ci)
 								'((symbol outer) outer_arg) (begin
 									/* prefix outer variable reference if it refers to a table in schemas2 */
 									(define s (string outer_arg))
 									(define parts (split s "."))
 									(match parts
 										(list tbl col) (if (not (nil? (schemas2 tbl)))
-											(list (quote outer) (symbol (concat id ":" tbl "." col)))
+											(list (quote outer) (symbol (concat id "\0" tbl "." col)))
 											(list (quote outer) outer_arg))
 										_ (list (quote outer) (replace_column_alias outer_arg))
 									)
@@ -1364,7 +1364,7 @@ WHAT IT MUST NOT DO:
 							)))
 							/* prefix all table aliases and transform their joinexprs */
 							(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
-								(list (concat id ":" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+								(list (concat id "\0" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
 							/* helper function to transform joinexpr: only transform references to subquery alias id */
 							(define transform_joinexpr (lambda (expr) (match expr
 								'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
@@ -1448,7 +1448,7 @@ WHAT IT MUST NOT DO:
 										(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)))
 											(list (quote if) joinexpr2 expr nil)
 											expr)))
-									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
+									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
 								)
 							)
 						) (error "non matching return value for untangle_query"))
