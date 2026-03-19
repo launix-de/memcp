@@ -1683,8 +1683,11 @@ WHAT IT MUST NOT DO:
 			/* eliminate unused LEFT JOINs: if no column of a LEFT JOIN table
 			is referenced in fields, condition, or group stages, the join
 			cannot affect row count and can be safely removed */
+			/* eliminate unused LEFT JOINs: a LEFT JOIN is unused when none of its
+			columns appear in fields or group stages. The merged condition includes
+			joinexprs which reference the JOIN itself — those must not prevent
+			elimination. We only check fields + groups (the query's output). */
 			(define _used_tvs (merge_unique
-				(extract_tblvars _canon_condition)
 				(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
 				(merge (map _canon_groups (lambda (stage)
 					(merge_unique
@@ -1694,6 +1697,16 @@ WHAT IT MUST NOT DO:
 			(define _pruned_tables (filter tables (lambda (t) (match t
 				'(alias _ _ isOuter _) (if isOuter (has? _used_tvs alias) true)
 				true))))
+			/* rebuild condition: drop AND-parts that reference ONLY eliminated aliases */
+			(define _kept_aliases (map _pruned_tables (lambda (t) (match t '(alias _ _ _ _) alias nil))))
+			(define _canon_condition (if (equal? (count _pruned_tables) (count tables)) _canon_condition
+				(begin
+					(define _cond_parts (match _canon_condition (cons (symbol and) parts) parts (list _canon_condition)))
+					(define _kept_parts (filter _cond_parts (lambda (part)
+						(reduce (extract_tblvars part) (lambda (acc tv) (or acc (has? _kept_aliases tv))) false))))
+					(if (equal? 0 (count _kept_parts)) true
+						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
+							(cons 'and _kept_parts))))))
 			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
 		)
 	)
