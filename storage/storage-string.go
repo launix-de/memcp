@@ -18,7 +18,7 @@ package storage
 
 import "io"
 import "fmt"
-import "sort"
+import "github.com/carli2/hybridsort"
 import "sync"
 import "time"
 import "unsafe"
@@ -823,7 +823,7 @@ func (s *StorageString) init(i uint32) {
 		for orig, start := range s.reverseMap {
 			entries = append(entries, dictEntry{orig, uint32(start[0]), start[1]})
 		}
-		sort.Slice(entries, func(a, b int) bool { return entries[a].rawOff < entries[b].rawOff })
+		hybridsort.Slice(entries, func(a, b int) bool { return entries[a].rawOff < entries[b].rawOff })
 
 		s.values.init(i)
 		s.starts.init(uint32(s.count))

@@ -16,7 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "sort"
+import "github.com/carli2/hybridsort"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
@@ -604,7 +604,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	// them like any other column; the LIKE pattern is a query-level overlay that filters
 	// via rowWithinBounds, not via sort order. The binary search skips LIKE columns.
 	if len(cols) > 1 {
-		sort.Slice(cols, func(i, j int) bool {
+		hybridsort.Slice(cols, func(i, j int) bool {
 			iPoint := boundaryIsPoint(cols[i])
 			jPoint := boundaryIsPoint(cols[j])
 			if iPoint != jPoint {
@@ -624,7 +624,7 @@ func reorderByFrequency(bounds boundaries, t *table) {
 	for _, b := range bounds {
 		t.bumpColFreq(b.col)
 	}
-	sort.SliceStable(bounds, func(i, j int) bool {
+	hybridsort.SliceStable(bounds, func(i, j int) bool {
 		iEq := boundaryIsPoint(bounds[i])
 		jEq := boundaryIsPoint(bounds[j])
 		if iEq != jEq {
