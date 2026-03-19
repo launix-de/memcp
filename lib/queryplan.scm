@@ -222,6 +222,7 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	(symbol scan) true '(quote scan) true 'scan true
 	(symbol scan_order) true '(quote scan_order) true 'scan_order true
 	(symbol scalar_scan) true '(quote scalar_scan) true 'scalar_scan true
+	(symbol newpromise) true '(quote newpromise) true 'newpromise true
 	(symbol newsession) true '(quote newsession) true 'newsession true
 	_ false)))
 /* canonicalize_columns resolves ti/ci flags to canonical casing.
@@ -802,22 +803,6 @@ WHAT IT MUST NOT DO:
 							(cons only '()) only
 							_ (error "scalar subselect must return single column")
 						))
-						(define scalar_neutral (list (quote quote) (quote __scalar_empty)))
-						(define scalar_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
-							(list (quote if)
-								(list (quote equal?) (quote acc) scalar_neutral)
-								(list (quote if)
-									(list (quote equal?) (quote v) scalar_neutral)
-									(quote acc)
-									(quote v)
-								)
-								(list (quote if)
-									(list (quote equal?) (quote v) scalar_neutral)
-									(quote acc)
-									(list (quote error) "scalar subselect returned more than one row")
-								)
-							)
-						))
 						(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
 						/* wrap remaining unresolved qualified get_column refs as (outer tbl.col).
@@ -902,14 +887,8 @@ WHAT IT MUST NOT DO:
 							(begin
 								/* hash of inner query after column-resolution — used as dedup key and unique name suffix */
 								(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
-								(define _sq_acc_name (concat "accsess_" _sq_hash))
+								(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
 								(define _sq_rr_name  (concat "__scalar_resultrow_" _sq_hash))
-								/*
-								* Do not reuse the naked accumulator read expression for identical scalar subqueries.
-								* In projection+aggregate pipelines the cached `accsess_*` read can be emitted
-								* without the local `!begin` that initializes the session, which breaks at runtime.
-								* Keeping the full setup per occurrence is slower but preserves correctness.
-								*/
 								(begin
 									(define replace_resultrow (lambda (expr) (match expr
 										(cons sym args) (if (equal? sym (quote resultrow))
@@ -923,24 +902,16 @@ WHAT IT MUST NOT DO:
 									)))
 									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
 									(list (quote !begin)
-										(list (quote set) (symbol _sq_acc_name) (list (quote newsession)))
-										(list (symbol _sq_acc_name) "acc" scalar_neutral)
+										(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
 										(list (quote set) (symbol _sq_rr_name)
 											(list (quote lambda) (list (symbol "row"))
-												(list (quote begin)
-													(list (symbol _sq_acc_name) "acc"
-														(list scalar_reduce
-															(list (symbol _sq_acc_name) "acc")
-															(list (quote nth) (symbol "row") 1)))
-													true
-												)
+												(list (symbol _sq_promise_name) "once"
+													(list (quote nth) (symbol "row") 1)
+													"scalar subselect returned more than one row")
 											)
 										)
 										subplan
-										(list (quote if)
-											(list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral)
-											nil
-											(list (symbol _sq_acc_name) "acc"))
+										(list (symbol _sq_promise_name) "value")
 									)
 								)
 							)

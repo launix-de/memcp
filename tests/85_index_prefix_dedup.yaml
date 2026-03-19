@@ -85,7 +85,7 @@ test_cases:
         (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
-        (if (equal? cols "a|b") "ok"
+        (if (equal? cols "a(equal)|b(equal)") "ok"
           (error (concat "expected a|b, got " cols))))
 
   - name: "Compound index has accumulated savings from prefix queries"
@@ -121,7 +121,7 @@ test_cases:
         (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
-        (if (equal? cols "a|b") "ok"
+        (if (equal? cols "a(equal)|b(equal)") "ok"
           (error (concat "expected a|b after rebuild, got " cols))))
 
   - name: "Post-rebuild: savings decayed (< pre-rebuild value)"
@@ -236,7 +236,7 @@ test_cases:
         (set indexes ((show "memcp-tests" "idx_rev" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
-        (if (equal? cols "p|q") "ok"
+        (if (equal? cols "p(equal)|q(equal)") "ok"
           (error (concat "expected p|q, got " cols))))
 
   - name: "Post-rebuild: merged savings from both indexes"

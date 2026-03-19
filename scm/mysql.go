@@ -21,8 +21,8 @@ import "os"
 import "fmt"
 import "net"
 import "sync"
-import "errors"
 import "strings"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 import "runtime"
 import "sync/atomic"
 import "github.com/launix-de/go-mysqlstack/xlog"
@@ -151,10 +151,10 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	password := Apply(m.authcallback, NewString(session.User()))
 	if password.IsNil() {
 		// user does not exist
-		return errors.New("Auth failed")
+		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
 	}
 	if !session.TestPassword([]byte(password.String())) {
-		return errors.New("Auth failed")
+		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
 	}
 	return nil
 }
@@ -162,7 +162,7 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	m.log.Info("%s", "db "+database)
 	allowed := Apply(m.schemacallback, NewString(session.User()), NewString(database))
 	if !allowed.Bool() {
-		return errors.New("access denied for database " + database)
+		return sqldb.NewSQLErrorf(sqldb.ER_ACCESS_DENIED_ERROR, "access denied for database %s", database)
 	}
 	session.SetSchema(database)
 	return nil
@@ -330,11 +330,14 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	rowcount := func() Scmer {
 		defer func() {
 			if r := recover(); r != nil {
-				errMsg := fmt.Sprint(r)
-				buf := make([]byte, 8192)
-				n := runtime.Stack(buf, false)
-				PrintError("error in mysql connection: " + errMsg + "\n" + string(buf[:n]))
-				myerr = ErrorWrapper(errMsg)
+				if sqlErr, ok := r.(*sqldb.SQLError); ok {
+					PrintError("error in mysql connection: " + sqlErr.Error())
+					myerr = sqlErr
+				} else {
+					errMsg := fmt.Sprint(r)
+					PrintError("error in mysql connection: " + errMsg)
+					myerr = ErrorWrapper(errMsg)
+				}
 			}
 		}()
 		callbackFn := NewFunc(func(a ...Scmer) Scmer {

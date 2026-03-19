@@ -727,12 +727,12 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	// to avoid deadlock: AddItem → run() → evict → keytableCleanup → TryLock(schemalock)
 	if strings.HasPrefix(name, ".") {
 		schemaName := schema
-		GlobalCache.AddItem(t, 0, TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
+		GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
 			return keytableCleanup(ptr.(*table), schemaName, freedByType)
 		}, keytableLastUsed, nil)
 	} else if pm == Cache {
 		// Register the initial shard so eviction can reach it before the first rebuild.
-		GlobalCache.AddItem(t.Shards[0], 0, TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 	}
 	return t, true
 }
