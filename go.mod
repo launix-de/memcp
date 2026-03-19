@@ -44,7 +44,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.6 // indirect
 	github.com/aws/smithy-go v1.24.0 // indirect
-	github.com/carli2/hybridsort v0.0.0-20260319194603-ddd18ae27ffa // indirect
+	github.com/carli2/hybridsort v0.0.0-20260319211747-bc628a3877c1 // indirect
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	golang.org/x/exp v0.0.0-20241009180824-f66d83c29e7c // indirect

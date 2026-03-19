@@ -42,6 +42,8 @@ github.com/carli2/hybridsort v0.0.0-20260319191746-8429712d7a1c h1:h9PAuqFyYi8dC
 github.com/carli2/hybridsort v0.0.0-20260319191746-8429712d7a1c/go.mod h1:ZSL9x9C2qLz4fL7VZdCs7QZCqNBkBZkcYtY0Fcw2Ezo=
 github.com/carli2/hybridsort v0.0.0-20260319194603-ddd18ae27ffa h1:nS1j57V0eKCC2ydo3ja9QTP2hl0EI/vntgp8cVJ1rVw=
 github.com/carli2/hybridsort v0.0.0-20260319194603-ddd18ae27ffa/go.mod h1:ZSL9x9C2qLz4fL7VZdCs7QZCqNBkBZkcYtY0Fcw2Ezo=
+github.com/carli2/hybridsort v0.0.0-20260319211747-bc628a3877c1 h1:YhHOYcRJ5z+Vc2ly2qJnAAF15qPYxQR39sibTmDfKUM=
+github.com/carli2/hybridsort v0.0.0-20260319211747-bc628a3877c1/go.mod h1:ZSL9x9C2qLz4fL7VZdCs7QZCqNBkBZkcYtY0Fcw2Ezo=
 github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a h1:qnerlW5tSOXN0OYjUAscEZWzTzTzSP+ASRJwpUdfya4=
 github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a/go.mod h1:homfLqTYRFyVYemLBFl5GgL/DWEiH5wcsQ5gSh1yziA=
 github.com/ceph/go-ceph v0.37.0 h1:KXliBe3ZDr3/AtfY7n9d1MG7ippYNCVhMPcAgm05CFI=
