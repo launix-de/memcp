@@ -18,7 +18,7 @@ package storage
 
 import "fmt"
 import "io"
-import "sort"
+import "github.com/carli2/hybridsort"
 import "sync"
 import "sync/atomic"
 import "time"
@@ -387,7 +387,7 @@ func Init(en scm.Env) {
 						return proc(args...)
 					}
 				}
-				sort.Slice(filtered, func(i, j int) bool {
+				hybridsort.Slice(filtered, func(i, j int) bool {
 					for c := 0; c < len(scols); c++ {
 						a := scols[c](uint32(i))
 						b := scols[c](uint32(j))

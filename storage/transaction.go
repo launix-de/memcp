@@ -17,7 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "sort"
+import "github.com/carli2/hybridsort"
 import "sync"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
@@ -423,7 +423,7 @@ func (tx *TxContext) commitACID() error {
 	tx.mu.Unlock()
 
 	// Deterministic lock ordering prevents deadlocks.
-	sort.Slice(shards, func(i, j int) bool {
+	hybridsort.Slice(shards, func(i, j int) bool {
 		return shards[i].uuid.String() < shards[j].uuid.String()
 	})
 	for _, s := range shards {

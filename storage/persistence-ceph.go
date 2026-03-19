@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"sort"
+	"github.com/carli2/hybridsort"
 	"strings"
 	"sync"
 	"time"
@@ -353,7 +353,7 @@ func (s *CephStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 			// no logs yet -> nothing to replay
 			return
 		}
-		sort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
+		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
 
 		for _, seg := range segments {
 			stat, err := s.ioctx.Stat(seg.obj)
@@ -446,7 +446,7 @@ func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error)
 		}
 	} else {
 		// last segment
-		sort.Slice(segs, func(i, j int) bool { return segs[i].seg < segs[j].seg })
+		hybridsort.Slice(segs, func(i, j int) bool { return segs[i].seg < segs[j].seg })
 		seg = segs[len(segs)-1].seg
 		all = make([]uint32, 0, len(segs))
 		for _, si := range segs {

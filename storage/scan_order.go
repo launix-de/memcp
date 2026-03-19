@@ -17,7 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "sort"
+import "github.com/carli2/hybridsort"
 import "time"
 import "strings"
 import "runtime/debug"
@@ -717,7 +717,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// When these conditions are met, the same knowledge could also be
 	// used to exit early during iterateIndex (stop after OFFSET+LIMIT).
 	if (maxInsertIndex > 0 || true) && len(sortcols) > 0 {
-		sort.Sort(result)
+		hybridsort.Slice(result.items, result.Less)
 		// or: quicksort but those segments above offset+limit can be omitted
 	}
 	return
