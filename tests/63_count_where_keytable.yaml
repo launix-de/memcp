@@ -77,5 +77,52 @@ test_cases:
       data:
         - c: 1
 
+  # === Incremental invalidation: COUNT must reflect DML changes ===
+  # The keytable computed column is cached; DML triggers must invalidate it.
+
+  - name: "COUNT(*) before INSERT"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features"
+    expect:
+      rows: 1
+      data:
+        - c: 6
+
+  - name: "INSERT new row"
+    sql: "INSERT INTO ckw_features VALUES (3, 'form_c', 'sub1', 'collapsed', 'true')"
+
+  - name: "COUNT(*) after INSERT"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features"
+    expect:
+      rows: 1
+      data:
+        - c: 7
+
+  - name: "INSERT another row"
+    sql: "INSERT INTO ckw_features VALUES (4, 'form_c', 'sub2', 'collapsed', 'false')"
+
+  - name: "COUNT(*) after second INSERT"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features"
+    expect:
+      rows: 1
+      data:
+        - c: 8
+
+  - name: "DELETE one row"
+    sql: "DELETE FROM ckw_features WHERE uid = 3"
+
+  - name: "COUNT(*) after DELETE"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features"
+    expect:
+      rows: 1
+      data:
+        - c: 7
+
+  - name: "COUNT(*) with WHERE after DML"
+    sql: "SELECT COUNT(*) AS c FROM ckw_features WHERE form = 'form_c'"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ckw_features"

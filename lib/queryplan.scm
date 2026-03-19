@@ -2004,12 +2004,11 @@ store results as keytable columns named "expr|condition"
 						(define compute_plan
 							'('time (cons 'parallel agg_plans) "compute"))
 
-						/* global aggregates (stage_group='(1)): invalidate computed columns before recompute
-						so correlated subqueries get fresh values per outer row */
-						(define invalidation_plan (if (equal? stage_group '(1))
-							(cons 'begin (map ags (lambda (ag) (match ag '(expr reduce neutral)
-								'('invalidatecolumn schema grouptbl (agg_col_name ag))))))
-							nil))
+						/* invalidation is handled by registerComputeTriggers in ComputeColumn:
+						DML triggers on the base table invalidate computed columns automatically.
+						No forced invalidation needed here — the createcolumn/ComputeColumn path
+						skips recompute when the proxy is still valid (no DML since last compute). */
+						(define invalidation_plan nil)
 
 						/* build key column pairs for keytable cleanup triggers: ((base_col kt_col) ...) */
 						(define key_pairs (map stage_group (lambda (expr)
