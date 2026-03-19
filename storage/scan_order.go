@@ -209,7 +209,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 						}
 					}
 					if !already {
-						boundaries = append(boundaries, columnboundaries{col: col, lower: scm.NewNil(), upper: scm.NewNil()})
+						boundaries = append(boundaries, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil()})
 					}
 					continue
 				}
@@ -254,7 +254,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 					}
 				}
 				if !already {
-					boundaries = append(boundaries, columnboundaries{col: canon, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
+					boundaries = append(boundaries, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
 				}
 			}
 		}

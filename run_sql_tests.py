@@ -232,7 +232,7 @@ class SQLTestRunner:
             self.noncritical_passed += 1
             print(f"   ⚠️  Passed but flagged noncritical — enable soon")
 
-    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False, elapsed_ms: float = None, threshold_ms: float = None):
+    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False, elapsed_ms: float = None, threshold_ms: float = None, on_fail_diag: str = None):
         self.failed_tests.append((name, is_noncritical))
         if is_noncritical:
             self.failed_noncritical += 1
@@ -246,7 +246,37 @@ class SQLTestRunner:
         if response is not None:
             print(f"    HTTP {response.status_code}: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
         if expect is not None:
-            print(f"    Expected: {expect}\n")
+            print(f"    Expected: {expect}")
+        if on_fail_diag:
+            print(f"    🔍 Diagnostic: {on_fail_diag}\n")
+
+    def _run_on_fail(self, test_case: Dict, database: str) -> Optional[str]:
+        """Execute on_fail diagnostic queries and return combined output."""
+        on_fail = test_case.get("on_fail")
+        if not on_fail:
+            return None
+        if isinstance(on_fail, str):
+            on_fail = [{"sql": on_fail}]
+        elif isinstance(on_fail, dict):
+            on_fail = [on_fail]
+        parts = []
+        for step in on_fail:
+            try:
+                if "sql" in step:
+                    resp = self.execute_sql(database, step["sql"], timeout=5)
+                    if resp and resp.status_code == 200:
+                        parts.append(f"[SQL] {step['sql'][:80]}\n       → {resp.text.strip()[:500]}")
+                elif "scm" in step:
+                    resp = requests.post(f"{self.base_url}/scm", data=step["scm"], headers=self.auth_header, timeout=5)
+                    if resp and resp.status_code == 200:
+                        parts.append(f"[SCM] {step['scm'][:80]}\n       → {resp.text.strip()[:500]}")
+                elif "psql" in step:
+                    resp = self.execute_sql(database, step["psql"], syntax="psql", timeout=5)
+                    if resp and resp.status_code == 200:
+                        parts.append(f"[PSQL] {step['psql'][:80]}\n       → {resp.text.strip()[:500]}")
+            except Exception as e:
+                parts.append(f"[DIAG ERROR] {e}")
+        return "\n    ".join(parts) if parts else None
 
     # ----------------------
     # Core execution
@@ -607,8 +637,9 @@ class SQLTestRunner:
 
         # Check performance threshold
         if is_perf_test and elapsed_ms > threshold_ms:
+            diag = self._run_on_fail(test_case, database)
             return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
-                                     test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms)
+                                     test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
 
         if self.validate_expectation(test_case, response, results):
             if is_perf_test:
@@ -620,7 +651,8 @@ class SQLTestRunner:
                 self._record_success(name, is_noncritical)
             return True
         else:
-            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical)
+            diag = self._run_on_fail(test_case, database)
+            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical, on_fail_diag=diag)
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})

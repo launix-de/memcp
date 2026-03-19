@@ -29,6 +29,7 @@ import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 import "github.com/launix-de/NonLockingReadMap"
 
 type storageShard struct {
@@ -857,7 +858,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 						if !wasDeletedBefore {
 							t.deletions.Set(uint(targetIdx), false) // restore only if we changed visibility here
 						}
-						panic("Unique key constraint violated in table " + t.t.Name + ": " + errmsg)
+						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.t.Name, errmsg))
 					}, 0)
 				} else {
 					// Keep old row visible until after we inserted the replacement in
@@ -1738,7 +1739,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Build equality boundaries for the index lookup
 	bounds := make(boundaries, len(columns))
 	for i, col := range columns {
-		bounds[i] = columnboundaries{col: col, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
+		bounds[i] = columnboundaries{col: col, matcher: EqualMatcher, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
 	}
 	lower, upperLast := indexFromBoundaries(bounds)
 

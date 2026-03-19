@@ -60,7 +60,12 @@ type StorageIndex struct {
 	// Both are nil for raw columns.
 	ColMapCols  [][]string  // per-column source col names; nil entry means raw column
 	ColMapFn    []scm.Scmer // per-column compute fn; IsNil() entry means raw column
-	Savings     float64     // store the amount of time savings here -> add selectivity (outputted / size) on each
+	ColMatchers []BoundaryMatcher // per-column matcher (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
+	// skipLists[colIdx][pattern] stores precomputed SkipLists for non-sorted columns.
+	// Built during buildIndex via BoundaryMatcher.BuildSkipList.
+	// TODO: replace map with NonLockingReadMap for lock-free reads.
+	skipLists   []map[string]*SkipList
+	Savings     float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
 	Native      bool        // true when data is physically sorted by this index (zero-cost)
 	mainIndexes StorageInt  // we can do binary searches here (unused when Native)
 	// deltaBtree holds delta inserts in index-column order. Contract:
@@ -96,18 +101,42 @@ func (s *StorageIndex) buildGetters() []colGetter {
 	return getters
 }
 
+// matcherKindEqual checks if two matchers have the same kind for index deduplication.
+func matcherKindEqual(a, b BoundaryMatcher) bool {
+	return a.Kind() == b.Kind()
+}
+
 func (idx *StorageIndex) ComputeSize() uint {
 	var sz uint = 24 * 8 // heuristic
 	if !idx.Native {
 		sz += idx.mainIndexes.ComputeSize()
 	}
+	for _, colCache := range idx.skipLists {
+		sz += 8
+		for k, sl := range colCache {
+			sz += uint(len(k)) + 24
+			sz += sl.ComputeSize()
+		}
+	}
 	// TODO: deltaBtree
 	return sz
 }
 
-// pretty-print
+// pretty-print: name(like)|birthdate(range)
 func (idx *StorageIndex) String() string {
-	return strings.Join(idx.Cols, "|")
+	var b strings.Builder
+	for i, col := range idx.Cols {
+		if i > 0 {
+			b.WriteByte('|')
+		}
+		b.WriteString(col)
+		if len(idx.ColMatchers) > i && idx.ColMatchers[i] != nil {
+			b.WriteByte('(')
+			b.WriteString(idx.ColMatchers[i].Kind())
+			b.WriteByte(')')
+		}
+	}
+	return b.String()
 }
 
 // getDeltaValue returns the raw column value for a delta row.
@@ -133,8 +162,14 @@ func (s *StorageIndex) getDeltaColValue(data []scm.Scmer, colIdx int) scm.Scmer 
 	return s.getDeltaValue(data, s.Cols[colIdx])
 }
 
+// rowWithinBounds checks sorted (equal/range) columns using lower/upper directly.
+// Non-sorted columns (LIKE etc.) are skipped — handled by block-level skipping
+// in iterate(); the scan layer applies the full condition afterwards.
 func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
 	for i := 0; i < cmpCols; i++ {
+		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+			continue // non-sorted: block-skip handles this, scan() filters exact
+		}
 		v := getter(i)
 		if i == cmpCols-1 {
 			if !upperLast.IsNil() {
@@ -146,11 +181,9 @@ func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast
 					return false, true
 				}
 			}
-			// lower bound check for last column (needed when Ascend is used for
-			// computed-column btrees, which start from the btree beginning)
 			if len(lower) > i && !lower[i].IsNil() {
 				if scm.Less(v, lower[i]) {
-					return false, false // below lower bound, not in range but don't stop
+					return false, false
 				}
 			}
 			continue
@@ -168,6 +201,9 @@ func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast
 
 func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainGetters []colGetter, delta indexPair) int {
 	for i := range s.Cols {
+		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+			continue
+		}
 		mainVal := mainGetters[i].get(mainRecid)
 		deltaVal := s.getDeltaColValue(delta.data, i)
 		if scm.Less(mainVal, deltaVal) {
@@ -201,6 +237,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		upperIncl = cols[len(cols)-1].upperInclusive
 	}
 
+
 	// check if we found conditions
 	if len(lower) > 0 {
 		// find an index that has at least the columns in that order we're searching for
@@ -212,11 +249,15 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 			if len(index.Cols) >= len(lower) {
 				for i := 0; i < len(lower); i++ {
 					if cols[i].col != index.Cols[i] {
-						goto skip_index // this index does not fit
+						goto skip_index // column mismatch
+					}
+					// matcher kind check (old indexes without ColMatchers are equal/range only)
+					if len(index.ColMatchers) > i && !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
+						goto skip_index // matcher kind mismatch
 					}
 				}
 				// this index fits!
-				index.iterate(lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+				index.iterate(cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 				return
 			}
 		skip_index:
@@ -237,11 +278,15 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 						covered = false
 						break
 					}
+					if len(index.ColMatchers) > i && !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
+						covered = false
+						break
+					}
 				}
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+					index.iterate(cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 					return
 				}
 			}
@@ -285,17 +330,19 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		index.Cols = make([]string, len(lower))
 		index.ColMapCols = make([][]string, len(lower))
 		index.ColMapFn = make([]scm.Scmer, len(lower))
+		index.ColMatchers = make([]BoundaryMatcher, len(lower))
 		for i := range lower {
 			index.Cols[i] = cols[i].col
 			index.ColMapCols[i] = cols[i].mapCols // nil for raw columns
 			index.ColMapFn[i] = cols[i].mapFn     // IsNil() for raw columns
+			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
 		}
 		index.Savings = 0.0  // count how many cost we wasted so we decide when to build the index
 		index.active = false // tell the engine that index has to be built first
 		index.t = t
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+		index.iterate(cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 		return
 	}
 
@@ -355,8 +402,9 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 		clone := new(StorageIndex)
 		clone.Cols = make([]string, len(idx.Cols))
 		copy(clone.Cols, idx.Cols)
-		clone.ColMapCols = idx.ColMapCols // shallow copy OK (immutable per-col slices)
-		clone.ColMapFn = idx.ColMapFn     // shallow copy OK
+		clone.ColMapCols = idx.ColMapCols   // shallow copy OK (immutable per-col slices)
+		clone.ColMapFn = idx.ColMapFn       // shallow copy OK
+		clone.ColMatchers = idx.ColMatchers // shallow copy OK (singletons)
 		clone.Savings = idx.Savings * 0.9
 		clone.t = t2
 		clone.active = false
@@ -457,9 +505,13 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 		for i := uint32(0); i < s.t.main_count; i++ {
 			tmp[i] = i // fill with natural order
 		}
-		// sort indexes
+		// sort indexes; skip non-sorted matcher columns (they don't affect
+		// sort order, they are query-level overlays for pruning)
 		hybridsort.Slice(tmp, func(i, j int) bool {
-			for _, g := range cols {
+			for colIdx, g := range cols {
+				if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+					continue
+				}
 				a := g.get(tmp[i])
 				b := g.get(tmp[j])
 				if scm.Less(a, b) {
@@ -484,9 +536,13 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 	}
 	// else: Native index — data is physically sorted, no mainIndexes needed
 
-	// delta storage — comparator uses getDeltaColValue so computed columns work
+	// delta storage — comparator uses getDeltaColValue so computed columns work;
+	// skip non-sorted matcher columns (they don't participate in sort order)
 	s.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		for colIdx := range s.Cols {
+			if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+				continue
+			}
 			av := s.getDeltaColValue(a.data, colIdx)
 			bv := s.getDeltaColValue(b.data, colIdx)
 			if scm.Less(av, bv) {
@@ -508,8 +564,51 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 	s.active = true // mark as ready
 }
 
+// getOrBuildSkipList returns the cached skip list for a non-sorted column,
+// building it on first access. The caller must hold s.t.mu.RLock for column access.
+func (s *StorageIndex) getOrBuildSkipList(colIdx int, pattern string) *SkipList {
+	// Fast path: check cache
+	if len(s.skipLists) > colIdx && s.skipLists[colIdx] != nil {
+		if sl, ok := s.skipLists[colIdx][pattern]; ok {
+			return sl
+		}
+	}
+	// Slow path: build and cache
+	if colIdx >= len(s.ColMatchers) || s.ColMatchers[colIdx] == nil {
+		return nil
+	}
+	colStorage := s.t.getColumnStorageRLocked(s.Cols[colIdx])
+	if colStorage == nil {
+		return nil
+	}
+	getRecid := func(pos uint32) uint32 {
+		if s.Native {
+			return pos
+		}
+		return uint32(int64(s.mainIndexes.GetValueUInt(pos)) + s.mainIndexes.offset)
+	}
+	sl := s.ColMatchers[colIdx].BuildSkipList(pattern, s.t.main_count, getRecid, colStorage)
+	// Cache the result (TODO: replace with NonLockingReadMap)
+	s.mu.Lock()
+	if s.skipLists == nil {
+		s.skipLists = make([]map[string]*SkipList, len(s.Cols))
+	}
+	if s.skipLists[colIdx] == nil {
+		s.skipLists[colIdx] = make(map[string]*SkipList)
+	}
+	s.skipLists[colIdx][pattern] = sl
+	s.mu.Unlock()
+	// Register skip list with CacheManager at 1/100 of the index priority,
+	// so rarely used patterns are evicted before the whole index.
+	if sl != nil {
+		entry := &skipListCacheEntry{index: s, colIdx: colIdx, pattern: pattern}
+		GlobalCache.AddItem(entry, int64(sl.ComputeSize()), TypeIndex, skipListCleanup, skipListLastUsed, skipListGetScore)
+	}
+	return sl
+}
+
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -562,12 +661,10 @@ start_scan:
 		return
 	}
 	snapMainIndexes := s.mainIndexes
-	var snapDeltaBtree *btree.BTreeG[indexPair]
-	if s.deltaBtree != nil {
-		// Clone under the index lock so scans can iterate a stable delta snapshot
-		// while concurrent inserts keep mutating the live tree.
-		snapDeltaBtree = s.deltaBtree.Clone()
-	}
+	// No clone needed: the shard's RLock (held by caller) prevents concurrent
+	// inserts from modifying deltaBtree. The index mutex protects against
+	// eviction only; the btree data is stable under RLock.
+	snapDeltaBtree := s.deltaBtree
 	isNative := s.Native
 	s.mu.Unlock()
 
@@ -582,12 +679,25 @@ start_scan:
 	// bisect where the lower bound is found
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
+
+	// Look up or build skip lists for non-sorted columns.
+	// Stack-allocated array, zero heap allocation on cache hit.
+	var skipListPtrs [8]*SkipList
+	skipCount := 0
+	for i := 0; i < cmpCols && i < len(bounds) && skipCount < 8; i++ {
+		if !bounds[i].matcher.IsSorted() {
+			skipListPtrs[skipCount] = s.getOrBuildSkipList(i, bounds[i].lower.String())
+			skipCount++
+		}
+	}
 	// Use last-hit hint to narrow binary search range (helps sorted outer loops).
 	// The hint is advisory: if stale or from a concurrent goroutine, we safely
 	// fall through to an unnarrowed search. No correctness dependency on the hint.
+	// LIKE columns cannot participate in binary search (pattern doesn't map to sort order).
 	searchLo := 0
 	searchN := int(s.t.main_count)
-	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && cmpCols > 0 && !lower[0].IsNil() {
+	firstSearchable := len(bounds) == 0 || bounds[0].matcher.IsSorted()
+	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && cmpCols > 0 && firstSearchable && !lower[0].IsNil() {
 		hintVal := cols[0].get(getRecid(hint))
 		if !hintVal.IsNil() {
 			if scm.Less(hintVal, lower[0]) {
@@ -601,6 +711,9 @@ start_scan:
 	mainIdx := searchLo + sort.Search(searchN, func(idx int) bool {
 		idx2 := getRecid(searchLo + idx)
 		for i := 0; i < cmpCols; i++ {
+			if len(bounds) > i && !bounds[i].matcher.IsSorted() {
+				continue // non-sorted matcher cols: no binary search, filter later
+			}
 			a := lower[i]
 			b := cols[i].get(idx2)
 			if scm.Less(a, b) {
@@ -614,7 +727,9 @@ start_scan:
 	})
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
-	if !lowerInclusive && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
+	// LIKE columns don't have lower/upper semantics, so skip this optimization.
+	lastHasMatcher := len(bounds) >= cmpCols && !bounds[cmpCols-1].matcher.IsSorted()
+	if !lowerInclusive && !lastHasMatcher && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
 			if !scm.Equal(cols[cmpCols-1].get(recid), lower[cmpCols-1]) {
@@ -624,8 +739,48 @@ start_scan:
 		}
 	}
 
+	// Block-end tracking for skip lists (stack-allocated).
+	var blockEnds [8]uint32
+
+	// advanceToNextBlock jumps mainIdx forward to the next position covered
+	// by ALL skip lists. Returns false if no more blocks exist.
+	advanceToNextBlock := func() bool {
+		if skipCount == 0 {
+			return uint32(mainIdx) < s.t.main_count
+		}
+		for {
+			if uint32(mainIdx) >= s.t.main_count {
+				return false
+			}
+			pos := uint32(mainIdx)
+			allOk := true
+			for si := 0; si < skipCount; si++ {
+				if pos < blockEnds[si] {
+					continue // still inside current block
+				}
+				sl := skipListPtrs[si]
+				start, length, ok := sl.NextBlock(pos)
+				if !ok {
+					return false // no more blocks
+				}
+				blockEnds[si] = start + length
+				if start > pos {
+					mainIdx = int(start)
+					allOk = false
+					break
+				}
+			}
+			if allOk {
+				return true
+			}
+		}
+	}
+
 	nextMain := func() (uint32, bool) {
 		for {
+			if !advanceToNextBlock() {
+				return 0, false
+			}
 			if uint32(mainIdx) >= s.t.main_count {
 				return 0, false
 			}
@@ -705,16 +860,17 @@ start_scan:
 			return !beyond && !stopped
 		}
 
-		// For computed columns the AscendGreaterOrEqual reference item cannot be
-		// constructed (computed col names have no entry in deltaColumns), so scan all.
-		hasComputedInBounds := false
+		// For computed or non-sorted matcher columns, AscendGreaterOrEqual cannot be
+		// used (computed col names have no entry in deltaColumns, matcher patterns
+		// don't map to sort order), so scan all.
+		hasUnsearchableInBounds := false
 		for i := 0; i < cmpCols; i++ {
-			if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
-				hasComputedInBounds = true
+			if (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (len(bounds) > i && !bounds[i].matcher.IsSorted()) {
+				hasUnsearchableInBounds = true
 				break
 			}
 		}
-		if hasComputedInBounds {
+		if hasUnsearchableInBounds {
 			snapDeltaBtree.Ascend(iterFn)
 		} else {
 			maxCol := 0
@@ -754,6 +910,7 @@ func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	idx.active = false
 	idx.mainIndexes = StorageInt{}
 	idx.deltaBtree = nil
+	idx.skipLists = nil
 	idx.mu.Unlock()
 	return true
 }
@@ -765,4 +922,32 @@ func indexLastUsed(ptr any) time.Time {
 
 func indexGetScore(ptr any) float64 {
 	return ptr.(*StorageIndex).Savings
+}
+
+// skipListCacheEntry wraps a single skip list for CacheManager eviction.
+type skipListCacheEntry struct {
+	index   *StorageIndex
+	colIdx  int
+	pattern string
+}
+
+func skipListCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
+	e := ptr.(*skipListCacheEntry)
+	if !e.index.mu.TryLock() {
+		return false
+	}
+	if len(e.index.skipLists) > e.colIdx && e.index.skipLists[e.colIdx] != nil {
+		delete(e.index.skipLists[e.colIdx], e.pattern)
+	}
+	e.index.mu.Unlock()
+	return true
+}
+
+func skipListLastUsed(ptr any) time.Time {
+	e := ptr.(*skipListCacheEntry)
+	return time.Unix(0, int64(atomic.LoadUint64(&e.index.t.lastAccessed)))
+}
+
+func skipListGetScore(ptr any) float64 {
+	return 1 // minimal telemetry protection; index has Savings (2+) so skip lists evicted first
 }
