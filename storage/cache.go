@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
+	"github.com/carli2/hybridsort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -598,7 +598,7 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 	}
 
 	// sort by dynamicScore (worst first)
-	sort.Slice(candidates, func(i, j int) bool {
+	hybridsort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].dynamicScore > candidates[j].dynamicScore
 	})
 

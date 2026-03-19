@@ -17,7 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "sort"
+import "github.com/carli2/hybridsort"
 import "sync"
 import "sync/atomic"
 import "time"
@@ -2077,7 +2077,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 			}
 			idxCols := idx.Cols
-			sort.Slice(sortPerm, func(a, b int) bool {
+			hybridsort.Slice(sortPerm, func(a, b int) bool {
 				for _, colName := range idxCols {
 					var va, vb scm.Scmer
 					idA, idB := sortPerm[a], sortPerm[b]

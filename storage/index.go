@@ -19,6 +19,7 @@ package storage
 
 import "sort"
 import "sync"
+import "github.com/carli2/hybridsort"
 import "sync/atomic"
 import "time"
 import "strings"
@@ -363,7 +364,7 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 	}
 
 	// 2. Prefix dedup: sort by len(Cols) descending so longer indexes absorb shorter ones
-	sort.Slice(candidates, func(i, j int) bool {
+	hybridsort.Slice(candidates, func(i, j int) bool {
 		return len(candidates[i].Cols) > len(candidates[j].Cols)
 	})
 	removed := make([]bool, len(candidates))
@@ -457,7 +458,7 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 			tmp[i] = i // fill with natural order
 		}
 		// sort indexes
-		sort.Slice(tmp, func(i, j int) bool {
+		hybridsort.Slice(tmp, func(i, j int) bool {
 			for _, g := range cols {
 				a := g.get(tmp[i])
 				b := g.get(tmp[j])

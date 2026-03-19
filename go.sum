@@ -38,6 +38,8 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.41.6 h1:5fFjR/ToSOzB2OQ/XqWpZBmNvmP/
 github.com/aws/aws-sdk-go-v2/service/sts v1.41.6/go.mod h1:qgFDZQSD/Kys7nJnVqYlWKnh0SSdMjAi0uSwON4wgYQ=
 github.com/aws/smithy-go v1.24.0 h1:LpilSUItNPFr1eY85RYgTIg5eIEPtvFbskaFcmmIUnk=
 github.com/aws/smithy-go v1.24.0/go.mod h1:LEj2LM3rBRQJxPZTB4KuzZkaZYnZPnvgIhb4pu07mx0=
+github.com/carli2/hybridsort v0.0.0-20260319191746-8429712d7a1c h1:h9PAuqFyYi8dCWABYlaiJjzpY9KmzXZsNUPU6RnZrGI=
+github.com/carli2/hybridsort v0.0.0-20260319191746-8429712d7a1c/go.mod h1:ZSL9x9C2qLz4fL7VZdCs7QZCqNBkBZkcYtY0Fcw2Ezo=
 github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a h1:qnerlW5tSOXN0OYjUAscEZWzTzTzSP+ASRJwpUdfya4=
 github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a/go.mod h1:homfLqTYRFyVYemLBFl5GgL/DWEiH5wcsQ5gSh1yziA=
 github.com/ceph/go-ceph v0.37.0 h1:KXliBe3ZDr3/AtfY7n9d1MG7ippYNCVhMPcAgm05CFI=

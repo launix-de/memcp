@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "sort"
+import "github.com/carli2/hybridsort"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
@@ -427,7 +428,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		for i := range cols {
 			isEq[i] = boundaryIsPoint(cols[i])
 		}
-		sort.Slice(cols, func(i, j int) bool {
+		hybridsort.Slice(cols, func(i, j int) bool {
 			if isEq[i] != isEq[j] {
 				return isEq[i] // equality conditions leftmost
 			}
