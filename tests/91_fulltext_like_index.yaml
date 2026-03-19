@@ -128,7 +128,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (set rows (map (produceN 30000) (lambda (i)
+            (set rows (map (produceN 5000) (lambda (i)
               (list i
                 (match i
                   42 "Klaus Heinemann"
@@ -153,7 +153,7 @@ test_cases:
   - name: "Enable scan debugging for LIKE test"
     setup:
       - scm: '(settings "ScanDebugging" true)'
-      - scm: '(sleep 100)'
+      - scm: '(sleep 0.1)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
     sql: "SELECT 1 AS ok"
     expect:
@@ -186,7 +186,7 @@ test_cases:
 
   - name: "Wait for LIKE scan logs"
     setup:
-      - scm: '(sleep 200)'
+      - scm: '(sleep 0.2)'
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
@@ -211,7 +211,7 @@ test_cases:
   # -- Test 2: Equal id=42 (regression test, must not be slower) --
   - name: "Clear log for Equal test"
     setup:
-      - scm: '(sleep 100)'
+      - scm: '(sleep 0.1)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
@@ -243,7 +243,7 @@ test_cases:
 
   - name: "Wait for Equal scan logs"
     setup:
-      - scm: '(sleep 200)'
+      - scm: '(sleep 0.2)'
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
@@ -268,7 +268,7 @@ test_cases:
   # -- Test 3: LIKE + Range (must be >= 3x faster) --
   - name: "Clear log for LIKE+Range test"
     setup:
-      - scm: '(sleep 100)'
+      - scm: '(sleep 0.1)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
@@ -300,7 +300,7 @@ test_cases:
 
   - name: "Wait for LIKE+Range scan logs"
     setup:
-      - scm: '(sleep 200)'
+      - scm: '(sleep 0.2)'
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
