@@ -1360,12 +1360,7 @@ func Init(en scm.Env) {
 			}
 			now := time.Now()
 			nowNs := uint64(now.UnixNano())
-			for _, s := range tbl.Shards {
-				atomic.StoreUint64(&s.lastAccessed, nowNs)
-			}
-			for _, s := range tbl.PShards {
-				atomic.StoreUint64(&s.lastAccessed, nowNs)
-			}
+			atomic.StoreUint64(&tbl.lastAccessed, nowNs)
 			for _, c := range tbl.Columns {
 				if c.IsTemp {
 					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())

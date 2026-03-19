@@ -255,6 +255,8 @@ type table struct {
 	orcMu         sync.Mutex
 	orcRecomputing int32 // atomic: >0 means an ORC recompute is in progress (skip re-entry in GetValue)
 
+	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
+
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
 	repartitionActive bool            // true when dual-write is in progress
