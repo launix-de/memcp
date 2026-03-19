@@ -19,11 +19,11 @@ package storage
 
 import "sort"
 import "sync"
-import "github.com/carli2/hybridsort"
 import "sync/atomic"
 import "time"
 import "strings"
 
+import "github.com/carli2/hybridsort"
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
 
@@ -507,16 +507,16 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 		}
 		// sort indexes; skip non-sorted matcher columns (they don't affect
 		// sort order, they are query-level overlays for pruning)
-		hybridsort.Slice(tmp, func(i, j int) bool {
+		hybridsort.HybridSort(tmp, func(a, b uint32) bool {
 			for colIdx, g := range cols {
 				if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
 					continue
 				}
-				a := g.get(tmp[i])
-				b := g.get(tmp[j])
-				if scm.Less(a, b) {
+				va := g.get(a)
+				vb := g.get(b)
+				if scm.Less(va, vb) {
 					return true // less
-				} else if !scm.Equal(a, b) {
+				} else if !scm.Equal(va, vb) {
 					return false // greater
 				}
 				// otherwise: next iteration
