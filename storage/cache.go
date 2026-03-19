@@ -45,9 +45,21 @@ const (
 )
 
 // evictableWeights maps EvictableType → eviction weight.
+// evictionScore = size * weight (multiplication, not division).
 // Higher weight = higher evictionScore = evicted sooner.
 // Low weight = more protected (expensive to rebuild).
-// Weights are exact inverses of the old factors (20/factor) to preserve behavior.
+//
+// Multiplication is used instead of division because:
+//   - Integer arithmetic (no floats)
+//   - Allows fine-grained upward scaling (e.g. LIKE skip lists can use weight 100+)
+//   - Division cannot distinguish between "slightly less important" items
+//
+// Phase 1 (heap) pulls candidates by evictionScore (max-heap).
+// Phase 2 sorts candidates by dynamicScore = age * evictionScore - telemetry*1000.
+// The minLifetime guarantee (default 1s) protects items from premature eviction
+// during query execution. Keytables use touch_keytable to refresh lastAccessed
+// before each use, ensuring they survive cache pressure during query runtime.
+//
 //                                         TempCol Shard Index TempKT CacheEntry StringDict
 var evictableWeights = [numEvictableTypes]int64{20, 1, 20, 2, 20, 20}
 
@@ -548,7 +560,12 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 	}
 }
 
-const telemetryWeight = 1000.0 // weight for telemetry score vs LRU age in seconds
+// telemetryWeight calibrates telemetry (rebuild-decayed usage score) against
+// age*weight (seconds * type priority). With K=50 and weight=20 (index):
+//   Savings=4  → protected ~10s after last access
+//   Savings=50 → protected ~125s after last access
+// Telemetry is decayed by 0.9x at each rebuild, so it reflects recent usage rate.
+const telemetryWeight = 50.0
 
 // evict runs two-phase eviction to bring currentUsage below budget.
 // additionalSize accounts for an upcoming allocation that hasn't been tracked yet.
@@ -588,8 +605,13 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 	}
 	candidates = alive
 
-	// score dynamically: age * evictionScore, reduced by telemetry
-	// high dynamicScore = old + large + unimportant → evict first
+	// Phase 2: dynamic scoring among candidates.
+	// dynamicScore = age * weight - telemetry * K
+	//   age: seconds since last access (higher = more stale)
+	//   weight: type-based eviction priority (higher = cheaper to rebuild)
+	//   telemetry: usage score, decayed at each rebuild (higher = more useful)
+	//   K: calibration constant balancing seconds vs usage score
+	// Size is NOT in Phase 2 — Phase 1 (heap) already selected by size*weight.
 	now := time.Now()
 	for _, c := range candidates {
 		age := now.Sub(c.getLastUsed(c.pointer)).Seconds()
@@ -597,7 +619,8 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		if c.getScore != nil {
 			telemetry = c.getScore(c.pointer)
 		}
-		c.dynamicScore = age*float64(c.evictionScore) - telemetry*telemetryWeight
+		weight := float64(evictableWeights[c.evictType])
+		c.dynamicScore = age*weight - telemetry*telemetryWeight
 	}
 
 	// sort by dynamicScore (worst first)
