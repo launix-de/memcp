@@ -1053,6 +1053,8 @@ func Init(en scm.Env) {
 					proxy.InvalidateAll()
 				}
 			}
+			// Propagate invalidation to downstream caches via AfterInvalidate triggers
+			t.ExecuteTriggers(AfterInvalidate, nil, nil)
 			return scm.NewBool(true)
 		}, false, false, nil,
 		nil,
@@ -1656,10 +1658,22 @@ func Init(en scm.Env) {
 					for i, s := range shards {
 						shardRows = append(shardRows, showBuildShardRow(t, i, s))
 					}
-					return scm.NewSlice([]scm.Scmer{
+					// build trigger info
+				triggerRows := make([]scm.Scmer, 0, len(t.Triggers))
+				for _, tr := range t.Triggers {
+					triggerRows = append(triggerRows, scm.NewSlice([]scm.Scmer{
+						scm.NewString("name"), scm.NewString(tr.Name),
+						scm.NewString("timing"), scm.NewString(string(tr.Timing)),
+						scm.NewString("hidden"), scm.NewBool(tr.Hidden),
+						scm.NewString("system"), scm.NewBool(tr.IsSystem),
+						scm.NewString("priority"), scm.NewInt(int64(tr.Priority)),
+					}))
+				}
+				return scm.NewSlice([]scm.Scmer{
 						scm.NewString("columns"), t.ShowColumns(),
 						scm.NewString("meta"), showBuildMeta(db, t),
 						scm.NewString("shards"), scm.NewSlice(shardRows),
+						scm.NewString("triggers"), scm.NewSlice(triggerRows),
 					})
 				}
 				// (show schema tbl N) → shard N overview
@@ -1955,6 +1969,8 @@ func Init(en scm.Env) {
 				timing = AfterDropTable
 			case "after_drop_column":
 				timing = AfterDropColumn
+			case "after_invalidate":
+				timing = AfterInvalidate
 			default:
 				panic("invalid trigger timing: " + timingStr)
 			}

@@ -33,6 +33,7 @@ const (
 	AfterDelete
 	AfterDropTable
 	AfterDropColumn
+	AfterInvalidate // fired when a computed column is invalidated; propagates cache invalidation
 )
 
 func (tt TriggerTiming) String() string {
@@ -53,6 +54,8 @@ func (tt TriggerTiming) String() string {
 		return "AFTER DROP TABLE"
 	case AfterDropColumn:
 		return "AFTER DROP COLUMN"
+	case AfterInvalidate:
+		return "AFTER INVALIDATE"
 	default:
 		return "UNKNOWN"
 	}
@@ -77,6 +80,8 @@ func (tt TriggerTiming) MarshalJSON() ([]byte, error) {
 		s = "after_drop_table"
 	case AfterDropColumn:
 		s = "after_drop_column"
+	case AfterInvalidate:
+		s = "after_invalidate"
 	default:
 		return nil, errors.New("unknown trigger timing")
 	}
@@ -104,6 +109,8 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 			*tt = AfterDropTable
 		case "after_drop_column":
 			*tt = AfterDropColumn
+		case "after_invalidate":
+			*tt = AfterInvalidate
 		default:
 			return errors.New("unknown trigger timing: " + s)
 		}
@@ -114,7 +121,7 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &n); err != nil {
 		return errors.New("trigger timing must be string or number")
 	}
-	if n > uint8(AfterDropColumn) {
+	if n > uint8(AfterInvalidate) {
 		return fmt.Errorf("unknown trigger timing number: %d", n)
 	}
 	*tt = TriggerTiming(n)
@@ -265,6 +272,8 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 		case BeforeUpdate, AfterUpdate:
 			oldDict = t.rowToDict(oldRow)
 			newDict = t.rowToDict(newRow)
+		case AfterInvalidate:
+			// no row data — column-level invalidation propagation
 		}
 		if tr.Async {
 			// Fire-and-forget: run in background goroutine, no transaction context

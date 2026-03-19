@@ -1220,7 +1220,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 		}
 
-		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete, AfterInvalidate} {
 			triggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + timing.String()
 			// idempotency: skip if trigger already exists
 			exists := false
@@ -1232,10 +1232,10 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 			if !exists {
 				var body scm.Scmer
-				if incremental {
+				if incremental && timing != AfterInvalidate {
 					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[6], timing)
 				} else {
-					// Full invalidation: correct for non-additive aggregates.
+					// Full invalidation: for non-additive aggregates and AfterInvalidate propagation.
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						scm.NewString(targetSchema),
