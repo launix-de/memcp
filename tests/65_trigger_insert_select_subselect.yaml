@@ -1,0 +1,72 @@
+# Trigger INSERT SELECT with correlated subselect containing unqualified
+# columns from the subselect's own FROM table + CASE WHEN with @session vars.
+# Pattern from campaign.ia trigger that fails with "Column does not exist: date2"
+
+metadata:
+  version: "1.0"
+  description: "Trigger INSERT SELECT with correlated subselect and CASE WHEN"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS tis_log"
+  - sql: "DROP TABLE IF EXISTS tis_assoc"
+  - sql: "DROP TABLE IF EXISTS tis_main"
+  - sql: |
+      CREATE TABLE tis_main (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        name TEXT,
+        date1 BIGINT,
+        date2 BIGINT
+      )
+  - sql: |
+      CREATE TABLE tis_assoc (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        main_id INT,
+        target INT,
+        creation BIGINT
+      )
+  - sql: |
+      CREATE TABLE tis_log (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        assoc_id INT,
+        parent INT,
+        date1 BIGINT,
+        info TEXT
+      )
+  - sql: "INSERT INTO tis_assoc VALUES (1, NULL, 10, 1000), (2, NULL, 20, 2000)"
+  - sql: "SET @fop_time = 5000"
+  - sql: "SET @fop_time2 = 7000"
+  - sql: |
+      CREATE TRIGGER `tis_main.ia` AFTER INSERT ON `tis_main` FOR EACH ROW BEGIN
+        SET @fop_time = 5000;
+        SET @fop_time2 = 7000;
+        INSERT IGNORE INTO tis_log(assoc_id, parent, date1, info)
+          SELECT `ID`, `ASSOCIATED`.`creation`, NULL, (SELECT (`RPHfmoLB`.`name`) FROM `tis_main` `RPHfmoLB` WHERE `RPHfmoLB`.`ID` = `ASSOCIATED`.`main_id` AND CASE WHEN @fop_time2 IS NULL THEN TRUE ELSE
+            CASE WHEN `date1` IS NULL THEN @fop_time ELSE `date1` END <= @fop_time AND CASE WHEN `date2` IS NULL THEN @fop_time2 ELSE `date2` END >= @fop_time2 END LIMIT 1) FROM `tis_assoc` AS `ASSOCIATED`
+          WHERE NOT ((`ASSOCIATED`.`target`) IS NULL) AND ((NEW.`ID` = `ASSOCIATED`.`main_id`));
+      END
+
+test_cases:
+
+  - name: "setup assoc references"
+    sql: "UPDATE tis_assoc SET main_id = 1 WHERE ID IN (1, 2)"
+
+  - name: "INSERT triggers INSERT SELECT with CASE WHEN date2 subselect"
+    sql: "INSERT INTO tis_main VALUES (1, 'test', 3000, 6000)"
+
+  - name: "verify trigger populated log"
+    sql: "SELECT assoc_id, parent, info FROM tis_log ORDER BY assoc_id"
+    expect:
+      rows: 2
+      data:
+        - assoc_id: 1
+          parent: 10
+          info: "test"
+        - assoc_id: 2
+          parent: 20
+          info: "test"
+
+cleanup:
+  - sql: "DROP TRIGGER IF EXISTS `tis_main.ia`"
+  - sql: "DROP TABLE IF EXISTS tis_log"
+  - sql: "DROP TABLE IF EXISTS tis_assoc"
+  - sql: "DROP TABLE IF EXISTS tis_main"

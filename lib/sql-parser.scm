@@ -1474,12 +1474,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(atom "SET" true)
 		(define assignments (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 	) (begin
-		(if policy (policy (coalesce schema2 schema) tbl true) true)
-		(define coldesc (map assignments (lambda (a) (match a '(col _) col))))
-		(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
-		'('insert (coalesce schema2 schema) tbl (cons list coldesc) '(list (cons list dataset)) '(list)
-			(if ignoreexists '('lambda '() true) nil)
-			false '('lambda '('id) '('session "last_insert_id" 'id))))))
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define coldesc (map assignments (lambda (a) (match a '(col _) col))))
+			(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
+			'('insert (coalesce schema2 schema) tbl (cons list coldesc) '(list (cons list dataset)) '(list)
+				(if ignoreexists '('lambda '() true) nil)
+				false '('lambda '('id) '('session "last_insert_id" 'id))))))
 
 	(define sql_foreign_key_mode (parser (or
 		(parser (atom "RESTRICT" true) "restrict")
