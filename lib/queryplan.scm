@@ -1339,7 +1339,7 @@ WHAT IT MUST NOT DO:
 										'() (begin
 											/* column not in schemas2 - check if it's a SELECT alias in fields2 */
 											(if (nil? (fields2 col))
-												(error (concat "column " col " does not exist in subquery"))
+												expr /* leave unresolved — inner subselect scope will handle it */
 												/* found in fields2 - resolve to the underlying expression */
 												(replace_column_alias (fields2 col))
 											)
