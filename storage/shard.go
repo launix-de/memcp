@@ -633,6 +633,10 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 }
 
 func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool) func(...scm.Scmer) scm.Scmer {
+	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil)
+}
+
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch) func(...scm.Scmer) scm.Scmer {
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
@@ -1059,7 +1063,10 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				}
 			}
 			if withTrigger && triggerDeletedRow != nil {
-				if alreadyLocked {
+				if batch != nil {
+					// Batch mode: collect row, trigger fires later via Flush()
+					batch.Add(triggerDeletedRow)
+				} else if alreadyLocked {
 					func() {
 						t.mu.Unlock()
 						defer t.mu.Lock()
@@ -1127,6 +1134,7 @@ type ShardMapReducer struct {
 	mapFn           func(...scm.Scmer) scm.Scmer
 	reduceFn        func(...scm.Scmer) scm.Scmer
 	mapScmer        scm.Scmer // original Scmer for network serialization
+	deleteBatch     *triggerBatch // when set, DELETE triggers are batched instead of per-row
 	reduceScmer     scm.Scmer // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
@@ -1172,10 +1180,20 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		mainCount:        t.main_count,
 		shardWriteLocked: alreadyLocked,
 	}
+	hasVectorizedDeleteTrigger := false
+	for _, tr := range t.t.Triggers {
+		if (tr.Timing == AfterDelete) && !tr.VectorFunc.IsNil() {
+			hasVectorizedDeleteTrigger = true
+			break
+		}
+	}
 	for i, col := range cols {
 		if col == "$update" {
 			mr.isUpdate[i] = true
 			mr.hasUpdateCol = true
+			if hasVectorizedDeleteTrigger {
+				mr.deleteBatch = t.t.BeginTriggerBatch(AfterDelete, true)
+			}
 		} else if len(col) >= 4 && col[:4] == "NEW." {
 			mr.isUpdate[i] = true // NEW. columns always return nil
 			mr.hasUpdateCol = true
@@ -1337,7 +1355,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				} else if m.isBreak[i] {
 					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
 				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, m.hasUpdateCol))
+					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, m.hasUpdateCol, m.deleteBatch))
 				} else {
 					if effectiveID < m.mainCount {
 						m.args[i] = col.GetValue(effectiveID)
@@ -1395,7 +1413,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				} else if m.isBreak[i] {
 					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
 				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, m.hasUpdateCol))
+					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, m.hasUpdateCol, m.deleteBatch))
 				} else if len(col) >= 4 && col[:4] == "NEW." {
 					m.args[i] = scm.NewNil()
 				} else {
@@ -1416,8 +1434,13 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 	return acc
 }
 
-// Close releases resources held by the MapReducer. No-op for local shards.
+// Close releases resources held by the MapReducer and flushes any pending
+// trigger batches (e.g. collected DELETE rows for vectorized triggers).
 func (m *ShardMapReducer) Close() {
+	if m.deleteBatch != nil {
+		m.deleteBatch.Flush()
+		m.deleteBatch = nil
+	}
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {

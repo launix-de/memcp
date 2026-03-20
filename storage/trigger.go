@@ -360,12 +360,8 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 		}
 		// Check for vectorized trigger (VectorFunc set)
 		if !tr.VectorFunc.IsNil() {
-			// Build batch dicts
-			dicts := make([]scm.Scmer, len(rows))
-			for i, row := range rows {
-				dicts[i] = t.rowToDict(row)
-			}
-			batchList := scm.NewSlice(dicts)
+			// Build columnar dict-of-lists: {"col1": [v1,v2,...], "col2": [v1,v2,...]}
+			colBatch := t.rowsToColumnar(rows)
 			func() {
 				tx := CurrentTx()
 				var sp Savepoint
@@ -379,13 +375,22 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 						if hasSavepoint {
 							tx.RollbackToSavepoint(sp)
 						}
-						panic(fmt.Sprintf("vectorized trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
+						// Vectorization failed: fall back to per-row
+						for _, row := range rows {
+							var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+							if isOld {
+								oldDict = t.rowToDict(row)
+							} else {
+								newDict = t.rowToDict(row)
+							}
+							scm.Apply(tr.Func, oldDict, newDict)
+						}
 					}
 				}()
 				if isOld {
-					scm.Apply(tr.VectorFunc, batchList, scm.NewNil())
+					scm.Apply(tr.VectorFunc, colBatch, scm.NewNil())
 				} else {
-					scm.Apply(tr.VectorFunc, scm.NewNil(), batchList)
+					scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch)
 				}
 			}()
 			continue
@@ -418,6 +423,31 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 			}()
 		}
 	}
+}
+
+// rowsToColumnar converts a batch of rows into columnar dict-of-lists format.
+// Result: FastDict{"col1": [v1,v2,...], "col2": [v1,v2,...], ...}
+// This is the optimal format for vectorized trigger bodies: get_assoc returns
+// the entire column as a list, enabling batch operations like has?.
+func (t *table) rowsToColumnar(rows []dataset) scm.Scmer {
+	if len(rows) == 0 {
+		return scm.NewNil()
+	}
+	cols := t.Columns
+	// Build flat assoc: (col1 [v1,v2,...] col2 [v1,v2,...] ...)
+	result := make([]scm.Scmer, 0, len(cols)*2)
+	for ci, col := range cols {
+		vals := make([]scm.Scmer, len(rows))
+		for i, row := range rows {
+			if row != nil && ci < len(row) {
+				vals[i] = row[ci]
+			} else {
+				vals[i] = scm.NewNil()
+			}
+		}
+		result = append(result, scm.NewString(col.Name), scm.NewSlice(vals))
+	}
+	return scm.NewSlice(result)
 }
 
 // rowToDictWithColumns converts a dataset to a dict using explicit column names

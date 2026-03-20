@@ -38,6 +38,11 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	if !triggerFn.IsProc() {
 		return scm.NewNil()
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			// Vectorization failed — not vectorizable, return nil
+		}
+	}()
 	proc := triggerFn.Proc()
 	body := proc.Body
 
@@ -92,72 +97,58 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	// (lambda (OLD_batch NEW_batch)
 	//   for each OLD in OLD_batch: collect get_assoc OLD key into a set
 	//   then do a single scan with has? filter)
+	// Pre-compute the column param index at vectorization time (not per-call)
+	colParamIdx := findEqualParamIdx(filterFn)
+	if colParamIdx < 0 {
+		return scm.NewNil()
+	}
+
 	return scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		// args[0] = OLD_batch (columnar dict-of-lists: {"col": [v1,v2,...], ...})
+		// args[1] = NEW_batch (nil for DELETE)
 		oldBatch := args[0]
-		if oldBatch.IsNil() || !oldBatch.IsSlice() {
-			return scm.NewNil()
-		}
-		batchRows := oldBatch.Slice()
-		if len(batchRows) == 0 {
+		if oldBatch.IsNil() {
 			return scm.NewNil()
 		}
 
-		// Collect all OLD values for the key into a fast lookup set
-		vals := make(map[string]bool, len(batchRows))
-		valsList := make([]scm.Scmer, 0, len(batchRows))
-		for _, oldDict := range batchRows {
-			v := scm.Apply(scm.NewSymbol("get_assoc"), oldDict, scm.NewString(key))
-			s := v.String()
-			if !vals[s] {
-				vals[s] = true
-				valsList = append(valsList, v)
-			}
-		}
-
-		// Build a new filter function that checks has? against our set
-		origFilterProc := filterFn
-		var origParams []scm.Scmer
-		if origFilterProc.IsProc() {
-			if origFilterProc.Proc().Params.IsSlice() {
-				origParams = origFilterProc.Proc().Params.Slice()
-			}
-		}
-		// Find which param index corresponds to the filtered column
-		colParamIdx := findEqualParamIdx(filterFn)
-		if colParamIdx < 0 {
-			// Fallback: run per-row
-			for _, oldDict := range batchRows {
-				scm.Apply(triggerFn, oldDict, scm.NewNil())
-			}
+		// Extract the column values from the columnar batch via get_assoc
+		valsList := scm.Apply(scm.NewSymbol("get_assoc"), oldBatch, scm.NewString(key))
+		if valsList.IsNil() {
 			return scm.NewNil()
 		}
 
-		// Build the set as a Scheme value for has?
-		valsSet := scm.NewSlice(valsList)
+		// Build a fast lookup set for the IN-check
+		var vals []scm.Scmer
+		if valsList.IsSlice() {
+			vals = valsList.Slice()
+		} else {
+			// Single value (shouldn't happen with columnar, but handle it)
+			vals = []scm.Scmer{valsList}
+		}
+		if len(vals) == 0 {
+			return scm.NewNil()
+		}
 
-		// Replace the filter function with a batch-aware one
+		// Replace the filter function with a batch-aware IN-check
 		newFilter := scm.NewFunc(func(filterArgs ...scm.Scmer) scm.Scmer {
 			if colParamIdx >= len(filterArgs) {
 				return scm.NewBool(false)
 			}
 			colVal := filterArgs[colParamIdx]
-			// Check if colVal is in our batch set
-			for _, v := range valsList {
+			for _, v := range vals {
 				if !scm.Less(colVal, v) && !scm.Less(v, colVal) {
 					return scm.NewBool(true)
 				}
 			}
 			return scm.NewBool(false)
 		})
-		_ = valsSet
-		_ = origParams
 
 		// Build new scan call with the batch filter
 		newItems := make([]scm.Scmer, len(items))
 		copy(newItems, items)
 		newItems[4] = newFilter
 
-		// Execute the scan
+		// Execute the single batched scan
 		return scm.Eval(scm.NewSlice(newItems), proc.En)
 	})
 }
