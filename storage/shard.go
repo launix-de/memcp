@@ -1180,13 +1180,20 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		mainCount:        t.main_count,
 		shardWriteLocked: alreadyLocked,
 	}
-	// TODO: batch DELETE triggers when lock-safety is resolved.
-	// Currently disabled because FlushTriggerBatch inside scan causes deadlocks
-	// (trigger handlers scan other tables while shard locks are held).
+	hasDeleteTriggers := false
+	for _, tr := range t.t.Triggers {
+		if tr.Timing == AfterDelete {
+			hasDeleteTriggers = true
+			break
+		}
+	}
 	for i, col := range cols {
 		if col == "$update" {
 			mr.isUpdate[i] = true
 			mr.hasUpdateCol = true
+			if hasDeleteTriggers {
+				mr.deleteBatch = t.t.BeginTriggerBatch(AfterDelete, true)
+			}
 		} else if len(col) >= 4 && col[:4] == "NEW." {
 			mr.isUpdate[i] = true // NEW. columns always return nil
 			mr.hasUpdateCol = true
