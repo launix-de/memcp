@@ -56,6 +56,79 @@ test_cases:
         - name: "beta"
           latest: "only"
 
+  - name: "correlated subselect with colon column inside derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID,
+          (SELECT c.val FROM ccn_child c WHERE c.`dynamic:parent` = p.ID ORDER BY c.`dynamic:time` DESC LIMIT 1) AS latest
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "unqualified colon column in correlated subselect inside derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID,
+          (SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1) AS latest
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "unqualified colon column in deeper correlated subselect"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID AND `dynamic:time` <= 999 ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "multiple colon subselects in derived table projection"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID, p.name AS name,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID AND `dynamic:time` <= 999 ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest,
+          COALESCE((SELECT c.`dynamic:time` FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS last_time
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
+  - name: "colon column in correlated subselect with LEFT JOIN in derived table"
+    noncritical: true
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS `ref:ID`, name AS `ref:name` FROM ccn_parent) r ON r.`ref:ID` = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
   - name: "COUNT with colon column in WHERE"
     sql: "SELECT COUNT(*) AS c FROM ccn_child WHERE `dynamic:parent` = 1"
     expect:

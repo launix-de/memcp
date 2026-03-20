@@ -1347,7 +1347,9 @@ WHAT IT MUST NOT DO:
 										(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 									)
 								)
-								'((symbol get_column) alias_ ti col ci) '('get_column (concat id "\0" alias_) ti col ci)
+								'((symbol get_column) alias_ ti col ci) (if (not (nil? (schemas2 alias_)))
+								'('get_column (concat id "\0" alias_) ti col ci)
+								expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
 								'((symbol outer) outer_arg) (begin
 									/* prefix outer variable reference if it refers to a table in schemas2 */
 									(define s (string outer_arg))
@@ -1359,7 +1361,7 @@ WHAT IT MUST NOT DO:
 										_ (list (quote outer) (replace_column_alias outer_arg))
 									)
 								)
-								(cons sym args) /* function call */ (cons (replace_column_alias sym) (map args replace_column_alias))
+												(cons sym args) /* function call */ (cons (replace_column_alias sym) (map args replace_column_alias))
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs */
