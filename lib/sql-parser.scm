@@ -175,6 +175,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(define _transform_new_old_only (lambda (e) (match e
 					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+					'('session var) (list (list (symbol "context") "session") var)
+					'('session var value) (list (list (symbol "context") "session") var (_transform_new_old_only value))
 					(cons h t) (cons (_transform_new_old_only h) (map t _transform_new_old_only))
 					e)))
 				(transform_trigger_expr (build_queryplan_term (_transform_new_old_only (car tail)))))
