@@ -1180,20 +1180,13 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		mainCount:        t.main_count,
 		shardWriteLocked: alreadyLocked,
 	}
-	hasVectorizedDeleteTrigger := false
-	for _, tr := range t.t.Triggers {
-		if (tr.Timing == AfterDelete) && !tr.VectorFunc.IsNil() {
-			hasVectorizedDeleteTrigger = true
-			break
-		}
-	}
+	// TODO: batch DELETE triggers when lock-safety is resolved.
+	// Currently disabled because FlushTriggerBatch inside scan causes deadlocks
+	// (trigger handlers scan other tables while shard locks are held).
 	for i, col := range cols {
 		if col == "$update" {
 			mr.isUpdate[i] = true
 			mr.hasUpdateCol = true
-			if hasVectorizedDeleteTrigger {
-				mr.deleteBatch = t.t.BeginTriggerBatch(AfterDelete, true)
-			}
 		} else if len(col) >= 4 && col[:4] == "NEW." {
 			mr.isUpdate[i] = true // NEW. columns always return nil
 			mr.hasUpdateCol = true
@@ -1434,9 +1427,16 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 	return acc
 }
 
-// Close releases resources held by the MapReducer and flushes any pending
-// trigger batches (e.g. collected DELETE rows for vectorized triggers).
+// Close releases resources held by the MapReducer. Does NOT flush trigger
+// batches — that must happen after all shard locks are released.
+// Call FlushTriggerBatch() separately after the scan completes.
 func (m *ShardMapReducer) Close() {
+}
+
+// FlushTriggerBatch flushes any pending trigger batches. Must be called
+// AFTER the scan completes and all shard locks are released, to avoid
+// deadlocks when trigger handlers scan other tables.
+func (m *ShardMapReducer) FlushTriggerBatch() {
 	if m.deleteBatch != nil {
 		m.deleteBatch.Flush()
 		m.deleteBatch = nil
