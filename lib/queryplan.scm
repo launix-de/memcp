@@ -1677,7 +1677,11 @@ WHAT IT MUST NOT DO:
 				nil))) (lambda (x) (not (nil? x)))))
 			(define _canon_condition (if (equal? (count _pruned_tables) (count tables)) _canon_condition
 				(begin
-					(define _cond_parts (match _canon_condition (cons (symbol and) parts) parts (list _canon_condition)))
+					/* flatten nested (and ...) to get individual condition parts */
+				(define _flatten_and (lambda (expr)
+					(match expr (cons (symbol and) parts) (merge (map parts _flatten_and))
+						(list expr))))
+				(define _cond_parts (_flatten_and _canon_condition))
 					/* drop condition parts that reference ANY eliminated alias */
 					(define _kept_parts (filter _cond_parts (lambda (part)
 						(not (reduce (extract_tblvars part) (lambda (acc tv) (or acc (has? _elim_aliases tv))) false)))))
