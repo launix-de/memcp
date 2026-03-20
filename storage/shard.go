@@ -1135,6 +1135,10 @@ type ShardMapReducer struct {
 	reduceFn        func(...scm.Scmer) scm.Scmer
 	mapScmer        scm.Scmer // original Scmer for network serialization
 	deleteBatch     *triggerBatch // when set, DELETE triggers are batched instead of per-row
+	// Batched side effects: collected during scan, flushed after lock release.
+	// $increment calls are aggregated per (proxy, recid) → one update per unique target.
+	incrementBatch  map[*StorageComputeProxy]map[uint32]scm.Scmer // proxy → recid → accumulated delta
+	invalidateBatch map[*StorageComputeProxy]bool                  // proxies to InvalidateAll after scan
 	reduceScmer     scm.Scmer // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
@@ -1248,9 +1252,28 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		}
 		if mr.isIncrement[i] {
 			if proxy := mr.incrementProxy[i]; proxy != nil {
+				// Batch increments: aggregate per (proxy, recid) and flush after scan
+				if mr.incrementBatch == nil {
+					mr.incrementBatch = make(map[*StorageComputeProxy]map[uint32]scm.Scmer)
+				}
+				if mr.incrementBatch[proxy] == nil {
+					mr.incrementBatch[proxy] = make(map[uint32]scm.Scmer)
+				}
+				proxyBatch := mr.incrementBatch[proxy]
 				fn := func(id uint32, args ...scm.Scmer) scm.Scmer {
 					if len(args) > 0 {
-						proxy.IncrementalUpdate(id, args[0])
+						if existing, ok := proxyBatch[id]; ok {
+							// Aggregate: add deltas
+							if existing.IsInt() && args[0].IsInt() {
+								proxyBatch[id] = scm.NewInt(existing.Int() + args[0].Int())
+							} else if existing.IsFloat() && args[0].IsFloat() {
+								proxyBatch[id] = scm.NewFloat(existing.Float() + args[0].Float())
+							} else {
+								proxyBatch[id] = args[0] // can't aggregate, last wins
+							}
+						} else {
+							proxyBatch[id] = args[0]
+						}
 					}
 					return scm.NewBool(true)
 				}
@@ -1259,8 +1282,12 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		}
 		if mr.isInvalidate[i] {
 			if proxy := mr.invalidateProxy[i]; proxy != nil {
+				// Batch invalidations: mark proxy for InvalidateAll after scan
+				if mr.invalidateBatch == nil {
+					mr.invalidateBatch = make(map[*StorageComputeProxy]bool)
+				}
 				fn := func(id uint32, args ...scm.Scmer) scm.Scmer {
-					proxy.Invalidate(id)
+					mr.invalidateBatch[proxy] = true
 					return scm.NewBool(true)
 				}
 				mr.invClosureFn[i] = &fn
@@ -1440,10 +1467,25 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 func (m *ShardMapReducer) Close() {
 }
 
-// FlushTriggerBatch flushes any pending trigger batches. Must be called
-// AFTER the scan completes and all shard locks are released, to avoid
-// deadlocks when trigger handlers scan other tables.
-func (m *ShardMapReducer) FlushTriggerBatch() {
+// FlushSideEffects flushes all batched side effects (triggers, increments,
+// invalidations). Must be called AFTER the scan completes and all shard
+// locks are released, to avoid deadlocks.
+func (m *ShardMapReducer) FlushSideEffects() {
+	// 1. Flush batched invalidations (cheapest: just set bits)
+	for proxy := range m.invalidateBatch {
+		proxy.InvalidateAll()
+	}
+	m.invalidateBatch = nil
+
+	// 2. Flush batched increments (aggregated per proxy+recid)
+	for proxy, batch := range m.incrementBatch {
+		for recid, delta := range batch {
+			proxy.IncrementalUpdate(recid, delta)
+		}
+	}
+	m.incrementBatch = nil
+
+	// 3. Flush batched DELETE triggers (may trigger cascading scans)
 	if m.deleteBatch != nil {
 		m.deleteBatch.Flush()
 		m.deleteBatch = nil

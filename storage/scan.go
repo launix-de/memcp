@@ -420,7 +420,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			t.mu.RUnlock()
 			locked = false
 		}
-		mapper.FlushTriggerBatch()
+		mapper.FlushSideEffects()
 		return scm.NewNil(), outCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
@@ -443,6 +443,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		t.mu.Unlock()
 		writeLocked = false
 	}
-	mapper.FlushTriggerBatch()
+	mapper.FlushSideEffects()
 	return akkumulator, outCount
 }
