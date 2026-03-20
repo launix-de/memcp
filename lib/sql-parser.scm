@@ -169,9 +169,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			or (equal?? head "inner_select") (equal?? head (quote inner_select))
 			(equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
 			(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
-			/* resolve inner_select: first transform NEW/OLD refs in the
-			subquery args, then resolve via query planner */
-			(transform_trigger_expr (build_queryplan_term (transform_trigger_expr (car tail))))
+			/* resolve inner_select: transform only NEW/OLD column refs
+			(not session vars), then resolve via query planner */
+			(begin
+				(define _transform_new_old_only (lambda (e) (match e
+					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+					(cons h t) (cons (_transform_new_old_only h) (map t _transform_new_old_only))
+					e)))
+				(transform_trigger_expr (build_queryplan_term (_transform_new_old_only (car tail)))))
 			(cons (transform_trigger_expr head) (map tail transform_trigger_expr)))
 		expr
 	)))
