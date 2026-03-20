@@ -97,7 +97,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 (define replace_columns_from_expr (lambda (expr)
 	(match expr
 		(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
-		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (error (concat "column " col " not found")) (symbol (concat tblvar "." col)))
+		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (symbol (concat "__unresolved__." col)) (symbol (concat tblvar "." col)))
 		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 		expr /* literals */
 	)

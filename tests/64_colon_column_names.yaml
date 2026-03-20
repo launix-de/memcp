@@ -143,6 +143,23 @@ test_cases:
         - ID: 2
           latest: "only"
 
+  - name: "colon subselect + multiple LEFT JOINs in derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS `ref1:ID`, name AS `ref1:name` FROM ccn_parent) r1 ON r1.`ref1:ID` = p.ID
+        LEFT JOIN (SELECT ID AS `ref2:ID`, name AS `ref2:name` FROM ccn_parent) r2 ON r2.`ref2:ID` = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
   - name: "COUNT with colon column in WHERE"
     sql: "SELECT COUNT(*) AS c FROM ccn_child WHERE `dynamic:parent` = 1"
     expect:
