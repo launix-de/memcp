@@ -1378,7 +1378,7 @@ WHAT IT MUST NOT DO:
 								expr
 							)))
 							/* transform and attach joinexpr to first table in tablesPrefixed */
-							(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
+							(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr (replace_inner_selects joinexpr schemas2))))
 							/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
 							(set condition2_transformed (replace_column_alias condition2))
 							(set joinexpr2 (if isOuter

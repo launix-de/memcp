@@ -160,6 +160,64 @@ test_cases:
         - ID: 2
           latest: "only"
 
+  - name: "correlated subselect referencing outer table inside derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          (SELECT c.name FROM ccn_parent c WHERE c.ID = p.ID LIMIT 1) AS looked_up
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          looked_up: "alpha"
+        - ID: 2
+          looked_up: "beta"
+
+  - name: "COALESCE(correlated subselect, default) in derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.name FROM ccn_parent c WHERE c.ID = p.ID LIMIT 1), 'none') AS looked_up
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          looked_up: "alpha"
+        - ID: 2
+          looked_up: "beta"
+
+  - name: "nested subselects in CASE WHEN inside derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          (CASE WHEN TRUE THEN TRUE ELSE NOT (
+            (SELECT (c.ID = 999) FROM ccn_parent c WHERE c.ID = p.ID LIMIT 1)
+          ) END) AS perm
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
+  - name: "double-nested correlated subselect in derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT (
+            (SELECT c2.name FROM ccn_parent c2 WHERE c2.ID = c.ID LIMIT 1)
+          ) FROM ccn_child c WHERE c.`dynamic:parent` = p.ID LIMIT 1), 'none') AS deep
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
   - name: "COUNT with colon column in WHERE"
     sql: "SELECT COUNT(*) AS c FROM ccn_child WHERE `dynamic:parent` = 1"
     expect:
