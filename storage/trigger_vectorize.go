@@ -55,13 +55,19 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 		return scm.NewNil()
 	}
 	// Check for (scan schema tbl condCols filterFn ...)
-	isScan := (items[0].IsSymbol() && items[0].String() == "scan") ||
-		(scm.DeclarationForValue(items[0]) != nil && scm.DeclarationForValue(items[0]).Name == "scan")
-	if !isScan {
+	// Handle both symbol "scan" and resolved tagFunc references.
+	headName := ""
+	if items[0].IsSymbol() {
+		headName = items[0].String()
+	} else if d := scm.DeclarationForValue(items[0]); d != nil {
+		headName = d.Name
+	}
+	if headName != "scan" {
 		return scm.NewNil()
 	}
 
 	// Extract filter function (items[4])
+	// After eval, this is a Proc. In AST form, it's a (lambda ...) list.
 	filterFn := items[4]
 	if !filterFn.IsProc() && !filterFn.IsSlice() {
 		return scm.NewNil()
@@ -77,18 +83,9 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	if len(items) < 6 {
 		return scm.NewNil()
 	}
-	mapCols := items[5]
-	if !mapCols.IsSlice() {
-		return scm.NewNil()
-	}
-	mapColsSlice := mapCols.Slice()
-	hasUpdate := false
-	for _, mc := range mapColsSlice {
-		if mc.IsString() && mc.String() == "$update" {
-			hasUpdate = true
-		}
-	}
-	if !hasUpdate {
+	// Check that callback columns contain "$update" (DELETE pattern).
+	// The mapCols can be (list "$update") as AST or ["$update"] as evaluated list.
+	if !containsUpdateCol(items[5]) {
 		return scm.NewNil()
 	}
 
@@ -182,15 +179,8 @@ func findGetAssocOldInExpr(expr scm.Scmer) string {
 	}
 
 	// Check for (equal? X (get_assoc OLD key)) or (equal? (get_assoc OLD key) X)
-	isEqual := false
-	if items[0].IsSymbol() {
-		name := items[0].String()
-		isEqual = name == "equal?" || name == "equal??"
-	}
-	if !isEqual {
-		d := scm.DeclarationForValue(items[0])
-		isEqual = d != nil && (d.Name == "equal?" || d.Name == "equal??")
-	}
+	headName := declName(items[0])
+	isEqual := headName == "equal?" || headName == "equal??"
 
 	if isEqual && len(items) == 3 {
 		if k := extractGetAssocOldFromArg(items[2]); k != "" {
@@ -202,8 +192,7 @@ func findGetAssocOldInExpr(expr scm.Scmer) string {
 	}
 
 	// Check for (and ...) — recurse into children
-	isAnd := items[0].IsSymbol() && items[0].String() == "and"
-	if isAnd {
+	if declName(items[0]) == "and" {
 		for _, child := range items[1:] {
 			if k := findGetAssocOldInExpr(child); k != "" {
 				return k
@@ -224,15 +213,7 @@ func extractGetAssocOldFromArg(expr scm.Scmer) string {
 		return ""
 	}
 	// Check for (get_assoc OLD "key")
-	isGetAssoc := false
-	if items[0].IsSymbol() {
-		isGetAssoc = items[0].String() == "get_assoc"
-	}
-	if !isGetAssoc {
-		d := scm.DeclarationForValue(items[0])
-		isGetAssoc = d != nil && d.Name == "get_assoc"
-	}
-	if !isGetAssoc {
+	if declName(items[0]) != "get_assoc" {
 		return ""
 	}
 	// items[1] should be OLD (a symbol)
@@ -275,18 +256,10 @@ func findEqualParamInExpr(expr scm.Scmer, params []scm.Scmer) int {
 		return -1
 	}
 
-	isEqual := false
-	if items[0].IsSymbol() {
-		name := items[0].String()
-		isEqual = name == "equal?" || name == "equal??"
-	}
-	if !isEqual {
-		d := scm.DeclarationForValue(items[0])
-		isEqual = d != nil && (d.Name == "equal?" || d.Name == "equal??")
-	}
+	hn := declName(items[0])
+	isEqual := hn == "equal?" || hn == "equal??"
 
 	if isEqual && len(items) == 3 {
-		// Check which side is a param reference
 		if idx := matchParam(items[1], params); idx >= 0 {
 			if extractGetAssocOldFromArg(items[2]) != "" {
 				return idx
@@ -299,8 +272,7 @@ func findEqualParamInExpr(expr scm.Scmer, params []scm.Scmer) int {
 		}
 	}
 
-	// Recurse into (and ...)
-	if items[0].IsSymbol() && items[0].String() == "and" {
+	if hn == "and" {
 		for _, child := range items[1:] {
 			if idx := findEqualParamInExpr(child, params); idx >= 0 {
 				return idx
@@ -309,6 +281,34 @@ func findEqualParamInExpr(expr scm.Scmer, params []scm.Scmer) int {
 	}
 
 	return -1
+}
+
+// declName returns the declaration name for a Scmer value, handling both
+// symbols and resolved tagFunc references.
+func declName(v scm.Scmer) string {
+	if v.IsSymbol() {
+		return v.String()
+	}
+	if d := scm.DeclarationForValue(v); d != nil {
+		return d.Name
+	}
+	return ""
+}
+
+// containsUpdateCol checks if an expression contains "$update" as a string,
+// either as a direct element or inside a (list ...) AST node.
+func containsUpdateCol(expr scm.Scmer) bool {
+	if expr.IsString() && expr.String() == "$update" {
+		return true
+	}
+	if expr.IsSlice() {
+		for _, item := range expr.Slice() {
+			if containsUpdateCol(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func matchParam(expr scm.Scmer, params []scm.Scmer) int {
