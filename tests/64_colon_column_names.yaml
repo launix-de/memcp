@@ -112,8 +112,22 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "LEFT JOIN inside derived table (no colon)"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID, p.name
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "alpha"
+        - ID: 2
+          name: "beta"
+
   - name: "colon column in correlated subselect with LEFT JOIN in derived table"
-    noncritical: true
     sql: |
       SELECT t.* FROM (
         SELECT p.ID AS ID,

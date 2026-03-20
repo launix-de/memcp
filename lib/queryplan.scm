@@ -1671,12 +1671,15 @@ WHAT IT MUST NOT DO:
 				'(alias _ _ isOuter _) (if isOuter (has? _used_tvs alias) true)
 				true))))
 			/* rebuild condition: drop AND-parts that reference ONLY eliminated aliases */
-			(define _kept_aliases (map _pruned_tables (lambda (t) (match t '(alias _ _ _ _) alias nil))))
+			(define _elim_aliases (filter (map tables (lambda (t) (match t
+				'(alias _ _ true _) (if (has? _used_tvs alias) nil alias)
+				nil))) (lambda (x) (not (nil? x)))))
 			(define _canon_condition (if (equal? (count _pruned_tables) (count tables)) _canon_condition
 				(begin
 					(define _cond_parts (match _canon_condition (cons (symbol and) parts) parts (list _canon_condition)))
+					/* drop condition parts that reference ANY eliminated alias */
 					(define _kept_parts (filter _cond_parts (lambda (part)
-						(reduce (extract_tblvars part) (lambda (acc tv) (or acc (has? _kept_aliases tv))) false))))
+						(not (reduce (extract_tblvars part) (lambda (acc tv) (or acc (has? _elim_aliases tv))) false)))))
 					(if (equal? 0 (count _kept_parts)) true
 						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 							(cons 'and _kept_parts))))))
