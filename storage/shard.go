@@ -2039,10 +2039,18 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// values to nil (while keeping the key) to free memory under pressure.
 		// rebuild must read all columns, so materialize any nil entries now
 		// while t.mu is not held (ensureColumnLoaded acquires it internally).
+		// Snapshot column keys under RLock to avoid concurrent map iteration/write
+		// with ComputeColumn which writes to t.columns under Lock.
+		t.mu.RLock()
+		var nilCols []string
 		for col, c := range t.columns {
 			if c == nil {
-				t.ensureColumnLoaded(col, false)
+				nilCols = append(nilCols, col)
 			}
+		}
+		t.mu.RUnlock()
+		for _, col := range nilCols {
+			t.ensureColumnLoaded(col, false)
 		}
 
 		// transfer indexes early so we know which index is Native (physically sorted)
