@@ -38,6 +38,7 @@
 (sql_builtins "WEEKDAY" (lambda (d) (extract_date d "WEEKDAY")))
 (sql_builtins "WEEK" (lambda (d) (extract_date d "WEEK")))
 (sql_builtins "QUARTER" (lambda (d) (extract_date d "QUARTER")))
+(sql_builtins "YEARWEEK" (lambda (d mode) (if (nil? d) nil (+ (* (extract_date d "YEAR") 100) (extract_date d "WEEK")))))
 
 /* math */
 (sql_builtins "FLOOR" floor)
