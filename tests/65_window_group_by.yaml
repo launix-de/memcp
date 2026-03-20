@@ -21,8 +21,7 @@ setup:
 
 test_cases:
 
-  - name: "COUNT with GROUP BY and window SUM OVER (degraded)"
-    noncritical: true
+  - name: "COUNT with GROUP BY and window SUM OVER"
     sql: |
       SELECT week_date,
         COUNT(*) AS cnt,
@@ -43,11 +42,6 @@ test_cases:
           cnt: 1
           total_cnt: 6
 
-  - name: "SUM with GROUP BY and window percentage (no crash)"
-    sql: |
-      SELECT week_date,
 
-  - name: "EXPLAIN window+GROUP BY"
-    sql: "EXPLAIN SELECT week_date, COUNT(*) AS cnt, SUM(COUNT(*)) OVER () AS total_cnt FROM wgb_data GROUP BY week_date"
-    expect:
-      rows: 999
+cleanup:
+  - sql: "DROP TABLE IF EXISTS wgb_data"

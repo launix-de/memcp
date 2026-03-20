@@ -1822,74 +1822,20 @@ store results as keytable columns named "expr|condition"
 	(define window_in_condition (not (equal? (extract_window_funcs (coalesceNil condition true)) '())))
 	(if window_in_condition (error "window functions not allowed in WHERE clause"))
 
-	/* window functions with GROUP BY: precompute OVER() totals via promises,
-	then run GROUP BY with promise references in place of window expressions.
-	Each SUM(x) OVER() becomes a global aggregate computed as a side query
-	before the main GROUP BY scan. The main scan references (promise "value"). */
+	/* window functions with GROUP BY: strip window expressions to inner
+	aggregates so the normal GROUP BY path processes them. Save original
+	fields so we can inject promise values after compute_plan. */
+	(define _wg_store (newsession))
+	(_wg_store "fields" nil)
 	(if (and has_window stage_group) (begin
-		(define _wg_counter (newsession))
-		(_wg_counter "n" 0)
-		(define _wg_next (lambda () (begin (_wg_counter "n" (+ (_wg_counter "n") 1)) (concat "__wgp_" (_wg_counter "n")))))
-		(define _wg_promises (newsession)) /* mutable: collects (promise_sym inner_aggregate fn) */
-		(_wg_promises "list" '())
-		/* replace window expressions with (promise "value") references */
-		(define replace_window_with_promise (lambda (expr)
-			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
-				(begin
-					(define psym (symbol (_wg_next)))
-					(define fn (nth expr 1))
-					(define args (nth expr 2))
-					(define inner_expr (if (and (list? args) (> (count args) 0)) (car args) 1))
-					(_wg_promises "list" (cons (list psym inner_expr fn) (_wg_promises "list")))
-					(list psym "value"))
-				(if (list? expr)
-					(map expr replace_window_with_promise)
-					expr))))
-		/* strip window expressions to inner aggregates for Phase 1 GROUP BY */
+		(_wg_store "fields" fields) /* save original fields with window_func */
 		(define strip_window_inner (lambda (expr)
 			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
 				(begin (define args (nth expr 2))
 					(if (and (list? args) (> (count args) 0)) (car args) 1))
 				(if (list? expr) (map expr strip_window_inner) expr))))
-		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window_inner v))))
-		/* collect promises (side effect) */
-		(define output_field_exprs (map_assoc fields (lambda (k v) (replace_window_with_promise v))))
-		/* build side queries: each promise gets a global aggregate scan */
-		(define side_query_plans (map (_wg_promises "list") (lambda (wp) (match wp '(psym inner_agg fn) (begin
-			(define reduce_op (match fn "SUM" '+ "COUNT" '+ "MIN" 'min "MAX" 'max '+))
-			(define neutral (match fn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
-			(define agg_fields (list (list "__wgval" (list (quote aggregate) inner_agg reduce_op neutral))))
-			(define agg_plan (build_queryplan schema tables agg_fields condition (list (make_group_stage '(1) nil nil nil nil)) schemas replace_find_column))
-			(list
-				(list (quote set) psym (list (quote newpromise)))
-				(list (quote set) (symbol "resultrow")
-					(list (quote lambda) (list (symbol "row"))
-						(list psym "once" (list (quote nth) (symbol "row") 1) "window aggregate")))
-				agg_plan))))))
-		/* Phase 1: GROUP BY with INNER aggregates (not output fields with promise refs) */
-		(define strip_window_inner (lambda (expr)
-			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
-				(begin (define args (nth expr 2))
-					(if (and (list? args) (> (count args) 0)) (car args) 1))
-				(if (list? expr) (map expr strip_window_inner) expr))))
-		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window_inner v))))
-		(define phase1_plan (build_queryplan schema tables phase1_fields condition groups schemas replace_find_column))
-		/* combine: side queries set promises, then phase1 runs, reading promise values.
-		The promise "value" reads are placed AFTER the phase1_plan via a resultrow wrapper
-		so the optimizer sees them in the same !begin scope as the "set" and "once" calls. */
-		(define promise_reads (merge (extract_assoc output_field_exprs (lambda (k v)
-			(if (and (list? v) (equal? (count v) 2) (equal? (nth v 1) "value"))
-				(list k v) /* promise field: k → (psym "value") */
-				(list k (list (quote get_assoc) (symbol "__wg_row") k)))))))
-		(cons (quote !begin) (merge
-			(list (list (quote set) (symbol "__wg_prev_rr") (symbol "resultrow")))
-			side_query_plans
-			(list
-				(list (quote set) (symbol "resultrow")
-					(list (quote lambda) (list (symbol "__wg_row"))
-						(list (symbol "__wg_prev_rr")
-							(cons (quote list) promise_reads))))
-				phase1_plan)))))
+		(set fields (map_assoc fields (lambda (k v) (strip_window_inner v))))
+		(set has_window false)))
 
 	(if stage_group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
@@ -2083,7 +2029,53 @@ store results as keytable columns named "expr|condition"
 								(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
 									(make_collect false)
 									nil))
-							invalidation_plan compute_plan grouped_plan)
+							invalidation_plan compute_plan
+							/* window+GROUP BY injection: after keytable is computed,
+							scan it to fill promises with global totals, then wrap
+							grouped_plan's resultrow to inject promise values. */
+							(if (nil? (_wg_store "fields")) grouped_plan
+								(begin
+									(define _wg_ctr (newsession)) (_wg_ctr "n" 0)
+									(define _wg_nn (lambda () (begin (_wg_ctr "n" (+ (_wg_ctr "n") 1)) (concat "__wgp_" (_wg_ctr "n")))))
+									/* build promise info and output fields with promise refs */
+									(define _wg_pl (newsession)) (_wg_pl "l" '())
+									(define _wg_out_fields (map_assoc (_wg_store "fields") (lambda (k v)
+										(if (and (list? v) (> (count v) 0) (equal?? (car v) (quote window_func)))
+											(begin
+												(define pn (_wg_nn))
+												(define wfn (nth v 1))
+												(define wargs (nth v 2))
+												(define inner_agg (if (and (list? wargs) (> (count wargs) 0)) (car wargs) 1))
+												(define agg_tuple (match inner_agg (cons (symbol aggregate) rest) rest (list inner_agg (quote +) 0)))
+												(define acn (agg_col_name agg_tuple))
+												(_wg_pl "l" (cons (list pn acn wfn) (_wg_pl "l")))
+												(symbol pn))
+											v))))
+									/* scan keytable for each promise: aggregate the column globally */
+									(define _wg_scans (map (_wg_pl "l") (lambda (pi) (match pi '(pn acn wfn)
+										(begin
+											(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
+											(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
+											(list (quote set) (symbol pn)
+												'('scan schema grouptbl
+													'(list acn)
+													'('lambda (list (symbol acn)) true)
+													'(list acn)
+													'('lambda (list (symbol acn)) (symbol acn))
+													reduce_op
+													neutral
+													nil false)))))))
+									/* wrap grouped_plan: replace resultrow to inject promise values */
+									(define _wg_rr_body (cons (quote list) (merge (extract_assoc _wg_out_fields (lambda (k v)
+										(if (not (list? v))
+											(list k v)
+											(list k (list (quote get_assoc) (symbol "__wgr") k))))))))
+									(cons 'begin (merge _wg_scans (list
+										(list (quote set) (symbol "__wg_orig_rr") (symbol "resultrow"))
+										(list (quote set) (symbol "resultrow")
+											(list (quote lambda) (list (symbol "__wgr"))
+												(list (symbol "__wg_orig_rr") _wg_rr_body)))
+										grouped_plan))))))
 				))
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */
