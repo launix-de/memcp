@@ -375,6 +375,18 @@ func setupIO(wd string) {
 		nil,
 	})
 
+	// Hard crash for crash testing — equivalent to kill -9, no cleanup
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"crash", "Hard process exit with no cleanup (kill -9 equivalent) for crash testing. SCM only, not exposed to SQL.",
+		0, 0,
+		[]scm.DeclarationParameter{}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			os.Exit(137) // 128 + SIGKILL(9)
+			return scm.NewBool(false) // unreachable
+		}, false, false, nil,
+		nil,
+	})
+
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"args", "Returns command line arguments",
 		0, 0,

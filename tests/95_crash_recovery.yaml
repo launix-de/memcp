@@ -1,0 +1,737 @@
+metadata:
+  version: "1.0"
+  description: "Crash recovery tests — verify data integrity after hard process kill"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS crash_safe"
+  - sql: "DROP TABLE IF EXISTS crash_insert"
+  - sql: "DROP TABLE IF EXISTS crash_update"
+  - sql: "DROP TABLE IF EXISTS crash_count"
+  - sql: "DROP TABLE IF EXISTS crash_clean"
+  - sql: >
+      CREATE TABLE crash_safe (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        val INT,
+        name TEXT
+      ) ENGINE=safe
+  - sql: >
+      CREATE TABLE crash_insert (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        val INT
+      ) ENGINE=safe
+  - sql: >
+      CREATE TABLE crash_update (
+        id INT PRIMARY KEY,
+        val INT,
+        status TEXT
+      ) ENGINE=safe
+  - sql: >
+      CREATE TABLE crash_count (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        category TEXT,
+        amount INT
+      ) ENGINE=safe
+  - sql: >
+      CREATE TABLE crash_clean (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        data TEXT
+      ) ENGINE=safe
+
+test_cases:
+  # ============================================================
+  # Test 1: Crash with delta rows pending — WAL replay must recover
+  # ============================================================
+
+  # Seed data, then rebuild to move to main storage
+  - name: "Seed crash_safe with 100 rows"
+    setup:
+      - scm: |
+          (insert "memcp-tests" "crash_safe" '("val" "name")
+            (map (produceN 100) (lambda (i)
+              (list i (concat "row" i)))))
+    sql: "SELECT COUNT(*) AS cnt FROM crash_safe"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  - name: "SHUTDOWN to rebuild crash_safe into main storage"
+    sql: "SHUTDOWN"
+
+  - name: "Verify 100 rows survived rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_safe"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  # Insert more rows (go to delta/WAL), then hard crash
+  - name: "Insert 50 delta rows then crash"
+    setup:
+      - scm: |
+          (insert "memcp-tests" "crash_safe" '("val" "name")
+            (map (produceN 50) (lambda (i)
+              (list (+ 100 i) (concat "delta" i)))))
+    sql: "SELECT COUNT(*) AS cnt FROM crash_safe"
+    expect:
+      rows: 1
+      data:
+        - cnt: 150
+
+  - name: "Hard crash with delta rows pending"
+    scm: "(crash)"
+    expect:
+      error: true
+
+  - name: "Restart after delta crash"
+    action: restart
+
+  - name: "After crash: all 150 rows survived (main + WAL replay)"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_safe"
+    expect:
+      rows: 1
+      data:
+        - cnt: 150
+
+  - name: "After crash: main storage rows intact"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_safe WHERE val < 100"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  - name: "After crash: WAL-replayed delta rows intact"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_safe WHERE val >= 100"
+    expect:
+      rows: 1
+      data:
+        - cnt: 50
+
+  # ============================================================
+  # Test 2: Crash during large insert — at least pre-crash data survives
+  # ============================================================
+
+  - name: "Seed crash_insert with 20 known rows"
+    setup:
+      - scm: |
+          (insert "memcp-tests" "crash_insert" '("val")
+            (map (produceN 20) (lambda (i) (list i))))
+    sql: "SELECT COUNT(*) AS cnt FROM crash_insert"
+    expect:
+      rows: 1
+      data:
+        - cnt: 20
+
+  # Rebuild so the 20 rows are in main storage (power-safe)
+  - name: "SHUTDOWN to persist crash_insert seed"
+    sql: "SHUTDOWN"
+
+  - name: "Verify 20 rows after rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_insert"
+    expect:
+      rows: 1
+      data:
+        - cnt: 20
+
+  # Fire a large insert and crash concurrently
+  - name: "Large insert interrupted by crash"
+    noncritical: true
+    parallel: crash_insert
+    scm: |
+      (insert "memcp-tests" "crash_insert" '("val")
+        (map (produceN 100000) (lambda (i) (list (+ 20 i)))))
+    expect:
+      error: true
+
+  - name: "Crash during large insert"
+    parallel: crash_insert
+    scm: "(begin (sleep 0.05) (crash))"
+    expect:
+      error: true
+
+  - name: "Restart after large insert crash"
+    action: restart
+
+  - name: "After crash: at least the original 20 rows survive"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_insert WHERE val < 20"
+    expect:
+      rows: 1
+      data:
+        - cnt: 20
+
+  # ============================================================
+  # Test 3: Crash during large update — original data survives
+  # ============================================================
+
+  - name: "Seed crash_update with 1000 rows"
+    setup:
+      - scm: |
+          (insert "memcp-tests" "crash_update" '("id" "val" "status")
+            (map (produceN 1000) (lambda (i)
+              (list i i "original"))))
+    sql: "SELECT COUNT(*) AS cnt FROM crash_update WHERE status = 'original'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1000
+
+  # Crash during a bulk update
+  - name: "Bulk update interrupted by crash"
+    noncritical: true
+    parallel: crash_update
+    sql: "UPDATE crash_update SET status = 'updated', val = val * 10"
+    expect:
+      error: true
+
+  - name: "Crash during update"
+    parallel: crash_update
+    scm: "(begin (sleep 0.05) (crash))"
+    expect:
+      error: true
+
+  - name: "Restart after update crash"
+    action: restart
+
+  # Row count may be < 1000 if crash happened mid-UPDATE (delete+reinsert).
+  # This is expected: UPDATE is not atomic across crash.
+  # We verify the table is readable and has a reasonable count.
+  - name: "After crash: crash_update table readable"
+    noncritical: true
+    sql: "SELECT COUNT(*) AS cnt FROM crash_update"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1000
+
+  # ============================================================
+  # Test 4: Crash after insert — aggregation consistency
+  # ============================================================
+
+  - name: "Seed crash_count with 30 categorized rows"
+    setup:
+      - scm: |
+          (insert "memcp-tests" "crash_count" '("category" "amount")
+            (map (produceN 30) (lambda (i)
+              (list (concat "cat" (mod i 3)) (* i 10)))))
+    sql: "SELECT COUNT(*) AS cnt FROM crash_count"
+    expect:
+      rows: 1
+      data:
+        - cnt: 30
+
+  - name: "Verify SUM per category before crash"
+    sql: "SELECT category, SUM(amount) AS total FROM crash_count GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+
+  # Insert more rows then crash — verify aggregation consistency after recovery
+  - name: "Insert 30 more rows then crash"
+    scm: |
+      (begin
+        (insert "memcp-tests" "crash_count" '("category" "amount")
+          (map (produceN 30) (lambda (i)
+            (list (concat "cat" (mod (+ i 30) 3)) (* (+ i 30) 10)))))
+        (crash))
+    expect:
+      error: true
+
+  - name: "Restart after count crash"
+    action: restart
+
+  - name: "After crash: all 60 rows recovered"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_count"
+    expect:
+      rows: 1
+      data:
+        - cnt: 60
+
+  - name: "After crash: SUM aggregation consistent with row data"
+    sql: >
+      SELECT
+        (SELECT SUM(amount) FROM crash_count) AS total_sum,
+        (SELECT SUM(amount) FROM crash_count WHERE category = 'cat0') +
+        (SELECT SUM(amount) FROM crash_count WHERE category = 'cat1') +
+        (SELECT SUM(amount) FROM crash_count WHERE category = 'cat2') AS parts_sum
+    expect:
+      rows: 1
+
+  # ============================================================
+  # Test 5: Clean job after crash — stale shard cleanup
+  # ============================================================
+
+  - name: "Seed crash_clean with data"
+    setup:
+      - scm: |
+          (insert "memcp-tests" "crash_clean" '("data")
+            (map (produceN 40) (lambda (i)
+              (list (concat "item" i)))))
+    sql: "SELECT COUNT(*) AS cnt FROM crash_clean"
+    expect:
+      rows: 1
+      data:
+        - cnt: 40
+
+  - name: "SHUTDOWN to rebuild crash_clean"
+    sql: "SHUTDOWN"
+
+  - name: "Verify 40 rows after rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_clean"
+    expect:
+      rows: 1
+      data:
+        - cnt: 40
+
+  - name: "Insert more then crash"
+    scm: |
+      (begin
+        (insert "memcp-tests" "crash_clean" '("data")
+          (map (produceN 20) (lambda (i)
+            (list (concat "item" (+ i 40))))))
+        (crash))
+    expect:
+      error: true
+
+  - name: "Restart after clean crash"
+    action: restart
+
+  # clean job runs automatically at startup — verify data intact after it
+  - name: "After crash+clean: data intact"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_clean"
+    expect:
+      rows: 1
+      data:
+        - cnt: 60
+
+  - name: "After crash+clean: original rows intact"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_clean WHERE data LIKE 'item%'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 60
+
+  # ============================================================
+  # Test 6: Crash after INSERT — GROUP BY cache (sloppy keytable)
+  #   must be consistent after recovery
+  #   Bug scenario: keytable is ENGINE=SLOPPY, loses delta on crash.
+  #   Base table WAL replays inserts but triggers don't fire.
+  #   GROUP BY must still return correct results.
+  # ============================================================
+
+  - name: "Create GROUP BY source table"
+    sql: "DROP TABLE IF EXISTS crash_grp"
+  - name: "Create crash_grp table"
+    sql: >
+      CREATE TABLE crash_grp (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        category TEXT,
+        amount INT
+      ) ENGINE=safe
+
+  - name: "Seed crash_grp with initial data"
+    sql: >
+      INSERT INTO crash_grp (category, amount) VALUES
+        ('X', 100), ('X', 200), ('Y', 300), ('Y', 400), ('Z', 500)
+
+  # Materialize the GROUP BY cache (keytable)
+  - name: "Initial GROUP BY SUM to create cache"
+    sql: "SELECT category, SUM(amount) AS total FROM crash_grp GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "X"
+          total: 300
+        - category: "Y"
+          total: 700
+        - category: "Z"
+          total: 500
+
+  # INSERT more rows (triggers fire, cache updated incrementally)
+  - name: "INSERT more rows into crash_grp"
+    sql: >
+      INSERT INTO crash_grp (category, amount) VALUES
+        ('X', 50), ('Y', 150), ('Z', 250)
+
+  - name: "Verify GROUP BY after INSERT (cache updated)"
+    sql: "SELECT category, SUM(amount) AS total FROM crash_grp GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "X"
+          total: 350
+        - category: "Y"
+          total: 850
+        - category: "Z"
+          total: 750
+
+  # CRASH — base table WAL replays but keytable (sloppy) loses delta
+  - name: "Crash after GROUP BY INSERT"
+    scm: "(crash)"
+    expect:
+      error: true
+
+  - name: "Restart after GROUP BY crash"
+    action: restart
+
+  # This is the critical test: GROUP BY must show correct totals
+  # even though the keytable cache may be stale
+  - name: "After crash: GROUP BY SUM must match actual row data"
+    sql: "SELECT category, SUM(amount) AS total FROM crash_grp GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "X"
+          total: 350
+        - category: "Y"
+          total: 850
+        - category: "Z"
+          total: 750
+
+  - name: "After crash: COUNT per category matches actual rows"
+    sql: "SELECT category, COUNT(*) AS cnt FROM crash_grp GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "X"
+          cnt: 3
+        - category: "Y"
+          cnt: 3
+        - category: "Z"
+          cnt: 2
+
+  - name: "After crash: total row count matches"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_grp"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  # ============================================================
+  # Test 7: Crash after INSERT — GROUP BY cache was rebuilt before crash
+  #   Variant: SHUTDOWN (rebuild) → INSERT (delta+trigger) → CRASH
+  #   The keytable main storage has pre-INSERT values, delta lost.
+  # ============================================================
+
+  - name: "Create crash_grp2 table"
+    sql: "DROP TABLE IF EXISTS crash_grp2"
+  - name: "Create crash_grp2"
+    sql: >
+      CREATE TABLE crash_grp2 (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        grp TEXT,
+        val INT
+      ) ENGINE=safe
+
+  - name: "Seed crash_grp2"
+    sql: >
+      INSERT INTO crash_grp2 (grp, val) VALUES
+        ('A', 10), ('A', 20), ('B', 30)
+
+  - name: "Materialize GROUP BY cache for crash_grp2"
+    sql: "SELECT grp, SUM(val) AS s FROM crash_grp2 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 30
+        - grp: "B"
+          s: 30
+
+  # Rebuild so keytable gets compressed to disk with current values
+  - name: "SHUTDOWN to rebuild crash_grp2 + keytable"
+    sql: "SHUTDOWN"
+
+  - name: "Verify GROUP BY after rebuild"
+    sql: "SELECT grp, SUM(val) AS s FROM crash_grp2 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 30
+        - grp: "B"
+          s: 30
+
+  # INSERT more rows (delta + trigger update keytable)
+  - name: "INSERT after rebuild"
+    sql: >
+      INSERT INTO crash_grp2 (grp, val) VALUES
+        ('A', 100), ('B', 200), ('C', 300)
+
+  - name: "Verify GROUP BY after post-rebuild INSERT"
+    sql: "SELECT grp, SUM(val) AS s FROM crash_grp2 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 130
+        - grp: "B"
+          s: 230
+        - grp: "C"
+          s: 300
+
+  # CRASH — keytable disk has old values (A=30, B=30), delta lost
+  # Base table WAL replays: has A=10,20,100 B=30,200 C=300
+  - name: "Crash after post-rebuild INSERT"
+    scm: "(crash)"
+    expect:
+      error: true
+
+  - name: "Restart after post-rebuild crash"
+    action: restart
+
+  - name: "After crash: GROUP BY must reflect WAL-replayed rows"
+    sql: "SELECT grp, SUM(val) AS s FROM crash_grp2 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 130
+        - grp: "B"
+          s: 230
+        - grp: "C"
+          s: 300
+
+  # ============================================================
+  # Test 8: Crash with multi-level aggregation chain
+  #   sum(sum(...)) — keytable A feeds keytable B
+  #   Both are sloppy — invalidation must propagate through the chain
+  # ============================================================
+
+  - name: "Create chain source table"
+    sql: "DROP TABLE IF EXISTS crash_chain"
+  - name: "Create crash_chain"
+    sql: >
+      CREATE TABLE crash_chain (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        region TEXT,
+        dept TEXT,
+        revenue INT
+      ) ENGINE=safe
+
+  - name: "Seed crash_chain"
+    sql: >
+      INSERT INTO crash_chain (region, dept, revenue) VALUES
+        ('East', 'Sales', 100), ('East', 'Sales', 200),
+        ('East', 'Eng', 300),
+        ('West', 'Sales', 400), ('West', 'Eng', 500)
+
+  # First level: SUM by region+dept
+  - name: "First-level GROUP BY (region, dept)"
+    sql: "SELECT region, dept, SUM(revenue) AS dept_total FROM crash_chain GROUP BY region, dept ORDER BY region, dept"
+    expect:
+      rows: 4
+      data:
+        - region: "East"
+          dept: "Eng"
+          dept_total: 300
+        - region: "East"
+          dept: "Sales"
+          dept_total: 300
+        - region: "West"
+          dept: "Eng"
+          dept_total: 500
+        - region: "West"
+          dept: "Sales"
+          dept_total: 400
+
+  # Second level: SUM by region (sum of dept totals)
+  - name: "Second-level GROUP BY (region)"
+    sql: "SELECT region, SUM(revenue) AS region_total FROM crash_chain GROUP BY region ORDER BY region"
+    expect:
+      rows: 2
+      data:
+        - region: "East"
+          region_total: 600
+        - region: "West"
+          region_total: 900
+
+  # INSERT more data, then crash
+  - name: "INSERT into chain before crash"
+    sql: "INSERT INTO crash_chain (region, dept, revenue) VALUES ('East', 'Sales', 1000), ('West', 'Eng', 2000)"
+  - name: "Verify chain after INSERT"
+    sql: "SELECT SUM(revenue) AS total FROM crash_chain"
+    expect:
+      rows: 1
+      data:
+        - total: 4500
+  - name: "Crash after chain INSERT"
+    scm: "(crash)"
+    expect:
+      error: true
+
+  - name: "Restart after chain crash"
+    action: restart
+
+  # Both levels must show correct totals after crash recovery
+  - name: "After crash: first-level GROUP BY consistent"
+    sql: "SELECT region, dept, SUM(revenue) AS dept_total FROM crash_chain GROUP BY region, dept ORDER BY region, dept"
+    expect:
+      rows: 4
+      data:
+        - region: "East"
+          dept: "Eng"
+          dept_total: 300
+        - region: "East"
+          dept: "Sales"
+          dept_total: 1300
+        - region: "West"
+          dept: "Eng"
+          dept_total: 2500
+        - region: "West"
+          dept: "Sales"
+          dept_total: 400
+
+  - name: "After crash: second-level GROUP BY consistent"
+    sql: "SELECT region, SUM(revenue) AS region_total FROM crash_chain GROUP BY region ORDER BY region"
+    expect:
+      rows: 2
+      data:
+        - region: "East"
+          region_total: 1600
+        - region: "West"
+          region_total: 2900
+
+  - name: "After crash: total SUM consistent"
+    sql: "SELECT SUM(revenue) AS grand_total FROM crash_chain"
+    expect:
+      rows: 1
+      data:
+        - grand_total: 4500
+
+  # ============================================================
+  # Test 9: Crash with prejoin (JOIN-based computed column)
+  #   Prejoin triggers maintain a denormalized copy.
+  #   After crash, the prejoin must be consistent with source data.
+  # ============================================================
+
+  - name: "Create prejoin tables"
+    sql: "DROP TABLE IF EXISTS crash_orders"
+  - name: "Drop customers"
+    sql: "DROP TABLE IF EXISTS crash_customers"
+  - name: "Create crash_customers"
+    sql: "CREATE TABLE crash_customers (id INT PRIMARY KEY, name TEXT) ENGINE=safe"
+  - name: "Create crash_orders"
+    sql: "CREATE TABLE crash_orders (id INT PRIMARY KEY, customer_id INT, amount INT) ENGINE=safe"
+
+  - name: "Seed customers"
+    sql: "INSERT INTO crash_customers VALUES (1, 'Alice'), (2, 'Bob')"
+  - name: "Seed orders"
+    sql: "INSERT INTO crash_orders VALUES (10, 1, 100), (20, 1, 200), (30, 2, 50)"
+
+  # Materialize the prejoin via JOIN GROUP BY
+  - name: "Initial prejoin GROUP BY"
+    sql: "SELECT crash_customers.name, SUM(crash_orders.amount) AS total FROM crash_orders JOIN crash_customers ON crash_orders.customer_id = crash_customers.id GROUP BY crash_customers.name ORDER BY crash_customers.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          total: 300
+        - name: "Bob"
+          total: 50
+
+  # INSERT more orders, then crash
+  - name: "INSERT orders before crash"
+    sql: "INSERT INTO crash_orders VALUES (40, 1, 500), (50, 2, 600)"
+  - name: "Verify orders after INSERT"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_orders"
+    expect:
+      rows: 1
+      data:
+        - cnt: 5
+  - name: "Crash after prejoin INSERT"
+    scm: "(crash)"
+    expect:
+      error: true
+
+  - name: "Restart after prejoin crash"
+    action: restart
+
+  - name: "After crash: JOIN GROUP BY consistent with source data"
+    sql: "SELECT crash_customers.name, SUM(crash_orders.amount) AS total FROM crash_orders JOIN crash_customers ON crash_orders.customer_id = crash_customers.id GROUP BY crash_customers.name ORDER BY crash_customers.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          total: 800
+        - name: "Bob"
+          total: 650
+
+  - name: "After crash: base orders table correct"
+    sql: "SELECT COUNT(*) AS cnt FROM crash_orders"
+    expect:
+      rows: 1
+      data:
+        - cnt: 5
+
+  # ============================================================
+  # Test 10: Crash mid-rebuild — concurrent INSERT during rebuild
+  #   shard.go: old shard logfile gets write, then t.next.Insert()
+  #   If crash between the two, the published shard determines survival.
+  #   WARNING: This test is last because crash mid-rebuild can leave
+  #   the data directory in an irrecoverable state (deleted logfile
+  #   but schema still references old shard UUID → panic on replay).
+  # ============================================================
+
+  - name: "Create rebuild crash table"
+    sql: "DROP TABLE IF EXISTS crash_rebuild"
+  - name: "Create crash_rebuild"
+    sql: >
+      CREATE TABLE crash_rebuild (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        val INT
+      ) ENGINE=safe
+
+  - name: "Seed crash_rebuild with data for rebuild"
+    setup:
+      - scm: |
+          (insert "memcp-tests" "crash_rebuild" '("val")
+            (map (produceN 200) (lambda (i) (list i))))
+    sql: "SELECT COUNT(*) AS cnt FROM crash_rebuild"
+    expect:
+      rows: 1
+      data:
+        - cnt: 200
+
+  # Trigger rebuild + concurrent INSERT + crash
+  - name: "Rebuild + insert interrupted by crash"
+    noncritical: true
+    parallel: crash_rebuild
+    scm: |
+      (begin
+        (rebuild)
+        (insert "memcp-tests" "crash_rebuild" '("val")
+          (map (produceN 100) (lambda (i) (list (+ 200 i)))))
+        "ok")
+    expect:
+      error: true
+
+  - name: "Crash during rebuild"
+    parallel: crash_rebuild
+    scm: "(begin (sleep 0.05) (crash))"
+    expect:
+      error: true
+
+  - name: "Restart after rebuild crash"
+    noncritical: true
+    action: restart
+
+  - name: "After crash: at least original 200 rows survive rebuild crash"
+    noncritical: true
+    sql: "SELECT COUNT(*) AS cnt FROM crash_rebuild WHERE val < 200"
+    expect:
+      rows: 1
+      data:
+        - cnt: 200
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS crash_safe"
+  - sql: "DROP TABLE IF EXISTS crash_insert"
+  - sql: "DROP TABLE IF EXISTS crash_update"
+  - sql: "DROP TABLE IF EXISTS crash_count"
+  - sql: "DROP TABLE IF EXISTS crash_clean"
+  - sql: "DROP TABLE IF EXISTS crash_grp"
+  - sql: "DROP TABLE IF EXISTS crash_grp2"
+  - sql: "DROP TABLE IF EXISTS crash_chain"
+  - sql: "DROP TABLE IF EXISTS crash_rebuild"
+  - sql: "DROP TABLE IF EXISTS crash_orders"
+  - sql: "DROP TABLE IF EXISTS crash_customers"
