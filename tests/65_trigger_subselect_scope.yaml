@@ -113,6 +113,61 @@ test_cases:
         - detail_id: 1
           resolved_name: "cross"
 
+  # Pattern from campaign.ia: trigger INSERT SELECT with correlated subselect
+  # referencing a column from the INSERT SELECT's FROM clause (ASSOCIATED)
+  # and unqualified columns from the subselect's own FROM (campaign.date2)
+  - sql: "DROP TRIGGER IF EXISTS `tss_main.ia2`"
+  - sql: "DROP TRIGGER IF EXISTS `tss_main.ia3`"
+  - sql: "DROP TABLE IF EXISTS tss_target"
+  - sql: "CREATE TABLE tss_target (ID INT PRIMARY KEY AUTO_INCREMENT, main_id INT, target INT)"
+  - sql: "INSERT INTO tss_target VALUES (1, 10, 10), (2, 10, 20)"
+  - sql: "DELETE FROM tss_log"
+  - name: "trigger with INSERT SELECT + correlated subselect + ASSOCIATED ref"
+    sql: |
+      CREATE TRIGGER `tss_main.ia4` AFTER INSERT ON `tss_main` FOR EACH ROW BEGIN
+        INSERT IGNORE INTO tss_log(detail_id, resolved_name)
+          SELECT a.ID,
+            (SELECT m.name FROM tss_main m WHERE m.ID = a.main_id
+              AND CASE WHEN `date2` IS NULL THEN TRUE ELSE `date2` >= 500 END
+              LIMIT 1)
+          FROM tss_target a
+          WHERE NOT ((a.target) IS NULL) AND (NEW.ID = a.main_id);
+      END
+  - name: "INSERT triggers INSERT SELECT with ASSOCIATED-like pattern"
+    sql: "INSERT INTO tss_main VALUES (10, 'campaign', 999)"
+  - name: "verify ASSOCIATED-pattern trigger"
+    sql: "SELECT detail_id, resolved_name FROM tss_log ORDER BY detail_id"
+    expect:
+      rows: 2
+      data:
+        - detail_id: 1
+          resolved_name: "campaign"
+        - detail_id: 2
+          resolved_name: "campaign"
+
+  # Trigger cascade: INSERT into A → trigger inserts into B → trigger on B
+  # references column from A via subselect. Column 'date2' exists in A but
+  # not in B — the subselect must resolve date2 against A, not B.
+  - sql: "DROP TRIGGER IF EXISTS `tss_main.ia4`"
+  - sql: "DROP TABLE IF EXISTS tss_cascade_b"
+  - sql: "CREATE TABLE tss_cascade_b (ID INT PRIMARY KEY AUTO_INCREMENT, ref_id INT, info TEXT)"
+  - sql: |
+      CREATE TRIGGER `tss_main.ia5` AFTER INSERT ON `tss_main` FOR EACH ROW BEGIN
+        INSERT INTO tss_cascade_b(ref_id, info)
+          SELECT a.ID,
+            (SELECT m.name FROM tss_main m WHERE m.ID = a.main_id
+              AND CASE WHEN `date2` IS NULL THEN TRUE ELSE `date2` >= 500 END
+              LIMIT 1)
+          FROM tss_target a
+          WHERE NEW.ID = a.main_id;
+      END
+  - name: "trigger cascade with subselect referencing source table column"
+    sql: "INSERT INTO tss_main VALUES (11, 'cascade', 800)"
+  - name: "verify cascade trigger resolved date2 from source table"
+    sql: "SELECT ref_id, info FROM tss_cascade_b ORDER BY ref_id"
+    expect:
+      rows: 0
+
 cleanup:
   - sql: "DROP TRIGGER IF EXISTS `tss_main.ia`"
   - sql: "DROP TABLE IF EXISTS tss_log"

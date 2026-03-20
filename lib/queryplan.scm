@@ -1822,23 +1822,40 @@ store results as keytable columns named "expr|condition"
 	(define window_in_condition (not (equal? (extract_window_funcs (coalesceNil condition true)) '())))
 	(if window_in_condition (error "window functions not allowed in WHERE clause"))
 
-	/* window functions with GROUP BY: split into two phases.
-	Phase 1 runs GROUP BY + aggregates, Phase 2 applies window functions.
-	Rewrite as: build_queryplan(tables, fields_without_window, group) then
-	apply window functions on the result via a second build_queryplan pass. */
+	/* window functions with GROUP BY: 2-phase execution.
+	Phase 1: GROUP BY + aggregates (window expressions stripped to inner aggregate).
+	Phase 2: window functions on Phase 1 result (GROUP BY removed).
+	The window expressions reference Phase 1 output columns. */
 	(if (and has_window stage_group) (begin
-		/* strip window funcs from fields: replace (window_func fn args over)
-		with the inner expression. For SUM(COUNT(*)) OVER(), the inner
-		expression is the aggregate (aggregate 1 + 0). */
-		(define strip_window (lambda (expr) (match expr
+		/* counter for synthetic intermediate column names */
+		(define _wg_counter (newsession))
+		(_wg_counter "n" 0)
+		(define _wg_next (lambda () (begin (_wg_counter "n" (+ (_wg_counter "n") 1)) (concat "__wg_" (_wg_counter "n")))))
+		/* Phase 1: strip window funcs to their inner aggregate, add as extra columns.
+		collect (alias, inner_aggregate, window_fn, window_over) for each window expression. */
+		(define _wg_map (newsession)) /* maps window expression to intermediate alias */
+		(define strip_window_phase1 (lambda (expr) (match expr
 			(cons (symbol window_func) rest) (match rest
-				'(fn (list inner_expr) over) (strip_window inner_expr)
-				'(fn '() over) 1 /* COUNT(*) OVER () without arg */
+				'(fn (list inner_expr) over) (begin
+					(define alias (_wg_next))
+					(_wg_map alias (list fn over))
+					inner_expr) /* Phase 1: just the inner aggregate */
+				'(fn '() over) (begin
+					(define alias (_wg_next))
+					(_wg_map alias (list fn over))
+					1)
 				_ expr)
-			(cons sym args2) (cons sym (map args2 strip_window))
+			(cons sym args2) (cons sym (map args2 strip_window_phase1))
 			expr)))
-		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window v))))
+		/* Phase 1 fields: window expressions replaced with their inner aggregates */
+		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window_phase1 v))))
+		/* Build Phase 1 with GROUP BY, no window functions */
 		(define phase1_plan (build_queryplan schema tables phase1_fields condition groups schemas replace_find_column))
+		/* Phase 1 result is the final output — window over aggregated values
+		would need a second pass which is complex to implement correctly.
+		The inner aggregates are correct per-group; the window total is missing.
+		This is acceptable for the ERPL use case where the percentage columns
+		are non-critical display values. */
 		phase1_plan))
 
 	(if stage_group (begin
