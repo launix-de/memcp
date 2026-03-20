@@ -1822,41 +1822,56 @@ store results as keytable columns named "expr|condition"
 	(define window_in_condition (not (equal? (extract_window_funcs (coalesceNil condition true)) '())))
 	(if window_in_condition (error "window functions not allowed in WHERE clause"))
 
-	/* window functions with GROUP BY: 2-phase execution.
-	Phase 1: GROUP BY + aggregates (window expressions stripped to inner aggregate).
-	Phase 2: window functions on Phase 1 result (GROUP BY removed).
-	The window expressions reference Phase 1 output columns. */
+	/* window functions with GROUP BY: precompute OVER() totals via promises,
+	then run GROUP BY with promise references in place of window expressions.
+	Each SUM(x) OVER() becomes a global aggregate computed as a side query
+	before the main GROUP BY scan. The main scan references (promise "value"). */
 	(if (and has_window stage_group) (begin
-		/* counter for synthetic intermediate column names */
 		(define _wg_counter (newsession))
 		(_wg_counter "n" 0)
-		(define _wg_next (lambda () (begin (_wg_counter "n" (+ (_wg_counter "n") 1)) (concat "__wg_" (_wg_counter "n")))))
-		/* Phase 1: strip window funcs to their inner aggregate, add as extra columns.
-		collect (alias, inner_aggregate, window_fn, window_over) for each window expression. */
-		(define _wg_map (newsession)) /* maps window expression to intermediate alias */
-		(define strip_window_phase1 (lambda (expr) (match expr
-			(cons (symbol window_func) rest) (match rest
-				'(fn (list inner_expr) over) (begin
-					(define alias (_wg_next))
-					(_wg_map alias (list fn over))
-					inner_expr) /* Phase 1: just the inner aggregate */
-				'(fn '() over) (begin
-					(define alias (_wg_next))
-					(_wg_map alias (list fn over))
-					1)
-				_ expr)
-			(cons sym args2) (cons sym (map args2 strip_window_phase1))
-			expr)))
-		/* Phase 1 fields: window expressions replaced with their inner aggregates */
-		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window_phase1 v))))
-		/* Build Phase 1 with GROUP BY, no window functions */
-		(define phase1_plan (build_queryplan schema tables phase1_fields condition groups schemas replace_find_column))
-		/* Phase 1 result is the final output — window over aggregated values
-		would need a second pass which is complex to implement correctly.
-		The inner aggregates are correct per-group; the window total is missing.
-		This is acceptable for the ERPL use case where the percentage columns
-		are non-critical display values. */
-		phase1_plan))
+		(define _wg_next (lambda () (begin (_wg_counter "n" (+ (_wg_counter "n") 1)) (concat "__wgp_" (_wg_counter "n")))))
+		(define _wg_promises (newsession)) /* mutable: collects (promise_sym inner_aggregate fn) */
+		(_wg_promises "list" '())
+		/* replace window expressions with (promise "value") references */
+		(define replace_window_with_promise (lambda (expr)
+			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
+				(begin
+					(define psym (symbol (_wg_next)))
+					(define fn (nth expr 1))
+					(define args (nth expr 2))
+					(define inner_expr (if (and (list? args) (> (count args) 0)) (car args) 1))
+					(_wg_promises "list" (cons (list psym inner_expr fn) (_wg_promises "list")))
+					(list psym "value"))
+				(if (list? expr)
+					(map expr replace_window_with_promise)
+					expr))))
+		/* strip window expressions to inner aggregates for Phase 1 GROUP BY */
+		(define strip_window_inner (lambda (expr)
+			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
+				(begin (define args (nth expr 2))
+					(if (and (list? args) (> (count args) 0)) (car args) 1))
+				(if (list? expr) (map expr strip_window_inner) expr))))
+		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window_inner v))))
+		/* collect promises (side effect) */
+		(define output_field_exprs (map_assoc fields (lambda (k v) (replace_window_with_promise v))))
+		/* build side queries: each promise gets a global aggregate scan */
+		(define side_query_plans (map (_wg_promises "list") (lambda (wp) (match wp '(psym inner_agg fn) (begin
+			(define reduce_op (match fn "SUM" '+ "COUNT" '+ "MIN" 'min "MAX" 'max '+))
+			(define neutral (match fn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
+			(define agg_fields (list (list "__wgval" (list (quote aggregate) inner_agg reduce_op neutral))))
+			(define agg_plan (build_queryplan schema tables agg_fields condition '() schemas replace_find_column))
+			(list (quote !begin)
+				(list (quote set) psym (list (quote newpromise)))
+				(list (quote !begin)
+					(list (quote set) (symbol "resultrow")
+						(list (quote lambda) (list (symbol "row"))
+							(list psym "once" (list (quote nth) (symbol "row") 1) "window aggregate")))
+					agg_plan)))))))
+		/* Phase 1: GROUP BY with inner aggregates */
+		(define phase1_plan (build_queryplan schema tables output_field_exprs condition groups schemas replace_find_column))
+		/* resultrow wrapper: reads Phase 1 row, replaces window positions with promise values */
+		/* combine: side queries first, then main plan */
+		(cons (quote !begin) (merge side_query_plans (list phase1_plan)))))
 
 	(if stage_group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */

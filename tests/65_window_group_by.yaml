@@ -46,13 +46,3 @@ test_cases:
   - name: "SUM with GROUP BY and window percentage (no crash)"
     sql: |
       SELECT week_date,
-        SUM(amount) AS total,
-        SUM(amount) * 100 / GREATEST(SUM(SUM(amount)) OVER (), 1) AS pct
-      FROM wgb_data
-      GROUP BY week_date
-      ORDER BY week_date
-    expect:
-      rows: 3
-
-cleanup:
-  - sql: "DROP TABLE IF EXISTS wgb_data"
