@@ -1361,7 +1361,7 @@ WHAT IT MUST NOT DO:
 										_ (list (quote outer) (replace_column_alias outer_arg))
 									)
 								)
-												(cons sym args) /* function call */ (cons (replace_column_alias sym) (map args replace_column_alias))
+												(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs */
