@@ -40,7 +40,7 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			// Vectorization failed — not vectorizable, return nil
+			// Vectorization failed — not vectorizable
 		}
 	}()
 	proc := triggerFn.Proc()
@@ -68,7 +68,6 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	}
 
 	// Check if filter contains (equal? col (get_assoc OLD key)) pattern
-	// and extract the key
 	key := extractGetAssocOldKey(filterFn)
 	if key == "" {
 		return scm.NewNil()
