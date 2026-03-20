@@ -17,6 +17,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import "sync"
+import "time"
 import "strings"
 import "runtime/debug"
 import "sync/atomic"
@@ -238,6 +239,18 @@ func (t *table) initORCShard(s *storageShard, name string) {
 // for affected rows. This function finds the earliest invalid row's sort key,
 // predicts the accumulator from the last valid predecessor, and scans forward.
 func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32) {
+	recomputeStart := time.Now()
+	defer func() {
+		// Record recompute cost for invalidation telemetry
+		recomputeNs := time.Since(recomputeStart).Nanoseconds()
+		for _, s := range t.ActiveShards() {
+			s.mu.RLock()
+			if proxy, ok := s.columns[name].(*StorageComputeProxy); ok {
+				proxy.ResetInvalidationTelemetry(recomputeNs)
+			}
+			s.mu.RUnlock()
+		}
+	}()
 	// Prevent re-entry: GetValue during scan_order must not trigger another recompute.
 	atomic.AddInt32(&t.orcRecomputing, 1)
 	defer atomic.AddInt32(&t.orcRecomputing, -1)
@@ -393,6 +406,31 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 		return
 	}
 
+	// Telemetry debounce: if cumulative invalidation cost exceeds last recompute
+	// cost, skip selective invalidation — just mark all dirty. The next read will
+	// do a single full recompute instead of many small ones.
+	for _, s := range t.ActiveShards() {
+		s.mu.RLock()
+		if proxy, ok := s.columns[colName].(*StorageComputeProxy); ok {
+			if proxy.ShouldSkipSelectiveInvalidation() {
+				s.mu.RUnlock()
+				// Full invalidation is cheaper at this point
+				for _, s2 := range t.ActiveShards() {
+					s2.mu.RLock()
+					if p2, ok := s2.columns[colName].(*StorageComputeProxy); ok {
+						p2.InvalidateAll()
+					}
+					s2.mu.RUnlock()
+				}
+				return
+			}
+		}
+		s.mu.RUnlock()
+		break // only need to check one shard
+	}
+
+	invalidateStart := time.Now()
+
 	nCols := len(col.OrcSortCols)
 	if len(sortKeys) < nCols {
 		nCols = len(sortKeys)
@@ -489,6 +527,16 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 		}(s)
 	}
 	wg.Wait()
+
+	// Record invalidation cost for telemetry
+	invalidateNs := time.Since(invalidateStart).Nanoseconds()
+	for _, s := range shards {
+		s.mu.RLock()
+		if proxy, ok := s.columns[colName].(*StorageComputeProxy); ok {
+			proxy.AddInvalidationCost(invalidateNs)
+		}
+		s.mu.RUnlock()
+	}
 }
 
 // registerORCTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers on the
@@ -1232,10 +1280,10 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 			if !exists {
 				var body scm.Scmer
-				if incremental {
+				if incremental && timing != AfterInvalidate {
 					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[6], timing)
 				} else {
-					// Full invalidation: correct for non-additive aggregates.
+					// Full invalidation: for non-additive aggregates and AfterInvalidate propagation.
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						scm.NewString(targetSchema),

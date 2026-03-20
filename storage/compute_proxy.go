@@ -44,6 +44,11 @@ type StorageComputeProxy struct {
 	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
 	// Invalidation sets bits to 0; on-demand recompute sets them back to 1.
 	isOrdered bool
+	// Invalidation telemetry: tracks cumulative cost of selective invalidations
+	// since last read. When invalidation cost exceeds last recompute cost,
+	// switches to InvalidateAll() to avoid death-by-a-thousand-cuts.
+	invalidateNsSinceRead atomic.Int64 // cumulative invalidation nanoseconds since last read
+	lastRecomputeNs       atomic.Int64 // nanoseconds of the last full/suffix recompute
 }
 
 func (p *StorageComputeProxy) String() string {
@@ -345,6 +350,32 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.compressed = false
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
+}
+
+// ShouldSkipSelectiveInvalidation returns true when cumulative invalidation
+// cost exceeds the last recompute cost. The caller should then skip the
+// selective invalidation (the column is already dirty enough for a full
+// recompute on the next read).
+func (p *StorageComputeProxy) ShouldSkipSelectiveInvalidation() bool {
+	invNs := p.invalidateNsSinceRead.Load()
+	recompNs := p.lastRecomputeNs.Load()
+	if recompNs == 0 {
+		return false // no baseline yet, allow selective
+	}
+	return invNs > recompNs
+}
+
+// AddInvalidationCost adds nanoseconds to the invalidation telemetry counter.
+func (p *StorageComputeProxy) AddInvalidationCost(ns int64) {
+	p.invalidateNsSinceRead.Add(ns)
+}
+
+// ResetInvalidationTelemetry resets the invalidation counter (called after read/recompute).
+func (p *StorageComputeProxy) ResetInvalidationTelemetry(recomputeNs int64) {
+	p.invalidateNsSinceRead.Store(0)
+	if recomputeNs > 0 {
+		p.lastRecomputeNs.Store(recomputeNs)
+	}
 }
 
 // proposeCompression returns nil — the proxy does not participate in shard
