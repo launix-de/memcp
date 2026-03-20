@@ -165,7 +165,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 		'('session var) (list (list (symbol "context") "session") var)
 		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
-		(cons head tail) (cons (transform_trigger_expr head) (map tail transform_trigger_expr))
+		(cons head tail) (if (not (nil? (inner_select_kind head)))
+			expr /* inner_select: leave as-is, resolved later */
+			(cons (transform_trigger_expr head) (map tail transform_trigger_expr)))
 		expr
 	)))
 
