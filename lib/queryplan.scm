@@ -1389,7 +1389,6 @@ WHAT IT MUST NOT DO:
 										joinexpr2
 										(list (quote and) joinexpr2 condition2_transformed)))
 								joinexpr2))
-								(set joinexpr2 (if (nil? joinexpr2) nil (replace_inner_selects joinexpr2 (list))))
 							(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
 								(set tablesPrefixed (cons
 									/* inherit isOuter from the subquery's join type, not from inner table */
@@ -1447,8 +1446,9 @@ WHAT IT MUST NOT DO:
 									/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
 									/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
 									(set globalFilter (if isOuter true (replace_column_alias condition2)))
+									(define _check_inner_select (lambda (expr) (match expr (cons sym args) (if (not (nil? (inner_select_kind sym))) true (reduce args (lambda (a b) (or a (_check_inner_select b))) false)) false)))
 									(define wrap_outer_join_projection (lambda (expr)
-										(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)))
+										(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)) (not (_check_inner_select joinexpr2)))
 											(list (quote if) joinexpr2 expr nil)
 											expr)))
 									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
