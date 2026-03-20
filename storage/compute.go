@@ -1268,7 +1268,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 		}
 
-		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete, AfterInvalidate} {
+		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + timing.String()
 			// idempotency: skip if trigger already exists
 			exists := false

@@ -1053,8 +1053,6 @@ func Init(en scm.Env) {
 					proxy.InvalidateAll()
 				}
 			}
-			// Propagate invalidation to downstream caches via AfterInvalidate triggers
-			t.ExecuteTriggers(AfterInvalidate, nil, nil)
 			return scm.NewBool(true)
 		}, false, false, nil,
 		nil,
