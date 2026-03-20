@@ -1822,7 +1822,24 @@ store results as keytable columns named "expr|condition"
 	(define window_in_condition (not (equal? (extract_window_funcs (coalesceNil condition true)) '())))
 	(if window_in_condition (error "window functions not allowed in WHERE clause"))
 
-	(if (and has_window stage_group) (error "window functions with GROUP BY not yet supported"))
+	/* window functions with GROUP BY: split into two phases.
+	Phase 1 runs GROUP BY + aggregates, Phase 2 applies window functions.
+	Rewrite as: build_queryplan(tables, fields_without_window, group) then
+	apply window functions on the result via a second build_queryplan pass. */
+	(if (and has_window stage_group) (begin
+		/* strip window funcs from fields: replace (window_func fn args over)
+		with the inner expression. For SUM(COUNT(*)) OVER(), the inner
+		expression is the aggregate (aggregate 1 + 0). */
+		(define strip_window (lambda (expr) (match expr
+			(cons (symbol window_func) rest) (match rest
+				'(fn (list inner_expr) over) (strip_window inner_expr)
+				'(fn '() over) 1 /* COUNT(*) OVER () without arg */
+				_ expr)
+			(cons sym args2) (cons sym (map args2 strip_window))
+			expr)))
+		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window v))))
+		(define phase1_plan (build_queryplan schema tables phase1_fields condition groups schemas replace_find_column))
+		phase1_plan))
 
 	(if stage_group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */

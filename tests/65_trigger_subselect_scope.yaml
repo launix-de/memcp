@@ -80,6 +80,39 @@ test_cases:
         - detail_id: 3
           resolved_name: "world"
 
+  # Pattern from campaign.ia: INSERT SELECT with subselect WHERE unqualified
+  # column belongs to subselect's FROM table, not the INSERT target.
+  # The INSERT target (tss_log) does NOT have date2.
+  - name: "drop triggers for cross-table test"
+    sql: "DROP TRIGGER IF EXISTS `tss_main.ia`"
+  - sql: "DROP TRIGGER IF EXISTS `tss_main.ia2`"
+  - sql: "DROP TABLE IF EXISTS tss_assoc"
+  - sql: "CREATE TABLE tss_assoc (ID INT PRIMARY KEY AUTO_INCREMENT, main_id INT, target INT)"
+  - sql: "INSERT INTO tss_assoc VALUES (1, NULL, 10), (2, NULL, 20)"
+  - sql: "DELETE FROM tss_log"
+  - name: "trigger with INSERT SELECT + subselect referencing column absent from INSERT target"
+    sql: |
+      CREATE TRIGGER `tss_main.ia3` AFTER INSERT ON `tss_main` FOR EACH ROW BEGIN
+        INSERT IGNORE INTO tss_log(detail_id, resolved_name)
+          SELECT a.ID,
+            (SELECT m.name FROM tss_main m WHERE m.ID = a.main_id
+              AND CASE WHEN `date2` IS NULL THEN TRUE ELSE `date2` >= 500 END
+              LIMIT 1)
+          FROM tss_assoc a
+          WHERE a.main_id IS NOT NULL AND NEW.ID = a.main_id;
+      END
+  - name: "setup assoc for trigger"
+    sql: "UPDATE tss_assoc SET main_id = 3 WHERE ID = 1"
+  - name: "INSERT triggers cross-table subselect with unqualified column"
+    sql: "INSERT INTO tss_main VALUES (3, 'cross', 777)"
+  - name: "verify cross-table subselect resolved correctly"
+    sql: "SELECT detail_id, resolved_name FROM tss_log WHERE detail_id = 1"
+    expect:
+      rows: 1
+      data:
+        - detail_id: 1
+          resolved_name: "cross"
+
 cleanup:
   - sql: "DROP TRIGGER IF EXISTS `tss_main.ia`"
   - sql: "DROP TABLE IF EXISTS tss_log"
