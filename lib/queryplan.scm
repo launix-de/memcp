@@ -1389,7 +1389,7 @@ WHAT IT MUST NOT DO:
 										joinexpr2
 										(list (quote and) joinexpr2 condition2_transformed)))
 								joinexpr2))
-								(set joinexpr2 (if (nil? joinexpr2) nil (replace_inner_selects joinexpr2 schemas2)))
+								(set joinexpr2 (if (nil? joinexpr2) nil (replace_inner_selects joinexpr2 (list))))
 							(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
 								(set tablesPrefixed (cons
 									/* inherit isOuter from the subquery's join type, not from inner table */
