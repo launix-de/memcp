@@ -1841,7 +1841,7 @@ store results as keytable columns named "expr|condition"
 					(define args (nth expr 2))
 					(define inner_expr (if (and (list? args) (> (count args) 0)) (car args) 1))
 					(_wg_promises "list" (cons (list psym inner_expr fn) (_wg_promises "list")))
-					(list (list (symbol "context") "session") pname))
+					(list psym "value"))
 				(if (list? expr)
 					(map expr replace_window_with_promise)
 					expr))))
@@ -1859,18 +1859,37 @@ store results as keytable columns named "expr|condition"
 			(define reduce_op (match fn "SUM" '+ "COUNT" '+ "MIN" 'min "MAX" 'max '+))
 			(define neutral (match fn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
 			(define agg_fields (list (list "__wgval" (list (quote aggregate) inner_agg reduce_op neutral))))
-			(define agg_plan (build_queryplan schema tables agg_fields condition '() schemas replace_find_column))
-			(list (quote !begin)
-				(list (quote !begin)
-					(list (quote set) (symbol "resultrow")
-						(list (quote lambda) (list (symbol "row"))
-							(list (list (symbol "context") "session") pname (list (quote nth) (symbol "row") 1))))
-					agg_plan)))))))
-		/* Phase 1: GROUP BY with inner aggregates */
-		(define phase1_plan (build_queryplan schema tables output_field_exprs condition groups schemas replace_find_column))
-		/* resultrow wrapper: reads Phase 1 row, replaces window positions with promise values */
-		/* combine: side queries first, then main plan */
-		(cons (quote !begin) (merge side_query_plans (list phase1_plan)))))
+			(define agg_plan (build_queryplan schema tables agg_fields condition (list (make_group_stage '(1) nil nil nil nil)) schemas replace_find_column))
+			(list
+				(list (quote set) psym (list (quote newpromise)))
+				(list (quote set) (symbol "resultrow")
+					(list (quote lambda) (list (symbol "row"))
+						(list psym "once" (list (quote nth) (symbol "row") 1) "window aggregate")))
+				agg_plan))))))
+		/* Phase 1: GROUP BY with INNER aggregates (not output fields with promise refs) */
+		(define strip_window_inner (lambda (expr)
+			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
+				(begin (define args (nth expr 2))
+					(if (and (list? args) (> (count args) 0)) (car args) 1))
+				(if (list? expr) (map expr strip_window_inner) expr))))
+		(define phase1_fields (map_assoc fields (lambda (k v) (strip_window_inner v))))
+		(define phase1_plan (build_queryplan schema tables phase1_fields condition groups schemas replace_find_column))
+		/* combine: side queries set promises, then phase1 runs, reading promise values.
+		The promise "value" reads are placed AFTER the phase1_plan via a resultrow wrapper
+		so the optimizer sees them in the same !begin scope as the "set" and "once" calls. */
+		(define promise_reads (merge (extract_assoc output_field_exprs (lambda (k v)
+			(if (and (list? v) (equal? (count v) 2) (equal? (nth v 1) "value"))
+				(list k v) /* promise field: k → (psym "value") */
+				(list k (list (quote get_assoc) (symbol "__wg_row") k)))))))
+		(cons (quote !begin) (merge
+			(list (list (quote set) (symbol "__wg_prev_rr") (symbol "resultrow")))
+			side_query_plans
+			(list
+				(list (quote set) (symbol "resultrow")
+					(list (quote lambda) (list (symbol "__wg_row"))
+						(list (symbol "__wg_prev_rr")
+							(cons (quote list) promise_reads))))
+				phase1_plan)))))
 
 	(if stage_group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */

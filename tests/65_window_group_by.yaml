@@ -46,3 +46,8 @@ test_cases:
   - name: "SUM with GROUP BY and window percentage (no crash)"
     sql: |
       SELECT week_date,
+
+  - name: "EXPLAIN window+GROUP BY"
+    sql: "EXPLAIN SELECT week_date, COUNT(*) AS cnt, SUM(COUNT(*)) OVER () AS total_cnt FROM wgb_data GROUP BY week_date"
+    expect:
+      rows: 999
