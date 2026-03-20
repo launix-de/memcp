@@ -491,6 +491,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			) true) ",")
 			(? (atom ";" false))
 		) '!nop)
+		/* INSERT [IGNORE] INTO table SET col=expr, col=expr, ...[;] (MySQL SET syntax) */
+		(parser '(
+			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
+			(atom "SET" true) (define assignments (+ (parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr)) ","))
+			(? (atom ";" false))
+		) (list '!insert tbl
+				(map assignments (lambda (a) (match a '(col expr) col)))
+				(list (map assignments (lambda (a) (match a '(col expr) expr))))
+				ignore))
 		/* INSERT [IGNORE] INTO table (...) VALUES (...)[;] */
 		(parser '(
 			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
@@ -1442,6 +1451,23 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
+	/* INSERT [IGNORE] INTO table SET col=expr, col=expr, ...[;] (MySQL SET syntax) */
+	(define sql_insert_set (parser '(
+		(atom "INSERT" true)
+		(define ignoreexists (? (atom "IGNORE" true true true)))
+		(atom "INTO" true)
+		(? (define schema2 sql_identifier) ".")
+		(define tbl sql_identifier)
+		(atom "SET" true)
+		(define assignments (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
+	) (begin
+		(if policy (policy (coalesce schema2 schema) tbl true) true)
+		(define coldesc (map assignments (lambda (a) (match a '(col _) col))))
+		(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
+		'('insert (coalesce schema2 schema) tbl (cons list coldesc) '(list (cons list dataset)) '(list)
+			(if ignoreexists '('lambda '() true) nil)
+			false '('lambda '('id) '('session "last_insert_id" 'id))))))
+
 	(define sql_foreign_key_mode (parser (or
 		(parser (atom "RESTRICT" true) "restrict")
 		(parser (atom "CASCADE" true) "cascade")
@@ -1570,6 +1596,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query sql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
 		sql_insert_select
