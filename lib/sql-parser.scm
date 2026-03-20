@@ -169,7 +169,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			or (equal?? head "inner_select") (equal?? head (quote inner_select))
 			(equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
 			(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
-			expr /* inner_select: leave as-is, resolved later */
+			/* resolve inner_select via query planner so inner columns bind to
+			their own FROM tables, then transform NEW/OLD refs in the result */
+			(transform_trigger_expr (build_queryplan_term (car tail)))
 			(cons (transform_trigger_expr head) (map tail transform_trigger_expr)))
 		expr
 	)))

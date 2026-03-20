@@ -1,0 +1,87 @@
+# Trigger with INSERT SELECT containing correlated subselect
+# The subselect's unqualified columns must resolve against its own FROM,
+# not against the trigger's target table.
+
+metadata:
+  version: "1.0"
+  description: "Trigger INSERT SELECT with correlated subselect column scope"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS tss_log"
+  - sql: "DROP TABLE IF EXISTS tss_detail"
+  - sql: "DROP TABLE IF EXISTS tss_main"
+  - sql: |
+      CREATE TABLE tss_main (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        name TEXT,
+        date2 BIGINT
+      )
+  - sql: |
+      CREATE TABLE tss_detail (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        main_id INT,
+        label TEXT
+      )
+  - sql: |
+      CREATE TABLE tss_log (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        detail_id INT,
+        resolved_name TEXT
+      )
+  - sql: "INSERT INTO tss_detail VALUES (1, 1, 'alpha'), (2, 1, 'beta'), (3, 2, 'gamma')"
+  - sql: |
+      CREATE TRIGGER `tss_main.ia` AFTER INSERT ON `tss_main` FOR EACH ROW BEGIN
+        INSERT IGNORE INTO tss_log(detail_id, resolved_name)
+          SELECT d.ID,
+            (SELECT m.name FROM tss_main m WHERE m.ID = d.main_id AND m.date2 IS NOT NULL LIMIT 1)
+          FROM tss_detail d
+          WHERE d.main_id = NEW.ID;
+      END
+
+test_cases:
+
+  - name: "INSERT into main triggers INSERT SELECT with correlated subselect"
+    sql: "INSERT INTO tss_main VALUES (1, 'hello', 1000)"
+
+  - name: "verify trigger populated log"
+    sql: "SELECT detail_id, resolved_name FROM tss_log ORDER BY detail_id"
+    expect:
+      rows: 2
+      data:
+        - detail_id: 1
+          resolved_name: "hello"
+        - detail_id: 2
+          resolved_name: "hello"
+
+  # Real pattern: INSERT into table WITHOUT date2, subselect FROM table WITH date2
+  # The unqualified date2 in the subselect must resolve against the subselect's
+  # FROM table, not against the INSERT target (which lacks date2).
+  - name: "drop first trigger"
+    sql: "DROP TRIGGER IF EXISTS `tss_main.ia`"
+  - sql: "DELETE FROM tss_log"
+  - name: "create trigger where INSERT target lacks the subselect column"
+    sql: |
+      CREATE TRIGGER `tss_main.ia2` AFTER INSERT ON `tss_main` FOR EACH ROW BEGIN
+        INSERT IGNORE INTO tss_log(detail_id, resolved_name)
+          SELECT d.ID,
+            (SELECT m.name FROM tss_main m WHERE m.ID = d.main_id
+              AND CASE WHEN `date2` IS NULL THEN TRUE ELSE `date2` >= 500 END
+              LIMIT 1)
+          FROM tss_detail d
+          WHERE d.main_id = NEW.ID;
+      END
+  - name: "INSERT triggers subselect with column absent from INSERT target"
+    sql: "INSERT INTO tss_main VALUES (2, 'world', 999)"
+  - name: "verify subselect resolved column from its own FROM table"
+    sql: "SELECT detail_id, resolved_name FROM tss_log WHERE detail_id = 3"
+    expect:
+      rows: 1
+      data:
+        - detail_id: 3
+          resolved_name: "world"
+
+cleanup:
+  - sql: "DROP TRIGGER IF EXISTS `tss_main.ia`"
+  - sql: "DROP TABLE IF EXISTS tss_log"
+  - sql: "DROP TABLE IF EXISTS tss_detail"
+  - sql: "DROP TABLE IF EXISTS tss_main"
