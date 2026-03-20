@@ -1374,11 +1374,11 @@ WHAT IT MUST NOT DO:
 									(replace_column_alias (list (quote get_column) nil ti col ci))
 									/* reference to outer table -> keep as-is */
 									expr)
-								(cons sym args) /* function call */ (cons sym (map args transform_joinexpr))
+								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects have their own scope */ (cons sym (map args transform_joinexpr)))
 								expr
 							)))
 							/* transform and attach joinexpr to first table in tablesPrefixed */
-							(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr (replace_inner_selects joinexpr (list)))))
+							(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
 							/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
 							(set condition2_transformed (replace_column_alias condition2))
 							(set joinexpr2 (if isOuter
