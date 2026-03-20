@@ -135,9 +135,10 @@ type TriggerDescription struct {
 	Func      scm.Scmer     `json:"func"`                 // The trigger function (compiled Scheme procedure)
 	SourceSQL string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
 	IsSystem  bool          `json:"is_system,omitempty"`  // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
-	Hidden    bool          `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
-	Priority  int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
-	Async     bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
+	Hidden     bool          `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
+	Priority   int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
+	Async      bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
+	VectorFunc scm.Scmer     `json:"-"`                    // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
 }
 
 // GetTriggers returns all triggers for a specific timing
@@ -153,8 +154,15 @@ func (t *table) GetTriggers(timing TriggerTiming) []TriggerDescription {
 	return result
 }
 
-// AddTrigger adds a trigger to the table
+// AddTrigger adds a trigger to the table. Automatically attempts to vectorize
+// the trigger for batch execution (DELETE/INSERT patterns on prejoin tables).
 func (t *table) AddTrigger(trigger TriggerDescription) {
+	// Auto-vectorize: try to produce a batch-aware version of the trigger
+	if trigger.VectorFunc.IsNil() && !trigger.Func.IsNil() {
+		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
+			trigger.VectorFunc = vf
+		}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// Keep trigger list ordered by priority (lower = earlier). For equal
@@ -309,6 +317,106 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 			}()
 			scm.Apply(tr.Func, oldDict, newDict)
 		}()
+	}
+}
+
+// ExecuteTriggersBatch fires triggers once per trigger with a batch of rows.
+// For triggers that have a vectorized form (VectorFunc), the batch is passed
+// as a single call. For non-vectorized triggers, falls back to per-row execution.
+func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld bool) {
+	if len(rows) == 0 {
+		return
+	}
+	if len(rows) == 1 {
+		// Single row: use the normal path
+		if isOld {
+			t.ExecuteTriggers(timing, rows[0], nil)
+		} else {
+			t.ExecuteTriggers(timing, nil, rows[0])
+		}
+		return
+	}
+	triggers := t.GetTriggers(timing)
+	for _, tr := range triggers {
+		if tr.Func.IsNil() {
+			continue
+		}
+		if tr.Async {
+			// Async: fire per-row (no batching for fire-and-forget)
+			for _, row := range rows {
+				var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+				if isOld {
+					oldDict = t.rowToDict(row)
+				} else {
+					newDict = t.rowToDict(row)
+				}
+				trFunc := tr.Func
+				go func() {
+					defer func() { recover() }()
+					scm.Apply(trFunc, oldDict, newDict)
+				}()
+			}
+			continue
+		}
+		// Check for vectorized trigger (VectorFunc set)
+		if !tr.VectorFunc.IsNil() {
+			// Build batch dicts
+			dicts := make([]scm.Scmer, len(rows))
+			for i, row := range rows {
+				dicts[i] = t.rowToDict(row)
+			}
+			batchList := scm.NewSlice(dicts)
+			func() {
+				tx := CurrentTx()
+				var sp Savepoint
+				hasSavepoint := false
+				if tx != nil {
+					sp = tx.CreateSavepoint()
+					hasSavepoint = true
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						if hasSavepoint {
+							tx.RollbackToSavepoint(sp)
+						}
+						panic(fmt.Sprintf("vectorized trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
+					}
+				}()
+				if isOld {
+					scm.Apply(tr.VectorFunc, batchList, scm.NewNil())
+				} else {
+					scm.Apply(tr.VectorFunc, scm.NewNil(), batchList)
+				}
+			}()
+			continue
+		}
+		// Fallback: per-row execution
+		for _, row := range rows {
+			var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+			if isOld {
+				oldDict = t.rowToDict(row)
+			} else {
+				newDict = t.rowToDict(row)
+			}
+			func() {
+				tx := CurrentTx()
+				var sp Savepoint
+				hasSavepoint := false
+				if tx != nil {
+					sp = tx.CreateSavepoint()
+					hasSavepoint = true
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						if hasSavepoint {
+							tx.RollbackToSavepoint(sp)
+						}
+						panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
+					}
+				}()
+				scm.Apply(tr.Func, oldDict, newDict)
+			}()
+		}
 	}
 }
 
