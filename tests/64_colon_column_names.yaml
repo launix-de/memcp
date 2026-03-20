@@ -218,6 +218,17 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "LEFT JOIN ON clause with correlated subselect + referenced column"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID, r.rname AS rn
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r
+          ON r.rid = COALESCE((SELECT c.`dynamic:parent` FROM ccn_child c WHERE c.`dynamic:parent` = p.ID ORDER BY c.`dynamic:time` DESC LIMIT 1), NULL)
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
   - name: "COUNT with colon column in WHERE"
     sql: "SELECT COUNT(*) AS c FROM ccn_child WHERE `dynamic:parent` = 1"
     expect:

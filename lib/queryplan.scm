@@ -1348,8 +1348,8 @@ WHAT IT MUST NOT DO:
 									)
 								)
 								'((symbol get_column) alias_ ti col ci) (if (not (nil? (schemas2 alias_)))
-								'('get_column (concat id "\0" alias_) ti col ci)
-								expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
+									'('get_column (concat id "\0" alias_) ti col ci)
+									expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
 								'((symbol outer) outer_arg) (begin
 									/* prefix outer variable reference if it refers to a table in schemas2 */
 									(define s (string outer_arg))
@@ -1361,7 +1361,7 @@ WHAT IT MUST NOT DO:
 										_ (list (quote outer) (replace_column_alias outer_arg))
 									)
 								)
-												(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
+								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs */
@@ -1389,6 +1389,7 @@ WHAT IT MUST NOT DO:
 										joinexpr2
 										(list (quote and) joinexpr2 condition2_transformed)))
 								joinexpr2))
+								(set joinexpr2 (if (nil? joinexpr2) nil (replace_inner_selects joinexpr2 schemas2)))
 							(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
 								(set tablesPrefixed (cons
 									/* inherit isOuter from the subquery's join type, not from inner table */
