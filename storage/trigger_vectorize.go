@@ -16,6 +16,8 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
+import "fmt"
 import "github.com/launix-de/memcp/scm"
 
 // VectorizeTrigger analyzes a trigger body and produces a vectorized version
@@ -154,6 +156,13 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 // Returns "" if the pattern is not found.
 func extractGetAssocOldKey(filterFn scm.Scmer) string {
 	var body scm.Scmer
+	fmt.Fprintln(os.Stderr, "  [extractKey] isProc:", filterFn.IsProc(), "isSlice:", filterFn.IsSlice())
+	if filterFn.IsSlice() {
+		sl := filterFn.Slice()
+		if len(sl) >= 3 {
+			fmt.Fprintln(os.Stderr, "  [extractKey] sl[0]:", scm.String(sl[0]), "isSymbol:", sl[0].IsSymbol(), "tag:", sl[0].GetTag())
+		}
+	}
 	if filterFn.IsProc() {
 		body = filterFn.Proc().Body
 	} else if filterFn.IsSlice() {
@@ -223,11 +232,14 @@ func extractGetAssocOldFromArg(expr scm.Scmer) string {
 			return ""
 		}
 	}
-	// items[2] should be a string key
-	if !items[2].IsString() {
-		return ""
+	// items[2] should be a string key or a symbol key
+	if items[2].IsString() {
+		return items[2].String()
 	}
-	return items[2].String()
+	if items[2].IsSymbol() {
+		return items[2].String()
+	}
+	return ""
 }
 
 // findEqualParamIdx finds which parameter index in the filter lambda is compared
@@ -240,6 +252,14 @@ func findEqualParamIdx(filterFn scm.Scmer) int {
 			params = filterFn.Proc().Params.Slice()
 		}
 		body = filterFn.Proc().Body
+	} else if filterFn.IsSlice() {
+		items := filterFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			if items[1].IsSlice() {
+				params = items[1].Slice()
+			}
+			body = items[2]
+		}
 	}
 	if len(params) == 0 || body.IsNil() {
 		return -1

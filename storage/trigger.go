@@ -16,6 +16,7 @@ Copyright (C) 2025, 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
 import "errors"
 import "encoding/json"
@@ -159,8 +160,48 @@ func (t *table) GetTriggers(timing TriggerTiming) []TriggerDescription {
 func (t *table) AddTrigger(trigger TriggerDescription) {
 	// Auto-vectorize: try to produce a batch-aware version of the trigger
 	if trigger.VectorFunc.IsNil() && !trigger.Func.IsNil() {
+		if trigger.Timing == AfterDelete {
+			fmt.Fprintln(os.Stderr, "[AT-DEL]", trigger.Name, "isProc:", trigger.Func.IsProc())
+			if trigger.Func.IsProc() {
+				b := trigger.Func.Proc().Body
+				fmt.Fprintln(os.Stderr, "  body isSlice:", b.IsSlice())
+				if b.IsSlice() {
+					items := b.Slice()
+					fmt.Fprintln(os.Stderr, "  len:", len(items))
+					if len(items) > 4 {
+						fmt.Fprintln(os.Stderr, "  head:", scm.String(items[0]), "isSymbol:", items[0].IsSymbol())
+						fmt.Fprintln(os.Stderr, "  items[4] tag:", items[4].GetTag(), "isSlice:", items[4].IsSlice())
+						if items[4].IsSlice() {
+							sl := items[4].Slice()
+							if len(sl) >= 3 {
+								fmt.Fprintln(os.Stderr, "  lambda body:", scm.String(sl[2]))
+								if sl[2].IsSlice() {
+									bs := sl[2].Slice()
+									fmt.Fprintln(os.Stderr, "  body[0]:", scm.String(bs[0]), "isSymbol:", bs[0].IsSymbol(), "declName:", declName(bs[0]))
+									if len(bs) == 3 {
+										fmt.Fprintln(os.Stderr, "  body[2]:", scm.String(bs[2]), "isSlice:", bs[2].IsSlice())
+										if bs[2].IsSlice() {
+											ga := bs[2].Slice()
+											fmt.Fprintln(os.Stderr, "  getassoc head:", scm.String(ga[0]), "declName:", declName(ga[0]))
+											fmt.Fprintln(os.Stderr, "  getassoc[1]:", scm.String(ga[1]), "isSymbol:", ga[1].IsSymbol())
+											fmt.Fprintln(os.Stderr, "  getassoc[2]:", scm.String(ga[2]), "isString:", ga[2].IsString(), "isSymbol:", ga[2].IsSymbol())
+										}
+									}
+								}
+							}
+						}
+						key := extractGetAssocOldKey(items[4])
+						fmt.Fprintln(os.Stderr, "  extracted key:", key)
+						if len(items) > 5 {
+							fmt.Fprintln(os.Stderr, "  containsUpdate:", containsUpdateCol(items[5]))
+						}
+					}
+				}
+			}
+		}
 		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
 			trigger.VectorFunc = vf
+			fmt.Fprintln(os.Stderr, "[VECTORIZED]", trigger.Name)
 		}
 	}
 	t.mu.Lock()
