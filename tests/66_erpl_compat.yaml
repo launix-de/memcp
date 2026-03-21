@@ -166,6 +166,37 @@ test_cases:
       data:
         - c: 2
 
+  # --- Bug 4: multi-table UPDATE with correlated subselect ---
+  # UPDATE tbl1, tbl2 SET tbl1.col = (SELECT ... FROM tbl3 WHERE unqualified_col ...)
+  # The unqualified column in the subselect must resolve against tbl3 (subselect FROM),
+  # not against tbl1/tbl2 (UPDATE tables). Pattern from campaign.ia trigger.
+
+  - sql: "DROP TABLE IF EXISTS mt_log"
+  - sql: "DROP TABLE IF EXISTS mt_assoc"
+  - sql: "DROP TABLE IF EXISTS mt_source"
+  - sql: "CREATE TABLE mt_source (ID INT PRIMARY KEY, name TEXT, date1 BIGINT, date2 BIGINT)"
+  - sql: "CREATE TABLE mt_assoc (ID INT PRIMARY KEY, src_id INT, target INT, creation BIGINT)"
+  - sql: "CREATE TABLE mt_log (ID INT PRIMARY KEY AUTO_INCREMENT, ref_id INT, dt BIGINT, notiz TEXT)"
+  - sql: "INSERT INTO mt_source VALUES (1, 'hello', 3000, 6000)"
+  - sql: "INSERT INTO mt_assoc VALUES (1, 1, 10, 1000)"
+  - sql: "INSERT INTO mt_log VALUES (1, 1, 999, 'old')"
+
+  - name: "multi-table UPDATE with subselect unqualified column from subselect FROM"
+    sql: |
+      UPDATE `mt_log`, `mt_assoc` AS `A` SET
+        `mt_log`.`notiz` = (SELECT `s`.`name` FROM `mt_source` `s`
+          WHERE `s`.`ID` = `A`.`src_id`
+          AND CASE WHEN `date2` IS NULL THEN TRUE ELSE `date2` >= 500 END
+          LIMIT 1)
+      WHERE `mt_log`.`ref_id` = `A`.`ID` AND `A`.`src_id` = 1
+
+  - name: "verify multi-table UPDATE resolved subselect correctly"
+    sql: "SELECT notiz FROM mt_log WHERE ref_id = 1"
+    expect:
+      rows: 1
+      data:
+        - notiz: "hello"
+
 cleanup:
   - sql: "DROP TRIGGER IF EXISTS `ec_main.ia`"
   - sql: "DROP TRIGGER IF EXISTS `ec_main.ia2`"
@@ -173,3 +204,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ec_fahrt"
   - sql: "DROP TABLE IF EXISTS ec_users"
   - sql: "DROP TABLE IF EXISTS ec_main"
+  - sql: "DROP TABLE IF EXISTS mt_log"
+  - sql: "DROP TABLE IF EXISTS mt_assoc"
+  - sql: "DROP TABLE IF EXISTS mt_source"

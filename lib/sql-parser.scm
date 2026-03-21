@@ -1105,7 +1105,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(define replace_find_column (lambda (expr) (match expr
 				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
 				'((symbol get_column) tblvar _ col ci) (if (and tblalias (equal?? tblvar tblalias)) '((quote get_column) tbl false col ci) expr)
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+				(cons sym args) (cons sym (map args replace_find_column))
+				expr
+			)))
+			/* shallow version: skip inner_select subtrees so subselect columns resolve against their own FROM */
+			(define replace_find_column_no_subselect (lambda (expr) (match expr
+				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci)
+				'((symbol get_column) tblvar _ col ci) (if (and tblalias (equal?? tblvar tblalias)) '((quote get_column) tbl false col ci) expr)
+				(cons sym args) (if (sql_expr_contains_inner_select (list sym))
+					expr
+					(cons sym (map args replace_find_column_no_subselect)))
 				expr
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
