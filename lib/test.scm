@@ -445,6 +445,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (toLower "ÄBCd") "äbcd") true "toLower handles letters")
 	(assert (equal? (toUpper "ÄBCd") "ÄBCD") true "toUpper handles letters")
 
+	/* null byte escape in string literals */
+	(assert (equal? (strlen "\0") 1) true "\\0 produces single null byte")
+	(assert (equal? "\0" (substr "a\0b" 1 1)) true "\\0 survives concat/substr")
+	(assert (equal? (replace "x\0y" "\0" ":") "x:y") true "null byte is replaceable")
+
 	/* collate comparator */
 	(define less_bin (collate "bin"))
 	(assert (less_bin "a" "b") true "bin collation: a<b")

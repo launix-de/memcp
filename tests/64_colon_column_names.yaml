@@ -1,0 +1,246 @@
+# Column names containing colons must not collide with the internal
+# null-byte alias separator used by derived table flattening.
+
+metadata:
+  version: "1.0"
+  description: "Column names with colons in derived tables"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ccn_parent"
+  - sql: "DROP TABLE IF EXISTS ccn_child"
+  - sql: |
+      CREATE TABLE ccn_parent (
+        ID INT PRIMARY KEY,
+        name TEXT
+      )
+  - sql: |
+      CREATE TABLE ccn_child (
+        ID INT PRIMARY KEY,
+        `dynamic:parent` INT,
+        `dynamic:time` INT,
+        val TEXT
+      )
+  - sql: |
+      INSERT INTO ccn_parent VALUES (1, 'alpha'), (2, 'beta')
+  - sql: |
+      INSERT INTO ccn_child VALUES
+        (1, 1, 100, 'old'),
+        (2, 1, 200, 'new'),
+        (3, 2, 100, 'only')
+
+test_cases:
+
+  - name: "direct select with colon column"
+    sql: "SELECT `dynamic:parent`, val FROM ccn_child WHERE `dynamic:parent` = 1 ORDER BY `dynamic:time`"
+    expect:
+      rows: 2
+
+  - name: "derived table with colon column"
+    sql: "SELECT t.* FROM (SELECT `dynamic:parent`, val FROM ccn_child) t WHERE t.`dynamic:parent` = 2"
+    expect:
+      rows: 1
+      data:
+        - dynamic:parent: 2
+          val: "only"
+
+  - name: "correlated subselect with colon column"
+    sql: |
+      SELECT p.name,
+        (SELECT c.val FROM ccn_child c WHERE c.`dynamic:parent` = p.ID ORDER BY c.`dynamic:time` DESC LIMIT 1) AS latest
+      FROM ccn_parent p ORDER BY p.ID
+    expect:
+      rows: 2
+      data:
+        - name: "alpha"
+          latest: "new"
+        - name: "beta"
+          latest: "only"
+
+  - name: "correlated subselect with colon column inside derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID,
+          (SELECT c.val FROM ccn_child c WHERE c.`dynamic:parent` = p.ID ORDER BY c.`dynamic:time` DESC LIMIT 1) AS latest
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "unqualified colon column in correlated subselect inside derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID,
+          (SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1) AS latest
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "unqualified colon column in deeper correlated subselect"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID AND `dynamic:time` <= 999 ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "multiple colon subselects in derived table projection"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID, p.name AS name,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID AND `dynamic:time` <= 999 ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest,
+          COALESCE((SELECT c.`dynamic:time` FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS last_time
+        FROM ccn_parent p
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
+  - name: "LEFT JOIN inside derived table (no colon)"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID, p.name
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "alpha"
+        - ID: 2
+          name: "beta"
+
+  - name: "colon column in correlated subselect with LEFT JOIN in derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS `ref:ID`, name AS `ref:name` FROM ccn_parent) r ON r.`ref:ID` = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "colon subselect + multiple LEFT JOINs in derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.val FROM ccn_child c WHERE `dynamic:parent` = p.ID ORDER BY `dynamic:time` DESC LIMIT 1), NULL) AS latest
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS `ref1:ID`, name AS `ref1:name` FROM ccn_parent) r1 ON r1.`ref1:ID` = p.ID
+        LEFT JOIN (SELECT ID AS `ref2:ID`, name AS `ref2:name` FROM ccn_parent) r2 ON r2.`ref2:ID` = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: "new"
+        - ID: 2
+          latest: "only"
+
+  - name: "correlated subselect referencing outer table inside derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          (SELECT c.name FROM ccn_parent c WHERE c.ID = p.ID LIMIT 1) AS looked_up
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          looked_up: "alpha"
+        - ID: 2
+          looked_up: "beta"
+
+  - name: "COALESCE(correlated subselect, default) in derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT c.name FROM ccn_parent c WHERE c.ID = p.ID LIMIT 1), 'none') AS looked_up
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          looked_up: "alpha"
+        - ID: 2
+          looked_up: "beta"
+
+  - name: "nested subselects in CASE WHEN inside derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          (CASE WHEN TRUE THEN TRUE ELSE NOT (
+            (SELECT (c.ID = 999) FROM ccn_parent c WHERE c.ID = p.ID LIMIT 1)
+          ) END) AS perm
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
+  - name: "double-nested correlated subselect in derived table with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT (
+            (SELECT c2.name FROM ccn_parent c2 WHERE c2.ID = c.ID LIMIT 1)
+          ) FROM ccn_child c WHERE c.`dynamic:parent` = p.ID LIMIT 1), 'none') AS deep
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid FROM ccn_parent) r ON r.rid = p.ID
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
+  - name: "LEFT JOIN ON clause with correlated subselect + referenced column"
+    sql: |
+      SELECT t.* FROM (
+        SELECT p.ID AS ID, r.rname AS rn
+        FROM ccn_parent p
+        LEFT JOIN (SELECT ID AS rid, name AS rname FROM ccn_parent) r
+          ON r.rid = COALESCE((SELECT c.`dynamic:parent` FROM ccn_child c WHERE c.`dynamic:parent` = p.ID ORDER BY c.`dynamic:time` DESC LIMIT 1), NULL)
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+
+  - name: "COUNT with colon column in WHERE"
+    sql: "SELECT COUNT(*) AS c FROM ccn_child WHERE `dynamic:parent` = 1"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
+  - name: "JOIN on colon column"
+    sql: "SELECT p.name, c.val FROM ccn_parent p JOIN ccn_child c ON c.`dynamic:parent` = p.ID ORDER BY c.ID"
+    expect:
+      rows: 3
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ccn_child"
+  - sql: "DROP TABLE IF EXISTS ccn_parent"

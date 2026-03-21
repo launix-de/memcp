@@ -75,6 +75,15 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(createtrigger src_schema src_table (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
 	true)))
 
+/* returns a list of all tblvar aliases referenced via get_column in expr */
+(define extract_tblvars (lambda (expr)
+	(match expr
+		'((symbol get_column) tblvar _ _ _) (if (nil? tblvar) '() '(tblvar))
+		(cons sym args) (merge_unique (map args extract_tblvars))
+		'()
+	)
+))
+
 /* returns a list of '(string...) */
 (define extract_columns_for_tblvar (lambda (tblvar expr)
 	(match expr
@@ -88,7 +97,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 (define replace_columns_from_expr (lambda (expr)
 	(match expr
 		(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
-		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (error (concat "column " col " not found")) (symbol (concat tblvar "." col)))
+		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (symbol (concat "__unresolved__." col)) (symbol (concat tblvar "." col)))
 		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 		expr /* literals */
 	)
@@ -226,7 +235,7 @@ to avoid matching outer tables which would break scope resolution. */
 			(define resolved_alias (if (nil? alias_)
 				/* unqualified: search non-prefixed aliases only (local tables) */
 				(reduce_assoc all_schemas (lambda (a alias cols)
-					(if (and (equal? (replace (string alias) ":" "") (string alias))
+					(if (and (equal? (replace (string alias) "\0" "") (string alias))
 						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 						alias a)) nil)
 				/* qualified: search all schemas including outer */
@@ -1318,19 +1327,19 @@ WHAT IT MUST NOT DO:
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
 									/* resolve unqualified column against inner schemas2; must match exactly one table.
-									Skip aliases that contain ':' — those are prefixed from flattened derived tables
+									Skip aliases that contain \0 (null byte) — those are prefixed from flattened derived tables
 									and should not participate in unqualified column resolution. */
 									(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
-										(if (and (equal? (replace alias ":" "") alias)
+										(if (and (equal? (replace alias "\0" "") alias)
 											(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 											(cons alias acc)
 											acc)) '()))
 									(match matches
-										(cons only '()) '('get_column (concat id ":" only) ti col ci)
+										(cons only '()) '('get_column (concat id "\0" only) ti col ci)
 										'() (begin
 											/* column not in schemas2 - check if it's a SELECT alias in fields2 */
 											(if (nil? (fields2 col))
-												(error (concat "column " col " does not exist in subquery"))
+												expr /* leave unresolved — inner subselect scope will handle it */
 												/* found in fields2 - resolve to the underlying expression */
 												(replace_column_alias (fields2 col))
 											)
@@ -1338,24 +1347,26 @@ WHAT IT MUST NOT DO:
 										(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 									)
 								)
-								'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+								'((symbol get_column) alias_ ti col ci) (if (not (nil? (schemas2 alias_)))
+									'('get_column (concat id "\0" alias_) ti col ci)
+									expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
 								'((symbol outer) outer_arg) (begin
 									/* prefix outer variable reference if it refers to a table in schemas2 */
 									(define s (string outer_arg))
 									(define parts (split s "."))
 									(match parts
 										(list tbl col) (if (not (nil? (schemas2 tbl)))
-											(list (quote outer) (symbol (concat id ":" tbl "." col)))
+											(list (quote outer) (symbol (concat id "\0" tbl "." col)))
 											(list (quote outer) outer_arg))
 										_ (list (quote outer) (replace_column_alias outer_arg))
 									)
 								)
-								(cons sym args) /* function call */ (cons (replace_column_alias sym) (map args replace_column_alias))
+								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs */
 							(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
-								(list (concat id ":" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+								(list (concat id "\0" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
 							/* helper function to transform joinexpr: only transform references to subquery alias id */
 							(define transform_joinexpr (lambda (expr) (match expr
 								'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
@@ -1363,7 +1374,7 @@ WHAT IT MUST NOT DO:
 									(replace_column_alias (list (quote get_column) nil ti col ci))
 									/* reference to outer table -> keep as-is */
 									expr)
-								(cons sym args) /* function call */ (cons sym (map args transform_joinexpr))
+								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects have their own scope */ (cons sym (map args transform_joinexpr)))
 								expr
 							)))
 							/* transform and attach joinexpr to first table in tablesPrefixed */
@@ -1462,11 +1473,12 @@ WHAT IT MUST NOT DO:
 									/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
 									/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
 									(set globalFilter (if isOuter true (replace_column_alias condition2)))
+									(define _check_inner_select (lambda (expr) (match expr (cons sym args) (if (not (nil? (inner_select_kind sym))) true (reduce args (lambda (a b) (or a (_check_inner_select b))) false)) false)))
 									(define wrap_outer_join_projection (lambda (expr)
-										(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)))
+										(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)) (not (_check_inner_select joinexpr2)))
 											(list (quote if) joinexpr2 expr nil)
 											expr)))
-									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
+									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
 								)
 							)
 						) (error "non matching return value for untangle_query"))
@@ -1669,7 +1681,41 @@ WHAT IT MUST NOT DO:
 			(define _canon_fields (map_assoc fields (lambda (k v) (_canon (replace_rename v)))))
 			(define _canon_condition (_canon conditionAll))
 			(define _canon_groups (map (coalesceNil groups '()) (lambda (stage) (canonicalize_stage stage schemas))))
-			(list schema tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
+			/* eliminate unused LEFT JOINs: if no column of a LEFT JOIN table
+			is referenced in fields, condition, or group stages, the join
+			cannot affect row count and can be safely removed */
+			/* eliminate unused LEFT JOINs: a LEFT JOIN is unused when none of its
+			columns appear in fields or group stages. The merged condition includes
+			joinexprs which reference the JOIN itself — those must not prevent
+			elimination. We only check fields + groups (the query's output). */
+			(define _used_tvs (merge_unique
+				(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
+				(merge (map _canon_groups (lambda (stage)
+					(merge_unique
+						(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
+						(extract_tblvars (coalesceNil (stage_having_expr stage) true))
+						(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))))))))
+			(define _pruned_tables (filter tables (lambda (t) (match t
+				'(alias _ _ isOuter _) (if isOuter (has? _used_tvs alias) true)
+				true))))
+			/* rebuild condition: drop AND-parts that reference ONLY eliminated aliases */
+			(define _elim_aliases (filter (map tables (lambda (t) (match t
+				'(alias _ _ true _) (if (has? _used_tvs alias) nil alias)
+				nil))) (lambda (x) (not (nil? x)))))
+			(define _canon_condition (if (equal? (count _pruned_tables) (count tables)) _canon_condition
+				(begin
+					/* flatten nested (and ...) to get individual condition parts */
+				(define _flatten_and (lambda (expr)
+					(match expr (cons (symbol and) parts) (merge (map parts _flatten_and))
+						(list expr))))
+				(define _cond_parts (_flatten_and _canon_condition))
+					/* drop condition parts that reference ANY eliminated alias */
+					(define _kept_parts (filter _cond_parts (lambda (part)
+						(not (reduce (extract_tblvars part) (lambda (acc tv) (or acc (has? _elim_aliases tv))) false)))))
+					(if (equal? 0 (count _kept_parts)) true
+						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
+							(cons 'and _kept_parts))))))
+			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
 		)
 	)
 )
@@ -1807,7 +1853,20 @@ store results as keytable columns named "expr|condition"
 	(define window_in_condition (not (equal? (extract_window_funcs (coalesceNil condition true)) '())))
 	(if window_in_condition (error "window functions not allowed in WHERE clause"))
 
-	(if (and has_window stage_group) (error "window functions with GROUP BY not yet supported"))
+	/* window functions with GROUP BY: strip window expressions to inner
+	aggregates so the normal GROUP BY path processes them. Save original
+	fields so we can inject promise values after compute_plan. */
+	(define _wg_store (newsession))
+	(_wg_store "fields" nil)
+	(if (and has_window stage_group) (begin
+		(_wg_store "fields" fields) /* save original fields with window_func */
+		(define strip_window_inner (lambda (expr)
+			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
+				(begin (define args (nth expr 2))
+					(if (and (list? args) (> (count args) 0)) (car args) 1))
+				(if (list? expr) (map expr strip_window_inner) expr))))
+		(set fields (map_assoc fields (lambda (k v) (strip_window_inner v))))
+		(set has_window false)))
 
 	(if stage_group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
@@ -1979,12 +2038,11 @@ store results as keytable columns named "expr|condition"
 						(define compute_plan
 							'('time (cons 'parallel agg_plans) "compute"))
 
-						/* global aggregates (stage_group='(1)): invalidate computed columns before recompute
-						so correlated subqueries get fresh values per outer row */
-						(define invalidation_plan (if (equal? stage_group '(1))
-							(cons 'begin (map ags (lambda (ag) (match ag '(expr reduce neutral)
-								'('invalidatecolumn schema grouptbl (agg_col_name ag))))))
-							nil))
+						/* invalidation is handled by registerComputeTriggers in ComputeColumn:
+						DML triggers on the base table invalidate computed columns automatically.
+						No forced invalidation needed here — the createcolumn/ComputeColumn path
+						skips recompute when the proxy is still valid (no DML since last compute). */
+						(define invalidation_plan nil)
 
 						/* build key column pairs for keytable cleanup triggers: ((base_col kt_col) ...) */
 						(define key_pairs (map stage_group (lambda (expr)
@@ -2002,7 +2060,53 @@ store results as keytable columns named "expr|condition"
 								(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
 									(make_collect false)
 									nil))
-							invalidation_plan compute_plan grouped_plan)
+							invalidation_plan compute_plan
+							/* window+GROUP BY injection: after keytable is computed,
+							scan it to fill promises with global totals, then wrap
+							grouped_plan's resultrow to inject promise values. */
+							(if (nil? (_wg_store "fields")) grouped_plan
+								(begin
+									(define _wg_ctr (newsession)) (_wg_ctr "n" 0)
+									(define _wg_nn (lambda () (begin (_wg_ctr "n" (+ (_wg_ctr "n") 1)) (concat "__wgp_" (_wg_ctr "n")))))
+									/* build promise info and output fields with promise refs */
+									(define _wg_pl (newsession)) (_wg_pl "l" '())
+									(define _wg_out_fields (map_assoc (_wg_store "fields") (lambda (k v)
+										(if (and (list? v) (> (count v) 0) (equal?? (car v) (quote window_func)))
+											(begin
+												(define pn (_wg_nn))
+												(define wfn (nth v 1))
+												(define wargs (nth v 2))
+												(define inner_agg (if (and (list? wargs) (> (count wargs) 0)) (car wargs) 1))
+												(define agg_tuple (match inner_agg (cons (symbol aggregate) rest) rest (list inner_agg (quote +) 0)))
+												(define acn (agg_col_name agg_tuple))
+												(_wg_pl "l" (cons (list pn acn wfn) (_wg_pl "l")))
+												(symbol pn))
+											v))))
+									/* scan keytable for each promise: aggregate the column globally */
+									(define _wg_scans (map (_wg_pl "l") (lambda (pi) (match pi '(pn acn wfn)
+										(begin
+											(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
+											(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
+											(list (quote set) (symbol pn)
+												'('scan schema grouptbl
+													'(list acn)
+													'('lambda (list (symbol acn)) true)
+													'(list acn)
+													'('lambda (list (symbol acn)) (symbol acn))
+													reduce_op
+													neutral
+													nil false)))))))
+									/* wrap grouped_plan: replace resultrow to inject promise values */
+									(define _wg_rr_body (cons (quote list) (merge (extract_assoc _wg_out_fields (lambda (k v)
+										(if (not (list? v))
+											(list k v)
+											(list k (list (quote get_assoc) (symbol "__wgr") k))))))))
+									(cons 'begin (merge _wg_scans (list
+										(list (quote set) (symbol "__wg_orig_rr") (symbol "resultrow"))
+										(list (quote set) (symbol "resultrow")
+											(list (quote lambda) (list (symbol "__wgr"))
+												(list (symbol "__wg_orig_rr") _wg_rr_body)))
+										grouped_plan))))))
 				))
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */

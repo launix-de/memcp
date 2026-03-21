@@ -139,8 +139,8 @@ restart:
 						}
 					}
 					symStr := string(sym)
-					if strings.Contains(symStr, ".") && !strings.Contains(symStr, ":") {
-						suffix := ":" + symStr
+					if strings.Contains(symStr, ".") && !strings.Contains(symStr, "\x00") {
+						suffix := "\x00" + symStr
 						for env := en.Outer; env != nil; env = env.Outer {
 							for key, val := range env.Vars {
 								if strings.HasSuffix(string(key), suffix) {
@@ -787,7 +787,7 @@ func init() {
 			DeclarationParameter{"condition...", "any", "condition to evaluate", nil},
 			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true", nil},
 			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false", nil},
-		}, "returntype", nil, true, false, nil,
+		}, "returntype", nil, true, false, &TypeDescriptor{Optimize: optimizeIf},
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{

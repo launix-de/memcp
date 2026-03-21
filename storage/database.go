@@ -702,6 +702,9 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	if t != nil {
 		db.schemalock.Unlock()
 		if ifnotexists {
+			// Touch table timestamp so CacheManager does not evict a
+			// keytable that is about to be used by the current query.
+			atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 			return t, false // return the table found
 		}
 		panic("Table " + name + " already exists")
@@ -711,6 +714,7 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	t.Name = name
 	t.PersistencyMode = pm
 	t.ShardMode = ShardModeFree
+	t.lastAccessed = uint64(time.Now().UnixNano())
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	t.Auto_increment = 1
@@ -850,17 +854,5 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 
 func keytableLastUsed(ptr any) time.Time {
 	tbl := ptr.(*table)
-	// use the newest shard lastAccessed as proxy
-	var latestNs uint64
-	for _, s := range tbl.Shards {
-		if v := atomic.LoadUint64(&s.lastAccessed); v > latestNs {
-			latestNs = v
-		}
-	}
-	for _, s := range tbl.PShards {
-		if v := atomic.LoadUint64(&s.lastAccessed); v > latestNs {
-			latestNs = v
-		}
-	}
-	return time.Unix(0, int64(latestNs))
+	return time.Unix(0, int64(atomic.LoadUint64(&tbl.lastAccessed)))
 }

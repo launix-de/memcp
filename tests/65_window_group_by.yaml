@@ -1,0 +1,47 @@
+# Window functions on aggregated values with GROUP BY
+# Pattern: SUM(COUNT(*)) OVER () alongside GROUP BY
+
+metadata:
+  version: "1.0"
+  description: "Window functions with GROUP BY (aggregate over aggregates)"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS wgb_data"
+  - sql: |
+      CREATE TABLE wgb_data (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        week_date INT,
+        amount DOUBLE
+      )
+  - sql: |
+      INSERT INTO wgb_data (week_date, amount) VALUES
+        (1, 10), (1, 20), (1, 30),
+        (2, 40), (2, 50),
+        (3, 60)
+
+test_cases:
+
+  - name: "COUNT with GROUP BY and window SUM OVER"
+    sql: |
+      SELECT week_date,
+        COUNT(*) AS cnt,
+        SUM(COUNT(*)) OVER () AS total_cnt
+      FROM wgb_data
+      GROUP BY week_date
+      ORDER BY week_date
+    expect:
+      rows: 3
+      data:
+        - week_date: 1
+          cnt: 3
+          total_cnt: 6
+        - week_date: 2
+          cnt: 2
+          total_cnt: 6
+        - week_date: 3
+          cnt: 1
+          total_cnt: 6
+
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS wgb_data"

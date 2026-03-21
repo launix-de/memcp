@@ -939,6 +939,47 @@ func unwrapConstListFromCode(val Scmer) Scmer {
 	return val
 }
 
+// optimizeIf is the Optimize hook for the (if ...) special form.
+// It eliminates dead branches when conditions are compile-time constants.
+// (if true x ...) → x, (if false _ cond2 then2 ...) → (if cond2 then2 ...)
+func optimizeIf(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	// Process condition-then pairs, folding away constant conditions
+	out := []Scmer{v[0]} // keep head "if"
+	i := 1
+	for i+1 < len(v) {
+		cond, _ := oc.OptimizeSub(v[i], true)
+		switch cond.GetTag() {
+		case tagNil, tagBool, tagInt, tagFloat, tagString:
+			if ToBool(cond) {
+				// Constant true: this branch is always taken, return its body
+				body, td := oc.OptimizeSub(v[i+1], useResult)
+				return body, td
+			}
+			// Constant false: skip this condition+then pair entirely
+			i += 2
+			continue
+		}
+		// Non-constant condition: keep it and optimize the then-branch
+		then, _ := oc.OptimizeSub(v[i+1], useResult)
+		out = append(out, cond, then)
+		i += 2
+	}
+	// Remaining else branch
+	if i < len(v) {
+		elseVal, td := oc.OptimizeSub(v[i], useResult)
+		if len(out) == 1 {
+			// All conditions were constant-false: return else branch
+			return elseVal, td
+		}
+		out = append(out, elseVal)
+	} else if len(out) == 1 {
+		// All conditions false and no else: nil
+		return NewNil(), &TypeDescriptor{Transfer: true, Const: true}
+	}
+	// Single condition left: keep as (if cond then else)
+	return NewSlice(out), nil
+}
+
 // optimizeAnd is the Optimize hook for the (and ...) special form.
 // It short-circuits on constant-false and removes constant-true arguments.
 func optimizeAnd(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
