@@ -495,13 +495,25 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table
 is_dedup=true: leave aggregates intact (for dedup stages)
 is_dedup=false: replace aggregates with column fetches (for normal group stages) */
-(define make_col_replacer (lambda (grouptbl condition is_dedup expr_name) (begin
+(define make_col_replacer (lambda (grouptbl condition is_dedup expr_name src_tblvar) (begin
 	(define colname (lambda (expr) (if (nil? expr_name) (concat expr) (expr_name expr))))
 	(define replacer (lambda (expr) (match expr
 		(cons (symbol aggregate) rest) (if is_dedup
 			expr
 			'('get_column grouptbl false (concat (colname rest) "|" (colname condition)) false))
-		'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (colname '('get_column tblvar ti col ci)) ci)
+		'((symbol get_column) src_tblvar ti col ci) '('get_column grouptbl ti (colname '('get_column src_tblvar ti col ci)) ci)
+		/* rewrite (outer tblvar.col) inside scalar subselects to reference keytable column */
+		'('outer sym) (begin
+			(define symStr (concat sym))
+			(define prefix (concat src_tblvar "."))
+			(define prefixLen (strlen prefix))
+			(if (and (>= (strlen symStr) prefixLen) (equal? (substr symStr 0 prefixLen) prefix))
+				(begin
+					(define col (substr symStr prefixLen (- (strlen symStr) prefixLen)))
+					(define gc_expr '('get_column src_tblvar false col false))
+					(define kt_col (colname gc_expr))
+					'('outer (symbol (concat grouptbl "." kt_col))))
+				expr))
 		(cons sym args) (cons sym (map args replacer))
 		expr
 	)))
@@ -1705,10 +1717,10 @@ WHAT IT MUST NOT DO:
 			(define _canon_condition (if (equal? (count _pruned_tables) (count tables)) _canon_condition
 				(begin
 					/* flatten nested (and ...) to get individual condition parts */
-				(define _flatten_and (lambda (expr)
-					(match expr (cons (symbol and) parts) (merge (map parts _flatten_and))
-						(list expr))))
-				(define _cond_parts (_flatten_and _canon_condition))
+					(define _flatten_and (lambda (expr)
+						(match expr (cons (symbol and) parts) (merge (map parts _flatten_and))
+							(list expr))))
+					(define _cond_parts (_flatten_and _canon_condition))
 					/* drop condition parts that reference ANY eliminated alias */
 					(define _kept_parts (filter _cond_parts (lambda (part)
 						(not (reduce (extract_tblvars part) (lambda (acc tv) (or acc (has? _elim_aliases tv))) false)))))
@@ -1939,7 +1951,7 @@ store results as keytable columns named "expr|condition"
 
 				(if is_dedup (begin
 					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
-					(define replace_col_for_dedup (make_col_replacer grouptbl condition true expr_name))
+					(define replace_col_for_dedup (make_col_replacer grouptbl condition true expr_name tblvar))
 					/* transform rest_groups to reference grouptbl columns instead of source table columns;
 					first resolve nil -> tblvar via replace_find_column, then map tblvar -> grouptbl */
 					(define _dedup_resolve (lambda (e) (replace_col_for_dedup (replace_find_column e))))
@@ -1962,7 +1974,7 @@ store results as keytable columns named "expr|condition"
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
-						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name))
+						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar))
 						(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)

@@ -1581,6 +1581,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(parser empty '((quote list)))
 			))) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
 			(parser '((atom "CONVERT" true) (atom "TO" true) (atom "CHARACTER" true) (atom "SET" true) (define charset sql_identifier) (? (atom "COLLATE" true) (define coll sql_identifier))) (lambda (id) true))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop_if_exists" col)))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
