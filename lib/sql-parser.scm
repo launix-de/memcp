@@ -165,6 +165,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 		'('session var) (list (list (symbol "context") "session") var)
 		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
+		/* convert __trigger_session_read back to session (from inner_select path) */
+		(cons (symbol __trigger_session_read) rest) (match rest
+			'(var) (list (list (symbol "context") "session") var)
+			'(var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
+			(cons (transform_trigger_expr (symbol __trigger_session_read)) (map rest transform_trigger_expr)))
 		(cons head tail) (if (
 			or (equal?? head "inner_select") (equal?? head (quote inner_select))
 			(equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
@@ -172,12 +177,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			/* resolve inner_select: transform only NEW/OLD column refs
 			(not session vars), then resolve via query planner */
 			(begin
+				/* __trigger_session_read is a symbol that build_queryplan_term cannot
+				resolve at compile time (it's not a declared function). After
+				build_queryplan_term, transform_trigger_expr converts
+				(__trigger_session_read var) back to (session var) which resolves
+				via the injected (define session (context "session")) binding. */
 				(define _transform_new_old_only (lambda (e) (match e
 					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-					/* session vars stay as ('session var) — build_queryplan_term passes them
-					through as runtime symbols. At trigger execution time, the trigger env
-					has (define session (context "session")) which resolves them correctly. */
+					'('session var) (list (symbol "__trigger_session_read") var)
+					'('session var value) (list (symbol "__trigger_session_read") var (_transform_new_old_only value))
 					(cons h t) (cons (_transform_new_old_only h) (map t _transform_new_old_only))
 					e)))
 				(transform_trigger_expr (build_queryplan_term (_transform_new_old_only (car tail)))))
