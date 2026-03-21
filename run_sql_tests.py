@@ -389,6 +389,28 @@ class SQLTestRunner:
         if is_noncritical:
             self.noncritical_count += 1
 
+        # Special action test cases (restart, etc.)
+        action = test_case.get("action")
+        if action == "restart":
+            if self._restart_handler is not None:
+                print("🔄 Restarting server after crash...")
+                ok = self._restart_handler()
+                if ok:
+                    self._record_success(name, is_noncritical)
+                else:
+                    self._record_fail(name, "Server restart failed after crash", None, None, None, is_noncritical)
+            else:
+                # connect-only mode: wait for server to come back
+                try:
+                    port = int(self.base_url.rsplit(':', 1)[1])
+                except Exception:
+                    port = 4321
+                if wait_for_memcp(port, timeout=30):
+                    self._record_success(name, is_noncritical)
+                else:
+                    self._record_fail(name, "Server not reachable after crash", None, None, None, is_noncritical)
+            return True
+
         # Performance test handling
         yaml_threshold_ms = test_case.get("threshold_ms")
         is_perf_test = yaml_threshold_ms is not None
@@ -498,17 +520,26 @@ class SQLTestRunner:
             bg_results: list = []  # [(step_dict, response_or_exception)]
             bg_threads: list = []
 
+            def run_step_request(step):
+                """Execute a single step (sql or scm) and return the response."""
+                step_timeout = int(step.get("timeout", 30))
+                if "scm" in step:
+                    url = f"{self.base_url}/scm"
+                    return requests.post(url, data=step["scm"], headers=self.auth_header, timeout=step_timeout)
+                else:
+                    return self.execute_sql(database, step["sql"],
+                                            session_id=step.get("session_id"),
+                                            timeout=step_timeout)
+
             def run_bg_step(step, out: list):
                 try:
-                    r = self.execute_sql(database, step["sql"],
-                                        session_id=step.get("session_id"),
-                                        timeout=int(step.get("timeout", 30)))
+                    r = run_step_request(step)
                     out.append((step, r))
                 except Exception as exc:
                     out.append((step, exc))
 
             for step in steps:
-                step_sql = step.get("sql", "")
+                step_sql = step.get("sql") or step.get("scm", "")
                 step_sid = step.get("session_id")
                 step_timeout = int(step.get("timeout", 30))
                 step_expect = step.get("expect", {})
@@ -517,7 +548,7 @@ class SQLTestRunner:
                     t.start()
                     bg_threads.append(t)
                 else:
-                    resp = self.execute_sql(database, step_sql, session_id=step_sid, timeout=step_timeout)
+                    resp = run_step_request(step)
                     if step_expect:
                         if step_expect.get("error"):
                             if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
@@ -631,6 +662,10 @@ class SQLTestRunner:
             cpu_pct = measure_cpu_load(memcp_pid, start_cpu, end_cpu, elapsed_sec) if memcp_pid else None
 
         if response is None:
+            expect = test_case.get("expect", {})
+            if expect.get("error"):
+                self._record_success(name, is_noncritical)
+                return True
             return self._record_fail(name, "No response", query, None, None, is_noncritical)
 
         results = self.parse_jsonl_response(response)

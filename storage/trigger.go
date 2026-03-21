@@ -16,6 +16,7 @@ Copyright (C) 2025, 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
 import "errors"
 import "encoding/json"
@@ -33,6 +34,7 @@ const (
 	AfterDelete
 	AfterDropTable
 	AfterDropColumn
+	AfterInvalidate // fired when a computed column is invalidated; propagates cache invalidation
 )
 
 func (tt TriggerTiming) String() string {
@@ -53,6 +55,8 @@ func (tt TriggerTiming) String() string {
 		return "AFTER DROP TABLE"
 	case AfterDropColumn:
 		return "AFTER DROP COLUMN"
+	case AfterInvalidate:
+		return "AFTER INVALIDATE"
 	default:
 		return "UNKNOWN"
 	}
@@ -77,6 +81,8 @@ func (tt TriggerTiming) MarshalJSON() ([]byte, error) {
 		s = "after_drop_table"
 	case AfterDropColumn:
 		s = "after_drop_column"
+	case AfterInvalidate:
+		s = "after_invalidate"
 	default:
 		return nil, errors.New("unknown trigger timing")
 	}
@@ -104,6 +110,8 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 			*tt = AfterDropTable
 		case "after_drop_column":
 			*tt = AfterDropColumn
+		case "after_invalidate":
+			*tt = AfterInvalidate
 		default:
 			return errors.New("unknown trigger timing: " + s)
 		}
@@ -114,7 +122,7 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &n); err != nil {
 		return errors.New("trigger timing must be string or number")
 	}
-	if n > uint8(AfterDropColumn) {
+	if n > uint8(AfterInvalidate) {
 		return fmt.Errorf("unknown trigger timing number: %d", n)
 	}
 	*tt = TriggerTiming(n)
@@ -128,9 +136,10 @@ type TriggerDescription struct {
 	Func      scm.Scmer     `json:"func"`                 // The trigger function (compiled Scheme procedure)
 	SourceSQL string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
 	IsSystem  bool          `json:"is_system,omitempty"`  // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
-	Hidden    bool          `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
-	Priority  int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
-	Async     bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
+	Hidden     bool          `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
+	Priority   int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
+	Async      bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
+	VectorFunc scm.Scmer     `json:"-"`                    // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
 }
 
 // GetTriggers returns all triggers for a specific timing
@@ -146,8 +155,55 @@ func (t *table) GetTriggers(timing TriggerTiming) []TriggerDescription {
 	return result
 }
 
-// AddTrigger adds a trigger to the table
+// AddTrigger adds a trigger to the table. Automatically attempts to vectorize
+// the trigger for batch execution (DELETE/INSERT patterns on prejoin tables).
 func (t *table) AddTrigger(trigger TriggerDescription) {
+	// Auto-vectorize: try to produce a batch-aware version of the trigger
+	if trigger.VectorFunc.IsNil() && !trigger.Func.IsNil() {
+		if trigger.Timing == AfterDelete {
+			fmt.Fprintln(os.Stderr, "[AT-DEL]", trigger.Name, "isProc:", trigger.Func.IsProc())
+			if trigger.Func.IsProc() {
+				b := trigger.Func.Proc().Body
+				fmt.Fprintln(os.Stderr, "  body isSlice:", b.IsSlice())
+				if b.IsSlice() {
+					items := b.Slice()
+					fmt.Fprintln(os.Stderr, "  len:", len(items))
+					if len(items) > 4 {
+						fmt.Fprintln(os.Stderr, "  head:", scm.String(items[0]), "isSymbol:", items[0].IsSymbol())
+						fmt.Fprintln(os.Stderr, "  items[4] tag:", items[4].GetTag(), "isSlice:", items[4].IsSlice())
+						if items[4].IsSlice() {
+							sl := items[4].Slice()
+							if len(sl) >= 3 {
+								fmt.Fprintln(os.Stderr, "  lambda body:", scm.String(sl[2]))
+								if sl[2].IsSlice() {
+									bs := sl[2].Slice()
+									fmt.Fprintln(os.Stderr, "  body[0]:", scm.String(bs[0]), "isSymbol:", bs[0].IsSymbol(), "declName:", declName(bs[0]))
+									if len(bs) == 3 {
+										fmt.Fprintln(os.Stderr, "  body[2]:", scm.String(bs[2]), "isSlice:", bs[2].IsSlice())
+										if bs[2].IsSlice() {
+											ga := bs[2].Slice()
+											fmt.Fprintln(os.Stderr, "  getassoc head:", scm.String(ga[0]), "declName:", declName(ga[0]))
+											fmt.Fprintln(os.Stderr, "  getassoc[1]:", scm.String(ga[1]), "isSymbol:", ga[1].IsSymbol())
+											fmt.Fprintln(os.Stderr, "  getassoc[2]:", scm.String(ga[2]), "isString:", ga[2].IsString(), "isSymbol:", ga[2].IsSymbol())
+										}
+									}
+								}
+							}
+						}
+						key := extractGetAssocOldKey(items[4])
+						fmt.Fprintln(os.Stderr, "  extracted key:", key)
+						if len(items) > 5 {
+							fmt.Fprintln(os.Stderr, "  containsUpdate:", containsUpdateCol(items[5]))
+						}
+					}
+				}
+			}
+		}
+		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
+			trigger.VectorFunc = vf
+			fmt.Fprintln(os.Stderr, "[VECTORIZED]", trigger.Name)
+		}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// Keep trigger list ordered by priority (lower = earlier). For equal
@@ -265,6 +321,8 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 		case BeforeUpdate, AfterUpdate:
 			oldDict = t.rowToDict(oldRow)
 			newDict = t.rowToDict(newRow)
+		case AfterInvalidate:
+			// no row data — column-level invalidation propagation
 		}
 		if tr.Async {
 			// Fire-and-forget: run in background goroutine, no transaction context
@@ -301,6 +359,136 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 			scm.Apply(tr.Func, oldDict, newDict)
 		}()
 	}
+}
+
+// ExecuteTriggersBatch fires triggers once per trigger with a batch of rows.
+// For triggers that have a vectorized form (VectorFunc), the batch is passed
+// as a single call. For non-vectorized triggers, falls back to per-row execution.
+func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld bool) {
+	if len(rows) == 0 {
+		return
+	}
+	if len(rows) == 1 {
+		// Single row: use the normal path
+		if isOld {
+			t.ExecuteTriggers(timing, rows[0], nil)
+		} else {
+			t.ExecuteTriggers(timing, nil, rows[0])
+		}
+		return
+	}
+	triggers := t.GetTriggers(timing)
+	for _, tr := range triggers {
+		if tr.Func.IsNil() {
+			continue
+		}
+		if tr.Async {
+			// Async: fire per-row (no batching for fire-and-forget)
+			for _, row := range rows {
+				var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+				if isOld {
+					oldDict = t.rowToDict(row)
+				} else {
+					newDict = t.rowToDict(row)
+				}
+				trFunc := tr.Func
+				go func() {
+					defer func() { recover() }()
+					scm.Apply(trFunc, oldDict, newDict)
+				}()
+			}
+			continue
+		}
+		// Check for vectorized trigger (VectorFunc set)
+		if !tr.VectorFunc.IsNil() {
+			// Build columnar dict-of-lists: {"col1": [v1,v2,...], "col2": [v1,v2,...]}
+			colBatch := t.rowsToColumnar(rows)
+			func() {
+				tx := CurrentTx()
+				var sp Savepoint
+				hasSavepoint := false
+				if tx != nil {
+					sp = tx.CreateSavepoint()
+					hasSavepoint = true
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						if hasSavepoint {
+							tx.RollbackToSavepoint(sp)
+						}
+						// Vectorization failed: fall back to per-row
+						for _, row := range rows {
+							var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+							if isOld {
+								oldDict = t.rowToDict(row)
+							} else {
+								newDict = t.rowToDict(row)
+							}
+							scm.Apply(tr.Func, oldDict, newDict)
+						}
+					}
+				}()
+				if isOld {
+					scm.Apply(tr.VectorFunc, colBatch, scm.NewNil())
+				} else {
+					scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch)
+				}
+			}()
+			continue
+		}
+		// Fallback: per-row execution
+		for _, row := range rows {
+			var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+			if isOld {
+				oldDict = t.rowToDict(row)
+			} else {
+				newDict = t.rowToDict(row)
+			}
+			func() {
+				tx := CurrentTx()
+				var sp Savepoint
+				hasSavepoint := false
+				if tx != nil {
+					sp = tx.CreateSavepoint()
+					hasSavepoint = true
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						if hasSavepoint {
+							tx.RollbackToSavepoint(sp)
+						}
+						panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
+					}
+				}()
+				scm.Apply(tr.Func, oldDict, newDict)
+			}()
+		}
+	}
+}
+
+// rowsToColumnar converts a batch of rows into columnar dict-of-lists format.
+// Result: FastDict{"col1": [v1,v2,...], "col2": [v1,v2,...], ...}
+// This is the optimal format for vectorized trigger bodies: get_assoc returns
+// the entire column as a list, enabling batch operations like has?.
+func (t *table) rowsToColumnar(rows []dataset) scm.Scmer {
+	if len(rows) == 0 {
+		return scm.NewNil()
+	}
+	cols := t.Columns
+	// Build flat assoc: (col1 [v1,v2,...] col2 [v1,v2,...] ...)
+	result := make([]scm.Scmer, 0, len(cols)*2)
+	for ci, col := range cols {
+		vals := make([]scm.Scmer, len(rows))
+		for i, row := range rows {
+			if row != nil && ci < len(row) {
+				vals[i] = row[ci]
+			} else {
+				vals[i] = scm.NewNil()
+			}
+		}
+		result = append(result, scm.NewString(col.Name), scm.NewSlice(vals))
+	}
+	return scm.NewSlice(result)
 }
 
 // rowToDictWithColumns converts a dataset to a dict using explicit column names

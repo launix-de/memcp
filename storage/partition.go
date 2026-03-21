@@ -17,7 +17,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "sort"
+import "github.com/carli2/hybridsort"
 import "sync"
 import "sync/atomic"
 import "time"
@@ -322,7 +322,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	}
 
 	// sort samplelist
-	sort.Slice(pivotSamples, func(i, j int) bool {
+	hybridsort.Slice(pivotSamples, func(i, j int) bool {
 		return scm.Less(pivotSamples[i], pivotSamples[j])
 	})
 	// extract n-1 pivots
@@ -361,7 +361,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	}
 
 	// sort for highest ranking column
-	sort.Slice(shardCandidates, func(i, j int) bool { // Less
+	hybridsort.Slice(shardCandidates, func(i, j int) bool { // Less
 		return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
 	})
 	// prune shard candidates to max dimensions
