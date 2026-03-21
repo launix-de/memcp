@@ -2039,11 +2039,13 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// values to nil (while keeping the key) to free memory under pressure.
 		// rebuild must read all columns, so materialize any nil entries now
 		// while t.mu is not held (ensureColumnLoaded acquires it internally).
-		// Snapshot nil-column keys to load them. When called from ComputeColumn,
-		// the caller holds t.mu.Lock() so we must NOT take RLock (deadlock).
-		// When called from database.rebuild, the caller also holds t.mu.Lock().
-		// In both cases the write lock protects against concurrent map writes,
-		// so iterating without an extra lock is safe here.
+		// Snapshot nil-column keys to load them.
+		// rebuild() operates on the ORIGINAL shard (t), building a NEW shard (result).
+		// No concurrent writes to t.columns happen during rebuild because:
+		// - ComputeColumn writes to a DIFFERENT shard's columns map, not t's
+		// - The caller (database.rebuild or ComputeColumn) serializes rebuilds
+		//   for the same shard via table lock or retry loop
+		// Therefore iterating t.columns without lock is safe here.
 		var nilCols []string
 		for col, c := range t.columns {
 			if c == nil {
