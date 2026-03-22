@@ -1157,7 +1157,9 @@ WHAT IT MUST NOT DO:
 								(define isOuter (nth tdesc 3))
 								(define joinexpr (nth tdesc 4))
 								(if (not (nil? joinexpr)) (error "EXISTS subselect joins not supported yet"))
-								(define filtercols (extract_columns_for_tblvar tblvar condition2))
+								(define filtercols (merge_unique (list
+									(extract_columns_for_tblvar tblvar condition2)
+									(extract_outer_columns_for_tblvar tblvar condition2))))
 								(define use_ordered (or (and (not (nil? stage_order)) (not (equal? stage_order '()))) (not (nil? stage_limit)) (not (nil? stage_offset))))
 								(define ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
 									'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
