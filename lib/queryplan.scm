@@ -1839,15 +1839,19 @@ WHAT IT MUST NOT DO:
 			(define cnames (extract_assoc cols (lambda (k v) k)))
 			(merge (map cnames (lambda (cn) (begin
 				(define set_key (concat "$set:" cn))
-				(define resolved_val (reduce_assoc resolved_fields (lambda (acc k v) (if (equal? k set_key) v acc)) nil))
-				(list cn (coalesce resolved_val (list (quote get_column) nil false cn false)))
+				/* Use a mutable flag (newsession) to track if match was found,
+			   avoiding equality check on the sentinel (0 == "__not_found__" is buggy) */
+			(define _found (newsession))
+			(_found "v" nil)
+			(reduce_assoc resolved_fields (lambda (acc k v) (if (equal?? k set_key) (begin (_found "v" v) (_found "hit" true) v) acc)) nil)
+			(list cn (if (_found "hit") (_found "v") (list (quote get_column) nil false cn false)))
 			)))))
 		'())) /* DELETE: empty cols signals deletion */
-	/* Assemble final pipeline args: replace fields with resolved SET cols, add update_target */
+	/* Assemble final pipeline args: fields are dummy (not used for output), update_target has the real SET cols */
 	(define final_pipeline (list
 		(nth pipeline_result 0) /* schema */
 		(nth pipeline_result 1) /* tables */
-		resolved_target_cols    /* fields for $update output */
+		'("$dml" 1) /* dummy fields — not used for output in DML mode */
 		(nth pipeline_result 3) /* condition */
 		(nth pipeline_result 4) /* groups */
 		(nth pipeline_result 5) /* schemas */
@@ -2758,6 +2762,12 @@ store results as keytable columns named "expr|condition"
 									(define scan_offset (if is_first stage_offset 0))
 									(define scan_limit (if is_first (coalesceNil stage_limit -1) -1))
 
+									/* check if this table is the DML target (ordered path) */
+									(define is_update_target_ord (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
+									(define ord_scan_mapcols (if is_update_target_ord (cons list (cons "$update" cols)) (cons list cols)))
+									(define ord_scan_mapfn_params (if is_update_target_ord
+										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
+										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									(scan_wrapper 'scan_order schema tbl
 										/* condition */
 										(cons list filtercols)
@@ -2768,11 +2778,11 @@ store results as keytable columns named "expr|condition"
 										scan_offset
 										scan_limit
 										/* extract columns and store them into variables */
-										(cons list cols)
-										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition false))
-										/* no reduce+neutral */
-										nil
-										nil
+										ord_scan_mapcols
+										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables later_condition false))
+										/* reduce+neutral for DML */
+										(if is_update_target_ord (symbol "+") nil)
+										(if is_update_target_ord 0 nil)
 										isOuter
 									)
 								))
@@ -2782,9 +2792,7 @@ store results as keytable columns named "expr|condition"
 								/* DML mode: emit $update call */
 								(begin (define _ut_cols (nth update_target 1))
 									(if (equal? _ut_cols '())
-										/* DELETE mode: $update with no args deletes the row */
 										'('if true '('$update) 0)
-										/* UPDATE mode: $update with SET values */
 										'('if true '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
 						)
 					))
