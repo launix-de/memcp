@@ -689,8 +689,9 @@ WHAT IT MUST NOT DO:
 			'((quote outer) _) true
 			/* nested inner_selects may reference outer tables at deeper levels;
 			we can't cheaply check, so conservatively assume correlated */
-			(cons sym args) (if (or (not (nil? (inner_select_kind sym))) (equal?? sym (quote !begin)) (equal?? sym (symbol !begin))) true
-				(reduce args (lambda (a b) (or a (_check_refs b))) false))
+			(cons sym args) (if (not (nil? (inner_select_kind sym))) true
+				(if (or (equal?? sym (quote !begin)) (equal?? sym (symbol !begin))) false
+					(reduce args (lambda (a b) (or a (_check_refs b))) false)))
 			false
 		)))
 		(define fields_corr (if raw_fields (reduce_assoc raw_fields (lambda (a k v) (or a (_check_refs v))) false) false))
@@ -745,7 +746,9 @@ WHAT IT MUST NOT DO:
 						(define kind (inner_select_kind sym))
 						(if (equal?? kind (quote inner_select))
 							(match args
-								(cons sq '()) (unnest_subselect sq combined_schemas)
+								(cons sq '()) (if (_subquery_is_correlated sq combined_schemas)
+									expr /* leave correlated inner_selects for build_scalar_subselect */
+									(unnest_subselect sq combined_schemas))
 								_ (cons sym (map args walk_replace)))
 							/* leave IN/EXISTS for their own handlers */
 							(if (not (nil? kind))
