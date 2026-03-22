@@ -1,0 +1,191 @@
+# Nested correlated subselect inside derived table where an inner
+# subselect references a column from an intermediate table.
+# Pattern: SELECT t.* FROM (SELECT ... COALESCE((SELECT ... FROM auto WHERE auto.ID = event.vehicle LIMIT 1), FALSE) ...) t
+# The column "vehicle" must be resolved as event.vehicle, not as a table name.
+
+metadata:
+  version: "1.0"
+  description: "Nested subselect column resolution in derived table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nsc_doc"
+  - sql: "DROP TABLE IF EXISTS nsc_event"
+  - sql: "DROP TABLE IF EXISTS nsc_vehicle"
+  - sql: |
+      CREATE TABLE nsc_vehicle (
+        ID INT PRIMARY KEY,
+        name TEXT,
+        public INT
+      )
+  - sql: |
+      CREATE TABLE nsc_event (
+        ID INT PRIMARY KEY,
+        vehicle INT,
+        description TEXT
+      )
+  - sql: |
+      CREATE TABLE nsc_doc (
+        ID INT PRIMARY KEY,
+        subject TEXT,
+        ref_event INT
+      )
+  - sql: "INSERT INTO nsc_vehicle VALUES (1, 'Car A', 1), (2, 'Car B', 0)"
+  - sql: "INSERT INTO nsc_event VALUES (1, 1, 'Oil change'), (2, 2, 'Tire swap')"
+  - sql: "INSERT INTO nsc_doc VALUES (1, 'Invoice', 1), (2, 'Report', 2), (3, 'Note', NULL)"
+
+test_cases:
+
+  - name: "correlated subselect through intermediate table (no derived table)"
+    sql: |
+      SELECT d.ID, d.subject,
+        COALESCE((SELECT (
+          COALESCE((SELECT v.name FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), 'unknown')
+        ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), 'none') AS vehicle_name
+      FROM nsc_doc d
+      ORDER BY d.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          subject: "Invoice"
+          vehicle_name: "Car A"
+        - ID: 2
+          subject: "Report"
+          vehicle_name: "Car B"
+        - ID: 3
+          subject: "Note"
+          vehicle_name: "none"
+
+  - name: "same query wrapped in derived table with SELECT t.*"
+    sql: |
+      SELECT t.* FROM (
+        SELECT d.ID AS ID, d.subject AS subject,
+          COALESCE((SELECT (
+            COALESCE((SELECT v.name FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), 'unknown')
+          ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), 'none') AS vehicle_name
+        FROM nsc_doc d
+        ORDER BY d.ID
+      ) t
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          subject: "Invoice"
+          vehicle_name: "Car A"
+        - ID: 2
+          subject: "Report"
+          vehicle_name: "Car B"
+        - ID: 3
+          subject: "Note"
+          vehicle_name: "none"
+
+  - name: "access check pattern: nested COALESCE with subselect chain"
+    sql: |
+      SELECT d.ID, d.subject,
+        COALESCE((SELECT (
+          COALESCE((SELECT (v.public) FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), FALSE)
+        ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), TRUE) AS has_access
+      FROM nsc_doc d
+      ORDER BY d.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          subject: "Invoice"
+          has_access: 1
+        - ID: 2
+          subject: "Report"
+          has_access: 0
+        - ID: 3
+          subject: "Note"
+          has_access: 1
+
+  - name: "derived table with access check in WHERE using nested subselect"
+    sql: |
+      SELECT t.* FROM (
+        SELECT d.ID AS ID, d.subject AS subject
+        FROM nsc_doc d
+        WHERE COALESCE((SELECT (
+          COALESCE((SELECT v.public FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), FALSE)
+        ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), TRUE)
+        ORDER BY d.ID
+      ) t
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          subject: "Invoice"
+        - ID: 3
+          subject: "Note"
+
+  - name: "COUNT over derived table with nested access check"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT d.ID AS ID
+        FROM nsc_doc d
+        WHERE COALESCE((SELECT (
+          COALESCE((SELECT v.public FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), FALSE)
+        ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), TRUE)
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "triple-nested: inner subselect uses column from middle scope"
+    sql: |
+      SELECT t.* FROM (
+        SELECT d.ID AS ID, d.subject AS subject,
+          COALESCE((SELECT (
+            COALESCE((SELECT (v.public) FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), FALSE)
+          ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), TRUE) AS can_access
+        FROM nsc_doc d
+      ) t ORDER BY t.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          subject: "Invoice"
+          can_access: 1
+        - ID: 2
+          subject: "Report"
+          can_access: 0
+        - ID: 3
+          subject: "Note"
+          can_access: 1
+
+  - name: "triple-nested in WHERE of derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT d.ID AS ID, d.subject AS subject
+        FROM nsc_doc d
+        WHERE COALESCE((SELECT (
+          COALESCE((SELECT (v.public) FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), FALSE)
+        ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), TRUE)
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          subject: "Invoice"
+        - ID: 3
+          subject: "Note"
+
+  - name: "triple-nested in WHERE + GROUP BY"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT d.ID AS ID
+        FROM nsc_doc d
+        WHERE COALESCE((SELECT (
+          COALESCE((SELECT (v.public) FROM nsc_vehicle v WHERE v.ID = ev.vehicle LIMIT 1), FALSE)
+        ) FROM nsc_event ev WHERE ev.ID = d.ref_event LIMIT 1), TRUE)
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nsc_doc"
+  - sql: "DROP TABLE IF EXISTS nsc_event"
+  - sql: "DROP TABLE IF EXISTS nsc_vehicle"
