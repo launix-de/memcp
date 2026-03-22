@@ -1539,6 +1539,7 @@ WHAT IT MUST NOT DO:
 			/* TODO: add rename_prefix to all table names and get_column expressions */
 			/* TODO: apply renamelist to all expressions in fields condition group having order */
 
+			(define _where_before_joinexpr condition)
 			/* at first: extract additional join exprs into condition list */
 			(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
 
@@ -1733,6 +1734,7 @@ WHAT IT MUST NOT DO:
 			elimination. We only check fields + groups (the query's output). */
 			(define _used_tvs (merge_unique
 				(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
+				(extract_tblvars _where_before_joinexpr)
 				(merge (map _canon_groups (lambda (stage)
 					(merge_unique
 						(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
@@ -2301,7 +2303,8 @@ store results as keytable columns named "expr|condition"
 									(cons list filtercols)
 									'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 									(cons list cols)
-									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_mat_scan rest later_condition false))
+									(begin (define _mi (build_mat_scan rest later_condition false))
+									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (if isOuter '('if (replace_columns_from_expr now_condition) _mi '(list)) _mi)))
 									/* reduce: merge sub-results */
 									'('lambda '('acc 'sub) '('merge 'acc 'sub))
 									'(list)
@@ -2839,7 +2842,8 @@ store results as keytable columns named "expr|condition"
 										scan_limit
 										/* extract columns and store them into variables */
 										ord_scan_mapcols
-										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables later_condition false))
+										(begin (define _oi (build_scan tables later_condition false))
+											(list (symbol "lambda") ord_scan_mapfn_params (if isOuter '('if (replace_columns_from_expr now_condition) _oi nil) _oi)))
 										/* reduce+neutral for DML */
 										(if is_update_target_ord (symbol "+") nil)
 										(if is_update_target_ord 0 nil)
@@ -2903,7 +2907,8 @@ store results as keytable columns named "expr|condition"
 											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 											/* extract columns and store them into variables */
 											scan_mapcols
-											(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+											(begin (define _ui (build_scan tables later_condition))
+											(list (symbol "lambda") scan_mapfn_params (if isOuter '('if (replace_columns_from_expr now_condition) _ui nil) _ui)))
 											(if is_update_target (symbol "+") nil)
 											(if is_update_target 0 nil)
 											nil
