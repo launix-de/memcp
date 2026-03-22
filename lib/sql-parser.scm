@@ -1108,47 +1108,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(cons sym args) (cons sym (map args replace_find_column))
 				expr
 			)))
-			/* shallow version: skip inner_select subtrees so subselect columns resolve against their own FROM */
-			(define replace_find_column_no_subselect (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci)
-				'((symbol get_column) tblvar _ col ci) (if (and tblalias (equal?? tblvar tblalias)) '((quote get_column) tbl false col ci) expr)
-				(cons sym args) (if (sql_expr_contains_inner_select (list sym))
-					expr
-					(cons sym (map args replace_find_column_no_subselect)))
-				expr
-			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
 			(set condition (replace_find_column (coalesceNil condition true)))
 			(if (> (count all_defs) 1)
-				/* multi-table UPDATE: UPDATE t1 [AS a], t2 [AS b] SET ... WHERE ... */
-				(begin
-					(define others (cdr all_defs))
-					(define target_cols (extract_columns_for_tblvar tbl condition))
-					(define scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
-					(define mapcols (cons list (cons "$update" scancols)))
-					(define mapfn '('lambda
-						(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-						'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
-					))
-					(define condition_body (replace_columns_from_expr condition))
-					(define filter_body (wrap_multi_scans others tblalias condition condition_body))
-					(define filterfn (list (symbol "lambda")
-						(map target_cols (lambda (col) (symbol (concat tbl "." col))))
-						filter_body))
-					'((quote scan)
-						schema
-						tbl
-						(cons list target_cols)
-						filterfn
-						mapcols
-						mapfn
-						(quote +)
-						0
-					)
-				)
+				/* multi-table UPDATE: rewrite as SELECT through queryplan pipeline.
+				   This enables proper inner_select/subselect handling via build_queryplan.
+				   cols are NOT pre-resolved — the query planner handles column resolution. */
+				(build_multi_table_update schema tbl tblalias all_defs (merge cols) condition)
 				/* single-table UPDATE */
 				(begin
+					(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
 					(set filtercols (extract_columns_for_tblvar tbl condition))
 					(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
 					(define mapcols (cons list (cons "$update" scancols)))

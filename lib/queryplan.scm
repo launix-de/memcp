@@ -1804,6 +1804,21 @@ WHAT IT MUST NOT DO:
 	)
 )))
 
+/* build_multi_table_update: rewrite multi-table UPDATE through the full query planner pipeline.
+   schema: target schema
+   tbl: target table name (the table being updated)
+   tblalias: alias of target table (or nil)
+   all_defs: list of table definitions ((alias schema tblname isOuter joinexpr) ...)
+   cols: flat assoc list (col1 expr1 col2 expr2 ...) of SET assignments (raw, not pre-resolved)
+   condition: WHERE clause expression
+   Approach: run the UPDATE's tables+condition through untangle_query → join_reorder → build_queryplan
+   with an update_target parameter that tells build_queryplan to inject $update into the target table's scan. */
+(define build_multi_table_update (lambda (schema tbl tblalias all_defs cols condition) (begin
+	/* TODO: implement by extending build_queryplan with update_target parameter.
+	   For now, fall back to error so the test fails cleanly. */
+	(error "multi-table UPDATE with subselect: not yet implemented (requires build_queryplan update_target extension)")
+)))
+
 /*
 === CONTRACT: build_queryplan ===
 
