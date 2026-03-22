@@ -1803,51 +1803,63 @@ WHAT IT MUST NOT DO:
 	)
 )))
 
-/* build_multi_table_update: rewrite multi-table UPDATE through the full query planner pipeline.
+/* build_dml_plan: route UPDATE/DELETE through the full query planner pipeline.
    schema: target schema
-   tbl: target table name (the table being updated)
-   tblalias: alias of target table (or nil)
+   target_tbl: target table name (the table being modified)
+   target_alias: alias of target table (or nil → uses target_tbl)
    all_defs: list of table definitions ((alias schema tblname isOuter joinexpr) ...)
-   cols: flat assoc list (col1 expr1 col2 expr2 ...) of SET assignments (raw, not pre-resolved)
-   condition: WHERE clause expression
-   Approach: run the UPDATE's tables+condition through untangle_query → join_reorder → build_queryplan
-   with an update_target parameter that tells build_queryplan to inject $update into the target table's scan. */
-(define build_multi_table_update (lambda (schema tbl tblalias all_defs cols condition) (begin
-	/* Build a synthetic SELECT from the UPDATE's table list and WHERE clause.
-	   The SET-value expressions go into the fields so untangle_query processes them
-	   (including replace_inner_selects for scalar subselects). The update_target
-	   tells build_queryplan to inject $update into the target table's scan. */
-	(define target_alias (coalesce tblalias tbl))
-	/* Put SET expressions into fields with "$set:" prefixed names.
-	   After the pipeline, we reconstruct the cols from the resolved fields. */
-	(define set_field_names (extract_assoc cols (lambda (k v) (concat "$set:" k))))
-	(define set_fields (merge (map (produceN (count set_field_names)) (lambda (i)
-		(list (nth set_field_names i) (nth (extract_assoc cols (lambda (k v) v)) i))))))
-	(define synthetic_select (list schema all_defs set_fields condition nil nil nil nil nil))
-	/* Run through the full pipeline: untangle_query resolves inner_selects in fields */
+   cols: flat assoc list (col1 expr1 col2 expr2 ...) for UPDATE, or nil/() for DELETE
+   condition: WHERE clause expression (raw, not pre-resolved)
+   order: ORDER BY list or nil
+   limit_val: LIMIT value or nil
+   offset_val: OFFSET value or nil
+   The pipeline resolves inner_selects in SET expressions, handles JOINs, subselects,
+   column resolution — then injects $update into the target table's scan. */
+(define build_dml_plan (lambda (schema target_tbl target_alias all_defs cols condition order limit_val offset_val) (begin
+	(define tgt (coalesce target_alias target_tbl))
+	(define is_update (and (not (nil? cols)) (not (equal? cols '()))))
+	/* For UPDATE: put SET expressions into synthetic fields so untangle_query processes them
+	   (including replace_inner_selects for scalar subselects).
+	   For DELETE: fields are empty — just the tables + condition. */
+	(define set_fields (if is_update
+		(begin
+			(define col_names (extract_assoc cols (lambda (k v) k)))
+			(define col_vals (extract_assoc cols (lambda (k v) v)))
+			(merge (map (produceN (count col_names)) (lambda (i)
+				(list (concat "$set:" (nth col_names i)) (nth col_vals i))))))
+		'("$dml_dummy" 1))) /* need at least one field for the pipeline to work */
+	/* Build synthetic SELECT 9-tuple: (schema tables fields condition group having order limit offset) */
+	(define synthetic_select (list schema all_defs set_fields condition nil nil order limit_val offset_val))
+	/* Run through untangle_query → join_reorder → build_queryplan */
 	(define pipeline_result (apply join_reorder (apply untangle_query (merge synthetic_select (list nil)))))
-	/* Reconstruct resolved cols from the pipeline's fields (element 2).
-	   The fields are now resolved (inner_selects → scalar subselect code). */
-	(define resolved_fields (nth pipeline_result 2))
-	(define col_names (extract_assoc cols (lambda (k v) k)))
-	(define resolved_cols (merge (map col_names (lambda (cn) (begin
-		(define set_key (concat "$set:" cn))
-		(define resolved_val (reduce_assoc resolved_fields (lambda (acc k v) (if (equal? k set_key) v acc)) nil))
-		(list cn (coalesce resolved_val (list (quote get_column) nil false cn false)))
-	)))))
-	/* Replace fields in pipeline result with empty (no SELECT output needed) and pass update_target */
+	/* For UPDATE: reconstruct resolved cols from the pipeline's fields */
+	(define resolved_target_cols (if is_update
+		(begin
+			(define resolved_fields (nth pipeline_result 2))
+			(define cnames (extract_assoc cols (lambda (k v) k)))
+			(merge (map cnames (lambda (cn) (begin
+				(define set_key (concat "$set:" cn))
+				(define resolved_val (reduce_assoc resolved_fields (lambda (acc k v) (if (equal? k set_key) v acc)) nil))
+				(list cn (coalesce resolved_val (list (quote get_column) nil false cn false)))
+			)))))
+		'())) /* DELETE: empty cols signals deletion */
+	/* Assemble final pipeline args: replace fields with resolved SET cols, add update_target */
 	(define final_pipeline (list
 		(nth pipeline_result 0) /* schema */
 		(nth pipeline_result 1) /* tables */
-		resolved_cols /* fields: use resolved SET cols for the $update output */
+		resolved_target_cols    /* fields for $update output */
 		(nth pipeline_result 3) /* condition */
 		(nth pipeline_result 4) /* groups */
 		(nth pipeline_result 5) /* schemas */
 		(nth pipeline_result 6) /* replace_find_column */
-		(list target_alias resolved_cols) /* update_target */
+		(list tgt resolved_target_cols) /* update_target: (alias cols) — empty cols = DELETE */
 	))
 	(apply build_queryplan final_pipeline)
 )))
+
+/* Convenience wrapper for multi-table UPDATE (called from sql_update) */
+(define build_multi_table_update (lambda (schema tbl tblalias all_defs cols condition)
+	(build_dml_plan schema tbl tblalias all_defs cols condition nil nil nil)))
 
 /*
 === CONTRACT: build_queryplan ===
@@ -2767,9 +2779,13 @@ store results as keytable columns named "expr|condition"
 							)
 							'() /* final inner */ (if (nil? update_target)
 								'((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
-								/* UPDATE mode: emit $update call with resolved SET values */
+								/* DML mode: emit $update call */
 								(begin (define _ut_cols (nth update_target 1))
-									'('if true '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0)))
+									(if (equal? _ut_cols '())
+										/* DELETE mode: $update with no args deletes the row */
+										'('if true '('$update) 0)
+										/* UPDATE mode: $update with SET values */
+										'('if true '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
 						)
 					))
 					(build_scan tables (replace_find_column condition) true)
@@ -2829,9 +2845,13 @@ store results as keytable columns named "expr|condition"
 								)
 								'() /* final inner (=scalar) */ (if (nil? update_target)
 								'('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
-								/* UPDATE mode */
+								/* DML mode */
 								(begin (define _ut_cols (nth update_target 1))
-									'('if (coalesceNil condition true) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0)))
+									(if (equal? _ut_cols '())
+										/* DELETE */
+										'('if (coalesceNil condition true) '('$update) 0)
+										/* UPDATE */
+										'('if (coalesceNil condition true) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
 							)
 						))
 						(build_scan tables (replace_find_column condition))
