@@ -2240,10 +2240,18 @@ store results as keytable columns named "expr|condition"
 						(list tv (concat tschema "." ttbl)))))
 				)
 				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
-				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
-				(define prejointbl (concat ".prejoin:"
+				/* Hash the condition for the prejoin name: after replace_inner_selects,
+				   the condition may contain expanded scalar subselect code that makes
+				   canonical_expr_name produce extremely long strings. Hashing keeps
+				   the name short and deterministic. */
+				(define prejoin_condition_name (fnv_hash (concat (canonical_expr_name condition '(list) '(list) prejoin_alias_map))))
+				(define prejointbl_full (concat ".prejoin:"
 					(map tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
+				/* Use a short hash-based name to prevent explosively long keytable column names
+				   in the recursive build_queryplan call (canon_alias_map embeds the prejoin name
+				   into every keytable column). The full name is used for debugging only. */
+				(define prejointbl (concat ".pj:" (fnv_hash prejointbl_full)))
 				/* capture outer schema and table name for trigger code generation */
 				(define pj_schema schema)
 				(define pjtbl prejointbl)
