@@ -52,14 +52,25 @@ test_cases:
           title: "Task B"
           creator_name: "Bob"
 
-  - name: "COUNT over derived table with colon alias JOIN"
+  - name: "LEFT JOIN WHERE on right table filters correctly"
     sql: |
-      SELECT COUNT(*) AS cnt FROM (
-        SELECT i.ID AS ID
-        FROM cad_items i
-        LEFT JOIN cad_users AS `ref:creator` ON `ref:creator`.ID = i.creator
-        WHERE `ref:creator`.active = 1
-      ) t
+      SELECT i.ID, i.title
+      FROM cad_items i
+      LEFT JOIN cad_users AS `ref:creator` ON `ref:creator`.ID = i.creator
+      WHERE `ref:creator`.active = 1
+      ORDER BY i.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          title: "Task A"
+
+  - name: "COUNT over LEFT JOIN WHERE on right table"
+    sql: |
+      SELECT COUNT(*) AS cnt
+      FROM cad_items i
+      LEFT JOIN cad_users AS `ref:creator` ON `ref:creator`.ID = i.creator
+      WHERE `ref:creator`.active = 1
     expect:
       rows: 1
       data:
