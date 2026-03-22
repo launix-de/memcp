@@ -1102,64 +1102,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(define tblalias (match first_def '(id _ _ _ _) id))
 			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
-				'((symbol get_column) tblvar _ col ci) (if (and tblalias (equal?? tblvar tblalias)) '((quote get_column) tbl false col ci) expr)
-				(cons sym args) (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(if (> (count all_defs) 1)
-				/* multi-table UPDATE: rewrite as SELECT through queryplan pipeline.
-				   This enables proper inner_select/subselect handling via build_queryplan.
-				   cols are NOT pre-resolved — the query planner handles column resolution. */
-				(build_multi_table_update schema tbl tblalias all_defs (merge cols) condition)
-				/* single-table UPDATE */
-				(begin
-					(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-					(set filtercols (extract_columns_for_tblvar tbl condition))
-					(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
-					(define mapcols (cons list (cons "$update" scancols)))
-					(define mapfn '('lambda
-						(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-						'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
-					))
-					(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
-					(if (or (not (nil? order)) (not (nil? limit)))
-						(begin
-							(define ordercols (if (nil? order) '() (map order (lambda (x)
-								(car (cdr (cdr (cdr (replace_find_column (car x))))))
-							))))
-							(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
-							'((quote scan_order)
-								schema
-								tbl
-								(cons list filtercols)
-								filterfn
-								(cons list ordercols)
-								(cons list dirs)
-								(coalesceNil offset 0)
-								(coalesceNil limit -1)
-								mapcols
-								mapfn
-								(quote +)
-								0
-							)
-						)
-						'((quote scan)
-							schema
-							tbl
-							(cons list filtercols)
-							filterfn
-							mapcols
-							mapfn
-							(quote +)
-							0
-						)
-					)
-				)
-			)
+			/* Route ALL UPDATE (single + multi-table) through the query planner.
+			   The planner handles column resolution, inner_selects, joins. */
+			(build_dml_plan schema tbl tblalias all_defs (merge cols) (coalesceNil condition true) order limit offset)
 	)))
 
 	(define sql_delete (parser '(
@@ -1199,47 +1144,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
-			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
-			(if (or (not (nil? order)) (not (nil? limit)))
-				(begin
-					(define ordercols (if (nil? order) '() (map order (lambda (x)
-						(car (cdr (cdr (cdr (replace_find_column (car x))))))
-					))))
-					(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
-					'((quote scan_order)
-						(coalesce schema2 schema)
-						tbl
-						(cons list filtercols)
-						filterfn
-						(cons list ordercols)
-						(cons list dirs)
-						(coalesceNil offset 0)
-						(coalesceNil limit -1)
-						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-						(quote +)
-						0
-					)
-				)
-				'((quote scan)
-					(coalesce schema2 schema)
-					tbl
-					(cons list filtercols)
-					filterfn
-					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
-					0
-				)
-			)
+			/* Route single-table DELETE through the query planner pipeline.
+			   cols = nil signals DELETE mode. */
+			(define del_schema (coalesce schema2 schema))
+			(define del_defs (list (list tbl del_schema tbl false nil)))
+			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -1249,46 +1158,19 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(? (define schema2 sql_identifier) ".") (define tbl sql_identifier)
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			'((quote scan)
-				(coalesce schema2 schema)
-				tbl
-				'(list)
-				'((quote lambda) '() true)
-				'(list "$update")
-				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-				(quote +)
-				0
-			)
+			(define trunc_schema (coalesce schema2 schema))
+			(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)
 	)))
 
-	/* Multi-table DELETE: DELETE t1 FROM t1, t2 WHERE ... or DELETE FROM t1 USING t1, t2 WHERE ... */
+	/* Multi-table DELETE: route through query planner pipeline via build_dml_plan */
 	(define gen_multi_delete (lambda (target all_defs condition) (begin
-		/* Find the target table definition */
+		/* Find target table definition */
 		(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
 			'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 			acc)) nil))
 		(define target_alias (match target_def '(id _ _ _ _) id))
 		(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-		/* Other tables (non-target) for nested scans */
-		(define others (reduce all_defs (lambda (acc tdef) (match tdef
-			'(id _ _ _ _) (if (equal? id target_alias) acc (cons tdef acc))
-			acc)) '()))
-		(define target_cols (extract_columns_for_tblvar target_alias condition))
-		(define condition_body (replace_columns_from_expr condition))
-		(define filter_body (wrap_multi_scans others target_alias condition condition_body))
-		(define filterfn (list (symbol "lambda")
-			(map target_cols (lambda (col) (symbol (concat target_alias "." col))))
-			filter_body))
-		'((quote scan)
-			schema
-			target_tbl
-			(cons list target_cols)
-			filterfn
-			'(list "$update")
-			'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-			(quote +)
-			0
-		)
+		(build_dml_plan schema target_tbl target_alias all_defs nil condition nil nil nil)
 	)))
 	(define sql_multi_delete (parser (or
 		/* DELETE t1 FROM t1 JOIN t2 ON ... WHERE ... */
