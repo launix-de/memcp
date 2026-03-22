@@ -302,7 +302,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				{Name: "@@max_allowed_packet", Type: querypb.Type_INT64},
 			},
 			Rows: [][]sqltypes.Value{
-				{sqltypes.MakeTrusted(querypb.Type_INT64, []byte("33554432"))},
+				{sqltypes.MakeTrusted(querypb.Type_INT64, []byte("4194304"))},
 			},
 		})
 		return nil
