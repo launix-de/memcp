@@ -133,8 +133,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(define raw_sql (car captured_result))
 				/* hash overly long auto-generated column names to avoid
 				   exceeding MySQL protocol packet limits */
-				(if (> (strlen raw_sql) 256)
-					(concat (substr raw_sql 0 200) "..." (fnv_hash raw_sql))
+				(if (> (strlen raw_sql) 64)
+					(concat (substr raw_sql 0 48) "..." (fnv_hash raw_sql))
 					raw_sql))
 		)
 	))
