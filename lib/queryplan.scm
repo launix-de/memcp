@@ -140,6 +140,24 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	)
 ))
 
+/* extract_all_outer_columns: return all (outer tblvar.col) refs as ("tblvar.col" (get_column tblvar false col false)) pairs.
+   Used alongside extract_all_get_columns to ensure prejoin materialization includes
+   columns referenced by scalar subselects via outer scope. */
+(define extract_all_outer_columns (lambda (expr)
+	(match expr
+		(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+			(match args
+				'(symname) (begin
+					(define parts (split (string symname) "."))
+					(match parts
+						(list tbl col) (list (list (concat tbl "." col) (list (quote get_column) tbl false col false)))
+						_ '()))
+				_ '())
+			(merge (map args extract_all_outer_columns)))
+		'()
+	)
+))
+
 /* extract_scanned_tables: walk an expression AST and return all (schema table) pairs from scan/scan_order calls.
 Used to detect which tables a computor lambda reads from, so we can register invalidation triggers. */
 (define extract_scanned_tables (lambda (expr)
@@ -2195,12 +2213,19 @@ store results as keytable columns named "expr|condition"
 				/* resolve condition and fields */
 				(set condition (replace_find_column (coalesceNil condition true)))
 				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
-				/* extract all get_column refs from group, fields, having, order */
+				/* extract all get_column AND outer refs from group, fields, having, order, condition.
+			   outer refs come from scalar subselects that were expanded by replace_inner_selects. */
 				(define mat_cols_raw (merge
 					(merge (map stage_group extract_all_get_columns))
+					(merge (map stage_group extract_all_outer_columns))
 					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
+					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_outer_columns v))))
 					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
+					(if (nil? stage_having) '() (extract_all_outer_columns stage_having))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
+					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_outer_columns col)))))
+					(extract_all_get_columns condition)
+					(extract_all_outer_columns condition)
 				))
 				(define mat_cols (reduce mat_cols_raw (lambda (acc mc)
 					(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false)
