@@ -166,16 +166,40 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'('session var) (list (list (symbol "context") "session") var)
 		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
 
-		(cons head tail) (if (
-			or (equal?? head "inner_select") (equal?? head (quote inner_select))
-			(equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
-			(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
-			/* inner_select in trigger: leave as-is for runtime evaluation.
-			The default (cons) path below recurses and converts NEW/OLD refs.
-			Session vars like @fop_time2 resolve at runtime via the trigger
-			env which has (define session (context "session")). */
-			expr
-			(cons (transform_trigger_expr head) (map tail transform_trigger_expr)))
+		(cons head tail) (if (or (equal?? head "inner_select") (equal?? head (quote inner_select)))
+			/* scalar subselect in trigger: compile via build_queryplan_term.
+			   Wrap result in a promise pattern to extract the scalar value. */
+			(match tail (cons subquery '()) (begin
+				/* Transform NEW/OLD refs in the subselect before passing to query planner.
+				   Use a shallow transform that does NOT recurse into nested inner_selects. */
+				(define transform_new_old_shallow (lambda (e) (match e
+					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+					(cons h t) (cons (transform_new_old_shallow h) (map t transform_new_old_shallow))
+					e)))
+				(define transformed_subquery (match subquery '(s tables fields condition group having order limit offset)
+					(list s tables
+						(map_assoc fields (lambda (k v) (transform_new_old_shallow v)))
+						(transform_new_old_shallow condition)
+						group having order limit offset)
+					(transform_new_old_shallow subquery)))
+				(define _hash (fnv_hash (concat transformed_subquery)))
+				(define _psym (symbol (concat "__trig_scalar_promise_" _hash)))
+				(define _rrsym (symbol (concat "__trig_scalar_rr_" _hash)))
+				(list (symbol "!begin")
+					(list (symbol "set") _psym (list (symbol "newpromise")))
+					(list (symbol "set") _rrsym
+						(list (symbol "lambda") (list (symbol "row"))
+							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
+					(list (symbol "set") (symbol "resultrow") _rrsym)
+					(build_queryplan_term transformed_subquery)
+					(list _psym "value")))
+				expr)
+			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
+				(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
+				/* IN/EXISTS subselects: compile via build_queryplan_term */
+				expr /* TODO: implement IN/EXISTS in trigger context */
+				(cons (transform_trigger_expr head) (map tail transform_trigger_expr))))
 		expr
 	)))
 
