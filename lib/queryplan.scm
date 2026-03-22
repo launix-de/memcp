@@ -1539,8 +1539,23 @@ WHAT IT MUST NOT DO:
 			/* TODO: add rename_prefix to all table names and get_column expressions */
 			/* TODO: apply renamelist to all expressions in fields condition group having order */
 
+			/* Save WHERE-only condition BEFORE merging joinexprs.
+			   Used by LEFT JOIN elimination: joinexprs reference the right table
+			   and would prevent elimination, but WHERE refs should prevent it. */
+			(define _where_condition_before_joinexpr_merge condition)
 			/* at first: extract additional join exprs into condition list */
 			(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
+
+			/* LEFT JOIN → INNER JOIN promotion: if the WHERE clause references a column
+			   from the right side of a LEFT JOIN, that LEFT JOIN is effectively an INNER JOIN
+			   (WHERE filters out NULL rows from non-matching LEFT JOINs anyway).
+			   This is standard SQL semantics: LEFT JOIN + WHERE on right = INNER JOIN. */
+			(define _where_tvs (extract_tblvars _where_condition_before_joinexpr_merge))
+			(set tables (map tables (lambda (t) (match t
+				'(alias s tbl true joinexpr) (if (has? _where_tvs alias)
+					(list alias s tbl false joinexpr) /* promote to INNER JOIN */
+					t)
+				t))))
 
 			/* tells whether there is an aggregate inside */
 			(define expr_find_aggregate (lambda (expr) (match expr
@@ -1733,6 +1748,9 @@ WHAT IT MUST NOT DO:
 			elimination. We only check fields + groups (the query's output). */
 			(define _used_tvs (merge_unique
 				(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
+				/* include WHERE-only condition tblvars (not joinexprs) to prevent
+				   eliminating LEFT JOINs whose right table is referenced in WHERE */
+				(extract_tblvars _where_condition_before_joinexpr_merge)
 				(merge (map _canon_groups (lambda (stage)
 					(merge_unique
 						(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
@@ -2297,11 +2315,16 @@ store results as keytable columns named "expr|condition"
 								(set filtercols (merge_unique (list
 									(extract_columns_for_tblvar tblvar now_condition)
 									(extract_outer_columns_for_tblvar tblvar now_condition))))
+								/* For LEFT JOIN: wrap inner scan with post-join filter */
+								(define _mat_inner (build_mat_scan rest later_condition false))
+								(define _mat_mapfn_body (if isOuter
+									'('if (replace_columns_from_expr now_condition) _mat_inner '(list))
+									_mat_inner))
 								(scan_wrapper 'scan schema tbl
 									(cons list filtercols)
 									'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 									(cons list cols)
-									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_mat_scan rest later_condition false))
+									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) _mat_mapfn_body)
 									/* reduce: merge sub-results */
 									'('lambda '('acc 'sub) '('merge 'acc 'sub))
 									'(list)
@@ -2828,6 +2851,11 @@ store results as keytable columns named "expr|condition"
 									(define ord_scan_mapfn_params (if is_update_target_ord
 										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
+									/* For LEFT JOIN: wrap inner scan with post-join filter */
+									(define _ord_inner (build_scan tables later_condition false))
+									(define _ord_mapfn_body (if isOuter
+										'('if (replace_columns_from_expr now_condition) _ord_inner nil)
+										_ord_inner))
 									(scan_wrapper 'scan_order schema tbl
 										/* condition */
 										(cons list filtercols)
@@ -2839,7 +2867,7 @@ store results as keytable columns named "expr|condition"
 										scan_limit
 										/* extract columns and store them into variables */
 										ord_scan_mapcols
-										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables later_condition false))
+										(list (symbol "lambda") ord_scan_mapfn_params _ord_mapfn_body)
 										/* reduce+neutral for DML */
 										(if is_update_target_ord (symbol "+") nil)
 										(if is_update_target_ord 0 nil)
@@ -2896,6 +2924,13 @@ store results as keytable columns named "expr|condition"
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
+										/* For LEFT JOIN: wrap inner build_scan with post-join filter.
+										   The scan filter runs BEFORE null-padding, so WHERE on the
+										   outer-joined table needs to be re-checked AFTER. */
+										(define _inner (build_scan tables later_condition))
+										(define _mapfn_body (if isOuter
+											'('if (replace_columns_from_expr now_condition) _inner nil)
+											_inner))
 
 										(scan_wrapper 'scan schema tbl
 											/* condition */
@@ -2903,7 +2938,7 @@ store results as keytable columns named "expr|condition"
 											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 											/* extract columns and store them into variables */
 											scan_mapcols
-											(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+											(list (symbol "lambda") scan_mapfn_params _mapfn_body)
 											(if is_update_target (symbol "+") nil)
 											(if is_update_target 0 nil)
 											nil
