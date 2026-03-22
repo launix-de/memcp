@@ -1,0 +1,58 @@
+# Derived table containing EXISTS with scalar subselect.
+# After derived-table flattening, the EXISTS table alias must not
+# leak into the outer query as a column name.
+# Pattern: SELECT COUNT(*) FROM (SELECT ... EXISTS (SELECT ... FROM t alias ...) ...) t
+
+metadata:
+  version: "1.0"
+  description: "Derived table flattening with EXISTS subselect"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dtef_items"
+  - sql: "DROP TABLE IF EXISTS dtef_team"
+  - sql: "DROP TABLE IF EXISTS dtef_users"
+  - sql: "CREATE TABLE dtef_users (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE dtef_team (ID INT PRIMARY KEY, list_id INT, member INT)"
+  - sql: "CREATE TABLE dtef_items (ID INT PRIMARY KEY, team_id INT, val INT)"
+  - sql: "INSERT INTO dtef_users VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO dtef_team VALUES (1, 10, 1), (2, 20, 2)"
+  - sql: "INSERT INTO dtef_items VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300)"
+
+test_cases:
+
+  - name: "COUNT over derived table with EXISTS + scalar subselect"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.val) AS total FROM (
+        SELECT i.ID AS ID, i.val AS val FROM dtef_items i
+        WHERE EXISTS (
+          SELECT TRUE FROM dtef_team tm
+          WHERE tm.list_id = i.team_id
+          AND (SELECT u.name FROM dtef_users u WHERE u.ID = tm.member LIMIT 1) IS NOT NULL
+          LIMIT 1
+        )
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+          total: 300
+
+  - name: "SUM(CASE) over derived table with EXISTS + scalar subselect"
+    sql: |
+      SELECT
+        SUM(CASE WHEN EXISTS (
+          SELECT TRUE FROM dtef_team tm
+          WHERE tm.list_id = t.team_id
+          AND (SELECT u.name FROM dtef_users u WHERE u.ID = tm.member LIMIT 1) IS NOT NULL
+          LIMIT 1
+        ) THEN 1 ELSE 0 END) AS has_team
+      FROM dtef_items t
+    expect:
+      rows: 1
+      data:
+        - has_team: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dtef_items"
+  - sql: "DROP TABLE IF EXISTS dtef_team"
+  - sql: "DROP TABLE IF EXISTS dtef_users"
