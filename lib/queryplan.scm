@@ -825,8 +825,11 @@ WHAT IT MUST NOT DO:
 						(define _has_fail (reduce _classified (lambda (a c) (or a (equal? (car c) "fail"))) false))
 						(define _domain_joins (if _has_fail '()
 							(filter (map _classified (lambda (c) (if (equal? (car c) "domain") (list (nth c 1) (nth c 2)) nil))) (lambda (x) (not (nil? x))))))
-						/* can we decorrelate? need: aggregate, domain joins found, no failures */
-						(if (or (nil? _agg_info) _has_fail (equal? _domain_joins '()) (nil? _value_col))
+						/* can we decorrelate? need: aggregate, domain joins found, no failures,
+						and if outer has GROUP BY, domain cols must be expressible via group keys
+						(Neumann: D ⋈ Γ_{A;f} ≡ Γ_{A∪D;f}(D ⋈ T) requires D compatible with A) */
+						(define _outer_has_incompatible_group (and (not (nil? group)) (not (equal? group '()))))
+						(if (or (nil? _agg_info) _has_fail (equal? _domain_joins '()) (nil? _value_col) _outer_has_incompatible_group)
 							(build_scalar_subselect subquery outer_schemas)
 							(begin
 								(define sq_num (unnest_acc "counter"))
@@ -847,20 +850,24 @@ WHAT IT MUST NOT DO:
 									(if (>= (count subquery) 6) (nth subquery 5) nil)
 									(if (>= (count subquery) 7) (nth subquery 6) nil)
 									nil nil))
-								/* materialize: collect all rows */
-								(define rows_sym (symbol (concat "__unnest_rows:" sq_id)))
+								/* materialize into real temp table (compatible with prejoin GROUP BY path) */
+								(define temp_tbl_name (concat ".unnest:" sq_id))
+								(define all_col_names (merge (list _value_col) (map _domain_joins (lambda (dj) (_gc_col (car dj))))))
+								(createtable schema temp_tbl_name
+									(map all_col_names (lambda (col) (list "column" col "any" '() '())))
+									'("engine" "sloppy") true)
 								(define resultrow_sym (symbol (concat "__unnest_rr:" sq_id)))
-								(define materialized (list (quote begin)
-									(list (quote set) rows_sym (list (quote newsession)))
-									(list rows_sym "rows" '())
+								(define materialize_code (list (quote begin)
 									(list (quote set) resultrow_sym (symbol "resultrow"))
 									(list (quote set) (symbol "resultrow")
 										(list (quote lambda) (list (symbol "item"))
-											(list rows_sym "rows"
-												(list (quote cons) (symbol "item") (list rows_sym "rows")))))
+											(list (quote insert) schema temp_tbl_name
+												(cons (quote list) all_col_names)
+												(list (quote list) (cons (quote list)
+													(map all_col_names (lambda (col) (list (quote get_assoc) (symbol "item") col)))))
+												'(list) '('lambda '() true) true)))
 									(build_queryplan_term decorrelated_subquery)
-									(list (quote set) (symbol "resultrow") resultrow_sym)
-									(list rows_sym "rows")))
+									(list (quote set) (symbol "resultrow") resultrow_sym)))
 								/* joinexpr: match domain columns */
 								(define domain_join_conds (map _domain_joins (lambda (dj)
 									(list (quote equal??) (nth dj 1) (list (quote get_column) sq_id false (_gc_col (car dj)) false)))))
@@ -868,11 +875,16 @@ WHAT IT MUST NOT DO:
 								/* schema */
 								(define sq_schema_cols (merge (list (list "Field" _value_col "Type" "any"))
 									(map _domain_joins (lambda (dj) (list "Field" (_gc_col (car dj)) "Type" "any")))))
-								/* register */
-								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema materialized true joinexpr))))
+								/* register: use string table name, prepend materialize_code to unnest_acc init */
+								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema temp_tbl_name true joinexpr))))
 								(unnest_acc "schemas" (merge (unnest_acc "schemas") (list sq_id sq_schema_cols)))
-								/* substitution with COALESCE for aggregate neutral */
-								(list (quote coalesceNil) (list (quote get_column) sq_id false _value_col false) (nth _agg_info 2))
+								/* register init code for materialization (executed before scan by build_queryplan) */
+								(define guarded_init (list (quote if) (list (quote equal?) 0 (list (quote scan_estimate) schema temp_tbl_name))
+									materialize_code nil))
+								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) (list guarded_init)))
+								/* substitution: pure query term */
+								(define agg_neutral (nth _agg_info 2))
+								(list (quote coalesceNil) (list (quote get_column) sq_id false _value_col false) agg_neutral)
 						))
 					)
 					(begin
@@ -1057,7 +1069,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -1211,7 +1223,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -1370,7 +1382,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -1557,9 +1569,10 @@ WHAT IT MUST NOT DO:
 			/* merge unnested subselect tables/schemas into result */
 			(define extra_tables (unnest_acc "tables"))
 			(define extra_schemas (unnest_acc "schemas"))
+			(define _init_code (coalesceNil (unnest_acc "init") '()))
 			(if (equal? extra_tables '())
-				(list schema tables fields condition groups '() (lambda (expr) expr))
-				(list schema extra_tables fields condition groups extra_schemas (lambda (expr) expr)))
+				(list schema tables fields condition groups '() (lambda (expr) expr) _init_code)
+				(list schema extra_tables fields condition groups extra_schemas (lambda (expr) expr) _init_code))
 		)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -1595,7 +1608,7 @@ WHAT IT MUST NOT DO:
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 							)
 						))
-						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2) (begin
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -1875,6 +1888,7 @@ WHAT IT MUST NOT DO:
 			(set schemas (merge schemas (unnest_acc "schemas")))
 			/* integrate joinexprs from unnested domain tables into condition */
 			(set condition (reduce (unnest_acc "tables") (lambda (cond t) (match t '(_ _ _ _ je) (if (nil? je) cond (list (quote and) cond je)) cond)) condition))
+
 			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 			but ONLY for columns referencing derived table aliases (keys in renamelist).
 			Uses schemas to find canonical column name without calling replace_find_column. */
@@ -1996,7 +2010,7 @@ WHAT IT MUST NOT DO:
 					(if (equal? 0 (count _kept_parts)) true
 						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 							(cons 'and _kept_parts))))))
-			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
+			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column (coalesceNil (unnest_acc "init") '()))
 		)
 	)
 )
@@ -2029,7 +2043,12 @@ WHAT IT MUST NOT DO:
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(apply build_queryplan (merge (apply join_reorder (apply untangle_query (merge query (list nil)))) (list nil)))
+			(begin
+				(define _uq_result (apply untangle_query (merge query (list nil))))
+				(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
+				(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
+				(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
+				(if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan)))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
@@ -2101,7 +2120,9 @@ column resolution — then injects $update into the target table's scan. */
 	/* Build synthetic SELECT 9-tuple: (schema tables fields condition group having order limit offset) */
 	(define synthetic_select (list schema all_defs set_fields condition nil nil order limit_val offset_val))
 	/* Run through untangle_query → join_reorder → build_queryplan */
-	(define pipeline_result (apply join_reorder (apply untangle_query (merge synthetic_select (list nil)))))
+	(define _dml_uq (apply untangle_query (merge synthetic_select (list nil))))
+	(define _dml_init (if (>= (count _dml_uq) 8) (nth _dml_uq 7) '()))
+	(define pipeline_result (apply join_reorder (list (nth _dml_uq 0) (nth _dml_uq 1) (nth _dml_uq 2) (nth _dml_uq 3) (nth _dml_uq 4) (nth _dml_uq 5) (nth _dml_uq 6))))
 	/* For UPDATE: reconstruct resolved cols from the pipeline's fields */
 	(define resolved_target_cols (if is_update
 		(begin
@@ -2128,7 +2149,8 @@ column resolution — then injects $update into the target table's scan. */
 		(nth pipeline_result 6) /* replace_find_column */
 		(list tgt resolved_target_cols) /* update_target: (alias cols) — empty cols = DELETE */
 	))
-	(apply build_queryplan final_pipeline)
+	(define _dml_plan (apply build_queryplan final_pipeline))
+	(if (equal? _dml_init '()) _dml_plan (cons (quote begin) (merge _dml_init (list _dml_plan))))
 )))
 
 /* Convenience wrapper for multi-table UPDATE (called from sql_update) */
@@ -2478,12 +2500,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
 				(define prejoin_alias_map (map tables (lambda (t)
 					(match t '(tv tschema ttbl _ _)
-						(list tv (concat tschema "." ttbl)))))
+						(list tv (concat tschema "." (if (string? ttbl) ttbl tv))))))
 				)
 				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
 				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
 				(define prejointbl (concat ".prejoin:"
-					(map tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
+					(map tables (lambda (t) (match t '(tv tschema ttbl _ _) (concat tschema "." (if (string? ttbl) ttbl tv))))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* capture outer schema and table name for trigger code generation */
 				(define pj_schema schema)
