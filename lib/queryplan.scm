@@ -506,7 +506,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 			(cons sym args_) (cons sym (map args_ replace_wf_with_fetch))
 			expr)))
 		(define new_fields (map_assoc fields (lambda (k v) (replace_wf_with_fetch (replace_find_column v)))))
-		(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
+		(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil nil))
 		(list 'begin keytable_init '('time collect_plan "collect") '('time compute_plan "compute") scan_plan)))
 )))
 
@@ -819,7 +819,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -930,7 +930,7 @@ WHAT IT MUST NOT DO:
 										)
 										expr
 									)))
-									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
+									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil nil)))
 									(list (quote !begin)
 										(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
 										(list (quote set) (symbol _sq_rr_name)
@@ -973,7 +973,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -1132,7 +1132,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -1318,7 +1318,7 @@ WHAT IT MUST NOT DO:
 			(set having (replace_inner_selects having '()))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col '()) dir)))))
 			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
-			(list schema tables fields condition groups '() (lambda (expr) expr))
+			(list schema tables fields condition groups '() (lambda (expr) expr) nil)
 		)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -1354,7 +1354,7 @@ WHAT IT MUST NOT DO:
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 							)
 						))
-						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _) (begin
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -1625,6 +1625,10 @@ WHAT IT MUST NOT DO:
 			)))
 
 			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
+			/* Snapshot condition string BEFORE inner_select expansion for stable
+			   prejoin/keytable naming. After expansion, the condition contains
+			   promise/scan code that inflates canonical names. */
+			(define condition_canonical_pre_expansion (concat condition))
 			(set condition (replace_inner_selects condition schemas))
 			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
 			(set having (replace_inner_selects having schemas))
@@ -1746,7 +1750,7 @@ WHAT IT MUST NOT DO:
 					(if (equal? 0 (count _kept_parts)) true
 						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 							(cons 'and _kept_parts))))))
-			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
+			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column condition_canonical_pre_expansion)
 		)
 	)
 )
@@ -1772,14 +1776,16 @@ WHAT IT MUST NOT DO:
 - Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
 */
 /* currently a stub — preserves original table order */
-(define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
-	(list schema tables fields condition groups schemas replace_find_column)))
+(define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column condition_canonical_pre_expansion)
+	(list schema tables fields condition groups schemas replace_find_column condition_canonical_pre_expansion)))
 
 (define build_queryplan_term (lambda (query) (begin
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(apply build_queryplan (merge (apply join_reorder (apply untangle_query (merge query (list nil)))) (list nil)))
+			(begin
+				(define _pr (apply join_reorder (apply untangle_query (merge query (list nil)))))
+				(build_queryplan (nth _pr 0) (nth _pr 1) (nth _pr 2) (nth _pr 3) (nth _pr 4) (nth _pr 5) (nth _pr 6) nil (nth _pr 7)))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
@@ -1877,6 +1883,7 @@ WHAT IT MUST NOT DO:
 		(nth pipeline_result 5) /* schemas */
 		(nth pipeline_result 6) /* replace_find_column */
 		(list tgt resolved_target_cols) /* update_target: (alias cols) — empty cols = DELETE */
+		(nth pipeline_result 7) /* condition_canonical_pre_expansion */
 	))
 	(apply build_queryplan final_pipeline)
 )))
@@ -1915,7 +1922,7 @@ store results as keytable columns named "expr|condition"
 */
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
    When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
-(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
+(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target condition_canonical_pre_expansion) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
@@ -2054,7 +2061,7 @@ store results as keytable columns named "expr|condition"
 						transformed_rest_groups
 						schemas
 						replace_find_column
-						nil))
+						nil nil))
 					(list 'begin keytable_init (make_collect true) grouped_plan)
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
@@ -2101,7 +2108,7 @@ store results as keytable columns named "expr|condition"
 							next_groups
 							schemas
 							replace_find_column
-							nil))
+							nil nil))
 
 						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
 						(define createcol_options (cons 'list (merge '("temp" true)
@@ -2244,7 +2251,15 @@ store results as keytable columns named "expr|condition"
 				   the condition may contain expanded scalar subselect code that makes
 				   canonical_expr_name produce extremely long strings. Hashing keeps
 				   the name short and deterministic. */
-				(define prejoin_condition_name (fnv_hash (concat (canonical_expr_name condition '(list) '(list) prejoin_alias_map))))
+				/* Use pre-expansion condition string for stable naming.
+			   After replace_inner_selects, the condition contains promise/scan code
+			   that inflates canonical names and causes name mismatches. */
+			/* Use pre-expansion condition for stable prejoin naming.
+			   condition_canonical_pre_expansion is (concat condition) from BEFORE
+			   replace_inner_selects — it doesn't contain promise/scan code. */
+			(define prejoin_condition_name (if (nil? condition_canonical_pre_expansion)
+				(canonical_expr_name condition '(list) '(list) prejoin_alias_map)
+				(fnv_hash condition_canonical_pre_expansion)))
 				(define prejointbl_full (concat ".prejoin:"
 					(map tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
@@ -2313,7 +2328,7 @@ store results as keytable columns named "expr|condition"
 					pj_all_groups
 					schemas
 					replace_find_column
-					nil))
+					nil nil))
 				/* build per-source-table incremental trigger functions entirely in Scheme,
 				then register them via a thin Go wrapper */
 				(define pj_trigger_registrations
@@ -2569,7 +2584,7 @@ store results as keytable columns named "expr|condition"
 										"mapcols" extra_mapcols
 										"mapfn" orc_mapfn "reducefn" orc_reducefn
 										"reduceinit" orc_reduceinit "temp" true))))
-							(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
+							(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil nil))
 							(list (quote begin) (list orc_setup) scan_plan)
 						)
 						(error "window functions on joined tables not yet supported"))
