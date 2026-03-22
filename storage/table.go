@@ -894,6 +894,18 @@ func (t *table) DropColumn(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
+func (t *table) DropColumnIfExists(name string) bool {
+	t.schema.schemalock.Lock()
+	for _, c := range t.Columns {
+		if c.Name == name {
+			t.schema.schemalock.Unlock()
+			return t.DropColumn(name)
+		}
+	}
+	t.schema.schemalock.Unlock()
+	return false
+}
+
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
 	result := 0
 	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE

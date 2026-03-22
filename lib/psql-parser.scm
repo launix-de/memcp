@@ -466,33 +466,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define condition psql_expression)
 		))
 	) (begin
-			(if (> (count tables) 1) (error "multi-table UPDATE is not implemented yet") true)
 			(define tbl (car tables))
-			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
-			(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
-			'((quote scan)
-				schema
-				tbl
-				(cons list filtercols)
-				'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
-				(cons list (cons "$update" scancols))
-				'('lambda
-					(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-					'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
-				)
-				(quote +)
-				0
-			)
+			(define all_defs (map tables (lambda (t) (list t schema t false nil))))
+			(build_dml_plan schema tbl nil all_defs (merge cols) (coalesceNil condition true) nil nil nil)
 	)))
 
 	(define psql_delete (parser '(
@@ -530,49 +507,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		)
 		(? (atom "OFFSET" true) (define offset psql_expression))
 	) (begin
-			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
-			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
-			(if (or (not (nil? order)) (not (nil? limit)))
-				(begin
-					(define ordercols (if (nil? order) '() (map order (lambda (x)
-						(car (cdr (cdr (cdr (replace_find_column (car x))))))
-					))))
-					(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
-					'((quote scan_order)
-						(coalesce schema2 schema)
-						tbl
-						(cons list filtercols)
-						filterfn
-						(cons list ordercols)
-						(cons list dirs)
-						(coalesceNil offset 0)
-						(coalesceNil limit -1)
-						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-						(quote +)
-						0
-					)
-				)
-				'((quote scan)
-					(coalesce schema2 schema)
-					tbl
-					(cons list filtercols)
-					filterfn
-					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
-					0
-				)
-			)
+			(define del_schema (coalesce schema2 schema))
+			(build_dml_plan del_schema tbl nil (list (list tbl del_schema tbl false nil)) nil (coalesceNil condition true) order limit offset)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -582,16 +519,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(? (define schema2 psql_identifier) ".") (define tbl psql_identifier)
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			'((quote scan)
-				(coalesce schema2 schema)
-				tbl
-				'(list)
-				'((quote lambda) '() true)
-				'(list "$update")
-				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-				(quote +)
-				0
-			)
+			(define trunc_schema (coalesce schema2 schema))
+			(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)
 	)))
 
 	(define psql_insert_into (parser '(

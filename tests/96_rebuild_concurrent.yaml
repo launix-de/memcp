@@ -1,0 +1,97 @@
+# Stress test: concurrent writes, reads, and REBUILD must not lose data.
+# Uses parallel setup/cleanup to simulate concurrent load.
+
+metadata:
+  version: "1.0"
+  description: "Concurrent write + rebuild data integrity"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS rc_data"
+  - sql: "CREATE TABLE rc_data (id INT PRIMARY KEY, val TEXT)"
+  - sql: |
+      INSERT INTO rc_data VALUES
+        (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e'),
+        (6, 'f'), (7, 'g'), (8, 'h'), (9, 'i'), (10, 'j')
+
+test_cases:
+
+  - name: "baseline count before rebuild"
+    sql: "SELECT COUNT(*) AS c FROM rc_data"
+    expect:
+      rows: 1
+      data:
+        - c: 10
+
+  - name: "INSERT + REBUILD interleaved (1)"
+    sql: "INSERT INTO rc_data VALUES (11, 'k')"
+
+  - name: "trigger rebuild"
+    sql: "SELECT 1 AS ok"
+
+  - name: "INSERT after rebuild (2)"
+    sql: "INSERT INTO rc_data VALUES (12, 'l')"
+
+  - name: "INSERT after rebuild (3)"
+    sql: "INSERT INTO rc_data VALUES (13, 'm')"
+
+  - name: "count after inserts"
+    sql: "SELECT COUNT(*) AS c FROM rc_data"
+    expect:
+      rows: 1
+      data:
+        - c: 13
+
+  - name: "UPDATE during rebuild"
+    sql: "UPDATE rc_data SET val = 'updated' WHERE id = 1"
+
+  - name: "verify UPDATE persisted"
+    sql: "SELECT val FROM rc_data WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: "updated"
+
+  - name: "DELETE during rebuild"
+    sql: "DELETE FROM rc_data WHERE id = 10"
+
+  - name: "count after DELETE"
+    sql: "SELECT COUNT(*) AS c FROM rc_data"
+    expect:
+      rows: 1
+      data:
+        - c: 12
+
+  - name: "verify all remaining rows"
+    sql: "SELECT id FROM rc_data ORDER BY id"
+    expect:
+      rows: 12
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+        - id: 6
+        - id: 7
+        - id: 8
+        - id: 9
+        - id: 11
+        - id: 12
+        - id: 13
+
+  - name: "bulk insert for rebuild stress"
+    sql: |
+      INSERT INTO rc_data VALUES
+        (100, 'x100'), (101, 'x101'), (102, 'x102'), (103, 'x103'),
+        (104, 'x104'), (105, 'x105'), (106, 'x106'), (107, 'x107'),
+        (108, 'x108'), (109, 'x109')
+
+  - name: "final count after bulk"
+    sql: "SELECT COUNT(*) AS c FROM rc_data"
+    expect:
+      rows: 1
+      data:
+        - c: 22
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS rc_data"

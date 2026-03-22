@@ -889,6 +889,8 @@ func Init(en scm.Env) {
 			switch scm.String(a[2]) {
 			case "drop":
 				return scm.NewBool(t.DropColumn(scm.String(a[3])))
+			case "drop_if_exists":
+				return scm.NewBool(t.DropColumnIfExists(scm.String(a[3])))
 			case "engine":
 				newMode := parsePersistencyMode(scm.String(a[3]))
 				oldMode := t.PersistencyMode

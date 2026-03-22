@@ -1,0 +1,80 @@
+# Trigger with scalar subselect in IF condition and in INSERT VALUES.
+# Pattern from ticketEvent.ia: IF (SELECT ...) IS NOT NULL THEN INSERT ... (SELECT ...) END IF
+
+metadata:
+  version: "1.0"
+  description: "Trigger scalar subselect in IF condition and VALUES"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS tss_forecast"
+  - sql: "DROP TABLE IF EXISTS tss_event"
+  - sql: "DROP TABLE IF EXISTS tss_parent"
+  - sql: |
+      CREATE TABLE tss_parent (
+        ID INT PRIMARY KEY,
+        owner INT
+      )
+  - sql: |
+      CREATE TABLE tss_event (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        parent_id INT,
+        amount INT,
+        label TEXT
+      )
+  - sql: |
+      CREATE TABLE tss_forecast (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        event_id INT,
+        owner INT,
+        amount INT
+      )
+  - sql: "INSERT INTO tss_parent VALUES (1, 100), (2, NULL)"
+
+test_cases:
+
+  - name: "create trigger with scalar subselect in IF and INSERT VALUES"
+    sql: |
+      CREATE TRIGGER `tss_event.ia` AFTER INSERT ON `tss_event` FOR EACH ROW BEGIN
+        IF (NEW.`amount` <> 0) AND (NOT ((SELECT `p`.`owner` FROM `tss_parent` `p` WHERE `p`.`ID` = NEW.`parent_id` LIMIT 1) IS NULL)) THEN
+          INSERT INTO `tss_forecast` (`event_id`, `owner`, `amount`)
+            VALUES (NEW.`ID`, (SELECT `p`.`owner` FROM `tss_parent` `p` WHERE `p`.`ID` = NEW.`parent_id` LIMIT 1), NEW.`amount`);
+        END IF;
+      END
+
+  - name: "trigger fires with matching parent (owner not null)"
+    sql: "INSERT INTO tss_event VALUES (1, 1, 50, 'billable')"
+
+  - name: "verify forecast created for matching parent"
+    sql: "SELECT event_id, owner, amount FROM tss_forecast"
+    expect:
+      rows: 1
+      data:
+        - event_id: 1
+          owner: 100
+          amount: 50
+
+  - name: "trigger fires with null-owner parent (should NOT insert)"
+    sql: "INSERT INTO tss_event VALUES (2, 2, 30, 'non-billable')"
+
+  - name: "verify no forecast for null-owner parent"
+    sql: "SELECT COUNT(*) AS c FROM tss_forecast"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+  - name: "trigger fires with zero amount (should NOT insert)"
+    sql: "INSERT INTO tss_event VALUES (3, 1, 0, 'zero')"
+
+  - name: "verify no forecast for zero amount"
+    sql: "SELECT COUNT(*) AS c FROM tss_forecast"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+cleanup:
+  - sql: "DROP TRIGGER IF EXISTS `tss_event.ia`"
+  - sql: "DROP TABLE IF EXISTS tss_forecast"
+  - sql: "DROP TABLE IF EXISTS tss_event"
+  - sql: "DROP TABLE IF EXISTS tss_parent"
