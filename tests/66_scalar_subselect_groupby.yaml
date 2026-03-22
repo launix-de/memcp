@@ -1,0 +1,103 @@
+# Scalar subselect in GROUP BY context: the correlated subselect's
+# (outer tblvar.col) must be rewritten to reference the keytable column.
+
+metadata:
+  version: "1.0"
+  description: "Scalar subselect with GROUP BY"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ssg_drivers"
+  - sql: "DROP TABLE IF EXISTS ssg_trips"
+  - sql: |
+      CREATE TABLE ssg_drivers (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        name TEXT
+      )
+  - sql: |
+      CREATE TABLE ssg_trips (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        driver_id INT,
+        km INT
+      )
+  - sql: "INSERT INTO ssg_drivers VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO ssg_trips VALUES (1, 1, 100), (2, 1, 200), (3, 2, 50)"
+
+test_cases:
+
+  - name: "scalar subselect in GROUP BY select list"
+    sql: |
+      SELECT t.driver_id,
+        SUM(t.km) AS total_km,
+        (SELECT d.name FROM ssg_drivers d WHERE d.ID = t.driver_id LIMIT 1) AS driver_name
+      FROM ssg_trips t
+      GROUP BY t.driver_id
+      ORDER BY t.driver_id
+    expect:
+      rows: 2
+      data:
+        - driver_id: 1
+          total_km: 300
+          driver_name: "Alice"
+        - driver_id: 2
+          total_km: 50
+          driver_name: "Bob"
+
+  - name: "scalar subselect in GROUP BY with session var"
+    session_id: "sess_ssg"
+    sql: "SET @current_driver = 1"
+  - name: "scalar subselect in GROUP BY with WHERE and session var"
+    session_id: "sess_ssg"
+    sql: |
+      SELECT t.driver_id,
+        SUM(t.km) AS total_km,
+        (SELECT d.name FROM ssg_drivers d WHERE d.ID = t.driver_id AND d.ID = @current_driver LIMIT 1) AS driver_name
+      FROM ssg_trips t
+      WHERE t.driver_id = 1
+      GROUP BY t.driver_id
+    expect:
+      rows: 1
+      data:
+        - driver_id: 1
+          total_km: 300
+          driver_name: "Alice"
+
+  - name: "scalar subselect without GROUP BY (baseline)"
+    sql: |
+      SELECT t.ID, t.driver_id,
+        (SELECT d.name FROM ssg_drivers d WHERE d.ID = t.driver_id LIMIT 1) AS driver_name
+      FROM ssg_trips t
+      ORDER BY t.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          driver_id: 1
+          driver_name: "Alice"
+        - ID: 2
+          driver_id: 1
+          driver_name: "Alice"
+        - ID: 3
+          driver_id: 2
+          driver_name: "Bob"
+
+  - name: "scalar subselect returning NULL for no match"
+    sql: |
+      SELECT t.driver_id,
+        SUM(t.km) AS total_km,
+        (SELECT d.name FROM ssg_drivers d WHERE d.ID = t.driver_id AND d.ID = 999 LIMIT 1) AS driver_name
+      FROM ssg_trips t
+      GROUP BY t.driver_id
+      ORDER BY t.driver_id
+    expect:
+      rows: 2
+      data:
+        - driver_id: 1
+          total_km: 300
+          driver_name: null
+        - driver_id: 2
+          total_km: 50
+          driver_name: null
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ssg_trips"
+  - sql: "DROP TABLE IF EXISTS ssg_drivers"

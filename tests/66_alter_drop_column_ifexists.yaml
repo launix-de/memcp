@@ -1,0 +1,43 @@
+# ALTER TABLE DROP COLUMN IF EXISTS: must not error when column is absent.
+
+metadata:
+  version: "1.0"
+  description: "ALTER TABLE DROP COLUMN IF EXISTS"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS adci_t"
+  - sql: "CREATE TABLE adci_t (id INT PRIMARY KEY, keep_col TEXT, drop_col INT)"
+  - sql: "INSERT INTO adci_t VALUES (1, 'a', 10), (2, 'b', 20)"
+
+test_cases:
+
+  - name: "DROP COLUMN IF EXISTS on existing column"
+    sql: "ALTER TABLE adci_t DROP COLUMN IF EXISTS drop_col"
+
+  - name: "verify column was dropped"
+    sql: "SELECT id, keep_col FROM adci_t ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          keep_col: "a"
+        - id: 2
+          keep_col: "b"
+
+  - name: "DROP COLUMN IF EXISTS on non-existing column (no error)"
+    sql: "ALTER TABLE adci_t DROP COLUMN IF EXISTS nonexistent_col"
+
+  - name: "table still works after no-op DROP"
+    sql: "SELECT COUNT(*) AS c FROM adci_t"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
+  - name: "DROP COLUMN without IF EXISTS on non-existing column (must error)"
+    sql: "ALTER TABLE adci_t DROP COLUMN nonexistent_col"
+    expect:
+      error: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS adci_t"
