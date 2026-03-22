@@ -1,0 +1,74 @@
+# EXISTS subselect where the inner scalar subselect references a column
+# from the EXISTS table via (outer alias.col). The EXISTS scan must
+# include that column in its filtercols.
+# Pattern: ticket access check with mitarbeiterTeamItem.
+
+metadata:
+  version: "1.0"
+  description: "EXISTS with nested scalar subselect referencing EXISTS table column"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ens_items"
+  - sql: "DROP TABLE IF EXISTS ens_team"
+  - sql: "DROP TABLE IF EXISTS ens_users"
+  - sql: "CREATE TABLE ens_users (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE ens_team (ID INT PRIMARY KEY, list_id INT, member INT)"
+  - sql: "CREATE TABLE ens_items (ID INT PRIMARY KEY, team_id INT, title TEXT)"
+  - sql: "INSERT INTO ens_users VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO ens_team VALUES (1, 10, 1), (2, 10, 2), (3, 20, 2)"
+  - sql: "INSERT INTO ens_items VALUES (1, 10, 'Team A'), (2, 20, 'Team B'), (3, 30, 'No Team')"
+
+test_cases:
+
+  - name: "EXISTS with nested scalar subselect (IS NOT NULL)"
+    sql: |
+      SELECT i.ID, i.title FROM ens_items i WHERE
+        EXISTS (SELECT TRUE FROM ens_team t
+          WHERE t.list_id = i.team_id
+          AND (SELECT u.name FROM ens_users u WHERE u.ID = t.member LIMIT 1) IS NOT NULL
+          LIMIT 1)
+      ORDER BY i.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          title: "Team A"
+        - ID: 2
+          title: "Team B"
+
+  - name: "EXISTS with nested scalar subselect (equality check)"
+    session_id: "sess_ens"
+    sql: "SET @current_user = 1"
+  - name: "EXISTS nested scalar with session var"
+    session_id: "sess_ens"
+    sql: |
+      SELECT i.ID, i.title FROM ens_items i WHERE
+        EXISTS (SELECT TRUE FROM ens_team t
+          WHERE t.list_id = i.team_id
+          AND (SELECT u.ID = @current_user FROM ens_users u WHERE u.ID = t.member LIMIT 1)
+          LIMIT 1)
+      ORDER BY i.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          title: "Team A"
+
+  - name: "NOT EXISTS with nested scalar"
+    sql: |
+      SELECT i.ID, i.title FROM ens_items i WHERE
+        NOT EXISTS (SELECT TRUE FROM ens_team t
+          WHERE t.list_id = i.team_id
+          AND (SELECT u.name FROM ens_users u WHERE u.ID = t.member LIMIT 1) IS NOT NULL
+          LIMIT 1)
+      ORDER BY i.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 3
+          title: "No Team"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ens_items"
+  - sql: "DROP TABLE IF EXISTS ens_team"
+  - sql: "DROP TABLE IF EXISTS ens_users"
