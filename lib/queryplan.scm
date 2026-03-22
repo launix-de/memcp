@@ -638,12 +638,114 @@ WHAT IT MUST NOT DO:
 - Create keytables or aggregate infrastructure (that is build_queryplan's job)
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
-	/* TODO: unnest correlated scalar subqueries into LEFT JOIN LIMIT 1 table entries
-	instead of producing inline runtime code via build_scalar_subselect */
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
 	(define sq_cache (newsession))
+
+	/* Accumulator for unnested subselect tables/schemas (Neumann unnesting) */
+	(define unnest_acc (newsession))
+	(unnest_acc "tables" '())
+	(unnest_acc "schemas" '())
+	(unnest_acc "counter" 0)
+
+	/* unnest_subselect: converts a scalar subselect into a materialized derived table.
+	Returns a (get_column $sqN false "col" false) substitution expression.
+	The materialized table and its schema are accumulated in unnest_acc
+	and merged into the outer query's table list after all inner_selects are processed.
+	Neumann/Kemper BTW 2015: subquery → derived table with LEFT JOIN. */
+	/* _has_outer_refs: check if an expression tree contains (outer ...) references
+	or get_column references with case-insensitive flags that might resolve to outer tables */
+	(define _has_outer_refs (lambda (expr outer_schemas) (match expr
+		'((symbol outer) _) true
+		'((quote outer) _) true
+		'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci))
+			/* check if the alias resolves in outer_schemas but not in inner schemas — delegate to caller */
+			true
+			false)
+		(cons sym args) (if (not (nil? (inner_select_kind sym))) false /* don't descend into nested subselects */
+			(reduce args (lambda (a b) (or a (_has_outer_refs b outer_schemas))) false))
+		false
+	)))
+	/* _subquery_is_correlated: check if any part of a raw subquery references outer tables.
+	Conservative: assumes correlated if uncertain (nested inner_selects, unqualified columns
+	that might resolve to outer scope). False negatives (missing a correlation) cause panics,
+	false positives (assuming correlated when not) only lose the optimization. */
+	(define _subquery_is_correlated (lambda (subquery outer_schemas) (begin
+		(define raw_fields (if (and (list? subquery) (>= (count subquery) 3)) (nth subquery 2) nil))
+		(define raw_condition (if (and (list? subquery) (>= (count subquery) 4)) (nth subquery 3) nil))
+		(define raw_tables (if (and (list? subquery) (>= (count subquery) 2)) (nth subquery 1) nil))
+		/* collect inner table aliases */
+		(define inner_aliases (if (list? raw_tables)
+			(map raw_tables (lambda (t) (match t '(alias _ _ _ _) alias _ nil)))
+			'()))
+		/* check if fields or condition contain outer refs, nested subselects, or
+		unqualified columns that might resolve to outer scope */
+		(define _check_refs (lambda (expr) (match expr
+			/* qualified get_column: correlated if alias NOT in inner tables */
+			'((symbol get_column) alias_ ti col ci) (if (nil? alias_) false
+				(not (reduce inner_aliases (lambda (a ia) (or a ((if ti equal?? equal?) alias_ ia))) false)))
+			'((symbol outer) _) true
+			'((quote outer) _) true
+			/* nested inner_selects may reference outer tables at deeper levels;
+			we can't cheaply check, so conservatively assume correlated */
+			(cons sym args) (if (not (nil? (inner_select_kind sym))) true
+				(reduce args (lambda (a b) (or a (_check_refs b))) false))
+			false
+		)))
+		(define fields_corr (if raw_fields (reduce_assoc raw_fields (lambda (a k v) (or a (_check_refs v))) false) false))
+		(define cond_corr (if raw_condition (_check_refs raw_condition) false))
+		/* also check for unqualified get_columns that might be outer references:
+		if outer_schemas is non-empty and there are unqualified columns, be conservative */
+		(define _has_unqualified (lambda (expr) (match expr
+			'((symbol get_column) nil _ col _) true
+			(cons sym args) (if (not (nil? (inner_select_kind sym))) false
+				(reduce args (lambda (a b) (or a (_has_unqualified b))) false))
+			false
+		)))
+		(define has_unqual_cols (and (not (equal? outer_schemas '()))
+			(or
+				(if raw_fields (reduce_assoc raw_fields (lambda (a k v) (or a (_has_unqualified v))) false) false)
+				(if raw_condition (_has_unqualified raw_condition) false))))
+		(or fields_corr cond_corr has_unqual_cols)
+	)))
+
+	(define unnest_subselect (lambda (subquery outer_schemas) (begin
+		/* correlated subselects: fall back to build_scalar_subselect for now
+		(Neumann domain-column handling will be added later) */
+		(if (_subquery_is_correlated subquery outer_schemas)
+			(build_scalar_subselect subquery outer_schemas)
+			(begin
+				/* Non-correlated scalar subselect: pre-compute via build_queryplan_term.
+				Uses !begin + newpromise to evaluate the subquery once and substitute its value.
+				This is efficient because non-correlated subqueries are constant w.r.t. outer rows.
+				Inner nested subselects are recursively processed through the same pipeline. */
+				(define sq_num (unnest_acc "counter"))
+				(unnest_acc "counter" (+ sq_num 1))
+				(define sq_id (concat "$sq" sq_num))
+
+				(define union_parts (query_union_all_parts subquery))
+				(if (not (nil? union_parts))
+					(error "scalar subselect UNION ALL is not supported yet")
+					(begin
+						(define resultrow_sym (symbol (concat "__unnest_rr:" sq_id)))
+						(define promise_sym (symbol (concat "__unnest_promise:" sq_id)))
+
+						/* inline pre-computation: evaluate subquery, capture scalar value via promise */
+						(list (quote !begin)
+							(list (quote set) promise_sym (list (quote newpromise)))
+							(list (quote set) resultrow_sym (symbol "resultrow"))
+							(list (quote set) (symbol "resultrow")
+								(list (quote lambda) (list (symbol "item"))
+									(list promise_sym "once"
+										(list (quote nth) (symbol "item") 1)
+										"scalar subselect returned more than one row")))
+							(build_queryplan_term subquery)
+							(list (quote set) (symbol "resultrow") resultrow_sym)
+							(list promise_sym "value"))
+				))
+		))
+	)))
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
 	(define _cd_is_subquery (lambda (sym) (match sym
@@ -1270,7 +1372,7 @@ WHAT IT MUST NOT DO:
 			(if (nil? not_expr)
 				(match kind
 					(quote inner_select) (match args
-						(cons subquery '()) (build_scalar_subselect subquery outer_schemas)
+						(cons subquery '()) (unnest_subselect subquery outer_schemas)
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_in) (match args
@@ -1298,7 +1400,12 @@ WHAT IT MUST NOT DO:
 			(set having (replace_inner_selects having '()))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col '()) dir)))))
 			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
-			(list schema tables fields condition groups '() (lambda (expr) expr))
+			/* merge unnested subselect tables/schemas into result */
+			(define extra_tables (unnest_acc "tables"))
+			(define extra_schemas (unnest_acc "schemas"))
+			(if (equal? extra_tables '())
+				(list schema tables fields condition groups '() (lambda (expr) expr))
+				(list schema extra_tables fields condition groups extra_schemas (lambda (expr) expr)))
 		)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -1609,6 +1716,9 @@ WHAT IT MUST NOT DO:
 			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
 			(set having (replace_inner_selects having schemas))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
+			/* merge unnested subselect tables/schemas into outer query (Neumann unnesting) */
+			(set tables (merge tables (unnest_acc "tables")))
+			(set schemas (merge schemas (unnest_acc "schemas")))
 			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 			but ONLY for columns referencing derived table aliases (keys in renamelist).
 			Uses schemas to find canonical column name without calling replace_find_column. */
@@ -1699,7 +1809,11 @@ WHAT IT MUST NOT DO:
 			columns appear in fields or group stages. The merged condition includes
 			joinexprs which reference the JOIN itself — those must not prevent
 			elimination. We only check fields + groups (the query's output). */
+			/* unnested table aliases must never be pruned — they're data dependencies
+			referenced in conditions, not just joinexprs */
+			(define _unnested_aliases (map (unnest_acc "tables") (lambda (t) (match t '(alias _ _ _ _) alias _ nil))))
 			(define _used_tvs (merge_unique
+				_unnested_aliases
 				(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
 				(merge (map _canon_groups (lambda (stage)
 					(merge_unique
@@ -1804,23 +1918,23 @@ WHAT IT MUST NOT DO:
 )))
 
 /* build_dml_plan: route UPDATE/DELETE through the full query planner pipeline.
-   schema: target schema
-   target_tbl: target table name (the table being modified)
-   target_alias: alias of target table (or nil → uses target_tbl)
-   all_defs: list of table definitions ((alias schema tblname isOuter joinexpr) ...)
-   cols: flat assoc list (col1 expr1 col2 expr2 ...) for UPDATE, or nil/() for DELETE
-   condition: WHERE clause expression (raw, not pre-resolved)
-   order: ORDER BY list or nil
-   limit_val: LIMIT value or nil
-   offset_val: OFFSET value or nil
-   The pipeline resolves inner_selects in SET expressions, handles JOINs, subselects,
-   column resolution — then injects $update into the target table's scan. */
+schema: target schema
+target_tbl: target table name (the table being modified)
+target_alias: alias of target table (or nil → uses target_tbl)
+all_defs: list of table definitions ((alias schema tblname isOuter joinexpr) ...)
+cols: flat assoc list (col1 expr1 col2 expr2 ...) for UPDATE, or nil/() for DELETE
+condition: WHERE clause expression (raw, not pre-resolved)
+order: ORDER BY list or nil
+limit_val: LIMIT value or nil
+offset_val: OFFSET value or nil
+The pipeline resolves inner_selects in SET expressions, handles JOINs, subselects,
+column resolution — then injects $update into the target table's scan. */
 (define build_dml_plan (lambda (schema target_tbl target_alias all_defs cols condition order limit_val offset_val) (begin
 	(define tgt (coalesce target_alias target_tbl))
 	(define is_update (and (not (nil? cols)) (not (equal? cols '()))))
 	/* For UPDATE: put SET expressions into synthetic fields so untangle_query processes them
-	   (including replace_inner_selects for scalar subselects).
-	   For DELETE: fields are empty — just the tables + condition. */
+	(including replace_inner_selects for scalar subselects).
+	For DELETE: fields are empty — just the tables + condition. */
 	(define set_fields (if is_update
 		(begin
 			(define col_names (extract_assoc cols (lambda (k v) k)))
@@ -1840,12 +1954,12 @@ WHAT IT MUST NOT DO:
 			(merge (map cnames (lambda (cn) (begin
 				(define set_key (concat "$set:" cn))
 				/* Use a mutable flag (newsession) to track if match was found,
-			   avoiding equality check on the sentinel (0 == "__not_found__" is buggy) */
-			(define _found (newsession))
-			(_found "v" nil)
-			(reduce_assoc resolved_fields (lambda (acc k v) (if (equal?? k set_key) (begin (_found "v" v) (_found "hit" true) v) acc)) nil)
-			(list cn (if (_found "hit") (_found "v") (list (quote get_column) nil false cn false)))
-			)))))
+				avoiding equality check on the sentinel (0 == "__not_found__" is buggy) */
+				(define _found (newsession))
+				(_found "v" nil)
+				(reduce_assoc resolved_fields (lambda (acc k v) (if (equal?? k set_key) (begin (_found "v" v) (_found "hit" true) v) acc)) nil)
+				(list cn (if (_found "hit") (_found "v") (list (quote get_column) nil false cn false)))
+		)))))
 		'())) /* DELETE: empty cols signals deletion */
 	/* Assemble final pipeline args: fields are dummy (not used for output), update_target has the real SET cols */
 	(define final_pipeline (list
@@ -1894,7 +2008,7 @@ store results as keytable columns named "expr|condition"
 3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
 */
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
-   When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
+When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
@@ -2852,14 +2966,14 @@ store results as keytable columns named "expr|condition"
 									))
 								)
 								'() /* final inner (=scalar) */ (if (nil? update_target)
-								'('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
-								/* DML mode */
-								(begin (define _ut_cols (nth update_target 1))
-									(if (equal? _ut_cols '())
-										/* DELETE */
-										'('if (coalesceNil condition true) '('$update) 0)
-										/* UPDATE */
-										'('if (coalesceNil condition true) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
+									'('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+									/* DML mode */
+									(begin (define _ut_cols (nth update_target 1))
+										(if (equal? _ut_cols '())
+											/* DELETE */
+											'('if (coalesceNil condition true) '('$update) 0)
+											/* UPDATE */
+											'('if (coalesceNil condition true) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
 							)
 						))
 						(build_scan tables (replace_find_column condition))
