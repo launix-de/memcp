@@ -711,6 +711,35 @@ WHAT IT MUST NOT DO:
 		(or fields_corr cond_corr has_unqual_cols)
 	)))
 
+	/* Domain extraction helpers for Neumann decorrelation */
+	(define _is_gc_sym (lambda (sym) (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))))
+	(define _gc_alias (lambda (expr) (match expr
+		(cons sym '(alias_ ti col ci)) (if (and (_is_gc_sym sym) (not (nil? alias_))) alias_ nil)
+		_ nil)))
+	(define _gc_col (lambda (expr) (match expr
+		(cons sym '(alias_ ti col ci)) (if (_is_gc_sym sym) col nil)
+		_ nil)))
+	(define _gc_in_aliases (lambda (expr aliases) (begin
+		(define a (_gc_alias expr))
+		(if (nil? a) false
+			(reduce aliases (lambda (acc ia) (or acc (equal?? a ia))) false)))))
+	(define _gc_not_in_aliases (lambda (expr aliases) (begin
+		(define a (_gc_alias expr))
+		(if (nil? a) false
+			(not (reduce aliases (lambda (acc ia) (or acc (equal?? a ia))) false))))))
+	(define _flat_and (lambda (expr) (match expr
+		(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym '(symbol and)))
+			(merge (map parts _flat_and))
+			(list expr))
+		(list expr))))
+	(define _rebuild_and (lambda (parts) (match parts
+		'() true (cons only '()) only _ (cons (quote and) parts))))
+	(define _expr_has_outer_ref (lambda (expr inner_aliases) (match expr
+		(cons sym args) (if (or (not (nil? (inner_select_kind sym))) (_is_precomputed sym)) false
+			(if (_gc_not_in_aliases expr inner_aliases) true
+				(reduce args (lambda (a b) (or a (_expr_has_outer_ref b inner_aliases))) false)))
+		false)))
+
 	/* _is_precomputed: check if a symbol is !begin (pre-computed subselect value, opaque to analysis) */
 	(define _is_precomputed (lambda (sym) (match sym
 		'!begin true '(quote !begin) true (symbol !begin) true _ false)))
@@ -771,9 +800,81 @@ WHAT IT MUST NOT DO:
 				Since nested inner_selects have been replaced with !begin (opaque),
 				this only finds direct references to outer tables. */
 				(if (_subquery_is_correlated modified_subquery outer_schemas)
-					/* correlated: fall back to build_scalar_subselect with ORIGINAL subquery
-					(it handles outer-ref resolution via make_replace_find_column_subselect) */
-					(build_scalar_subselect subquery outer_schemas)
+					/* correlated: try Neumann domain decorrelation for aggregate scalars */
+					(begin
+						(define _val_keys (extract_assoc new_fields (lambda (k v) k)))
+						(define _val_exprs (extract_assoc new_fields (lambda (k v) v)))
+						(define _value_col (match _val_keys (cons only '()) only _ nil))
+						(define _value_expr (if _value_col (car _val_exprs) nil))
+						(define _is_agg_sym (lambda (sym) (or (equal? sym (quote aggregate)) (equal? sym '(quote aggregate)) (equal? sym '(symbol aggregate)))))
+						(define _agg_info (if _value_expr (match _value_expr
+							(cons sym '(item reduce neutral)) (if (_is_agg_sym sym) (list item reduce neutral) nil)
+							_ nil) nil))
+						/* classify AND-parts as domain equi-joins, inner conditions, or fail */
+						(define _cond_parts (if (nil? new_condition) '() (_flat_and new_condition)))
+						(define _is_eq_sym (lambda (sym) (or (equal?? (string sym) "equal??") (equal?? (string sym) "equal?"))))
+						(define _classified (map _cond_parts (lambda (part) (match part
+							(cons sym '(a b)) (if (_is_eq_sym sym)
+								(if (and (_gc_in_aliases a inner_aliases) (_gc_not_in_aliases b inner_aliases))
+									(list "domain" a b)
+									(if (and (_gc_not_in_aliases a inner_aliases) (_gc_in_aliases b inner_aliases))
+										(list "domain" b a)
+										(if (_expr_has_outer_ref part inner_aliases) (list "fail" part) (list "inner" part))))
+								(if (_expr_has_outer_ref part inner_aliases) (list "fail" part) (list "inner" part)))
+							_ (if (_expr_has_outer_ref part inner_aliases) (list "fail" part) (list "inner" part))))))
+						(define _has_fail (reduce _classified (lambda (a c) (or a (equal? (car c) "fail"))) false))
+						(define _domain_joins (if _has_fail '()
+							(filter (map _classified (lambda (c) (if (equal? (car c) "domain") (list (nth c 1) (nth c 2)) nil))) (lambda (x) (not (nil? x))))))
+						/* can we decorrelate? need: aggregate, domain joins found, no failures */
+						(if (or (nil? _agg_info) _has_fail (equal? _domain_joins '()) (nil? _value_col))
+							(build_scalar_subselect subquery outer_schemas)
+							(begin
+								(define sq_num (unnest_acc "counter"))
+								(unnest_acc "counter" (+ sq_num 1))
+								(define sq_id (concat "$sq" sq_num))
+								/* build remaining inner condition */
+								(define _inner_parts (filter (map _classified (lambda (c) (if (equal? (car c) "inner") (nth c 1) nil))) (lambda (x) (not (nil? x)))))
+								(define remaining_cond (_rebuild_and _inner_parts))
+								/* add domain columns to fields and GROUP BY */
+								(define domain_field_entries (merge (map _domain_joins (lambda (dj) (list (_gc_col (car dj)) (car dj))))))
+								(define domain_group_cols (map _domain_joins (lambda (dj) (car dj))))
+								(define raw_group (if (>= (count subquery) 5) (nth subquery 4) nil))
+								(define new_group (merge (coalesceNil raw_group '()) domain_group_cols))
+								/* build decorrelated subquery */
+								(define decorrelated_subquery (list raw_schema raw_tables
+									(merge new_fields domain_field_entries) remaining_cond
+									new_group
+									(if (>= (count subquery) 6) (nth subquery 5) nil)
+									(if (>= (count subquery) 7) (nth subquery 6) nil)
+									nil nil))
+								/* materialize: collect all rows */
+								(define rows_sym (symbol (concat "__unnest_rows:" sq_id)))
+								(define resultrow_sym (symbol (concat "__unnest_rr:" sq_id)))
+								(define materialized (list (quote begin)
+									(list (quote set) rows_sym (list (quote newsession)))
+									(list rows_sym "rows" '())
+									(list (quote set) resultrow_sym (symbol "resultrow"))
+									(list (quote set) (symbol "resultrow")
+										(list (quote lambda) (list (symbol "item"))
+											(list rows_sym "rows"
+												(list (quote cons) (symbol "item") (list rows_sym "rows")))))
+									(build_queryplan_term decorrelated_subquery)
+									(list (quote set) (symbol "resultrow") resultrow_sym)
+									(list rows_sym "rows")))
+								/* joinexpr: match domain columns */
+								(define domain_join_conds (map _domain_joins (lambda (dj)
+									(list (quote equal??) (nth dj 1) (list (quote get_column) sq_id false (_gc_col (car dj)) false)))))
+								(define joinexpr (match domain_join_conds (cons only '()) only _ (cons (quote and) domain_join_conds)))
+								/* schema */
+								(define sq_schema_cols (merge (list (list "Field" _value_col "Type" "any"))
+									(map _domain_joins (lambda (dj) (list "Field" (_gc_col (car dj)) "Type" "any")))))
+								/* register */
+								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema materialized true joinexpr))))
+								(unnest_acc "schemas" (merge (unnest_acc "schemas") (list sq_id sq_schema_cols)))
+								/* substitution with COALESCE for aggregate neutral */
+								(list (quote coalesceNil) (list (quote get_column) sq_id false _value_col false) (nth _agg_info 2))
+						))
+					)
 					(begin
 						/* Step 3: non-correlated — pre-compute via build_queryplan_term */
 						(define sq_num (unnest_acc "counter"))
@@ -1772,6 +1873,8 @@ WHAT IT MUST NOT DO:
 			/* merge unnested subselect tables/schemas into outer query (Neumann unnesting) */
 			(set tables (merge tables (unnest_acc "tables")))
 			(set schemas (merge schemas (unnest_acc "schemas")))
+			/* integrate joinexprs from unnested domain tables into condition */
+			(set condition (reduce (unnest_acc "tables") (lambda (cond t) (match t '(_ _ _ _ je) (if (nil? je) cond (list (quote and) cond je)) cond)) condition))
 			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 			but ONLY for columns referencing derived table aliases (keys in renamelist).
 			Uses schemas to find canonical column name without calling replace_find_column. */
