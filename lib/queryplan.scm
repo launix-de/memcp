@@ -488,7 +488,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 			(cons sym args_) (cons sym (map args_ replace_wf_with_fetch))
 			expr)))
 		(define new_fields (map_assoc fields (lambda (k v) (replace_wf_with_fetch (replace_find_column v)))))
-		(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
+		(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
 		(list 'begin keytable_init '('time collect_plan "collect") '('time compute_plan "compute") scan_plan)))
 )))
 
@@ -912,7 +912,7 @@ WHAT IT MUST NOT DO:
 										)
 										expr
 									)))
-									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
+									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
 									(list (quote !begin)
 										(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
 										(list (quote set) (symbol _sq_rr_name)
@@ -1609,7 +1609,6 @@ WHAT IT MUST NOT DO:
 			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
 			(set having (replace_inner_selects having schemas))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
-
 			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 			but ONLY for columns referencing derived table aliases (keys in renamelist).
 			Uses schemas to find canonical column name without calling replace_find_column. */
@@ -1760,7 +1759,7 @@ WHAT IT MUST NOT DO:
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(apply build_queryplan (apply join_reorder (apply untangle_query (merge query (list nil)))))
+			(apply build_queryplan (merge (apply join_reorder (apply untangle_query (merge query (list nil)))) (list nil)))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
@@ -1814,9 +1813,40 @@ WHAT IT MUST NOT DO:
    Approach: run the UPDATE's tables+condition through untangle_query → join_reorder → build_queryplan
    with an update_target parameter that tells build_queryplan to inject $update into the target table's scan. */
 (define build_multi_table_update (lambda (schema tbl tblalias all_defs cols condition) (begin
-	/* TODO: implement by extending build_queryplan with update_target parameter.
-	   For now, fall back to error so the test fails cleanly. */
-	(error "multi-table UPDATE with subselect: not yet implemented (requires build_queryplan update_target extension)")
+	/* Build a synthetic SELECT from the UPDATE's table list and WHERE clause.
+	   The SET-value expressions go into the fields so untangle_query processes them
+	   (including replace_inner_selects for scalar subselects). The update_target
+	   tells build_queryplan to inject $update into the target table's scan. */
+	(define target_alias (coalesce tblalias tbl))
+	/* Put SET expressions into fields with "$set:" prefixed names.
+	   After the pipeline, we reconstruct the cols from the resolved fields. */
+	(define set_field_names (extract_assoc cols (lambda (k v) (concat "$set:" k))))
+	(define set_fields (merge (map (produceN (count set_field_names)) (lambda (i)
+		(list (nth set_field_names i) (nth (extract_assoc cols (lambda (k v) v)) i))))))
+	(define synthetic_select (list schema all_defs set_fields condition nil nil nil nil nil))
+	/* Run through the full pipeline: untangle_query resolves inner_selects in fields */
+	(define pipeline_result (apply join_reorder (apply untangle_query (merge synthetic_select (list nil)))))
+	/* Reconstruct resolved cols from the pipeline's fields (element 2).
+	   The fields are now resolved (inner_selects → scalar subselect code). */
+	(define resolved_fields (nth pipeline_result 2))
+	(define col_names (extract_assoc cols (lambda (k v) k)))
+	(define resolved_cols (merge (map col_names (lambda (cn) (begin
+		(define set_key (concat "$set:" cn))
+		(define resolved_val (reduce_assoc resolved_fields (lambda (acc k v) (if (equal? k set_key) v acc)) nil))
+		(list cn (coalesce resolved_val (list (quote get_column) nil false cn false)))
+	)))))
+	/* Replace fields in pipeline result with empty (no SELECT output needed) and pass update_target */
+	(define final_pipeline (list
+		(nth pipeline_result 0) /* schema */
+		(nth pipeline_result 1) /* tables */
+		resolved_cols /* fields: use resolved SET cols for the $update output */
+		(nth pipeline_result 3) /* condition */
+		(nth pipeline_result 4) /* groups */
+		(nth pipeline_result 5) /* schemas */
+		(nth pipeline_result 6) /* replace_find_column */
+		(list target_alias resolved_cols) /* update_target */
+	))
+	(apply build_queryplan final_pipeline)
 )))
 
 /*
@@ -1847,7 +1877,9 @@ GROUP BY AGGREGATE PIPELINE:
 store results as keytable columns named "expr|condition"
 3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
 */
-(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column) (begin
+/* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
+   When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
+(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
@@ -1983,7 +2015,8 @@ store results as keytable columns named "expr|condition"
 						nil /* condition already applied in collect */
 						transformed_rest_groups
 						schemas
-						replace_find_column))
+						replace_find_column
+						nil))
 					(list 'begin keytable_init (make_collect true) grouped_plan)
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
@@ -2029,7 +2062,8 @@ store results as keytable columns named "expr|condition"
 							effective_having
 							next_groups
 							schemas
-							replace_find_column))
+							replace_find_column
+							nil))
 
 						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
 						(define createcol_options (cons 'list (merge '("temp" true)
@@ -2225,7 +2259,8 @@ store results as keytable columns named "expr|condition"
 					nil /* condition already applied during materialization */
 					pj_all_groups
 					schemas
-					replace_find_column))
+					replace_find_column
+					nil))
 				/* build per-source-table incremental trigger functions entirely in Scheme,
 				then register them via a thin Go wrapper */
 				(define pj_trigger_registrations
@@ -2481,7 +2516,7 @@ store results as keytable columns named "expr|condition"
 										"mapcols" extra_mapcols
 										"mapfn" orc_mapfn "reducefn" orc_reducefn
 										"reduceinit" orc_reduceinit "temp" true))))
-							(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
+							(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
 							(list (quote begin) (list orc_setup) scan_plan)
 						)
 						(error "window functions on joined tables not yet supported"))
@@ -2730,7 +2765,11 @@ store results as keytable columns named "expr|condition"
 									)
 								))
 							)
-							'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
+							'() /* final inner */ (if (nil? update_target)
+								'((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
+								/* UPDATE mode: emit $update call with resolved SET values */
+								(begin (define _ut_cols (nth update_target 1))
+									'('if true '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0)))
 						)
 					))
 					(build_scan tables (replace_find_column condition) true)
@@ -2742,6 +2781,12 @@ store results as keytable columns named "expr|condition"
 						(define build_scan (lambda (tables condition)
 							(match tables
 								(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+									/* check if this table is the UPDATE target */
+									(define is_update_target (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
+									/* also extract cols needed for SET expressions in update_target */
+									(define ut_extra_cols (if is_update_target
+										(merge_unique (extract_assoc (nth update_target 1) (lambda (k v) (extract_columns_for_tblvar tblvar v))))
+										'()))
 									(set cols (merge_unique
 										(list
 											(merge_unique
@@ -2756,8 +2801,14 @@ store results as keytable columns named "expr|condition"
 													(extract_assoc fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
 												)
 											)
+											ut_extra_cols
 										)
 									))
+									/* For UPDATE target: prepend $update to mapcols */
+									(define scan_mapcols (if is_update_target (cons list (cons "$update" cols)) (cons list cols)))
+									(define scan_mapfn_params (if is_update_target
+										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
+										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
@@ -2767,16 +2818,20 @@ store results as keytable columns named "expr|condition"
 											(cons list filtercols)
 											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 											/* extract columns and store them into variables */
-											(cons list cols)
-											'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
-											nil
-											nil
+											scan_mapcols
+											(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+											(if is_update_target (symbol "+") nil)
+											(if is_update_target 0 nil)
 											nil
 											isOuter
 										)
 									))
 								)
-								'() /* final inner (=scalar) */ '('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+								'() /* final inner (=scalar) */ (if (nil? update_target)
+								'('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+								/* UPDATE mode */
+								(begin (define _ut_cols (nth update_target 1))
+									'('if (coalesceNil condition true) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0)))
 							)
 						))
 						(build_scan tables (replace_find_column condition))
