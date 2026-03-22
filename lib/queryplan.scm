@@ -769,7 +769,11 @@ WHAT IT MUST NOT DO:
 				(define combined_schemas (merge (coalesceNil outer_schemas '())
 					(merge (map inner_aliases (lambda (alias) (list alias '()))))))
 
-				/* walk expression tree and recursively unnest scalar inner_selects */
+				/* walk expression tree and recursively unnest scalar inner_selects.
+				TODO (Neumann next step): process ALL inner_selects including correlated.
+				With full Neumann, walk_replace calls unnest_subselect unconditionally;
+				the correlated case produces a domain-decorrelated derived table.
+				This enables recursive decorrelation of arbitrarily nested correlated subqueries. */
 				(define walk_replace (lambda (expr) (match expr
 					(cons sym args) (begin
 						(define kind (inner_select_kind sym))
@@ -831,6 +835,40 @@ WHAT IT MUST NOT DO:
 						(define _outer_has_incompatible_group (and (not (nil? group)) (not (equal? group '()))))
 						(if (or (nil? _agg_info) _has_fail (equal? _domain_joins '()) (nil? _value_col) _outer_has_incompatible_group)
 							(build_scalar_subselect subquery outer_schemas)
+							/* TODO (Neumann next steps to eliminate this fallback):
+
+							1. Non-aggregate correlated scalars (e.g. SELECT val FROM t2 WHERE owner = t1.id):
+							Use promise as aggregate for scalar enforcement in the keytable/createcolumn path:
+							neutral = (newpromise)
+							reduce = (lambda (a b) (begin (a "once" b "scalar subselect returned more than one row") a))
+							Read via (promise "value") in the substitution.
+							This fits the existing createcolumn infrastructure: one promise per GROUP BY domain key.
+
+							2. Incompatible outer GROUP BY (e.g. SELECT COUNT(*), (SELECT SUM(...) WHERE ...) GROUP BY customer):
+							The domain table is joined BEFORE the GROUP BY in the scan pipeline, so there is no
+							conflict. Remove the _outer_has_incompatible_group guard. The Neumann equivalence
+							D |><| Gamma_{A;f}(T) = Gamma_{A+D;f}(D |><| T) handles this naturally.
+
+							3. Equi-join symbol detection (_is_eq_sym):
+							The Scheme symbol equal?? cannot be reliably compared using the equal?? function
+							itself (self-reference/collision). Use match patterns like inner_select_kind does:
+							'((symbol equal??) a b), '('equal?? a b), '((quote equal??) a b) etc.
+							OR use (list? part) + (count part) + car/nth instead of (cons sym '(a b)) match.
+
+							4. Unqualified column handling (_gc_in_aliases):
+							Change (if (nil? a) false ...) to (if (nil? a) true ...) so that unqualified
+							columns (no table alias) are assumed to be inner table columns. This is safe
+							because unqualified columns resolve to inner tables during column resolution.
+
+							5. ORDER BY + LIMIT 1 per domain (crop1 pattern):
+							For subqueries like (SELECT file FROM rev WHERE doc = d.id ORDER BY created DESC LIMIT 1),
+							the LIMIT 1 applies per domain value, not globally. Use GROUP BY domain with
+							a promise-based aggregate (same as non-aggregate case) — the keytable/createcolumn
+							scan_order per group key naturally produces the first value per domain.
+
+							6. Once all cases are handled, remove build_scalar_subselect entirely
+							(except the UNION ALL fallback). All scalar subselects go through unnest_subselect.
+							*/
 							(begin
 								(define sq_num (unnest_acc "counter"))
 								(unnest_acc "counter" (+ sq_num 1))
