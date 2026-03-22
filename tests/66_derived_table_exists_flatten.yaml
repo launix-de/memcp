@@ -20,6 +20,20 @@ setup:
 
 test_cases:
 
+  - name: "COUNT with WHERE EXISTS + scalar subselect (no derived table)"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM dtef_items i
+      WHERE EXISTS (
+        SELECT TRUE FROM dtef_team tm
+        WHERE tm.list_id = i.team_id
+        AND (SELECT u.name FROM dtef_users u WHERE u.ID = tm.member LIMIT 1) IS NOT NULL
+        LIMIT 1
+      )
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
   - name: "COUNT over derived table with EXISTS + scalar subselect"
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.val) AS total FROM (

@@ -1978,7 +1978,9 @@ store results as keytable columns named "expr|condition"
 				/* preparation */
 				(define tblvar_cols (merge_unique (map stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
 				(set condition (replace_find_column (coalesceNil condition true)))
-				(set filtercols (extract_columns_for_tblvar tblvar condition))
+				(set filtercols (merge_unique (list
+					(extract_columns_for_tblvar tblvar condition)
+					(extract_outer_columns_for_tblvar tblvar condition))))
 
 				/* make_collect: builds collect plan with optional WHERE filter
 				with_filter=true: apply WHERE condition (for DEDUP)
