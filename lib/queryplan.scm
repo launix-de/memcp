@@ -148,10 +148,15 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 		(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
 			(match args
 				'(symname) (begin
-					(define parts (split (string symname) "."))
-					(match parts
-						(list tbl col) (list (list (concat tbl "." col) (list (quote get_column) tbl false col false)))
-						_ '()))
+					(define s (string symname))
+					(define parts (split s "."))
+					(if (> (count parts) 1)
+						(begin
+							(define tbl (car parts))
+							/* rejoin remaining parts with . for column names containing dots */
+							(define col (reduce (cdr parts) (lambda (acc p) (if (equal? acc "") p (concat acc "." p))) ""))
+							(list (list (concat tbl "." col) (list (quote get_column) tbl false col false))))
+						'()))
 				_ '())
 			(merge (map args extract_all_outer_columns)))
 		'()
@@ -217,11 +222,14 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
 		(match args
 			'(symname) (begin
-				(define parts (split (string symname) "."))
-				(match parts
-					(list tbl col) (if (equal?? tbl (string tblvar)) (list col) '())
-					_ '()
-				)
+				(define s (string symname))
+				(define parts (split s "."))
+				(if (> (count parts) 1)
+					(begin
+						(define tbl (car parts))
+						(define col (reduce (cdr parts) (lambda (acc p) (if (equal? acc "") p (concat acc "." p))) ""))
+						(if (equal?? tbl (string tblvar)) (list col) '()))
+					'())
 			)
 			_ '()
 		)
