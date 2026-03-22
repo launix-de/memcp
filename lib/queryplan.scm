@@ -689,7 +689,7 @@ WHAT IT MUST NOT DO:
 			'((quote outer) _) true
 			/* nested inner_selects may reference outer tables at deeper levels;
 			we can't cheaply check, so conservatively assume correlated */
-			(cons sym args) (if (not (nil? (inner_select_kind sym))) true
+			(cons sym args) (if (or (not (nil? (inner_select_kind sym))) (equal?? sym (quote !begin)) (equal?? sym (symbol !begin))) true
 				(reduce args (lambda (a b) (or a (_check_refs b))) false))
 			false
 		)))
@@ -699,7 +699,7 @@ WHAT IT MUST NOT DO:
 		if outer_schemas is non-empty and there are unqualified columns, be conservative */
 		(define _has_unqualified (lambda (expr) (match expr
 			'((symbol get_column) nil _ col _) true
-			(cons sym args) (if (not (nil? (inner_select_kind sym))) false
+			(cons sym args) (if (or (not (nil? (inner_select_kind sym))) (equal?? sym (quote !begin)) (equal?? sym (symbol !begin))) false
 				(reduce args (lambda (a b) (or a (_has_unqualified b))) false))
 			false
 		)))
@@ -710,28 +710,77 @@ WHAT IT MUST NOT DO:
 		(or fields_corr cond_corr has_unqual_cols)
 	)))
 
+	/* _is_precomputed: check if a symbol is !begin (pre-computed subselect value, opaque to analysis) */
+	(define _is_precomputed (lambda (sym) (match sym
+		'!begin true '(quote !begin) true (symbol !begin) true _ false)))
+
 	(define unnest_subselect (lambda (subquery outer_schemas) (begin
-		/* correlated subselects: fall back to build_scalar_subselect for now
-		(Neumann domain-column handling will be added later) */
-		(if (_subquery_is_correlated subquery outer_schemas)
+		/* Step 1: recursive unnesting — replace nested inner_selects BEFORE
+		checking correlation. This flattens the subquery so that nested
+		non-correlated scalars become inline !begin values, and the correlation
+		check sees only direct references to outer tables. */
+		(define union_parts (query_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			/* UNION ALL scalar subselect: not supported, fall back */
 			(build_scalar_subselect subquery outer_schemas)
 			(begin
-				/* Non-correlated scalar subselect: pre-compute via build_queryplan_term.
-				Uses !begin + newpromise to evaluate the subquery once and substitute its value.
-				This is efficient because non-correlated subqueries are constant w.r.t. outer rows.
-				Inner nested subselects are recursively processed through the same pipeline. */
-				(define sq_num (unnest_acc "counter"))
-				(unnest_acc "counter" (+ sq_num 1))
-				(define sq_id (concat "$sq" sq_num))
+				/* extract raw components */
+				(define raw_schema (nth subquery 0))
+				(define raw_tables (coalesceNil (nth subquery 1) '()))
+				(define raw_fields (coalesceNil (nth subquery 2) '()))
+				(define raw_condition (if (>= (count subquery) 4) (nth subquery 3) nil))
 
-				(define union_parts (query_union_all_parts subquery))
-				(if (not (nil? union_parts))
-					(error "scalar subselect UNION ALL is not supported yet")
+				/* build combined outer_schemas for recursive calls:
+				inner_selects inside this subquery see both the actual outer tables
+				AND this subquery's own tables as "outer" for correlation analysis */
+				(define inner_aliases (if (list? raw_tables)
+					(map raw_tables (lambda (t) (match t '(alias _ _ _ _) alias _ nil)))
+					'()))
+				(define combined_schemas (merge (coalesceNil outer_schemas '())
+					(merge (map inner_aliases (lambda (alias) (list alias '()))))))
+
+				/* walk expression tree and recursively unnest scalar inner_selects */
+				(define walk_replace (lambda (expr) (match expr
+					(cons sym args) (begin
+						(define kind (inner_select_kind sym))
+						(if (equal?? kind (quote inner_select))
+							(match args
+								(cons sq '()) (unnest_subselect sq combined_schemas)
+								_ (cons sym (map args walk_replace)))
+							/* leave IN/EXISTS for their own handlers */
+							(if (not (nil? kind))
+								expr
+								(cons sym (map args walk_replace)))))
+					expr)))
+
+				(define new_fields (map_assoc raw_fields (lambda (k v) (walk_replace v))))
+				(define new_condition (if (nil? raw_condition) nil (walk_replace raw_condition)))
+
+				/* rebuild modified subquery with replaced inner_selects */
+				(define modified_subquery (list raw_schema raw_tables new_fields new_condition
+					(if (>= (count subquery) 5) (nth subquery 4) nil)
+					(if (>= (count subquery) 6) (nth subquery 5) nil)
+					(if (>= (count subquery) 7) (nth subquery 6) nil)
+					(if (>= (count subquery) 8) (nth subquery 7) nil)
+					(if (>= (count subquery) 9) (nth subquery 8) nil)))
+
+				/* Step 2: correlation check on the MODIFIED subquery.
+				Since nested inner_selects have been replaced with !begin (opaque),
+				this only finds direct references to outer tables. */
+				(if (_subquery_is_correlated modified_subquery outer_schemas)
+					/* correlated: fall back to build_scalar_subselect with ORIGINAL subquery
+					(it handles outer-ref resolution via make_replace_find_column_subselect) */
+					(build_scalar_subselect subquery outer_schemas)
 					(begin
+						/* Step 3: non-correlated — pre-compute via build_queryplan_term */
+						(define sq_num (unnest_acc "counter"))
+						(unnest_acc "counter" (+ sq_num 1))
+						(define sq_id (concat "$sq" sq_num))
+
 						(define resultrow_sym (symbol (concat "__unnest_rr:" sq_id)))
 						(define promise_sym (symbol (concat "__unnest_promise:" sq_id)))
 
-						/* inline pre-computation: evaluate subquery, capture scalar value via promise */
+						/* inline pre-computation: evaluate modified subquery, capture scalar value */
 						(list (quote !begin)
 							(list (quote set) promise_sym (list (quote newpromise)))
 							(list (quote set) resultrow_sym (symbol "resultrow"))
@@ -740,12 +789,13 @@ WHAT IT MUST NOT DO:
 									(list promise_sym "once"
 										(list (quote nth) (symbol "item") 1)
 										"scalar subselect returned more than one row")))
-							(build_queryplan_term subquery)
+							(build_queryplan_term modified_subquery)
 							(list (quote set) (symbol "resultrow") resultrow_sym)
 							(list promise_sym "value"))
 				))
 		))
 	)))
+
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
 	(define _cd_is_subquery (lambda (sym) (match sym
