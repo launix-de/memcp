@@ -1,0 +1,70 @@
+# Derived table with JOIN alias containing colon (ref:colname pattern).
+# The colon in the alias must not be confused with the internal
+# null-byte separator used for derived-table flattening.
+
+metadata:
+  version: "1.0"
+  description: "Colon in table alias within derived table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cad_items"
+  - sql: "DROP TABLE IF EXISTS cad_users"
+  - sql: "CREATE TABLE cad_users (ID INT PRIMARY KEY, name TEXT, active INT)"
+  - sql: "CREATE TABLE cad_items (ID INT PRIMARY KEY, title TEXT, creator INT, assigned INT)"
+  - sql: "INSERT INTO cad_users VALUES (1, 'Alice', 1), (2, 'Bob', 0)"
+  - sql: "INSERT INTO cad_items VALUES (1, 'Task A', 1, 2), (2, 'Task B', 2, 1)"
+
+test_cases:
+
+  - name: "JOIN with colon alias (ref:creator pattern)"
+    sql: |
+      SELECT i.ID, i.title,
+        `ref:creator`.`name` AS creator_name
+      FROM cad_items i
+      LEFT JOIN cad_users AS `ref:creator` ON `ref:creator`.ID = i.creator
+      ORDER BY i.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          title: "Task A"
+          creator_name: "Alice"
+        - ID: 2
+          title: "Task B"
+          creator_name: "Bob"
+
+  - name: "derived table with colon alias JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT i.ID AS ID, i.title AS title,
+          `ref:creator`.`name` AS creator_name
+        FROM cad_items i
+        LEFT JOIN cad_users AS `ref:creator` ON `ref:creator`.ID = i.creator
+        ORDER BY i.ID
+      ) t
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          title: "Task A"
+          creator_name: "Alice"
+        - ID: 2
+          title: "Task B"
+          creator_name: "Bob"
+
+  - name: "COUNT over derived table with colon alias JOIN"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT i.ID AS ID
+        FROM cad_items i
+        LEFT JOIN cad_users AS `ref:creator` ON `ref:creator`.ID = i.creator
+        WHERE `ref:creator`.active = 1
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cad_items"
+  - sql: "DROP TABLE IF EXISTS cad_users"
