@@ -116,7 +116,7 @@ def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
     return 10_000_000  # fallback: 10M rows
 
 class SQLTestRunner:
-    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False):
+    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests"):
         self.base_url = base_url
         self.username = username
         self.password = password
@@ -137,7 +137,6 @@ class SQLTestRunner:
         self.suite_syntax = None
         self.perf_baselines = {}  # test_name -> {"time_ms": float, "rows": int}
         self.perf_results = {}  # test_name -> {"time_ms": float, "rows": int}
-        self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
 
     def set_restart_handler(self, fn):
         """Install a restart handler callable that restarts MemCP (returns True on success)."""
@@ -652,15 +651,11 @@ class SQLTestRunner:
             memcp_pid = find_memcp_pid() if is_perf_test else None
             start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
 
-            # Execute query (with ns-precision timing)
-            start_ns = time.monotonic_ns()
+            # Execute query (with timing for perf tests)
+            start_time = time.monotonic()
             response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id, timeout=sql_timeout, params=sql_params)
-            elapsed_ns = time.monotonic_ns() - start_ns
-            elapsed_ms = elapsed_ns / 1_000_000
+            elapsed_ms = (time.monotonic() - start_time) * 1000
             elapsed_sec = elapsed_ms / 1000
-
-            if self.log_times:
-                print(f"QUERY_TIME ns={elapsed_ns} name={name}")
 
             # End CPU measurement
             end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
@@ -1010,13 +1005,10 @@ def main():
     spec_file = sys.argv[1]
     port = None
     connect_only = False
-    log_times = False
 
     for arg in sys.argv[2:]:
         if arg == "--connect-only":
             connect_only = True
-        elif arg == "--log-times":
-            log_times = True
         elif arg.isdigit():
             port = int(arg)
 
@@ -1044,7 +1036,7 @@ def main():
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
 
-    runner = SQLTestRunner(base_url, log_times=log_times)
+    runner = SQLTestRunner(base_url)
     if not connect_only:
         def restart_handler() -> bool:
             nonlocal memcp_process

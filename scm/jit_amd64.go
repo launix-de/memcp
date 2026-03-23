@@ -74,7 +74,7 @@ func jitCompileCall(call []Scmer) []byte {
 	}
 	// Look up the Declaration for the head
 	decl := DeclarationForValue(call[0])
-	if decl == nil || decl.Type == nil || decl.Type.JITEmit == nil {
+	if decl == nil || decl.JITEmit == nil {
 		return nil
 	}
 
@@ -122,7 +122,7 @@ func jitCompileCall(call []Scmer) []byte {
 
 	// Result goes into RAX (ptr) + RBX (aux) — the Go return registers
 	resultDesc := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
-	decl.Type.JITEmit(ctx, args, descs, resultDesc)
+	decl.JITEmit(ctx, args, descs, resultDesc)
 
 	// Emit stack frame epilogue + RET
 	w.emitBytes(0x48, 0x83, 0xC4, frameSize) // ADD RSP, frameSize

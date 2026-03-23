@@ -33,124 +33,133 @@ const mysqlImportMetaSchema = "system"
 const mysqlImportTriggersTable = "triggers"
 
 func initMySQLImport(en scm.Env) {
-		scm.Declare(&en, &scm.Declaration{
-		Name: "mysql_import",
-		Desc: "imports schema+data from a MySQL server into MemCP",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-				host := "127.0.0.1"
-				if !a[0].IsNil() {
-					host = scm.String(a[0])
-				}
-				port := 3306
-				if !a[1].IsNil() {
-					port = scm.ToInt(a[1])
-				}
-				user := scm.String(a[2])
-				password := scm.String(a[3])
-				var sourceDB, targetDB, sourceTable, targetTable string
-				if len(a) > 4 && !a[4].IsNil() {
-					sourceDB = scm.String(a[4])
-				}
-				if len(a) > 5 && !a[5].IsNil() {
-					targetDB = scm.String(a[5])
-				}
-				if len(a) > 6 && !a[6].IsNil() {
-					sourceTable = scm.String(a[6])
-				}
-				if len(a) > 7 && !a[7].IsNil() {
-					targetTable = scm.String(a[7])
-				}
-	
-				if targetDB == "" {
-					targetDB = sourceDB
-				}
-				if targetTable == "" {
-					targetTable = sourceTable
-				}
-	
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				defer cancel()
-	
-				db, err := openMySQL(ctx, host, port, user, password, "")
-				if err != nil {
-					panic(err.Error())
-				}
-				defer db.Close()
-	
-				// drop-semantics: reset trigger metadata for this import run
-				DropTable(mysqlImportMetaSchema, mysqlImportTriggersTable, true)
-	
-				srcDBs, err := mysqlListDatabases(ctx, db, sourceDB)
-				if err != nil {
-					panic(err.Error())
-				}
-	
-				type job struct {
-					srcDB string
-					dstDB string
-					srcT  string
-					dstT  string
-				}
-				jobs := make(chan job, 64)
-				var wg sync.WaitGroup
-				var firstErrMu sync.Mutex
-				var firstErr error
-	
-				workerCount := runtime.GOMAXPROCS(0)
-				if workerCount < 1 {
-					workerCount = 1
-				}
-				if workerCount > 8 {
-					workerCount = 8
-				}
-				for i := 0; i < workerCount; i++ {
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
-						for j := range jobs {
-							if err := mysqlImportTable(ctx, db, j.srcDB, j.srcT, j.dstDB, j.dstT); err != nil {
-								firstErrMu.Lock()
-								if firstErr == nil {
-									firstErr = err
-								}
-								firstErrMu.Unlock()
-							}
-						}
-					}()
-				}
-	
-				for _, src := range srcDBs {
-					dst := targetDB
-					if dst == "" {
-						dst = src
-					}
-					srcTables, err := mysqlListTables(ctx, db, src, sourceTable)
-					if err != nil {
-						panic(err.Error())
-					}
-					for _, st := range srcTables {
-						dt := targetTable
-						if dt == "" {
-							dt = st
-						}
-						jobs <- job{srcDB: src, dstDB: dst, srcT: st, dstT: dt}
-					}
-				}
-				close(jobs)
-				wg.Wait()
-	
-				firstErrMu.Lock()
-				err = firstErr
-				firstErrMu.Unlock()
-				if err != nil {
-					panic(err.Error())
-				}
-				return scm.NewBool(true)
-			},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string|nil", ParamName: "host", ParamDesc: "MySQL host (nil => 127.0.0.1)"}, &scm.TypeDescriptor{Kind: "int|nil", ParamName: "port", ParamDesc: "MySQL port (nil => 3306)"}, &scm.TypeDescriptor{Kind: "string", ParamName: "username", ParamDesc: "MySQL username"}, &scm.TypeDescriptor{Kind: "string", ParamName: "password", ParamDesc: "MySQL password"}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcedb", ParamDesc: "source database (omit/nil => all non-system dbs)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targetdb", ParamDesc: "target database (omit/nil => sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcetable", ParamDesc: "source table (omit/nil => all tables in sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targettable", ParamDesc: "target table (omit/nil => sourcetable)", Optional: true}},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
+	scm.Declare(&en, &scm.Declaration{
+		"mysql_import", "imports schema+data from a MySQL server into MemCP",
+		4, 8,
+		[]scm.DeclarationParameter{
+			{"host", "string|nil", "MySQL host (nil => 127.0.0.1)", nil},
+			{"port", "int|nil", "MySQL port (nil => 3306)", nil},
+			{"username", "string", "MySQL username", nil},
+			{"password", "string", "MySQL password", nil},
+			{"sourcedb", "string|nil", "source database (omit/nil => all non-system dbs)", nil},
+			{"targetdb", "string|nil", "target database (omit/nil => sourcedb)", nil},
+			{"sourcetable", "string|nil", "source table (omit/nil => all tables in sourcedb)", nil},
+			{"targettable", "string|nil", "target table (omit/nil => sourcetable)", nil},
 		},
+		"bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			host := "127.0.0.1"
+			if !a[0].IsNil() {
+				host = scm.String(a[0])
+			}
+			port := 3306
+			if !a[1].IsNil() {
+				port = scm.ToInt(a[1])
+			}
+			user := scm.String(a[2])
+			password := scm.String(a[3])
+			var sourceDB, targetDB, sourceTable, targetTable string
+			if len(a) > 4 && !a[4].IsNil() {
+				sourceDB = scm.String(a[4])
+			}
+			if len(a) > 5 && !a[5].IsNil() {
+				targetDB = scm.String(a[5])
+			}
+			if len(a) > 6 && !a[6].IsNil() {
+				sourceTable = scm.String(a[6])
+			}
+			if len(a) > 7 && !a[7].IsNil() {
+				targetTable = scm.String(a[7])
+			}
+
+			if targetDB == "" {
+				targetDB = sourceDB
+			}
+			if targetTable == "" {
+				targetTable = sourceTable
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			db, err := openMySQL(ctx, host, port, user, password, "")
+			if err != nil {
+				panic(err.Error())
+			}
+			defer db.Close()
+
+			// drop-semantics: reset trigger metadata for this import run
+			DropTable(mysqlImportMetaSchema, mysqlImportTriggersTable, true)
+
+			srcDBs, err := mysqlListDatabases(ctx, db, sourceDB)
+			if err != nil {
+				panic(err.Error())
+			}
+
+			type job struct {
+				srcDB string
+				dstDB string
+				srcT  string
+				dstT  string
+			}
+			jobs := make(chan job, 64)
+			var wg sync.WaitGroup
+			var firstErrMu sync.Mutex
+			var firstErr error
+
+			workerCount := runtime.GOMAXPROCS(0)
+			if workerCount < 1 {
+				workerCount = 1
+			}
+			if workerCount > 8 {
+				workerCount = 8
+			}
+			for i := 0; i < workerCount; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for j := range jobs {
+						if err := mysqlImportTable(ctx, db, j.srcDB, j.srcT, j.dstDB, j.dstT); err != nil {
+							firstErrMu.Lock()
+							if firstErr == nil {
+								firstErr = err
+							}
+							firstErrMu.Unlock()
+						}
+					}
+				}()
+			}
+
+			for _, src := range srcDBs {
+				dst := targetDB
+				if dst == "" {
+					dst = src
+				}
+				srcTables, err := mysqlListTables(ctx, db, src, sourceTable)
+				if err != nil {
+					panic(err.Error())
+				}
+				for _, st := range srcTables {
+					dt := targetTable
+					if dt == "" {
+						dt = st
+					}
+					jobs <- job{srcDB: src, dstDB: dst, srcT: st, dstT: dt}
+				}
+			}
+			close(jobs)
+			wg.Wait()
+
+			firstErrMu.Lock()
+			err = firstErr
+			firstErrMu.Unlock()
+			if err != nil {
+				panic(err.Error())
+			}
+			return scm.NewBool(true)
+		},
+		false, false, nil,
+		nil,
 	})
 }
 

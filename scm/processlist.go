@@ -199,60 +199,56 @@ func GetCurrentSessionState() *SessionState {
 
 func init_processlist() {
 	nextSessionID.Store(1)
-		Declare(&Globalenv, &Declaration{
-		Name: "show_processlist",
-		Desc: "returns a list of active sessions for SHOW [FULL] PROCESSLIST; pass true for full info",
-		Fn: func(a ...Scmer) Scmer {
-				full := len(a) > 0 && a[0].Bool()
-				sessions := Snapshot()
-				result := make([]Scmer, len(sessions))
-				for i, s := range sessions {
-					info := strPtr(&s.Info)
-					if !full && len(info) > 100 {
-						info = info[:100]
-					}
-					result[i] = NewSlice([]Scmer{
-						NewString("Id"), NewInt(int64(s.ID)),
-						NewString("User"), NewString(s.User),
-						NewString("Host"), NewString(s.Host),
-						NewString("db"), NewString(strPtr(&s.DB)),
-						NewString("Command"), NewString(strPtr(&s.Command)),
-						NewString("Time"), NewInt(s.ElapsedSeconds()),
-						NewString("State"), NewString(strPtr(&s.State)),
-						NewString("Info"), NewString(info),
-					})
+	Declare(&Globalenv, &Declaration{
+		"show_processlist", "returns a list of active sessions for SHOW [FULL] PROCESSLIST; pass true for full info",
+		0, 1,
+		[]DeclarationParameter{{"full", "bool", "if true, include full Info text", nil}},
+		"list",
+		func(a ...Scmer) Scmer {
+			full := len(a) > 0 && a[0].Bool()
+			sessions := Snapshot()
+			result := make([]Scmer, len(sessions))
+			for i, s := range sessions {
+				info := strPtr(&s.Info)
+				if !full && len(info) > 100 {
+					info = info[:100]
 				}
-				return NewSlice(result)
-			},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", ParamName: "full", ParamDesc: "if true, include full Info text", Optional: true}},
-			Return: &TypeDescriptor{Kind: "list"},
+				result[i] = NewSlice([]Scmer{
+					NewString("Id"), NewInt(int64(s.ID)),
+					NewString("User"), NewString(s.User),
+					NewString("Host"), NewString(s.Host),
+					NewString("db"), NewString(strPtr(&s.DB)),
+					NewString("Command"), NewString(strPtr(&s.Command)),
+					NewString("Time"), NewInt(s.ElapsedSeconds()),
+					NewString("State"), NewString(strPtr(&s.State)),
+					NewString("Info"), NewString(info),
+				})
+			}
+			return NewSlice(result)
 		},
+		false, false, nil, nil,
 	})
-		Declare(&Globalenv, &Declaration{
-		Name: "connection_id",
-		Desc: "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
-		Fn: func(a ...Scmer) Scmer {
-				if ss := GetCurrentSessionState(); ss != nil {
-					return NewInt(int64(ss.ID))
-				}
-				return NewInt(0)
-			},
-		Type: &TypeDescriptor{
-			Return: &TypeDescriptor{Kind: "int"},
+	Declare(&Globalenv, &Declaration{
+		"connection_id", "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
+		0, 0,
+		[]DeclarationParameter{}, "int",
+		func(a ...Scmer) Scmer {
+			if ss := GetCurrentSessionState(); ss != nil {
+				return NewInt(int64(ss.ID))
+			}
+			return NewInt(0)
 		},
+		false, false, nil, nil,
 	})
-		Declare(&Globalenv, &Declaration{
-		Name: "kill_query",
-		Desc: "cancel the running query in session id; returns true if a query was killed",
-		Fn: func(a ...Scmer) Scmer {
-				return NewBool(KillSession(uint64(a[0].Int())))
-			},
-		Type: &TypeDescriptor{
-			HasSideEffects: true,
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "int", ParamName: "id", ParamDesc: "session ID from SHOW PROCESSLIST"}},
-			Return: &TypeDescriptor{Kind: "bool"},
+	Declare(&Globalenv, &Declaration{
+		"kill_query", "cancel the running query in session id; returns true if a query was killed",
+		1, 1,
+		[]DeclarationParameter{{"id", "int", "session ID from SHOW PROCESSLIST", nil}},
+		"bool",
+		func(a ...Scmer) Scmer {
+			return NewBool(KillSession(uint64(a[0].Int())))
 		},
+		false, false, nil, nil,
 	})
 }
 

@@ -21,68 +21,39 @@ import "fmt"
 import "strings"
 import "path/filepath"
 
-// Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
-	Name string
-	Desc string
-	Fn   func(...Scmer) Scmer
-	Type *TypeDescriptor
-}
-
-// MinParams returns the minimum number of required parameters.
-func (d *Declaration) MinParams() int {
-	if d.Type == nil {
-		return 0
-	}
-	count := 0
-	for _, p := range d.Type.Params {
-		if p != nil && !p.Optional && !p.Variadic {
-			count++
-		}
-	}
-	return count
-}
-
-// MaxParams returns the maximum number of parameters (10000 if variadic).
-func (d *Declaration) MaxParams() int {
-	if d.Type == nil {
-		return 0
-	}
-	for _, p := range d.Type.Params {
-		if p != nil && p.Variadic {
-			return 10000
-		}
-	}
-	return len(d.Type.Params)
+	Name         string
+	Desc         string
+	MinParameter int
+	MaxParameter int
+	Params       []DeclarationParameter
+	Returns      string // any | string | number | int | bool | func | list | symbol | nil
+	Fn           func(...Scmer) Scmer
+	Foldable     bool                                                                                        // safe to constant-fold when all args are literals
+	Forbidden    bool                                                                                        // optimizer-only: hidden from help, blocked from .scm code
+	Type         *TypeDescriptor                                                                             // function type with optional Optimize hook; nil = derive from Params/Returns
+	JITEmit      func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc // optional JIT emitter; nil = not JIT-able
 }
 
 // TypeDescriptor describes the type of any Scmer value at arbitrary depth.
 // Uses pointers throughout — nil means "unknown / don't care" (conservative).
 type TypeDescriptor struct {
-	Kind      string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
-	NoEscape  bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
-	Transfer  bool                       // callee receives ownership, can mutate
-	Const     bool                       // value is a compile-time constant; for func: safe to constant-fold
-	Optional  bool                       // for func params: parameter is optional
-	Variadic  bool                       // for func params: last param accepts 0+ values
-	Forbidden      bool                  // for func: optimizer-only, hidden from help
-	HasSideEffects bool                  // for func: true = call has side effects, cannot be eliminated even if result unused
-	ParamName string                     // for func params: documentation name
-	ParamDesc string                     // for func params: documentation description
-	Params    []*TypeDescriptor          // for Kind="func": parameter types
-	Return    *TypeDescriptor            // for Kind="func": return type
-	Keys      map[string]*TypeDescriptor // for Kind="assoc": per-key type info
-	Element   *TypeDescriptor            // for Kind="list": element type
+	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
+	Escape         bool                       // value may outlive its scope
+	Transfer       bool                       // callee receives ownership, can mutate
+	Const          bool                       // value is a compile-time constant
+	HasSideEffects bool                       // function has side effects (insert, session writes, etc.); optimizer must not eliminate calls whose result is unused. Default assumption for unknown functions is true (conservative).
+	Params         []*TypeDescriptor          // for Kind="func": parameter types
+	Return         *TypeDescriptor            // for Kind="func": return type
+	Keys           map[string]*TypeDescriptor // for Kind="assoc": per-key type info
+	Element        *TypeDescriptor            // for Kind="list": element type
 	// Custom optimizer hook for function types. When set, the optimizer calls this
 	// INSTEAD of the default arg optimization + post-processing.
-	Optimize  func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
-	// Optional JIT emitter for native code generation.
-	JITEmit   func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
-	// Specialized variants keyed by param-ownership bitmask.
-	// Built on-demand by the optimizer when a call site provides owned args.
-	// TODO: deoptimization — if the global function is redefined, all callsites
-	// referencing cached variants must be invalidated (reset to the original code).
-	Variants  map[uint64]Scmer
+	// v[0] is head, v[1:] are UN-optimized args. The hook optimizes its own args
+	// via oc.OptimizeSub() and may rewrite the entire call.
+	// Returns (optimized_expr, result_type) where result_type describes the
+	// optimized expression's type for full transfer/escape analysis.
+	Optimize func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
 }
 
 // OptimizerContext is an exported wrapper so packages like storage can use
@@ -92,72 +63,20 @@ type OptimizerContext struct {
 	Ome *optimizerMetainfo
 }
 
-// TypeInfo is a compact, stack-allocated type descriptor returned by OptimizeEx.
-// No heap allocation for the common case (Kind + Flags). Extra info (sub-structure
-// types, function signatures) is stored in an optional *TypeDescriptor pointer.
-type TypeInfo struct {
-	kind  uint8
-	flags uint8
-	Extra *TypeDescriptor // nil in common case; only allocated for sub-structure info
-}
-
-// Kind constants for TypeInfo
-const (
-	KindAny    uint8 = iota // 0: unknown
-	KindString              // 1
-	KindInt                 // 2
-	KindFloat               // 3
-	KindBool                // 4
-	KindNil                 // 5
-	KindSymbol              // 6
-	KindFunc                // 7
-	KindList                // 8
-	KindAssoc               // 9
-)
-
-// Flag bits for TypeInfo
-const (
-	FlagTransfer uint8 = 1 << iota // callee receives ownership
-	FlagConst                      // compile-time constant
-	FlagEscape                     // value may outlive scope
-)
-
-func (ti TypeInfo) Transfer() bool { return ti.flags&FlagTransfer != 0 }
-func (ti TypeInfo) Const() bool    { return ti.flags&FlagConst != 0 }
-func (ti TypeInfo) Escape() bool   { return ti.flags&FlagEscape != 0 }
-func (ti TypeInfo) Kind() uint8    { return ti.kind }
-
-func (ti TypeInfo) WithTransfer() TypeInfo { ti.flags |= FlagTransfer; return ti }
-func (ti TypeInfo) WithConst() TypeInfo    { ti.flags |= FlagConst; return ti }
-func (ti TypeInfo) WithKind(k uint8) TypeInfo { ti.kind = k; return ti }
-
-// ToTypeDescriptor converts to a heap-allocated TypeDescriptor (for APIs that need it).
-func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
-	if ti.kind == KindAny && ti.flags == 0 && ti.Extra == nil {
-		return nil
-	}
-	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape()}
-	if ti.Extra != nil {
-		*td = *ti.Extra
-		td.Transfer = ti.Transfer()
-		td.Const = ti.Const()
-		td.NoEscape = !ti.Escape()
-	}
-	return td
+type DeclarationParameter struct {
+	Name     string
+	Type     string // any | string | number | int | bool | func | list | symbol | nil
+	Desc     string
+	TypeInfo *TypeDescriptor // rich type info (nil = unknown / no annotation)
 }
 
 // NoEscape is a reusable TypeDescriptor annotation for parameters that
 // the callee reads but never stores — safe to back with stack-allocated !list.
-var NoEscape = &TypeDescriptor{Kind: "any", NoEscape: true}
+var NoEscape = &TypeDescriptor{Kind: "any", Escape: false}
 
 var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)
 var declarations_hash map[string]*Declaration = make(map[string]*Declaration)
-
-// globalFuncTypeInfo stores optimizer type info for Scheme-defined functions.
-// Persists across import boundaries so cross-file ownership propagation works.
-// Not used for arity checks or documentation — only for optimizer type inference.
-var globalFuncTypeInfo = make(map[Symbol]TypeInfo)
 
 func DeclareTitle(title string) {
 	declaration_titles = append(declaration_titles, "#"+title)
@@ -167,16 +86,8 @@ func DeclareTitle(title string) {
 // is always a fresh allocation — safe for _mut swap by the optimizer.
 var FreshAlloc = &TypeDescriptor{Kind: "list", Transfer: true}
 
-func (d *Declaration) IsForbidden() bool {
-	return d.Type != nil && d.Type.Forbidden
-}
-
-func (d *Declaration) IsFoldable() bool {
-	return d.Type != nil && d.Type.Const
-}
-
 func Declare(env *Env, def *Declaration) {
-	if !def.IsForbidden() {
+	if !def.Forbidden {
 		declaration_titles = append(declaration_titles, def.Name)
 	}
 	declarations[def.Name] = def
@@ -195,7 +106,7 @@ func DeclareInSection(section string, env *Env, def *Declaration) {
 		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
 		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
 	}
-	if def.IsForbidden() {
+	if def.Forbidden {
 		return
 	}
 	// find the position right before the next section header after sectionName
@@ -337,23 +248,19 @@ func WriteDocumentation(folder string) error {
 			if def.Desc != "" {
 				fmt.Fprintf(f, "%s\n\n", def.Desc)
 			}
-			fmt.Fprintf(f, "**Allowed number of parameters:** %d–%d\n\n", def.MinParams(), def.MaxParams())
+			fmt.Fprintf(f, "**Allowed number of parameters:** %d–%d\n\n", def.MinParameter, def.MaxParameter)
 
 			fmt.Fprintln(f, "### Parameters")
-			if def.Type == nil || len(def.Type.Params) == 0 {
+			if len(def.Params) == 0 {
 				fmt.Fprintln(f, "_This function has no parameters._")
-			} else if d, ok := declarations[def.Name]; ok && !d.IsForbidden() {
-				for _, p := range def.Type.Params {
-					fmt.Fprintf(f, "- **%s** (`%s`): %s\n", p.ParamName, p.Kind, p.ParamDesc)
+			} else if d, ok := declarations[def.Name]; ok && !d.Forbidden {
+				for _, p := range def.Params {
+					fmt.Fprintf(f, "- **%s** (`%s`): %s\n", p.Name, p.Type, p.Desc)
 				}
 				fmt.Fprintln(f)
 			}
 
-			retKind := "any"
-			if def.Type != nil && def.Type.Return != nil && def.Type.Return.Kind != "" {
-				retKind = def.Type.Return.Kind
-			}
-			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", retKind)
+			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", def.Returns)
 		}
 
 		_ = f.Close()
@@ -447,11 +354,11 @@ func Validate(val Scmer, require string) string {
 				}
 			}
 			if def != nil {
-				if len(slice)-1 < def.MinParams() {
-					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
+				if len(slice)-1 < def.MinParameter {
+					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParameter) + " parameters")
 				}
-				if len(slice)-1 > def.MaxParams() {
-					panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParams()) + " parameters")
+				if len(slice)-1 > def.MaxParameter {
+					panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParameter) + " parameters")
 				}
 			}
 			skipFirst := slice[0].IsSymbol() && (slice[0].SymbolEquals("lambda") || slice[0].SymbolEquals("parser"))
@@ -464,17 +371,12 @@ func Validate(val Scmer, require string) string {
 				if i != 1 || !skipFirst {
 					subrequired := "any"
 					isReturntype := false
-					if def != nil && def.Type != nil {
+					if def != nil {
 						j := i - 1
-						if j >= len(def.Type.Params) {
-							j = len(def.Type.Params) - 1
+						if j >= len(def.Params) {
+							j = len(def.Params) - 1
 						}
-						if j >= 0 && j < len(def.Type.Params) && def.Type.Params[j] != nil {
-							subrequired = def.Type.Params[j].Kind
-							if subrequired == "" {
-								subrequired = "any"
-							}
-						}
+						subrequired = def.Params[j].Type
 						if subrequired == "returntype" {
 							subrequired = require
 							isReturntype = true
@@ -490,17 +392,13 @@ func Validate(val Scmer, require string) string {
 				}
 			}
 			if def != nil {
-				retKind := "any"
-				if def.Type != nil && def.Type.Return != nil && def.Type.Return.Kind != "" {
-					retKind = def.Type.Return.Kind
-				}
-				if retKind == "returntype" {
+				if def.Returns == "returntype" {
 					if returntype == "" {
 						panic("return returntype without returntype parameters")
 					}
 					return returntype
 				}
-				return retKind
+				return def.Returns
 			}
 			return "any"
 		}
@@ -528,7 +426,7 @@ func Help(fn Scmer) string {
 		for _, title := range declaration_titles {
 			if title[0] == '#' {
 				b.WriteString("\n-- " + title[1:] + " --\n")
-			} else if d, ok := declarations[title]; ok && !d.IsForbidden() {
+			} else if d, ok := declarations[title]; ok && !d.Forbidden {
 				b.WriteString("  " + title + ": " + strings.Split(d.Desc, "\n")[0] + "\n")
 			}
 		}
@@ -538,13 +436,9 @@ func Help(fn Scmer) string {
 		if def != nil {
 			b.WriteString("Help for: " + def.Name + "\n===\n\n")
 			b.WriteString(def.Desc + "\n\n")
-			b.WriteString(fmt.Sprintf("Allowed nø of parameters: %d-%d\n\n", def.MinParams(), def.MaxParams()))
-			if def.Type != nil {
-				for _, p := range def.Type.Params {
-					if p != nil {
-						b.WriteString(" - " + p.ParamName + " (" + p.Kind + "): " + p.ParamDesc + "\n")
-					}
-				}
+			b.WriteString(fmt.Sprintf("Allowed nø of parameters: %d-%d\n\n", def.MinParameter, def.MaxParameter))
+			for _, p := range def.Params {
+				b.WriteString(" - " + p.Name + " (" + p.Type + "): " + p.Desc + "\n")
 			}
 			b.WriteString("\n")
 		} else {

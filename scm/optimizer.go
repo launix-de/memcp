@@ -839,13 +839,11 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	for i := 0; i < len(v); i++ {
 		if i > 0 && callDecl != nil {
 			paramIdx := i - 1
-			if callDecl.Type == nil || len(callDecl.Type.Params) == 0 {
-				// no type info
-			} else if paramIdx >= len(callDecl.Type.Params) {
-				paramIdx = len(callDecl.Type.Params) - 1
+			if paramIdx >= len(callDecl.Params) {
+				paramIdx = len(callDecl.Params) - 1
 			}
-			if paramIdx >= 0 && callDecl.Type != nil && paramIdx < len(callDecl.Type.Params) {
-				if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
+			if paramIdx >= 0 {
+				if ti := callDecl.Params[paramIdx].TypeInfo; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
 					owned := make([]bool, len(ti.Params))
 					hasAny := false
 					for pi, pt := range ti.Params {
@@ -900,20 +898,20 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	}
 
 	// !list rewrite: when an argument is (list expr...) passed to a function
-	// whose parameter is annotated NoEscape:true, replace with (!list start count expr...)
+	// whose parameter is annotated Escape:false, replace with (!list start count expr...)
 	// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
 	if headOk && ome.nextSlot != nil {
-		if decl := DeclarationForValue(v[0]); decl != nil && decl.Type != nil && len(decl.Type.Params) > 0 {
+		if decl := DeclarationForValue(v[0]); decl != nil {
 			for i := 1; i < len(v); i++ {
 				paramIdx := i - 1
-				if paramIdx >= len(decl.Type.Params) {
-					paramIdx = len(decl.Type.Params) - 1 // variadic: use last param
+				if paramIdx >= len(decl.Params) {
+					paramIdx = len(decl.Params) - 1 // variadic: use last param
 				}
 				if paramIdx < 0 {
 					continue
 				}
-				ti := decl.Type.Params[paramIdx]
-				if ti == nil || !ti.NoEscape {
+				ti := decl.Params[paramIdx].TypeInfo
+				if ti == nil || ti.Escape {
 					continue // unknown or escaping parameter
 				}
 				// Check if this argument is a (list ...) call
@@ -938,7 +936,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if scmerIsSymbol(v[0], "!begin") && allConstArgs {
 		return v[len(v)-1], &TypeDescriptor{Transfer: true, Const: true}
 	}
-	if d := DeclarationForValue(v[0]); d != nil && d.IsFoldable() && allConstArgs && d.Fn != nil {
+	if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
 		for i := range v {
 			v[i] = unwrapConstListFromCode(v[i])
 		}

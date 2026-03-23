@@ -624,8 +624,14 @@ func initTransaction(en scm.Env) {
 	scm.DeclareTitle("Transactions")
 
 	scm.Declare(&en, &scm.Declaration{
-		Name: "tx_begin",
-		Desc: "Begins a new cursor-stability transaction. Takes the session function as argument. Stores the transaction context in the session.",
+		Name:         "tx_begin",
+		Desc:         "Begins a new cursor-stability transaction. Takes the session function as argument. Stores the transaction context in the session.",
+		MinParameter: 1,
+		MaxParameter: 1,
+		Params: []scm.DeclarationParameter{
+			{Name: "session", Type: "func", Desc: "the session function to store tx state in"},
+		},
+		Returns: "bool",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -639,15 +645,17 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in"}},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
-		Name: "tx_begin_acid",
-		Desc: "Begins a new ACID transaction with snapshot isolation and OCC commit. Takes the session function as argument.",
+		Name:         "tx_begin_acid",
+		Desc:         "Begins a new ACID transaction with snapshot isolation and OCC commit. Takes the session function as argument.",
+		MinParameter: 1,
+		MaxParameter: 1,
+		Params: []scm.DeclarationParameter{
+			{Name: "session", Type: "func", Desc: "the session function to store tx state in"},
+		},
+		Returns: "bool",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -661,15 +669,17 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in"}},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
-		Name: "tx_commit",
-		Desc: "Commits the current transaction.",
+		Name:         "tx_commit",
+		Desc:         "Commits the current transaction.",
+		MinParameter: 1,
+		MaxParameter: 1,
+		Params: []scm.DeclarationParameter{
+			{Name: "session", Type: "func", Desc: "the session function that holds tx state"},
+		},
+		Returns: "bool",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -686,15 +696,17 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state"}},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
-		Name: "tx_rollback",
-		Desc: "Rolls back the current transaction.",
+		Name:         "tx_rollback",
+		Desc:         "Rolls back the current transaction.",
+		MinParameter: 1,
+		MaxParameter: 1,
+		Params: []scm.DeclarationParameter{
+			{Name: "session", Type: "func", Desc: "the session function that holds tx state"},
+		},
+		Returns: "bool",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -707,10 +719,6 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state"}},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
@@ -720,15 +728,15 @@ func initTransaction(en scm.Env) {
 			"and re-raises any panic so the caller's error handler still fires. " +
 			"If an explicit transaction is active (session[\"transaction\"] != nil), " +
 			"fn is executed without any wrapping.",
+		MinParameter: 2,
+		MaxParameter: 2,
+		Params: []scm.DeclarationParameter{
+			{Name: "session", Type: "func", Desc: "the session function holding tx state"},
+			{Name: "fn", Type: "func", Desc: "zero-argument function to execute"},
+		},
+		Returns: "any",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return WithAutocommit(a[0].Func(), a[1])
-		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{
-				{Kind: "func", ParamName: "session", ParamDesc: "the session function holding tx state"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "zero-argument function to execute"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
 }

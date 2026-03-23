@@ -265,13 +265,6 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			return
 		}
 		b.WriteString(fmt.Sprint(v.Any()))
-	case tagParser:
-		sp := v.Parser()
-		b.WriteString("(parser ")
-		SerializeEx(b, sp.Syntax, glob, glob, p)
-		b.WriteByte(' ')
-		SerializeEx(b, sp.Generator, en, glob, p)
-		b.WriteByte(')')
 	case tagJIT:
 		jep := v.JIT()
 		serializeProcShallow(b, jep.Proc, glob)

@@ -30,174 +30,184 @@ import _ "github.com/lib/pq"
 import "github.com/launix-de/memcp/scm"
 
 func initPSQLImport(en scm.Env) {
-		scm.Declare(&en, &scm.Declaration{
-		Name: "psql_import",
-		Desc: "imports schema+data from a PostgreSQL server into MemCP",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-				host := "127.0.0.1"
-				if !a[0].IsNil() {
-					host = scm.String(a[0])
-				}
-				port := 5432
-				if !a[1].IsNil() {
-					port = scm.ToInt(a[1])
-				}
-				user := scm.String(a[2])
-				password := scm.String(a[3])
-				var sourceDB, sourceSchema, targetDB, sourceTable, targetTable string
-				if len(a) > 4 && !a[4].IsNil() {
-					sourceDB = scm.String(a[4])
-				}
-				if len(a) > 5 && !a[5].IsNil() {
-					sourceSchema = scm.String(a[5])
-				}
-				if len(a) > 6 && !a[6].IsNil() {
-					targetDB = scm.String(a[6])
-				}
-				if len(a) > 7 && !a[7].IsNil() {
-					sourceTable = scm.String(a[7])
-				}
-				if len(a) > 8 && !a[8].IsNil() {
-					targetTable = scm.String(a[8])
-				}
-	
-				if targetDB == "" {
-					targetDB = sourceDB
-				}
-				if targetTable == "" {
-					targetTable = sourceTable
-				}
-	
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				defer cancel()
-	
-				// connect to default "postgres" db to list databases
-				listDB, err := openPSQL(ctx, host, port, user, password, "postgres")
-				if err != nil {
-					panic(err.Error())
-				}
-				defer listDB.Close()
-	
-				srcDBs, err := psqlListDatabases(ctx, listDB, sourceDB)
-				if err != nil {
-					panic(err.Error())
-				}
-				listDB.Close()
-	
-				type job struct {
-					srcDB     string
-					srcSchema string
-					srcTable  string
-					dstDB     string
-					dstTable  string
-				}
-				jobs := make(chan job, 64)
-				var wg sync.WaitGroup
-				var firstErrMu sync.Mutex
-				var firstErr error
-	
-				workerCount := runtime.GOMAXPROCS(0)
-				if workerCount < 1 {
-					workerCount = 1
-				}
-				if workerCount > 8 {
-					workerCount = 8
-				}
-	
-				for i := 0; i < workerCount; i++ {
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
-						var workerConn *sql.DB
-						var workerDB string
-						defer func() {
+	scm.Declare(&en, &scm.Declaration{
+		"psql_import", "imports schema+data from a PostgreSQL server into MemCP",
+		4, 9,
+		[]scm.DeclarationParameter{
+			{"host", "string|nil", "PostgreSQL host (nil => 127.0.0.1)", nil},
+			{"port", "int|nil", "PostgreSQL port (nil => 5432)", nil},
+			{"username", "string", "PostgreSQL username", nil},
+			{"password", "string", "PostgreSQL password", nil},
+			{"sourcedb", "string|nil", "source database (omit/nil => all non-system dbs)", nil},
+			{"sourceschema", "string|nil", "source schema (omit/nil => all non-system schemas in sourcedb)", nil},
+			{"targetdb", "string|nil", "target database (omit/nil => sourcedb)", nil},
+			{"sourcetable", "string|nil", "source table (omit/nil => all tables in sourceschema)", nil},
+			{"targettable", "string|nil", "target table (omit/nil => sourcetable)", nil},
+		},
+		"bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			host := "127.0.0.1"
+			if !a[0].IsNil() {
+				host = scm.String(a[0])
+			}
+			port := 5432
+			if !a[1].IsNil() {
+				port = scm.ToInt(a[1])
+			}
+			user := scm.String(a[2])
+			password := scm.String(a[3])
+			var sourceDB, sourceSchema, targetDB, sourceTable, targetTable string
+			if len(a) > 4 && !a[4].IsNil() {
+				sourceDB = scm.String(a[4])
+			}
+			if len(a) > 5 && !a[5].IsNil() {
+				sourceSchema = scm.String(a[5])
+			}
+			if len(a) > 6 && !a[6].IsNil() {
+				targetDB = scm.String(a[6])
+			}
+			if len(a) > 7 && !a[7].IsNil() {
+				sourceTable = scm.String(a[7])
+			}
+			if len(a) > 8 && !a[8].IsNil() {
+				targetTable = scm.String(a[8])
+			}
+
+			if targetDB == "" {
+				targetDB = sourceDB
+			}
+			if targetTable == "" {
+				targetTable = sourceTable
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			// connect to default "postgres" db to list databases
+			listDB, err := openPSQL(ctx, host, port, user, password, "postgres")
+			if err != nil {
+				panic(err.Error())
+			}
+			defer listDB.Close()
+
+			srcDBs, err := psqlListDatabases(ctx, listDB, sourceDB)
+			if err != nil {
+				panic(err.Error())
+			}
+			listDB.Close()
+
+			type job struct {
+				srcDB     string
+				srcSchema string
+				srcTable  string
+				dstDB     string
+				dstTable  string
+			}
+			jobs := make(chan job, 64)
+			var wg sync.WaitGroup
+			var firstErrMu sync.Mutex
+			var firstErr error
+
+			workerCount := runtime.GOMAXPROCS(0)
+			if workerCount < 1 {
+				workerCount = 1
+			}
+			if workerCount > 8 {
+				workerCount = 8
+			}
+
+			for i := 0; i < workerCount; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					var workerConn *sql.DB
+					var workerDB string
+					defer func() {
+						if workerConn != nil {
+							workerConn.Close()
+						}
+					}()
+					for j := range jobs {
+						if j.srcDB != workerDB {
 							if workerConn != nil {
 								workerConn.Close()
 							}
-						}()
-						for j := range jobs {
-							if j.srcDB != workerDB {
-								if workerConn != nil {
-									workerConn.Close()
-								}
-								workerConn, err = openPSQL(ctx, host, port, user, password, j.srcDB)
-								if err != nil {
-									firstErrMu.Lock()
-									if firstErr == nil {
-										firstErr = err
-									}
-									firstErrMu.Unlock()
-									workerConn = nil
-									workerDB = ""
-									continue
-								}
-								workerDB = j.srcDB
-							}
-							if workerConn == nil {
-								continue
-							}
-							if e := psqlImportTable(ctx, workerConn, j.srcSchema, j.srcTable, j.dstDB, j.dstTable); e != nil {
+							workerConn, err = openPSQL(ctx, host, port, user, password, j.srcDB)
+							if err != nil {
 								firstErrMu.Lock()
 								if firstErr == nil {
-									firstErr = e
+									firstErr = err
 								}
 								firstErrMu.Unlock()
+								workerConn = nil
+								workerDB = ""
+								continue
 							}
+							workerDB = j.srcDB
 						}
-					}()
-				}
-	
-				for _, src := range srcDBs {
-					dst := targetDB
-					if dst == "" {
-						dst = src
-					}
-					// connect temporarily to list schemas
-					schemaConn, err := openPSQL(ctx, host, port, user, password, src)
-					if err != nil {
-						panic(err.Error())
-					}
-					schemas, err := psqlListSchemas(ctx, schemaConn, sourceSchema)
-					schemaConn.Close()
-					if err != nil {
-						panic(err.Error())
-					}
-	
-					for _, schema := range schemas {
-						// for each schema we need a separate connection to list tables
-						tableConn, err := openPSQL(ctx, host, port, user, password, src)
-						if err != nil {
-							panic(err.Error())
+						if workerConn == nil {
+							continue
 						}
-						tables, err := psqlListTables(ctx, tableConn, schema, sourceTable)
-						tableConn.Close()
-						if err != nil {
-							panic(err.Error())
-						}
-						for _, st := range tables {
-							dt := targetTable
-							if dt == "" {
-								dt = st
+						if e := psqlImportTable(ctx, workerConn, j.srcSchema, j.srcTable, j.dstDB, j.dstTable); e != nil {
+							firstErrMu.Lock()
+							if firstErr == nil {
+								firstErr = e
 							}
-							jobs <- job{srcDB: src, srcSchema: schema, srcTable: st, dstDB: dst, dstTable: dt}
+							firstErrMu.Unlock()
 						}
 					}
+				}()
+			}
+
+			for _, src := range srcDBs {
+				dst := targetDB
+				if dst == "" {
+					dst = src
 				}
-				close(jobs)
-				wg.Wait()
-	
-				firstErrMu.Lock()
-				err = firstErr
-				firstErrMu.Unlock()
+				// connect temporarily to list schemas
+				schemaConn, err := openPSQL(ctx, host, port, user, password, src)
 				if err != nil {
 					panic(err.Error())
 				}
-				return scm.NewBool(true)
-			},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string|nil", ParamName: "host", ParamDesc: "PostgreSQL host (nil => 127.0.0.1)"}, &scm.TypeDescriptor{Kind: "int|nil", ParamName: "port", ParamDesc: "PostgreSQL port (nil => 5432)"}, &scm.TypeDescriptor{Kind: "string", ParamName: "username", ParamDesc: "PostgreSQL username"}, &scm.TypeDescriptor{Kind: "string", ParamName: "password", ParamDesc: "PostgreSQL password"}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcedb", ParamDesc: "source database (omit/nil => all non-system dbs)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourceschema", ParamDesc: "source schema (omit/nil => all non-system schemas in sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targetdb", ParamDesc: "target database (omit/nil => sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcetable", ParamDesc: "source table (omit/nil => all tables in sourceschema)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targettable", ParamDesc: "target table (omit/nil => sourcetable)", Optional: true}},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
+				schemas, err := psqlListSchemas(ctx, schemaConn, sourceSchema)
+				schemaConn.Close()
+				if err != nil {
+					panic(err.Error())
+				}
+
+				for _, schema := range schemas {
+					// for each schema we need a separate connection to list tables
+					tableConn, err := openPSQL(ctx, host, port, user, password, src)
+					if err != nil {
+						panic(err.Error())
+					}
+					tables, err := psqlListTables(ctx, tableConn, schema, sourceTable)
+					tableConn.Close()
+					if err != nil {
+						panic(err.Error())
+					}
+					for _, st := range tables {
+						dt := targetTable
+						if dt == "" {
+							dt = st
+						}
+						jobs <- job{srcDB: src, srcSchema: schema, srcTable: st, dstDB: dst, dstTable: dt}
+					}
+				}
+			}
+			close(jobs)
+			wg.Wait()
+
+			firstErrMu.Lock()
+			err = firstErr
+			firstErrMu.Unlock()
+			if err != nil {
+				panic(err.Error())
+			}
+			return scm.NewBool(true)
 		},
+		false, false, nil,
+		nil,
 	})
 }
 
