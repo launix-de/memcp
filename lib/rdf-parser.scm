@@ -47,8 +47,10 @@ oder _:identifier
 
 */
 
+(define rdf_number (parser (define x (regex "[0-9]+" true)) (simplify x)))
 (define rdf_select (parser '(
 	(atom "SELECT" true)
+	(? (define distinct (atom "DISTINCT" true)))
 	(define cols (+ (or
 		(parser '((define v rdf_expression) (atom "AS" true) (define v2 rdf_variable)) (match v2 '('get_var s) '((concat s) v))) /* rdf_variable AS rdf_variable */
 		(parser (define v rdf_variable) (match v '('get_var s) '((concat s) v))) /* rdf_variable */
@@ -69,8 +71,10 @@ oder _:identifier
 		(atom "BY" true)
 		(define group (+ rdf_variable ","))
 	)
-	/* TODO: OFFSET xyz LIMIT xyz */
-) '("select" (merge cols) /* TODO: merge cols -> AS */ "where" (merge (coalesce conditions '('())))) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+	(? (atom "ORDER" true) (atom "BY" true) (+ (or (parser '((atom "DESC" true) "(" rdf_expression ")") nil) (parser '((atom "ASC" true) "(" rdf_expression ")") nil) rdf_expression) ",")) /* ORDER BY parsed but not yet executed */
+	(? (atom "LIMIT" true) (define limit rdf_number))
+	(? (atom "OFFSET" true) (define offset rdf_number))
+) '("select" (merge cols) "where" (merge (coalesce conditions '('()))) "limit" limit "offset" offset "distinct" distinct) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define ttl_header (parser '(
 	(define definitions (*
@@ -89,7 +93,7 @@ oder _:identifier
 )))
 
 (define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */) (begin
-	(match query '("select" cols "where" conditions) (begin
+	(match query '("select" cols "where" conditions "limit" limit "offset" offset "distinct" distinct) (begin
 		/* ctx: array with predefined variables */
 		/* no join reordering yet */
 		(define build_scan (lambda (conditions ctx) (match conditions
@@ -118,7 +122,49 @@ oder _:identifier
 )))
 
 (define parse_sparql (lambda (schema s) (match (ttl_header s)
-	'("prefixes" definitions "rest" rest) (rdf_queryplan schema (rdf_select rest) definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))))
+	'("prefixes" definitions "rest" rest) (begin
+		(set parsed (rdf_select rest))
+		(set qlimit (parsed "limit"))
+		(set qoffset (parsed "offset"))
+		(set qdistinct (parsed "distinct"))
+		(set needs_wrap (or (not (nil? qlimit)) (not (nil? qoffset)) (not (nil? qdistinct))))
+		(set effective_offset (coalesce qoffset 0))
+		(set effective_limit (coalesce qlimit 999999999))
+		/* build resultfunc that includes limit/offset/distinct logic */
+		(if needs_wrap (begin
+			/* state session is created at compile time, initialized here, used at eval time */
+			(set _st (newsession))
+			(_st "cnt" 0)
+			(if qdistinct (_st "seen" (newsession)))
+			(rdf_queryplan schema parsed definitions '() (lambda (cols ctx) (begin
+				(set row_expr (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))
+				(if qdistinct
+					/* DISTINCT + LIMIT/OFFSET: check seen, then count */
+					'('begin
+						'('set '_row row_expr)
+						'('set '_dkey '('json_encode '_row))
+						'('if '('not '((_st "seen") '_dkey)) '('begin
+							'((_st "seen") '_dkey true)
+							'('set '_c '(_st "cnt"))
+							'('if '('and '('>= '_c effective_offset) '('< '_c '('+ effective_offset effective_limit)))
+								'('resultrow '_row)
+							)
+							'(_st "cnt" '('+ '_c 1))
+						))
+					)
+					/* LIMIT/OFFSET only: just count */
+					'('begin
+						'('set '_row row_expr)
+						'('set '_c '(_st "cnt"))
+						'('if '('and '('>= '_c effective_offset) '('< '_c '('+ effective_offset effective_limit)))
+							'('resultrow '_row)
+						)
+						'(_st "cnt" '('+ '_c 1))
+					)
+				)
+			)))
+		) (rdf_queryplan schema parsed definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx))))))))
+	)
 )))
 
 
