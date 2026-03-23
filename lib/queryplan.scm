@@ -1583,10 +1583,15 @@ WHAT IT MUST NOT DO:
 									'((symbol get_column) _ _ col _) col
 									'((quote get_column) _ _ col _) col
 									"__unknown__"))))
-								/* all columns needed: filter cols + domain cols for sorting */
+								/* all columns needed: filter cols + domain cols + outer refs from opaque scopes */
 								(define ue_all_cols (merge_unique
 									(extract_columns_for_tblvar ue_tblvar condition2_ue)
+									(extract_outer_columns_for_tblvar ue_tblvar condition2_ue)
 									ue_dom_inner_cols))
+
+
+
+
 								/* build scan_order: sort by domain cols, limitPartitionCols=N, limit=1 */
 								(define ue_dom_count (count ue_domain_cols))
 								(define ue_dom_idx 0)
