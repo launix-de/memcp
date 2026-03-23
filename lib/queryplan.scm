@@ -597,9 +597,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					/* If tbl is a materialized subquery (list), wrap in begin+set */
-					(define _scan_tbl (if (list? tbl) (car tbl) tbl))
-					(define _scan_code (list 'scan schema _scan_tbl
+					(define _scan_code (list 'scan schema tbl
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -617,9 +615,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 								(list 'insert pj_schema pjtbl (cons 'list mat_col_names) 'shard_rows (list) (list 'lambda (list) true) true))
 							(list 'lambda (list 'acc 'shard_rows) (list 'merge 'acc 'shard_rows)))
 						isOuter))
-					(if (list? tbl)
-						(list (quote begin) (list (quote set) (car tbl) (cadr tbl)) _scan_code)
-						_scan_code)
+					_scan_code
 				))
 			)
 		)
@@ -1676,8 +1672,10 @@ WHAT IT MUST NOT DO:
 								(list rows_sym "rows")
 							))
 							(define mat_var_sym (symbol (concat "__mat_var:" id)))
+							(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
+								(list (list (quote set) mat_var_sym materialized_rows))))
 							(list
-								(list (list id schemax (list mat_var_sym materialized_rows) isOuter joinexpr))
+								(list (list id schemax mat_var_sym isOuter joinexpr))
 								'()
 								true
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
@@ -1842,8 +1840,10 @@ WHAT IT MUST NOT DO:
 									   (not a literal code block). The materialization code is stored
 									   separately and must be emitted before the scan in build_scan. */
 									(define mat_var_sym (symbol (concat "__mat_var:" id)))
+									(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
+										(list (list (quote set) mat_var_sym materialized_rows))))
 									(list
-										(list (list id schemax (list mat_var_sym materialized_rows) isOuter joinexpr))
+										(list (list id schemax mat_var_sym isOuter joinexpr))
 										'()
 										(if isOuter true (replace_column_alias condition2))
 										(list id (map output_cols_sub (lambda (col) '("Field" col "Type" "any"))))
