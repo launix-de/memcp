@@ -1471,6 +1471,129 @@ WHAT IT MUST NOT DO:
 		)
 	)))
 
+	/* === Neumann EXISTS/NOT EXISTS unnesting ===
+	Decorrelate EXISTS into a materialized DISTINCT domain table + LEFT JOIN.
+	EXISTS → (not (nil? domain_col)), NOT EXISTS → (nil? domain_col).
+	Returns (substitution table_entries) or nil if not unnestable. */
+	(define unnest_exists_subselect (lambda (subquery outer_schemas) (begin
+		(define union_parts_ue (query_union_all_parts subquery))
+		(if (not (nil? union_parts_ue))
+			nil /* UNION ALL: not handled yet */
+			(match (apply untangle_query subquery)
+				'(schema2_ue tables2_ue fields2_ue condition2_ue groups2_ue schemas2_ue rfcol2_ue) (begin
+					/* resolve columns */
+					(define rfcs_ue (make_replace_find_column_subselect schemas2_ue outer_schemas))
+					(set condition2_ue (rfcs_ue (coalesceNil condition2_ue true)))
+					/* wrap unresolved outer refs */
+					(define _ue_wrap (lambda (e) (match e
+						'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci))
+							(list (quote outer) (symbol (concat alias_ "." col)))
+							e)
+						(cons sym args) (cons (_ue_wrap sym) (map args _ue_wrap))
+						e)))
+					(set condition2_ue (_ue_wrap condition2_ue))
+					/* extract outer refs — reuse helpers from unnest_subselect */
+					(define ue_inner_aliases (map tables2_ue (lambda (td) (match td '(a _ _ _ _) a ""))))
+					(define _ue_eor (lambda (expr) (match expr
+						(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+							(match args (cons sym_arg '()) (list (string sym_arg)) '())
+							(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+								(match args '(alias_ _ col _) (if (and (not (nil? alias_)) (not (reduce ue_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false)))
+									(list (concat alias_ "." col)) '())
+									'())
+								(if (_is_opaque_scope_sym sym) '()
+									(merge_unique (map args _ue_eor)))))
+						'())))
+					(define ue_outer_refs (_ue_eor condition2_ue))
+					(define ue_has_outer (not (equal? ue_outer_refs '())))
+					/* EXISTS unnesting requires per-domain LIMIT 1 (or DISTINCT) to avoid
+					row multiplication. Until limitPartitionCols is integrated into
+					build_queryplan, fall back to inline code for all correlated EXISTS. */
+					(if true nil /* TODO: enable when limitPartitionCols integration ready */
+						(begin
+							/* Generate unique alias */
+							(define ue_sq_idx (coalesce (sq_cache "idx") 0))
+							(sq_cache "idx" (+ ue_sq_idx 1))
+							(define ue_sq_prefix (concat "_sq" ue_sq_idx))
+							(define ue_single_tbl (and (list? tables2_ue) (equal? (count tables2_ue) 1)))
+							/* alias rename map */
+							(define ue_alias_map (map tables2_ue (lambda (td) (match td
+								'(alias _ _ _ _) (list alias (if ue_single_tbl ue_sq_prefix (concat ue_sq_prefix "\0" alias)))
+								(list "" "")))))
+							(define _ue_lookup (lambda (a) (reduce ue_alias_map (lambda (acc p) (if (nil? acc) (if (equal?? a (nth p 0)) (nth p 1) nil) acc)) nil)))
+							/* split condition into correlated/non-correlated */
+							(define _ue_hor (lambda (expr) (match expr
+								(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+									true
+									(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+										(match args '(alias_ _ _ _) (and (not (nil? alias_)) (not (reduce ue_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false))) false)
+										(if (_is_opaque_scope_sym sym) false
+											(reduce args (lambda (a b) (or a (_ue_hor b))) false))))
+								false)))
+							(define _ue_fap (lambda (expr) (match expr
+								(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
+									(merge (map parts _ue_fap))
+									(list expr))
+								(list expr))))
+							(define ue_cond_parts (_ue_fap condition2_ue))
+							(define ue_inner_parts (filter ue_cond_parts (lambda (p) (not (_ue_hor p)))))
+							(define ue_outer_parts (filter ue_cond_parts (lambda (p) (_ue_hor p))))
+							/* resolve outer refs + rename inner aliases */
+							(define _ue_ror (lambda (expr) (match expr
+								(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+									(match args
+										(cons sym_arg '()) (begin
+											(define ps (split (string sym_arg) "."))
+											(match ps (list tbl col) (list (quote get_column) tbl false col false) _ expr))
+										_ expr)
+									(cons (_ue_ror sym) (map args _ue_ror)))
+								expr)))
+							(define _ue_ria (lambda (expr) (match expr
+								'((symbol get_column) alias_ ti col ci) (begin
+									(define na (_ue_lookup alias_))
+									(if (nil? na) expr (list (quote get_column) na false col false)))
+								'((quote get_column) alias_ ti col ci) (begin
+									(define na (_ue_lookup alias_))
+									(if (nil? na) expr (list (quote get_column) na false col false)))
+								(cons sym args) (cons (_ue_ria sym) (map args _ue_ria))
+								expr)))
+							/* build join condition (correlated → resolved, inner alias renamed) */
+							(define ue_join_parts (map ue_outer_parts (lambda (p) (_ue_ria (_ue_ror p)))))
+							(define ue_inner_cond (_ue_ria (if (equal? (count ue_inner_parts) 0) nil
+								(if (equal? (count ue_inner_parts) 1) (car ue_inner_parts)
+									(cons (quote and) ue_inner_parts)))))
+							(define ue_full_je (if (nil? ue_inner_cond)
+								(if (equal? (count ue_join_parts) 0) true
+									(if (equal? (count ue_join_parts) 1) (car ue_join_parts)
+										(cons (quote and) ue_join_parts)))
+								(cons (quote and) (merge ue_join_parts (list ue_inner_cond)))))
+							/* direct LEFT JOIN of inner tables */
+							(define ue_is_first true)
+							(define ue_tbl_entries (map tables2_ue (lambda (td) (match td
+								'(alias schema3 tbl3 isOuter3 je3) (begin
+									(define na (coalesce (_ue_lookup alias) alias))
+									(define entry (if ue_is_first
+										(begin (set ue_is_first false) (list na schema3 tbl3 true ue_full_je))
+										(list na schema3 tbl3 isOuter3 nil)))
+									entry)
+								td))))
+							/* substitution: EXISTS = first inner column is not null after LEFT JOIN */
+							(define ue_first_tbl (car tables2_ue))
+							(define ue_first_new_alias (coalesce (_ue_lookup (nth ue_first_tbl 0)) (nth ue_first_tbl 0)))
+							(define ue_first_cols (schemas2_ue (nth ue_first_tbl 0)))
+							(define ue_null_indicator_col (if (and (list? ue_first_cols) (> (count ue_first_cols) 0))
+								((car ue_first_cols) "Field") "ID"))
+							(define ue_subst (list (quote not) (list (quote nil?)
+								(list (quote get_column) ue_first_new_alias false ue_null_indicator_col false))))
+							(list ue_subst ue_tbl_entries)
+						)
+					)
+				)
+				nil /* untangle failed */
+			)
+		)
+	)))
+
 	(define inner_select_kind (lambda (sym) (begin
 		(if (string? sym)
 			(if (equal?? sym "inner_select")
@@ -1513,7 +1636,19 @@ WHAT IT MUST NOT DO:
 									(cons target_expr (cons subquery '())) (list (quote not) (build_in_subselect target_expr subquery outer_schemas))
 									_ nil
 								)
-								nil)
+								(if (equal?? inner_kind (quote inner_select_exists))
+									(match inner_args
+										(cons subquery '()) (begin
+											/* try Neumann NOT EXISTS unnesting */
+											(define _une_r (unnest_exists_subselect subquery outer_schemas))
+											(if (nil? _une_r)
+												(list (quote not) (build_exists_subselect subquery outer_schemas))
+												(match _une_r '(_une_subst _une_tbls) (begin
+													(sq_cache "tables" (merge _une_tbls (coalesceNil (sq_cache "tables") '())))
+													/* invert: EXISTS→true becomes NOT EXISTS→false */
+													(list (quote not) _une_subst)))))
+										_ nil)
+									nil))
 						)
 						_ nil
 					)
@@ -1538,7 +1673,14 @@ WHAT IT MUST NOT DO:
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_exists) (match args
-						(cons subquery '()) (build_exists_subselect subquery outer_schemas)
+						(cons subquery '()) (begin
+							/* try Neumann EXISTS unnesting; fall back to inline code */
+							(define _ue_r (unnest_exists_subselect subquery outer_schemas))
+							(if (nil? _ue_r)
+								(build_exists_subselect subquery outer_schemas)
+								(match _ue_r '(_ue_subst _ue_tbls) (begin
+									(sq_cache "tables" (merge _ue_tbls (coalesceNil (sq_cache "tables") '())))
+									_ue_subst))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
