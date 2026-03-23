@@ -1,48 +1,48 @@
-# Column name equals table name: SELECT user.user FROM user must work.
+# Column name equals table name: SELECT cnc_item.cnc_item FROM cnc_item must work.
 
 metadata:
   version: "1.0"
   description: "Column with same name as table"
 
 setup:
-  - sql: "DROP TABLE IF EXISTS item"
-  - sql: "CREATE TABLE item (ID INT PRIMARY KEY, item TEXT, val INT)"
-  - sql: "INSERT INTO item VALUES (1, 'foo', 10), (2, 'bar', 20)"
+  - sql: "DROP TABLE IF EXISTS cnc_item"
+  - sql: "CREATE TABLE cnc_item (ID INT PRIMARY KEY, cnc_item TEXT, val INT)"
+  - sql: "INSERT INTO cnc_item VALUES (1, 'foo', 10), (2, 'bar', 20)"
 
 test_cases:
 
   - name: "SELECT column with same name as table"
-    sql: "SELECT item FROM item ORDER BY ID"
+    sql: "SELECT cnc_item FROM cnc_item ORDER BY ID"
     expect:
       rows: 2
       data:
-        - item: "foo"
-        - item: "bar"
+        - cnc_item: "foo"
+        - cnc_item: "bar"
 
   - name: "qualified SELECT table.column where names match"
-    sql: "SELECT item.item FROM item ORDER BY item.ID"
+    sql: "SELECT cnc_item.cnc_item FROM cnc_item ORDER BY cnc_item.ID"
     expect:
       rows: 2
       data:
-        - item: "foo"
-        - item: "bar"
+        - cnc_item: "foo"
+        - cnc_item: "bar"
 
   - name: "WHERE on column with same name as table"
-    sql: "SELECT ID FROM item WHERE item = 'foo'"
+    sql: "SELECT ID FROM cnc_item WHERE cnc_item = 'foo'"
     expect:
       rows: 1
       data:
         - ID: 1
 
   - name: "UPDATE column with same name as table"
-    sql: "UPDATE item SET item = 'updated' WHERE ID = 1"
+    sql: "UPDATE cnc_item SET cnc_item = 'updated' WHERE ID = 1"
 
   - name: "verify UPDATE"
-    sql: "SELECT item FROM item WHERE ID = 1"
+    sql: "SELECT cnc_item FROM cnc_item WHERE ID = 1"
     expect:
       rows: 1
       data:
-        - item: "updated"
+        - cnc_item: "updated"
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS item"
+  - sql: "DROP TABLE IF EXISTS cnc_item"
