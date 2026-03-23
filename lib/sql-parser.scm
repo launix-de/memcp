@@ -129,7 +129,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(match (car (cdr captured_result))
 			'((symbol get_column) nil _ col _) col
 			'((symbol get_column) tblvar _ col _) col /* x.y -> col */
-			_ (car captured_result) /* for complex expressions, use captured SQL */
+			_ (begin
+				(define raw_sql (car captured_result))
+				/* hash overly long auto-generated column names to avoid
+				   exceeding MySQL protocol packet limits */
+				(if (> (strlen raw_sql) 256)
+					(concat (substr raw_sql 0 200) "..." (fnv_hash raw_sql))
+					raw_sql))
 		)
 	))
 
