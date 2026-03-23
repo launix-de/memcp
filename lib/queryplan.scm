@@ -896,8 +896,8 @@ WHAT IT MUST NOT DO:
 									'("engine" "sloppy") true)
 								(define resultrow_sym (symbol (concat "__unnest_rr:" sq_id)))
 								(define materialize_code (list (quote begin)
-									(list (quote set) resultrow_sym (symbol "resultrow"))
-									(list (quote set) (symbol "resultrow")
+									(list (quote define) resultrow_sym (symbol "resultrow"))
+									(list (quote define) (symbol "resultrow")
 										(list (quote lambda) (list (symbol "item"))
 											(list (quote insert) schema temp_tbl_name
 												(cons (quote list) all_col_names)
@@ -905,7 +905,7 @@ WHAT IT MUST NOT DO:
 													(map all_col_names (lambda (col) (list (quote get_assoc) (symbol "item") col)))))
 												'(list) '('lambda '() true) true)))
 									(build_queryplan_term decorrelated_subquery)
-									(list (quote set) (symbol "resultrow") resultrow_sym)))
+									nil))
 								/* joinexpr: match domain columns */
 								(define domain_join_conds (map _domain_joins (lambda (dj)
 									(list (quote equal??) (nth dj 1) (list (quote get_column) sq_id false (_gc_col (car dj)) false)))))
@@ -936,16 +936,14 @@ WHAT IT MUST NOT DO:
 
 						/* inline pre-computation: evaluate modified subquery, capture scalar value */
 						(list (quote !begin)
-							(list (quote set) promise_sym (list (quote newpromise)))
-							(list (quote set) resultrow_sym (symbol "resultrow"))
-							(list (quote set) (symbol "resultrow")
+							(list (quote define) promise_sym (list (quote newpromise)))
+														(list (quote define) (symbol "resultrow")
 								(list (quote lambda) (list (symbol "item"))
 									(list promise_sym "once"
 										(list (quote nth) (symbol "item") 1)
 										"scalar subselect returned more than one row")))
 							(build_queryplan_term modified_subquery)
-							(list (quote set) (symbol "resultrow") resultrow_sym)
-							(list promise_sym "value"))
+														(list promise_sym "value"))
 				))
 		))
 	)))
@@ -1218,9 +1216,9 @@ WHAT IT MUST NOT DO:
 										expr
 									)))
 									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
-									(list (quote !begin)
-										(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
-										(list (quote set) (symbol _sq_rr_name)
+									(list (quote begin)
+										(list (quote define) (symbol _sq_promise_name) (list (quote newpromise)))
+										(list (quote define) (symbol _sq_rr_name)
 											(list (quote lambda) (list (symbol "row"))
 												(list (symbol _sq_promise_name) "once"
 													(list (quote nth) (symbol "row") 1)
@@ -2490,7 +2488,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(begin
 											(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
 											(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
-											(list (quote set) (symbol pn)
+											(list (quote define) (symbol pn)
 												'('scan schema grouptbl
 													'(list acn)
 													'('lambda (list (symbol acn)) true)
@@ -2505,8 +2503,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											(list k v)
 											(list k (list (quote get_assoc) (symbol "__wgr") k))))))))
 									(cons 'begin (merge _wg_scans (list
-										(list (quote set) (symbol "__wg_orig_rr") (symbol "resultrow"))
-										(list (quote set) (symbol "resultrow")
+										(list (quote define) (symbol "__wg_orig_rr") (symbol "resultrow"))
+										(list (quote define) (symbol "resultrow")
 											(list (quote lambda) (list (symbol "__wgr"))
 												(list (symbol "__wg_orig_rr") _wg_rr_body)))
 										grouped_plan))))))
