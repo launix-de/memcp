@@ -250,7 +250,7 @@ test_cases:
         - dname: "Engineering"
           total_sal: 265000
 
-  - name: "Aggregate correlated subselect with no match returns NULL"
+  - name: "Aggregate correlated subselect with no match returns 0"
     sql: |
       SELECT d.dname,
         (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did) AS emp_count
@@ -259,10 +259,9 @@ test_cases:
       rows: 1
       data:
         - dname: "Empty"
-          emp_count: null
+          emp_count: 0
 
   - name: "Aggregate correlated subselect in WHERE comparison"
-    noncritical: true
     sql: |
       SELECT d.dname
       FROM sq_dept d
@@ -284,11 +283,11 @@ test_cases:
         - eid: 1
           matching: 1
         - eid: 2
-          matching: null
+          matching: 0
         - eid: 3
-          matching: null
+          matching: 0
         - eid: 4
-          matching: null
+          matching: 0
 
   - name: "Nested subselect: inner unnested, outer is aggregate"
     noncritical: true

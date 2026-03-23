@@ -1447,7 +1447,17 @@ WHAT IT MUST NOT DO:
 											/* schema for the materialized table (column defs) */
 											(define us_sch (list us_sq_prefix (map us_output_cols (lambda (col) (list "Field" col "Type" "any")))))
 											(sq_cache "schemas" (merge us_sch (coalesceNil (sq_cache "schemas") '())))
-											(define us_subst (list (quote get_column) us_sq_prefix false us_value_key false))
+											(define us_subst_raw (list (quote get_column) us_sq_prefix false us_value_key false))
+											/* COUNT on empty domain returns NULL from LEFT JOIN but SQL expects 0.
+											Detect COUNT pattern (aggregate N + 0) and wrap with COALESCE. */
+											(define us_is_count (match us_value_expr
+												'((symbol aggregate) _ (symbol +) 0) true
+												'((quote aggregate) _ (symbol +) 0) true
+												'((quote aggregate) _ '(symbol +) 0) true
+												false))
+											(define us_subst (if us_is_count
+												(list (quote coalesceNil) us_subst_raw 0)
+												us_subst_raw))
 											(list us_subst us_tbl_entries)
 										)
 									)
