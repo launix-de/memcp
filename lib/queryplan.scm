@@ -1260,7 +1260,7 @@ WHAT IT MUST NOT DO:
 	- schema_entry: (alias coldefs) for the schemas assoc
 	For correlated single-table non-aggregated subselects, this replaces
 	the inline dependent join with a regular LEFT JOIN. */
-	(define unnest_subselect (lambda (subquery outer_schemas is_where_context) (begin
+	(define unnest_subselect (lambda (subquery outer_schemas) (begin
 		(define union_parts_us (query_union_all_parts subquery))
 		(if (not (nil? union_parts_us))
 			nil /* UNION ALL not handled yet */
@@ -1452,7 +1452,7 @@ WHAT IT MUST NOT DO:
 												(build_queryplan_term us_derived_ast)
 												(list (quote set) (symbol "resultrow") us_rr_sym)
 												(list us_rows_sym "rows")))
-											(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized (not is_where_context) us_dom_je)))
+											(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized true us_dom_je)))
 											(define us_sch (list us_sq_prefix (map us_output_cols (lambda (col) (list "Field" col "Type" "any")))))
 											(sq_cache "schemas" (merge us_sch (coalesceNil (sq_cache "schemas") '())))
 											(define us_subst_raw (list (quote get_column) us_sq_prefix false us_value_key false))
@@ -1725,8 +1725,6 @@ WHAT IT MUST NOT DO:
 		'(quote not) true
 		_ false
 	)))
-	(define _ris_ctx (newsession))
-	(_ris_ctx "where" false)
 	(define replace_inner_selects (lambda (expr outer_schemas) (match expr
 		(cons sym args) (begin
 			(define kind (inner_select_kind sym))
@@ -1764,7 +1762,7 @@ WHAT IT MUST NOT DO:
 					(quote inner_select) (match args
 						(cons subquery '()) (begin
 							/* try Neumann unnesting first; fall back to inline code */
-							(define _us_r (unnest_subselect subquery outer_schemas (_ris_ctx "where")))
+							(define _us_r (unnest_subselect subquery outer_schemas))
 							(if (nil? _us_r)
 								(build_scalar_subselect subquery outer_schemas)
 								(match _us_r '(_us_subst _us_tbls) (begin
@@ -2111,9 +2109,7 @@ WHAT IT MUST NOT DO:
 			)))
 
 			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
-			(_ris_ctx "where" true)
 			(set condition (replace_inner_selects condition schemas))
-			(_ris_ctx "where" false)
 			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
 			(set having (replace_inner_selects having schemas))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
