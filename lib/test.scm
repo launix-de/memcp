@@ -365,9 +365,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(print "testing dictionaries ...")
 
 	/* small assoc basic ops */
-	(define d '())
-	(set d (set_assoc d "a" 1))
-	(set d (set_assoc d "b" 2))
+	(define d (set_assoc (set_assoc '() "a" 1) "b" 2))
 	(assert (has_assoc? d "a") true "assoc has a")
 	(assert (has_assoc? d "x") false "assoc no x")
 	(assert (equal? (reduce_assoc d (lambda (acc k v) (+ acc v)) 0) 3) true "reduce sum small")
@@ -376,9 +374,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (d "b") 2) true "call assoc as func(dict)")
 
 	/* overwrite should not grow list length */
-	(set d (set_assoc d "a" 11))
-	(assert (equal? (d "a") 11) true "overwrite list assoc value")
-	(assert (equal? (count d) 4) true "list length unchanged on overwrite")
+	(define d_ow (set_assoc d "a" 11))
+	(assert (equal? (d_ow "a") 11) true "overwrite list assoc value")
+	(assert (equal? (count d_ow) 4) true "list length unchanged on overwrite")
 
 	/* merge + map + filter */
 	(define d1 (list "x" 10 "y" 20))
@@ -402,15 +400,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (big "k1") 1) true "fastdict getter small key")
 
 	/* Overwrite existing key in FastDict and get updated value */
-	(set big (set_assoc big "k100" 555))
-	(assert (equal? (big "k100") 555) true "fastdict overwrite value")
+	(define big_ow (set_assoc big "k100" 555))
+	(assert (equal? (big_ow "k100") 555) true "fastdict overwrite value")
 
 	/* extract_assoc produces all keys (sanity: count) */
-	(define countkeys (reduce (extract_assoc big (lambda (k v) 1)) (lambda (a b) (+ a b)) 0))
+	(define countkeys (reduce (extract_assoc big_ow (lambda (k v) 1)) (lambda (a b) (+ a b)) 0))
 	(assert (equal? countkeys 2000) true "fastdict extract returns all keys (2000)")
 
 	/* map_assoc and filter_assoc over FastDict */
-	(define biginc (map_assoc big (lambda (k v) (+ v 1))))
+	(define biginc (map_assoc big_ow (lambda (k v) (+ v 1))))
 	(assert (equal? (biginc "k0") 1) true "map fastdict increments")
 	(define bigf (filter_assoc biginc (lambda (k v) (> v 1000))))
 	(assert (has_assoc? bigf "k1500") true "filter keeps large values")
@@ -472,24 +470,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (nth (json_decode "[1,2,3]") 1) 2) true "json_decode array -> list indexable with nth")
 
 	/* Optimizer safeguards for eval/import and aliasing in begin */
-	/* Case: preserve old binding while overloading after an eval barrier */
+	/* Case: handler layering via newsession */
 	(define http_test_begin (begin
-		(define http_handler (lambda (req res) 1))
-		(define old_handler http_handler)
+		(define _htb (newsession))
+		(_htb "handler" (lambda (req res) 1))
+		(define old_handler (_htb "handler"))
 		(eval '(print "optimizer eval barrier test"))
-		(define http_handler (lambda (req res) (+ (old_handler req res) 1)))
-		(http_handler 0 0)
+		(_htb "handler" (lambda (req res) (+ (old_handler req res) 1)))
+		((_htb "handler") 0 0)
 	))
 	(assert http_test_begin 2 "handler layering with eval barrier")
-
-	/* Case: forbid inlining an alias to a symbol redefined later in the same begin */
-	(define alias_cycle_guard (begin
-		(define a 10)
-		(define old_a a)
-		(define a (+ old_a 5))
-		(equal? a 15)
-	))
-	(assert alias_cycle_guard true "no self-referential aliasing inlining")
 
 	/* hex/bin encode-decode */
 	(assert (equal? (bin2hex "AB") "4142") true "bin2hex encodes bytes to hex")
@@ -577,8 +567,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* Assoc merge with custom merge function */
 	(print "testing assoc merge ...")
-	(define m1 (list "x" 1))
-	(set m1 (set_assoc m1 "x" 2 (lambda (old new) (+ old new))))
+	(define m1 (set_assoc (list "x" 1) "x" 2 (lambda (old new) (+ old new))))
 	(assert (equal? (m1 "x") 3) true "set_assoc merge function")
 	(define m2 (merge_assoc (list "a" 1) (list "a" 5) (lambda (old new) (+ old new))))
 	(assert (equal? (m2 "a") 6) true "merge_assoc merge function")
@@ -650,7 +639,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((eval (optimize '('lambda '('x) '(count '(list 'x 2 3))))) 42) 3 "list with variable arg: count still works")
 
 	/* Flatten nested !begin blocks */
-	(assert (begin (define xb1 1) (!begin (!begin (set xb1 2) (set xb1 (+ xb1 3))) (set xb1 (* xb1 10))) xb1) 50 "nested !begin flattens correctly")
+	(assert (begin (define xb1 1) (!begin (define xb2 2) (!begin (define xb3 3))) (+ xb1 xb2 xb3)) 6 "nested !begin defines visible in parent begin scope")
 
 	/* Lambda params overshadow outer variables */
 	(define y 10)
@@ -755,33 +744,35 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(print "testing more lambda functions ...")
 	(define lam_nested1 (lambda (req res) (+ req res)))
 	(define lam_nested2 (lambda (req res) (+ 1 (lam_nested1 req res))))
-	(define lam_nested3 (lambda (req res) (lam_nested2 req res)))
-	(define lam_nested4 lam_nested3)
-	(define lam_nested3 (lambda (req res) (+ 3 (lam_nested4 req res))))
+	(define lam_nested3_base (lambda (req res) (lam_nested2 req res)))
+	(define lam_nested3 (lambda (req res) (+ 3 (lam_nested3_base req res))))
 	(assert (lam_nested3 4 7) 15 "nested lambda scope calling")
 
 	/* cascade overrides with same variable name -> value must be drawn into inner scope */
-	(set lam_handler (newsession))
+	(define lam_handler (newsession))
 	(lam_handler "handler" (lambda (req res) (+ req res)))
-	(lam_handler "handler" (begin (set old_handler (lam_handler "handler")) (lambda (req res) (+ 1 (old_handler req res)))))
+	(lam_handler "handler" (begin (define old_handler (lam_handler "handler")) (lambda (req res) (+ 1 (old_handler req res)))))
 	(assert ((lam_handler "handler") 4 7) 12 "nested lambda scope overriding")
-	(lam_handler "handler" (begin (set old_handler (lam_handler "handler")) (set mid_handler (lambda (req res) (+ 1 (old_handler req res)))) mid_handler))
+	(lam_handler "handler" (begin (define old_handler2 (lam_handler "handler")) (define mid_handler (lambda (req res) (+ 1 (old_handler2 req res)))) mid_handler))
 	(assert ((lam_handler "handler") 4 7) 13 "nested lambda scope overriding with inner variables")
 
-	/* Handler chain via global define (dashboard/sql/rdf pattern) */
-	(define test_handler (lambda (x) (concat "base:" x)))
-	(define test_handler (begin (set old_th test_handler) (lambda (x) (concat "w1:" (old_th x)))))
-	(assert (test_handler "a") "w1:base:a" "global handler chain without workaround")
-	(define test_handler (begin (set old_th test_handler) (lambda (x) (concat "w2:" (old_th x)))))
-	(assert (test_handler "b") "w2:w1:base:b" "double global handler chain")
-	/* Handler chain with if statement (exact dashboard pattern) */
-	(define test_handler (lambda (x) (concat "base:" x)))
-	(define test_handler (begin (set old_th test_handler) (if true nil) (lambda (x) (concat "wrap:" (old_th x)))))
-	(assert (test_handler "c") "wrap:base:c" "handler chain with if-statement")
+	/* Handler chain via newsession (dashboard/sql/rdf pattern) */
+	(define test_chain (newsession))
+	(test_chain "handler" (lambda (x) (concat "base:" x)))
+	(test_chain "handler" (begin (define old_th1 (test_chain "handler")) (lambda (x) (concat "w1:" (old_th1 x)))))
+	(assert ((test_chain "handler") "a") "w1:base:a" "global handler chain via newsession")
+	(test_chain "handler" (begin (define old_th2 (test_chain "handler")) (lambda (x) (concat "w2:" (old_th2 x)))))
+	(assert ((test_chain "handler") "b") "w2:w1:base:b" "double global handler chain")
+	/* Handler chain with if statement */
+	(define test_chain2 (newsession))
+	(test_chain2 "handler" (lambda (x) (concat "base:" x)))
+	(test_chain2 "handler" (begin (define old_th3 (test_chain2 "handler")) (if true nil) (lambda (x) (concat "wrap:" (old_th3 x)))))
+	(assert ((test_chain2 "handler") "c") "wrap:base:c" "handler chain with if-statement")
 	/* Handler chain with eval in lambda body */
-	(define test_handler (lambda (x) (concat "base:" x)))
-	(define test_handler (begin (set old_th test_handler) (if true nil) (lambda (x) (begin (if false (eval '(+ 1 2)) nil) (concat "ev:" (old_th x))))))
-	(assert (test_handler "d") "ev:base:d" "handler chain with eval in body")
+	(define test_chain3 (newsession))
+	(test_chain3 "handler" (lambda (x) (concat "base:" x)))
+	(test_chain3 "handler" (begin (define old_th4 (test_chain3 "handler")) (if true nil) (lambda (x) (begin (if false (eval '(+ 1 2)) nil) (concat "ev:" (old_th4 x))))))
+	(assert ((test_chain3 "handler") "d") "ev:base:d" "handler chain with eval in body")
 
 	/* Mixed-type comparison: be forgiving (SQL) — no panic */
 	(try (lambda () (< "x" 1)) (lambda (e) (panicked "cmp-panic" true)))
@@ -1255,8 +1246,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (filter_mut '(1 2 3 4) (lambda (x) (> x 2))) '(3 4)) true "filter_mut keeps >2")
 	(assert (equal? (append_mut '(1 2) 3 4) '(1 2 3 4)) true "append_mut extends list")
 	(assert (equal? (append_unique_mut '(1 2 2) 2 3) '(1 2 2 3)) true "append_unique_mut deduplicates")
-	(define d_mut (list "a" 1))
-	(set d_mut (set_assoc_mut d_mut "b" 2))
+	(define d_mut (set_assoc_mut (list "a" 1) "b" 2))
 	(assert (equal? (get_assoc d_mut "b") 2) true "set_assoc_mut adds key")
 	(define d_mut2 (merge_assoc_mut (list "x" 1) (list "y" 2)))
 	(assert (equal? (get_assoc d_mut2 "y") 2) true "merge_assoc_mut merges")
@@ -1273,52 +1263,58 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* LAG(col1, 1): window_size=2, stride=1, skip=0 */
 	(define _win_results (newsession))
 	(_win_results "items" '())
-	(define _win_lag1 (list 0 0 1 nil nil))
-	(set _win_lag1 (window_mut _win_lag1 (lambda (oldest newest) (_win_results "items" (merge (_win_results "items") (list oldest)))) (list 10)))
+	(define _wl1_emit (lambda (state row) (begin
+		(define next (window_mut state (lambda (oldest newest) (_win_results "items" (merge (_win_results "items") (list oldest)))) row))
+		next)))
+	(define _wl1_s0 (list 0 0 1 nil nil))
+	(define _wl1_s1 (_wl1_emit _wl1_s0 (list 10)))
 	(assert (equal? (_win_results "items") '(nil)) true "window_mut LAG stride=1 row1 emits nil")
-	(set _win_lag1 (window_mut _win_lag1 (lambda (oldest newest) (_win_results "items" (merge (_win_results "items") (list oldest)))) (list 20)))
+	(define _wl1_s2 (_wl1_emit _wl1_s1 (list 20)))
 	(assert (equal? (_win_results "items") '(nil 10)) true "window_mut LAG stride=1 row2 emits 10")
-	(set _win_lag1 (window_mut _win_lag1 (lambda (oldest newest) (_win_results "items" (merge (_win_results "items") (list oldest)))) (list 30)))
+	(define _wl1_s3 (_wl1_emit _wl1_s2 (list 30)))
 	(assert (equal? (_win_results "items") '(nil 10 20)) true "window_mut LAG stride=1 row3 emits 20")
 
 	/* LEAD(col1, 1): window_size=2, stride=1, skip=1 */
 	(define _win_results2 (newsession))
 	(_win_results2 "items" '())
-	(define _win_lead1 (list 1 0 1 nil nil))
-	(set _win_lead1 (window_mut _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) (list 10)))
+	(define _wld1_emit (lambda (state row) (window_mut state (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) row)))
+	(define _wld1_s0 (list 1 0 1 nil nil))
+	(define _wld1_s1 (_wld1_emit _wld1_s0 (list 10)))
 	(assert (equal? (_win_results2 "items") '()) true "window_mut LEAD skip=1 row1 no emit")
-	(set _win_lead1 (window_mut _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) (list 20)))
+	(define _wld1_s2 (_wld1_emit _wld1_s1 (list 20)))
 	(assert (equal? (_win_results2 "items") '(20)) true "window_mut LEAD row2 emits newest=20")
-	(set _win_lead1 (window_mut _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) (list 30)))
+	(define _wld1_s3 (_wld1_emit _wld1_s2 (list 30)))
 	(assert (equal? (_win_results2 "items") '(20 30)) true "window_mut LEAD row3 emits newest=30")
 	/* flush remaining */
-	(window_flush _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) 1)
+	(window_flush _wld1_s3 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) 1)
 	(assert (equal? (_win_results2 "items") '(20 30 nil)) true "window_flush LEAD emits nil for last row")
 
 	/* LEAD(col1, 2): window_size=3, stride=1, skip=2 */
 	(define _win_results3 (newsession))
 	(_win_results3 "items" '())
-	(define _win_lead2 (list 2 0 1 nil nil nil))
-	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) (list 10)))
-	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) (list 20)))
+	(define _wld2_emit (lambda (state row) (window_mut state (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) row)))
+	(define _wld2_s0 (list 2 0 1 nil nil nil))
+	(define _wld2_s1 (_wld2_emit _wld2_s0 (list 10)))
+	(define _wld2_s2 (_wld2_emit _wld2_s1 (list 20)))
 	(assert (equal? (_win_results3 "items") '()) true "window_mut LEAD(2) skips first 2 rows")
-	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) (list 30)))
+	(define _wld2_s3 (_wld2_emit _wld2_s2 (list 30)))
 	(assert (equal? (_win_results3 "items") '(30)) true "window_mut LEAD(2) row3 emits newest=30")
-	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) (list 40)))
+	(define _wld2_s4 (_wld2_emit _wld2_s3 (list 40)))
 	(assert (equal? (_win_results3 "items") '(30 40)) true "window_mut LEAD(2) row4 emits 40")
-	(window_flush _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) 2)
+	(window_flush _wld2_s4 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) 2)
 	(assert (equal? (_win_results3 "items") '(30 40 nil nil)) true "window_flush LEAD(2) flushes 2 nils")
 
 /* stride=2: tracking two columns, LAG(col1,1) + LAG(col2,1)
 	window_size=2, stride=2 -> 4 slots, emit gets 4 flat args: old_c1 old_c2 new_c1 new_c2 */
 	(define _win_results4 (newsession))
 	(_win_results4 "items" '())
-	(define _win_stride2 (list 0 0 2 nil nil nil nil))
-	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) (list 10 100)))
+	(define _ws2_emit (lambda (state row) (window_mut state (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) row)))
+	(define _ws2_s0 (list 0 0 2 nil nil nil nil))
+	(define _ws2_s1 (_ws2_emit _ws2_s0 (list 10 100)))
 	(assert (equal? (_win_results4 "items") '(nil nil)) true "window_mut stride=2 row1 emits old=(nil nil)")
-	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) (list 20 200)))
+	(define _ws2_s2 (_ws2_emit _ws2_s1 (list 20 200)))
 	(assert (equal? (_win_results4 "items") '(nil nil 10 100)) true "window_mut stride=2 row2 emits old=(10 100)")
-	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) (list 30 300)))
+	(define _ws2_s3 (_ws2_emit _ws2_s2 (list 30 300)))
 	(assert (equal? (_win_results4 "items") '(nil nil 10 100 20 200)) true "window_mut stride=2 row3 emits old=(20 200)")
 
 	/* promise */

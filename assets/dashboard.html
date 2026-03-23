@@ -1048,6 +1048,7 @@ location.hash="db/"+encodeURIComponent(_tblTabDb)+"/+console";
 return;
 }
 _tblTab=tab;
+window.scrollTo(0,0);
 var tabs=["data","structure","triggers"];
 for(var i=0;i<tabs.length;i++){
 var p=document.getElementById("tabpanel-tbl-"+tabs[i]);
@@ -1227,6 +1228,7 @@ var el=document.getElementById(id);
 if(el)el.style.display=defaultPassword?"":"none";
 }
 function route(){
+window.scrollTo(0,0);
 var hash=location.hash.replace(/^#/,"");
 var m;
 if(!hash){

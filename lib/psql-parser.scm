@@ -15,7 +15,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-(define sql_builtins (coalesce sql_builtins (newsession)))
+/* sql_builtins defined in sql-parser.scm */
 
 (define psql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
@@ -476,10 +476,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				expr
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
-			(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
+			(define cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
+			(define condition (replace_find_column (coalesceNil condition true)))
+			(define filtercols (extract_columns_for_tblvar tbl condition))
+			(define scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
 			'((quote scan)
 				schema
 				tbl
@@ -538,8 +538,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				expr
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
+			(define condition (replace_find_column (coalesceNil condition true)))
+			(define filtercols (extract_columns_for_tblvar tbl condition))
 			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
 			(if (or (not (nil? order)) (not (nil? limit)))
 				(begin
@@ -634,11 +634,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(set do_nothing (match onconflict '(do_nothing) true _ false))
-			(set conflictupdates (match onconflict '(do_update u) u _ nil))
-			(set updaterows3 (coalesce conflictupdates updaterows))
-			(set updaterows2 (if (nil? updaterows3) nil (merge updaterows3)))
-			(set updatecols (if (nil? updaterows3) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+			(define do_nothing (match onconflict '(do_nothing) true _ false))
+			(define conflictupdates (match onconflict '(do_update u) u _ nil))
+			(define updaterows3 (coalesce conflictupdates updaterows))
+			(define updaterows2 (if (nil? updaterows3) nil (merge updaterows3)))
+			(define updatecols (if (nil? updaterows3) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
 				(if (or do_nothing (and ignoreexists (nil? updaterows3)))
@@ -675,8 +675,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
-			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+			(define updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+			(define updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			'('begin
 				'('set 'resultrow '('lambda '('item) '('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
@@ -1037,9 +1037,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define psql_copy_def (parser '(psql_identifier /* ignore */ "." (define tbl psql_identifier) "(" (define columns (+ psql_identifier ",")) ")") '(tbl columns)))
 
 (define load_psql (lambda (schema stream policy) (begin
-	(set state (newsession))
-	(set resultrow print)
-	(set session (newsession))
+	(define state (newsession))
+	(define resultrow print)
+	(define session (newsession))
 	(define psql_line (lambda (line) (begin
 		(match line
 			(concat "--" b) /* comment */ false
@@ -1059,7 +1059,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(concat start ";" rest) (begin
 				/* command ended -> execute (at max one command per line) */
 				(print (concat (state "sql") start))
-				(set plan (parse_psql schema (concat (state "sql") start) policy))
+				(define plan (parse_psql schema (concat (state "sql") start) policy))
 				(print "SQL execute" plan)
 				(eval plan)
 				(state "sql" rest)

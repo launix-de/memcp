@@ -38,14 +38,15 @@ type Declaration struct {
 // TypeDescriptor describes the type of any Scmer value at arbitrary depth.
 // Uses pointers throughout — nil means "unknown / don't care" (conservative).
 type TypeDescriptor struct {
-	Kind     string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
-	Escape   bool                       // value may outlive its scope
-	Transfer bool                       // callee receives ownership, can mutate
-	Const    bool                       // value is a compile-time constant
-	Params   []*TypeDescriptor          // for Kind="func": parameter types
-	Return   *TypeDescriptor            // for Kind="func": return type
-	Keys     map[string]*TypeDescriptor // for Kind="assoc": per-key type info
-	Element  *TypeDescriptor            // for Kind="list": element type
+	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
+	Escape         bool                       // value may outlive its scope
+	Transfer       bool                       // callee receives ownership, can mutate
+	Const          bool                       // value is a compile-time constant
+	HasSideEffects bool                       // function has side effects (insert, session writes, etc.); optimizer must not eliminate calls whose result is unused. Default assumption for unknown functions is true (conservative).
+	Params         []*TypeDescriptor          // for Kind="func": parameter types
+	Return         *TypeDescriptor            // for Kind="func": return type
+	Keys           map[string]*TypeDescriptor // for Kind="assoc": per-key type info
+	Element        *TypeDescriptor            // for Kind="list": element type
 	// Custom optimizer hook for function types. When set, the optimizer calls this
 	// INSTEAD of the default arg optimization + post-processing.
 	// v[0] is head, v[1:] are UN-optimized args. The hook optimizes its own args

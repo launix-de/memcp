@@ -15,7 +15,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-(define sql_builtins (coalesce sql_builtins (newsession)))
+(define sql_builtins (newsession))
 
 /* Aggregate function registry: maps uppercase name → (reduce neutral ordered).
 ordered=false: ORDER BY in OVER() can be ignored (result independent of row order)
@@ -190,12 +190,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
 
-		/* Helper to compile SET assignments into (set changed_rows ...) statements */
-		/* Returns a list of set statements for each assignment */
+		/* Helper to compile SET assignments into (changed_rows "value" (set_assoc ...)) statements */
+		/* Returns a list of promise-update statements for each assignment */
 		(define compile_set_assignments (lambda (assignments)
 			(map assignments (lambda (a) (match a '(col expr)
-				(list (symbol "set") changed_rows_sym
-					(list (symbol "set_assoc") changed_rows_sym col (transform_trigger_expr expr))))))))
+				(list changed_rows_sym "value"
+					(list (symbol "set_assoc") (list changed_rows_sym "value") col (transform_trigger_expr expr))))))))
 
 		/* Helper to compile a single statement */
 		/* For BEFORE triggers with SET: returns (set changed_rows ...) statements */
@@ -457,9 +457,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 					(list (symbol "lambda") params
 						(list (symbol "begin")
 							session_bind
-							(list (symbol "define") changed_rows_sym (symbol "NEW"))
+							(list (symbol "define") changed_rows_sym (list (symbol "newpromise")))
+							(list changed_rows_sym "value" (symbol "NEW"))
 							(cons '!begin valid_stmts)
-							changed_rows_sym)))
+							(list changed_rows_sym "value"))))
 			)
 			/* SET assignments (legacy format) - body is AST (list (col1 expr1) ...), eval to get actual list */
 			(cons (symbol list) assignments) (begin
@@ -1090,8 +1091,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				expr
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-			(set condition (replace_find_column (coalesceNil condition true)))
+			(define cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
+			(define condition (replace_find_column (coalesceNil condition true)))
 			(if (> (count all_defs) 1)
 				/* multi-table UPDATE: UPDATE t1 [AS a], t2 [AS b] SET ... WHERE ... */
 				(begin
@@ -1121,8 +1122,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				)
 				/* single-table UPDATE */
 				(begin
-					(set filtercols (extract_columns_for_tblvar tbl condition))
-					(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
+					(define filtercols (extract_columns_for_tblvar tbl condition))
+					(define scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
 					(define mapcols (cons list (cons "$update" scancols)))
 					(define mapfn '('lambda
 						(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
@@ -1208,8 +1209,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				expr
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
+			(define condition (replace_find_column (coalesceNil condition true)))
+			(define filtercols (extract_columns_for_tblvar tbl condition))
 			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
 			(if (or (not (nil? order)) (not (nil? limit)))
 				(begin
@@ -1306,7 +1307,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			))
 		) (begin
 				(define all_defs (merge tbldefs))
-				(set condition (coalesceNil condition true))
+				(define condition (coalesceNil condition true))
 				/* policy: write access check */
 				(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
 					'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
@@ -1328,7 +1329,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			))
 		) (begin
 				(define all_defs (merge tbldefs))
-				(set condition (coalesceNil condition true))
+				(define condition (coalesceNil condition true))
 				(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
 					'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 					acc)) nil))
@@ -1366,8 +1367,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
-			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+			(define updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+			(define updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
 				(begin
@@ -1402,8 +1403,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		) updaterows)))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
-			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+			(define updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+			(define updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
@@ -1436,8 +1437,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
-			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+			(define updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+			(define updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
@@ -1868,9 +1869,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 )))
 
 (define load_sql (lambda (schema stream) (begin
-	(set state (newsession))
-	(set resultrow print)
-	(set session (newsession))
+	(define state (newsession))
+	(define resultrow print)
+	(define session (newsession))
 	(define sql_line (lambda (line) (begin
 		(match line
 			(concat "--" b) /* comment */ false
@@ -1879,7 +1880,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(concat start (eval (state "delimiter")) rest) (begin
 				/* command ended -> execute (at max one command per line) */
 				(print (concat (state "sql") start))
-				(set plan (parse_sql schema (concat (state "sql") start) nil))
+				(define plan (parse_sql schema (concat (state "sql") start) nil))
 				(print "SQL execute" plan)
 				(eval plan)
 				(state "sql" rest)

@@ -260,7 +260,11 @@ restart:
 				if target.Vars == nil {
 					target.Vars = make(Vars)
 				}
-				target.Vars[mustSymbol(list[1])] = val
+				sym := mustSymbol(list[1])
+				if _, exists := target.Vars[sym]; exists {
+					panic("set/define is single state assignment only. for mutable values, use (newpromise) for values or the more expensive (newsession) for maps. Redefined: " + string(sym))
+				}
+				target.Vars[sym] = val
 				return val
 			case "setN":
 				val := Eval(list[2], en)

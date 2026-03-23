@@ -18,7 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "rdf-parser.scm")
 
 /* query plan cache for SPARQL */
-(set sparql_queryplan_cache (newcachemap))
+(define sparql_queryplan_cache (newcachemap))
 
 /*
 this is how rdf works:
@@ -34,11 +34,11 @@ this is how rdf works:
 )))
 
 /* http hook for handling SparQL */
-(define http_handler (begin
-	(set old_handler (coalesce http_handler handler_404))
+(http_handler_chain "value" (begin
+	(define old_handler (coalesce (http_handler_chain "value") handler_404))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(define pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (time (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
@@ -56,7 +56,7 @@ this is how rdf works:
 	)))
 	(define handle_ttl_load (lambda (req res schema ttl_data) (begin
 		/* check for password */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(define pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
@@ -82,15 +82,15 @@ this is how rdf works:
 		/* hooked our additional paths to it */
 		(match (req "path")
 			(regex "^/rdf/([^/]+)$" url schema) (begin
-				(set query ((req "body")))
+				(define query ((req "body")))
 				(handle_query req res schema query)
 			)
 			(regex "^/rdf/([^/]+)/(.*)$" url schema query_un) (begin
-				(set query (urldecode query_un))
+				(define query (urldecode query_un))
 				(handle_query req res schema query)
 			)
 			(regex "^/rdf/([^/]+)/load_ttl$" url schema) (begin
-				(set ttl_data ((req "body")))
+				(define ttl_data ((req "body")))
 				(handle_ttl_load req res schema ttl_data)
 			)
 			/* default */

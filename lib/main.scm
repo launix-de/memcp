@@ -20,24 +20,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (print "")
 (import "test.scm")
 
-(set static_files (serveStatic "../assets"))
+(define static_files (serveStatic "../assets"))
 
-/* this can be overhooked */
-(define http_handler (lambda (req res) (begin
+/* handler chain: modules wrap http_handler via promise for mutable chaining */
+(define http_handler_chain (newpromise))
+(http_handler_chain "value" (lambda (req res) (begin
 	(print "request " req)
 	(if (equal? (req "path") "/") (begin
 		((res "header") "Location" "/dashboard")
 		((res "status") 301)
 	) (static_files req res))
-	/*
-	((res "header") "Content-Type" "text/plain")
-	((res "status") 404)
-	((res "println") "404 not found")
-	*/
 )))
+(define http_handler (lambda (req res) ((http_handler_chain "value") req res)))
 
 /* global service registry: each module registers itself as (service_registry name (list port route protocols)) */
-(set service_registry (coalesce service_registry (newsession)))
+(define service_registry (coalesce service_registry (newsession)))
 
 (import "sql.scm")
 (import "dashboard.scm")
@@ -45,7 +42,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* read ports from command line arguments or environment */
 (if (not (arg "disable-api" false)) (begin
-	(set port (arg "api-port" (env "PORT" "4321")))
+	(define port (arg "api-port" (env "PORT" "4321")))
 	(serve port (lambda (req res) (http_handler req res)))
 	(service_registry "HTTP Server" (list port "/" "HTTP"))
 	(print "listening on http://localhost:" port)

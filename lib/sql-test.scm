@@ -19,7 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ((lambda () (begin
 	(print "performing SQL engine tests ...")
 
-	(set teststat (newsession))
+	(define teststat (newsession))
 	(teststat "count" 0)
 	(teststat "success" 0)
 	(define assert (lambda (val1 val2 errormsg) (begin
@@ -33,7 +33,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* Helper function to execute SQL and return result rows */
 	(define sql-test-exec (lambda (query) (begin
-		(set query-results (newsession))
+		(define query-results (newsession))
 		(query-results "rows" '())
 		(define resultrow (lambda (row) (begin
 			(query-results "rows" (append (query-results "rows") (list row)))

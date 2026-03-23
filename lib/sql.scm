@@ -21,8 +21,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "queryplan.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
-(set sql_queryplan_cache (newcachemap))
-(set psql_queryplan_cache (newcachemap))
+(define sql_queryplan_cache (newcachemap))
+(define psql_queryplan_cache (newcachemap))
 
 /* cached_parse: wraps a parser with cachemap-based caching.
 cache_key = username:schema:hash(query) — per-user isolation (policy checked at parse time).
@@ -127,7 +127,7 @@ if the user is not allowed to access this property, the function will throw an e
 ))
 
 /* global counter incremented on each logged error — used by dashboard WebSocket to trigger refresh */
-(set error_log_counter (newsession))
+(define error_log_counter (newsession))
 (error_log_counter "count" 0)
 
 /* error_log: insert a failed query into system_statistic.errors (no-op when ErrorQueryLog is off)
@@ -170,7 +170,7 @@ qry    — query text (pass "" when unknown) */
 )) (lambda (e) true))
 
 /* global variables exposed via @@ and SHOW VARIABLES */
-(set globalvars (newsession))
+(define globalvars (newsession))
 (globalvars "lower_case_table_names" 0)
 (globalvars "character_set_server" "utf8mb4")
 (globalvars "collation_server" "utf8mb4_general_ci")
@@ -183,20 +183,20 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 
 
 /* persistent HTTP sessions for transaction support */
-(set http_sessions (newsession))
+(define http_sessions (newsession))
 
 /* http hook for handling SQL */
-(define http_handler (begin
-	(set old_handler http_handler)
+(http_handler_chain "value" (begin
+	(define old_handler (http_handler_chain "value"))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(define pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
 					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username")))
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
-					(define resultrow (res "jsonl"))
+					(define original_resultrow (res "jsonl"))
 					/* Use persistent session if X-Session-Id header is present */
 					(define session_id ((req "header") "X-Session-Id"))
 					(define session (if session_id
@@ -210,20 +210,17 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						)
 						(context "session")
 					))
-					(set resultrow_called false)
-					(set original_resultrow resultrow)
-					(set last_row nil)
+					(define resultrow_called (newpromise))
+					(resultrow_called "value" false)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
-						(if (equal? row last_row)
-							true
-							(begin (set last_row row) (original_resultrow row))))))
+						(resultrow_called "value" true)
+						(original_resultrow row))))
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
-					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
+					(define query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
+					(if (and (not (resultrow_called "value")) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
@@ -243,21 +240,18 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(define pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
 					((res "header") "Content-Type" "text/plain")
-					(define resultrow (res "jsonl"))
+					(define original_resultrow_pg (res "jsonl"))
 					(define session (context "session"))
-					(set resultrow_called false)
-					(set original_resultrow resultrow)
-					(set last_row nil)
+					(define resultrow_called_pg (newpromise))
+					(resultrow_called_pg "value" false)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
-						(if (equal? row last_row)
-							true
-							(begin (set last_row row) (original_resultrow row))))))
+						(resultrow_called_pg "value" true)
+						(original_resultrow_pg row))))
 					(define handled (match query
 						(regex "SELECT\\s+c\\.relname\\s+as\\s+tblname\\s+FROM\\s+pg_catalog\\.pg_class" _)
 						(begin
@@ -280,8 +274,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
-						(original_resultrow '("affected_rows" query_result))
+					(if (and (not (resultrow_called_pg "value")) (number? query_result)) (begin
+						(original_resultrow_pg '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
 						(error_log (concat e) schema (req "username") query)
@@ -301,13 +295,13 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	/* handler for raw Scheme code execution (global, no schema) */
 	(define handle_scm (lambda (req res code) (begin
 		/* check for password - must be admin */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+		(define pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
 		(if (and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
 			(begin
 				(try (lambda () (begin
 					((res "header") "Content-Type" "application/json")
 					(define session (context "session"))
-					(set result (eval (scheme code)))
+					(define result (eval (scheme code)))
 					((res "print") (json_encode result))
 				)) (lambda(e) (begin
 						(error_log (concat e) "" (req "username") code)
@@ -330,31 +324,31 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 		(match (req "path")
 			/* Scheme code execution endpoint (global, admin only) */
 			"/scm" (begin
-				(set code ((req "body")))
+				(define code ((req "body")))
 				(handle_scm req res code)
 			)
 			(regex "^/sql/([^/]+)$" url schema) (begin
-				(set query ((req "body")))
+				(define query_raw ((req "body")))
 				/* tolerate an optional trailing ';' - must be at end of string */
-				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
+				(define query (match query_raw (regex "^((?s:.*));\\s*$" _ body) body query_raw))
 				(handle_query req res schema query)
 			)
 			(regex "^/sql/([^/]+)/(.*)$" url schema query_un) (begin
-				(set query (urldecode query_un))
+				(define query_raw (urldecode query_un))
 				/* tolerate an optional trailing ';' - must be at end of string */
-				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
+				(define query (match query_raw (regex "^((?s:.*));\\s*$" _ body) body query_raw))
 				(handle_query req res schema query)
 			)
 			(regex "^/psql/([^/]+)$" url schema) (begin
-				(set query ((req "body")))
+				(define query_raw ((req "body")))
 				/* tolerate an optional trailing ';' - must be at end of string */
-				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
+				(define query (match query_raw (regex "^((?s:.*));\\s*$" _ body) body query_raw))
 				(handle_query_postgres req res schema query)
 			)
 			(regex "^/psql/([^/]+)/(.*)$" url schema query_un) (begin
-				(set query (urldecode query_un))
+				(define query_raw (urldecode query_un))
 				/* tolerate an optional trailing ';' - must be at end of string */
-				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
+				(define query (match query_raw (regex "^((?s:.*));\\s*$" _ body) body query_raw))
 				(handle_query_postgres req res schema query)
 			)
 			/* default */
@@ -368,19 +362,19 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 (service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
-(set mysql_auth (lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
-(set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
-(set mysql_handler (lambda (schema sql resultrow_sql session) (begin
+(define mysql_auth (lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
+(define mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
+(define mysql_handler (lambda (schema sql resultrow_sql session) (begin
 	(define resultrow resultrow_sql)
 	(try (lambda () (begin
 		(if (equal? (session "syntax") "scheme") (begin
 			/* scheme syntax mode */
-			(set print (lambda args (resultrow '("result" (concat args)))))
+			(define print (lambda args (resultrow '("result" (concat args)))))
 			(resultrow '("result" (eval (scheme sql))))
 		) (time (begin
 				/* SQL syntax mode */
 				/* tolerate an optional trailing ';' - must be at end of string */
-				(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
+				(define sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
 				(define mysql_username (coalesce (session "username") "root"))
 				(define formula (if (equal? (session "syntax") "postgresql")
 					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
@@ -396,7 +390,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 /* dedicated mysql protocol listening at specified port */
 (try (lambda () (begin
 	(if (not (arg "disable-mysql" false)) (begin
-		(set port (arg "mysql-port" (env "MYSQL_PORT" "3307")))
+		(define port (arg "mysql-port" (env "MYSQL_PORT" "3307")))
 		(mysql port mysql_auth mysql_schema mysql_handler)
 		(if (not (nil? service_registry)) (service_registry "MySQL Protocol" (list port "" "MySQL Wire Protocol")))
 		(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password '" (arg "root-password" "admin") "'), set with --mysql-port")
@@ -405,7 +399,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 
 /* dedicated mysql unix socket */
 (try (lambda () (begin
-	(set socketpath (arg "mysql-socket" (env "MYSQL_SOCKET" "/tmp/memcp.sock")))
+	(define socketpath (arg "mysql-socket" (env "MYSQL_SOCKET" "/tmp/memcp.sock")))
 	(if (not (equal? socketpath ""))
 		(begin
 			(mysql_socket socketpath mysql_auth mysql_schema mysql_handler)

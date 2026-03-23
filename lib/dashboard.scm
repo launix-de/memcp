@@ -19,13 +19,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* check admin credentials against system.user table */
 (define dashboard_check_admin (lambda (req) (begin
-	(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+	(define pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
 	(and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
 )))
 
 /* check any authenticated user (returns admin flag or false) */
 (define dashboard_check_user (lambda (req) (begin
-	(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+	(define pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
 	(if (and pw (equal? (car pw) (password (req "password")))) (equal? (car (cdr pw)) 1) nil)
 )))
 
@@ -53,7 +53,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 /* rolling errors/sec: sample error_log_counter every 10 pushes (~1s) */
-(set eps_state (newsession))
+(define eps_state (newsession))
 (eps_state "prev_count" 0)
 (eps_state "ticks" 0)
 (eps_state "eps" 0)
@@ -127,9 +127,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: build JSON for a single user entry (takes username string) */
 (define dashboard_build_user_json (lambda (uname) (begin
-	(set is_adm (scan "system" "user" '("username") (lambda (u) (equal? u uname)) '("admin") (lambda (a) a) (lambda (a b) b) false))
+	(define is_adm (scan "system" "user" '("username") (lambda (u) (equal? u uname)) '("admin") (lambda (a) a) (lambda (a b) b) false))
 	/* get database access for non-admins */
-	(set dbs_csv (if is_adm ""
+	(define dbs_csv (if is_adm ""
 		(scan "system" "access" '("username") (lambda (u) (equal?? u uname))
 			'("database") (lambda (db) (json_encode db))
 			(lambda (acc db) (if (equal? acc "") db (concat acc "," db))) "")))
@@ -139,8 +139,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 /* hook into http_handler */
-(define http_handler (begin
-	(set old_handler http_handler)
+(http_handler_chain "value" (begin
+	(define old_handler (http_handler_chain "value"))
 	/* register Dashboard in service registry */
 	(if (not (nil? service_registry)) (begin
 		(service_registry "Dashboard" (list (arg "api-port" (env "PORT" "4321")) "/dashboard" "GET, WebSocket"))
@@ -352,7 +352,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"/ws/dashboard" (begin
 				(if (dashboard_check_admin req)
 					(begin
-						(set send ((res "websocket") (lambda (msg) nil)))
+						(define send ((res "websocket") (lambda (msg) nil)))
 						(dashboard_push send)
 					)
 					(dashboard_send_401 res)
@@ -390,8 +390,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		)
 	))
 	/* reschedule: use configured interval (default 60s) */
-	(set interval (settings "MetricsTracingInterval"))
-	(if (<= interval 0) (set interval 60))
+	(define interval_raw (settings "MetricsTracingInterval"))
+	(define interval (if (<= interval_raw 0) 60 interval_raw))
 	(setTimeout metrics_trace_tick (* interval 1000))
 )))
 

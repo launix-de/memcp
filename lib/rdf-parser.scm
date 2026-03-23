@@ -128,7 +128,7 @@ oder _:identifier
 			)
 			(define rest rest)
 		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
-		(set load (lambda (facts) (!begin
+		(define load (lambda (facts) (!begin
 			/* (print "start ======== " facts "-- end") */
 			(insert schema "rdf" '("s" "p" "o") facts '() (lambda () true))
 		)))

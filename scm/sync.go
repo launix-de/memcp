@@ -17,12 +17,16 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 package scm
 
-import "sync"
-import "time"
-import "unsafe"
-import "context"
-import "runtime"
-import "github.com/jtolds/gls"
+import (
+	"context"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
+
+	"github.com/jtolds/gls"
+)
 
 // cachedMemStats provides a cached version of runtime.ReadMemStats.
 // The cache is refreshed when older than 1 minute. Between refreshes,
@@ -64,12 +68,14 @@ func AdjustMemStats(delta int64) {
 	cachedStatsMu.Unlock()
 }
 
-/* promise: single-value cell */
+/* promise: single-value cell, lock-free via atomic CAS on state tag */
 
-// NOTE: current implementation is intentionally not thread-safe.
-// It is sufficient for sequential query-plan execution. Fresh promises use a
-// dedicated [2]Scmer backing; (newpromise list) reuses an existing >=2-element
-// slice with zero extra allocation.
+// Thread-safe via lock-free CAS on cells[1].aux:
+// To mutate, CAS cells[1].aux from current to lockSentinel (tagBool|false).
+// On success: read/write cells[0], then store the new state tag.
+// On failure (already locked or failed): spin-retry.
+// Fresh promises use a dedicated [2]Scmer backing; (newpromise list) reuses
+// an existing >=2-element slice with zero extra allocation.
 func NewPromise(a ...Scmer) Scmer {
 	var cells []Scmer
 	if len(a) == 0 {
@@ -85,7 +91,40 @@ func NewPromise(a ...Scmer) Scmer {
 	return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 1)}
 }
 
+// promiseLockSentinel is the aux value used as a spin-lock marker on cells[1].
+// Uses tagBool|false (auxVal=0). The "failed" state uses tagBool|auxVal=2
+// to distinguish it from the lock sentinel while keeping the same tag byte.
+var promiseLockSentinel = makeAux(tagBool, 0)
+
+// promiseFailedAux is the aux value for a failed promise state.
+// Distinct from promiseLockSentinel (auxVal=0) to avoid deadlock on failed reads.
+var promiseFailedAux = makeAux(tagBool, 2)
+
+// promiseLock acquires the CAS spin-lock on cells[1].aux.
+// Returns the previous aux value (the state before locking).
+func promiseLock(cells *[2]Scmer) uint64 {
+	statePtr := (*uint64)(unsafe.Pointer(&cells[1].aux))
+	for {
+		old := atomic.LoadUint64(statePtr)
+		if old == promiseLockSentinel {
+			// Already locked (or failed) — spin
+			runtime.Gosched()
+			continue
+		}
+		if atomic.CompareAndSwapUint64(statePtr, old, promiseLockSentinel) {
+			return old
+		}
+		runtime.Gosched()
+	}
+}
+
+// promiseUnlock releases the lock by storing the new state aux.
+func promiseUnlock(cells *[2]Scmer, newStateAux uint64) {
+	atomic.StoreUint64(&cells[1].aux, newStateAux)
+}
+
 // ApplyPromise dispatches a tagPromise call. Called from ApplyEx.
+// Thread-safe via CAS spin-lock on cells[1].aux.
 func ApplyPromise(p Scmer, args []Scmer) Scmer {
 	cells := (*[2]Scmer)(unsafe.Pointer(p.ptr))
 	if len(args) == 0 {
@@ -96,46 +135,65 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 	case 1:
 		switch key {
 		case "value":
-			if cells[1].IsNil() {
+			prevAux := promiseLock(cells)
+			if prevAux == NewNil().aux {
+				promiseUnlock(cells, prevAux)
 				return NewNil()
 			}
-			return cells[0]
+			val := cells[0]
+			promiseUnlock(cells, prevAux)
+			return val
 		case "state":
-			return cells[1]
+			prevAux := promiseLock(cells)
+			promiseUnlock(cells, prevAux)
+			if prevAux == NewNil().aux {
+				return NewNil()
+			}
+			if prevAux == promiseFailedAux {
+				return NewBool(false)
+			}
+			return NewBool(true)
 		case "fail":
+			promiseLock(cells)
 			cells[0] = NewNil()
-			cells[1] = NewBool(false)
+			promiseUnlock(cells, promiseFailedAux)
 			return NewBool(false)
 		default:
 			panic("promise: unknown operation: " + key)
 		}
 	case 2:
 		if key == "value" {
+			promiseLock(cells)
 			cells[0] = args[1]
-			cells[1] = NewBool(true)
+			promiseUnlock(cells, NewBool(true).aux)
 			return args[1]
 		}
 		if key == "once" {
-			if !cells[1].IsNil() {
+			prevAux := promiseLock(cells)
+			if prevAux != NewNil().aux {
+				promiseUnlock(cells, prevAux)
 				panic("promise already fulfilled/failed")
 			}
 			cells[0] = args[1]
-			cells[1] = NewBool(true)
+			promiseUnlock(cells, NewBool(true).aux)
 			return args[1]
 		}
 		if key == "fail" {
+			promiseLock(cells)
 			cells[0] = args[1]
-			cells[1] = NewBool(false)
+			promiseUnlock(cells, promiseFailedAux)
 			return args[1]
 		}
 		panic("promise: unknown operation: " + key)
 	case 3:
 		if key == "once" {
-			if !cells[1].IsNil() {
+			prevAux := promiseLock(cells)
+			if prevAux != NewNil().aux {
+				promiseUnlock(cells, prevAux)
 				panic(args[2].String())
 			}
 			cells[0] = args[1]
-			cells[1] = NewBool(true)
+			promiseUnlock(cells, NewBool(true).aux)
 			return args[1]
 		}
 		panic("promise: unknown operation: " + key)
@@ -309,14 +367,14 @@ func init_sync() {
 		[]DeclarationParameter{
 			{"list", "any", "optional: ≥2-element slice to use as backing", nil},
 		}, "func",
-		NewPromise, false, false, nil,
+		NewPromise, false, false, &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "func", HasSideEffects: true}},
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"newsession", "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
 		0, 0,
 		[]DeclarationParameter{}, "func",
-		NewSession, false, false, nil,
+		NewSession, false, false, &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "func", HasSideEffects: true}},
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{

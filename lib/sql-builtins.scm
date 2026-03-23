@@ -1,4 +1,4 @@
-(define sql_builtins (coalesce sql_builtins (newsession)))
+/* sql_builtins defined in sql-parser.scm */
 
 /* all upper case */
 /*(sql_builtins "HELLO" (lambda () "Hello world"))*/

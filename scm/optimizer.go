@@ -173,10 +173,12 @@ type optimizerMetainfo struct {
 	nextSlot             *int            // pointer to lambda's slot counter; nil outside lambda
 	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
+	definedInScope       map[Symbol]bool // tracks variables defined in the current scope for single-assignment check
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
+	result.definedInScope = make(map[Symbol]bool)
 	return
 }
 func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
@@ -185,6 +187,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
 	}
 	result.setBlacklist = ome.setBlacklist
+	result.definedInScope = make(map[Symbol]bool) // new lambda = fresh scope
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
 }
@@ -204,6 +207,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.setBlacklist = ome.setBlacklist
 	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
 	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
+	result.definedInScope = make(map[Symbol]bool) // new scope = fresh tracking
 	return
 }
 
@@ -303,6 +307,40 @@ func expressionContainsEvalOrImportCall(v Scmer) bool {
 	return false
 }
 
+// exprHasSideEffects returns true if the expression may have side effects.
+// Conservative: returns true for unknown functions. Only returns false when the
+// called function has an explicit Declaration with Type.HasSideEffects == false,
+// AND all callback arguments (lambdas) are also side-effect-free.
+func exprHasSideEffects(val Scmer) bool {
+	list, ok := scmerSlice(val)
+	if !ok || len(list) == 0 {
+		return false // literals, symbols — no side effects
+	}
+	head := list[0]
+	// set/define always has side effects (scope mutation)
+	if scmerIsSymbol(head, "set") || scmerIsSymbol(head, "define") || scmerIsSymbol(head, "setN") {
+		return true
+	}
+	// begin/!begin: check all sub-expressions
+	if scmerIsSymbol(head, "begin") || scmerIsSymbol(head, "!begin") {
+		for _, sub := range list[1:] {
+			if exprHasSideEffects(sub) {
+				return true
+			}
+		}
+		return false
+	}
+	// Known function: check Declaration type info
+	decl := DeclarationForValue(head)
+	if decl == nil {
+		return true // unknown function — conservative
+	}
+	if decl.Type != nil {
+		return decl.Type.HasSideEffects
+	}
+	return true // no type info — conservative
+}
+
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
 	if val.ptr == nil && val.aux == 0 {
 		return NewNil(), true, true
@@ -384,6 +422,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		outerOme := optimizerMetainfo{
 			variableReplacement: make(map[Symbol]Scmer),
 			setBlacklist:        ome.setBlacklist,
+			definedInScope:      make(map[Symbol]bool),
 		}
 		for k, repl := range ome.variableReplacement {
 			if slice, ok := scmerSlice(repl); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
@@ -556,13 +595,14 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		for i := 1; i < len(v); i++ {
 			var constant bool
 			v[i], transferOwnership, constant = OptimizeEx(v[i], env, &ome2, i == len(v)-1 && useResult)
-			if constant {
-				if i == len(v)-1 {
-					isConstant = true
-				} else {
+			if i < len(v)-1 {
+				// Non-last statement: eliminate if constant OR side-effect-free
+				if constant || !exprHasSideEffects(v[i]) {
 					v = append(v[:i], v[i+1:]...)
 					i--
 				}
+			} else if constant {
+				isConstant = true
 			}
 		}
 		// Flatten nested !begin blocks
@@ -700,6 +740,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					return NewNil(), true, true
 				}
 			}
+			if ome.definedInScope[sym] {
+				panic("set/define is single state assignment only. for mutable values, use (newpromise) for values or the more expensive (newsession) for maps. Redefined: " + string(sym))
+			}
+			ome.definedInScope[sym] = true
 			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
 				v[1] = repl
 			}
