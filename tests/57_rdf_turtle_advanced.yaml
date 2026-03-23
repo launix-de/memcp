@@ -1,0 +1,215 @@
+metadata:
+  version: "1.0"
+  description: "Advanced Turtle syntax — numeric literals, booleans, blank nodes, datatypes, escapes, base, collections"
+
+setup: []
+
+test_cases:
+
+  # ==========================================================
+  # Numeric and Boolean Literals
+  # ==========================================================
+
+  - name: "TTL: integer literal"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv01.org/> .
+      t:item t:count 42 .
+    sparql: |
+      @prefix t: <http://ttladv01.org/> .
+      SELECT ?v WHERE { t:item t:count ?v }
+    expect:
+      rows: 1
+
+  - name: "TTL: decimal literal"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv02.org/> .
+      t:item t:price 19.99 .
+    sparql: |
+      @prefix t: <http://ttladv02.org/> .
+      SELECT ?v WHERE { t:item t:price ?v }
+    expect:
+      rows: 1
+
+  - name: "TTL: boolean true"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv03.org/> .
+      t:item t:active true .
+    sparql: |
+      @prefix t: <http://ttladv03.org/> .
+      SELECT ?v WHERE { t:item t:active ?v }
+    expect:
+      rows: 1
+
+  - name: "TTL: boolean false"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv04.org/> .
+      t:item t:deleted false .
+    sparql: |
+      @prefix t: <http://ttladv04.org/> .
+      SELECT ?v WHERE { t:item t:deleted ?v }
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # Datatype Annotations
+  # ==========================================================
+
+  - name: "TTL: datatype annotation xsd:integer"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv05.org/> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      t:item t:val "42"^^xsd:integer .
+    sparql: |
+      @prefix t: <http://ttladv05.org/> .
+      SELECT ?v WHERE { t:item t:val ?v }
+    expect:
+      rows: 1
+
+  - name: "TTL: datatype annotation xsd:date"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv06.org/> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      t:item t:date "2026-03-23"^^xsd:date .
+    sparql: |
+      @prefix t: <http://ttladv06.org/> .
+      SELECT ?v WHERE { t:item t:date ?v }
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # Blank Nodes
+  # ==========================================================
+
+  - name: "TTL: blank node _:identifier"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv07.org/> .
+      t:alice t:address _:addr1 .
+      _:addr1 t:city "Berlin" .
+    sparql: |
+      @prefix t: <http://ttladv07.org/> .
+      SELECT ?city WHERE { t:alice t:address ?addr . ?addr t:city ?city }
+    expect:
+      rows: 1
+      data:
+        - "?city": "Berlin"
+
+  - name: "TTL: anonymous blank node [ ... ]"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv08.org/> .
+      t:alice t:address [ t:city "Munich" ; t:zip "80331" ] .
+    sparql: |
+      @prefix t: <http://ttladv08.org/> .
+      SELECT ?city WHERE { t:alice t:address ?addr . ?addr t:city ?city }
+    expect:
+      rows: 1
+      data:
+        - "?city": "Munich"
+
+  # ==========================================================
+  # Escape Sequences
+  # ==========================================================
+
+  - name: "TTL: escape newline in string"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv09.org/> .
+      t:item t:val "line1\nline2" .
+    sparql: |
+      @prefix t: <http://ttladv09.org/> .
+      SELECT ?v WHERE { t:item t:val ?v }
+    expect:
+      rows: 1
+      contains: "line1"
+
+  - name: "TTL: escape tab in string"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv10.org/> .
+      t:item t:val "col1\tcol2" .
+    sparql: |
+      @prefix t: <http://ttladv10.org/> .
+      SELECT ?v WHERE { t:item t:val ?v }
+    expect:
+      rows: 1
+
+  - name: "TTL: escape backslash"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv11.org/> .
+      t:item t:path "C:\\Users\\test" .
+    sparql: |
+      @prefix t: <http://ttladv11.org/> .
+      SELECT ?v WHERE { t:item t:path ?v }
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # @base
+  # ==========================================================
+
+  - name: "TTL: @base directive"
+    noncritical: true
+    ttl_data: |
+      @base <http://ttladv12.org/> .
+      <item> <val> "based" .
+    sparql: |
+      SELECT ?v WHERE { <http://ttladv12.org/item> <http://ttladv12.org/val> ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "based"
+
+  # ==========================================================
+  # Collections (RDF Lists)
+  # ==========================================================
+
+  - name: "TTL: collection syntax"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv13.org/> .
+      t:item t:list ( t:a t:b t:c ) .
+    sparql: |
+      @prefix t: <http://ttladv13.org/> .
+      SELECT ?first WHERE { t:item t:list ?l }
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # Triple-quoted strings
+  # ==========================================================
+
+  - name: "TTL: triple-quoted string with embedded quotes"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv14.org/> .
+      t:item t:html """<div class="test">Hello</div>""" .
+    sparql: |
+      @prefix t: <http://ttladv14.org/> .
+      SELECT ?v WHERE { t:item t:html ?v }
+    expect:
+      rows: 1
+      contains: 'class="test"'
+
+  - name: "TTL: triple-quoted multiline"
+    noncritical: true
+    ttl_data: |
+      @prefix t: <http://ttladv15.org/> .
+      t:item t:text """line one
+      line two
+      line three""" .
+    sparql: |
+      @prefix t: <http://ttladv15.org/> .
+      SELECT ?v WHERE { t:item t:text ?v }
+    expect:
+      rows: 1
+      contains: "line one"
+
+cleanup: []

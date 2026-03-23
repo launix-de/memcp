@@ -19,7 +19,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (define rdf_variable (parser (define x (regex "\?[a-zA-Z0-9_]+" true)) '('get_var (symbol x))))
 (define rdf_constant (parser (or
-	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* string */
+	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* IRI */
+	(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false)) x) /* triple-quoted string (may contain " and newlines) */
 	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) x) /* string with language, ignore language, TODO: escape tbnrf */
 	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"" false false)) x) /* string, TODO: escape tbnrf */
 	(regex "[a-zA-Z0-9_]+" true) /* string, TODO: handle prefixing */
@@ -62,17 +63,17 @@ oder _:identifier
 		(define group (+ rdf_variable ","))
 	)
 	/* TODO: OFFSET xyz LIMIT xyz */
-) '("select" (merge cols) /* TODO: merge cols -> AS */ "where" (merge (coalesce conditions '('())))) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+) '("select" (merge cols) /* TODO: merge cols -> AS */ "where" (merge (coalesce conditions '('())))) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define ttl_header (parser '(
 	(define definitions (*
 		(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant) ".") '(pfx content))
 	))
 	(define rest rest)
-) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define rdf_replace_ctx (lambda (expr ctx) (match expr
-	'('get_var sym) (coalesce (ctx sym) (error "unknown symbol " sym " in " ctx))
+	'('get_var sym) (coalesce (ctx sym) (error "SPARQL error: variable " sym " is used in SELECT but not bound in WHERE clause"))
 	(cons head tail) (cons head (map tail (lambda (x) (replace_ctx x ctx))))
 	expr
 )))
@@ -89,7 +90,7 @@ oder _:identifier
 						'(conditions (append vars sym (symbol var)))) /* variable is free: collect in scope */
 					(string? s) '((append conditions sym s) vars)
 					(list? l) '((append conditions sym (eval l)) vars)
-					(print "undetected " v)
+					(error "SPARQL error: unsupported expression type in WHERE clause: " v)
 				)))
 				(match (process s "s" '() '()) '(conditions vars)
 					(match (process p "p" conditions vars) '(conditions vars)
@@ -127,13 +128,13 @@ oder _:identifier
 				) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 			)
 			(define rest rest)
-		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 		(set load (lambda (facts) (!begin
 			/* (print "start ======== " facts "-- end") */
 			(insert schema "rdf" '("s" "p" "o") facts '() (lambda () true))
 		)))
 		(define process_fact (lambda (rest) (match (ttl_fact rest)
-			'("facts" facts "rest" (regex "[ \\n\\r\\t]*" _)) (load facts)
+			'("facts" facts "rest" (regex "^[ \\n\\r\\t]*$" _)) (load facts)
 			'("facts" facts "rest" rest) (!begin (load facts) (process_fact rest))
 			rest (error "couldnt parse: " rest)
 		)))
