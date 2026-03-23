@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "sort"
 import "github.com/carli2/hybridsort"
 import "time"
 import "strings"
@@ -27,26 +28,60 @@ import "github.com/launix-de/memcp/scm"
 
 // optimizeScanOrder is the Optimize hook for the scan_order declaration.
 // scan_order args: 1=schema, 2=table, 3=filterCols, 4=filter, 5=sortcols, 6=sortdirs,
-// 7=offset, 8=limit, 9=mapCols, 10=map, 11=reduce, 12=neutral, 13=isOuter
+// 7=limitPartitionCols, 8=offset, 9=limit, 10=mapCols, 11=map, 12=reduce, 13=neutral, 14=isOuter
 func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	// Optimize args 1-10 normally
-	for i := 1; i <= 10 && i < len(v); i++ {
+	// Optimize args 1-11 normally
+	for i := 1; i <= 11 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
-	// Arg 11 (reduce callback): set callback ownership before optimizing
-	if len(v) > 11 && !v[11].IsNil() {
+	// Arg 12 (reduce callback): set callback ownership before optimizing
+	if len(v) > 12 && !v[12].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
-		v[11], _ = oc.OptimizeSub(v[11], true)
-	}
-	// Arg 12 (neutral)
-	if len(v) > 12 {
 		v[12], _ = oc.OptimizeSub(v[12], true)
 	}
-	// Arg 13 (isOuter)
+	// Arg 13 (neutral)
 	if len(v) > 13 {
 		v[13], _ = oc.OptimizeSub(v[13], true)
 	}
+	// Arg 14 (isOuter)
+	if len(v) > 14 {
+		v[14], _ = oc.OptimizeSub(v[14], true)
+	}
 	return scm.NewSlice(v), nil
+}
+
+// pkEqual compares two partition key slices element-wise.
+func pkEqual(a, b []scm.Scmer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !scm.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// skipPartition uses binary search to skip all remaining items in the current
+// partition of a shardqueue. Since items are sorted by (partition_key, order_key),
+// all items of the same partition are contiguous — sort.Search finds the first
+// item of the next partition in O(log n).
+func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
+	idx := sort.Search(len(qx.items), func(i int) bool {
+		for c := 0; c < n; c++ {
+			if !scm.Equal(qx.scols[c](qx.items[i]), pk[c]) {
+				return true
+			}
+		}
+		return false
+	})
+	qx.items = qx.items[idx:]
+	if len(qx.items) > 0 {
+		heap.Fix(q, 0)
+	} else {
+		heap.Pop(q)
+	}
 }
 
 type shardqueue struct {
@@ -139,7 +174,7 @@ func (s *globalqueue) Pop() any {
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
@@ -279,7 +314,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 	// total_limit helps the shard-scanners to early-out
 	total_limit := -1
-	if limit >= 0 {
+	if limitPartitionCols == 0 && limit >= 0 {
 		total_limit = offset + limit
 	}
 
@@ -310,7 +345,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 					q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 				}
 			}()
-			res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
+			res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols)
 			q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 		})
 		close(q_)
@@ -348,6 +383,13 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	bufN := 0
 	var bufShard *shardqueue
 	breakCaught := false
+
+	// Per-partition offset/limit state. When limitPartitionCols == 0 this
+	// degenerates to a single partition covering all rows (= global limit).
+	var prevPK []scm.Scmer
+	partOffset := offset
+	partLimit := limit
+
 	for !breakCaught && len(q.q) > 0 {
 		qx := q.q[0]
 
@@ -356,10 +398,31 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 			continue
 		}
 
-		if offset > 0 {
-			// offset skip (typically small)
+		// Extract partition key from leading sort columns (empty slice when limitPartitionCols == 0)
+		peekItem := qx.items[0]
+		curPK := make([]scm.Scmer, limitPartitionCols)
+		for c := 0; c < limitPartitionCols && c < len(qx.scols); c++ {
+			curPK[c] = qx.scols[c](peekItem)
+		}
+		// Detect partition change (first row or key differs)
+		if prevPK == nil || !pkEqual(prevPK, curPK) {
+			// Flush buffer before partition switch
+			if bufN > 0 && bufShard != nil {
+				akkumulator, breakCaught = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
+				hadValue = true
+				bufN = 0
+				if breakCaught {
+					break
+				}
+			}
+			partOffset = offset
+			partLimit = limit
+			prevPK = curPK
+		}
+		// Per-partition offset skip
+		if partOffset > 0 {
+			partOffset--
 			qx.items = qx.items[1:]
-			offset--
 			if len(qx.items) > 0 {
 				heap.Fix(&q, 0)
 			} else {
@@ -367,10 +430,17 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 			}
 			continue
 		}
-
-		if limit == 0 {
+		// Per-partition limit exhausted
+		if partLimit == 0 {
+			if limitPartitionCols > 0 {
+				// Bulk-skip rest of partition via binary search (O(log n))
+				skipPartition(&q, qx, prevPK, limitPartitionCols)
+				continue // proceed to next partition
+			}
+			// limitPartitionCols == 0: single partition = all done
 			break
 		}
+		partLimit--
 
 		// Pop one item from the global merge
 		item := qx.items[0]
@@ -391,9 +461,6 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		buf[bufN] = item
 		bufN++
 		outCount++
-		if limit >= 0 {
-			limit--
-		}
 
 		// Flush if buffer full
 		if bufN == len(buf) {
@@ -478,7 +545,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limit int, callbackCols []string) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
@@ -719,6 +786,33 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	if (maxInsertIndex > 0 || true) && len(sortcols) > 0 {
 		hybridsort.Slice(result.items, result.Less)
 		// or: quicksort but those segments above offset+limit can be omitted
+	}
+	// Shard-local per-partition pruning: keep at most offset+limit items per
+	// partition. This reduces what goes into the cross-shard globalqueue merge.
+	// When limitPartitionCols == 0 this is a single partition (= global limit).
+	if limit >= 0 {
+		perPart := offset + limit
+		if perPart < 0 {
+			perPart = len(result.items) // overflow guard
+		}
+		var pruned []uint32
+		var prevPK []scm.Scmer
+		partCount := 0
+		for _, idx := range result.items {
+			curPK := make([]scm.Scmer, limitPartitionCols)
+			for c := 0; c < limitPartitionCols; c++ {
+				curPK[c] = result.scols[c](idx)
+			}
+			if prevPK == nil || !pkEqual(prevPK, curPK) {
+				partCount = 0
+				prevPK = curPK
+			}
+			if partCount < perPart {
+				pruned = append(pruned, idx)
+			}
+			partCount++
+		}
+		result.items = pruned
 	}
 	return
 }
