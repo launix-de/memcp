@@ -946,7 +946,7 @@ func init() {
 		Fn: nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "value for the list", Variadic: true}},
-			Return: &TypeDescriptor{Kind: "list"},
+			Return: FreshAlloc,
 			Const: true,
 		},
 	})

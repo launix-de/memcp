@@ -60,7 +60,7 @@ func (d *Declaration) MaxParams() int {
 // Uses pointers throughout — nil means "unknown / don't care" (conservative).
 type TypeDescriptor struct {
 	Kind      string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
-	Escape    bool                       // value may outlive its scope
+	NoEscape  bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
 	Transfer  bool                       // callee receives ownership, can mutate
 	Const     bool                       // value is a compile-time constant; for func: safe to constant-fold
 	Optional  bool                       // for func params: parameter is optional
@@ -135,19 +135,19 @@ func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
 	if ti.kind == KindAny && ti.flags == 0 && ti.Extra == nil {
 		return nil
 	}
-	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), Escape: ti.Escape()}
+	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape()}
 	if ti.Extra != nil {
 		*td = *ti.Extra
 		td.Transfer = ti.Transfer()
 		td.Const = ti.Const()
-		td.Escape = ti.Escape()
+		td.NoEscape = !ti.Escape()
 	}
 	return td
 }
 
 // NoEscape is a reusable TypeDescriptor annotation for parameters that
 // the callee reads but never stores — safe to back with stack-allocated !list.
-var NoEscape = &TypeDescriptor{Kind: "any", Escape: false}
+var NoEscape = &TypeDescriptor{Kind: "any", NoEscape: true}
 
 var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)

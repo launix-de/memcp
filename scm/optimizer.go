@@ -440,7 +440,7 @@ func typeInfoFromDescriptor(td *TypeDescriptor) TypeInfo {
 	if td.Const {
 		ti = ti.WithConst()
 	}
-	if td.Escape {
+	if !td.NoEscape {
 		ti.flags |= FlagEscape
 	}
 	ti.Extra = td
@@ -1097,7 +1097,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			}
 		}
 		// Mark local lambda escaped if passed as argument (before optimization),
-		// unless the callee's parameter is annotated Escape:false (e.g. map's callback)
+		// unless the callee's parameter is annotated NoEscape:true (e.g. map's callback)
 		if i > 0 && ome.localLambdas != nil {
 			if argSym, ok := scmerSymbol(v[i]); ok {
 				if info, ok2 := ome.localLambdas[argSym]; ok2 {
@@ -1108,7 +1108,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 							paramIdx = len(callDecl.Type.Params) - 1
 						}
 						if paramIdx >= 0 {
-							if ti := callDecl.Type.Params[paramIdx]; ti != nil && !ti.Escape {
+							if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.NoEscape {
 								paramEscapes = false
 							}
 						}
@@ -1233,7 +1233,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	}
 
 	// !list rewrite: when an argument is (list expr...) passed to a function
-	// whose parameter is annotated Escape:false, replace with (!list start count expr...)
+	// whose parameter is annotated NoEscape:true, replace with (!list start count expr...)
 	// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
 	if headOk && ome.nextSlot != nil {
 		if decl := DeclarationForValue(v[0]); decl != nil {
@@ -1248,7 +1248,10 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 				if paramIdx < 0 {
 					continue
 				}
-				if decl.Type == nil || paramIdx >= len(decl.Type.Params) || decl.Type.Params[paramIdx] == nil || decl.Type.Params[paramIdx].Escape {
+				// Only rewrite if param is explicitly annotated as NoEscape
+				// (Kind must be set to distinguish from zero-value TypeDescriptor)
+				p := decl.Type.Params[paramIdx]
+				if p == nil || p.Kind == "" || !p.NoEscape {
 					continue // unknown or escaping parameter
 				}
 				// Check if this argument is a (list ...) call

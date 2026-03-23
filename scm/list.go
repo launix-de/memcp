@@ -139,7 +139,7 @@ func init_list() {
 		Fn: List,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "items...", ParamDesc: "items to put into the list", Variadic: true}},
-			Return: &TypeDescriptor{Kind: "list"},
+			Return: FreshAlloc,
 			Const: true,
 		},
 	})
