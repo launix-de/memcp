@@ -18,12 +18,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* RDF parser according to: https://www.w3.org/TR/sparql11-query/ */
 
 (define rdf_variable (parser (define x (regex "\?[a-zA-Z0-9_]+" true)) '('get_var (symbol x))))
+/* datatype suffix parser: consumes ^^<IRI> or ^^prefix:name or ^^barename */
+(define rdf_datatype_suffix (parser (or
+	(parser '((atom "<" false false) (regex "[^>]*" false false) (atom ">" false false)) nil) /* ^^<IRI> */
+	(regex "[a-zA-Z0-9_]*:[a-zA-Z0-9_]*" false false) /* ^^prefix:name */
+	(regex "[a-zA-Z0-9_]+" false false) /* ^^barename */
+)))
 (define rdf_constant (parser (or
 	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* IRI */
-	(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false)) x) /* triple-quoted string (may contain " and newlines) */
-	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) x) /* string with language, ignore language, TODO: escape tbnrf */
-	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"" false false)) x) /* string, TODO: escape tbnrf */
-	(regex "[a-zA-Z0-9_]+" true) /* string, TODO: handle prefixing */
+	(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x) /* triple-quoted string, optional datatype ignored */
+	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) x) /* string with language, ignore language */
+	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x) /* string, optional datatype ignored */
+	(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node _:identifier */
+	(regex "[a-zA-Z0-9_]+" true) /* bare name */
 )))
 (define rdf_expression (parser (or
 	(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) '('concat '('definitions pfx) post)) /* as expression */
@@ -67,7 +74,10 @@ oder _:identifier
 
 (define ttl_header (parser '(
 	(define definitions (*
-		(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant) ".") '(pfx content))
+		(or
+			(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant) ".") '(pfx content))
+			(parser '((atom "@base" true) (define content rdf_constant) ".") '("" content)) /* @base sets the empty prefix */
+		)
 	))
 	(define rest rest)
 ) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
@@ -115,12 +125,25 @@ oder _:identifier
 (define load_ttl (lambda (schema s) (match (ttl_header s)
 	'("prefixes" definitions "rest" rest)
 	(begin
+		/* blank node registry: maps _:id to urn:uuid:... per load */
+		(set blank_nodes (newsession))
+		(define resolve_blank (lambda (val)
+			(match val (regex "^_:(.+)$" _ id) (begin
+				(set existing (blank_nodes id))
+				(if (nil? existing) (begin
+					(set generated (concat "urn:uuid:" (uuid)))
+					(blank_nodes id generated)
+					generated
+				) existing)
+			) val)
+		))
 		(define rdf_constant_pfx (parser (or
+			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node before prefix match */
 			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))) /* add prefix with validation */
 			rdf_constant
 		)))
 		(define ttl_fact (parser '(
-			(define facts 
+			(define facts
 				(parser '(
 					(define s rdf_constant_pfx)
 					(define ps (+ (parser '((define p rdf_constant_pfx) (define os (+ rdf_constant_pfx ",")) (? ";")) (map os (lambda (o) '(p o))))))
@@ -130,8 +153,9 @@ oder _:identifier
 			(define rest rest)
 		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 		(set load (lambda (facts) (!begin
-			/* (print "start ======== " facts "-- end") */
-			(insert schema "rdf" '("s" "p" "o") facts '() (lambda () true))
+			/* resolve blank nodes to UUIDs */
+			(set resolved_facts (map facts (lambda (triple) (match triple '(s p o) '((resolve_blank s) (resolve_blank p) (resolve_blank o))))))
+			(insert schema "rdf" '("s" "p" "o") resolved_facts '() (lambda () true))
 		)))
 		(define process_fact (lambda (rest) (match (ttl_fact rest)
 			'("facts" facts "rest" (regex "^[ \\n\\r\\t]*$" _)) (load facts)

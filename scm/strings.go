@@ -33,6 +33,7 @@ import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
 import "sync"
 import "reflect"
+import "github.com/google/uuid"
 
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
@@ -808,6 +809,20 @@ func init_strings() {
 				panic("error while decoding hex: " + fmt.Sprint(err))
 			}
 			return NewString(string(decoded))
+		}, true, false, nil,
+		nil,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"uuid", "generates a new random UUID v4 string",
+		0, 0,
+		[]DeclarationParameter{}, "string",
+		func(a ...Scmer) Scmer {
+			id, err := uuid.NewRandom()
+			if err != nil {
+				panic("error generating UUID: " + fmt.Sprint(err))
+			}
+			return NewString(id.String())
 		}, true, false, nil,
 		nil,
 	})
