@@ -301,7 +301,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
-		10, 13,
+		11, 14,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "database where the table is located", nil},
 			scm.DeclarationParameter{"table", "string", "name of the table to scan", nil},
@@ -309,6 +309,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", nil},
 			scm.DeclarationParameter{"sortcols", "list", "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value", nil},
 			scm.DeclarationParameter{"sortdirs", "list", "list of column directions to sort. Must be same length as sortcols. < means ascending, > means descending, (collate ...) will add collations", nil},
+			scm.DeclarationParameter{"limitPartitionCols", "number", "number of leading sort columns that form the partition key for per-partition offset/limit. 0 (default) means global offset/limit.", nil},
 			scm.DeclarationParameter{"offset", "number", "number of items to skip before the first one is fed into map", nil},
 			scm.DeclarationParameter{"limit", "number", "max number of items to read", nil},
 			scm.DeclarationParameter{"mapColumns", "list", "list of columns that are fed into map", nil},
@@ -321,15 +322,16 @@ func Init(en scm.Env) {
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
 			sortcolsVals := mustScmerSlice(a[4], "sortcols")
 			sortdirsVals := mustScmerSlice(a[5], "sortdirs")
-			mapcols := scmerSliceToStrings(mustScmerSlice(a[8], "mapColumns"))
+			limitPartitionCols := scm.ToInt(a[6])
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[9], "mapColumns"))
 
 			aggregate := scm.NewNil()
-			if len(a) > 10 {
-				aggregate = a[10]
+			if len(a) > 11 {
+				aggregate = a[11]
 			}
 			neutral := scm.NewNil()
-			if len(a) > 11 {
-				neutral = a[11]
+			if len(a) > 12 {
+				neutral = a[12]
 			}
 
 			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcolsVals))
@@ -337,13 +339,13 @@ func Init(en scm.Env) {
 				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
 			}
 
-			isOuter := len(a) > 12 && scm.ToBool(a[12])
+			isOuter := len(a) > 13 && scm.ToBool(a[13])
 
 			if list, ok := scmerSlice(a[1]); ok {
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[3])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[9])
+				mapfn := scm.OptimizeProcToSerialFunction(a[10])
 				mapparams := make([]scm.Scmer, len(mapcols))
 				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
 				if !aggregate.IsNil() {
@@ -399,8 +401,8 @@ func Init(en scm.Env) {
 					}
 					return false
 				})
-				offset := int(scm.ToInt(a[6]))
-				limit := int(scm.ToInt(a[7]))
+				offset := int(scm.ToInt(a[7]))
+				limit := int(scm.ToInt(a[8]))
 				hadValue := false
 				count := 0
 				for idx, val := range filtered {
@@ -437,7 +439,7 @@ func Init(en scm.Env) {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
 
-			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
+			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[7]), scm.ToInt(a[8]), mapcols, a[10], aggregate, neutral, isOuter)
 		}, false, false, &scm.TypeDescriptor{Optimize: optimizeScanOrder},
 		nil,
 	})

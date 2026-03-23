@@ -299,7 +299,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(if (dashboard_check_admin req) (begin
 					(define items (scan_order "system_statistic" "logs"
 						'() (lambda () true)
-						'("datetime") '(>) 0 100
+						'("datetime") '(>) 0 0 100
 						'("datetime" "message")
 						(lambda (dt msg) (json_encode_assoc (list "datetime" dt "message" msg)))
 						(lambda (acc item) (if (equal? acc "") item (concat acc "," item)))
@@ -406,7 +406,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(try (lambda () (begin
 			(define cnt (scan "system_statistic" "logs" '() (lambda () true) '() (lambda () 1) + 0))
 			(if (> cnt max_print)
-				(scan_order "system_statistic" "logs" '() (lambda () true) '("datetime") '(<) 0 (- cnt max_print) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+				(scan_order "system_statistic" "logs" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
 			)
 		)) (lambda (e) true))
 	))
@@ -416,7 +416,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(try (lambda () (begin
 			(define cnt (scan "system_statistic" "errors" '() (lambda () true) '() (lambda () 1) + 0))
 			(if (> cnt max_err)
-				(scan_order "system_statistic" "errors" '() (lambda () true) '("datetime") '(<) 0 (- cnt max_err) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+				(scan_order "system_statistic" "errors" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
 			)
 		)) (lambda (e) true))
 	))

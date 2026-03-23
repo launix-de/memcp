@@ -379,7 +379,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	t.scan_order(
 		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
-		0, -1,
+		0, 0, -1,
 		scanCallbackCols,
 		scanMapFn,
 		scanReduceFn,
