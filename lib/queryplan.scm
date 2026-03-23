@@ -109,7 +109,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(if (equal? result neutral) nil result)
 )))
 (define scalar_scan_order (lambda (schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral) (begin
-	(define result (scan_order schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral))
+	(define result (scan_order schema tbl filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
 	(if (equal? result neutral) nil result)
 )))
 
@@ -1355,6 +1355,7 @@ WHAT IT MUST NOT DO:
 														)
 														(cons list ordercols)
 														(cons list dirs)
+														0
 														(coalesceNil stage_offset 0)
 														(coalesceNil stage_limit -1)
 														(cons list cur_cols)
@@ -1495,6 +1496,7 @@ WHAT IT MUST NOT DO:
 										)
 										(cons list ordercols)
 										(cons list dirs)
+										0
 										(coalesceNil stage_offset 0)
 										(coalesceNil stage_limit -1)
 										(cons list '())
@@ -2988,7 +2990,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 															(cons list ordercols)
 															(cons list sort_dirs)
-															0 -1
+															0 0 -1
 															(cons list stride_cols)
 															mapfn_ast
 															reducer_ast
@@ -3000,7 +3002,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 													(cons list ordercols)
 													(cons list sort_dirs)
-													0 -1
+													0 0 -1
 													(cons list stride_cols)
 													mapfn_ast
 													reducer_ast
@@ -3026,7 +3028,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 																'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 																(cons list ordercols)
 																(cons list sort_dirs)
-																0 -1
+																0 0 -1
 																(cons list stride_cols)
 																mapfn_ast
 																reducer_ast
@@ -3038,7 +3040,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 														(cons list ordercols)
 														(cons list sort_dirs)
-														0 -1
+														0 0 -1
 														(cons list stride_cols)
 														mapfn_ast
 														reducer_ast
@@ -3109,6 +3111,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										/* sortcols, sortdirs */
 										(cons list ordercols)
 										(cons list dirs)
+										0
 										scan_offset
 										scan_limit
 										/* extract columns and store them into variables */
