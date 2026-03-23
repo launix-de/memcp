@@ -283,7 +283,11 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			t.t.waitTableLock(scm.GetCurrentSessionState(), true)
 		}
 	}
-	skipShardReadLock := ownsWrite || lockMutationExclusively
+	/* Skip RLock when ANY goroutine holds the write lock on this shard.
+	   Nested scans (e.g. EXISTS inside UPDATE) run in child goroutines
+	   via gls.Go but inherit the parent's write-lock ownership logically.
+	   Without this, the child's RLock deadlocks against the parent's Lock. */
+	skipShardReadLock := ownsWrite || lockMutationExclusively || t.anyWriteOwner()
 	t.ensureMainCount(skipShardReadLock)
 
 	// condition column readers
