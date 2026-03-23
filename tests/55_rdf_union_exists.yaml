@@ -1,0 +1,63 @@
+metadata:
+  version: "1.0"
+  description: "SPARQL UNION, EXISTS, NOT EXISTS"
+
+setup: []
+
+test_cases:
+
+  - name: "UNION: two alternatives"
+    noncritical: true
+    ttl_data: |
+      @prefix u01: <http://union01.org/> .
+      u01:a a u01:Cat .
+      u01:b a u01:Dog .
+      u01:c a u01:Fish .
+    sparql: |
+      @prefix u01: <http://union01.org/> .
+      SELECT ?s WHERE { { ?s a u01:Cat } UNION { ?s a u01:Dog } }
+    expect:
+      rows: 2
+
+  - name: "UNION: no overlap"
+    noncritical: true
+    ttl_data: |
+      @prefix u02: <http://union02.org/> .
+      u02:a u02:x "1" .
+      u02:b u02:y "2" .
+    sparql: |
+      @prefix u02: <http://union02.org/> .
+      SELECT ?s WHERE { { ?s u02:x ?v } UNION { ?s u02:y ?v } }
+    expect:
+      rows: 2
+
+  - name: "NOT EXISTS: filter out"
+    noncritical: true
+    ttl_data: |
+      @prefix u03: <http://union03.org/> .
+      u03:a u03:name "Alice" .
+      u03:b u03:name "Bob" .
+      u03:b u03:deleted "true" .
+    sparql: |
+      @prefix u03: <http://union03.org/> .
+      SELECT ?n WHERE { ?s u03:name ?n . FILTER NOT EXISTS { ?s u03:deleted ?d } }
+    expect:
+      rows: 1
+      data:
+        - "?n": "Alice"
+
+  - name: "EXISTS: keep only matching"
+    noncritical: true
+    ttl_data: |
+      @prefix u04: <http://union04.org/> .
+      u04:a u04:name "Alice" ; u04:verified "true" .
+      u04:b u04:name "Bob" .
+    sparql: |
+      @prefix u04: <http://union04.org/> .
+      SELECT ?n WHERE { ?s u04:name ?n . FILTER EXISTS { ?s u04:verified ?v } }
+    expect:
+      rows: 1
+      data:
+        - "?n": "Alice"
+
+cleanup: []
