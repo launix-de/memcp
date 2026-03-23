@@ -2593,19 +2593,12 @@ store results as keytable columns named "expr|condition"
 						(list tv (concat tschema "." (if (string? ttbl) ttbl tv))))))
 				)
 				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
-				/* Hash the condition for the prejoin name: after replace_inner_selects,
-				   the condition may contain expanded scalar subselect code that makes
-				   canonical_expr_name produce extremely long strings. Hashing keeps
-				   the name short and deterministic. */
-				/* Use pre-expansion condition string for stable naming.
-			   After replace_inner_selects, the condition contains promise/scan code
-			   that inflates canonical names and causes name mismatches. */
-			/* Use pre-expansion condition for stable prejoin naming.
-			   condition_canonical_pre_expansion is (concat condition) from BEFORE
-			   replace_inner_selects — it doesn't contain promise/scan code. */
-			(define prejoin_condition_name (if (nil? condition_canonical_pre_expansion)
-				(canonical_expr_name condition '(list) '(list) prejoin_alias_map)
-				(fnv_hash condition_canonical_pre_expansion)))
+				/* Use pre-expansion condition for stable prejoin naming.
+				   condition_canonical_pre_expansion is (concat condition) from BEFORE
+				   replace_inner_selects — it doesn't contain promise/scan code. */
+				(define prejoin_condition_name (if (nil? condition_canonical_pre_expansion)
+					(canonical_expr_name condition '(list) '(list) prejoin_alias_map)
+					(fnv_hash condition_canonical_pre_expansion)))
 				(define prejointbl_full (concat ".prejoin:"
 					(map tables (lambda (t) (match t '(tv tschema ttbl _ _) (concat tschema "." (if (string? ttbl) ttbl tv))))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
