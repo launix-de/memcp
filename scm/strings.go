@@ -156,7 +156,7 @@ func init_strings() {
 				return NewString(sb.String())
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "values to concat", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "first value to concat"}, &TypeDescriptor{Kind: "any", ParamName: "more...", ParamDesc: "additional values to concat", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const: true,
 		},

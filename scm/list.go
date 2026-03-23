@@ -217,7 +217,7 @@ func init_list() {
 				return NewSlice(base)
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "any", ParamName: "item", ParamDesc: "first item to add"}, &TypeDescriptor{Kind: "any", ParamName: "more...", ParamDesc: "additional items to add", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "list", Transfer: true},
 			Const: true,
 			Optimize: FirstParameterMutable("append_mut"),
@@ -241,7 +241,7 @@ func init_list() {
 				return NewSlice(list)
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "any", ParamName: "item", ParamDesc: "item to add"}, &TypeDescriptor{Kind: "any", ParamName: "rest...", ParamDesc: "additional items to add", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "list", Transfer: true},
 			Const: true,
 			Optimize: FirstParameterMutable("append_unique_mut"),
@@ -457,7 +457,7 @@ func init_list() {
 				return NewNil()
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list to search"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(any)->bool that is applied until the first match"}, &TypeDescriptor{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list to search"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(any)->bool that is applied until the first match"}, &TypeDescriptor{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Optional: true}},
 			Const: true,
 		},
 	})
@@ -1078,7 +1078,7 @@ func init_list() {
 				return dst
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict1", ParamDesc: "first input dictionary that has to be changed. You must not use this value again."}, &TypeDescriptor{Kind: "list", ParamName: "dict2", ParamDesc: "input dictionary that contains the new values that have to be added"}, &TypeDescriptor{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict1", ParamDesc: "first input dictionary that has to be changed. You must not use this value again."}, &TypeDescriptor{Kind: "list", ParamName: "dict2", ParamDesc: "input dictionary that contains the new values that have to be added"}, &TypeDescriptor{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", Optional: true}},
 			Return: &TypeDescriptor{Kind: "list", Transfer: true},
 			Const: true,
 			Optimize: FirstParameterMutable("merge_assoc_mut"),

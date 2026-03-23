@@ -801,7 +801,7 @@ func init() {
 		Desc: "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
 		Fn: nil,
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "condition...", ParamDesc: "condition to evaluate", Variadic: true}, &TypeDescriptor{Kind: "returntype", ParamName: "true-branch...", ParamDesc: "code to evaluate if condition is true", Variadic: true}, &TypeDescriptor{Kind: "any", ParamName: "false-branch", ParamDesc: "code to evaluate if condition is false", Optional: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "condition", ParamDesc: "condition to evaluate"}, &TypeDescriptor{Kind: "returntype", ParamName: "true-branch", ParamDesc: "code to evaluate if condition is true"}, &TypeDescriptor{Kind: "any", ParamName: "extra...", ParamDesc: "additional condition+branch pairs and/or else branch", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "returntype"},
 			Const: true,
 			Optimize: optimizeIf,
@@ -812,7 +812,7 @@ func init() {
 		Desc: "returns true if all conditions evaluate to true",
 		Fn: nil,
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", ParamName: "condition", ParamDesc: "first condition to evaluate"}, &TypeDescriptor{Kind: "bool", ParamName: "conditions...", ParamDesc: "additional conditions to evaluate", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const: true,
 			Optimize: optimizeAnd,
@@ -823,7 +823,7 @@ func init() {
 		Desc: "returns true if at least one condition evaluates to true",
 		Fn: nil,
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "condition", ParamDesc: "first condition to evaluate"}, &TypeDescriptor{Kind: "any", ParamName: "conditions...", ParamDesc: "additional conditions to evaluate", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const: true,
 		},
@@ -883,7 +883,7 @@ func init() {
 				}
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "value or message to throw", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value or message to throw"}, &TypeDescriptor{Kind: "any", ParamName: "rest...", ParamDesc: "additional message parts", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "string"},
 		},
 	})
@@ -1026,7 +1026,7 @@ func init() {
 		Fn: // TODO: returntype as soon as repead validate is implemented */
 			nil,
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to evaluate"}, &TypeDescriptor{Kind: "any", ParamName: "pattern...", ParamDesc: "pattern", Variadic: true}, &TypeDescriptor{Kind: "returntype", ParamName: "result...", ParamDesc: "result value when the pattern matches; this code can use the variables matched in the pattern", Variadic: true}, &TypeDescriptor{Kind: "any", ParamName: "default", ParamDesc: "(optional) value that is returned when no pattern matches", Optional: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to evaluate"}, &TypeDescriptor{Kind: "any", ParamName: "pattern", ParamDesc: "first pattern"}, &TypeDescriptor{Kind: "returntype", ParamName: "result", ParamDesc: "result value when the pattern matches; this code can use the variables matched in the pattern"}, &TypeDescriptor{Kind: "any", ParamName: "extra...", ParamDesc: "additional pattern+result pairs and/or default value", Variadic: true}},
 			Const: true,
 		},
 	})

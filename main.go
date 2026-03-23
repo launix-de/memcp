@@ -222,7 +222,7 @@ func setupIO(wd string) {
 				return scm.NewBool(true)
 			},
 		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "values to print", Variadic: true}},
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "first value to print"}, &scm.TypeDescriptor{Kind: "any", ParamName: "rest...", ParamDesc: "additional values to print", Variadic: true}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})

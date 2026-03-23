@@ -270,7 +270,7 @@ func init_alu() {
 				return NewBool(Equal(a[0], a[1]))
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "values", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "a", ParamDesc: "first value"}, &TypeDescriptor{Kind: "any", ParamName: "b", ParamDesc: "second value"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const: true,
 		},
@@ -282,7 +282,7 @@ func init_alu() {
 				return EqualSQL(a[0], a[1])
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "values", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "a", ParamDesc: "first value"}, &TypeDescriptor{Kind: "any", ParamName: "b", ParamDesc: "second value"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const: true,
 		},

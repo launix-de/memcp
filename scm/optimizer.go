@@ -915,17 +915,18 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			v[0] = NewSymbol("setN")
 		}
 		v[2], ti = OptimizeEx(v[2], env, ome, true)
-		// Track return type info for Scheme-defined functions
+		// TODO(funcTypeInfo): disabled — ownership tracking for Scheme-defined
+		// functions causes incorrect _mut promotion in queryplan compilation
+		/*
 		if sym, ok2 := scmerSymbol(v[1]); ok2 {
 			if ti.Transfer() {
 				if ome.funcTypeInfo == nil {
 					ome.funcTypeInfo = make(map[Symbol]TypeInfo)
 				}
 				ome.funcTypeInfo[sym] = TypeInfo{}.WithTransfer()
-				// Also register globally so cross-import lookups work
-				globalFuncTypeInfo[sym] = TypeInfo{}.WithTransfer()
 			}
 		}
+		*/
 		// Use-count-based ownership: if RHS is fresh (Transfer) and the variable
 		// is used exactly once in this begin block, mark it as owned so that
 		// map/match on it can be promoted to _mut variants.
