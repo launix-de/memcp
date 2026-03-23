@@ -801,7 +801,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -955,7 +955,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -1115,7 +1115,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
@@ -1242,7 +1242,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit_us (nth raw_vals_us 3))
 				(define raw_offset_us (nth raw_vals_us 4))
 				(match (apply untangle_query subquery)
-					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us) (begin
+					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us _) (begin
 						(define groups2_us (coalesceNil groups2_us '()))
 						(define groups2_us (if (or (nil? groups2_us) (equal? groups2_us '()))
 							(if (or raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
@@ -1381,161 +1381,94 @@ WHAT IT MUST NOT DO:
 										'((symbol equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
 										'((quote equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
 										nil))) (lambda (x) (not (nil? x)))))
-									/* === Materialized derived table with domain columns ===
-									Both aggregate and non-aggregate paths use materialization.
-									Aggregate: adds domain cols to GROUP BY (Neumann Γ_{A∪D;f}).
-									Non-aggregate: preserves ORDER/LIMIT/OFFSET per domain via the subquery.
-									Non-aggregate without LIMIT: promise "once" enforces max-1-row. */
-									(begin
-										/* domain column names + fields */
-										(define us_dom_idx 0)
-										(define us_dom_fields (merge (map us_domain_cols (lambda (dc) (begin
-											(define dname (concat "__domain_" us_dom_idx))
-											(set us_dom_idx (+ us_dom_idx 1))
-											(list dname (nth dc 0)))))))
-										/* extend GROUP BY for aggregates: prepend domain columns */
-										(define us_orig_group (if us_has_stages
-											(coalesceNil (stage_group_cols (car groups2_us)) '()) '()))
-										(define us_orig_having (if us_has_stages (stage_having_expr (car groups2_us)) nil))
-										(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car groups2_us)) '()) '()))
-										(define us_orig_limit (if us_has_stages (stage_limit_val (car groups2_us)) nil))
-										(define us_orig_offset (if us_has_stages (stage_offset_val (car groups2_us)) nil))
-										(define us_new_group (if (or us_has_agg us_has_grp)
-											(merge (map us_domain_cols (lambda (dc) (nth dc 0)))
-												(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1))) '() us_orig_group))
-											nil))
-										/* modified subquery AST: fields + domain, non-correlated condition.
-										Strip joinexprs from tables — they're already in the condition
-										(prevents outer refs from leaking into the derived table). */
-										(define us_mod_fields (merge fields2_us us_dom_fields))
-										(define us_mod_cond (if (nil? us_inner_cond_raw) true us_inner_cond_raw))
-										(define us_clean_tables (map tables2_us (lambda (td) (match td
-											'(a s t io _) (list a s t io nil)
-											td))))
-										/* For aggregate subselects, LIMIT/ORDER are redundant (GROUP BY
-										produces 1 row per domain value). Drop them to avoid global limit
-										that would break per-domain semantics. */
-										(define us_derived_ast (list schema2_us us_clean_tables us_mod_fields
-											us_mod_cond us_new_group us_orig_having nil nil nil))
-										/* join condition: sq_prefix.__domain_N = resolved_outer_ref */
-										(define us_dom_je_idx 0)
-										(define us_dom_je_parts (map us_domain_cols (lambda (dc) (begin
-											(define dname (concat "__domain_" us_dom_je_idx))
-											(set us_dom_je_idx (+ us_dom_je_idx 1))
-											(list (quote equal??) (list (quote get_column) us_sq_prefix false dname false) (nth dc 1))))))
-										(define us_dom_je (if (equal? (count us_dom_je_parts) 0) true
-											(if (equal? (count us_dom_je_parts) 1) (car us_dom_je_parts)
-												(cons (quote and) us_dom_je_parts))))
-										/* materialize: aggregate uses build_queryplan_term,
-										non-aggregate uses direct scan_order with limitPartitionCols */
-										(define us_output_cols (extract_assoc us_mod_fields (lambda (k v) k)))
-										(define us_rows_sym (symbol (concat "__us_rows:" us_sq_prefix)))
-										(define us_rr_sym (symbol (concat "__us_rr:" us_sq_prefix)))
-										(define us_materialized (if (or us_has_agg us_has_grp)
-											/* === Aggregate: build_queryplan_term with GROUP BY === */
-											(list (quote begin)
+									/* === Three-way branch: aggregate / non-agg+LIMIT / non-agg-no-LIMIT === */
+									(if (or us_has_agg us_has_grp)
+										/* === A: Aggregate → materialized derived table with GROUP BY === */
+										(begin
+											(define us_dom_idx 0)
+											(define us_dom_fields (merge (map us_domain_cols (lambda (dc) (begin
+												(define dname (concat "__domain_" us_dom_idx))
+												(set us_dom_idx (+ us_dom_idx 1))
+												(list dname (nth dc 0)))))))
+											(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car groups2_us)) '()) '()))
+											(define us_orig_having (if us_has_stages (stage_having_expr (car groups2_us)) nil))
+											(define us_new_group (merge (map us_domain_cols (lambda (dc) (nth dc 0)))
+												(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1))) '() us_orig_group)))
+											(define us_mod_fields (merge fields2_us us_dom_fields))
+											(define us_mod_cond (if (nil? us_inner_cond_raw) true us_inner_cond_raw))
+											(define us_clean_tables (map tables2_us (lambda (td) (match td '(a s t io _) (list a s t io nil) td))))
+											(define us_derived_ast (list schema2_us us_clean_tables us_mod_fields us_mod_cond us_new_group us_orig_having nil nil nil))
+											(define us_dom_je_idx 0)
+											(define us_dom_je_parts (map us_domain_cols (lambda (dc) (begin
+												(define dname (concat "__domain_" us_dom_je_idx))
+												(set us_dom_je_idx (+ us_dom_je_idx 1))
+												(list (quote equal??) (list (quote get_column) us_sq_prefix false dname false) (nth dc 1))))))
+											(define us_dom_je (if (equal? (count us_dom_je_parts) 0) true
+												(if (equal? (count us_dom_je_parts) 1) (car us_dom_je_parts)
+													(cons (quote and) us_dom_je_parts))))
+											(define us_output_cols (extract_assoc us_mod_fields (lambda (k v) k)))
+											(define us_rows_sym (symbol (concat "__us_rows:" us_sq_prefix)))
+											(define us_rr_sym (symbol (concat "__us_rr:" us_sq_prefix)))
+											(define us_materialized (list (quote begin)
 												(list (quote set) us_rows_sym (list (quote newsession)))
 												(list us_rows_sym "rows" '())
 												(list (quote set) us_rr_sym (symbol "resultrow"))
 												(list (quote set) (symbol "resultrow")
 													(list (quote lambda) (list (symbol "item"))
-														(list us_rows_sym "rows"
-															(list (quote cons) (symbol "item") (list us_rows_sym "rows")))))
+														(list us_rows_sym "rows" (list (quote cons) (symbol "item") (list us_rows_sym "rows")))))
 												(build_queryplan_term us_derived_ast)
 												(list (quote set) (symbol "resultrow") us_rr_sym)
-												(list us_rows_sym "rows"))
-											/* === Non-aggregate: direct scan_order with limitPartitionCols === */
-											(if true nil /* non-aggregate scan_order: disabled until LEFT JOIN interaction with nested subselects is resolved */
-												(begin
-													(define us_tdesc (car tables2_us))
-													(define us_tblvar (nth us_tdesc 0))
-													(define us_tbl_schema (nth us_tdesc 1))
-													(define us_tbl_name (nth us_tdesc 2))
-													/* domain inner col names for sort + map */
-													(define us_dom_inner_cols (map us_domain_cols (lambda (dc) (match (nth dc 0)
-														'((symbol get_column) _ _ col _) col
-														'((quote get_column) _ _ col _) col
-														"__unknown__"))))
-													/* value col name */
-													(define us_val_col (match us_value_expr
-														'((symbol get_column) _ _ col _) col
-														'((quote get_column) _ _ col _) col
-														us_value_key))
-													/* all needed columns */
-													(define us_scan_cols (merge_unique
-														(extract_columns_for_tblvar us_tblvar us_mod_cond)
-														(extract_outer_columns_for_tblvar us_tblvar us_mod_cond)
-														us_dom_inner_cols (list us_val_col)))
-													/* ORDER BY columns from stage (if any) */
-													(define us_order_cols (if (nil? us_orig_order) '()
-														(filter (map us_orig_order (lambda (oi) (match oi
-															'(col dir) (match col
-																'((symbol get_column) _ _ c _) c
-																'((quote get_column) _ _ c _) c
-																nil)
-															nil))) (lambda (x) (not (nil? x))))))
-													(define us_order_dirs (if (nil? us_orig_order) '()
-														(filter (map us_orig_order (lambda (oi) (match oi
-															'(col dir) dir nil))) (lambda (x) (not (nil? x))))))
-													/* sort = domain cols + order cols */
-													(define us_sort_cols (merge us_dom_inner_cols us_order_cols))
-													(define us_sort_dirs (merge (map us_dom_inner_cols (lambda (_) '<)) us_order_dirs))
-													(define us_dom_count (count us_domain_cols))
-													/* per-domain limit: original LIMIT or 1 for scalar without LIMIT */
-													(define us_per_limit (coalesce us_orig_limit 1))
-													(define us_per_offset (coalesceNil us_orig_offset 0))
-													/* map output: value + domain fields */
-													(define us_map_cols (merge (list us_val_col) us_dom_inner_cols))
-													(define us_dom_field_names_idx 0)
-													(define us_dom_field_names (map us_domain_cols (lambda (dc) (begin
-														(define dn (concat "__domain_" us_dom_field_names_idx))
-														(set us_dom_field_names_idx (+ us_dom_field_names_idx 1))
-														dn))))
-													(list (quote begin)
-														(list (quote set) us_rows_sym (list (quote newsession)))
-														(list us_rows_sym "rows" '())
-														(list (quote set) us_rr_sym (symbol "resultrow"))
-														(list (quote set) (symbol "resultrow")
-															(list (quote lambda) (list (symbol "item"))
-																(list us_rows_sym "rows"
-																	(list (quote cons) (symbol "item") (list us_rows_sym "rows")))))
-														(list (quote scan_order)
-															us_tbl_schema us_tbl_name
-															(cons list us_scan_cols)
-															(list (quote lambda)
-																(map us_scan_cols (lambda (col) (symbol (concat us_tblvar "." col))))
-																(optimize (replace_columns_from_expr (coalesceNil us_mod_cond true))))
-															(cons list us_sort_cols)
-															(cons list us_sort_dirs)
-															us_dom_count us_per_offset us_per_limit
-															(cons list us_map_cols)
-															(list (quote lambda)
-																(map us_map_cols (lambda (col) (symbol (concat us_tblvar "." col))))
-																(list (symbol "resultrow")
-																	(cons (quote list) (merge
-																		(list us_value_key (symbol (concat us_tblvar "." us_val_col)))
-																		(begin (define _dm_i 0) (merge (map us_dom_inner_cols (lambda (col) (begin (define dn (nth us_dom_field_names _dm_i)) (set _dm_i (+ _dm_i 1)) (list dn (symbol (concat us_tblvar "." col))))))))))))
-															nil nil false)
-														(list (quote set) (symbol "resultrow") us_rr_sym)
-														(list us_rows_sym "rows"))))))
-										(if (nil? us_materialized) nil /* multi-table non-agg fallback */
+												(list us_rows_sym "rows")))
+											(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized true us_dom_je)))
+											(define us_sch (list us_sq_prefix (map us_output_cols (lambda (col) (list "Field" col "Type" "any")))))
+											(sq_cache "schemas" (merge us_sch (coalesceNil (sq_cache "schemas") '())))
+											(define us_subst_raw (list (quote get_column) us_sq_prefix false us_value_key false))
+											(define us_is_count (match us_value_expr
+												'((symbol aggregate) _ (symbol +) 0) true
+												'((quote aggregate) _ (symbol +) 0) true
+												'((quote aggregate) _ '(symbol +) 0) true
+												false))
+											(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
+											(list us_subst us_tbl_entries))
+										/* === B/C: Non-aggregate === */
+										(if (and us_single_tbl us_has_limit)
+											/* === B: Non-agg + LIMIT → direct table entry + partition_map === */
 											(begin
-												/* table entry: materialized rows as tbl, LEFT JOIN on domain */
-												(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized true us_dom_je)))
-												/* schema for the materialized table (column defs) */
-												(define us_sch (list us_sq_prefix (map us_output_cols (lambda (col) (list "Field" col "Type" "any")))))
-												(sq_cache "schemas" (merge us_sch (coalesceNil (sq_cache "schemas") '())))
-												(define us_subst_raw (list (quote get_column) us_sq_prefix false us_value_key false))
-												/* COUNT on empty domain returns NULL from LEFT JOIN but SQL expects 0. */
-												(define us_is_count (match us_value_expr
-													'((symbol aggregate) _ (symbol +) 0) true
-													'((quote aggregate) _ (symbol +) 0) true
-													'((quote aggregate) _ '(symbol +) 0) true
-													false))
-												(define us_subst (if us_is_count
-													(list (quote coalesceNil) us_subst_raw 0)
-													us_subst_raw))
-												(list us_subst us_tbl_entries)))
+												(define us_tdesc (car tables2_us))
+												(define us_tblvar (nth us_tdesc 0))
+												(define us_tbl_schema (nth us_tdesc 1))
+												(define us_tbl_name (nth us_tdesc 2))
+												(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car groups2_us)) '()) '()))
+												(define us_orig_limit (if us_has_stages (stage_limit_val (car groups2_us)) nil))
+												(define us_orig_offset (if us_has_stages (stage_offset_val (car groups2_us)) nil))
+												/* domain inner col names */
+												(define us_dom_inner_cols (map us_domain_cols (lambda (dc) (match (nth dc 0)
+													'((symbol get_column) _ _ col _) col '((quote get_column) _ _ col _) col "__unknown__"))))
+												/* ORDER BY from stage */
+												(define us_order_cols (if (nil? us_orig_order) '()
+													(filter (map us_orig_order (lambda (oi) (match oi '(col dir) (match col
+														'((symbol get_column) _ _ c _) c '((quote get_column) _ _ c _) c nil) nil))) (lambda (x) (not (nil? x))))))
+												(define us_order_dirs (if (nil? us_orig_order) '()
+													(filter (map us_orig_order (lambda (oi) (match oi '(col dir) dir nil))) (lambda (x) (not (nil? x))))))
+												/* sort = domain cols + order cols */
+												(define us_sort_cols (merge us_dom_inner_cols us_order_cols))
+												(define us_sort_dirs (merge (map us_dom_inner_cols (lambda (_) '<)) us_order_dirs))
+												(define us_dom_count (count us_domain_cols))
+												(define us_per_limit (coalesce us_orig_limit 1))
+												(define us_per_offset (coalesceNil us_orig_offset 0))
+												/* register partition_map: build_queryplan will emit scan_order for this table */
+												(sq_cache "partition_map" (merge (list us_sq_prefix (list us_dom_count us_sort_cols us_sort_dirs us_per_limit us_per_offset)) (coalesceNil (sq_cache "partition_map") '())))
+												/* direct table entry with join condition */
+												(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
+												(define us_inner_lim (_us_ria us_inner_cond_raw))
+												(define us_full_lim (if (nil? us_inner_lim)
+													(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
+													(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+												(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim)))
+												(define us_subst (list (quote get_column) us_sq_prefix false us_value_key false))
+												(list us_subst us_tbl_entries))
+											/* === C: Non-agg without LIMIT → nil (inline fallback with promise "once") === */
+											nil)
 									)
 								)
 							)
@@ -1556,7 +1489,7 @@ WHAT IT MUST NOT DO:
 		(if (not (nil? union_parts_ue))
 			nil /* UNION ALL: not handled yet */
 			(match (apply untangle_query subquery)
-				'(schema2_ue tables2_ue fields2_ue condition2_ue groups2_ue schemas2_ue rfcol2_ue) (begin
+				'(schema2_ue tables2_ue fields2_ue condition2_ue groups2_ue schemas2_ue rfcol2_ue _) (begin
 					/* resolve columns */
 					(define rfcs_ue (make_replace_find_column_subselect schemas2_ue outer_schemas))
 					(set condition2_ue (rfcs_ue (coalesceNil condition2_ue true)))
@@ -1839,7 +1772,7 @@ WHAT IT MUST NOT DO:
 			(set having (replace_inner_selects having '()))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col '()) dir)))))
 			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
-			(list schema tables fields condition groups '() (lambda (expr) expr))
+			(list schema tables fields condition groups '() (lambda (expr) expr) '())
 		)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -1875,7 +1808,7 @@ WHAT IT MUST NOT DO:
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 							)
 						))
-						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _) (begin
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -2279,7 +2212,7 @@ WHAT IT MUST NOT DO:
 					(if (equal? 0 (count _kept_parts)) true
 						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 							(cons 'and _kept_parts))))))
-			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
+			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column (coalesceNil (sq_cache "partition_map") '()))
 		)
 	)
 )
@@ -2305,8 +2238,8 @@ WHAT IT MUST NOT DO:
 - Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
 */
 /* currently a stub — preserves original table order */
-(define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
-	(list schema tables fields condition groups schemas replace_find_column)))
+(define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column partition_map)
+	(list schema tables fields condition groups schemas replace_find_column partition_map)))
 
 (define build_queryplan_term (lambda (query) (begin
 	(define union_parts (query_union_all_parts query))
@@ -2409,6 +2342,7 @@ column resolution — then injects $update into the target table's scan. */
 		(nth pipeline_result 4) /* groups */
 		(nth pipeline_result 5) /* schemas */
 		(nth pipeline_result 6) /* replace_find_column */
+		(nth pipeline_result 7) /* partition_map */
 		(list tgt resolved_target_cols) /* update_target: (alias cols) — empty cols = DELETE */
 	))
 	(apply build_queryplan final_pipeline)
@@ -2448,7 +2382,7 @@ store results as keytable columns named "expr|condition"
 */
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
 When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
-(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
+(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column partition_map update_target) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
@@ -3390,19 +3324,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-
-										(scan_wrapper 'scan schema tbl
-											/* condition */
-											(cons list filtercols)
-											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-											/* extract columns and store them into variables */
-											scan_mapcols
-											(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
-											(if is_update_target (symbol "+") nil)
-											(if is_update_target 0 nil)
-											nil
-											isOuter
-										)
+										/* check partition_map: if present, use scan_order with limitPartitionCols */
+										(define _pinfo (if (nil? partition_map) nil (reduce_assoc partition_map (lambda (a k v) (if (nil? a) (if (equal?? k tblvar) v nil) a)) nil)))
+										(if (not (nil? _pinfo))
+											(match _pinfo '(_pi_n _pi_sc _pi_sd _pi_l _pi_o)
+												(scan_wrapper 'scan_order schema tbl
+													(cons list (merge_unique filtercols cols))
+													'((quote lambda) (map (merge_unique filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+													(cons list _pi_sc) (cons list _pi_sd)
+													_pi_n _pi_o _pi_l
+													scan_mapcols
+													(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+													nil nil isOuter))
+											(scan_wrapper 'scan schema tbl
+												(cons list filtercols)
+												'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+												scan_mapcols
+												(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+												(if is_update_target (symbol "+") nil)
+												(if is_update_target 0 nil)
+												nil
+												isOuter
+										))
 									))
 								)
 								'() /* final inner (=scalar) */ (if (nil? update_target)
