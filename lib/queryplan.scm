@@ -597,7 +597,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(define _scan_code (list 'scan schema tbl
+					(list 'scan schema tbl
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -614,8 +614,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 							(list 'lambda (list 'acc 'shard_rows)
 								(list 'insert pj_schema pjtbl (cons 'list mat_col_names) 'shard_rows (list) (list 'lambda (list) true) true))
 							(list 'lambda (list 'acc 'shard_rows) (list 'merge 'acc 'shard_rows)))
-						isOuter))
-					_scan_code
+						isOuter)
 				))
 			)
 		)
@@ -1665,16 +1664,14 @@ WHAT IT MUST NOT DO:
 								(list (quote set) (symbol "resultrow")
 									(list (quote lambda) (list (symbol "item"))
 										(list rows_sym "rows"
-											(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
+											(list (quote cons) (symbol "item") (list rows_sym "rows"))))
 								)
 								(build_queryplan_term subquery)
 								(list (quote set) (symbol "resultrow") resultrow_sym)
 								(list rows_sym "rows")
 							))
-							/* Tagged list: build_scan materializes at runtime per scan iteration */
-							(define mat_var_sym (symbol (concat "__mat_var:" id)))
 							(list
-								(list (list id schemax (list "__mat" mat_var_sym materialized_rows) isOuter joinexpr))
+								(list (list id schemax materialized_rows isOuter joinexpr))
 								'()
 								true
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
@@ -1818,7 +1815,7 @@ WHAT IT MUST NOT DO:
 											(list (quote set) mat_rr_sym
 												(list (quote lambda) (list (symbol "item"))
 													(list rows_sym "rows"
-														(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
+														(list (quote cons) (symbol "item") (list rows_sym "rows"))))
 											)
 											/* with limit: stop collecting after mat_limit rows */
 											(list (quote begin)
@@ -1829,21 +1826,16 @@ WHAT IT MUST NOT DO:
 															(list (quote begin)
 																(list (quote set) cnt_sym (list (quote +) cnt_sym 1))
 																(list rows_sym "rows"
-																	(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
+																	(list (quote cons) (symbol "item") (list rows_sym "rows"))))
 															nil))))
 										)
 										mat_inner_plan
-										(list rows_sym "rows")
+										(list (quote apply) (quote list) (list rows_sym "rows"))
 									))
-									/* Use a symbol reference as tbl so scan receives a runtime value
-									   (not a literal code block). The materialization code is stored
-									   separately and must be emitted before the scan in build_scan. */
-									/* Tagged list: build_scan materializes at runtime per scan iteration */
-									(define mat_var_sym (symbol (concat "__mat_var:" id)))
 									(list
-										(list (list id schemax (list "__mat" mat_var_sym materialized_rows) isOuter joinexpr))
+										(list (list id schemax materialized_rows isOuter joinexpr))
 										'()
-										(if isOuter true (replace_column_alias condition2))
+										true
 										(list id (map output_cols_sub (lambda (col) '("Field" col "Type" "any"))))
 									)
 								)
@@ -2361,11 +2353,8 @@ store results as keytable columns named "expr|condition"
 			/* TODO: allow for more than just group by single table */
 			/* TODO: outer tables that only join on group */
 			'('(tblvar schema tbl isOuter _)) (begin
-				/* Subquery materialization */
-				(define _mat_tag (if (and (not (string? tbl)) (list? tbl) (equal? (car tbl) "__mat")) tbl nil))
-				(if _mat_tag (set tbl (nth _mat_tag 1)))
 				/* prepare preaggregate */
-				(define canon_alias_map (list (list tblvar (concat schema "." (if (string? tbl) tbl tblvar)))))
+				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
 				(define expr_name (lambda (expr) (canonical_expr_name expr '(list) '(list) canon_alias_map)))
 
 				(define kt_result (make_keytable schema tbl stage_group tblvar (if is_dedup condition nil)))
@@ -2392,7 +2381,7 @@ store results as keytable columns named "expr|condition"
 							(begin
 								/* key columns */
 								(set keycols (merge_unique (map stage_group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
-								(define _collect_scan (scan_wrapper 'scan schema tbl
+								(scan_wrapper 'scan schema tbl
 									(if with_filter (cons list filtercols) '(list))
 									(if with_filter
 										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
@@ -2410,8 +2399,7 @@ store results as keytable columns named "expr|condition"
 											'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
 											'(list) '('lambda '() true) true)
 									)
-									isOuter))
-								(if _mat_tag (list (quote begin) (list (quote set) (nth _mat_tag 1) (nth _mat_tag 2)) _collect_scan) _collect_scan)
+									isOuter)
 							)
 						)
 					) "collect")))
@@ -2502,7 +2490,7 @@ store results as keytable columns named "expr|condition"
 							'((quote createcolumn) schema grouptbl (agg_col_name ag) "any" '(list) this_options
 								(cons list (map stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 								'((quote lambda) (map stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
-									(begin (define _compute_scan (scan_wrapper 'scan schema tbl
+									(scan_wrapper 'scan schema tbl
 										(cons list (merge tblvar_cols filtercols))
 										/* check group equality AND WHERE-condition */
 										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
@@ -2512,8 +2500,7 @@ store results as keytable columns named "expr|condition"
 										neutral
 										nil
 										isOuter
-									))
-									(if _mat_tag (list (quote begin) (list (quote set) (nth _mat_tag 1) (nth _mat_tag 2)) _compute_scan) _compute_scan))
+									)
 							))
 						)))))
 
@@ -2647,9 +2634,6 @@ store results as keytable columns named "expr|condition"
 				(define build_mat_scan (lambda (scan_tables scan_condition is_outermost)
 					(match scan_tables
 						(cons '(tblvar schema tbl isOuter joinexpr) rest) (begin
-							/* Subquery materialization */
-							(define _mat_tag (if (and (not (string? tbl)) (list? tbl) (equal? (car tbl) "__mat")) tbl nil))
-							(if _mat_tag (set tbl (nth _mat_tag 1)))
 							/* columns needed from this table for materialization + condition */
 							(set cols (merge_unique (list
 								(extract_columns_for_tblvar tblvar scan_condition)
@@ -2661,7 +2645,7 @@ store results as keytable columns named "expr|condition"
 								(set filtercols (merge_unique (list
 									(extract_columns_for_tblvar tblvar now_condition)
 									(extract_outer_columns_for_tblvar tblvar now_condition))))
-								(define _mat_scan (scan_wrapper 'scan schema tbl
+								(scan_wrapper 'scan schema tbl
 									(cons list filtercols)
 									'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 									(cons list cols)
@@ -2672,8 +2656,7 @@ store results as keytable columns named "expr|condition"
 										'('lambda '('acc 'shard_rows) '('insert pj_schema prejointbl (cons 'list mat_col_names) 'shard_rows '(list) '('lambda '() true) true))
 										'('lambda '('acc 'shard_rows) '('merge 'acc 'shard_rows)))
 									isOuter
-								))
-								(if _mat_tag (list (quote begin) (list (quote set) (nth _mat_tag 1) (nth _mat_tag 2)) _mat_scan) _mat_scan)
+								)
 							))
 						)
 						'() /* base case: produce one row wrapped in a list */
@@ -3146,9 +3129,6 @@ store results as keytable columns named "expr|condition"
 					(define build_scan (lambda (tables condition is_first)
 						(match tables
 							(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
-								/* Subquery materialization: tbl = ("__mat" sym code) → extract and wrap */
-								(define _mat_tag (if (and (not (string? tbl)) (list? tbl) (equal? (car tbl) "__mat")) tbl nil))
-								(if _mat_tag (set tbl (nth _mat_tag 1))) /* tbl becomes the symbol */
 								/* For LEFT JOIN: merge joinexpr into condition for extraction */
 								(set cols (merge_unique
 									(list
@@ -3196,7 +3176,7 @@ store results as keytable columns named "expr|condition"
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-									(define _ord_scan (scan_wrapper 'scan_order schema tbl
+									(scan_wrapper 'scan_order schema tbl
 										(cons list filtercols)
 										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 										(cons list ordercols)
@@ -3209,8 +3189,7 @@ store results as keytable columns named "expr|condition"
 										(if is_update_target_ord (symbol "+") nil)
 										(if is_update_target_ord 0 nil)
 										isOuter
-									))
-									(if _mat_tag (list (quote begin) (list (quote set) (nth _mat_tag 1) (nth _mat_tag 2)) _ord_scan) _ord_scan)
+									)
 								))
 							)
 							'() /* final inner */ (if (nil? update_target)
@@ -3231,9 +3210,6 @@ store results as keytable columns named "expr|condition"
 						(define build_scan (lambda (tables condition)
 							(match tables
 								(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
-									/* Subquery materialization */
-									(define _mat_tag (if (and (not (string? tbl)) (list? tbl) (equal? (car tbl) "__mat")) tbl nil))
-									(if _mat_tag (set tbl (nth _mat_tag 1)))
 									/* check if this table is the UPDATE target */
 									(define is_update_target (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
 									/* also extract cols needed for SET expressions in update_target */
@@ -3265,7 +3241,7 @@ store results as keytable columns named "expr|condition"
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-										(define _unord_scan (scan_wrapper 'scan schema tbl
+										(scan_wrapper 'scan schema tbl
 											/* condition */
 											(cons list filtercols)
 											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
@@ -3276,8 +3252,7 @@ store results as keytable columns named "expr|condition"
 											(if is_update_target 0 nil)
 											nil
 											isOuter
-										))
-										(if _mat_tag (list (quote begin) (list (quote set) (nth _mat_tag 1) (nth _mat_tag 2)) _unord_scan) _unord_scan)
+										)
 									))
 								)
 								'() /* final inner (=scalar) */ (if (nil? update_target)

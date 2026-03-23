@@ -399,10 +399,8 @@ func (u *storageShard) ensureMainCount(alreadyLocked bool) {
 func (s *storageShard) GetState() SharedState { return s.srState }
 func (s *storageShard) GetRead() func() {
 	s.ensureLoaded()
-	// Ensure main_count is initialized by loading at least one column.
-	// If another goroutine holds the write lock (e.g. UPDATE with nested
-	// EXISTS scan on same table), skip the RLock to avoid deadlock.
-	s.ensureMainCount(s.anyWriteOwner())
+	// Ensure main_count is initialized by loading at least one column
+	s.ensureMainCount(false)
 	if s.srState == COLD {
 		s.srState = SHARED
 	}
@@ -584,15 +582,6 @@ func (t *storageShard) hasWriteOwner() bool {
 	t.writeOwnMu.Lock()
 	defer t.writeOwnMu.Unlock()
 	return t.writeOwners[goid] > 0
-}
-
-// anyWriteOwner returns true if ANY goroutine holds the write lock on this shard.
-// Used by nested read scans (e.g. EXISTS inside UPDATE) to skip RLock and avoid
-// deadlocking against the parent goroutine's exclusive Lock.
-func (t *storageShard) anyWriteOwner() bool {
-	t.writeOwnMu.Lock()
-	defer t.writeOwnMu.Unlock()
-	return len(t.writeOwners) > 0
 }
 
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
