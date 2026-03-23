@@ -194,5 +194,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	'((ignorecase "information_schema") (ignorecase "partitions"))
 	(merge '(scanfn schema '(list)) rest) /* empty: no MySQL partitions */
 	'(schema tbl) /* normal case */
-	(merge '(scanfn schema tbl) rest)
+	(if (list? tbl)
+		/* materialized subquery: tbl = (var_sym materialization_code) — wrap scan in begin+set */
+		(begin
+			(define _mat_sym (car tbl))
+			(define _mat_code (cadr tbl))
+			(list (quote begin) (list (quote set) _mat_sym _mat_code) (merge (list scanfn schema _mat_sym) rest)))
+		(merge '(scanfn schema tbl) rest))
 ))))

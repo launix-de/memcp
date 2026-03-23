@@ -597,7 +597,9 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(list 'scan schema tbl
+					/* If tbl is a materialized subquery (list), wrap in begin+set */
+					(define _scan_tbl (if (list? tbl) (car tbl) tbl))
+					(define _scan_code (list 'scan schema _scan_tbl
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -614,7 +616,10 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 							(list 'lambda (list 'acc 'shard_rows)
 								(list 'insert pj_schema pjtbl (cons 'list mat_col_names) 'shard_rows (list) (list 'lambda (list) true) true))
 							(list 'lambda (list 'acc 'shard_rows) (list 'merge 'acc 'shard_rows)))
-						isOuter)
+						isOuter))
+					(if (list? tbl)
+						(list (quote begin) (list (quote set) (car tbl) (cadr tbl)) _scan_code)
+						_scan_code)
 				))
 			)
 		)
@@ -1664,14 +1669,15 @@ WHAT IT MUST NOT DO:
 								(list (quote set) (symbol "resultrow")
 									(list (quote lambda) (list (symbol "item"))
 										(list rows_sym "rows"
-											(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+											(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 								)
 								(build_queryplan_term subquery)
 								(list (quote set) (symbol "resultrow") resultrow_sym)
 								(list rows_sym "rows")
 							))
+							(define mat_var_sym (symbol (concat "__mat_var:" id)))
 							(list
-								(list (list id schemax materialized_rows isOuter joinexpr))
+								(list (list id schemax (list mat_var_sym materialized_rows) isOuter joinexpr))
 								'()
 								true
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
@@ -1789,38 +1795,57 @@ WHAT IT MUST NOT DO:
 									(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
 									(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
 									(define resultrow_sym (symbol (concat "__from_subquery_resultrow:" id)))
-									(define materialized_rows (list (quote begin)
+									/* Materialization: collect rows from build_queryplan_term into a list.
+								   Use a unique resultrow name (__mat_rr:id) so that replace_resultrow in
+								   build_scalar_subselect does NOT accidentally replace the collector —
+								   otherwise correlated scalar subselects break because the inner
+								   query's resultrow gets rewritten to the promise handler. */
+								(define mat_rr_sym (symbol (concat "__mat_rr:" id)))
+								(define mat_inner_plan (build_queryplan_term subquery))
+								/* Replace resultrow → mat_rr_sym in the inner plan, so the inner
+								   query feeds into our collector instead of the outer resultrow */
+								(define replace_rr_mat (lambda (expr) (match expr
+									(cons sym args) (if (equal? sym (quote resultrow))
+										(cons mat_rr_sym (map args replace_rr_mat))
+										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+											(list (quote symbol) (concat "__mat_rr:" id))
+											(cons (replace_rr_mat sym) (map args replace_rr_mat))))
+									expr)))
+								(define mat_inner_plan (replace_rr_mat mat_inner_plan))
+								(define materialized_rows (list (quote begin)
 										(list (quote set) rows_sym (list (quote newsession)))
 										(list rows_sym "rows" '())
-										(list (quote set) resultrow_sym (symbol "resultrow"))
 										(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
 										(if (nil? mat_limit)
 											/* no limit */
-											(list (quote set) (symbol "resultrow")
+											(list (quote set) mat_rr_sym
 												(list (quote lambda) (list (symbol "item"))
 													(list rows_sym "rows"
-														(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+														(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 											)
 											/* with limit: stop collecting after mat_limit rows */
 											(list (quote begin)
 												(list (quote set) cnt_sym 0)
-												(list (quote set) (symbol "resultrow")
+												(list (quote set) mat_rr_sym
 													(list (quote lambda) (list (symbol "item"))
 														(list (quote if) (list (quote <) cnt_sym mat_limit)
 															(list (quote begin)
 																(list (quote set) cnt_sym (list (quote +) cnt_sym 1))
 																(list rows_sym "rows"
-																	(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+																	(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 															nil))))
 										)
-										(build_queryplan_term subquery)
-										(list (quote set) (symbol "resultrow") resultrow_sym)
+										mat_inner_plan
 										(list rows_sym "rows")
 									))
+									/* Use a symbol reference as tbl so scan receives a runtime value
+									   (not a literal code block). The materialization code is stored
+									   separately and must be emitted before the scan in build_scan. */
+									(define mat_var_sym (symbol (concat "__mat_var:" id)))
 									(list
-										(list (list id schemax materialized_rows isOuter joinexpr))
+										(list (list id schemax (list mat_var_sym materialized_rows) isOuter joinexpr))
 										'()
-										true
+										(if isOuter true (replace_column_alias condition2))
 										(list id (map output_cols_sub (lambda (col) '("Field" col "Type" "any"))))
 									)
 								)
