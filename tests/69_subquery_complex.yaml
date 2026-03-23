@@ -326,6 +326,97 @@ test_cases:
         - name: "Carol"
           dept: "Marketing"
 
+  # === 1-row constraint: LIMIT 1 on non-unique keys ===
+
+  - name: "LIMIT 1 correlated subselect on non-unique key"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did ORDER BY e.salary DESC LIMIT 1) AS top_earner
+      FROM sq_dept d WHERE d.did <= 3
+      ORDER BY d.did
+    expect:
+      rows: 3
+      data:
+        - dname: "Engineering"
+          top_earner: "Frank"
+        - dname: "Marketing"
+          top_earner: "Dave"
+        - dname: "Sales"
+          top_earner: "Grace"
+
+  - name: "LIMIT 1 correlated subselect without ORDER BY"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did LIMIT 1) AS any_emp
+      FROM sq_dept d WHERE d.did = 4
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+          any_emp: null
+
+  - name: "Correlated subselect without LIMIT must error on multiple rows"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did) AS emp
+      FROM sq_dept d WHERE d.did = 1
+    expect:
+      error: true
+
+  - name: "COUNT correlated subselect with LIMIT 1 (redundant LIMIT)"
+    sql: |
+      SELECT d.dname,
+        (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did LIMIT 1) AS cnt
+      FROM sq_dept d WHERE d.did <= 2
+      ORDER BY d.did
+    expect:
+      rows: 2
+      data:
+        - dname: "Engineering"
+          cnt: 3
+        - dname: "Marketing"
+          cnt: 2
+
+  # === 1-row constraint: COUNT NULL vs 0 ===
+
+  - name: "COUNT correlated returns 0 not NULL for empty match"
+    noncritical: true
+    sql: |
+      SELECT d.dname,
+        COALESCE((SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did), 0) AS cnt
+      FROM sq_dept d WHERE d.did = 4
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+          cnt: 0
+
+  # === 1-row constraint: OFFSET ===
+
+  - name: "Correlated subselect with OFFSET skips first match"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did ORDER BY e.salary DESC LIMIT 1 OFFSET 1) AS second_earner
+      FROM sq_dept d WHERE d.did = 1
+    expect:
+      rows: 1
+      data:
+        - dname: "Engineering"
+          second_earner: "Alice"
+
+  # === Aggregate in WHERE with correct 0-semantics ===
+
+  - name: "Aggregate in WHERE with zero check"
+    noncritical: true
+    sql: |
+      SELECT d.dname
+      FROM sq_dept d
+      WHERE (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did) = 0
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sq_emp"
   - sql: "DROP TABLE IF EXISTS sq_dept"
