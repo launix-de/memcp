@@ -1782,22 +1782,38 @@ WHAT IT MUST NOT DO:
 									(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
 									(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
 									(define resultrow_sym (symbol (concat "__from_subquery_resultrow:" id)))
-									(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
+									/* Materialization: collect rows from build_queryplan_term into a list.
+								   Use a unique resultrow name (__mat_rr:id) so that replace_resultrow in
+								   build_scalar_subselect does NOT accidentally replace the collector —
+								   otherwise correlated scalar subselects break because the inner
+								   query's resultrow gets rewritten to the promise handler. */
+								(define mat_rr_sym (symbol (concat "__mat_rr:" id)))
+								(define mat_inner_plan_raw (build_queryplan_term subquery))
+								/* Replace resultrow → mat_rr_sym in the inner plan, so the inner
+								   query feeds into our collector instead of the outer resultrow */
+								(define replace_rr_mat (lambda (expr) (match expr
+									(cons sym args) (if (equal? sym (quote resultrow))
+										(cons mat_rr_sym (map args replace_rr_mat))
+										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+											(list (quote symbol) (concat "__mat_rr:" id))
+											(cons (replace_rr_mat sym) (map args replace_rr_mat))))
+									expr)))
+								(define mat_inner_plan (replace_rr_mat mat_inner_plan_raw))
 								(define materialized_rows (list (quote begin)
 										(list (quote define) rows_sym (list (quote newsession)))
 										(list rows_sym "rows" '())
+										(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
 										(if (nil? mat_limit)
 											/* no limit */
-											(list (quote define) (symbol "resultrow")
+											(list (quote define) mat_rr_sym
 												(list (quote lambda) (list (symbol "item"))
 													(list rows_sym "rows"
 														(list (quote cons) (symbol "item") (list rows_sym "rows"))))
 											)
 											/* with limit: stop collecting after mat_limit rows */
 											(list (quote begin)
-												(list (quote define) cnt_sym (list (quote newsession)))
-												(list cnt_sym "n" 0)
-												(list (quote define) (symbol "resultrow")
+												(list (quote define) cnt_sym 0)
+												(list (quote define) mat_rr_sym
 													(list (quote lambda) (list (symbol "item"))
 														(list (quote if) (list (quote <) (list cnt_sym "n") mat_limit)
 															(list (quote begin)
@@ -1806,8 +1822,8 @@ WHAT IT MUST NOT DO:
 																	(list (quote cons) (symbol "item") (list rows_sym "rows"))))
 															nil))))
 										)
-										(build_queryplan_term subquery)
-										(list rows_sym "rows")
+										mat_inner_plan
+										(list (quote apply) (quote list) (list rows_sym "rows"))
 									))
 									(list
 										(list (list id schemax materialized_rows isOuter joinexpr))

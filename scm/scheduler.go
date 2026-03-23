@@ -231,25 +231,25 @@ func (s *Scheduler) run() {
 }
 
 func init_scheduler() {
-	Declare(&Globalenv, &Declaration{
-		"setTimeout", "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
-		2, 1000,
-		[]DeclarationParameter{
-			{"callback", "func", "function to execute once the timeout expires", nil},
-			{"milliseconds", "number", "milliseconds until execution", nil},
-			{"args...", "any", "optional arguments forwarded to the callback", nil},
-		}, "int",
-		setTimeout, false, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "setTimeout",
+		Desc: "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
+		Fn: setTimeout,
+		Type: &TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "callback", ParamDesc: "function to execute once the timeout expires"}, &TypeDescriptor{Kind: "number", ParamName: "milliseconds", ParamDesc: "milliseconds until execution"}, &TypeDescriptor{Kind: "any", ParamName: "args...", ParamDesc: "optional arguments forwarded to the callback", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "int"},
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"clearTimeout", "Cancels a timeout created with setTimeout.",
-		1, 1,
-		[]DeclarationParameter{
-			{"id", "number", "identifier returned by setTimeout", nil},
-		}, "bool",
-		clearTimeout, false, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "clearTimeout",
+		Desc: "Cancels a timeout created with setTimeout.",
+		Fn: clearTimeout,
+		Type: &TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "id", ParamDesc: "identifier returned by setTimeout"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+		},
 	})
 }
 
