@@ -109,7 +109,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(if (equal? result neutral) nil result)
 )))
 (define scalar_scan_order (lambda (schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral) (begin
-	(define result (scan_order schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral))
+	(define result (scan_order schema tbl filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
 	(if (equal? result neutral) nil result)
 )))
 
@@ -136,6 +136,29 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(match expr
 		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
 		(cons sym args) (merge (map args extract_all_get_columns))
+		'()
+	)
+))
+
+/* extract_all_outer_columns: return all (outer tblvar.col) refs as ("tblvar.col" (get_column tblvar false col false)) pairs.
+   Used alongside extract_all_get_columns to ensure prejoin materialization includes
+   columns referenced by scalar subselects via outer scope. */
+(define extract_all_outer_columns (lambda (expr)
+	(match expr
+		(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+			(match args
+				'(symname) (begin
+					(define s (string symname))
+					(define parts (split s "."))
+					(if (> (count parts) 1)
+						(begin
+							(define tbl (car parts))
+							/* rejoin remaining parts with . for column names containing dots */
+							(define col (reduce (cdr parts) (lambda (acc p) (if (equal? acc "") p (concat acc "." p))) ""))
+							(list (list (concat tbl "." col) (list (quote get_column) tbl false col false))))
+						'()))
+				_ '())
+			(merge (map args extract_all_outer_columns)))
 		'()
 	)
 ))
@@ -199,11 +222,14 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
 		(match args
 			'(symname) (begin
-				(define parts (split (string symname) "."))
-				(match parts
-					(list tbl col) (if (equal?? tbl (string tblvar)) (list col) '())
-					_ '()
-				)
+				(define s (string symname))
+				(define parts (split s "."))
+				(if (> (count parts) 1)
+					(begin
+						(define tbl (car parts))
+						(define col (reduce (cdr parts) (lambda (acc p) (if (equal? acc "") p (concat acc "." p))) ""))
+						(if (equal?? tbl (string tblvar)) (list col) '()))
+					'())
 			)
 			_ '()
 		)
@@ -488,7 +514,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 			(cons sym args_) (cons sym (map args_ replace_wf_with_fetch))
 			expr)))
 		(define new_fields (map_assoc fields (lambda (k v) (replace_wf_with_fetch (replace_find_column v)))))
-		(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
+		(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil nil))
 		(list 'begin keytable_init '('time collect_plan "collect") '('time compute_plan "compute") scan_plan)))
 )))
 
@@ -641,6 +667,7 @@ WHAT IT MUST NOT DO:
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(define rename_prefix (coalesce rename_prefix ""))
 	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
+	/* sq_cache: memoize scalar subselect plans */
 	(define sq_cache (newsession))
 
 	/* Accumulator for unnested subselect tables/schemas (Neumann unnesting) */
@@ -1105,7 +1132,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2 _)
 					(begin
 						(define groups2_or_staged (if (or (nil? groups2) (equal? groups2 '()))
 							(if (or raw_group raw_having raw_order raw_limit raw_offset)
@@ -1215,7 +1242,7 @@ WHAT IT MUST NOT DO:
 										)
 										expr
 									)))
-									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
+									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil nil)))
 									(list (quote begin)
 										(list (quote define) (symbol _sq_promise_name) (list (quote newpromise)))
 										(list (quote define) (symbol _sq_rr_name)
@@ -1258,7 +1285,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2 _)
 					(begin
 						(define groups2_or_staged (if (or (nil? groups2) (equal? groups2 '()))
 							(if (or raw_group raw_having raw_order raw_limit raw_offset)
@@ -1351,6 +1378,7 @@ WHAT IT MUST NOT DO:
 														)
 														(cons list ordercols)
 														(cons list dirs)
+														0
 														(coalesceNil stage_offset 0)
 														(coalesceNil stage_limit -1)
 														(cons list cur_cols)
@@ -1416,7 +1444,7 @@ WHAT IT MUST NOT DO:
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
 				(match (apply untangle_query subquery)
-					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2 _)
 					(begin
 						(define groups2_or_staged (if (or (nil? groups2) (equal? groups2 '()))
 							(if (or raw_group raw_having raw_order raw_limit raw_offset)
@@ -1490,6 +1518,7 @@ WHAT IT MUST NOT DO:
 										)
 										(cons list ordercols)
 										(cons list dirs)
+										0
 										(coalesceNil stage_offset 0)
 										(coalesceNil stage_limit -1)
 										(cons list '())
@@ -1606,8 +1635,8 @@ WHAT IT MUST NOT DO:
 			(define extra_schemas (unnest_acc "schemas"))
 			(define _init_code (coalesceNil (unnest_acc "init") '()))
 			(if (equal? extra_tables '())
-				(list schema tables fields condition groups '() (lambda (expr) expr) _init_code)
-				(list schema extra_tables fields condition groups extra_schemas (lambda (expr) expr) _init_code))
+				(list schema tables fields condition groups '() (lambda (expr) expr) _init_code nil)
+				(list schema extra_tables fields condition groups extra_schemas (lambda (expr) expr) _init_code nil))
 		)
 		(begin
 			(define zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -1641,7 +1670,7 @@ WHAT IT MUST NOT DO:
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 							)
 						))
-						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2) (begin
+						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2 _) (begin
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -1818,7 +1847,15 @@ WHAT IT MUST NOT DO:
 			/* TODO: apply renamelist to all expressions in fields condition group having order */
 
 			/* at first: extract additional join exprs into condition list */
-			(define condition_with_joins (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
+			/* Outer-to-inner join conversion: if the WHERE clause references any column
+			   of a LEFT JOIN table, that LEFT JOIN can be safely converted to INNER JOIN
+			   because NULL-padded rows would be rejected by the WHERE anyway. */
+			(define tables_join_converted (map tables (lambda (t) (match t
+				'(a s tbl true je) (if (has? (extract_tblvars condition) a)
+					(list a s tbl false je) /* WHERE references this table -> convert LEFT to INNER */
+					t)
+				t))))
+			(define condition_with_joins (cons 'and (coalesce (filter (append (map tables_join_converted (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
 
 			/* tells whether there is an aggregate inside */
 			(define expr_find_aggregate (lambda (expr) (match expr
@@ -1910,13 +1947,21 @@ WHAT IT MUST NOT DO:
 				expr
 			)))
 
-			(define fields_inner_resolved (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
+			(define fields (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
+			/* Snapshot condition string BEFORE inner_select expansion for stable
+			   prejoin/keytable naming. After expansion, the condition contains
+			   promise/scan code that inflates canonical names. */
+			(define condition_canonical_pre_expansion (concat condition))
 			(define condition_inner_resolved (replace_inner_selects condition_with_joins schemas))
-			(define group_inner_resolved (map group_with_implicit_agg (lambda (g) (replace_inner_selects g schemas))))
+			(define group_inner_resolved (map group (lambda (g) (replace_inner_selects g schemas))))
 			(define having_inner_resolved (replace_inner_selects having schemas))
 			(define order_inner_resolved (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
+			/* Also resolve inner_selects in joinexprs so build_scan can use them directly */
+			(define tables_inner_resolved (map tables_join_converted (lambda (t) (match t
+				'(a s tbl io je) (list a s tbl io (if (nil? je) nil (replace_inner_selects je schemas)))
+				t))))
 			/* merge unnested subselect tables/schemas into outer query (Neumann unnesting) */
-			(define tables_with_unnested (merge tables (unnest_acc "tables")))
+			(define tables_with_unnested (merge tables_inner_resolved (unnest_acc "tables")))
 			(define schemas_with_unnested (merge schemas (unnest_acc "schemas")))
 			/* integrate joinexprs from unnested domain tables into condition */
 			(define condition_with_unnested_joins (reduce (unnest_acc "tables") (lambda (cond t) (match t '(_ _ _ _ je) (if (nil? je) cond (list (quote and) cond je)) cond)) condition_inner_resolved))
@@ -2003,16 +2048,11 @@ WHAT IT MUST NOT DO:
 			(define _canon (lambda (expr) (canonicalize_columns expr schemas_with_unnested)))
 			(define _canon_fields (map_assoc fields_expanded (lambda (k v) (_canon (replace_rename v)))))
 			(define _canon_condition (_canon conditionAll))
-			(define _canon_groups (map (coalesceNil groups '()) (lambda (stage) (canonicalize_stage stage schemas_with_unnested))))
-			/* eliminate unused LEFT JOINs: if no column of a LEFT JOIN table
-			is referenced in fields, condition, or group stages, the join
-			cannot affect row count and can be safely removed */
+			(define _canon_groups (map (coalesceNil groups '()) (lambda (stage) (canonicalize_stage stage schemas))))
 			/* eliminate unused LEFT JOINs: a LEFT JOIN is unused when none of its
-			columns appear in fields or group stages. The merged condition includes
-			joinexprs which reference the JOIN itself — those must not prevent
-			elimination. We only check fields + groups (the query's output). */
-			/* unnested table aliases must never be pruned — they're data dependencies
-			referenced in conditions, not just joinexprs */
+			columns appear in fields or group stages. Tables whose WHERE references
+			were converted to INNER JOIN above are no longer isOuter, so they won't
+			be eliminated. Unnested table aliases must never be pruned. */
 			(define _unnested_aliases (map (unnest_acc "tables") (lambda (t) (match t '(alias _ _ _ _) alias _ nil))))
 			(define _used_tvs (merge_unique
 				_unnested_aliases
@@ -2042,7 +2082,7 @@ WHAT IT MUST NOT DO:
 					(if (equal? 0 (count _kept_parts)) true
 						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 							(cons 'and _kept_parts))))))
-			(list schema _pruned_tables _canon_fields _canon_condition_pruned _canon_groups schemas_with_unnested replace_find_column (coalesceNil (unnest_acc "init") '()))
+			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column (coalesceNil (unnest_acc "init") '()) condition_canonical_pre_expansion)
 		)
 	)
 )
@@ -2078,8 +2118,9 @@ WHAT IT MUST NOT DO:
 			(begin
 				(define _uq_result (apply untangle_query (merge query (list nil))))
 				(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
+				(define _uq_cond_pre (if (>= (count _uq_result) 9) (nth _uq_result 8) nil))
 				(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
-				(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
+				(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil _uq_cond_pre))))
 				(if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan)))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
@@ -2153,6 +2194,7 @@ column resolution — then injects $update into the target table's scan. */
 	/* Run through untangle_query → join_reorder → build_queryplan */
 	(define _dml_uq (apply untangle_query (merge synthetic_select (list nil))))
 	(define _dml_init (if (>= (count _dml_uq) 8) (nth _dml_uq 7) '()))
+	(define _dml_cond_pre (if (>= (count _dml_uq) 9) (nth _dml_uq 8) nil))
 	(define pipeline_result (apply join_reorder (list (nth _dml_uq 0) (nth _dml_uq 1) (nth _dml_uq 2) (nth _dml_uq 3) (nth _dml_uq 4) (nth _dml_uq 5) (nth _dml_uq 6))))
 	/* For UPDATE: reconstruct resolved cols from the pipeline's fields */
 	(define resolved_target_cols (if is_update
@@ -2179,6 +2221,7 @@ column resolution — then injects $update into the target table's scan. */
 		(nth pipeline_result 5) /* schemas */
 		(nth pipeline_result 6) /* replace_find_column */
 		(list tgt resolved_target_cols) /* update_target: (alias cols) — empty cols = DELETE */
+		_dml_cond_pre /* condition_canonical_pre_expansion */
 	))
 	(define _dml_plan (apply build_queryplan final_pipeline))
 	(if (equal? _dml_init '()) _dml_plan (cons (quote begin) (merge _dml_init (list _dml_plan))))
@@ -2217,8 +2260,8 @@ store results as keytable columns named "expr|condition"
 3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
 */
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
-When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
-(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
+   When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
+(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target condition_canonical_pre_expansion) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
@@ -2356,7 +2399,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						transformed_rest_groups
 						schemas
 						replace_find_column
-						nil))
+						nil nil))
 					(list 'begin keytable_init (make_collect true) grouped_plan)
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
@@ -2403,7 +2446,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							next_groups
 							schemas
 							replace_find_column
-							nil))
+							nil nil))
 
 						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
 						(define createcol_options (cons 'list (merge '("temp" true)
@@ -2515,12 +2558,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* resolve condition and fields */
 				(define condition (replace_find_column (coalesceNil condition true)))
 				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
-				/* extract all get_column refs from group, fields, having, order */
+				/* extract all get_column AND outer refs from group, fields, having, order, condition.
+			   outer refs come from scalar subselects that were expanded by replace_inner_selects. */
 				(define mat_cols_raw (merge
 					(merge (map stage_group extract_all_get_columns))
+					(merge (map stage_group extract_all_outer_columns))
 					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
+					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_outer_columns v))))
 					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
+					(if (nil? stage_having) '() (extract_all_outer_columns stage_having))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
+					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_outer_columns col)))))
+					(extract_all_get_columns condition)
+					(extract_all_outer_columns condition)
 				))
 				(define mat_cols (reduce mat_cols_raw (lambda (acc mc)
 					(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false)
@@ -2535,10 +2585,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(list tv (concat tschema "." (if (string? ttbl) ttbl tv))))))
 				)
 				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
-				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
-				(define prejointbl (concat ".prejoin:"
+				/* Use pre-expansion condition for stable prejoin naming.
+				   condition_canonical_pre_expansion is (concat condition) from BEFORE
+				   replace_inner_selects — it doesn't contain promise/scan code. */
+				(define prejoin_condition_name (if (nil? condition_canonical_pre_expansion)
+					(canonical_expr_name condition '(list) '(list) prejoin_alias_map)
+					(fnv_hash condition_canonical_pre_expansion)))
+				(define prejointbl_full (concat ".prejoin:"
 					(map tables (lambda (t) (match t '(tv tschema ttbl _ _) (concat tschema "." (if (string? ttbl) ttbl tv))))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
+				/* Use a short hash-based name to prevent explosively long keytable column names
+				   in the recursive build_queryplan call (canon_alias_map embeds the prejoin name
+				   into every keytable column). The full name is used for debugging only. */
+				(define prejointbl (concat ".pj:" (fnv_hash prejointbl_full)))
 				/* capture outer schema and table name for trigger code generation */
 				(define pj_schema schema)
 				(define pjtbl prejointbl)
@@ -2549,7 +2608,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* build materialization scan: nested-loop join populating prejoin table */
 				(define build_mat_scan (lambda (scan_tables scan_condition is_outermost)
 					(match scan_tables
-						(cons '(tblvar schema tbl isOuter _) rest) (begin
+						(cons '(tblvar schema tbl isOuter joinexpr) rest) (begin
 							/* columns needed from this table for materialization + condition */
 							(define cols (merge_unique (list
 								(extract_columns_for_tblvar tblvar scan_condition)
@@ -2566,10 +2625,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 									(cons list cols)
 									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_mat_scan rest later_condition false))
-									/* reduce: merge sub-results */
 									'('lambda '('acc 'sub) '('merge 'acc 'sub))
 									'(list)
-									/* reduce2: outermost inserts into prejoin, inner levels merge */
 									(if is_outermost
 										'('lambda '('acc 'shard_rows) '('insert pj_schema prejointbl (cons 'list mat_col_names) 'shard_rows '(list) '('lambda '() true) true))
 										'('lambda '('acc 'shard_rows) '('merge 'acc 'shard_rows)))
@@ -2600,7 +2657,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					pj_all_groups
 					schemas
 					replace_find_column
-					nil))
+					nil nil))
 				/* build per-source-table incremental trigger functions entirely in Scheme,
 				then register them via a thin Go wrapper */
 				(define pj_trigger_registrations
@@ -2856,7 +2913,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										"mapcols" extra_mapcols
 										"mapfn" orc_mapfn "reducefn" orc_reducefn
 										"reduceinit" orc_reduceinit "temp" true))))
-							(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
+							(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil nil))
 							(list (quote begin) (list orc_setup) scan_plan)
 						)
 						(error "window functions on joined tables not yet supported"))
@@ -2978,7 +3035,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 															(cons list ordercols)
 															(cons list sort_dirs)
-															0 -1
+															0 0 -1
 															(cons list stride_cols)
 															mapfn_ast
 															reducer_ast
@@ -2990,7 +3047,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 													(cons list ordercols)
 													(cons list sort_dirs)
-													0 -1
+													0 0 -1
 													(cons list stride_cols)
 													mapfn_ast
 													reducer_ast
@@ -3016,7 +3073,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 																'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 																(cons list ordercols)
 																(cons list sort_dirs)
-																0 -1
+																0 0 -1
 																(cons list stride_cols)
 																mapfn_ast
 																reducer_ast
@@ -3028,7 +3085,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 														(cons list ordercols)
 														(cons list sort_dirs)
-														0 -1
+														0 0 -1
 														(cons list stride_cols)
 														mapfn_ast
 														reducer_ast
@@ -3046,7 +3103,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
 					(define build_scan (lambda (tables condition is_first)
 						(match tables
-							(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+							(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
+								/* For LEFT JOIN: merge joinexpr into condition for extraction */
 								(define cols (merge_unique
 									(list
 										(merge_unique
@@ -3064,7 +3122,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									)
 								))
 								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-									(define filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* TODO: add columns from rest condition into cols list */
 
 									/* extract order cols for this tblvar */
@@ -3092,19 +3149,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ord_scan_mapfn_params (if is_update_target_ord
 										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
+
+									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									(scan_wrapper 'scan_order schema tbl
-										/* condition */
 										(cons list filtercols)
 										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-										/* sortcols, sortdirs */
 										(cons list ordercols)
 										(cons list dirs)
+										0
 										scan_offset
 										scan_limit
-										/* extract columns and store them into variables */
 										ord_scan_mapcols
 										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables later_condition false))
-										/* reduce+neutral for DML */
 										(if is_update_target_ord (symbol "+") nil)
 										(if is_update_target_ord 0 nil)
 										isOuter
@@ -3128,7 +3184,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* TODO: match tbl to inner query vs string */
 						(define build_scan (lambda (tables condition)
 							(match tables
-								(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+								(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
 									/* check if this table is the UPDATE target */
 									(define is_update_target (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
 									/* also extract cols needed for SET expressions in update_target */
@@ -3160,7 +3216,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 										(define filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-
 										(scan_wrapper 'scan schema tbl
 											/* condition */
 											(cons list filtercols)
