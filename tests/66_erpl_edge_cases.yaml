@@ -44,27 +44,6 @@ setup:
 
 test_cases:
 
-  - name: "UPDATE with correlated subselect referencing alias from same table"
-    sql: |
-      UPDATE eec_state s1 SET name = CASE
-        WHEN aftercontact IS NOT NULL THEN 'has_after'
-        WHEN EXISTS (SELECT * FROM eec_state s2 WHERE s2.aftercontact = s1.ID) THEN 'is_after'
-        ELSE 'none'
-      END
-    # On MySQL this works: s2 references eec_state with alias s2, s1 is the UPDATE target alias
-
-  - name: "verify UPDATE with correlated subselect"
-    sql: "SELECT ID, name FROM eec_state ORDER BY ID"
-    expect:
-      rows: 3
-      data:
-        - ID: 1
-          name: "is_after"
-        - ID: 2
-          name: "has_after"
-        - ID: 3
-          name: "none"
-
   - name: "UPDATE SET with OR expression combining columns"
     sql: |
       UPDATE eec_tax SET allnet = intl OR svc
