@@ -1310,91 +1310,154 @@ WHAT IT MUST NOT DO:
 						(define us_outer_in_fields (not (equal?
 							(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v)))) '())))
 						(if (not us_has_outer) nil /* non-correlated: use existing path */
-							(if (or us_has_grp us_has_agg) nil /* aggregated: not handled yet */
-								(if us_has_limit nil /* LIMIT/ORDER: not handled yet */
-									(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
-										(begin
-											/* === Neumann unnesting: nD domain, single or multi-table === */
-											(define us_sq_idx (coalesce (sq_cache "idx") 0))
-											(sq_cache "idx" (+ us_sq_idx 1))
-											(define us_sq_prefix (concat "_sq" us_sq_idx))
-											/* build alias rename map for all inner tables */
-											(define us_alias_map (map tables2_us (lambda (td) (match td
-												'(alias _ _ _ _) (list alias (if us_single_tbl us_sq_prefix (concat us_sq_prefix "\0" alias)))
-												(list "" "")))))
-											(define _us_lookup (lambda (a) (reduce us_alias_map (lambda (acc p) (if (nil? acc) (if (equal?? a (nth p 0)) (nth p 1) nil) acc)) nil)))
-											/* value column and its source alias */
-											(define us_value_key (car (extract_assoc fields2_us (lambda (k v) k))))
-											(define us_value_expr (car (extract_assoc fields2_us (lambda (k v) v))))
-											(define us_value_src (match us_value_expr '((symbol get_column) a _ _ _) a '((quote get_column) a _ _ _) a nil))
-											(define us_value_new (if (nil? us_value_src) us_sq_prefix (coalesce (_us_lookup us_value_src) us_sq_prefix)))
-											/* helper: does expr contain outer refs? Detects both (outer ...) and
-											bare get_column refs to non-inner tables. Skip opaque scopes. */
-											(define _us_hor (lambda (expr) (match expr
-												(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-													true
-													(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
-														(match args '(alias_ _ _ _) (and (not (nil? alias_)) (not (reduce us_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false))) false)
-														(if (_is_opaque_scope_sym sym) false
-															(reduce args (lambda (a b) (or a (_us_hor b))) false))))
-												false)))
-											/* split condition into AND-parts */
-											(define _us_fap (lambda (expr) (match expr
-												(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
-													(merge (map parts _us_fap))
-													(list expr))
-												(list expr))))
-											(define us_cond_parts (_us_fap condition2_us))
-											(define us_inner_parts (filter us_cond_parts (lambda (p) (not (_us_hor p)))))
-											(define us_outer_parts (filter us_cond_parts (lambda (p) (_us_hor p))))
-											/* resolve (outer tbl.col) -> (get_column tbl false col false).
-											Runtime resolves bare symbols via scope chain (multi-level lookup). */
-											(define _us_ror (lambda (expr) (match expr
-												(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-													(match args
-														(cons sym_arg '()) (begin
-															(define ps (split (string sym_arg) "."))
-															(match ps
-																(list tbl col) (list (quote get_column) tbl false col false)
-																_ expr))
-														_ expr)
-													(cons (_us_ror sym) (map args _us_ror)))
-												expr)))
-											/* replace ANY inner alias with its renamed version */
-											(define _us_ria (lambda (expr) (match expr
-												'((symbol get_column) alias_ ti col ci) (begin
-													(define na (_us_lookup alias_))
-													(if (nil? na) expr (list (quote get_column) na false col false)))
-												'((quote get_column) alias_ ti col ci) (begin
-													(define na (_us_lookup alias_))
-													(if (nil? na) expr (list (quote get_column) na false col false)))
-												(cons sym args) (cons (_us_ria sym) (map args _us_ria))
-												expr)))
-											/* build join condition + inner condition */
-											(define us_join_parts (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
-											(define us_join_cond (if (equal? (count us_join_parts) 0) true
-												(if (equal? (count us_join_parts) 1) (car us_join_parts)
-													(cons (quote and) us_join_parts))))
-											(define us_inner_cond_parts (map us_inner_parts _us_ria))
-											(define us_inner_cond (if (equal? (count us_inner_cond_parts) 0) nil
-												(if (equal? (count us_inner_cond_parts) 1) (car us_inner_cond_parts)
-													(cons (quote and) us_inner_cond_parts))))
-											(define us_full_je (if (nil? us_inner_cond) us_join_cond
-												(if (equal? us_join_cond true) us_inner_cond
-													(list (quote and) us_join_cond us_inner_cond))))
-											/* build table entries: first=LEFT JOIN, rest keep original isOuter */
-											(define us_is_first true)
-											(define us_tbl_entries (map tables2_us (lambda (td) (match td
-												'(alias schema3 tbl3 isOuter3 je3) (begin
-													(define na (coalesce (_us_lookup alias) alias))
-													(define entry (if us_is_first
-														(begin (set us_is_first false) (list na schema3 tbl3 true us_full_je))
-														(list na schema3 tbl3 isOuter3 nil)))
-													entry)
-												td))))
-											/* substitution + return */
-											(define us_subst (list (quote get_column) us_value_new false us_value_key false))
-											(list us_subst us_tbl_entries)
+							(if us_has_limit nil /* LIMIT/ORDER: not handled yet */
+								(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
+									(begin
+										/* === Neumann unnesting: nD domain, single or multi-table === */
+										(define us_sq_idx (coalesce (sq_cache "idx") 0))
+										(sq_cache "idx" (+ us_sq_idx 1))
+										(define us_sq_prefix (concat "_sq" us_sq_idx))
+										/* build alias rename map for all inner tables */
+										(define us_alias_map (map tables2_us (lambda (td) (match td
+											'(alias _ _ _ _) (list alias (if us_single_tbl us_sq_prefix (concat us_sq_prefix "\0" alias)))
+											(list "" "")))))
+										(define _us_lookup (lambda (a) (reduce us_alias_map (lambda (acc p) (if (nil? acc) (if (equal?? a (nth p 0)) (nth p 1) nil) acc)) nil)))
+										/* value column and its source alias */
+										(define us_value_key (car (extract_assoc fields2_us (lambda (k v) k))))
+										(define us_value_expr (car (extract_assoc fields2_us (lambda (k v) v))))
+										(define us_value_src (match us_value_expr '((symbol get_column) a _ _ _) a '((quote get_column) a _ _ _) a nil))
+										(define us_value_new (if (nil? us_value_src) us_sq_prefix (coalesce (_us_lookup us_value_src) us_sq_prefix)))
+										/* helper: does expr contain outer refs? Detects both (outer ...) and
+										bare get_column refs to non-inner tables. Skip opaque scopes. */
+										(define _us_hor (lambda (expr) (match expr
+											(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+												true
+												(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+													(match args '(alias_ _ _ _) (and (not (nil? alias_)) (not (reduce us_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false))) false)
+													(if (_is_opaque_scope_sym sym) false
+														(reduce args (lambda (a b) (or a (_us_hor b))) false))))
+											false)))
+										/* split condition into AND-parts */
+										(define _us_fap (lambda (expr) (match expr
+											(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
+												(merge (map parts _us_fap))
+												(list expr))
+											(list expr))))
+										(define us_cond_parts (_us_fap condition2_us))
+										(define us_inner_parts (filter us_cond_parts (lambda (p) (not (_us_hor p)))))
+										(define us_outer_parts (filter us_cond_parts (lambda (p) (_us_hor p))))
+										/* resolve (outer tbl.col) -> (get_column tbl false col false).
+										Runtime resolves bare symbols via scope chain (multi-level lookup). */
+										(define _us_ror (lambda (expr) (match expr
+											(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+												(match args
+													(cons sym_arg '()) (begin
+														(define ps (split (string sym_arg) "."))
+														(match ps
+															(list tbl col) (list (quote get_column) tbl false col false)
+															_ expr))
+													_ expr)
+												(cons (_us_ror sym) (map args _us_ror)))
+											expr)))
+										/* replace ANY inner alias with its renamed version */
+										(define _us_ria (lambda (expr) (match expr
+											'((symbol get_column) alias_ ti col ci) (begin
+												(define na (_us_lookup alias_))
+												(if (nil? na) expr (list (quote get_column) na false col false)))
+											'((quote get_column) alias_ ti col ci) (begin
+												(define na (_us_lookup alias_))
+												(if (nil? na) expr (list (quote get_column) na false col false)))
+											(cons sym args) (cons (_us_ria sym) (map args _us_ria))
+											expr)))
+										/* inner condition (non-correlated) - kept with original aliases for
+										aggregate path; renamed for non-aggregate path */
+										(define us_inner_cond_raw (if (equal? (count us_inner_parts) 0) nil
+											(if (equal? (count us_inner_parts) 1) (car us_inner_parts)
+												(cons (quote and) us_inner_parts))))
+										/* extract domain columns from correlated equalities:
+										(equal?? inner_expr outer_expr) → (inner_expr resolved_outer_expr) */
+										(define us_domain_cols (filter (map us_outer_parts (lambda (part) (match part
+											'((symbol equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
+											'((quote equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
+											nil))) (lambda (x) (not (nil? x)))))
+										(if (or us_has_agg us_has_grp)
+											/* === Neumann GROUP BY extension: Γ_{A∪D;f}(T) ===
+											Construct a derived table with domain columns in GROUP BY + projection.
+											The outer query LEFT JOINs on the domain columns. */
+											(begin
+												/* domain column names + fields */
+												(define us_dom_idx 0)
+												(define us_dom_fields (merge (map us_domain_cols (lambda (dc) (begin
+													(define dname (concat "__domain_" us_dom_idx))
+													(set us_dom_idx (+ us_dom_idx 1))
+													(list dname (nth dc 0)))))))
+												(define us_dom_group_exprs (map us_domain_cols (lambda (dc) (nth dc 0))))
+												/* extend GROUP BY: prepend domain columns */
+												(define us_orig_group (if us_has_stages
+													(coalesceNil (stage_group_cols (car groups2_us)) '()) '()))
+												(define us_orig_having (if us_has_stages (stage_having_expr (car groups2_us)) nil))
+												(define us_new_group (merge us_dom_group_exprs
+													(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1))) '() us_orig_group)))
+												/* modified subquery AST: fields + domain, non-correlated condition, extended GROUP BY */
+												(define us_mod_fields (merge fields2_us us_dom_fields))
+												(define us_mod_cond (if (nil? us_inner_cond_raw) true us_inner_cond_raw))
+												(define us_derived_ast (list schema2_us tables2_us us_mod_fields
+													us_mod_cond us_new_group us_orig_having nil nil nil))
+												/* join condition: sq_prefix.__domain_N = resolved_outer_ref */
+												(define us_dom_je_idx 0)
+												(define us_dom_je_parts (map us_domain_cols (lambda (dc) (begin
+													(define dname (concat "__domain_" us_dom_je_idx))
+													(set us_dom_je_idx (+ us_dom_je_idx 1))
+													(list (quote equal??) (list (quote get_column) us_sq_prefix false dname false) (nth dc 1))))))
+												(define us_dom_je (if (equal? (count us_dom_je_parts) 0) true
+													(if (equal? (count us_dom_je_parts) 1) (car us_dom_je_parts)
+														(cons (quote and) us_dom_je_parts))))
+												/* materialize the derived table: build plan + collect rows at runtime */
+												(define us_output_cols (extract_assoc us_mod_fields (lambda (k v) k)))
+												(define us_rows_sym (symbol (concat "__us_rows:" us_sq_prefix)))
+												(define us_rr_sym (symbol (concat "__us_rr:" us_sq_prefix)))
+												(define us_materialized (list (quote begin)
+													(list (quote set) us_rows_sym (list (quote newsession)))
+													(list us_rows_sym "rows" '())
+													(list (quote set) us_rr_sym (symbol "resultrow"))
+													(list (quote set) (symbol "resultrow")
+														(list (quote lambda) (list (symbol "item"))
+															(list us_rows_sym "rows"
+																(list (quote cons) (symbol "item") (list us_rows_sym "rows")))))
+													(build_queryplan_term us_derived_ast)
+													(list (quote set) (symbol "resultrow") us_rr_sym)
+													(list us_rows_sym "rows")))
+												/* table entry: materialized rows as tbl, LEFT JOIN on domain */
+												(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized true us_dom_je)))
+												/* schema for the materialized table (column defs) */
+												(define us_sch (list us_sq_prefix (map us_output_cols (lambda (col) (list "Field" col "Type" "any")))))
+												(sq_cache "schemas" (merge us_sch (coalesceNil (sq_cache "schemas") '())))
+												(define us_subst (list (quote get_column) us_sq_prefix false us_value_key false))
+												(list us_subst us_tbl_entries)
+											)
+											/* === Non-aggregate path: direct LEFT JOIN of inner tables === */
+											(begin
+												/* join condition: correlated parts resolved + inner alias renamed */
+												(define us_join_parts (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
+												(define us_inner_cond (_us_ria us_inner_cond_raw))
+												(define us_full_je (if (nil? us_inner_cond)
+													(if (equal? (count us_join_parts) 0) true
+														(if (equal? (count us_join_parts) 1) (car us_join_parts)
+															(cons (quote and) us_join_parts)))
+													(cons (quote and) (merge us_join_parts (list us_inner_cond)))))
+												/* table entries: first=LEFT JOIN, rest keep original isOuter */
+												(define us_is_first true)
+												(define us_tbl_entries (map tables2_us (lambda (td) (match td
+													'(alias schema3 tbl3 isOuter3 je3) (begin
+														(define na (coalesce (_us_lookup alias) alias))
+														(define entry (if us_is_first
+															(begin (set us_is_first false) (list na schema3 tbl3 true us_full_je))
+															(list na schema3 tbl3 isOuter3 nil)))
+														entry)
+													td))))
+												(define us_subst (list (quote get_column) us_value_new false us_value_key false))
+												(list us_subst us_tbl_entries)
+											)
 										)
 									)
 								)
@@ -1806,11 +1869,12 @@ WHAT IT MUST NOT DO:
 			(set having (replace_inner_selects having schemas))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
 			/* integrate unnested scalar subselects from Neumann unnesting.
-			IMPORTANT: do NOT update schemas — replace_find_column captures schemas
-			via closure, and adding _sqN aliases would cause unqualified column
-			resolution to pick up unnested table columns (e.g., id → _sq0.id). */
+			Tables from non-aggregate path (direct LEFT JOIN) do NOT need schema updates.
+			Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
 			(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
 			(set tables (merge tables _sq_tbls))
+			(define _sq_schs (coalesceNil (sq_cache "schemas") '()))
+			(if (not (equal? _sq_schs '())) (set schemas (merge schemas _sq_schs)))
 			(define _sq_jes (filter (map _sq_tbls (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 			(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
 			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
