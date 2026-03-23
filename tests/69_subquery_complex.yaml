@@ -183,6 +183,20 @@ test_cases:
         - name: "Alice"
           dept: "Engineering"
 
+  # === Nested subselect: inner subselect unnested, then outer level ===
+
+  - name: "Nested correlated subselect - inner unnested, outer inline"
+    sql: |
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d
+         WHERE d.did = (SELECT t.did FROM sq_emp t WHERE t.eid = e.eid) LIMIT 1) AS dept
+      FROM sq_emp e WHERE e.eid = 1
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+
   # === nD domain: multiple outer references ===
 
   - name: "2D domain: two correlated equality conditions"

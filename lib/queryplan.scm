@@ -1260,14 +1260,20 @@ WHAT IT MUST NOT DO:
 							e)))
 						(set fields2_us (map_assoc fields2_us (lambda (k v) (_us_wrap v))))
 						(set condition2_us (_us_wrap condition2_us))
-						/* extract all (outer X) references from fields and condition.
-						Skip opaque scopes (!begin, scan, etc.) — those contain inline
-						code from nested subselects with their own outer refs. */
+						/* extract all outer references from fields and condition.
+						Detects both explicit (outer tbl.col) AND bare (get_column tbl false col false)
+						where tbl is NOT in the inner table set (from nested unnesting).
+						Skip opaque scopes (!begin, scan, etc.). */
+						(define us_inner_aliases (map tables2_us (lambda (td) (match td '(a _ _ _ _) a ""))))
 						(define _us_eor (lambda (expr) (match expr
 							(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
 								(match args (cons sym_arg '()) (list (string sym_arg)) '())
-								(if (_is_opaque_scope_sym sym) '()
-									(merge_unique (map args _us_eor))))
+								(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+									(match args '(alias_ _ col _) (if (and (not (nil? alias_)) (not (reduce us_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false)))
+										(list (concat alias_ "." col)) '())
+										'())
+									(if (_is_opaque_scope_sym sym) '()
+										(merge_unique (map args _us_eor)))))
 							'())))
 						(define us_outer_refs (merge_unique
 							(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v))))
@@ -1322,12 +1328,15 @@ WHAT IT MUST NOT DO:
 											(define us_value_expr (car (extract_assoc fields2_us (lambda (k v) v))))
 											(define us_value_src (match us_value_expr '((symbol get_column) a _ _ _) a '((quote get_column) a _ _ _) a nil))
 											(define us_value_new (if (nil? us_value_src) us_sq_prefix (coalesce (_us_lookup us_value_src) us_sq_prefix)))
-											/* helper: does expr contain (outer ...) refs? Skip opaque scopes. */
+											/* helper: does expr contain outer refs? Detects both (outer ...) and
+											bare get_column refs to non-inner tables. Skip opaque scopes. */
 											(define _us_hor (lambda (expr) (match expr
 												(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
 													true
-													(if (_is_opaque_scope_sym sym) false
-														(reduce args (lambda (a b) (or a (_us_hor b))) false)))
+													(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+														(match args '(alias_ _ _ _) (and (not (nil? alias_)) (not (reduce us_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false))) false)
+														(if (_is_opaque_scope_sym sym) false
+															(reduce args (lambda (a b) (or a (_us_hor b))) false))))
 												false)))
 											/* split condition into AND-parts */
 											(define _us_fap (lambda (expr) (match expr
@@ -1338,7 +1347,8 @@ WHAT IT MUST NOT DO:
 											(define us_cond_parts (_us_fap condition2_us))
 											(define us_inner_parts (filter us_cond_parts (lambda (p) (not (_us_hor p)))))
 											(define us_outer_parts (filter us_cond_parts (lambda (p) (_us_hor p))))
-											/* resolve (outer tbl.col) -> (get_column tbl false col false) */
+											/* resolve (outer tbl.col) -> (get_column tbl false col false).
+											Runtime resolves bare symbols via scope chain (multi-level lookup). */
 											(define _us_ror (lambda (expr) (match expr
 												(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
 													(match args
@@ -1899,7 +1909,10 @@ WHAT IT MUST NOT DO:
 					(merge_unique
 						(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
 						(extract_tblvars (coalesceNil (stage_having_expr stage) true))
-						(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))))))))
+						(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))))))
+				/* include condition-referenced tables: unnested subqueries may create
+				cross-table dependencies (e.g., d.did = _sq0.did) that must prevent pruning */
+				(extract_tblvars _canon_condition)))
 			(define _pruned_tables (filter tables (lambda (t) (match t
 				'(alias _ _ isOuter _) (if isOuter (has? _used_tvs alias) true)
 				true))))
