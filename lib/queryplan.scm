@@ -1457,7 +1457,10 @@ WHAT IT MUST NOT DO:
 											(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
 											(list us_subst us_tbl_entries))
 										/* === B/C: Non-aggregate === */
-										(if (and us_single_tbl us_has_limit)
+										/* value must be a simple column (not computed expression) for direct table entry */
+										(define _us_val_is_col (match us_value_expr
+											'((symbol get_column) _ _ _ _) true '((quote get_column) _ _ _ _) true false))
+										(if (and us_single_tbl us_has_limit _us_val_is_col)
 											/* === B: Non-agg + LIMIT → direct table entry + partition stage in groups ===
 											build_queryplan reads the partition stage and emits scan_order for the
 											aliased table when it's pulled in build_scan. */
