@@ -1,0 +1,101 @@
+# Per-partition LIMIT/OFFSET for scan_order via limitPartitionCols parameter.
+# Tests use scm: blocks to call scan_order directly with partition semantics.
+
+metadata:
+  version: "1.0"
+  description: "scan_order limitPartitionCols: per-partition LIMIT/OFFSET with pruning"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS part_test"
+  - sql: |
+      CREATE TABLE part_test (
+        id INT PRIMARY KEY,
+        dept INT,
+        name VARCHAR(30),
+        salary INT
+      )
+  - sql: |
+      INSERT INTO part_test VALUES
+        (1, 1, 'Alice', 90000),
+        (2, 1, 'Bob', 80000),
+        (3, 1, 'Frank', 95000),
+        (4, 2, 'Carol', 70000),
+        (5, 2, 'Dave', 75000),
+        (6, 3, 'Eve', 60000),
+        (7, 3, 'Grace', 65000),
+        (8, 3, 'Henry', 50000)
+
+test_cases:
+
+  - name: "per-partition LIMIT 1: top earner per dept"
+    scm: |
+      (begin
+        (set s (newsession))
+        (s "cnt" 0)
+        (scan_order "memcp-tests" "part_test"
+          '() (lambda () true)
+          '("dept" "salary") '(< >)
+          1 0 1
+          '("dept" "name" "salary")
+          (lambda (dept name salary) (begin (s "cnt" (+ (s "cnt") 1)) nil))
+          (lambda (a b) b) nil false)
+        (if (equal? (s "cnt") 3) "ok" (error (concat "expected 3 rows but got " (s "cnt")))))
+
+  - name: "per-partition LIMIT 2: top 2 earners per dept"
+    scm: |
+      (begin
+        (set s (newsession))
+        (s "cnt" 0)
+        (scan_order "memcp-tests" "part_test"
+          '() (lambda () true)
+          '("dept" "salary") '(< >)
+          1 0 2
+          '("dept" "name" "salary")
+          (lambda (dept name salary) (begin (s "cnt" (+ (s "cnt") 1)) nil))
+          (lambda (a b) b) nil false)
+        (if (equal? (s "cnt") 6) "ok" (error (concat "expected 6 rows but got " (s "cnt")))))
+
+  - name: "per-partition OFFSET 1 LIMIT 1: second-best earner per dept"
+    scm: |
+      (begin
+        (set s (newsession))
+        (s "cnt" 0)
+        (scan_order "memcp-tests" "part_test"
+          '() (lambda () true)
+          '("dept" "salary") '(< >)
+          1 1 1
+          '("dept" "name" "salary")
+          (lambda (dept name salary) (begin (s "cnt" (+ (s "cnt") 1)) nil))
+          (lambda (a b) b) nil false)
+        (if (equal? (s "cnt") 3) "ok" (error (concat "expected 3 rows but got " (s "cnt")))))
+
+  - name: "limitPartitionCols=0 is global limit (regression)"
+    scm: |
+      (begin
+        (set s (newsession))
+        (s "cnt" 0)
+        (scan_order "memcp-tests" "part_test"
+          '() (lambda () true)
+          '("salary") '(>)
+          0 0 2
+          '("salary")
+          (lambda (salary) (begin (s "cnt" (+ (s "cnt") 1)) nil))
+          (lambda (a b) b) nil false)
+        (if (equal? (s "cnt") 2) "ok" (error (concat "expected 2 rows but got " (s "cnt")))))
+
+  - name: "pruning: map called only limit*partitions times"
+    scm: |
+      (begin
+        (set s (newsession))
+        (s "cnt" 0)
+        (scan_order "memcp-tests" "part_test"
+          '() (lambda () true)
+          '("dept" "salary") '(< >)
+          1 0 1
+          '("dept" "salary")
+          (lambda (dept salary) (begin (s "cnt" (+ (s "cnt") 1)) nil))
+          (lambda (a b) b) nil false)
+        (if (<= (s "cnt") 3) "ok" (error (concat "map called " (s "cnt") " times, expected at most 3"))))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS part_test"

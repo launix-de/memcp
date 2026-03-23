@@ -85,13 +85,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
 )))
 
-/* SQL modulo expression: NULL-safe, division-by-zero-safe, truncates quotient toward zero */
-(define psql_mod_expr (lambda (a b)
-	'((quote if)
-		'((quote or) '((quote nil?) a) '((quote nil?) b) '((quote equal??) b 0))
-		nil
-		'((quote -) a '((quote *) b '((quote if) '((quote <) '((quote /) a b) 0) '((quote ceil) '((quote /) a b)) '((quote floor) '((quote /) a b)))))
-	)
+/* SQL modulo expression: uses native mod builtin (NULL-safe, div-by-zero returns NULL) */
+(define psql_mod_expr (lambda (a b) '('mod a b))
 ))
 
 (define psql_type (parser (or
@@ -471,33 +466,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define condition psql_expression)
 		))
 	) (begin
-			(if (> (count tables) 1) (error "multi-table UPDATE is not implemented yet") true)
 			(define tbl (car tables))
-			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
-			(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
-			'((quote scan)
-				schema
-				tbl
-				(cons list filtercols)
-				'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
-				(cons list (cons "$update" scancols))
-				'('lambda
-					(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-					'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
-				)
-				(quote +)
-				0
-			)
+			(define all_defs (map tables (lambda (t) (list t schema t false nil))))
+			(build_dml_plan schema tbl nil all_defs (merge cols) (coalesceNil condition true) nil nil nil)
 	)))
 
 	(define psql_delete (parser '(
@@ -535,49 +507,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		)
 		(? (atom "OFFSET" true) (define offset psql_expression))
 	) (begin
-			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesceNil condition true)))
-			(set filtercols (extract_columns_for_tblvar tbl condition))
-			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
-			(if (or (not (nil? order)) (not (nil? limit)))
-				(begin
-					(define ordercols (if (nil? order) '() (map order (lambda (x)
-						(car (cdr (cdr (cdr (replace_find_column (car x))))))
-					))))
-					(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
-					'((quote scan_order)
-						(coalesce schema2 schema)
-						tbl
-						(cons list filtercols)
-						filterfn
-						(cons list ordercols)
-						(cons list dirs)
-						(coalesceNil offset 0)
-						(coalesceNil limit -1)
-						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-						(quote +)
-						0
-					)
-				)
-				'((quote scan)
-					(coalesce schema2 schema)
-					tbl
-					(cons list filtercols)
-					filterfn
-					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
-					0
-				)
-			)
+			(define del_schema (coalesce schema2 schema))
+			(build_dml_plan del_schema tbl nil (list (list tbl del_schema tbl false nil)) nil (coalesceNil condition true) order limit offset)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -587,16 +519,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(? (define schema2 psql_identifier) ".") (define tbl psql_identifier)
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			'((quote scan)
-				(coalesce schema2 schema)
-				tbl
-				'(list)
-				'((quote lambda) '() true)
-				'(list "$update")
-				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-				(quote +)
-				0
-			)
+			(define trunc_schema (coalesce schema2 schema))
+			(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)
 	)))
 
 	(define psql_insert_into (parser '(
@@ -814,18 +738,68 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_truncate
 
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
-		(parser '((atom "CREATE" true) (atom "USER" true) (define username psql_identifier)
-			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
+		/* CREATE USER/ROLE: support both MySQL (IDENTIFIED BY) and PostgreSQL (WITH PASSWORD / PASSWORD) syntax */
+		(parser '((atom "CREATE" true) (or (atom "USER" true) (atom "ROLE" true)) (define username psql_identifier)
+			(? (or
+				'((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))
+				'((? (atom "WITH" true)) (? (or (atom "SUPERUSER" true) (atom "LOGIN" true))) (atom "PASSWORD" true) (define password psql_expression))
+		)))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "user" '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
 		))
+		/* ALTER USER password: MySQL (IDENTIFIED BY) and PostgreSQL (WITH PASSWORD / PASSWORD) */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
-			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
+			(? (atom "WITH" true))
+			(atom "PASSWORD" true) (define password psql_expression))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
+		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
+			(atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))
+			(begin (if policy (policy "system" true true) true)
+				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+		))
+		/* ALTER USER SUPERUSER / NOSUPERUSER — PostgreSQL admin grant */
+		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "SUPERUSER" true))
+			(begin (if policy (policy "system" true true) true)
+				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+		))
+		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "NOSUPERUSER" true))
+			(begin (if policy (policy "system" true true) true)
+				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+		))
+		/* DROP USER/ROLE [IF EXISTS] — cascade-deletes access entries then the user row */
+		(parser '((atom "DROP" true) (or (atom "USER" true) (atom "ROLE" true)) (? (atom "IF" true) (atom "EXISTS" true)) (define username psql_identifier))
+			(begin (if policy (policy "system" true true) true)
+				(cons '!begin (list
+					'((quote scan) "system" "access"
+						'('list "username")
+						'((quote lambda) '('username) '((quote equal??) (quote username) username))
+						'(list "$update")
+						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						(quote +)
+						0)
+					'((quote scan) "system" "user"
+						'('list "username")
+						'((quote lambda) '('username) '((quote equal??) (quote username) username))
+						'(list "$update")
+						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						(quote +)
+						0)
+				))
+		))
 
 		/* GRANT syntax (PostgreSQL-style) -> reflect only admin and database-level access */
+		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
+		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username psql_identifier))
+			(begin (if policy (policy "system" true true) true)
+				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+		))
+		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
+		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username psql_identifier))
+			(begin (if policy (policy "system" true true) true)
+				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+		))
 		/* GRANT <any> ON DATABASE db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)

@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"github.com/carli2/hybridsort"
 	"strings"
 	"sync"
 	"time"
@@ -394,7 +394,7 @@ func (s *S3Storage) ReplayLog(shard string) (chan interface{}, PersistenceLogfil
 		if err != nil {
 			return
 		}
-		sort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
+		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
 
 		for _, seg := range segments {
 			resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
@@ -496,7 +496,7 @@ func openOrCreateS3Logfile(s *S3Storage, shard string) (*S3Logfile, error) {
 			return nil, err
 		}
 	} else {
-		sort.Slice(segs, func(i, j int) bool { return segs[i].seg < segs[j].seg })
+		hybridsort.Slice(segs, func(i, j int) bool { return segs[i].seg < segs[j].seg })
 		seg = segs[len(segs)-1].seg
 		all = make([]uint32, 0, len(segs))
 		for _, si := range segs {

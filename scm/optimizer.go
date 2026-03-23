@@ -14,6 +14,11 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 	You should have received a copy of the GNU General Public License
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+// TODO(optimizer): match with '(a b c) pattern (= (list a b c)) does not work
+// as destructuring in the /scm endpoint but works inside queryplan.scm when
+// the optimizer compiles lambdas. In /scm: (match (list 1 2 3) '(a b c) a)
+// returns nil. Workaround: use (cons a (cons b (cons c _))) patterns outside
+// optimizer-compiled contexts.
 package scm
 
 import "regexp"
@@ -155,130 +160,11 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	}
 }
 
-// optimizeApply is the optimizer hook for `apply`. It propagates the return
-// type of the applied function and specializes when args are fresh:
-// (apply fn freshArgs) → all of fn's params are owned → specialize fn.
-func optimizeApply(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	result, td := oc.ApplyDefaultOptimization(v, useResult)
-	if !result.IsSlice() {
-		return result, td
-	}
-	rv := result.Slice()
-	if len(rv) < 2 {
-		return result, td
-	}
-	fnSym, fnOk := scmerSymbol(rv[1])
-	if !fnOk {
-		return result, td
-	}
-
-	// Propagate return type of the applied function
-	fnReturnsFresh := false
-	if ti := globalFuncTypeInfo[fnSym]; ti.Transfer() {
-		fnReturnsFresh = true
-	} else if d := DeclarationForValue(rv[1]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
-		fnReturnsFresh = true
-	}
-	if fnReturnsFresh {
-		if td == nil {
-			td = &TypeDescriptor{}
-		}
-		td.Transfer = true
-	}
-
-	// Specialize: if args (rv[2]) are fresh, all of fn's params are owned.
-	// (apply fn freshList) → fn receives each element as owned.
-	if len(rv) >= 3 {
-		// Check if args are fresh: look at the call that produces them
-		argsFresh := false
-		if inner, ok := scmerSlice(rv[2]); ok && len(inner) > 0 {
-			// Direct function call: check return type
-			if d := DeclarationForValue(inner[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
-				argsFresh = true
-			}
-			if innerSym, ok2 := scmerSymbol(inner[0]); ok2 {
-				if globalFuncTypeInfo[innerSym].Transfer() {
-					argsFresh = true
-				}
-				// Nested apply: (apply untangle_query ...) — check if untangle_query returns fresh
-				if innerSym == Symbol("apply") && len(inner) >= 2 {
-					if appliedSym, ok3 := scmerSymbol(inner[1]); ok3 {
-						if globalFuncTypeInfo[appliedSym].Transfer() {
-							argsFresh = true
-						}
-					}
-				}
-			}
-		}
-		if argsFresh {
-			// Resolve fn to a Proc and specialize with all params owned
-			if resolved := oc.Env.FindRead(fnSym); resolved != nil {
-				if fnVal, ok := resolved.Vars[fnSym]; ok && fnVal.GetTag() == tagProc {
-					proc := *fnVal.Proc()
-					nParams := proc.NumVars
-					if nParams == 0 && proc.Params.IsSlice() {
-						nParams = len(proc.Params.Slice())
-					}
-					if nParams > 0 && nParams <= 64 {
-						var ownedMask uint64
-						for i := 0; i < nParams; i++ {
-							ownedMask |= 1 << uint(i)
-						}
-						// Get or create variant storage
-						ti := globalFuncTypeInfo[fnSym]
-						if ti.Extra == nil {
-							ti.Extra = &TypeDescriptor{}
-							globalFuncTypeInfo[fnSym] = ti
-						}
-						if ti.Extra.Variants == nil {
-							ti.Extra.Variants = make(map[uint64]Scmer)
-						}
-						if variantSym, exists := ti.Extra.Variants[ownedMask]; exists && !variantSym.IsNil() {
-							rv[1] = variantSym
-							return NewSlice(rv), td
-						} else if exists {
-							// sentinel from in-progress or failed attempt — skip
-						} else {
-							ti.Extra.Variants[ownedMask] = NewNil() // sentinel
-							ome2 := optimizerMetainfo{ownedSlots: make(map[int]bool)}
-							for i := 0; i < nParams; i++ {
-								ome2.ownedSlots[i] = true
-							}
-							specializedBody, _ := OptimizeEx(proc.Body, oc.Env, &ome2, true)
-							newProc := proc
-							newProc.Body = specializedBody
-							variantName := Symbol(string(fnSym) + "$$owned")
-							oc.Env.FindRead(fnSym).Vars[variantName] = NewProc(&newProc)
-							variantSym := NewSymbol(string(variantName))
-							ti.Extra.Variants[ownedMask] = variantSym
-							rv[1] = variantSym
-							return NewSlice(rv), td
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return result, td
-}
-
 // do preprocessing and optimization (Optimize is allowed to edit the value in-place)
 func Optimize(val Scmer, env *Env) Scmer {
 	ome := newOptimizerMetainfo()
-	v, _ := OptimizeEx(val, env, &ome, true)
+	v, _, _ := OptimizeEx(val, env, &ome, true)
 	return v
-}
-
-// localLambdaInfo tracks a locally-defined lambda for ownership inference.
-// If the lambda does not escape its defining scope (only called directly),
-// the optimizer re-runs its body with the AND-accumulated param ownership.
-type localLambdaInfo struct {
-	lambdaAST  []Scmer // full (lambda params body [NumVars]) slice; body at index 2
-	slotStart  int     // first NthLocalVar slot for this lambda's params (always 0)
-	nParams    int
-	paramOwned []bool // AND-accumulator: true means ALL callsites pass a fresh value
-	escaped    bool   // set when sym appears outside a direct call head
 }
 
 type optimizerMetainfo struct {
@@ -287,11 +173,6 @@ type optimizerMetainfo struct {
 	nextSlot             *int            // pointer to lambda's slot counter; nil outside lambda
 	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
-	ownedSlots           map[int]bool    // NthLocalVar slot → owned; used in second-pass re-opt
-	localLambdas         map[Symbol]*localLambdaInfo
-	funcTypeInfo         map[Symbol]TypeInfo // type info for Scheme-defined functions (e.g. Transfer for fresh returns)
-	beginUseCounts       map[Symbol]int  // from begin pre-scan: use count per variable
-	beginDefinedHere     map[Symbol]bool // symbols defined (not just set) in this begin block
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -305,7 +186,6 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	result.setBlacklist = ome.setBlacklist
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
-	result.funcTypeInfo = ome.funcTypeInfo // lambdas see outer type knowledge
 	return
 }
 
@@ -322,13 +202,8 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 		}
 	}
 	result.setBlacklist = ome.setBlacklist
-	result.nextSlot = ome.nextSlot         // shared scope shares VarsNumbered
-	result.ownedVars = ome.ownedVars             // shared scope inherits ownership info
-	result.localLambdas = ome.localLambdas       // shared scope can call same local lambdas
-	result.ownedSlots = ome.ownedSlots
-	result.funcTypeInfo = ome.funcTypeInfo       // inherit type knowledge
-	result.beginUseCounts = ome.beginUseCounts   // shared scope sees same use counts
-	result.beginDefinedHere = ome.beginDefinedHere
+	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
+	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
 	return
 }
 
@@ -428,71 +303,52 @@ func expressionContainsEvalOrImportCall(v Scmer) bool {
 	return false
 }
 
-// typeInfoFromDescriptor converts a *TypeDescriptor to TypeInfo.
-func typeInfoFromDescriptor(td *TypeDescriptor) TypeInfo {
-	var ti TypeInfo
-	if td == nil {
-		return ti
-	}
-	if td.Transfer {
-		ti = ti.WithTransfer()
-	}
-	if td.Const {
-		ti = ti.WithConst()
-	}
-	if !td.NoEscape {
-		ti.flags |= FlagEscape
-	}
-	ti.Extra = td
-	return ti
-}
-
-func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
+func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
 	if val.ptr == nil && val.aux == 0 {
-		return NewNil(), TypeInfo{}.WithTransfer().WithConst()
+		return NewNil(), true, true
 	}
 
 	switch val.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
-		return val, TypeInfo{}.WithTransfer().WithConst()
+		return val, true, true
 	case tagSymbol:
 		sym := mustSymbol(val)
 		if replacement, ok := ome.variableReplacement[sym]; ok {
 			// Avoid trivial self-alias loops like x -> x or (outer x)
 			if replacement.IsSymbol() && mustSymbol(replacement) == sym {
-				return val, TypeInfo{}.WithTransfer()
+				return val, true, false
 			}
 			if slice, ok := scmerSlice(replacement); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
 				if s2, ok := scmerSymbol(slice[1]); ok && s2 == sym {
-					return val, TypeInfo{}.WithTransfer()
+					return val, true, false
 				}
 			}
 			return OptimizeEx(replacement, env, ome, useResult)
 		}
-		return val, TypeInfo{}.WithTransfer()
+		return val, true, false
 	case tagSlice:
 		return optimizeList(val.Slice(), env, ome, useResult)
 	case tagSourceInfo:
 		si := *val.SourceInfo()
 		if SettingsHaveGoodBacktraces {
-			result, ti := OptimizeEx(si.value, env, ome, useResult)
-			if ti.Const() {
-				return result, ti
+			result, transferOwnership, isConstant = OptimizeEx(si.value, env, ome, useResult)
+			if isConstant {
+				return result, transferOwnership, true
 			}
 			si.value = result
-			return NewSourceInfo(si), TypeInfo{flags: ti.flags &^ FlagConst}
+			return NewSourceInfo(si), transferOwnership, false
 		}
 		return OptimizeEx(si.value, env, ome, useResult)
 	case tagAny:
 		payload := val.Any()
 		if pv, ok := payload.(SourceInfo); ok {
 			if SettingsHaveGoodBacktraces {
-				result, ti := OptimizeEx(pv.value, env, ome, useResult)
-				if ti.Const() {
-					return result, ti
+				result, transferOwnership, isConstant = OptimizeEx(pv.value, env, ome, useResult)
+				if isConstant {
+					return result, transferOwnership, true
 				}
 				pv.value = result
-				return NewSourceInfo(pv), TypeInfo{flags: ti.flags &^ FlagConst}
+				return NewSourceInfo(pv), transferOwnership, false
 			}
 			return OptimizeEx(pv.value, env, ome, useResult)
 		}
@@ -505,23 +361,17 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		}
 		switch v := payload.(type) {
 		case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string:
-			return FromAny(v), TypeInfo{}.WithTransfer().WithConst()
+			return FromAny(v), true, true
 		}
-		return val, TypeInfo{}
-	case tagNthLocalVar:
-		idx := int(val.NthLocalVar())
-		if ome.ownedSlots != nil && ome.ownedSlots[idx] {
-			return val, TypeInfo{}.WithTransfer()
-		}
-		return val, TypeInfo{}
+		return val, transferOwnership, false
 	default:
-		return val, TypeInfo{}
+		return val, transferOwnership, false
 	}
 }
 
-func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
+func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
 	if len(v) == 0 {
-		return NewSlice(v), TypeInfo{}
+		return NewSlice(v), transferOwnership, false
 	}
 
 	headSym, headOk := scmerSymbol(v[0])
@@ -542,17 +392,16 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			// Local NthLocalVar replacements (current lambda params) are NOT
 			// accessible in the outer scope, so we intentionally exclude them.
 		}
-		inner, innerTI := OptimizeEx(v[1], env, &outerOme, useResult)
-		if innerTI.Const() {
-			return inner, TypeInfo{}.WithTransfer().WithConst()
+		inner, transferOwnership, isConstant := OptimizeEx(v[1], env, &outerOme, useResult)
+		if isConstant {
+			return inner, true, true
 		}
 		v[1] = inner
-		return NewSlice(v), TypeInfo{flags: innerTI.flags &^ FlagConst}
+		return NewSlice(v), transferOwnership, false
 	}
 
 	if headOk && headSym == Symbol("begin") {
 		usedVariables := make(map[Symbol]int)
-		realUseCounts := make(map[Symbol]int) // actual use count ignoring depth (for ownership analysis)
 		variableContent := make(map[Symbol]Scmer)
 		// Track top-level define positions and earliest top-level eval/import index
 		defineTopIdx := make(map[Symbol]int)
@@ -605,7 +454,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						visitNode(sub[i], depth+1, blacklist)
 					}
 				} else {
-					// Also visit the head â it may be a variable used in call position
+					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
 					visitNode(sub[0], depth+1, blacklist)
 					for i := 1; i < len(sub); i++ {
 						visitNode(sub[i], depth+1, blacklist)
@@ -622,7 +471,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					}
 				}
 				if !isBlacklisted {
-					realUseCounts[sym] = realUseCounts[sym] + 1
 					if depth > 0 {
 						usedVariables[sym] = 100
 					} else {
@@ -697,21 +545,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				ome2.variableReplacement[sym] = content
 			}
 		}
-		// Populate real use counts (depth-independent) so the set/define
-		// handler can mark single-use fresh variables as owned.
-		if len(realUseCounts) > 0 {
-			ome2.beginUseCounts = make(map[Symbol]int, len(realUseCounts))
-			for sym, count := range realUseCounts {
-				// Only include non-inlined variables
-				if _, inlined := ome2.variableReplacement[sym]; !inlined {
-					ome2.beginUseCounts[sym] = count
-				}
-			}
-			ome2.beginDefinedHere = make(map[Symbol]bool, len(defineTopIdx))
-			for sym := range defineTopIdx {
-				ome2.beginDefinedHere[sym] = true
-			}
-		}
 		if len(usedVariables) == 0 && len(defineTopIdx) == 0 {
 			v[0] = NewSymbol("!begin")
 			for sym, content := range ome2.variableReplacement {
@@ -720,14 +553,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
-		var ti TypeInfo
 		for i := 1; i < len(v); i++ {
-			var elemTI TypeInfo
-			v[i], elemTI = OptimizeEx(v[i], env, &ome2, i == len(v)-1 && useResult)
-			ti = elemTI
-			if elemTI.Const() {
+			var constant bool
+			v[i], transferOwnership, constant = OptimizeEx(v[i], env, &ome2, i == len(v)-1 && useResult)
+			if constant {
 				if i == len(v)-1 {
-					// last element is const — keep ti as-is (has Const flag)
+					isConstant = true
 				} else {
 					v = append(v[:i], v[i+1:]...)
 					i--
@@ -748,7 +579,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		if scmerIsSymbol(v[0], "!begin") && len(v) == 1 {
-			return NewNil(), TypeInfo{}.WithTransfer().WithConst()
+			return NewNil(), true, true
 		}
 		if scmerIsSymbol(v[0], "!begin") && len(v) == 2 {
 			return OptimizeEx(v[1], env, &ome2, useResult)
@@ -757,13 +588,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			return OptimizeEx(v[1], env, &ome2, useResult)
 		}
 		if scmerIsSymbol(v[0], "begin") {
-			ti = TypeInfo{flags: ti.flags &^ FlagConst}
+			isConstant = false
 		}
-		return NewSlice(v), ti
+		return NewSlice(v), transferOwnership, isConstant
 	}
 
 	if headOk && headSym == Symbol("var") && len(v) == 2 {
-		return NewNthLocalVar(NthLocalVar(ToInt(v[1]))), TypeInfo{}
+		return NewNthLocalVar(NthLocalVar(ToInt(v[1]))), false, false
 	}
 
 	if headOk && headSym == Symbol("unquote") && len(v) == 2 {
@@ -773,10 +604,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		switch unquoted.GetTag() {
 		case tagString:
-			return NewSymbol(unquoted.String()), TypeInfo{}.WithTransfer()
+			return NewSymbol(unquoted.String()), true, false
 		case tagAny:
 			if s, ok := unquoted.Any().(string); ok {
-				return NewSymbol(s), TypeInfo{}.WithTransfer()
+				return NewSymbol(s), true, false
 			}
 		}
 	}
@@ -799,9 +630,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			} else if sym, ok := scmerSymbol(params); ok {
 				delete(ome2.variableReplacement, sym)
 			}
-			var bodyTI TypeInfo
-			v[2], bodyTI = OptimizeEx(v[2], env, &ome2, true)
-			return NewSlice(v), TypeInfo{flags: bodyTI.flags &^ FlagConst}
+			v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
+			return NewSlice(v), transferOwnership, false
 		}
 		// Skip lambdas that already have explicit NumVars
 		if len(v) > 3 {
@@ -815,9 +645,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			} else if sym, ok := scmerSymbol(params); ok {
 				delete(ome2.variableReplacement, sym)
 			}
-			var bodyTI TypeInfo
-			v[2], bodyTI = OptimizeEx(v[2], env, &ome2, true)
-			return NewSlice(v), TypeInfo{flags: bodyTI.flags &^ FlagConst}
+			v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
+			return NewSlice(v), transferOwnership, false
 		}
 		// Auto-number parameters
 		ome2 := ome.Copy()
@@ -846,65 +675,29 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					if pi < len(ome.pendingCallbackOwned) && ome.pendingCallbackOwned[pi] {
 						if sym, ok := scmerSymbol(param); ok {
 							ome2.ownedVars[sym] = true
-							// Also set ownedSlots so NthLocalVar lookup finds it
-							if repl, ok2 := ome2.variableReplacement[sym]; ok2 && repl.IsNthLocalVar() {
-								if ome2.ownedSlots == nil {
-									ome2.ownedSlots = make(map[int]bool)
-								}
-								ome2.ownedSlots[int(repl.NthLocalVar())] = true
-							}
 						}
 					}
 				}
 			}
 			ome.pendingCallbackOwned = nil // consumed
 		}
-		var bodyTI TypeInfo
-		v[2], bodyTI = OptimizeEx(v[2], env, &ome2, true)
-		// Second pass: re-optimize non-escaped local lambdas with collected param ownership
-		if ome2.localLambdas != nil {
-			for _, info := range ome2.localLambdas {
-				if info.escaped {
-					continue
-				}
-				anyOwned := false
-				for _, owned := range info.paramOwned {
-					if owned {
-						anyOwned = true
-						break
-					}
-				}
-				if !anyOwned {
-					continue
-				}
-				ome3 := optimizerMetainfo{
-					ownedSlots: make(map[int]bool, info.nParams),
-				}
-				for i, owned := range info.paramOwned {
-					if owned {
-						ome3.ownedSlots[info.slotStart+i] = true
-					}
-				}
-				info.lambdaAST[2], _ = OptimizeEx(info.lambdaAST[2], env, &ome3, true)
-			}
-		}
+		v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
 		// Set NumVars (may have grown due to !list allocations)
 		if slotIndex > 0 {
 			v = append(v[:len(v):len(v)], NewInt(int64(slotIndex)))
 		}
-		return NewSlice(v), TypeInfo{flags: bodyTI.flags &^ FlagConst}
+		return NewSlice(v), transferOwnership, false
 	}
 
-	var ti TypeInfo
 	switch {
 	case headOk && (headSym == Symbol("set") || headSym == Symbol("define")) && len(v) == 3:
 		if sym, ok := scmerSymbol(v[1]); ok {
 			for _, black := range ome.setBlacklist {
 				if black == sym {
 					if useResult {
-						return ome.variableReplacement[sym], TypeInfo{}
+						return ome.variableReplacement[sym], false, false
 					}
-					return NewNil(), TypeInfo{}.WithTransfer().WithConst()
+					return NewNil(), true, true
 				}
 			}
 			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
@@ -914,118 +707,51 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if v[1].IsNthLocalVar() {
 			v[0] = NewSymbol("setN")
 		}
-		v[2], ti = OptimizeEx(v[2], env, ome, true)
-		// TODO(funcTypeInfo): disabled — ownership tracking for Scheme-defined
-		// functions causes incorrect _mut promotion in queryplan compilation
-		/*
-		if sym, ok2 := scmerSymbol(v[1]); ok2 {
-			if ti.Transfer() {
-				if ome.funcTypeInfo == nil {
-					ome.funcTypeInfo = make(map[Symbol]TypeInfo)
-				}
-				ome.funcTypeInfo[sym] = TypeInfo{}.WithTransfer()
-			}
-		}
-		*/
-		// Use-count-based ownership: if RHS is fresh (Transfer) and the variable
-		// is used exactly once in this begin block, mark it as owned so that
-		// map/match on it can be promoted to _mut variants.
-		// Guard: only for define, or set to a symbol defined in this begin block.
-		if sym, ok2 := scmerSymbol(v[1]); ok2 && ti.Transfer() {
-			isDefine := headSym == Symbol("define")
-			definedHere := ome.beginDefinedHere != nil && ome.beginDefinedHere[sym]
-			count := 0
-			if ome.beginUseCounts != nil {
-				count = ome.beginUseCounts[sym]
-			}
-			if count == 1 && (isDefine || definedHere) {
-				if ome.ownedVars == nil {
-					ome.ownedVars = make(map[Symbol]bool)
-				}
-				ome.ownedVars[sym] = true
-				if repl, ok3 := ome.variableReplacement[sym]; ok3 && repl.IsNthLocalVar() {
-					if ome.ownedSlots == nil {
-						ome.ownedSlots = make(map[int]bool)
-					}
-					ome.ownedSlots[int(repl.NthLocalVar())] = true
-				}
-			}
-		}
-		// Register local non-escaping lambda for second-pass ownership inference
-		if sym, ok2 := scmerSymbol(v[1]); ok2 {
-			if lambdaAST, ok3 := scmerSlice(v[2]); ok3 && len(lambdaAST) >= 3 && scmerIsSymbol(lambdaAST[0], "lambda") {
-				nParams := 0
-				if paramList, ok4 := scmerSlice(lambdaAST[1]); ok4 {
-					for _, p := range paramList {
-						if sym2, ok5 := scmerSymbol(p); ok5 && sym2 != Symbol("_") {
-							nParams++
-						}
-					}
-				}
-				if nParams > 0 {
-					if ome.localLambdas == nil {
-						ome.localLambdas = make(map[Symbol]*localLambdaInfo)
-					}
-					owned := make([]bool, nParams)
-					for i := range owned {
-						owned[i] = true
-					}
-					ome.localLambdas[sym] = &localLambdaInfo{
-						lambdaAST:  lambdaAST,
-						nParams:    nParams,
-						paramOwned: owned,
-					}
-				}
-			}
-		}
+		v[2], transferOwnership, _ = OptimizeEx(v[2], env, ome, true)
 	case headOk && (headSym == Symbol("match") || headSym == Symbol("match_mut")):
-		valueTI := TypeInfo{}
-		v[1], valueTI = OptimizeEx(v[1], env, ome, true)
-		ti = valueTI
-		if headSym == Symbol("match") && valueTI.Transfer() {
+		value, valueTransfer, _ := OptimizeEx(v[1], env, ome, true)
+		v[1] = value
+		transferOwnership = valueTransfer
+		if headSym == Symbol("match") && valueTransfer {
 			v[0] = NewSymbol("match_mut")
 		}
 		for i := 3; i < len(v); i += 2 {
 			ome2 := ome.CopySharedScope()
 			v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2)
-			v[i], ti = OptimizeEx(v[i], env, &ome2, useResult)
+			v[i], transferOwnership, _ = OptimizeEx(v[i], env, &ome2, useResult)
 		}
 		if len(v)%2 == 1 {
-			v[len(v)-1], ti = OptimizeEx(v[len(v)-1], env, ome, useResult)
+			v[len(v)-1], transferOwnership, _ = OptimizeEx(v[len(v)-1], env, ome, useResult)
 		}
-		return NewSlice(v), TypeInfo{flags: ti.flags &^ FlagConst}
+		return NewSlice(v), transferOwnership, false
 	case headOk && headSym == Symbol("parser"):
-		result, parserFresh := OptimizeParser(NewSlice(v), env, ome, false)
-		if parserFresh {
-			return result, TypeInfo{}.WithTransfer()
-		}
-		return result, TypeInfo{}
+		return OptimizeParser(NewSlice(v), env, ome, false), true, false
 	case !headOk || headSym != Symbol("quote"):
 		// Look up declaration for hook dispatch
 		if callDecl := DeclarationForValue(v[0]); callDecl != nil && callDecl.Type != nil && callDecl.Type.Optimize != nil {
 			oc := &OptimizerContext{Env: env, Ome: ome}
 			result, td := callDecl.Type.Optimize(v, oc, useResult)
 			if td != nil {
-				return result, typeInfoFromDescriptor(td)
+				return result, td.Transfer, td.Const
 			}
-			return result, TypeInfo{}
+			return result, false, false
 		}
 		// Default optimization path
 		oc := &OptimizerContext{Env: env, Ome: ome}
 		result, td := oc.applyDefaultOptimization(v, useResult, "")
 		if td != nil {
-			return result, typeInfoFromDescriptor(td)
+			return result, td.Transfer, td.Const
 		}
-		return result, TypeInfo{}
+		return result, false, false
 	}
 
-	return NewSlice(v), TypeInfo{flags: ti.flags &^ FlagConst}
+	return NewSlice(v), transferOwnership, false
 }
 
 // OptimizeSub optimizes a sub-expression and returns its result TypeDescriptor.
 func (oc *OptimizerContext) OptimizeSub(val Scmer, useResult bool) (Scmer, *TypeDescriptor) {
-	result, ti := OptimizeEx(val, oc.Env, oc.Ome, useResult)
-	return result, ti.ToTypeDescriptor()
+	result, to, ic := OptimizeEx(val, oc.Env, oc.Ome, useResult)
+	return result, &TypeDescriptor{Transfer: to, Const: ic}
 }
 
 // SetCallbackOwned sets pendingCallbackOwned for the next lambda argument.
@@ -1058,7 +784,6 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	allConstArgs := true
 	var transferOwnership bool
-	argOwned := make([]bool, len(v)) // per-arg ownership for specialization
 
 	// Look up declaration for callback ownership propagation
 	var callDecl *Declaration
@@ -1066,21 +791,16 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		callDecl = DeclarationForValue(v[0])
 	}
 
-	// Resolve head symbol for local lambda tracking
-	headSym, headSymOk := scmerSymbol(v[0])
-	var headLocalLambda *localLambdaInfo
-	if headSymOk && ome.localLambdas != nil {
-		headLocalLambda = ome.localLambdas[headSym]
-	}
-
 	// Optimize all args with callback ownership propagation
 	for i := 0; i < len(v); i++ {
-		if i > 0 && callDecl != nil && callDecl.Type != nil {
+		if i > 0 && callDecl != nil {
 			paramIdx := i - 1
-			if paramIdx >= len(callDecl.Type.Params) {
+			if callDecl.Type == nil || len(callDecl.Type.Params) == 0 {
+				// no type info
+			} else if paramIdx >= len(callDecl.Type.Params) {
 				paramIdx = len(callDecl.Type.Params) - 1
 			}
-			if paramIdx >= 0 {
+			if paramIdx >= 0 && callDecl.Type != nil && paramIdx < len(callDecl.Type.Params) {
 				if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
 					owned := make([]bool, len(ti.Params))
 					hasAny := false
@@ -1096,105 +816,10 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 				}
 			}
 		}
-		// Mark local lambda escaped if passed as argument (before optimization),
-		// unless the callee's parameter is annotated NoEscape:true (e.g. map's callback)
-		if i > 0 && ome.localLambdas != nil {
-			if argSym, ok := scmerSymbol(v[i]); ok {
-				if info, ok2 := ome.localLambdas[argSym]; ok2 {
-					paramEscapes := true
-					if callDecl != nil {
-						paramIdx := i - 1
-						if paramIdx >= len(callDecl.Type.Params) {
-							paramIdx = len(callDecl.Type.Params) - 1
-						}
-						if paramIdx >= 0 {
-							if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.NoEscape {
-								paramEscapes = false
-							}
-						}
-					}
-					if paramEscapes {
-						info.escaped = true
-					}
-				}
-			}
-		}
-		var elemTI TypeInfo
-		v[i], elemTI = OptimizeEx(v[i], env, ome, true)
-		transferOwnership = elemTI.Transfer()
-		argOwned[i] = transferOwnership
-		if i > 0 && !elemTI.Const() {
+		var constant bool
+		v[i], transferOwnership, constant = OptimizeEx(v[i], env, ome, true)
+		if i > 0 && !constant {
 			allConstArgs = false
-		}
-		// Track param ownership for local lambda callsites
-		if i > 0 && headLocalLambda != nil && !headLocalLambda.escaped {
-			pi := i - 1
-			if pi < len(headLocalLambda.paramOwned) {
-				headLocalLambda.paramOwned[pi] = headLocalLambda.paramOwned[pi] && transferOwnership
-			}
-		}
-	}
-
-	// If the called function is known to always return a fresh alloc, mark result as owned.
-	if headOk {
-		if ti := ome.funcTypeInfo[headSym]; ti.Transfer() {
-			transferOwnership = true
-		} else if ti := globalFuncTypeInfo[headSym]; ti.Transfer() {
-			transferOwnership = true
-		} else if d := DeclarationForValue(v[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
-			transferOwnership = true
-		}
-	}
-
-	// Function specialization: when calling a known Proc with owned args,
-	// create or reuse a specialized variant with ownedSlots for those params.
-	// TODO(specialization): disabled — produces nil heads in compiled scan lambdas
-	if false && headSymOk && len(v) > 1 {
-		var ownedMask uint64
-		for i := 1; i < len(v) && i <= 64; i++ {
-			if argOwned[i] {
-				ownedMask |= 1 << uint(i-1)
-			}
-		}
-		if ownedMask != 0 && globalFuncTypeInfo[headSym].Transfer() {
-			// Only specialize functions registered in globalFuncTypeInfo (Scheme-defined globals)
-			if resolved := env.FindRead(headSym); resolved != nil {
-				if fnVal, ok := resolved.Vars[headSym]; ok && fnVal.GetTag() == tagProc {
-					proc := *fnVal.Proc()
-					// Get or create the TypeDescriptor for variants storage
-					ti := globalFuncTypeInfo[headSym]
-					if ti.Extra == nil {
-						ti.Extra = &TypeDescriptor{}
-						globalFuncTypeInfo[headSym] = ti
-					}
-					if ti.Extra.Variants == nil {
-						ti.Extra.Variants = make(map[uint64]Scmer)
-					}
-					if variantSym, exists := ti.Extra.Variants[ownedMask]; exists && !variantSym.IsNil() {
-						// Reuse cached variant symbol
-						v[0] = variantSym
-					} else if !exists && proc.Body.IsSlice() {
-						// Sentinel: mark as in-progress to prevent recursive specialization
-						ti.Extra.Variants[ownedMask] = NewNil()
-						// Build specialized variant: re-optimize body with ownedSlots
-						ome2 := optimizerMetainfo{ownedSlots: make(map[int]bool)}
-						for i := 0; i < 64; i++ {
-							if ownedMask&(1<<uint(i)) != 0 {
-								ome2.ownedSlots[i] = true
-							}
-						}
-						specializedBody, _ := OptimizeEx(proc.Body, env, &ome2, true)
-						newProc := proc
-						newProc.Body = specializedBody
-						// Register under a new symbol so callsite stays a clean function call
-						variantName := Symbol(string(headSym) + "$$owned")
-						env.FindRead(headSym).Vars[variantName] = NewProc(&newProc)
-						variantSym := NewSymbol(string(variantName))
-						ti.Extra.Variants[ownedMask] = variantSym
-						v[0] = variantSym
-					}
-				}
-			}
 		}
 	}
 
@@ -1222,8 +847,6 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 						}
 					}
 				}
-			} else if sym, ok := scmerSymbol(arg1); ok && ome.ownedVars != nil && ome.ownedVars[sym] {
-				firstArgFresh = true
 			}
 		}
 		if firstArgFresh && len(v) >= 2 {
@@ -1236,22 +859,17 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	// whose parameter is annotated NoEscape:true, replace with (!list start count expr...)
 	// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
 	if headOk && ome.nextSlot != nil {
-		if decl := DeclarationForValue(v[0]); decl != nil {
+		if decl := DeclarationForValue(v[0]); decl != nil && decl.Type != nil && len(decl.Type.Params) > 0 {
 			for i := 1; i < len(v); i++ {
 				paramIdx := i - 1
-				if decl.Type == nil {
-					continue
-				}
 				if paramIdx >= len(decl.Type.Params) {
 					paramIdx = len(decl.Type.Params) - 1 // variadic: use last param
 				}
 				if paramIdx < 0 {
 					continue
 				}
-				// Only rewrite if param is explicitly annotated as NoEscape
-				// (Kind must be set to distinguish from zero-value TypeDescriptor)
-				p := decl.Type.Params[paramIdx]
-				if p == nil || p.Kind == "" || !p.NoEscape {
+				ti := decl.Type.Params[paramIdx]
+				if ti == nil || !ti.NoEscape {
 					continue // unknown or escaping parameter
 				}
 				// Check if this argument is a (list ...) call
@@ -1448,7 +1066,7 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 		}
 		headSym, headOk := scmerSymbol(slice[0])
 		if headOk && headSym == Symbol("eval") && len(slice) > 1 {
-			slice[1], _ = OptimizeEx(slice[1], env, ome2, true)
+			slice[1], _, _ = OptimizeEx(slice[1], env, ome2, true)
 			return NewSlice(slice)
 		}
 		if headOk && headSym == Symbol("var") && len(slice) == 2 {
@@ -1478,17 +1096,15 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 	return pattern
 }
 
-func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) (Scmer, bool) {
+func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
 	if stripped, ok := scmerStripSourceInfo(val); ok {
 		val = stripped
 	}
 
 	slice, ok := scmerSlice(val)
 	if !ok || len(slice) == 0 {
-		return val, false
+		return val
 	}
-
-	transferOwnership := false
 
 	headSym, headOk := scmerSymbol(slice[0])
 	if headOk && headSym == Symbol("parser") {
@@ -1497,62 +1113,38 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 			ign2 = true // result of parser can be ignored when expr is executed
 		}
 		ome2 := ome.Copy()
-		slice[1], _ = OptimizeParser(slice[1], env, &ome2, ign2) // syntax expr -> collect new variables
+		slice[1] = OptimizeParser(slice[1], env, &ome2, ign2) // syntax expr -> collect new variables
 		if len(slice) > 2 {
-			var genTI TypeInfo
-			slice[2], genTI = OptimizeEx(slice[2], env, &ome2, !ignoreResult) // generator expr -> use variables
-			transferOwnership = genTI.Transfer()
+			slice[2], _, _ = OptimizeEx(slice[2], env, &ome2, !ignoreResult) // generator expr -> use variables
 		}
 		if len(slice) > 3 {
-			slice[3], _ = OptimizeEx(slice[3], env, ome, true) // delimiter expr
+			slice[3], _, _ = OptimizeEx(slice[3], env, ome, true) // delimiter expr
 		}
 		val = NewSlice(slice)
 	} else if headOk && headSym == Symbol("define") {
-		var subParserFresh bool
-		slice[2], subParserFresh = OptimizeParser(slice[2], env, ome, false)
+		slice[2] = OptimizeParser(slice[2], env, ome, false)
 		if sym, ok := scmerSymbol(slice[1]); ok {
 			if _, present := ome.variableReplacement[sym]; present {
 				delete(ome.variableReplacement, sym)
-			}
-			// Sub-parser produces a fresh value → mark variable as owned
-			// so that map/match in the generator body can be promoted to map_mut/match_mut
-			if subParserFresh {
-				if ome.ownedVars == nil {
-					ome.ownedVars = make(map[Symbol]bool)
-				}
-				ome.ownedVars[sym] = true
 			}
 		}
 		val = NewSlice(slice)
 	} else if headOk && headSym == Symbol("capture") {
 		// capture wrapper - optimize sub-parser but keep capture structure
-		slice[1], _ = OptimizeParser(slice[1], env, ome, false)
+		slice[1] = OptimizeParser(slice[1], env, ome, false)
 		val = NewSlice(slice)
 	} else {
 		for i := 1; i < len(slice); i++ {
-			slice[i], _ = OptimizeParser(slice[i], env, ome, ignoreResult)
+			slice[i] = OptimizeParser(slice[i], env, ome, ignoreResult)
 		}
 		val = NewSlice(slice)
-	}
-
-	// Kleene star (*) and one-or-more (+) always produce a fresh list
-	if headOk && (headSym == Symbol("*") || headSym == Symbol("+")) {
-		transferOwnership = true
-	}
-	// Sub-parser symbol reference: check funcTypeInfo (local + global)
-	if !ok {
-		if sym, ok2 := scmerSymbol(val); ok2 {
-			if (ome.funcTypeInfo != nil && ome.funcTypeInfo[sym].Transfer()) || globalFuncTypeInfo[sym].Transfer() {
-				transferOwnership = true
-			}
-		}
 	}
 
 	p := parseSyntax(val, env, ome, ignoreResult)
 	if p != nil {
-		return NewAny(p), transferOwnership
+		return NewAny(p)
 	}
-	return val, transferOwnership
+	return val
 }
 
 // deoptimizeExpr rewrites optimizer-produced special forms back to plain equivalents

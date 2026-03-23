@@ -8,16 +8,19 @@ setup:
   - sql: "DROP TABLE IF EXISTS ai_explicit"
   - sql: "DROP TABLE IF EXISTS ai_mixed"
   - sql: "DROP TABLE IF EXISTS ai_restart"
+  - sql: "DROP TABLE IF EXISTS ai_same_col"
   - sql: "CREATE TABLE ai_basic (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_explicit (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_mixed (id INT AUTO_INCREMENT PRIMARY KEY, val INT)"
   - sql: "CREATE TABLE ai_restart (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE ai_same_col (id INT AUTO_INCREMENT PRIMARY KEY, category INT, name TEXT)"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ai_basic"
   - sql: "DROP TABLE IF EXISTS ai_explicit"
   - sql: "DROP TABLE IF EXISTS ai_restart"
   - sql: "DROP TABLE IF EXISTS ai_mixed"
+  - sql: "DROP TABLE IF EXISTS ai_same_col"
 
 test_cases:
 
@@ -146,6 +149,50 @@ test_cases:
       rows: 1
       data:
         - {cnt: 0}
+
+  # --- Same first-column value across multiple inserts (the real FOP scenario) ---
+  # All rows have category=1. Before the fix, ProcessUniqueCollision used keyIdx=0
+  # (mapping to 'category') as the lookup value for PRIMARY KEY 'id'. After the
+  # first insert (id=1), every subsequent insert with category=1 triggered a false
+  # duplicate-key panic.
+
+  - name: "Same-col: first insert (category=1)"
+    sql: "INSERT INTO ai_same_col (category, name) VALUES (1, 'Autenung')"
+    expect:
+      affected_rows: 1
+
+  - name: "Same-col: second insert (category=1, different name)"
+    sql: "INSERT INTO ai_same_col (category, name) VALUES (1, 'Debe')"
+    expect:
+      affected_rows: 1
+
+  - name: "Same-col: third insert (category=1, different name)"
+    sql: "INSERT INTO ai_same_col (category, name) VALUES (1, 'Trei')"
+    expect:
+      affected_rows: 1
+
+  - name: "Same-col: all 3 rows present with distinct IDs"
+    sql: "SELECT COUNT(DISTINCT id) AS cnt FROM ai_same_col"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 3}
+
+  - name: "Same-col: no ID is NULL"
+    sql: "SELECT COUNT(*) AS cnt FROM ai_same_col WHERE id IS NULL"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 0}
+
+  - name: "Same-col: names in insertion order"
+    sql: "SELECT name FROM ai_same_col ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - {name: "Autenung"}
+        - {name: "Debe"}
+        - {name: "Trei"}
 
   # --- Duplicate explicit ID must fail ---
 

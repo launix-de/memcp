@@ -1,0 +1,187 @@
+# Tests for ORC (ordered-reduce computed) columns.
+# Phase 1: full recompute only (Mode A — InvalidateAll on any mutation).
+#
+# ORC columns are created via createcolumn with sortcols/sortdirs/mapcols/mapfn/reducefn/reduceinit
+# in the options assoc list. The proxy is compressed after the initial scan_order pass.
+# After INSERT/UPDATE/DELETE the proxy is invalidated; the next read triggers a full recompute.
+
+metadata:
+  version: "1.0"
+  description: "ORC Phase 1: ROW_NUMBER, running SUM, post-mutation lazy recompute"
+  isolated: true
+
+test_cases:
+
+  # ── Setup ──────────────────────────────────────────────────────────────────
+
+  - name: "Drop leftover rank table"
+    sql: "DROP TABLE IF EXISTS orc_rank"
+
+  - name: "Drop leftover sales table"
+    sql: "DROP TABLE IF EXISTS orc_sales"
+
+  # ── Test 1: ROW_NUMBER via ORC ─────────────────────────────────────────────
+
+  - name: "Create rank table"
+    sql: |
+      CREATE TABLE orc_rank (
+        id    INT PRIMARY KEY,
+        score INT,
+        rank  INT
+      )
+
+  - name: "Insert rank data"
+    sql: |
+      INSERT INTO orc_rank (id, score) VALUES
+        (1, 50),
+        (2, 100),
+        (3, 75),
+        (4, 25)
+
+  - name: "Materialize rank column via createcolumn ORC"
+    scm: |
+      (createcolumn "memcp-tests" "orc_rank" "rank" "INT" '()
+        (list
+          "sortcols"  '("score")
+          "sortdirs"  (list false)
+          "partitioncount" 0
+          "mapcols"   '()
+          "mapfn"     (lambda ($set) (list $set))
+          "reducefn"  (lambda (acc mapped)
+                        (begin
+                          ((car mapped) (+ acc 1))
+                          (+ acc 1)))
+          "reduceinit" 0))
+
+  - name: "rank values ordered by score ASC"
+    sql: "SELECT id, rank FROM orc_rank ORDER BY score ASC"
+    expect:
+      rows: 4
+      data:
+        - id: 4
+          rank: 1
+        - id: 1
+          rank: 2
+        - id: 3
+          rank: 3
+        - id: 2
+          rank: 4
+
+  - name: "rank readable via WHERE filter"
+    sql: "SELECT id FROM orc_rank WHERE rank = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 4
+
+  # ── Test 2: Running SUM via ORC ────────────────────────────────────────────
+
+  - name: "Create sales table"
+    sql: |
+      CREATE TABLE orc_sales (
+        id            INT PRIMARY KEY,
+        day           INT,
+        amount        INT,
+        running_total INT
+      )
+
+  - name: "Insert sales data"
+    sql: |
+      INSERT INTO orc_sales (id, day, amount) VALUES
+        (1, 1, 10),
+        (2, 2, 30),
+        (3, 3, 20)
+
+  - name: "Materialize running_total column via createcolumn ORC"
+    scm: |
+      (createcolumn "memcp-tests" "orc_sales" "running_total" "INT" '()
+        (list
+          "sortcols"  '("day")
+          "sortdirs"  (list false)
+          "partitioncount" 0
+          "mapcols"   '("amount")
+          "mapfn"     (lambda ($set amount) (list $set amount))
+          "reducefn"  (lambda (acc mapped)
+                        (begin
+                          ((car mapped) (+ acc (car (cdr mapped))))
+                          (+ acc (car (cdr mapped)))))
+          "reduceinit" 0))
+
+  - name: "running_total values ordered by day"
+    sql: "SELECT day, running_total FROM orc_sales ORDER BY day ASC"
+    expect:
+      rows: 3
+      data:
+        - day: 1
+          running_total: 10
+        - day: 2
+          running_total: 40
+        - day: 3
+          running_total: 60
+
+  # ── Test 3: Post-INSERT lazy recompute (non-additive: rank) ────────────────
+
+  - name: "Insert new row into rank table"
+    sql: "INSERT INTO orc_rank (id, score) VALUES (5, 60)"
+
+  - name: "rank recomputed after INSERT"
+    sql: "SELECT id, rank FROM orc_rank ORDER BY score ASC"
+    expect:
+      rows: 5
+      data:
+        - id: 4
+          rank: 1
+        - id: 1
+          rank: 2
+        - id: 5
+          rank: 3
+        - id: 3
+          rank: 4
+        - id: 2
+          rank: 5
+
+  # ── Test 4: Post-DELETE lazy recompute ─────────────────────────────────────
+
+  - name: "Delete row from rank table"
+    sql: "DELETE FROM orc_rank WHERE id = 3"
+
+  - name: "rank recomputed after DELETE"
+    sql: "SELECT id, rank FROM orc_rank ORDER BY score ASC"
+    expect:
+      rows: 4
+      data:
+        - id: 4
+          rank: 1
+        - id: 1
+          rank: 2
+        - id: 5
+          rank: 3
+        - id: 2
+          rank: 4
+
+  # ── Test 5: Post-UPDATE lazy recompute ─────────────────────────────────────
+
+  - name: "Update score in rank table"
+    sql: "UPDATE orc_rank SET score = 200 WHERE id = 4"
+
+  - name: "rank recomputed after UPDATE"
+    sql: "SELECT id, rank FROM orc_rank ORDER BY score ASC"
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          rank: 1
+        - id: 5
+          rank: 2
+        - id: 2
+          rank: 3
+        - id: 4
+          rank: 4
+
+  # ── Cleanup ────────────────────────────────────────────────────────────────
+
+  - name: "Drop rank table"
+    sql: "DROP TABLE IF EXISTS orc_rank"
+
+  - name: "Drop sales table"
+    sql: "DROP TABLE IF EXISTS orc_sales"

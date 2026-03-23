@@ -1,0 +1,87 @@
+# Prejoin (JOIN + GROUP BY) with scalar subselect in SELECT list.
+# The scalar subselect references a table not in the JOIN — it must
+# resolve via the outer scope, not the prejoin keytable.
+
+metadata:
+  version: "1.0"
+  description: "Prejoin with scalar subselect in aggregate query"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS pjs_child"
+  - sql: "DROP TABLE IF EXISTS pjs_state"
+  - sql: "DROP TABLE IF EXISTS pjs_parent"
+  - sql: "CREATE TABLE pjs_parent (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE pjs_state (ID INT PRIMARY KEY, description TEXT)"
+  - sql: "CREATE TABLE pjs_child (ID INT PRIMARY KEY, parent_id INT, state_id INT)"
+  - sql: "INSERT INTO pjs_parent VALUES (1, 'Alpha'), (2, 'Beta')"
+  - sql: "INSERT INTO pjs_state VALUES (1, 'Open'), (2, 'Closed')"
+  - sql: "INSERT INTO pjs_child VALUES (1, 1, 1), (2, 1, 2), (3, 2, 1)"
+
+test_cases:
+
+  - name: "scalar subselect in JOIN query (no aggregate, baseline)"
+    sql: |
+      SELECT c.ID,
+        s.description,
+        (SELECT p.name FROM pjs_parent p WHERE p.ID = c.parent_id LIMIT 1) AS pname
+      FROM pjs_child c
+      LEFT JOIN pjs_state s ON s.ID = c.state_id
+      ORDER BY c.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          description: "Open"
+          pname: "Alpha"
+        - ID: 2
+          description: "Closed"
+          pname: "Alpha"
+        - ID: 3
+          description: "Open"
+          pname: "Beta"
+
+  - name: "scalar subselect in JOIN + GROUP BY aggregate"
+    sql: |
+      SELECT c.parent_id,
+        COUNT(*) AS cnt,
+        (SELECT p.name FROM pjs_parent p WHERE p.ID = c.parent_id LIMIT 1) AS pname
+      FROM pjs_child c
+      LEFT JOIN pjs_state s ON s.ID = c.state_id
+      GROUP BY c.parent_id
+      ORDER BY c.parent_id
+    expect:
+      rows: 2
+      data:
+        - parent_id: 1
+          cnt: 2
+          pname: "Alpha"
+        - parent_id: 2
+          cnt: 1
+          pname: "Beta"
+
+  - name: "JOIN + GROUP BY + EXISTS in WHERE with scalar subselect"
+    sql: |
+      SELECT c.parent_id,
+        COUNT(*) AS cnt
+      FROM pjs_child c
+      LEFT JOIN pjs_state s ON s.ID = c.state_id
+      WHERE EXISTS (
+        SELECT TRUE FROM pjs_parent p
+        WHERE p.ID = c.parent_id
+        AND (SELECT s2.description FROM pjs_state s2 WHERE s2.ID = c.state_id LIMIT 1) IS NOT NULL
+        LIMIT 1
+      )
+      GROUP BY c.parent_id
+      ORDER BY c.parent_id
+    expect:
+      rows: 2
+      data:
+        - parent_id: 1
+          cnt: 2
+        - parent_id: 2
+          cnt: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS pjs_child"
+  - sql: "DROP TABLE IF EXISTS pjs_state"
+  - sql: "DROP TABLE IF EXISTS pjs_parent"

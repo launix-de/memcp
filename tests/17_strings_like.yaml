@@ -70,6 +70,26 @@ test_cases:
       data:
         - r: false
 
+  - name: "Qualified LIKE left-hand side"
+    sql: |
+      CREATE TABLE like_qualified (id INT PRIMARY KEY, txt VARCHAR(50))
+    expect:
+      affected_rows: 1
+
+  - name: "Qualified LIKE left-hand side insert"
+    sql: |
+      INSERT INTO like_qualified (id, txt) VALUES (1, 'alpha'), (2, 'beta')
+    expect:
+      affected_rows: 2
+
+  - name: "Qualified LIKE left-hand side filter"
+    sql: |
+      SELECT id FROM like_qualified WHERE like_qualified.txt LIKE 'a%' ORDER BY id
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
   # --- NOT LIKE ---
   - name: "Create NOT LIKE test table"
     sql: "CREATE TABLE notlike_test (id INT PRIMARY KEY, name VARCHAR(50))"
@@ -100,4 +120,5 @@ test_cases:
         - id: 7
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS like_qualified"
   - sql: "DROP TABLE IF EXISTS notlike_test"

@@ -1,0 +1,56 @@
+# MySQL INSERT ... SET col=val syntax
+
+metadata:
+  version: "1.0"
+  description: "INSERT ... SET syntax (MySQL extension)"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ins_set_test"
+  - sql: "CREATE TABLE ins_set_test (id INT PRIMARY KEY AUTO_INCREMENT, name TEXT, val INT)"
+
+test_cases:
+
+  - name: "INSERT SET basic"
+    sql: "INSERT INTO ins_set_test SET name = 'alpha', val = 10"
+
+  - name: "verify INSERT SET"
+    sql: "SELECT name, val FROM ins_set_test WHERE name = 'alpha'"
+    expect:
+      rows: 1
+      data:
+        - name: "alpha"
+          val: 10
+
+  - name: "INSERT IGNORE SET"
+    sql: "INSERT IGNORE INTO ins_set_test SET id = 1, name = 'beta', val = 20"
+
+  - name: "IGNORE did not overwrite"
+    sql: "SELECT name FROM ins_set_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "alpha"
+
+  - name: "INSERT SET with expression"
+    sql: "INSERT INTO ins_set_test SET name = 'gamma', val = 2 + 3"
+
+  - name: "verify expression"
+    sql: "SELECT val FROM ins_set_test WHERE name = 'gamma'"
+    expect:
+      rows: 1
+      data:
+        - val: 5
+
+  - name: "INSERT SET single column"
+    sql: "INSERT INTO ins_set_test SET name = 'delta'"
+
+  - name: "verify single column (val is NULL)"
+    sql: "SELECT name, val FROM ins_set_test WHERE name = 'delta'"
+    expect:
+      rows: 1
+      data:
+        - name: "delta"
+          val: null
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ins_set_test"

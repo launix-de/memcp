@@ -265,11 +265,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	currentTx := CurrentTx()
 	ownsWrite := t.hasWriteOwner()
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
+	writeLocked := false
 	if lockMutationExclusively {
 		t.mu.Lock()
-		defer t.mu.Unlock()
+		writeLocked = true
+		defer func() { if writeLocked { t.mu.Unlock() } }()
 		t.enterWriteOwner()
-		defer t.exitWriteOwner()
+		defer func() { if writeLocked { t.exitWriteOwner() } }()
 		if currentTx != nil {
 			currentTx.EnterShardWrite(t)
 			defer currentTx.ExitShardWrite(t)
@@ -366,7 +368,11 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				}
 			} else {
 				for i, k := range conditionCols {
-					cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
+					if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						cdataset[i] = ccols[i].GetValue(effectiveIdx)
+					} else {
+						cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
+					}
 				}
 			}
 			var condResult bool
@@ -409,6 +415,12 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		locked = false
 	}
 	if !hadValue {
+		// Release locks before flushing trigger batch
+		if locked {
+			t.mu.RUnlock()
+			locked = false
+		}
+		mapper.FlushSideEffects()
 		return scm.NewNil(), outCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
@@ -420,5 +432,17 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			akkumulator = mapper.Stream(akkumulator, pendingRecids[i:j])
 		}
 	}
+	// Release locks before flushing trigger batch to avoid deadlocks
+	// (trigger handlers may scan other tables that need locks)
+	if locked {
+		t.mu.RUnlock()
+		locked = false
+	}
+	if writeLocked {
+		t.exitWriteOwner()
+		t.mu.Unlock()
+		writeLocked = false
+	}
+	mapper.FlushSideEffects()
 	return akkumulator, outCount
 }

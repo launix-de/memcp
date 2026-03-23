@@ -72,6 +72,7 @@ const (
 	tagRegex   // *regexp.Regexp
 	tagCString // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
 	tagBString // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
+	tagClosure // lightweight id-carrying closure; ptr=*func(uint32,...Scmer)Scmer, aux=(id<<8)|tagClosure
 	tagPromise // tagPromise Scmer; ptr points to cells[0] of a [2]Scmer backing (auxVal==0 heap, auxVal==1 list-backed)
 	// custom tags >= 100
 )
@@ -248,6 +249,14 @@ func NewFunc(fn func(...Scmer) Scmer) Scmer {
 	ptr := new(func(...Scmer) Scmer)
 	*ptr = fn
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFunc, 0)}
+}
+
+// NewClosure creates a zero-allocation-per-row closure Scmer.
+// fnptr must be a long-lived pointer (hoisted outside any row loop).
+// The id is packed into the upper bits of aux alongside tagClosure.
+// On Apply, the fn is called as fn(id, args...).
+func NewClosure(fnptr *func(uint32, ...Scmer) Scmer, id uint32) Scmer {
+	return Scmer{(*byte)(unsafe.Pointer(fnptr)), makeAux(tagClosure, uint64(id))}
 }
 
 func NewFuncEnv(fn func(*Env, ...Scmer) Scmer) Scmer {
@@ -854,6 +863,10 @@ func (s Scmer) Any() any {
 		return s.Parser()
 	case tagRegex:
 		return s.Regex()
+	case tagCString:
+		return s.String()
+	case tagBString:
+		return s.String()
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:

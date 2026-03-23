@@ -1,0 +1,173 @@
+metadata:
+  version: "1.0"
+  description: "Real-world pattern: latest revision per document via ROW_NUMBER PARTITION BY"
+  isolated: true
+
+test_cases:
+
+  - name: "Create doc table"
+    sql: "CREATE TABLE doc (id INT PRIMARY KEY, title VARCHAR(100))"
+
+  - name: "Create doc_revision table"
+    sql: "CREATE TABLE doc_revision (id INT PRIMARY KEY, doc INT, file VARCHAR(100), created INT)"
+
+  - name: "Insert documents"
+    sql: "INSERT INTO doc VALUES (1, 'Contract A'), (2, 'Contract B'), (3, 'Invoice C')"
+
+  - name: "Insert revisions"
+    sql: |
+      INSERT INTO doc_revision VALUES
+      (1, 1, 'contract_v1.pdf', 100),
+      (2, 1, 'contract_v2.pdf', 200),
+      (3, 1, 'contract_v3.pdf', 300),
+      (4, 2, 'draft.pdf', 150),
+      (5, 3, 'invoice_v1.pdf', 50),
+      (6, 3, 'invoice_v2.pdf', 250)
+
+  # =========================================================================
+  # ROW_NUMBER PARTITION BY — latest revision per doc
+  # =========================================================================
+
+  - name: "ROW_NUMBER over partitions"
+    sql: |
+      SELECT doc, file, ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+      FROM doc_revision
+      ORDER BY doc, created DESC
+    expect:
+      rows: 6
+      data:
+        - {doc: 1, file: "contract_v3.pdf", rn: 1}
+        - {doc: 1, file: "contract_v2.pdf", rn: 2}
+        - {doc: 1, file: "contract_v1.pdf", rn: 3}
+        - {doc: 2, file: "draft.pdf", rn: 1}
+        - {doc: 3, file: "invoice_v2.pdf", rn: 1}
+        - {doc: 3, file: "invoice_v1.pdf", rn: 2}
+
+  # =========================================================================
+  # LEFT JOIN with rn=1 — the actual business query
+  # =========================================================================
+
+  - name: "Latest file per document via LEFT JOIN"
+    sql: |
+      SELECT doc.id, doc.title, dr.file
+      FROM doc
+      LEFT JOIN (
+          SELECT doc, file,
+                 ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+          FROM doc_revision
+      ) dr ON dr.doc = doc.id AND dr.rn = 1
+      ORDER BY doc.id
+    expect:
+      rows: 3
+      data:
+        - {id: 1, title: "Contract A", file: "contract_v3.pdf"}
+        - {id: 2, title: "Contract B", file: "draft.pdf"}
+        - {id: 3, title: "Invoice C", file: "invoice_v2.pdf"}
+
+  # =========================================================================
+  # Partition-local mutation: INSERT new revision for doc=1
+  # =========================================================================
+
+  - name: "INSERT new revision for doc 1"
+    sql: "INSERT INTO doc_revision VALUES (7, 1, 'contract_v4.pdf', 400)"
+
+  - name: "Latest file updated after INSERT (only doc=1 changes)"
+    sql: |
+      SELECT doc.id, doc.title, dr.file
+      FROM doc
+      LEFT JOIN (
+          SELECT doc, file,
+                 ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+          FROM doc_revision
+      ) dr ON dr.doc = doc.id AND dr.rn = 1
+      ORDER BY doc.id
+    expect:
+      rows: 3
+      data:
+        - {id: 1, title: "Contract A", file: "contract_v4.pdf"}
+        - {id: 2, title: "Contract B", file: "draft.pdf"}
+        - {id: 3, title: "Invoice C", file: "invoice_v2.pdf"}
+
+  # =========================================================================
+  # Partition-local mutation: DELETE old revision
+  # =========================================================================
+
+  - name: "DELETE oldest revision for doc 1"
+    sql: "DELETE FROM doc_revision WHERE id = 1"
+
+  - name: "Latest file unchanged after deleting old revision"
+    sql: |
+      SELECT doc.id, doc.title, dr.file
+      FROM doc
+      LEFT JOIN (
+          SELECT doc, file,
+                 ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+          FROM doc_revision
+      ) dr ON dr.doc = doc.id AND dr.rn = 1
+      ORDER BY doc.id
+    expect:
+      rows: 3
+      data:
+        - {id: 1, title: "Contract A", file: "contract_v4.pdf"}
+        - {id: 2, title: "Contract B", file: "draft.pdf"}
+        - {id: 3, title: "Invoice C", file: "invoice_v2.pdf"}
+
+  # =========================================================================
+  # Document with no revisions → NULL file
+  # =========================================================================
+
+  - name: "INSERT new document with no revisions"
+    sql: "INSERT INTO doc VALUES (4, 'Empty Doc')"
+
+  - name: "Document without revisions shows NULL file"
+    sql: |
+      SELECT doc.id, doc.title, dr.file
+      FROM doc
+      LEFT JOIN (
+          SELECT doc, file,
+                 ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+          FROM doc_revision
+      ) dr ON dr.doc = doc.id AND dr.rn = 1
+      ORDER BY doc.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, title: "Contract A", file: "contract_v4.pdf"}
+        - {id: 2, title: "Contract B", file: "draft.pdf"}
+        - {id: 3, title: "Invoice C", file: "invoice_v2.pdf"}
+        - {id: 4, title: "Empty Doc", file: null}
+
+  # =========================================================================
+  # UPDATE revision timestamp — changes which is "latest"
+  # =========================================================================
+
+  - name: "UPDATE: make v2 the newest for doc 1"
+    sql: "UPDATE doc_revision SET created = 999 WHERE id = 2"
+
+  - name: "Latest file changes after timestamp UPDATE"
+    sql: |
+      SELECT doc.id, doc.title, dr.file
+      FROM doc
+      LEFT JOIN (
+          SELECT doc, file,
+                 ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+          FROM doc_revision
+      ) dr ON dr.doc = doc.id AND dr.rn = 1
+      ORDER BY doc.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, title: "Contract A", file: "contract_v2.pdf"}
+        - {id: 2, title: "Contract B", file: "draft.pdf"}
+        - {id: 3, title: "Invoice C", file: "invoice_v2.pdf"}
+        - {id: 4, title: "Empty Doc", file: null}
+
+  # =========================================================================
+  # Cleanup
+  # =========================================================================
+
+  - name: "Drop tables"
+    sql: "DROP TABLE IF EXISTS doc_revision"
+
+  - name: "Drop doc table"
+    sql: "DROP TABLE IF EXISTS doc"

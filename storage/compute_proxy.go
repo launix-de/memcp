@@ -19,6 +19,7 @@ package storage
 import "io"
 import "fmt"
 import "sync"
+import "sync/atomic"
 import "reflect"
 import "encoding/json"
 import "encoding/binary"
@@ -39,11 +40,31 @@ type StorageComputeProxy struct {
 	colName    string                              // own column name (for cycle protection)
 	mu         sync.RWMutex                        // protects delta map + compressed flag
 	count      uint32                              // total row count at creation
+	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
+	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
+	// Invalidation sets bits to 0; on-demand recompute sets them back to 1.
+	isOrdered bool
+	// Invalidation telemetry: tracks cumulative cost of selective invalidations
+	// since last read. When invalidation cost exceeds last recompute cost,
+	// switches to InvalidateAll() to avoid death-by-a-thousand-cuts.
+	invalidateNsSinceRead atomic.Int64 // cumulative invalidation nanoseconds since last read
+	lastRecomputeNs       atomic.Int64 // nanoseconds of the last full/suffix recompute
 }
 
 func (p *StorageComputeProxy) String() string {
 	return "compute-proxy"
 }
+
+// orcCol returns the column definition for this ORC proxy's column.
+func (p *StorageComputeProxy) orcCol() *column {
+	for _, c := range p.shard.t.Columns {
+		if c.Name == p.colName {
+			return c
+		}
+	}
+	return nil
+}
+
 
 func (p *StorageComputeProxy) ComputeSize() uint {
 	var sz uint = 128 // struct overhead
@@ -55,8 +76,50 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 	return sz
 }
 
+
 // GetValue returns the value at idx, computing on demand if necessary.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
+	// ORC path: validity tracked per-row via validMask.
+	if p.isOrdered {
+		if !p.validMask.Get(uint(idx)) {
+			// During an active recompute (scan_order reading ORC values):
+			// Return nil for invalid rows (reducer uses nil to detect "needs compute").
+			// Return cached value for valid rows (enables Phase 1 skip + Phase 3 convergence).
+			if atomic.LoadInt32(&p.shard.t.orcRecomputing) > 0 {
+				if p.validMask.Get(uint(idx)) {
+					// Valid row: return cached value for convergence check
+					p.mu.RLock()
+					if val, ok := p.delta[idx]; ok {
+						p.mu.RUnlock()
+						return val
+					}
+					p.mu.RUnlock()
+					if p.main != nil {
+						return p.main.GetValue(idx)
+					}
+				}
+				return scm.NewNil() // invalid row
+			}
+			// Invalid row → on-demand incremental recompute
+			p.shard.t.orcMu.Lock()
+			if !p.validMask.Get(uint(idx)) {
+				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
+			}
+			p.shard.t.orcMu.Unlock()
+		}
+		// Valid: return from delta or main
+		p.mu.RLock()
+		if val, ok := p.delta[idx]; ok {
+			p.mu.RUnlock()
+			return val
+		}
+		p.mu.RUnlock()
+		if p.main != nil {
+			return p.main.GetValue(idx)
+		}
+		return scm.NewNil()
+	}
+
 	// Fast path 1: fully compressed → all values in main
 	if p.compressed {
 		return p.main.GetValue(idx)
@@ -258,13 +321,61 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 	}
 }
 
-// InvalidateAll marks all rows as needing recomputation.
+// SetValue writes val directly to the cached value at idx, bypassing recomputation.
+// If the shard is compressed and main is a StorageSCMER, the value is written in-place.
+// Otherwise the value is written to the delta map.
+func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.compressed && p.main != nil {
+		if scmer, ok := p.main.(*StorageSCMER); ok {
+			scmer.SetValue(idx, val)
+			return
+		}
+		// main is a compressed type → fall back to delta; mark all rows valid
+		// so that GetValue falls through to main for rows not in delta.
+		p.compressed = false
+		for i := uint32(0); i < p.count; i++ {
+			p.validMask.Set(uint(i), true)
+		}
+	}
+	p.delta[idx] = val
+	p.validMask.Set(uint(idx), true)
+}
+
+// InvalidateAll marks all rows as needing recomputation (resets validMask).
 func (p *StorageComputeProxy) InvalidateAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.compressed = false
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
+}
+
+// ShouldSkipSelectiveInvalidation returns true when cumulative invalidation
+// cost exceeds the last recompute cost. The caller should then skip the
+// selective invalidation (the column is already dirty enough for a full
+// recompute on the next read).
+func (p *StorageComputeProxy) ShouldSkipSelectiveInvalidation() bool {
+	invNs := p.invalidateNsSinceRead.Load()
+	recompNs := p.lastRecomputeNs.Load()
+	if recompNs == 0 {
+		return false // no baseline yet, allow selective
+	}
+	return invNs > recompNs
+}
+
+// AddInvalidationCost adds nanoseconds to the invalidation telemetry counter.
+func (p *StorageComputeProxy) AddInvalidationCost(ns int64) {
+	p.invalidateNsSinceRead.Add(ns)
+}
+
+// ResetInvalidationTelemetry resets the invalidation counter (called after read/recompute).
+func (p *StorageComputeProxy) ResetInvalidationTelemetry(recomputeNs int64) {
+	p.invalidateNsSinceRead.Store(0)
+	if recomputeNs > 0 {
+		p.lastRecomputeNs.Store(recomputeNs)
+	}
 }
 
 // proposeCompression returns nil — the proxy does not participate in shard
@@ -294,7 +405,7 @@ func (p *StorageComputeProxy) finish() {
 // storageComputeProxyVersion is the current binary format version for StorageComputeProxy.
 // Increment this constant and add a new deserializeComputeProxyV* helper whenever the
 // layout after the magic byte changes.  Never delete old helpers.
-const storageComputeProxyVersion = 0
+const storageComputeProxyVersion = 1
 
 // StorageComputeProxy binary layout (magic byte 50 consumed by shard loader):
 //
@@ -313,7 +424,8 @@ const storageComputeProxyVersion = 0
 //
 // Version history:
 //
-//	0 (current): layout as above.
+//	0: layout as above.
+//	1: adds [isOrdered uint8] after validMask (1=ORC column, 0=regular computed column).
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(50))                         // magic byte
 	binary.Write(f, binary.LittleEndian, uint8(storageComputeProxyVersion)) // version byte
@@ -367,6 +479,13 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	p.validMask.Iterate(func(idx uint) {
 		binary.Write(f, binary.LittleEndian, idx)
 	})
+
+	// v1: isOrdered flag
+	var isOrderedByte uint8
+	if p.isOrdered {
+		isOrderedByte = 1
+	}
+	binary.Write(f, binary.LittleEndian, isOrderedByte)
 }
 
 // Deserialize reads the proxy from the given reader.
@@ -377,6 +496,8 @@ func (p *StorageComputeProxy) Deserialize(f io.Reader) uint {
 	switch version {
 	case 0:
 		return p.deserializeComputeProxyV0(f)
+	case 1:
+		return p.deserializeComputeProxyV1(f)
 	default:
 		panic(fmt.Sprintf("StorageComputeProxy: unknown version %d", version))
 	}
@@ -451,4 +572,13 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 
 	// shard back-reference is set by post-load hook in ensureColumnLoaded
 	return uint(p.count)
+}
+
+func (p *StorageComputeProxy) deserializeComputeProxyV1(f io.Reader) uint {
+	n := p.deserializeComputeProxyV0(f)
+	// v1 adds isOrdered byte after validMask
+	var isOrderedByte uint8
+	binary.Read(f, binary.LittleEndian, &isOrderedByte)
+	p.isOrdered = isOrderedByte != 0
+	return n
 }

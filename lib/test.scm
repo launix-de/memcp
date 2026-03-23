@@ -448,6 +448,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (toLower "ÄBCd") "äbcd") true "toLower handles letters")
 	(assert (equal? (toUpper "ÄBCd") "ÄBCD") true "toUpper handles letters")
 
+	/* null byte escape in string literals */
+	(assert (equal? (strlen "\0") 1) true "\\0 produces single null byte")
+	(assert (equal? "\0" (substr "a\0b" 1 1)) true "\\0 survives concat/substr")
+	(assert (equal? (replace "x\0y" "\0" ":") "x:y") true "null byte is replaceable")
+
 	/* collate comparator */
 	(define less_bin (collate "bin"))
 	(assert (less_bin "a" "b") true "bin collation: a<b")
@@ -1415,6 +1420,45 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (_win_results4 "items") '(nil nil 10 100)) true "window_mut stride=2 row2 emits old=(10 100)")
 	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) (list 30 300)))
 	(assert (equal? (_win_results4 "items") '(nil nil 10 100 20 200)) true "window_mut stride=2 row3 emits old=(20 200)")
+
+	/* promise */
+	(print "testing promise ...")
+	(define p1 (newpromise))
+	(assert (nil? (p1 "value")) true "unresolved promise value is nil")
+	(assert (nil? (p1 "state")) true "unresolved promise state is nil")
+	(define p2 (newpromise))
+	(p2 "value" 42)
+	(assert (equal? (p2 "value") 42) true "resolved promise returns stored value")
+	(assert (equal? (p2 "state") true) true "resolved promise state is true")
+	(define p3 (newpromise))
+	(p3 "value" 1)
+	(p3 "value" 2)
+	(assert (equal? (p3 "value") 2) true "second resolution overwrites first")
+	(define p4 (newpromise))
+	(p4 "value" 5)
+	(p4 "fail")
+	(assert (equal? (p4 "state") false) true "failed promise state is false")
+	(assert (nil? (p4 "value")) true "failed promise without payload clears value")
+	(define p5 (newpromise))
+	(p5 "fail" "boom")
+	(assert (equal? (p5 "state") false) true "failed promise with payload keeps failed state")
+	(assert (equal? (p5 "value") "boom") true "failed promise stores payload")
+	(define p6 (newpromise))
+	(context (lambda () (p6 "value" 99)))
+	(assert (equal? (p6 "value") 99) true "promise resolves from inside context")
+	(define p7 (newpromise))
+	(setTimeout (lambda () (p7 "value" "async")) 1)
+	(context (lambda () (sleep 0.02)))
+	(assert (equal? (p7 "value") "async") true "promise resolves from async callback")
+	/* once: resolve exactly once, panic on second */
+	(define p8 (newpromise))
+	(p8 "once" 77)
+	(assert (equal? (p8 "value") 77) true "once resolves value")
+	(assert (equal? (try (lambda () (begin (p8 "once" 88) false)) (lambda (e) true)) true) true "once panics on second call")
+	/* once with custom error message */
+	(define p9 (newpromise))
+	(p9 "once" 1)
+	(assert (equal? (try (lambda () (begin (p9 "once" 2 "scalar subselect returned more than one row") false)) (lambda (e) (equal? e "scalar subselect returned more than one row"))) true) true "once custom error message")
 
 	/* dashboard metrics (metrics.go) */
 	(print "testing dashboard metrics ...")

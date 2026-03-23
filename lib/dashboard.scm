@@ -294,6 +294,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_json res (dashboard_json_array items))
 				)))
 			)
+			/* API: print log — list latest entries (admin only) */
+			"/dashboard/api/logs" (begin
+				(if (dashboard_check_admin req) (begin
+					(define items (scan_order "system_statistic" "logs"
+						'() (lambda () true)
+						'("datetime") '(>) 0 0 100
+						'("datetime" "message")
+						(lambda (dt msg) (json_encode_assoc (list "datetime" dt "message" msg)))
+						(lambda (acc item) (if (equal? acc "") item (concat acc "," item)))
+						""))
+					(dashboard_send_json res (concat "[" items "]"))
+				) (dashboard_send_401 res))
+			)
 			/* API: error query log — list entries (admin only) */
 			"/dashboard/api/errors" (begin
 				(if (dashboard_check_admin req) (begin
@@ -384,3 +397,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* start the tracing loop */
 (setTimeout metrics_trace_tick 60000)
+
+/* 15-minute cron: trim print log and error log to max size */
+(define log_trim_tick (lambda () (begin
+	/* trim print log */
+	(define max_print (settings "MaxPrintLog"))
+	(if (> max_print 0) (begin
+		(try (lambda () (begin
+			(define cnt (scan "system_statistic" "logs" '() (lambda () true) '() (lambda () 1) + 0))
+			(if (> cnt max_print)
+				(scan_order "system_statistic" "logs" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+			)
+		)) (lambda (e) true))
+	))
+	/* trim error log */
+	(define max_err (settings "MaxErrorQueryLog"))
+	(if (> max_err 0) (begin
+		(try (lambda () (begin
+			(define cnt (scan "system_statistic" "errors" '() (lambda () true) '() (lambda () 1) + 0))
+			(if (> cnt max_err)
+				(scan_order "system_statistic" "errors" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+			)
+		)) (lambda (e) true))
+	))
+	/* reschedule every 15 minutes */
+	(setTimeout log_trim_tick 900000)
+)))
+
+/* start the trim loop (first run after 15 min) */
+(setTimeout log_trim_tick 900000)

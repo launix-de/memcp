@@ -21,8 +21,8 @@ import "os"
 import "fmt"
 import "net"
 import "sync"
-import "errors"
 import "strings"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 import "runtime"
 import "sync/atomic"
 import "github.com/launix-de/go-mysqlstack/xlog"
@@ -151,10 +151,10 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	password := Apply(m.authcallback, NewString(session.User()))
 	if password.IsNil() {
 		// user does not exist
-		return errors.New("Auth failed")
+		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
 	}
 	if !session.TestPassword([]byte(password.String())) {
-		return errors.New("Auth failed")
+		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
 	}
 	return nil
 }
@@ -162,7 +162,7 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	m.log.Info("%s", "db "+database)
 	allowed := Apply(m.schemacallback, NewString(session.User()), NewString(database))
 	if !allowed.Bool() {
-		return errors.New("access denied for database " + database)
+		return sqldb.NewSQLErrorf(sqldb.ER_ACCESS_DENIED_ERROR, "access denied for database %s", database)
 	}
 	session.SetSchema(database)
 	return nil
@@ -213,6 +213,42 @@ type ErrorWrapper string
 func (s ErrorWrapper) Error() string {
 	return string(s)
 }
+
+func updateMySQLFieldMetadata(field *querypb.Field, val sqltypes.Value) {
+	field.Type = val.Type()
+	switch val.Type() {
+	case querypb.Type_TEXT, querypb.Type_VARCHAR, querypb.Type_CHAR, querypb.Type_BLOB:
+		field.Charset = 45 // utf8mb4_general_ci
+	default:
+		field.Charset = 0
+	}
+}
+
+func appendMySQLResultRow(result *sqltypes.Result, colmap map[string]int, item []Scmer) []sqltypes.Value {
+	newitem := make([]sqltypes.Value, len(result.Fields))
+	for i := 0; i < len(item)-1; i += 2 {
+		val := ScmerToMySQL(item[i+1])
+
+		colname := item[i].String()
+		colid, ok := colmap[colname]
+		if ok {
+			duplicateAliasInRow := colid < len(newitem) && !newitem[colid].IsNull()
+			newitem[colid] = val
+			if duplicateAliasInRow || result.Fields[colid].Type == querypb.Type_NULL_TYPE {
+				updateMySQLFieldMetadata(result.Fields[colid], val)
+			}
+		} else {
+			colmap[colname] = len(result.Fields)
+			newcol := new(querypb.Field)
+			newcol.Name = colname
+			updateMySQLFieldMetadata(newcol, val)
+			result.Fields = append(result.Fields, newcol)
+			newitem = append(newitem, val)
+		}
+	}
+	return newitem
+}
+
 func isSelectQuery(query string) bool {
 	trimmed := strings.TrimSpace(query)
 	for {
@@ -258,6 +294,19 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			ss.SetDB(session.Schema())
 		}
 	}()
+	// max_allowed_packet: PHP PDO queries this to size buffers.
+	// Return 32MB (33554432) so large result sets work.
+	if query == "select @@max_allowed_packet" || query == "SELECT @@max_allowed_packet" {
+		callback(&sqltypes.Result{
+			Fields: []*querypb.Field{
+				{Name: "@@max_allowed_packet", Type: querypb.Type_INT64},
+			},
+			Rows: [][]sqltypes.Value{
+				{sqltypes.MakeTrusted(querypb.Type_INT64, []byte("4194304"))},
+			},
+		})
+		return nil
+	}
 	if query == "select @@version_comment limit 1" {
 		callback(&sqltypes.Result{
 			Fields: []*querypb.Field{
@@ -294,9 +343,14 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	rowcount := func() Scmer {
 		defer func() {
 			if r := recover(); r != nil {
-				errMsg := fmt.Sprint(r)
-				PrintError("error in mysql connection: " + errMsg)
-				myerr = ErrorWrapper(errMsg)
+				if sqlErr, ok := r.(*sqldb.SQLError); ok {
+					PrintError("error in mysql connection: " + sqlErr.Error())
+					myerr = sqlErr
+				} else {
+					errMsg := fmt.Sprint(r)
+					PrintError("error in mysql connection: " + errMsg)
+					myerr = ErrorWrapper(errMsg)
+				}
 			}
 		}()
 		callbackFn := NewFunc(func(a ...Scmer) Scmer {
@@ -306,30 +360,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			defer resultlock.Unlock()
 			updateFlags(session, sessionFunc) // set transaction status
 
-			newitem := make([]sqltypes.Value, len(result.Fields))
-			for i := 0; i < len(item)-1; i += 2 {
-				val := ScmerToMySQL(item[i+1])
-
-				colname := item[i].String()
-				colid, ok := colmap[colname]
-				if ok {
-					newitem[colid] = val
-					if result.Fields[colid].Type == querypb.Type_NULL_TYPE {
-						result.Fields[colid].Type = val.Type()
-					}
-				} else {
-					// add row to result
-					colmap[colname] = len(result.Fields)
-					newcol := new(querypb.Field)
-					newcol.Name = colname
-					newcol.Type = val.Type()
-					if val.Type() == querypb.Type_TEXT || val.Type() == querypb.Type_VARCHAR || val.Type() == querypb.Type_CHAR || val.Type() == querypb.Type_BLOB {
-						newcol.Charset = 45 // utf8mb4_general_ci
-					}
-					result.Fields = append(result.Fields, newcol)
-					newitem = append(newitem, val)
-				}
-			}
+			newitem := appendMySQLResultRow(&result, colmap, item)
 			if len(result.Rows) == cap(result.Rows) {
 				// flush
 				callback(&result)

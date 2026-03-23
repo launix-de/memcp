@@ -65,7 +65,8 @@ type TypeDescriptor struct {
 	Const     bool                       // value is a compile-time constant; for func: safe to constant-fold
 	Optional  bool                       // for func params: parameter is optional
 	Variadic  bool                       // for func params: last param accepts 0+ values
-	Forbidden bool                       // for func: optimizer-only, hidden from help
+	Forbidden      bool                  // for func: optimizer-only, hidden from help
+	HasSideEffects bool                  // for func: true = call has side effects, cannot be eliminated even if result unused
 	ParamName string                     // for func params: documentation name
 	ParamDesc string                     // for func params: documentation description
 	Params    []*TypeDescriptor          // for Kind="func": parameter types

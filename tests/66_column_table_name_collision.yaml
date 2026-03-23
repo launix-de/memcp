@@ -1,0 +1,48 @@
+# Column name equals table name: SELECT cnc_item.cnc_item FROM cnc_item must work.
+
+metadata:
+  version: "1.0"
+  description: "Column with same name as table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cnc_item"
+  - sql: "CREATE TABLE cnc_item (ID INT PRIMARY KEY, cnc_item TEXT, val INT)"
+  - sql: "INSERT INTO cnc_item VALUES (1, 'foo', 10), (2, 'bar', 20)"
+
+test_cases:
+
+  - name: "SELECT column with same name as table"
+    sql: "SELECT cnc_item FROM cnc_item ORDER BY ID"
+    expect:
+      rows: 2
+      data:
+        - cnc_item: "foo"
+        - cnc_item: "bar"
+
+  - name: "qualified SELECT table.column where names match"
+    sql: "SELECT cnc_item.cnc_item FROM cnc_item ORDER BY cnc_item.ID"
+    expect:
+      rows: 2
+      data:
+        - cnc_item: "foo"
+        - cnc_item: "bar"
+
+  - name: "WHERE on column with same name as table"
+    sql: "SELECT ID FROM cnc_item WHERE cnc_item = 'foo'"
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+
+  - name: "UPDATE column with same name as table"
+    sql: "UPDATE cnc_item SET cnc_item = 'updated' WHERE ID = 1"
+
+  - name: "verify UPDATE"
+    sql: "SELECT cnc_item FROM cnc_item WHERE ID = 1"
+    expect:
+      rows: 1
+      data:
+        - cnc_item: "updated"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cnc_item"

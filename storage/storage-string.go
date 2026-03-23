@@ -18,13 +18,17 @@ package storage
 
 import "io"
 import "fmt"
-import "sort"
+import "github.com/carli2/hybridsort"
+import "sync"
+import "time"
 import "unsafe"
 import "strings"
 import "encoding/hex"
 import "encoding/base64"
 import "encoding/binary"
+import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
+import "github.com/pierrec/lz4/v4"
 
 // StringFormat describes how the string bytes in the dictionary are encoded.
 // The lowest bit encodes case for formats that have a case variant:
@@ -376,6 +380,13 @@ type StorageString struct {
 	nodict     bool       // disable values array
 	format     StringFormat
 
+	// LZ4 compression: when compressed==true, compressedDict holds the
+	// lz4-compressed dictionary and dictionary is materialized on demand.
+	compressedDict []byte // lz4-compressed dictionary bytes
+	compressed     bool   // true → dictionary is stored lz4-compressed
+	dictMu         sync.RWMutex
+	readCount      uint64 // atomic; incremented on each GetValue for rebuild telemetry
+
 	// helpers (scan/build phase only)
 	sb           strings.Builder
 	compBuf      []byte // accumulates compressed bytes during build (nodict) or init (dict)
@@ -390,15 +401,115 @@ type StorageString struct {
 }
 
 func (s *StorageString) ComputeSize() uint {
-	return s.values.ComputeSize() + 8 + uint(len(s.dictionary)) + 24 + s.starts.ComputeSize() + s.lens.ComputeSize() + 8*8
+	base := s.values.ComputeSize() + 8 + uint(len(s.dictionary)) + 24 + s.starts.ComputeSize() + s.lens.ComputeSize() + 8*8
+	base += uint(len(s.compressedDict))
+	return base
 }
 
 func (s *StorageString) String() string {
-	if s.nodict {
-		return fmt.Sprintf("string-buffer[%d bytes, format=%d]", len(s.dictionary), s.format)
-	} else {
-		return fmt.Sprintf("string-dict[%d entries; %d bytes, format=%d]", s.count, len(s.dictionary), s.format)
+	lz4Tag := ""
+	if s.compressed {
+		lz4Tag = ", lz4"
 	}
+	if s.nodict {
+		return fmt.Sprintf("string-buffer[%d bytes, format=%d%s]", len(s.dictionary)+len(s.compressedDict), s.format, lz4Tag)
+	} else {
+		return fmt.Sprintf("string-dict[%d entries; %d bytes, format=%d%s]", s.count, len(s.dictionary)+len(s.compressedDict), s.format, lz4Tag)
+	}
+}
+
+// ReadCount returns the number of GetValue calls since the last rebuild.
+func (s *StorageString) ReadCount() uint64 {
+	return atomic.LoadUint64(&s.readCount)
+}
+
+// CompressDictionary lz4-compresses the dictionary and clears the
+// materialized copy.  After this call, GetValue will lazily decompress
+// on first read.  No-op if the dictionary is already compressed or empty.
+func (s *StorageString) CompressDictionary() {
+	s.dictMu.Lock()
+	defer s.dictMu.Unlock()
+	if s.compressed || len(s.dictionary) == 0 {
+		return
+	}
+	src := unsafe.Slice(unsafe.StringData(s.dictionary), len(s.dictionary))
+	bound := lz4.CompressBlockBound(len(src))
+	dst := make([]byte, bound)
+	var c lz4.Compressor
+	n, err := c.CompressBlock(src, dst)
+	if err != nil || n == 0 {
+		// incompressible or error — keep uncompressed
+		return
+	}
+	// store original length as 4-byte LE prefix so we know the decompressed size
+	s.compressedDict = make([]byte, 4+n)
+	binary.LittleEndian.PutUint32(s.compressedDict, uint32(len(s.dictionary)))
+	copy(s.compressedDict[4:], dst[:n])
+	s.dictionary = ""
+	s.compressed = true
+}
+
+// EvictDictionary drops the materialized dictionary, keeping only the
+// lz4-compressed form.  Returns the number of bytes freed.
+// No-op if the column is not compressed or the dictionary is already evicted.
+func (s *StorageString) EvictDictionary() int64 {
+	s.dictMu.Lock()
+	defer s.dictMu.Unlock()
+	if !s.compressed || len(s.dictionary) == 0 {
+		return 0
+	}
+	freed := int64(len(s.dictionary))
+	s.dictionary = ""
+	return freed
+}
+
+// stringDictCleanup is the CacheManager callback for evicting a materialized
+// string dictionary.  The pointer is a *StorageString.
+func stringDictCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
+	s := ptr.(*StorageString)
+	freed := s.EvictDictionary()
+	if freed > 0 && freedByType != nil {
+		freedByType[TypeStringDict] += freed
+	}
+	return freed > 0
+}
+
+// stringDictLastUsed returns a zero time so that materialized dicts are
+// among the first candidates for eviction (they are cheap to re-decompress).
+func stringDictLastUsed(ptr any) time.Time {
+	return time.Time{}
+}
+
+// ensureDict materializes the dictionary from lz4-compressed form if needed.
+// Returns the dictionary string.  Safe for concurrent use.
+func (s *StorageString) ensureDict() string {
+	if !s.compressed {
+		return s.dictionary
+	}
+	// fast path: already materialized
+	s.dictMu.RLock()
+	if d := s.dictionary; len(d) > 0 {
+		s.dictMu.RUnlock()
+		return d
+	}
+	s.dictMu.RUnlock()
+
+	// slow path: decompress
+	s.dictMu.Lock()
+	defer s.dictMu.Unlock()
+	if d := s.dictionary; len(d) > 0 {
+		return d // another goroutine materialized while we waited
+	}
+	origLen := binary.LittleEndian.Uint32(s.compressedDict[:4])
+	buf := make([]byte, origLen)
+	n, err := lz4.UncompressBlock(s.compressedDict[4:], buf)
+	if err != nil || n != int(origLen) {
+		panic(fmt.Sprintf("StorageString: lz4 decompress failed: err=%v n=%d expected=%d", err, n, origLen))
+	}
+	s.dictionary = unsafe.String(&buf[0], int(origLen))
+	// register materialized dictionary with CacheManager so it can be evicted
+	GlobalCache.AddItem(s, int64(origLen), TypeStringDict, stringDictCleanup, stringDictLastUsed, nil)
+	return s.dictionary
 }
 
 // storageStringVersion is the current binary format version for StorageString.
@@ -413,7 +524,7 @@ func (s *StorageString) String() string {
 // reaches 11 or higher, the legacy sentinel (>10 for old "123456" dummy) must
 // be revisited.  New binary layout changes must use a version increment, NOT
 // a new StringFormat value.
-const storageStringVersion = 0
+const storageStringVersion = 1
 
 // StorageString binary layout (magic byte 20 consumed by shard loader):
 //
@@ -425,15 +536,24 @@ const storageStringVersion = 0
 //	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
 //	  [dictlen uint64] [dict bytes]
 //
-//	Version 0 (current):
+//	Version 0:
 //	  [version uint8]      ← pad[0], was 0 in all pre-versioning smallerstrings data
 //	  [pad 4 bytes]        ← alignment padding
 //	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
 //	  [dictlen uint64] [dict bytes]
 //
+//	Version 1 (current):
+//	  [version uint8]      ← 1
+//	  [pad 4 bytes]        ← alignment padding
+//	  [compressed uint8]   ← 0=uncompressed dict, 1=lz4-compressed dict
+//	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
+//	  if compressed==0: [dictlen uint64] [dict bytes]
+//	  if compressed==1: [compressedLen uint64] [compressedDict bytes]
+//
 // Version history:
 //
-//	0 (current): smallerstrings format; format byte 0..10; version in pad[0].
+//	0: smallerstrings format; format byte 0..10; version in pad[0].
+//	1 (current): adds lz4-compressed dictionary support.
 func (s *StorageString) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
 	var nodict uint8 = 0
@@ -445,6 +565,14 @@ func (s *StorageString) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(storageStringVersion)) // pad[0] repurposed as version byte
 	var pad [4]byte
 	f.Write(pad[:]) // remaining 4 alignment bytes
+
+	// Version 1: compressed flag
+	var compFlag uint8 = 0
+	if s.compressed && len(s.compressedDict) > 0 {
+		compFlag = 1
+	}
+	binary.Write(f, binary.LittleEndian, compFlag)
+
 	if s.nodict {
 		binary.Write(f, binary.LittleEndian, uint64(s.starts.count))
 	} else {
@@ -453,8 +581,17 @@ func (s *StorageString) Serialize(f io.Writer) {
 	s.values.Serialize(f)
 	s.starts.Serialize(f)
 	s.lens.Serialize(f)
-	binary.Write(f, binary.LittleEndian, uint64(len(s.dictionary)))
-	io.WriteString(f, s.dictionary)
+
+	if compFlag == 1 {
+		// write only the lz4-compressed dictionary
+		binary.Write(f, binary.LittleEndian, uint64(len(s.compressedDict)))
+		f.Write(s.compressedDict)
+	} else {
+		// write uncompressed dictionary (may need to materialize if compressed)
+		dict := s.ensureDict()
+		binary.Write(f, binary.LittleEndian, uint64(len(dict)))
+		io.WriteString(f, dict)
+	}
 }
 
 func (s *StorageString) Deserialize(f io.Reader) uint {
@@ -484,6 +621,8 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 	switch version {
 	case 0:
 		return s.deserializeStringBody(f)
+	case 1:
+		return s.deserializeStringV1(f)
 	default:
 		panic(fmt.Sprintf("StorageString: unknown version %d", version))
 	}
@@ -505,9 +644,37 @@ func (s *StorageString) deserializeStringBody(f io.Reader) uint {
 	return uint(l)
 }
 
+func (s *StorageString) deserializeStringV1(f io.Reader) uint {
+	var compFlag uint8
+	binary.Read(f, binary.LittleEndian, &compFlag)
+
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	s.values.DeserializeEx(f, true)
+	s.count = s.starts.DeserializeEx(f, true)
+	s.lens.DeserializeEx(f, true)
+
+	var dictLen uint64
+	binary.Read(f, binary.LittleEndian, &dictLen)
+	if dictLen > 0 {
+		rawdata := make([]byte, dictLen)
+		f.Read(rawdata)
+		if compFlag == 1 {
+			s.compressedDict = rawdata
+			s.compressed = true
+			// dictionary stays empty; ensureDict() will decompress on first read
+		} else {
+			s.dictionary = unsafe.String(&rawdata[0], dictLen)
+		}
+	}
+	return uint(l)
+}
+
 func (s *StorageString) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageString) GetValue(i uint32) scm.Scmer {
+	atomic.AddUint64(&s.readCount, 1)
+
 	var startVal, lensVal uint64
 	if s.nodict {
 		sv := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
@@ -533,11 +700,12 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 	//   Base64: decoded byte count
 	//   UUID: unused (always 16 bytes / 36 chars)
 	//   Raw: byte count
-	dictBase := unsafe.Pointer(unsafe.StringData(s.dictionary))
+	dict := s.ensureDict()
+	dictBase := unsafe.Pointer(unsafe.StringData(dict))
 	switch s.format {
 	case FormatRaw:
 		byteStart := startVal
-		return scm.NewString(s.dictionary[byteStart : byteStart+lensVal])
+		return scm.NewString(dict[byteStart : byteStart+lensVal])
 	case FormatHexLower, FormatHexUpper,
 		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
 		nibblePos := startVal
@@ -655,7 +823,7 @@ func (s *StorageString) init(i uint32) {
 		for orig, start := range s.reverseMap {
 			entries = append(entries, dictEntry{orig, uint32(start[0]), start[1]})
 		}
-		sort.Slice(entries, func(a, b int) bool { return entries[a].rawOff < entries[b].rawOff })
+		hybridsort.Slice(entries, func(a, b int) bool { return entries[a].rawOff < entries[b].rawOff })
 
 		s.values.init(i)
 		s.starts.init(uint32(s.count))
