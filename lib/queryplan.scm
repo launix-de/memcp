@@ -1510,140 +1510,144 @@ WHAT IT MUST NOT DO:
 						/* EXISTS on single table: use scan_order with limitPartitionCols=N
 						to get at most 1 row per domain value, avoiding row multiplication */
 						(if (not (and (list? tables2_ue) (equal? (count tables2_ue) 1))) nil
-							(begin
-								/* Generate unique alias */
-								(define ue_sq_idx (coalesce (sq_cache "idx") 0))
-								(sq_cache "idx" (+ ue_sq_idx 1))
-								(define ue_sq_prefix (concat "_sq" ue_sq_idx))
-								(define ue_single_tbl true)
-								/* alias rename map */
-								(define ue_alias_map (map tables2_ue (lambda (td) (match td
-									'(alias _ _ _ _) (list alias (if ue_single_tbl ue_sq_prefix (concat ue_sq_prefix "\0" alias)))
-									(list "" "")))))
-								(define _ue_lookup (lambda (a) (reduce ue_alias_map (lambda (acc p) (if (nil? acc) (if (equal?? a (nth p 0)) (nth p 1) nil) acc)) nil)))
-								/* split condition into correlated/non-correlated */
-								(define _ue_hor (lambda (expr) (match expr
-									(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-										true
-										(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
-											(match args '(alias_ _ _ _) (and (not (nil? alias_)) (not (reduce ue_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false))) false)
-											(if (_is_opaque_scope_sym sym) false
-												(reduce args (lambda (a b) (or a (_ue_hor b))) false))))
-									false)))
-								(define _ue_fap (lambda (expr) (match expr
-									(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
-										(merge (map parts _ue_fap))
-										(list expr))
-									(list expr))))
-								(define ue_cond_parts (_ue_fap condition2_ue))
-								(define ue_inner_parts (filter ue_cond_parts (lambda (p) (not (_ue_hor p)))))
-								(define ue_outer_parts (filter ue_cond_parts (lambda (p) (_ue_hor p))))
-								/* resolve outer refs + rename inner aliases */
-								(define _ue_ror (lambda (expr) (match expr
-									(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-										(match args
-											(cons sym_arg '()) (begin
-												(define ps (split (string sym_arg) "."))
-												(match ps (list tbl col) (list (quote get_column) tbl false col false) _ expr))
-											_ expr)
-										(cons (_ue_ror sym) (map args _ue_ror)))
-									expr)))
-								(define _ue_ria (lambda (expr) (match expr
-									'((symbol get_column) alias_ ti col ci) (begin
-										(define na (_ue_lookup alias_))
-										(if (nil? na) expr (list (quote get_column) na false col false)))
-									'((quote get_column) alias_ ti col ci) (begin
-										(define na (_ue_lookup alias_))
-										(if (nil? na) expr (list (quote get_column) na false col false)))
-									(cons sym args) (cons (_ue_ria sym) (map args _ue_ria))
-									expr)))
-								/* build join condition (correlated → resolved, inner alias renamed) */
-								(define ue_join_parts (map ue_outer_parts (lambda (p) (_ue_ria (_ue_ror p)))))
-								(define ue_inner_cond (_ue_ria (if (equal? (count ue_inner_parts) 0) nil
-									(if (equal? (count ue_inner_parts) 1) (car ue_inner_parts)
-										(cons (quote and) ue_inner_parts)))))
-								(define ue_full_je (if (nil? ue_inner_cond)
-									(if (equal? (count ue_join_parts) 0) true
-										(if (equal? (count ue_join_parts) 1) (car ue_join_parts)
-											(cons (quote and) ue_join_parts)))
-									(cons (quote and) (merge ue_join_parts (list ue_inner_cond)))))
-								/* Extract domain columns from correlated equalities */
-								(define ue_domain_cols (filter (map ue_outer_parts (lambda (part) (match part
-									'((symbol equal??) a b) (if (_ue_hor a) (if (not (_ue_hor b)) (list b (_ue_ror a)) nil) (if (_ue_hor b) (list a (_ue_ror b)) nil))
-									'((quote equal??) a b) (if (_ue_hor a) (if (not (_ue_hor b)) (list b (_ue_ror a)) nil) (if (_ue_hor b) (list a (_ue_ror b)) nil))
-									nil))) (lambda (x) (not (nil? x)))))
-								/* Materialize DISTINCT domain values via scan_order with limitPartitionCols.
-								Sort by domain cols, limit 1 per partition → each domain value appears once. */
-								(define ue_tdesc (car tables2_ue))
-								(define ue_tblvar (nth ue_tdesc 0))
-								(define ue_schema3 (nth ue_tdesc 1))
-								(define ue_tbl3 (nth ue_tdesc 2))
-								/* domain column field names in the inner table */
-								(define ue_dom_inner_cols (map ue_domain_cols (lambda (dc) (match (nth dc 0)
-									'((symbol get_column) _ _ col _) col
-									'((quote get_column) _ _ col _) col
-									"__unknown__"))))
-								/* all columns needed: filter cols + domain cols + outer refs from opaque scopes */
-								(define ue_all_cols (merge_unique
-									(extract_columns_for_tblvar ue_tblvar condition2_ue)
-									(extract_outer_columns_for_tblvar ue_tblvar condition2_ue)
-									ue_dom_inner_cols))
+							/* skip if condition has inline scalar code (opaque scopes) —
+							scan_order filter can't execute inline scalar subselect code */
+							(if (begin (define _ue_has_opaque (lambda (expr) (match expr (cons sym args) (if (_is_opaque_scope_sym sym) true (reduce args (lambda (a b) (or a (_ue_has_opaque b))) false)) false))) (_ue_has_opaque condition2_ue)) nil
+								(begin
+									/* Generate unique alias */
+									(define ue_sq_idx (coalesce (sq_cache "idx") 0))
+									(sq_cache "idx" (+ ue_sq_idx 1))
+									(define ue_sq_prefix (concat "_sq" ue_sq_idx))
+									(define ue_single_tbl true)
+									/* alias rename map */
+									(define ue_alias_map (map tables2_ue (lambda (td) (match td
+										'(alias _ _ _ _) (list alias (if ue_single_tbl ue_sq_prefix (concat ue_sq_prefix "\0" alias)))
+										(list "" "")))))
+									(define _ue_lookup (lambda (a) (reduce ue_alias_map (lambda (acc p) (if (nil? acc) (if (equal?? a (nth p 0)) (nth p 1) nil) acc)) nil)))
+									/* split condition into correlated/non-correlated */
+									(define _ue_hor (lambda (expr) (match expr
+										(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+											true
+											(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+												(match args '(alias_ _ _ _) (and (not (nil? alias_)) (not (reduce ue_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false))) false)
+												(if (_is_opaque_scope_sym sym) false
+													(reduce args (lambda (a b) (or a (_ue_hor b))) false))))
+										false)))
+									(define _ue_fap (lambda (expr) (match expr
+										(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
+											(merge (map parts _ue_fap))
+											(list expr))
+										(list expr))))
+									(define ue_cond_parts (_ue_fap condition2_ue))
+									(define ue_inner_parts (filter ue_cond_parts (lambda (p) (not (_ue_hor p)))))
+									(define ue_outer_parts (filter ue_cond_parts (lambda (p) (_ue_hor p))))
+									/* resolve outer refs + rename inner aliases */
+									(define _ue_ror (lambda (expr) (match expr
+										(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+											(match args
+												(cons sym_arg '()) (begin
+													(define ps (split (string sym_arg) "."))
+													(match ps (list tbl col) (list (quote get_column) tbl false col false) _ expr))
+												_ expr)
+											(cons (_ue_ror sym) (map args _ue_ror)))
+										expr)))
+									(define _ue_ria (lambda (expr) (match expr
+										'((symbol get_column) alias_ ti col ci) (begin
+											(define na (_ue_lookup alias_))
+											(if (nil? na) expr (list (quote get_column) na false col false)))
+										'((quote get_column) alias_ ti col ci) (begin
+											(define na (_ue_lookup alias_))
+											(if (nil? na) expr (list (quote get_column) na false col false)))
+										(cons sym args) (cons (_ue_ria sym) (map args _ue_ria))
+										expr)))
+									/* build join condition (correlated → resolved, inner alias renamed) */
+									(define ue_join_parts (map ue_outer_parts (lambda (p) (_ue_ria (_ue_ror p)))))
+									(define ue_inner_cond (_ue_ria (if (equal? (count ue_inner_parts) 0) nil
+										(if (equal? (count ue_inner_parts) 1) (car ue_inner_parts)
+											(cons (quote and) ue_inner_parts)))))
+									(define ue_full_je (if (nil? ue_inner_cond)
+										(if (equal? (count ue_join_parts) 0) true
+											(if (equal? (count ue_join_parts) 1) (car ue_join_parts)
+												(cons (quote and) ue_join_parts)))
+										(cons (quote and) (merge ue_join_parts (list ue_inner_cond)))))
+									/* Extract domain columns from correlated equalities */
+									(define ue_domain_cols (filter (map ue_outer_parts (lambda (part) (match part
+										'((symbol equal??) a b) (if (_ue_hor a) (if (not (_ue_hor b)) (list b (_ue_ror a)) nil) (if (_ue_hor b) (list a (_ue_ror b)) nil))
+										'((quote equal??) a b) (if (_ue_hor a) (if (not (_ue_hor b)) (list b (_ue_ror a)) nil) (if (_ue_hor b) (list a (_ue_ror b)) nil))
+										nil))) (lambda (x) (not (nil? x)))))
+									/* Materialize DISTINCT domain values via scan_order with limitPartitionCols.
+									Sort by domain cols, limit 1 per partition → each domain value appears once. */
+									(define ue_tdesc (car tables2_ue))
+									(define ue_tblvar (nth ue_tdesc 0))
+									(define ue_schema3 (nth ue_tdesc 1))
+									(define ue_tbl3 (nth ue_tdesc 2))
+									/* domain column field names in the inner table */
+									(define ue_dom_inner_cols (map ue_domain_cols (lambda (dc) (match (nth dc 0)
+										'((symbol get_column) _ _ col _) col
+										'((quote get_column) _ _ col _) col
+										"__unknown__"))))
+									/* all columns needed: filter cols + domain cols + outer refs from opaque scopes */
+									(define ue_all_cols (merge_unique
+										(extract_columns_for_tblvar ue_tblvar condition2_ue)
+										(extract_outer_columns_for_tblvar ue_tblvar condition2_ue)
+										ue_dom_inner_cols))
 
 
 
 
-								/* build scan_order: sort by domain cols, limitPartitionCols=N, limit=1 */
-								(define ue_dom_count (count ue_domain_cols))
-								(define ue_dom_idx 0)
-								(define ue_dom_field_names (map ue_domain_cols (lambda (dc) (begin
-									(define dname (concat "__domain_" ue_dom_idx))
-									(set ue_dom_idx (+ ue_dom_idx 1))
-									dname))))
-								/* resultrow collector */
-								(define ue_rows_sym (symbol (concat "__ue_rows:" ue_sq_prefix)))
-								(define ue_rr_sym (symbol (concat "__ue_rr:" ue_sq_prefix)))
-								(define ue_materialized (list (quote begin)
-									(list (quote set) ue_rows_sym (list (quote newsession)))
-									(list ue_rows_sym "rows" '())
-									(list (quote set) ue_rr_sym (symbol "resultrow"))
-									(list (quote set) (symbol "resultrow")
-										(list (quote lambda) (list (symbol "item"))
-											(list ue_rows_sym "rows"
-												(list (quote cons) (symbol "item") (list ue_rows_sym "rows")))))
-									(list (quote scan_order)
-										ue_schema3 ue_tbl3
-										(cons list ue_all_cols)
-										(list (quote lambda)
-											(map ue_all_cols (lambda (col) (symbol (concat ue_tblvar "." col))))
-											(optimize (replace_columns_from_expr condition2_ue)))
-										(cons list ue_dom_inner_cols)
-										(cons list (map ue_dom_inner_cols (lambda (_) '<)))
-										ue_dom_count 0 1
-										(cons list ue_dom_inner_cols)
-										(list (quote lambda)
-											(map ue_dom_inner_cols (lambda (col) (symbol (concat ue_tblvar "." col))))
-											(list (symbol "resultrow")
-												(cons (quote list) (merge (map ue_dom_inner_cols (lambda (col) (list col (symbol (concat ue_tblvar "." col)))))))))
-										nil nil false)
-									(list (quote set) (symbol "resultrow") ue_rr_sym)
-									(list ue_rows_sym "rows")))
-								/* domain join condition */
-								(set ue_dom_idx 0)
-								(define ue_dom_je_parts (map ue_domain_cols (lambda (dc) (begin
-									(define dname (nth ue_dom_field_names ue_dom_idx))
-									(set ue_dom_idx (+ ue_dom_idx 1))
-									(list (quote equal??) (list (quote get_column) ue_sq_prefix false dname false) (nth dc 1))))))
-								(define ue_dom_je (if (equal? (count ue_dom_je_parts) 0) true
-									(if (equal? (count ue_dom_je_parts) 1) (car ue_dom_je_parts)
-										(cons (quote and) ue_dom_je_parts))))
-								/* table entry + schema */
-								(define ue_tbl_entries (list (list ue_sq_prefix ue_schema3 ue_materialized true ue_dom_je)))
-								(define ue_sch (list ue_sq_prefix (map ue_dom_field_names (lambda (col) (list "Field" col "Type" "any")))))
-								(sq_cache "schemas" (merge ue_sch (coalesceNil (sq_cache "schemas") '())))
-								/* substitution: EXISTS = domain col is not null after LEFT JOIN */
-								(define ue_subst (list (quote not) (list (quote nil?)
-									(list (quote get_column) ue_sq_prefix false (car ue_dom_field_names) false))))
-								(list ue_subst ue_tbl_entries)
+									/* build scan_order: sort by domain cols, limitPartitionCols=N, limit=1 */
+									(define ue_dom_count (count ue_domain_cols))
+									(define ue_dom_idx 0)
+									(define ue_dom_field_names (map ue_domain_cols (lambda (dc) (begin
+										(define dname (concat "__domain_" ue_dom_idx))
+										(set ue_dom_idx (+ ue_dom_idx 1))
+										dname))))
+									/* resultrow collector */
+									(define ue_rows_sym (symbol (concat "__ue_rows:" ue_sq_prefix)))
+									(define ue_rr_sym (symbol (concat "__ue_rr:" ue_sq_prefix)))
+									(define ue_materialized (list (quote begin)
+										(list (quote set) ue_rows_sym (list (quote newsession)))
+										(list ue_rows_sym "rows" '())
+										(list (quote set) ue_rr_sym (symbol "resultrow"))
+										(list (quote set) (symbol "resultrow")
+											(list (quote lambda) (list (symbol "item"))
+												(list ue_rows_sym "rows"
+													(list (quote cons) (symbol "item") (list ue_rows_sym "rows")))))
+										(list (quote scan_order)
+											ue_schema3 ue_tbl3
+											(cons list ue_all_cols)
+											(list (quote lambda)
+												(map ue_all_cols (lambda (col) (symbol (concat ue_tblvar "." col))))
+												(optimize (replace_columns_from_expr (coalesceNil ue_inner_cond true))))
+											(cons list ue_dom_inner_cols)
+											(cons list (map ue_dom_inner_cols (lambda (_) '<)))
+											ue_dom_count 0 1
+											(cons list ue_dom_inner_cols)
+											(list (quote lambda)
+												(map ue_dom_inner_cols (lambda (col) (symbol (concat ue_tblvar "." col))))
+												(list (symbol "resultrow")
+													(cons (quote list) (merge (map ue_dom_inner_cols (lambda (col) (list col (symbol (concat ue_tblvar "." col)))))))))
+											nil nil false)
+										(list (quote set) (symbol "resultrow") ue_rr_sym)
+										(list ue_rows_sym "rows")))
+									/* domain join condition */
+									(set ue_dom_idx 0)
+									(define ue_dom_je_parts (map ue_domain_cols (lambda (dc) (begin
+										(define dname (nth ue_dom_field_names ue_dom_idx))
+										(set ue_dom_idx (+ ue_dom_idx 1))
+										(list (quote equal??) (list (quote get_column) ue_sq_prefix false dname false) (nth dc 1))))))
+									(define ue_dom_je (if (equal? (count ue_dom_je_parts) 0) true
+										(if (equal? (count ue_dom_je_parts) 1) (car ue_dom_je_parts)
+											(cons (quote and) ue_dom_je_parts))))
+									/* table entry + schema */
+									(define ue_tbl_entries (list (list ue_sq_prefix ue_schema3 ue_materialized true ue_dom_je)))
+									(define ue_sch (list ue_sq_prefix (map ue_dom_field_names (lambda (col) (list "Field" col "Type" "any")))))
+									(sq_cache "schemas" (merge ue_sch (coalesceNil (sq_cache "schemas") '())))
+									/* substitution: EXISTS = domain col is not null after LEFT JOIN */
+									(define ue_subst (list (quote not) (list (quote nil?)
+										(list (quote get_column) ue_sq_prefix false (car ue_dom_field_names) false))))
+									(list ue_subst ue_tbl_entries)
+								)
 							)
 						)
 					)
