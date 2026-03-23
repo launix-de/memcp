@@ -1450,7 +1450,7 @@ WHAT IT MUST NOT DO:
 											(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
 											(list us_subst us_tbl_entries))
 										/* === B/C: Non-aggregate === */
-										(if false /* B: Non-agg + LIMIT → TODO: materialized derived table with partition stage */
+										(if false /* B: TODO — non-agg+LIMIT with partition stage needs scope-aware materialization */
 											/* === B: Non-agg + LIMIT → materialized derived table with partition stage ===
 											The partition stage uses limitPartitionCols so scan_order applies
 											ORDER BY + LIMIT per domain value instead of globally. */
@@ -1483,10 +1483,17 @@ WHAT IT MUST NOT DO:
 												(define us_dom_je2 (if (equal? (count us_dom_je_parts2) 0) true
 													(if (equal? (count us_dom_je_parts2) 1) (car us_dom_je_parts2)
 														(cons (quote and) us_dom_je_parts2))))
-												/* materialize with build_queryplan_term */
+												/* materialize: run untangle_query then inject partition stage, then build_queryplan */
 												(define us_output_cols2 (extract_assoc us_mod_fields2 (lambda (k v) k)))
 												(define us_rows_sym2 (symbol (concat "__us_rows:" us_sq_prefix)))
 												(define us_rr_sym2 (symbol (concat "__us_rr:" us_sq_prefix)))
+												/* run untangle on the derived subquery, then replace groups with partition stage */
+												(define us_pipeline (apply untangle_query (merge us_derived_ast2 (list nil))))
+												(define us_pipeline_with_stage (list
+													(nth us_pipeline 0) (nth us_pipeline 1) (nth us_pipeline 2) (nth us_pipeline 3)
+													(list us_part_stage) /* inject partition stage as groups */
+													(nth us_pipeline 5) (nth us_pipeline 6)))
+												(define us_plan (apply build_queryplan (merge (apply join_reorder us_pipeline_with_stage) (list nil))))
 												(define us_materialized2 (list (quote begin)
 													(list (quote set) us_rows_sym2 (list (quote newsession)))
 													(list us_rows_sym2 "rows" '())
@@ -1494,7 +1501,7 @@ WHAT IT MUST NOT DO:
 													(list (quote set) (symbol "resultrow")
 														(list (quote lambda) (list (symbol "item"))
 															(list us_rows_sym2 "rows" (list (quote cons) (symbol "item") (list us_rows_sym2 "rows")))))
-													(build_queryplan_term us_derived_ast2)
+													us_plan
 													(list (quote set) (symbol "resultrow") us_rr_sym2)
 													(list us_rows_sym2 "rows")))
 												(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized2 true us_dom_je2)))
