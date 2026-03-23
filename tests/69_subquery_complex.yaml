@@ -152,6 +152,61 @@ test_cases:
     expect:
       rows: 0
 
+  # === nD domain: correlated on one column + inner filter ===
+
+  - name: "1D domain with inner filter"
+    sql: |
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d WHERE d.did = e.did AND d.did > 0) AS dept
+      FROM sq_emp e WHERE e.eid <= 3
+      ORDER BY e.eid
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+        - name: "Bob"
+          dept: "Engineering"
+        - name: "Carol"
+          dept: "Marketing"
+
+  # === Multi-table unnested subquery ===
+
+  - name: "Multi-table scalar subselect unnested"
+    sql: |
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d JOIN sq_dept d2 ON d.did = d2.did WHERE d.did = e.did) AS dept
+      FROM sq_emp e WHERE e.eid = 1
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+
+  # === nD domain: multiple outer references ===
+
+  - name: "2D domain: two correlated equality conditions"
+    sql: |
+      SELECT e.eid, e.did,
+        (SELECT d.dname FROM sq_dept d WHERE d.did = e.did AND d.did = e.eid) AS self_dept
+      FROM sq_emp e WHERE e.eid <= 4
+      ORDER BY e.eid
+    expect:
+      rows: 4
+      data:
+        - eid: 1
+          did: 1
+          self_dept: "Engineering"
+        - eid: 2
+          did: 1
+          self_dept: null
+        - eid: 3
+          did: 2
+          self_dept: null
+        - eid: 4
+          did: 2
+          self_dept: null
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sq_emp"
   - sql: "DROP TABLE IF EXISTS sq_dept"
