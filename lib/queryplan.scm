@@ -290,7 +290,7 @@ to avoid matching outer tables which would break scope resolution. */
 		(list (quote dedup) false)
 	)
 ))
-(define make_partition_stage (lambda (order partition_cols limit offset)
+(define make_partition_stage (lambda (aliases order partition_cols limit offset)
 	(list
 		(cons (quote group-cols) '())
 		(list (quote having) nil)
@@ -299,6 +299,7 @@ to avoid matching outer tables which would break scope resolution. */
 		(list (quote limit) limit)
 		(list (quote offset) offset)
 		(list (quote dedup) false)
+		(list (quote partition-aliases) aliases)
 	)
 ))
 (define make_dedup_stage (lambda (group)
@@ -345,6 +346,12 @@ to avoid matching outer tables which would break scope resolution. */
 (define stage_limit_partition_cols (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
 		(cons (quote limit-partition-cols) rest) (if (nil? rest) 0 (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_partition_aliases (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote partition-aliases) rest) (if (nil? rest) nil (car rest))
 		_ nil
 	) acc)
 ) nil)))
@@ -1450,63 +1457,33 @@ WHAT IT MUST NOT DO:
 											(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
 											(list us_subst us_tbl_entries))
 										/* === B/C: Non-aggregate === */
-										(if false /* B: TODO — non-agg+LIMIT with partition stage needs scope-aware materialization */
-											/* === B: Non-agg + LIMIT → materialized derived table with partition stage ===
-											The partition stage uses limitPartitionCols so scan_order applies
-											ORDER BY + LIMIT per domain value instead of globally. */
+										(if (and us_single_tbl us_has_limit)
+											/* === B: Non-agg + LIMIT → direct table entry + partition stage in groups ===
+											build_queryplan reads the partition stage and emits scan_order for the
+											aliased table when it's pulled in build_scan. */
 											(begin
-												(define us_dom_idx2 0)
-												(define us_dom_fields2 (merge (map us_domain_cols (lambda (dc) (begin
-													(define dname (concat "__domain_" us_dom_idx2))
-													(set us_dom_idx2 (+ us_dom_idx2 1))
-													(list dname (nth dc 0)))))))
+												(define us_tdesc (car tables2_us))
+												(define us_tblvar (nth us_tdesc 0))
+												(define us_tbl_schema (nth us_tdesc 1))
+												(define us_tbl_name (nth us_tdesc 2))
 												(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car groups2_us)) '()) '()))
 												(define us_orig_limit (if us_has_stages (stage_limit_val (car groups2_us)) nil))
 												(define us_orig_offset (if us_has_stages (stage_offset_val (car groups2_us)) nil))
-												/* domain inner expressions as order-cols for the partition stage */
-												(define us_dom_order (map us_domain_cols (lambda (dc) (list (nth dc 0) '<))))
-												/* partition stage: domain-sort + original order, partitioned limit */
-												(define us_part_order (merge us_dom_order (coalesce us_orig_order '())))
+												/* domain inner expressions as order-cols, renamed to use the new alias */
+												(define us_dom_order (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<))))
+												(define us_renamed_order (map (coalesce us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
+												(define us_part_order (merge us_dom_order us_renamed_order))
 												(define us_dom_count (count us_domain_cols))
-												(define us_part_stage (make_partition_stage us_part_order us_dom_count (coalesce us_orig_limit 1) (coalesceNil us_orig_offset 0)))
-												/* build derived table AST with partition stage */
-												(define us_mod_fields2 (merge fields2_us us_dom_fields2))
-												(define us_mod_cond2 (if (nil? us_inner_cond_raw) true us_inner_cond_raw))
-												(define us_clean_tables2 (map tables2_us (lambda (td) (match td '(a s t io _) (list a s t io nil) td))))
-												(define us_derived_ast2 (list schema2_us us_clean_tables2 us_mod_fields2 us_mod_cond2 nil nil nil nil nil))
-												/* join condition */
-												(define us_dom_je_idx2 0)
-												(define us_dom_je_parts2 (map us_domain_cols (lambda (dc) (begin
-													(define dname (concat "__domain_" us_dom_je_idx2))
-													(set us_dom_je_idx2 (+ us_dom_je_idx2 1))
-													(list (quote equal??) (list (quote get_column) us_sq_prefix false dname false) (nth dc 1))))))
-												(define us_dom_je2 (if (equal? (count us_dom_je_parts2) 0) true
-													(if (equal? (count us_dom_je_parts2) 1) (car us_dom_je_parts2)
-														(cons (quote and) us_dom_je_parts2))))
-												/* materialize: run untangle_query then inject partition stage, then build_queryplan */
-												(define us_output_cols2 (extract_assoc us_mod_fields2 (lambda (k v) k)))
-												(define us_rows_sym2 (symbol (concat "__us_rows:" us_sq_prefix)))
-												(define us_rr_sym2 (symbol (concat "__us_rr:" us_sq_prefix)))
-												/* run untangle on the derived subquery, then replace groups with partition stage */
-												(define us_pipeline (apply untangle_query (merge us_derived_ast2 (list nil))))
-												(define us_pipeline_with_stage (list
-													(nth us_pipeline 0) (nth us_pipeline 1) (nth us_pipeline 2) (nth us_pipeline 3)
-													(list us_part_stage) /* inject partition stage as groups */
-													(nth us_pipeline 5) (nth us_pipeline 6)))
-												(define us_plan (apply build_queryplan (merge (apply join_reorder us_pipeline_with_stage) (list nil))))
-												(define us_materialized2 (list (quote begin)
-													(list (quote set) us_rows_sym2 (list (quote newsession)))
-													(list us_rows_sym2 "rows" '())
-													(list (quote set) us_rr_sym2 (symbol "resultrow"))
-													(list (quote set) (symbol "resultrow")
-														(list (quote lambda) (list (symbol "item"))
-															(list us_rows_sym2 "rows" (list (quote cons) (symbol "item") (list us_rows_sym2 "rows")))))
-													us_plan
-													(list (quote set) (symbol "resultrow") us_rr_sym2)
-													(list us_rows_sym2 "rows")))
-												(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized2 true us_dom_je2)))
-												(define us_sch2 (list us_sq_prefix (map us_output_cols2 (lambda (col) (list "Field" col "Type" "any")))))
-												(sq_cache "schemas" (merge us_sch2 (coalesceNil (sq_cache "schemas") '())))
+												/* register partition stage in sq_cache → merged into groups by untangle_query */
+												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesce us_orig_limit 1) (coalesceNil us_orig_offset 0)))
+												(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '())))
+												/* direct table entry with join condition (like non-agg non-LIMIT path) */
+												(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
+												(define us_inner_lim (_us_ria us_inner_cond_raw))
+												(define us_full_lim (if (nil? us_inner_lim)
+													(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
+													(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+												(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim)))
 												(define us_subst (list (quote get_column) us_sq_prefix false us_value_key false))
 												(list us_subst us_tbl_entries))
 											/* === C: Non-agg without LIMIT → nil (inline fallback with promise "once") === */
@@ -2134,6 +2111,9 @@ WHAT IT MUST NOT DO:
 			(if (not (equal? _sq_schs '())) (set schemas (merge schemas _sq_schs)))
 			(define _sq_jes (filter (map _sq_tbls (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 			(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
+			/* integrate partition stages from non-aggregate LIMIT unnesting */
+			(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
+			(set groups (if (equal? _sq_pstages '()) groups (merge _sq_pstages (coalesceNil groups '()))))
 			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 			but ONLY for columns referencing derived table aliases (keys in renamelist).
 			Uses schemas to find canonical column name without calling replace_find_column. */
@@ -2439,6 +2419,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 	/* TODO: order tables: outer joins behind */
 	(set groups (coalesceNil groups '()))
+	/* separate partition stages (have partition-aliases) from regular stages */
+	(define partition_stages (filter groups (lambda (s) (not (nil? (stage_partition_aliases s))))))
+	(set groups (filter groups (lambda (s) (nil? (stage_partition_aliases s)))))
 	(define groups_present (and (not (nil? groups)) (not (equal? groups '()))))
 	(define stage (if groups_present (car groups) nil))
 	(define rest_groups (if groups_present (cdr groups) nil))
@@ -3366,17 +3349,43 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-
-										(scan_wrapper 'scan schema tbl
-											(cons list filtercols)
-											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-											scan_mapcols
-											(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
-											(if is_update_target (symbol "+") nil)
-											(if is_update_target 0 nil)
-											nil
-											isOuter
-										)
+										/* check partition_stages: does this table have a per-table partition limit? */
+										(define _ps (reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil))
+										(if (not (nil? _ps))
+											/* === partition-limited scan_order === */
+											(begin
+												(define _ps_order (coalesceNil (stage_order_list _ps) '()))
+												(define _ps_partcols (coalesceNil (stage_limit_partition_cols _ps) 0))
+												(define _ps_limit (coalesceNil (stage_limit_val _ps) -1))
+												(define _ps_offset (coalesceNil (stage_offset_val _ps) 0))
+												(define _ps_ordercols (merge (map _ps_order (lambda (oi) (match oi '(col dir) (match col
+													'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+													'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+													_ '()))))))
+												(define _ps_dirs (merge (map _ps_order (lambda (oi) (match oi '(col dir) (match col
+													'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+													'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+													_ '()))))))
+												(scan_wrapper 'scan_order schema tbl
+													(cons list (merge_unique filtercols cols))
+													'((quote lambda) (map (merge_unique filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+													(cons list _ps_ordercols)
+													(cons list _ps_dirs)
+													_ps_partcols _ps_offset _ps_limit
+													scan_mapcols
+													(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+													nil nil isOuter))
+											/* === regular scan === */
+											(scan_wrapper 'scan schema tbl
+												(cons list filtercols)
+												'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+												scan_mapcols
+												(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+												(if is_update_target (symbol "+") nil)
+												(if is_update_target 0 nil)
+												nil
+												isOuter
+										))
 									))
 								)
 								'() /* final inner (=scalar) */ (if (nil? update_target)
