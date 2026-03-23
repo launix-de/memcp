@@ -1,0 +1,84 @@
+metadata:
+  description: "Parser benchmark — simple single-value SELECTs"
+  database: memcp-bench-parse
+
+test_cases:
+  - name: select_literal_int
+    sql: "SELECT 1"
+    expect: {rows: 1}
+
+  - name: select_literal_string
+    sql: "SELECT 'hello'"
+    expect: {rows: 1}
+
+  - name: select_arithmetic
+    sql: "SELECT 1 + 2 * 3"
+    expect: {rows: 1}
+
+  - name: select_string_concat
+    sql: "SELECT CONCAT('foo', 'bar')"
+    expect: {rows: 1}
+
+  - name: select_now
+    sql: "SELECT NOW()"
+    expect: {rows: 1}
+
+  - name: select_if
+    sql: "SELECT IF(1=1, 'yes', 'no')"
+    expect: {rows: 1}
+
+  - name: select_case
+    sql: "SELECT CASE WHEN 1=1 THEN 'one' ELSE 'other' END"
+    expect: {rows: 1}
+
+  - name: select_coalesce
+    sql: "SELECT COALESCE(NULL, NULL, 42)"
+    expect: {rows: 1}
+
+  - name: select_cast_int
+    sql: "SELECT CAST(3.7 AS SIGNED)"
+    expect: {rows: 1}
+
+  - name: select_substring
+    sql: "SELECT SUBSTRING('hello world', 7)"
+    expect: {rows: 1}
+
+  - name: select_length
+    sql: "SELECT LENGTH('hello')"
+    expect: {rows: 1}
+
+  - name: select_upper_lower
+    sql: "SELECT UPPER(LOWER('Hello'))"
+    expect: {rows: 1}
+
+  - name: select_round
+    sql: "SELECT ROUND(3.14159, 2)"
+    expect: {rows: 1}
+
+  - name: select_abs_negative
+    sql: "SELECT ABS(-42)"
+    expect: {rows: 1}
+
+  - name: select_mod
+    sql: "SELECT MOD(17, 5)"
+    expect: {rows: 1}
+
+  - name: select_complex_expr
+    sql: "SELECT (1 + 2) * (3 + 4) / 7 - 1"
+    expect: {rows: 1}
+
+  - name: select_nested_if
+    sql: "SELECT IF(1>0, IF(2>1, 'deep', 'mid'), 'outer')"
+    expect: {rows: 1}
+
+  - name: select_null_is_null
+    sql: "SELECT NULL IS NULL"
+    expect: {rows: 1}
+
+  - name: select_in_list
+    sql: "SELECT 3 IN (1, 2, 3, 4, 5)"
+    expect: {rows: 1}
+
+  - name: select_between
+    sql: "SELECT 5 BETWEEN 1 AND 10"
+    expect: {rows: 1}
