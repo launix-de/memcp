@@ -290,6 +290,8 @@ type optimizerMetainfo struct {
 	ownedSlots           map[int]bool    // NthLocalVar slot → owned; used in second-pass re-opt
 	localLambdas         map[Symbol]*localLambdaInfo
 	funcTypeInfo         map[Symbol]TypeInfo // type info for Scheme-defined functions (e.g. Transfer for fresh returns)
+	beginUseCounts       map[Symbol]int  // from begin pre-scan: use count per variable
+	beginDefinedHere     map[Symbol]bool // symbols defined (not just set) in this begin block
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -321,10 +323,12 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	}
 	result.setBlacklist = ome.setBlacklist
 	result.nextSlot = ome.nextSlot         // shared scope shares VarsNumbered
-	result.ownedVars = ome.ownedVars       // shared scope inherits ownership info
-	result.localLambdas = ome.localLambdas // shared scope can call same local lambdas
+	result.ownedVars = ome.ownedVars             // shared scope inherits ownership info
+	result.localLambdas = ome.localLambdas       // shared scope can call same local lambdas
 	result.ownedSlots = ome.ownedSlots
-	result.funcTypeInfo = ome.funcTypeInfo // inherit type knowledge
+	result.funcTypeInfo = ome.funcTypeInfo       // inherit type knowledge
+	result.beginUseCounts = ome.beginUseCounts   // shared scope sees same use counts
+	result.beginDefinedHere = ome.beginDefinedHere
 	return
 }
 
@@ -548,6 +552,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 
 	if headOk && headSym == Symbol("begin") {
 		usedVariables := make(map[Symbol]int)
+		realUseCounts := make(map[Symbol]int) // actual use count ignoring depth (for ownership analysis)
 		variableContent := make(map[Symbol]Scmer)
 		// Track top-level define positions and earliest top-level eval/import index
 		defineTopIdx := make(map[Symbol]int)
@@ -600,7 +605,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						visitNode(sub[i], depth+1, blacklist)
 					}
 				} else {
-					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
+					// Also visit the head â it may be a variable used in call position
 					visitNode(sub[0], depth+1, blacklist)
 					for i := 1; i < len(sub); i++ {
 						visitNode(sub[i], depth+1, blacklist)
@@ -617,6 +622,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					}
 				}
 				if !isBlacklisted {
+					realUseCounts[sym] = realUseCounts[sym] + 1
 					if depth > 0 {
 						usedVariables[sym] = 100
 					} else {
@@ -689,6 +695,21 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				delete(usedVariables, sym)
 				ome2.setBlacklist = append(ome2.setBlacklist, sym)
 				ome2.variableReplacement[sym] = content
+			}
+		}
+		// Populate real use counts (depth-independent) so the set/define
+		// handler can mark single-use fresh variables as owned.
+		if len(realUseCounts) > 0 {
+			ome2.beginUseCounts = make(map[Symbol]int, len(realUseCounts))
+			for sym, count := range realUseCounts {
+				// Only include non-inlined variables
+				if _, inlined := ome2.variableReplacement[sym]; !inlined {
+					ome2.beginUseCounts[sym] = count
+				}
+			}
+			ome2.beginDefinedHere = make(map[Symbol]bool, len(defineTopIdx))
+			for sym := range defineTopIdx {
+				ome2.beginDefinedHere[sym] = true
 			}
 		}
 		if len(usedVariables) == 0 && len(defineTopIdx) == 0 {
@@ -905,10 +926,30 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				globalFuncTypeInfo[sym] = TypeInfo{}.WithTransfer()
 			}
 		}
-		// NOTE: ownership propagation through define/set requires use-count
-		// analysis (linear use). A variable defined with a fresh value may be
-		// used multiple times, so marking it as owned would allow _mut swap
-		// on the first use, corrupting the value for subsequent uses.
+		// Use-count-based ownership: if RHS is fresh (Transfer) and the variable
+		// is used exactly once in this begin block, mark it as owned so that
+		// map/match on it can be promoted to _mut variants.
+		// Guard: only for define, or set to a symbol defined in this begin block.
+		if sym, ok2 := scmerSymbol(v[1]); ok2 && ti.Transfer() {
+			isDefine := headSym == Symbol("define")
+			definedHere := ome.beginDefinedHere != nil && ome.beginDefinedHere[sym]
+			count := 0
+			if ome.beginUseCounts != nil {
+				count = ome.beginUseCounts[sym]
+			}
+			if count == 1 && (isDefine || definedHere) {
+				if ome.ownedVars == nil {
+					ome.ownedVars = make(map[Symbol]bool)
+				}
+				ome.ownedVars[sym] = true
+				if repl, ok3 := ome.variableReplacement[sym]; ok3 && repl.IsNthLocalVar() {
+					if ome.ownedSlots == nil {
+						ome.ownedSlots = make(map[int]bool)
+					}
+					ome.ownedSlots[int(repl.NthLocalVar())] = true
+				}
+			}
+		}
 		// Register local non-escaping lambda for second-pass ownership inference
 		if sym, ok2 := scmerSymbol(v[1]); ok2 {
 			if lambdaAST, ok3 := scmerSlice(v[2]); ok3 && len(lambdaAST) >= 3 && scmerIsSymbol(lambdaAST[0], "lambda") {
@@ -1106,7 +1147,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	// Function specialization: when calling a known Proc with owned args,
 	// create or reuse a specialized variant with ownedSlots for those params.
-	if headSymOk && len(v) > 1 {
+	// TODO(specialization): disabled — produces nil heads in compiled scan lambdas
+	if false && headSymOk && len(v) > 1 {
 		var ownedMask uint64
 		for i := 1; i < len(v) && i <= 64; i++ {
 			if argOwned[i] {
@@ -1275,6 +1317,47 @@ func unwrapConstListFromCode(val Scmer) Scmer {
 		return NewSlice(items)
 	}
 	return val
+}
+
+// optimizeIf is the Optimize hook for the (if ...) special form.
+// It eliminates dead branches when conditions are compile-time constants.
+// (if true x ...) → x, (if false _ cond2 then2 ...) → (if cond2 then2 ...)
+func optimizeIf(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	// Process condition-then pairs, folding away constant conditions
+	out := []Scmer{v[0]} // keep head "if"
+	i := 1
+	for i+1 < len(v) {
+		cond, _ := oc.OptimizeSub(v[i], true)
+		switch cond.GetTag() {
+		case tagNil, tagBool, tagInt, tagFloat, tagString:
+			if ToBool(cond) {
+				// Constant true: this branch is always taken, return its body
+				body, td := oc.OptimizeSub(v[i+1], useResult)
+				return body, td
+			}
+			// Constant false: skip this condition+then pair entirely
+			i += 2
+			continue
+		}
+		// Non-constant condition: keep it and optimize the then-branch
+		then, _ := oc.OptimizeSub(v[i+1], useResult)
+		out = append(out, cond, then)
+		i += 2
+	}
+	// Remaining else branch
+	if i < len(v) {
+		elseVal, td := oc.OptimizeSub(v[i], useResult)
+		if len(out) == 1 {
+			// All conditions were constant-false: return else branch
+			return elseVal, td
+		}
+		out = append(out, elseVal)
+	} else if len(out) == 1 {
+		// All conditions false and no else: nil
+		return NewNil(), &TypeDescriptor{Transfer: true, Const: true}
+	}
+	// Single condition left: keep as (if cond then else)
+	return NewSlice(out), nil
 }
 
 // optimizeAnd is the Optimize hook for the (and ...) special form.

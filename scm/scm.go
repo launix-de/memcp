@@ -804,6 +804,7 @@ func init() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "condition...", ParamDesc: "condition to evaluate", Variadic: true}, &TypeDescriptor{Kind: "returntype", ParamName: "true-branch...", ParamDesc: "code to evaluate if condition is true", Variadic: true}, &TypeDescriptor{Kind: "any", ParamName: "false-branch", ParamDesc: "code to evaluate if condition is false", Optional: true}},
 			Return: &TypeDescriptor{Kind: "returntype"},
 			Const: true,
+			Optimize: optimizeIf,
 		},
 	})
 		Declare(&Globalenv, &Declaration{
