@@ -1,0 +1,126 @@
+# Multi-table UPDATE/DELETE through the query planner pipeline.
+# Tests that scalar subselects in SET expressions resolve columns
+# against the subselect's FROM table, not the UPDATE target table.
+
+metadata:
+  version: "1.0"
+  description: "Multi-table UPDATE and DELETE with subselects"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS mtd_log"
+  - sql: "DROP TABLE IF EXISTS mtd_assoc"
+  - sql: "DROP TABLE IF EXISTS mtd_source"
+  - sql: |
+      CREATE TABLE mtd_source (
+        ID INT PRIMARY KEY,
+        name TEXT,
+        date1 BIGINT,
+        date2 BIGINT
+      )
+  - sql: |
+      CREATE TABLE mtd_assoc (
+        ID INT PRIMARY KEY,
+        src_id INT,
+        target INT,
+        creation BIGINT
+      )
+  - sql: |
+      CREATE TABLE mtd_log (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        ref_id INT,
+        dt BIGINT,
+        notiz TEXT
+      )
+  - sql: "INSERT INTO mtd_source VALUES (1, 'hello', 3000, 6000), (2, 'world', 1000, 2000)"
+  - sql: "INSERT INTO mtd_assoc VALUES (1, 1, 10, 1000), (2, 2, 20, 2000)"
+  - sql: "INSERT INTO mtd_log VALUES (1, 1, 999, 'old1'), (2, 2, 888, 'old2')"
+
+test_cases:
+
+  - name: "multi-table UPDATE with correlated subselect"
+    sql: |
+      UPDATE `mtd_log`, `mtd_assoc` AS `A` SET
+        `mtd_log`.`notiz` = (SELECT `s`.`name` FROM `mtd_source` `s`
+          WHERE `s`.`ID` = `A`.`src_id`
+          AND CASE WHEN `date2` IS NULL THEN TRUE ELSE `date2` >= 500 END
+          LIMIT 1)
+      WHERE `mtd_log`.`ref_id` = `A`.`ID` AND `A`.`src_id` = 1
+
+  - name: "verify multi-table UPDATE with subselect"
+    sql: "SELECT ref_id, notiz FROM mtd_log ORDER BY ref_id"
+    expect:
+      rows: 2
+      data:
+        - ref_id: 1
+          notiz: "hello"
+        - ref_id: 2
+          notiz: "old2"
+
+  - name: "multi-table UPDATE SET to constant zero"
+    sql: |
+      UPDATE `mtd_log`, `mtd_assoc` AS `A` SET
+        `mtd_log`.`dt` = 0
+      WHERE `mtd_log`.`ref_id` = `A`.`ID` AND `A`.`src_id` = 1
+
+  - name: "verify UPDATE SET to zero"
+    sql: "SELECT ref_id, dt FROM mtd_log ORDER BY ref_id"
+    expect:
+      rows: 2
+      data:
+        - ref_id: 1
+          dt: 0
+        - ref_id: 2
+          dt: 888
+
+  - name: "multi-table DELETE"
+    sql: |
+      DELETE `mtd_log` FROM `mtd_log`, `mtd_assoc` AS `A`
+      WHERE `mtd_log`.`ref_id` = `A`.`ID` AND `A`.`src_id` = 2
+
+  - name: "verify multi-table DELETE"
+    sql: "SELECT ref_id FROM mtd_log"
+    expect:
+      rows: 1
+      data:
+        - ref_id: 1
+
+  - name: "UPDATE with ORDER BY LIMIT"
+    setup:
+      - sql: "DROP TABLE IF EXISTS mtd_ordered"
+      - sql: "CREATE TABLE mtd_ordered (id INT, val INT)"
+      - sql: "INSERT INTO mtd_ordered VALUES (1,10),(2,20),(3,30),(4,40),(5,50)"
+    sql: "UPDATE mtd_ordered SET val = 0 ORDER BY id ASC LIMIT 2"
+
+  - name: "verify UPDATE ORDER BY LIMIT"
+    sql: "SELECT id, val FROM mtd_ordered ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          val: 0
+        - id: 2
+          val: 0
+        - id: 3
+          val: 30
+        - id: 4
+          val: 40
+        - id: 5
+          val: 50
+
+  - name: "DELETE with ORDER BY LIMIT"
+    sql: "DELETE FROM mtd_ordered ORDER BY id DESC LIMIT 2"
+
+  - name: "verify DELETE ORDER BY LIMIT"
+    sql: "SELECT id FROM mtd_ordered ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS mtd_log"
+  - sql: "DROP TABLE IF EXISTS mtd_assoc"
+  - sql: "DROP TABLE IF EXISTS mtd_source"
+  - sql: "DROP TABLE IF EXISTS mtd_ordered"

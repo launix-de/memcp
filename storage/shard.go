@@ -2111,10 +2111,21 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// values to nil (while keeping the key) to free memory under pressure.
 		// rebuild must read all columns, so materialize any nil entries now
 		// while t.mu is not held (ensureColumnLoaded acquires it internally).
+		// Snapshot nil-column keys to load them.
+		// rebuild() operates on the ORIGINAL shard (t), building a NEW shard (result).
+		// No concurrent writes to t.columns happen during rebuild because:
+		// - ComputeColumn writes to a DIFFERENT shard's columns map, not t's
+		// - The caller (database.rebuild or ComputeColumn) serializes rebuilds
+		//   for the same shard via table lock or retry loop
+		// Therefore iterating t.columns without lock is safe here.
+		var nilCols []string
 		for col, c := range t.columns {
 			if c == nil {
-				t.ensureColumnLoaded(col, false)
+				nilCols = append(nilCols, col)
 			}
+		}
+		for _, col := range nilCols {
+			t.ensureColumnLoaded(col, false)
 		}
 
 		// transfer indexes early so we know which index is Native (physically sorted)

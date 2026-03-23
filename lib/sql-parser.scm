@@ -165,7 +165,41 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 		'('session var) (list (list (symbol "context") "session") var)
 		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
-		(cons head tail) (cons (transform_trigger_expr head) (map tail transform_trigger_expr))
+
+		(cons head tail) (if (or (equal?? head "inner_select") (equal?? head (quote inner_select)))
+			/* scalar subselect in trigger: compile via build_queryplan_term.
+			Wrap result in a promise pattern to extract the scalar value. */
+			(match tail (cons subquery '()) (begin
+				/* Transform NEW/OLD refs in the subselect before passing to query planner.
+				Use a shallow transform that does NOT recurse into nested inner_selects. */
+				(define transform_new_old_shallow (lambda (e) (match e
+					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+					(cons h t) (cons (transform_new_old_shallow h) (map t transform_new_old_shallow))
+					e)))
+				(define transformed_subquery (match subquery '(s tables fields condition group having order limit offset)
+					(list s tables
+						(map_assoc fields (lambda (k v) (transform_new_old_shallow v)))
+						(transform_new_old_shallow condition)
+						group having order limit offset)
+					(transform_new_old_shallow subquery)))
+				(define _hash (fnv_hash (concat transformed_subquery)))
+				(define _psym (symbol (concat "__trig_scalar_promise_" _hash)))
+				(define _rrsym (symbol (concat "__trig_scalar_rr_" _hash)))
+				(list (symbol "!begin")
+					(list (symbol "set") _psym (list (symbol "newpromise")))
+					(list (symbol "set") _rrsym
+						(list (symbol "lambda") (list (symbol "row"))
+							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
+					(list (symbol "set") (symbol "resultrow") _rrsym)
+					(build_queryplan_term transformed_subquery)
+					(list _psym "value")))
+				expr)
+			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
+				(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
+				/* IN/EXISTS subselects: compile via build_queryplan_term */
+				expr /* TODO: implement IN/EXISTS in trigger context */
+				(cons (transform_trigger_expr head) (map tail transform_trigger_expr))))
 		expr
 	)))
 
@@ -288,57 +322,29 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin
 											(define tbl (car (cdr stmt)))
-											(define assignments (merge (car (cdr (cdr stmt))))) /* flatten from + combinator */
+											(define assignments (merge (car (cdr (cdr stmt)))))
 											(define where_raw (car (cdr (cdr (cdr stmt)))))
-											/* Transform: NEW/OLD -> get_assoc, nil-qualified -> tbl-qualified */
+											/* Transform NEW/OLD -> get_assoc */
 											(define fix_expr (lambda (expr) (match expr
 												'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 												'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-												'('get_column nil _ col ci) (list (symbol "get_column") tbl false col ci)
 												(cons h t) (cons (fix_expr h) (map t fix_expr))
 												expr)))
-											(define condition (if (nil? where_raw) true (fix_expr where_raw)))
-											(define filtercols (extract_columns_for_tblvar tbl condition))
-											(define scancols (merge_unique (extract_assoc assignments (lambda (col expr)
-												(extract_columns_for_tblvar tbl (fix_expr expr))))))
-											(define mapcols (cons (symbol "list") (cons "$update" scancols)))
-											(define mapfn (list (symbol "lambda")
-												(cons (symbol "$update") (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-												(list (symbol "if")
-													(list (symbol "$update") (cons (symbol "list") (map_assoc assignments (lambda (col expr) (replace_columns_from_expr (fix_expr expr))))))
-													1 0)))
-											(define filterfn (list (symbol "lambda")
-												(map filtercols (lambda (col) (symbol (concat tbl "." col))))
-												(replace_columns_from_expr condition)))
-											(list (list (symbol "scan") schema tbl
-												(cons (symbol "list") filtercols)
-												filterfn
-												mapcols
-												mapfn
-												(symbol "+") 0)))
+											(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
+											(define t_cols (map_assoc assignments (lambda (col expr) (fix_expr expr))))
+											(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) t_cols t_cond nil nil nil)))
 										(if (equal? tag '!delete)
 											/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
 											(begin
 												(define tbl (car (cdr stmt)))
 												(define where_raw (car (cdr (cdr stmt))))
-												/* Transform: NEW/OLD -> get_assoc, nil-qualified -> tbl-qualified */
 												(define fix_expr (lambda (expr) (match expr
 													'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 													'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-													'('get_column nil _ col ci) (list (symbol "get_column") tbl false col ci)
 													(cons h t) (cons (fix_expr h) (map t fix_expr))
 													expr)))
-												(define condition (if (nil? where_raw) true (fix_expr where_raw)))
-												(define filtercols (extract_columns_for_tblvar tbl condition))
-												(define filterfn (list (symbol "lambda")
-													(map filtercols (lambda (col) (symbol (concat tbl "." col))))
-													(replace_columns_from_expr condition)))
-												(list (list (symbol "scan") schema tbl
-													(cons (symbol "list") filtercols)
-													filterfn
-													(list (symbol "list") "$update")
-													(list (symbol "lambda") (list (symbol "$update")) (list (symbol "if") (list (symbol "$update")) 1 0))
-													(symbol "+") 0)))
+												(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
+												(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) nil t_cond nil nil nil)))
 											(if (equal? tag '!delete_using)
 												/* DELETE FROM target USING target, other [AS alias] WHERE condition */
 												/* stmt is (!delete_using target tbls where) */
@@ -346,7 +352,6 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 													(define target (car (cdr stmt)))
 													(define tbls (car (cdr (cdr stmt))))
 													(define where_raw (car (cdr (cdr (cdr stmt)))))
-													/* Build table defs early so target_alias is known before transform_dml */
 													(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
 													(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
 														'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
@@ -356,27 +361,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 													(define transform_dml (lambda (expr) (match expr
 														'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 														'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-														/* unqualified column: assign to target table (avoids internal notation confusion) */
-														'('get_column nil _ col ci) (list (symbol "get_column") target_alias false col ci)
 														(cons head tail) (cons (transform_dml head) (map tail transform_dml))
 														expr
 													)))
 													(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-													(define others (reduce all_defs (lambda (acc tdef) (match tdef
-														'(id _ _ _ _) (if (equal? id target_alias) acc (cons tdef acc))
-														acc)) '()))
-													(define target_cols (extract_columns_for_tblvar target_alias t_where))
-													(define condition_body (replace_columns_from_expr t_where))
-													(define filter_body (wrap_multi_scans others target_alias t_where condition_body))
-													(define filterfn (list (symbol "lambda")
-														(map target_cols (lambda (col) (symbol (concat target_alias "." col))))
-														filter_body))
-													(list (list (symbol "scan") schema target_tbl
-														(cons (symbol "list") target_cols)
-														filterfn
-														(list (symbol "list") "$update")
-														(list (symbol "lambda") (list (symbol "$update")) (list (symbol "if") (list (symbol "$update")) 1 0))
-														(symbol "+") 0)))
+													(list (build_dml_plan schema target_tbl target_alias all_defs nil t_where nil nil nil)))
 												(if (equal? tag '!update_multi)
 													/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
 													/* stmt is (!update_multi tbls assignments where) */
@@ -384,49 +373,19 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 														(define tbls (car (cdr stmt)))
 														(define assignments_raw (merge (car (cdr (cdr stmt)))))
 														(define where_raw (car (cdr (cdr (cdr stmt)))))
-														/* Build table defs early so target_alias is known before transform_dml */
 														(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
-														/* First table is the target for UPDATE */
 														(define target_def (car all_defs))
 														(define target_alias (match target_def '(id _ _ _ _) id))
 														(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-														(define others (cdr all_defs))
 														(define transform_dml (lambda (expr) (match expr
 															'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 															'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-															/* unqualified column: assign to target table (avoids internal notation confusion) */
-															'('get_column nil _ col ci) (list (symbol "get_column") target_alias false col ci)
 															(cons head tail) (cons (transform_dml head) (map tail transform_dml))
 															expr
 														)))
 														(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-														/* Build SET assignments - only columns for target table */
-														(define target_cols_filter (extract_columns_for_tblvar target_alias t_where))
-														(define target_cols_set (extract_assoc assignments_raw (lambda (col expr)
-															(extract_columns_for_tblvar target_alias (transform_dml expr)))))
-														(define scancols (merge_unique target_cols_set))
-														(define filtercols (merge_unique (list target_cols_filter scancols)))
-														(define condition_body (replace_columns_from_expr t_where))
-														(define filter_body (wrap_multi_scans others target_alias t_where condition_body))
-														(define filterfn (list (symbol "lambda")
-															(map filtercols (lambda (col) (symbol (concat target_alias "." col))))
-															filter_body))
-														/* Build map function for SET assignments */
-														(define mapcols (cons (symbol "list") (cons "$update" scancols)))
-														(define mapfn (list (symbol "lambda")
-															(cons (symbol "$update") (map scancols (lambda (col) (symbol (concat target_alias "." col)))))
-															(list (symbol "if")
-																(list (symbol "$update")
-																	(cons (symbol "list")
-																		(map_assoc assignments_raw (lambda (col expr)
-																			(replace_columns_from_expr (wrap_multi_scans others target_alias (transform_dml expr) (replace_columns_from_expr (transform_dml expr))))))))
-																1 0)))
-														(list (list (symbol "scan") schema target_tbl
-															(cons (symbol "list") filtercols)
-															filterfn
-															mapcols
-															mapfn
-															(symbol "+") 0)))
+														(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
+														(list (build_dml_plan schema target_tbl target_alias all_defs t_cols t_where nil nil nil)))
 													(if (equal? tag '!nop)
 														/* No-op statement (e.g. SET @var) - return empty list */
 														'()
@@ -492,6 +451,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			) true) ",")
 			(? (atom ";" false))
 		) '!nop)
+		/* INSERT [IGNORE] INTO table SET col=expr, col=expr, ...[;] (MySQL SET syntax) */
+		(parser '(
+			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
+			(atom "SET" true) (define assignments (+ (parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr)) ","))
+			(? (atom ";" false))
+		) (list '!insert tbl
+				(map assignments (lambda (a) (match a '(col expr) col)))
+				(list (map assignments (lambda (a) (match a '(col expr) expr))))
+				ignore))
 		/* INSERT [IGNORE] INTO table (...) VALUES (...)[;] */
 		(parser '(
 			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
@@ -1017,29 +985,6 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		sql_select_core
 	)))
 
-	/* Helper: wrap condition with nested scans for other tables in multi-table DML */
-	(define wrap_multi_scans (lambda (others target_alias condition expr) (begin
-		(define wrap_scans_inner (lambda (tbls inner_expr)
-			(if (equal? (count tbls) 0) inner_expr
-				(begin
-					(define tbl_def (car tbls))
-					(define rest_tbls (cdr tbls))
-					(match tbl_def '(alias s tblname _ _) (begin
-						(define s_ (coalesce s schema))
-						(define cols (extract_columns_for_tblvar alias condition))
-						(define inner (wrap_scans_inner rest_tbls inner_expr))
-						(list (symbol ">")
-							(list (symbol "scan") s_ tblname
-								(cons (symbol "list") cols)
-								(list (symbol "lambda")
-									(map cols (lambda (col) (symbol (concat alias "." col))))
-									inner)
-								(list (symbol "list"))
-								(list (symbol "lambda") (list) 1)
-								(symbol "+") 0)
-							0)))))))
-		(wrap_scans_inner others expr))))
-
 	(define sql_update (parser '(
 		(atom "UPDATE" true)
 		(define tbldefs (+ tabledefs ","))
@@ -1084,86 +1029,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(define tblalias (match first_def '(id _ _ _ _) id))
 			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
-				'((symbol get_column) tblvar _ col ci) (if (and tblalias (equal?? tblvar tblalias)) '((quote get_column) tbl false col ci) expr)
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(define cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-			(define condition (replace_find_column (coalesceNil condition true)))
-			(if (> (count all_defs) 1)
-				/* multi-table UPDATE: UPDATE t1 [AS a], t2 [AS b] SET ... WHERE ... */
-				(begin
-					(define others (cdr all_defs))
-					(define target_cols (extract_columns_for_tblvar tbl condition))
-					(define scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
-					(define mapcols (cons list (cons "$update" scancols)))
-					(define mapfn '('lambda
-						(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-						'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
-					))
-					(define condition_body (replace_columns_from_expr condition))
-					(define filter_body (wrap_multi_scans others tblalias condition condition_body))
-					(define filterfn (list (symbol "lambda")
-						(map target_cols (lambda (col) (symbol (concat tbl "." col))))
-						filter_body))
-					'((quote scan)
-						schema
-						tbl
-						(cons list target_cols)
-						filterfn
-						mapcols
-						mapfn
-						(quote +)
-						0
-					)
-				)
-				/* single-table UPDATE */
-				(begin
-					(define filtercols (extract_columns_for_tblvar tbl condition))
-					(define scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
-					(define mapcols (cons list (cons "$update" scancols)))
-					(define mapfn '('lambda
-						(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-						'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
-					))
-					(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
-					(if (or (not (nil? order)) (not (nil? limit)))
-						(begin
-							(define ordercols (if (nil? order) '() (map order (lambda (x)
-								(car (cdr (cdr (cdr (replace_find_column (car x))))))
-							))))
-							(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
-							'((quote scan_order)
-								schema
-								tbl
-								(cons list filtercols)
-								filterfn
-								(cons list ordercols)
-								(cons list dirs)
-								(coalesceNil offset 0)
-								(coalesceNil limit -1)
-								mapcols
-								mapfn
-								(quote +)
-								0
-							)
-						)
-						'((quote scan)
-							schema
-							tbl
-							(cons list filtercols)
-							filterfn
-							mapcols
-							mapfn
-							(quote +)
-							0
-						)
-					)
-				)
-			)
+			/* Route ALL UPDATE (single + multi-table) through the query planner.
+			The planner handles column resolution, inner_selects, joins. */
+			(build_dml_plan schema tbl tblalias all_defs (merge cols) (coalesceNil condition true) order limit offset)
 	)))
 
 	(define sql_delete (parser '(
@@ -1203,47 +1071,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-				expr
-			)))
-			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(define condition (replace_find_column (coalesceNil condition true)))
-			(define filtercols (extract_columns_for_tblvar tbl condition))
-			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
-			(if (or (not (nil? order)) (not (nil? limit)))
-				(begin
-					(define ordercols (if (nil? order) '() (map order (lambda (x)
-						(car (cdr (cdr (cdr (replace_find_column (car x))))))
-					))))
-					(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
-					'((quote scan_order)
-						(coalesce schema2 schema)
-						tbl
-						(cons list filtercols)
-						filterfn
-						(cons list ordercols)
-						(cons list dirs)
-						(coalesceNil offset 0)
-						(coalesceNil limit -1)
-						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-						(quote +)
-						0
-					)
-				)
-				'((quote scan)
-					(coalesce schema2 schema)
-					tbl
-					(cons list filtercols)
-					filterfn
-					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
-					0
-				)
-			)
+			/* Route single-table DELETE through the query planner pipeline.
+			cols = nil signals DELETE mode. */
+			(define del_schema (coalesce schema2 schema))
+			(define del_defs (list (list tbl del_schema tbl false nil)))
+			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -1253,46 +1085,19 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(? (define schema2 sql_identifier) ".") (define tbl sql_identifier)
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			'((quote scan)
-				(coalesce schema2 schema)
-				tbl
-				'(list)
-				'((quote lambda) '() true)
-				'(list "$update")
-				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-				(quote +)
-				0
-			)
+			(define trunc_schema (coalesce schema2 schema))
+			(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)
 	)))
 
-	/* Multi-table DELETE: DELETE t1 FROM t1, t2 WHERE ... or DELETE FROM t1 USING t1, t2 WHERE ... */
+	/* Multi-table DELETE: route through query planner pipeline via build_dml_plan */
 	(define gen_multi_delete (lambda (target all_defs condition) (begin
-		/* Find the target table definition */
+		/* Find target table definition */
 		(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
 			'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 			acc)) nil))
 		(define target_alias (match target_def '(id _ _ _ _) id))
 		(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-		/* Other tables (non-target) for nested scans */
-		(define others (reduce all_defs (lambda (acc tdef) (match tdef
-			'(id _ _ _ _) (if (equal? id target_alias) acc (cons tdef acc))
-			acc)) '()))
-		(define target_cols (extract_columns_for_tblvar target_alias condition))
-		(define condition_body (replace_columns_from_expr condition))
-		(define filter_body (wrap_multi_scans others target_alias condition condition_body))
-		(define filterfn (list (symbol "lambda")
-			(map target_cols (lambda (col) (symbol (concat target_alias "." col))))
-			filter_body))
-		'((quote scan)
-			schema
-			target_tbl
-			(cons list target_cols)
-			filterfn
-			'(list "$update")
-			'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-			(quote +)
-			0
-		)
+		(build_dml_plan schema target_tbl target_alias all_defs nil condition nil nil nil)
 	)))
 	(define sql_multi_delete (parser (or
 		/* DELETE t1 FROM t1 JOIN t2 ON ... WHERE ... */
@@ -1443,6 +1248,23 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
+	/* INSERT [IGNORE] INTO table SET col=expr, col=expr, ...[;] (MySQL SET syntax) */
+	(define sql_insert_set (parser '(
+		(atom "INSERT" true)
+		(define ignoreexists (? (atom "IGNORE" true true true)))
+		(atom "INTO" true)
+		(? (define schema2 sql_identifier) ".")
+		(define tbl sql_identifier)
+		(atom "SET" true)
+		(define assignments (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
+	) (begin
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define coldesc (map assignments (lambda (a) (match a '(col _) col))))
+			(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
+			'('insert (coalesce schema2 schema) tbl (cons list coldesc) '(list (cons list dataset)) '(list)
+				(if ignoreexists '('lambda '() true) nil)
+				false '('lambda '('id) '('session "last_insert_id" 'id))))))
+
 	(define sql_foreign_key_mode (parser (or
 		(parser (atom "RESTRICT" true) "restrict")
 		(parser (atom "CASCADE" true) "cascade")
@@ -1546,6 +1368,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(parser empty '((quote list)))
 			))) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
 			(parser '((atom "CONVERT" true) (atom "TO" true) (atom "CHARACTER" true) (atom "SET" true) (define charset sql_identifier) (? (atom "COLLATE" true) (define coll sql_identifier))) (lambda (id) true))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop_if_exists" col)))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
@@ -1571,6 +1394,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query sql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
 		sql_insert_select

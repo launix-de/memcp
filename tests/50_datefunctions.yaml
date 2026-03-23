@@ -434,5 +434,19 @@ test_cases:
     expect:
       error: true
 
+  - name: "YEARWEEK function"
+    sql: "SELECT YEARWEEK('2024-06-15') AS yw"
+    expect:
+      rows: 1
+      data:
+        - yw: 202424
+
+  - name: "YEARWEEK with NULL"
+    sql: "SELECT YEARWEEK(NULL) AS yw"
+    expect:
+      rows: 1
+      data:
+        - yw: null
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS date_test"

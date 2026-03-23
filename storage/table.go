@@ -255,6 +255,8 @@ type table struct {
 	orcMu         sync.Mutex
 	orcRecomputing int32 // atomic: >0 means an ORC recompute is in progress (skip re-entry in GetValue)
 
+	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
+
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
 	repartitionActive bool            // true when dual-write is in progress
@@ -890,6 +892,18 @@ func (t *table) DropColumn(name string) bool {
 	}
 	t.schema.schemalock.Unlock()
 	panic("drop column does not exist: " + t.Name + "." + name)
+}
+
+func (t *table) DropColumnIfExists(name string) bool {
+	t.schema.schemalock.Lock()
+	for _, c := range t.Columns {
+		if c.Name == name {
+			t.schema.schemalock.Unlock()
+			return t.DropColumn(name)
+		}
+	}
+	t.schema.schemalock.Unlock()
+	return false
 }
 
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
