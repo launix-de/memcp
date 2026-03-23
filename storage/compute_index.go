@@ -86,7 +86,7 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 		}
 		// the function must have a foldable declaration
 		decl := scm.DeclarationForValue(items[0])
-		if decl == nil || !decl.Foldable {
+		if decl == nil || !decl.IsFoldable() {
 			return false
 		}
 		// all arguments must be rawDataset

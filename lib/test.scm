@@ -390,6 +390,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define df (filter_assoc dmap (lambda (k v) (> v 10))))
 	(assert (has_assoc? df "x") true "filter keeps x")
 	(assert (has_assoc? df "z") false "filter drops z")
+	(assert (equal? (find_assoc df (lambda (k v) (equal? k "x"))) '("x" 11)) true "find_assoc finds slice pair")
+	(assert (equal? (find_assoc df (lambda (k v) (equal? k "missing")) '("fallback" 0)) '("fallback" 0)) true "find_assoc default on slice")
 
 	/* big assoc to test auto switch to FastDict */
 	(define big (reduce (produceN 2000) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
@@ -415,6 +417,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define bigf (filter_assoc biginc (lambda (k v) (> v 1000))))
 	(assert (has_assoc? bigf "k1500") true "filter keeps large values")
 	(assert (has_assoc? bigf "k1") false "filter drops small values")
+	(assert (equal? (find_assoc bigf (lambda (k v) (equal? k "k1500"))) '("k1500" 1501)) true "find_assoc finds FastDict pair")
 
 	/* set_assoc immutability: original must not be modified */
 	(define orig '("a" 1 "b" 2))
@@ -708,6 +711,66 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* scan callback ownership: reduce accumulator enables _mut inside reduce body */
 	(assert (serialize (optimize '('scan "db" "tbl" '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan \"db\" \"tbl\" (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: reduce acc enables set_assoc_mut")
 
+	/* match / match_mut correctness */
+	(print "testing match/match_mut correctness ...")
+	/* match: literal patterns */
+	(assert (match 42 42 "yes" nil) "yes" "match literal int hits branch")
+	(assert (match 42 0 "no" "yes") "yes" "match literal int falls through to default")
+	(assert (match "hi" "hi" true false) true "match literal string hits branch")
+	/* match: cons destructuring */
+	(assert (match '(1 2 3) (cons h t) h nil) 1 "match cons: head")
+	(assert (match '(1 2 3) (cons h t) t nil) '(2 3) "match cons: tail")
+	/* match: nil / empty */
+	(assert (match '() '() "empty" "other") "empty" "match nil list")
+	(assert (match '(1) '() "empty" "other") "other" "match non-nil falls to default")
+	/* match: variable binding */
+	(assert (match 7 x (* x 2)) 14 "match binds variable")
+	/* match: nested */
+	(assert (match '(1 2 3)
+		(cons a (cons b rest)) (+ a b)
+		nil)
+		3 "match nested cons adds head elements")
+
+	/* match_mut: same semantics as match */
+	(assert (match_mut 42 42 "yes" nil) "yes" "match_mut literal int hits branch")
+	(assert (match_mut '(1 2 3) (cons h t) h nil) 1 "match_mut cons: head")
+	(assert (match_mut '(1 2 3) (cons h t) t nil) '(2 3) "match_mut cons: tail")
+	(assert (match_mut '() '() "empty" "other") "empty" "match_mut nil list")
+	(assert (match_mut 7 x (* x 2)) 14 "match_mut binds variable")
+	(assert (match_mut '(1 2 3)
+		(cons a (cons b rest)) (+ a b)
+		nil)
+		3 "match_mut nested cons adds head elements")
+
+	/* match/match_mut agree on all cases */
+	(define test_match_agree (lambda (val)
+		(equal?
+			(match val (cons h t) h 42)
+			(match_mut val (cons h t) h 42))))
+	(assert (test_match_agree '(1 2 3)) true "match and match_mut agree on cons")
+	(assert (test_match_agree '()) true "match and match_mut agree on nil")
+	(assert (test_match_agree 99) true "match and match_mut agree on non-list")
+
+	/* optimizer: match_mut insertion */
+	(print "testing optimizer match_mut insertion ...")
+	/* fresh allocation (list with variable args) → must become match_mut */
+	(define opt_fresh_ser (serialize (optimize '('lambda '('x) '('match '('list 'x 2 3) '('cons 'a 'rest) 'a 'x)))))
+	(assert (match opt_fresh_ser (regex "match_mut" _) true false) true "optimizer: match on (list x ...) becomes match_mut")
+	/* lambda parameter (NthLocalVar after replacement) → must stay match */
+	(define opt_param_ser (serialize (optimize '('lambda '('x) '('match 'x nil "nil" "other")))))
+	(assert (match opt_param_ser (regex "match_mut" _) true false) false "optimizer: match on lambda param stays match (NthLocalVar has no ownership)")
+	/* nested: outer on param stays match, inner on fresh becomes match_mut */
+	(define opt_nested_ser (serialize (optimize '('lambda '('x) '('match 'x
+		'('cons 'h 't) '('match '('list 'h 't) '('cons 'a 'b) 'a nil)
+		nil)))))
+	(assert (match opt_nested_ser (regex "match_mut" _) true false) true "optimizer: inner match on fresh list inside lambda becomes match_mut")
+	/* reduce callback: accumulator is owned → match on acc becomes match_mut */
+	(define opt_reduce_ser (serialize (optimize '('lambda '('lst)
+		'('reduce 'lst
+			'('lambda '('acc 'x) '('match 'acc '('cons 'h 't) '(+ 'h 'x) 'x))
+			'(list))))))
+	(assert (match opt_reduce_ser (regex "match_mut" _) true false) true "optimizer: match on owned reduce accumulator becomes match_mut")
+
 	/* REGEXP_REPLACE precompilation: constant pattern gets precompiled */
 	(assert ((eval (optimize '('lambda '('s) '(regexp_replace 's "[^0-9]" "")))) "abc123def") "123" "regexp_replace precompilation works")
 	(assert ((eval (optimize '('lambda '('s) '(regexp_replace 's "^0+" "")))) "000042") "42" "regexp_replace precompiled strips leading zeros")
@@ -818,6 +881,36 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* mutex */
 	(define mtx (mutex))
 	(assert (equal? (mtx (lambda () 42)) 42) true "mutex executes inner function")
+
+	/* Promise */
+	(print "testing promise ...")
+	(define p1 (newpromise))
+	(assert (nil? (p1 "value")) true "unresolved promise value is nil")
+	(assert (nil? (p1 "state")) true "unresolved promise state is nil")
+	(define p2 (newpromise))
+	(p2 "value" 42)
+	(assert (equal? (p2 "value") 42) true "resolved promise returns stored value")
+	(assert (equal? (p2 "state") true) true "resolved promise state is true")
+	(define p3 (newpromise))
+	(p3 "value" 1)
+	(p3 "value" 2)
+	(assert (equal? (p3 "value") 2) true "second resolution overwrites first")
+	(define p4 (newpromise))
+	(p4 "value" 5)
+	(p4 "fail")
+	(assert (equal? (p4 "state") false) true "failed promise state is false")
+	(assert (nil? (p4 "value")) true "failed promise without payload clears value")
+	(define p5 (newpromise))
+	(p5 "fail" "boom")
+	(assert (equal? (p5 "state") false) true "failed promise with payload keeps failed state")
+	(assert (equal? (p5 "value") "boom") true "failed promise stores payload")
+	(define p6 (newpromise))
+	(context (lambda () (p6 "value" 99)))
+	(assert (equal? (p6 "value") 99) true "promise resolves from inside context")
+	(define p7 (newpromise))
+	(setTimeout (lambda () (p7 "value" "async")) 1)
+	(context (lambda () (sleep 0.02)))
+	(assert (equal? (p7 "value") "async") true "promise resolves from async callback")
 
 	/* Scheduler */
 	(print "testing scheduler ...")
@@ -1052,6 +1145,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (nil? (reduce '() (lambda (acc x) (+ acc x)))) true "reduce empty list no neutral returns nil")
 	(assert (equal? (merge '(1 2) '(3 4)) '(1 2 3 4)) true "merge multi-arg")
 	(assert (equal? (merge_unique '(1 2) '(2 3)) '(1 2 3)) true "merge_unique multi-arg")
+	(assert (equal? (find '(10 20 30) (lambda (x) (> x 15))) 20) true "find returns first matching element")
+	(assert (equal? (find '(10 20 30) (lambda (x) (> x 100)) 99) 99) true "find default when missing")
 	(assert (has_assoc? nil "key") false "has_assoc? on nil returns false")
 	(assert (nil? (get_assoc nil "key")) true "get_assoc on nil returns nil")
 
