@@ -863,7 +863,19 @@ WHAT IT MUST NOT DO:
 		replace_find_column_subselect
 	)))
 
-	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
+	/* === REMOVED: build_scalar_subselect, build_in_subselect, build_exists_subselect ===
+	All replaced by Neumann unnesting via replace_inner_selects → unnest_subselect.
+	Previously these generated inline runtime code (nested scans, promises) for
+	correlated subqueries — O(n²) nested loop evaluation. Now all subquery types
+	go through the algebraic Neumann transformation producing flat table lists. */
+
+	/* TODO: refactor replace_inner_selects — the NOT IN / NOT EXISTS / IN / EXISTS
+	blocks are nearly identical (build COUNT subquery, call unnest_subselect, wrap
+	with >0 or =0). Extract a shared helper rewrite_set_subselect(). */
+	/* TODO: remove double COALESCE — Path A wraps COUNT with coalesceNil, then
+	replace_inner_selects wraps again. One of them should be removed. */
+
+	(define _dead_build_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
 		(if (not (nil? union_parts))
 			(error "scalar subselect UNION ALL is not supported yet")
@@ -1408,6 +1420,7 @@ WHAT IT MUST NOT DO:
 						more complex handling, fall back for now */
 						(define us_outer_in_fields (not (equal?
 							(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v)))) '())))
+						(print "unnest_subselect: outer_in_fields=" us_outer_in_fields " has_agg=" us_has_agg " has_grp=" us_has_grp " has_limit=" us_has_limit " single_tbl=" us_single_tbl " outer_refs=" us_outer_refs " own_tables=" (count _us_own_tables) " inner_stages=" (count _us_inner_stages))
 						(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
 							(begin
 								/* === Neumann unnesting: nD domain, single or multi-table === */
@@ -1928,15 +1941,20 @@ WHAT IT MUST NOT DO:
 							/* Rewrite EXISTS → (> COALESCE(COUNT(*),0) 0) via Neumann aggregate unnesting.
 							If unnesting fails, fall back to legacy build_exists_subselect. */
 							(define _ex_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
+							(print "EXISTS rewrite: has_tables=" _ex_has_tables)
 							(define _ex_count_result (if _ex_has_tables (begin
 								(define _ex_count_sq (match subquery
 									'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
 									subquery))
-								(unnest_subselect _ex_count_sq outer_schemas))
+								(print "EXISTS count_sq=" _ex_count_sq)
+								(define _r (unnest_subselect _ex_count_sq outer_schemas))
+								(print "EXISTS unnest_result=" _r)
+								_r)
 								nil))
 							(if (nil? _ex_count_result)
-								expr /* leave as-is for build_queryplan */
+								(begin (print "EXISTS fallback to expr") expr) /* leave as-is for build_queryplan */
 								(match _ex_count_result '(_ex_subst _ex_tbls) (begin
+									(print "EXISTS subst=" _ex_subst " tbls=" _ex_tbls)
 									(sq_cache "tables" (merge _ex_tbls (coalesceNil (sq_cache "tables") '())))
 									(list (quote >) (list (quote coalesceNil) _ex_subst 0) 0)))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
