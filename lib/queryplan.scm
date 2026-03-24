@@ -1413,8 +1413,9 @@ WHAT IT MUST NOT DO:
 									(define us_sq_idx (coalesceNil (sq_cache "idx") 0))
 									(sq_cache "idx" (+ us_sq_idx 1))
 									(define us_sq_prefix (concat "_sq" us_sq_idx))
-									/* build alias rename map for all inner tables */
-									(define us_alias_map (map tables2_us (lambda (td) (match td
+									/* build alias rename map: only OWN tables get prefixed.
+									Inner-scoped tables (from nested decorrelation) keep their alias. */
+									(define us_alias_map (map _us_own_tables (lambda (td) (match td
 										'(alias _ _ _ _) (list alias (if us_single_tbl us_sq_prefix (concat us_sq_prefix "\0" alias)))
 										(list "" "")))))
 									(define _us_lookup (lambda (a) (reduce us_alias_map (lambda (acc p) (if (nil? acc) (if (equal?? a (nth p 0)) (nth p 1) nil) acc)) nil)))
@@ -1583,6 +1584,13 @@ WHAT IT MUST NOT DO:
 												(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
 												(define us_part_order (merge us_dom_order us_renamed_order))
 												(define us_dom_count (count us_domain_cols))
+												/* pass through inner-scoped tables (from nested decorrelation) with joinexpr rewriting */
+												(define _us_inner_tbls (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (has? _us_inner_aliases a) false))))
+												(define _us_inner_tbls_rewritten (map _us_inner_tbls (lambda (td) (match td
+													'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
+													td))))
+												(if (not (equal? _us_inner_tbls_rewritten '()))
+													(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
 												/* register partition stage in sq_cache → merged into groups by untangle_query */
 												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
 												(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '())))
@@ -1603,10 +1611,17 @@ WHAT IT MUST NOT DO:
 													(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
 													(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
 												(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim)))
-												/* register schema for _sq0 so GROUP BY grouped_plan can resolve columns */
+												/* register schema for own table + pass through inner-scoped schemas */
 												(define _us_inner_schema (schemas2_us us_tblvar))
-												(if (not (nil? _us_inner_schema))
-													(sq_cache "schemas" (merge (list us_sq_prefix _us_inner_schema) (coalesceNil (sq_cache "schemas") '()))))
+												(define _us_passthrough_schemas (merge
+													(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
+													(merge (map _us_inner_tbls (lambda (td) (match td
+														'(a _ _ _ _) (begin
+															(define _isch (schemas2_us a))
+															(if (nil? _isch) '() (list a _isch)))
+														'()))))))
+												(if (not (equal? _us_passthrough_schemas '()))
+													(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
 												(define us_subst (list (quote get_column) us_sq_prefix false us_value_key false))
 												(list us_subst us_tbl_entries))
 											/* === C: Non-agg without LIMIT → nil (inline fallback with promise "once") === */
@@ -2420,9 +2435,7 @@ WHAT IT MUST NOT DO:
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(begin (define _ir (apply join_reorder (apply untangle_query (merge query (list nil)))))
-				(match _ir '(_s _t _f _c _g _sch _rfc) (print "[IR] t=" (map _t (lambda (t) (match t '(a s tbl io je) (list a tbl io (not (nil? je))) t)))))
-				(apply build_queryplan (merge _ir (list nil))))
+			(apply build_queryplan (merge (apply join_reorder (apply untangle_query (merge query (list nil)))) (list nil)))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
