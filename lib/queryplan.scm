@@ -426,6 +426,19 @@ All stages have init: nil = no init code, or code to run before the scan. */
 	_ '()
 )))
 
+/* make_keytable_schema: compute keytable name and schema without creating the table.
+Used by untangle to predict the keytable name for HAVING subselect decorrelation.
+Returns (keytable_name key_col_names schema_def) where schema_def is a list of
+column descriptors suitable for the schemas assoc in untangle_query.
+Does NOT handle FK→PK reuse (returns nil for that case — caller must check). */
+(define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
+	(define alias_map (list (list tblvar (concat schema "." tbl))))
+	(define key_names (map keys (lambda (k) (canonical_expr_name k '(list) '(list) alias_map))))
+	(define keytable_name (concat "." tbl ":" key_names))
+	(define schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
+	(list keytable_name key_names schema_def)
+)))
+
 /* make_keytable: create a canonically named group/key table with sloppy engine
 Returns (keytable_name init_code fk_pk_col) where init_code is plan-time code that ensures
 the table exists at execution time (survives cache eviction of sloppy tables).
@@ -1668,7 +1681,17 @@ WHAT IT MUST NOT DO:
 			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
 			(set condition (replace_inner_selects condition schemas))
 			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
-			(set having (replace_inner_selects having schemas))
+			(set having (begin
+				(define _hv_resolved (replace_inner_selects having schemas))
+				/* check if any inner_select nodes remain — HAVING with subqueries
+				requires post-group processing which is not yet implemented */
+				(define _hv_check (lambda (expr) (match expr
+					(cons sym args) (if (not (nil? (inner_select_kind sym))) true
+						(reduce args (lambda (a b) (or a (_hv_check b))) false))
+					false)))
+				(if (and (not (nil? _hv_resolved)) (_hv_check _hv_resolved))
+					(error "HAVING with subqueries not yet supported")
+					_hv_resolved)))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
 			/* integrate unnested scalar subselects from Neumann unnesting.
 			Tables from non-aggregate path (direct LEFT JOIN) do NOT need schema updates.
@@ -1747,8 +1770,10 @@ WHAT IT MUST NOT DO:
 			/* return parameter list for build_queryplan */
 			(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x)))))) /* TODO: append inner conditions to condition */
 			(set group (map group (lambda (g) (replace_rename (canonicalize_for_rename g)))))
-			(set having (replace_rename (canonicalize_for_rename having)))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename (canonicalize_for_rename col)) dir)))))
+
+			(set having (replace_rename (canonicalize_for_rename having)))
+
 			(define groups (merge
 				(coalesceNil _sq_pstages '())
 				(coalesceNil _sq_prop_groups '())

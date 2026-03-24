@@ -1,0 +1,229 @@
+# Scalar subselects in WHERE, GROUP BY, HAVING, ORDER BY
+# Tests that untangle correctly decorrelates subselects appearing in
+# various SQL clauses (not just SELECT list).
+
+metadata:
+  version: "1.0"
+  description: "Correlated scalar subselects in WHERE, GROUP BY, HAVING"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sc_dept"
+  - sql: "DROP TABLE IF EXISTS sc_emp"
+  - sql: "DROP TABLE IF EXISTS sc_bonus"
+  - sql: |
+      CREATE TABLE sc_dept (id INT PRIMARY KEY, name VARCHAR(30), budget INT)
+  - sql: |
+      CREATE TABLE sc_emp (id INT PRIMARY KEY, name VARCHAR(30), did INT, salary INT)
+  - sql: |
+      CREATE TABLE sc_bonus (id INT PRIMARY KEY, emp_id INT, amount INT)
+  - sql: |
+      INSERT INTO sc_dept VALUES (1, 'Engineering', 300000), (2, 'Marketing', 100000), (3, 'Sales', 80000)
+  - sql: |
+      INSERT INTO sc_emp VALUES
+        (1, 'Alice', 1, 90000), (2, 'Bob', 1, 80000), (3, 'Carol', 2, 70000),
+        (4, 'Dave', 2, 75000), (5, 'Eve', 3, 60000), (6, 'Frank', 1, 95000)
+  - sql: |
+      INSERT INTO sc_bonus VALUES (1, 1, 5000), (2, 2, 3000), (3, 6, 8000)
+
+test_cases:
+
+  # ============================================================
+  # Scalar subselect in WHERE
+  # ============================================================
+
+  - name: "WHERE: scalar subselect comparison"
+    sql: |
+      SELECT e.name, e.salary
+      FROM sc_emp e
+      WHERE e.salary > (SELECT AVG(salary) FROM sc_emp)
+      ORDER BY e.salary DESC
+    expect:
+      rows: 4
+
+  - name: "WHERE: correlated scalar subselect"
+    sql: |
+      SELECT e.name
+      FROM sc_emp e
+      WHERE e.salary = (SELECT MAX(e2.salary) FROM sc_emp e2 WHERE e2.did = e.did)
+      ORDER BY e.name
+    expect:
+      rows: 3
+      data:
+        - name: "Dave"
+        - name: "Eve"
+        - name: "Frank"
+
+  - name: "WHERE: nested correlated scalar depth 2"
+    sql: |
+      SELECT d.name
+      FROM sc_dept d
+      WHERE d.budget > (SELECT MAX(e.salary) FROM sc_emp e WHERE e.did = d.id)
+      ORDER BY d.name
+    expect:
+      rows: 3
+
+  - name: "WHERE: scalar subselect with LIMIT in nested depth 2"
+    sql: |
+      SELECT e.name
+      FROM sc_emp e
+      WHERE e.salary > (SELECT salary FROM sc_emp e2 WHERE e2.did = e.did ORDER BY e2.salary ASC LIMIT 1)
+      ORDER BY e.name
+    expect:
+      rows: 3
+      data:
+        - name: "Bob"
+        - name: "Dave"
+        - name: "Frank"
+
+  # ============================================================
+  # Scalar subselect in HAVING
+  # ============================================================
+
+  - name: "HAVING: scalar subselect comparison"
+    noncritical: true
+    sql: |
+      SELECT e.did, COUNT(*) AS cnt
+      FROM sc_emp e
+      GROUP BY e.did
+      HAVING COUNT(*) > (SELECT 1)
+      ORDER BY e.did
+    expect:
+      rows: 2
+      data:
+        - did: 1
+          cnt: 3
+        - did: 2
+          cnt: 2
+
+  - name: "HAVING: correlated scalar subselect references group key"
+    noncritical: true
+    sql: |
+      SELECT e.did, SUM(e.salary) AS total
+      FROM sc_emp e
+      GROUP BY e.did
+      HAVING SUM(e.salary) > (SELECT d.budget / 3 FROM sc_dept d WHERE d.id = e.did LIMIT 1)
+      ORDER BY e.did
+    expect:
+      rows: 1
+      data:
+        - did: 1
+          total: 265000
+
+  # ============================================================
+  # EXISTS / IN in WHERE (flat, no scalar nesting)
+  # ============================================================
+
+  - name: "WHERE EXISTS: correlated"
+    sql: |
+      SELECT e.name
+      FROM sc_emp e
+      WHERE EXISTS (SELECT 1 FROM sc_bonus b WHERE b.emp_id = e.id)
+      ORDER BY e.name
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+        - name: "Bob"
+        - name: "Frank"
+
+  - name: "WHERE NOT EXISTS: correlated"
+    sql: |
+      SELECT e.name
+      FROM sc_emp e
+      WHERE NOT EXISTS (SELECT 1 FROM sc_bonus b WHERE b.emp_id = e.id)
+      ORDER BY e.name
+    expect:
+      rows: 3
+      data:
+        - name: "Carol"
+        - name: "Dave"
+        - name: "Eve"
+
+  - name: "WHERE IN: correlated"
+    sql: |
+      SELECT e.name
+      FROM sc_emp e
+      WHERE e.id IN (SELECT b.emp_id FROM sc_bonus b WHERE b.amount > 4000)
+      ORDER BY e.name
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+        - name: "Frank"
+
+  - name: "WHERE NOT IN: correlated"
+    sql: |
+      SELECT e.name
+      FROM sc_emp e
+      WHERE e.id NOT IN (SELECT b.emp_id FROM sc_bonus b)
+      ORDER BY e.name
+    expect:
+      rows: 3
+      data:
+        - name: "Carol"
+        - name: "Dave"
+        - name: "Eve"
+
+  # ============================================================
+  # EXISTS / IN in HAVING
+  # ============================================================
+
+  - name: "HAVING EXISTS: department has bonus employees"
+    noncritical: true
+    sql: |
+      SELECT e.did, COUNT(*) AS cnt
+      FROM sc_emp e
+      GROUP BY e.did
+      HAVING EXISTS (SELECT 1 FROM sc_bonus b JOIN sc_emp e2 ON e2.id = b.emp_id WHERE e2.did = e.did)
+      ORDER BY e.did
+    expect:
+      rows: 1
+      data:
+        - did: 1
+          cnt: 3
+
+  # ============================================================
+  # Combined: scalar subselect in multiple clauses
+  # ============================================================
+
+  - name: "WHERE + SELECT: scalar subselects in both"
+    sql: |
+      SELECT e.name,
+        (SELECT d.name FROM sc_dept d WHERE d.id = e.did LIMIT 1) AS dept
+      FROM sc_emp e
+      WHERE e.salary > (SELECT AVG(salary) FROM sc_emp)
+      ORDER BY e.name
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+        - name: "Bob"
+          dept: "Engineering"
+
+  - name: "WHERE + HAVING + SELECT: all three"
+    noncritical: true
+    sql: |
+      SELECT e.did,
+        (SELECT d.name FROM sc_dept d WHERE d.id = e.did LIMIT 1) AS dept_name,
+        COUNT(*) AS cnt
+      FROM sc_emp e
+      WHERE e.salary > (SELECT 60000)
+      GROUP BY e.did
+      HAVING COUNT(*) >= (SELECT 2)
+      ORDER BY e.did
+    expect:
+      rows: 2
+      data:
+        - did: 1
+          dept_name: "Engineering"
+          cnt: 3
+        - did: 2
+          dept_name: "Marketing"
+          cnt: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sc_bonus"
+  - sql: "DROP TABLE IF EXISTS sc_emp"
+  - sql: "DROP TABLE IF EXISTS sc_dept"
