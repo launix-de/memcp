@@ -728,9 +728,6 @@ WHAT IT MUST NOT DO:
 - Create keytables or aggregate infrastructure (that is build_queryplan's job)
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
-	/* TODO: unnest correlated scalar subqueries into LEFT JOIN LIMIT 1 table entries
-	instead of producing inline runtime code via build_scalar_subselect */
-	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
 	(define sq_cache (newsession))
@@ -974,7 +971,6 @@ WHAT IT MUST NOT DO:
 						more complex handling, fall back for now */
 						(define us_outer_in_fields (not (equal?
 							(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v)))) '())))
-						(print "unnest_subselect: outer_in_fields=" us_outer_in_fields " has_agg=" us_has_agg " has_grp=" us_has_grp " has_limit=" us_has_limit " single_tbl=" us_single_tbl " outer_refs=" us_outer_refs " own_tables=" (count _us_own_tables) " inner_stages=" (count _us_inner_stages))
 						(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
 							(begin
 								/* === Neumann unnesting: nD domain, single or multi-table === */
@@ -1238,9 +1234,38 @@ WHAT IT MUST NOT DO:
 		'(quote not) true
 		_ false
 	)))
+	/* _unnest_count_subselect: shared helper for IN/EXISTS/NOT IN/NOT EXISTS rewrite.
+	Builds a COUNT(*) subquery from the original, optionally adding an equality condition
+	(for IN/NOT IN: first_field = target_expr). Returns (substitution tables) or nil.
+	comparison: (quote >) for positive match, (quote equal?) for negated match */
+	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
+		(define _has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
+		(define _first_field (if (nil? target_expr) nil
+			(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons k (cons v _)) v nil) nil)))
+		(if (and (not _has_tables) (nil? target_expr)) nil
+			(if (and (not (nil? target_expr)) (nil? _first_field)) nil
+				(begin
+					(define _count_sq (match subquery
+						'(s t f c g h o l off) (list s t
+							(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+							(if (nil? target_expr) c
+								(if (or (nil? c) (equal? c true))
+									(list (quote equal??) _first_field target_expr)
+									(list (quote and) c (list (quote equal??) _first_field target_expr))))
+							(list 1) nil nil nil nil)
+						nil))
+					(if (nil? _count_sq) nil
+						(begin
+							(define _result (unnest_subselect _count_sq outer_schemas))
+							(if (nil? _result) nil
+								(match _result '(_subst _tbls) (begin
+									(sq_cache "tables" (merge _tbls (coalesceNil (sq_cache "tables") '())))
+									(list comparison (list (quote coalesceNil) _subst 0) 0)))))))))
+	)))
 	(define replace_inner_selects (lambda (expr outer_schemas) (match expr
 		(cons sym args) (begin
 			(define kind (inner_select_kind sym))
+			/* handle NOT IN / NOT EXISTS */
 			(define not_expr (if (not_symbol sym)
 				(match args
 					(cons inner_expr '()) (match inner_expr
@@ -1248,118 +1273,39 @@ WHAT IT MUST NOT DO:
 							(define inner_kind (inner_select_kind inner_sym))
 							(if (equal?? inner_kind (quote inner_select_in))
 								(match inner_args
-									(cons target_expr (cons subquery '())) (begin
-										/* Rewrite NOT IN → (= COALESCE(COUNT(*),0) 0) with target equality */
-										(define _nin_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
-										(define _nin_first_field (match subquery '(_ _ flds _ _ _ _ _ _)
-											(match flds (cons k (cons v _)) v nil) nil))
-										(define _nin_count_result (if (and _nin_has_tables (not (nil? _nin_first_field))) (begin
-											(define _nin_count_sq (match subquery
-												'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
-													(if (or (nil? c) (equal? c true))
-														(list (quote equal??) _nin_first_field target_expr)
-														(list (quote and) c (list (quote equal??) _nin_first_field target_expr)))
-													(list 1) nil nil nil nil)
-												nil))
-											(if (nil? _nin_count_sq) nil (unnest_subselect _nin_count_sq outer_schemas)))
-											nil))
-										(if (nil? _nin_count_result)
-											expr /* leave as-is for build_queryplan */
-											(match _nin_count_result '(_nin_subst _nin_tbls) (begin
-												(sq_cache "tables" (merge _nin_tbls (coalesceNil (sq_cache "tables") '())))
-												(list (quote equal?) (list (quote coalesceNil) _nin_subst 0) 0)))))
-									_ nil
-								)
+									(cons target_expr (cons subquery '()))
+									(coalesce (_unnest_count_subselect subquery outer_schemas target_expr (quote equal?)) expr)
+									_ nil)
 								(if (equal?? inner_kind (quote inner_select_exists))
 									(match inner_args
-										(cons subquery '()) (begin
-											/* Rewrite NOT EXISTS → (= COALESCE(COUNT(*),0) 0) via Neumann. */
-											(define _nex_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
-											(define _nex_count_result (if _nex_has_tables (begin
-												(define _nex_count_sq (match subquery
-													'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
-													subquery))
-												(unnest_subselect _nex_count_sq outer_schemas))
-												nil))
-											(if (nil? _nex_count_result)
-												expr /* leave as-is for build_queryplan */
-												(match _nex_count_result '(_nex_subst _nex_tbls) (begin
-													(sq_cache "tables" (merge _nex_tbls (coalesceNil (sq_cache "tables") '())))
-													(list (quote equal?) (list (quote coalesceNil) _nex_subst 0) 0)))))
+										(cons subquery '())
+										(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?)) expr)
 										_ nil)
-									nil))
-						)
-						_ nil
-					)
-					_ nil
-				)
+									nil)))
+						_ nil)
+					_ nil)
 				nil))
 			(if (nil? not_expr)
 				(match kind
 					(quote inner_select) (match args
 						(cons subquery '()) (begin
-							/* Neumann unnesting — no fallback to inline code */
 							(define _us_r (unnest_subselect subquery outer_schemas))
 							(if (nil? _us_r)
-								expr /* leave as-is for build_queryplan */
+								expr
 								(match _us_r '(_us_subst _us_tbls) (begin
 									(sq_cache "tables" (merge _us_tbls (coalesceNil (sq_cache "tables") '())))
 									_us_subst))))
-						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
-					)
+						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_in) (match args
-						(cons target_expr (cons subquery '())) (begin
-							/* Rewrite IN → (> COALESCE(COUNT(*),0) 0) with target equality added to condition.
-							WHERE x IN (SELECT y FROM t WHERE cond) → WHERE COALESCE(COUNT(1) FROM t WHERE cond AND y=x, 0) > 0 */
-							(define _in_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
-							(define _in_first_field (match subquery '(_ _ flds _ _ _ _ _ _)
-								(match flds (cons k (cons v _)) v nil) nil))
-							(define _in_count_result (if (and _in_has_tables (not (nil? _in_first_field))) (begin
-								/* build COUNT subquery: add (equal?? first_field target_expr) to condition */
-								(define _in_count_sq (match subquery
-									'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
-										(if (or (nil? c) (equal? c true))
-											(list (quote equal??) _in_first_field target_expr)
-											(list (quote and) c (list (quote equal??) _in_first_field target_expr)))
-										(list 1) nil nil nil nil)
-									nil))
-								(if (nil? _in_count_sq) nil (unnest_subselect _in_count_sq outer_schemas)))
-								nil))
-							(if (nil? _in_count_result)
-								expr /* leave as-is for build_queryplan */
-								(match _in_count_result '(_in_subst _in_tbls) (begin
-									(sq_cache "tables" (merge _in_tbls (coalesceNil (sq_cache "tables") '())))
-									(list (quote >) (list (quote coalesceNil) _in_subst 0) 0)))))
-						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
-					)
+						(cons target_expr (cons subquery '()))
+						(coalesce (_unnest_count_subselect subquery outer_schemas target_expr (quote >)) expr)
+						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_exists) (match args
-						(cons subquery '()) (begin
-							/* Rewrite EXISTS → (> COALESCE(COUNT(*),0) 0) via Neumann aggregate unnesting.
-							If unnesting fails, fall back to legacy build_exists_subselect. */
-							(define _ex_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
-							(print "EXISTS rewrite: has_tables=" _ex_has_tables)
-							(define _ex_count_result (if _ex_has_tables (begin
-								(define _ex_count_sq (match subquery
-									'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
-									subquery))
-								(print "EXISTS count_sq=" _ex_count_sq)
-								(define _r (unnest_subselect _ex_count_sq outer_schemas))
-								(print "EXISTS unnest_result=" _r)
-								_r)
-								nil))
-							(if (nil? _ex_count_result)
-								(begin (print "EXISTS fallback to expr") expr) /* leave as-is for build_queryplan */
-								(match _ex_count_result '(_ex_subst _ex_tbls) (begin
-									(print "EXISTS subst=" _ex_subst " tbls=" _ex_tbls)
-									(sq_cache "tables" (merge _ex_tbls (coalesceNil (sq_cache "tables") '())))
-									(list (quote >) (list (quote coalesceNil) _ex_subst 0) 0)))))
-						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
-					)
-					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
-				)
-				not_expr
-			)
-		)
+						(cons subquery '())
+						(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >)) expr)
+						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
+					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
+				not_expr))
 		expr
 	)))
 
@@ -1582,10 +1528,7 @@ WHAT IT MUST NOT DO:
 			(set tables (merge tablesList))
 			(set schemas (merge schemasList))
 
-			/* TODO: add rename_prefix to all table names and get_column expressions */
-			/* TODO: apply renamelist to all expressions in fields condition group having order */
-
-			/* at first: extract additional join exprs into condition list */
+			/* extract additional join exprs into condition list */
 			(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
 
 			/* tells whether there is an aggregate inside */
@@ -1768,7 +1711,7 @@ WHAT IT MUST NOT DO:
 			)))))
 
 			/* return parameter list for build_queryplan */
-			(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x)))))) /* TODO: append inner conditions to condition */
+			(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x))))))
 			(set group (map group (lambda (g) (replace_rename (canonicalize_for_rename g)))))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename (canonicalize_for_rename col)) dir)))))
 
@@ -2007,7 +1950,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
-	(print "build queryplan " '(schema tables fields condition groups schemas))
+	/*(print "build queryplan " '(schema tables fields condition groups schemas))*/
 	/*
 	Query builder masterplan:
 	1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with fields, conditions, and group-stages)
