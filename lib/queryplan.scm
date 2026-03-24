@@ -2704,8 +2704,9 @@ store results as keytable columns named "expr|condition"
 				/* build per-source-table incremental trigger functions entirely in Scheme,
 				then register them via a thin Go wrapper */
 				(define pj_trigger_registrations
-					(map tables (lambda (trigger_tbl)
+					(filter (map tables (lambda (trigger_tbl)
 						(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
+							(if (not (string? src_tbl)) nil /* skip materialized variable tables (.unnest:, __mat:) */
 							(begin
 								/* collect (pj_col base_col) pairs for this source table */
 								(define ti_col_pairs
@@ -2745,7 +2746,7 @@ store results as keytable columns named "expr|condition"
 								(define update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list insert_fn 'OLD 'NEW)))))
 								/* emit the register call as an S-expression to be executed at query time */
 								(list 'register_prejoin_incremental src_schema src_tbl pj_schema pjtbl
-									delete_fn insert_fn update_fn))))))
+									delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x))))
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
