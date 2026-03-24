@@ -1682,6 +1682,9 @@ WHAT IT MUST NOT DO:
 							)
 						))
 						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2 _) (begin
+							/* propagate _init2 (e.g. window materialization code) from inner untangle_query */
+							(if (and (not (nil? _init2)) (not (equal? _init2 '())))
+								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) _init2)))
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
