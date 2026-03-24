@@ -1,0 +1,135 @@
+# Correlated scalar subselect containing a derived table with window function.
+# Pattern from ERPL: COALESCE((SELECT sub.col FROM (SELECT ..., ROW_NUMBER()
+# OVER (PARTITION BY parent ORDER BY time DESC) AS rn FROM hist) sub
+# WHERE sub.parent = main.ID AND sub.rn = 1), default)
+#
+# The window-function derived table is materialized in untangle_query.
+# The materialized rows must be available when the scalar subselect scans them.
+
+metadata:
+  version: "1.0"
+  description: "Scalar subselect with window function derived table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS swd_main"
+  - sql: "DROP TABLE IF EXISTS swd_hist"
+  - sql: "CREATE TABLE swd_main (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE swd_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
+  - sql: "INSERT INTO swd_main VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO swd_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000)"
+
+test_cases:
+
+  - name: "standalone window function derived table"
+    sql: |
+      SELECT * FROM (
+        SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+        FROM swd_hist
+      ) t ORDER BY parent, rn
+    expect:
+      rows: 3
+      data:
+        - parent: 1
+          val: 200
+          rn: 1
+        - parent: 1
+          val: 100
+          rn: 2
+        - parent: 2
+          val: 300
+          rn: 1
+
+  - name: "LEFT JOIN with window function derived table"
+    sql: |
+      SELECT m.ID, m.name, h.val
+      FROM swd_main m
+      LEFT JOIN (
+        SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+        FROM swd_hist
+      ) h ON h.parent = m.ID AND h.rn = 1
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          val: 200
+        - ID: 2
+          name: "Bob"
+          val: 300
+
+  - name: "correlated scalar subselect with window function derived table"
+    sql: |
+      SELECT m.ID, m.name,
+        (SELECT sub.val FROM (
+          SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+          FROM swd_hist
+        ) sub WHERE sub.parent = m.ID AND sub.rn = 1) AS latest
+      FROM swd_main m
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          latest: 200
+        - ID: 2
+          name: "Bob"
+          latest: 300
+
+  - name: "COALESCE wrapped (ERPL pattern)"
+    sql: |
+      SELECT m.ID,
+        COALESCE((SELECT sub.val FROM (
+          SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+          FROM swd_hist
+        ) sub WHERE sub.parent = m.ID AND sub.rn = 1), 0) AS latest
+      FROM swd_main m
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: 200
+        - ID: 2
+          latest: 300
+
+  - name: "wrapped in outer derived table (SELECT t.* FROM (...) t)"
+    sql: |
+      SELECT t.* FROM (
+        SELECT m.ID AS ID, m.name AS name,
+          COALESCE((SELECT sub.val FROM (
+            SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+            FROM swd_hist
+          ) sub WHERE sub.parent = m.ID AND sub.rn = 1), 0) AS latest
+        FROM swd_main m
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          latest: 200
+        - ID: 2
+          name: "Bob"
+          latest: 300
+
+  - name: "COUNT over wrapped derived table"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.latest) AS total FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT sub.val FROM (
+            SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+            FROM swd_hist
+          ) sub WHERE sub.parent = m.ID AND sub.rn = 1), 0) AS latest
+        FROM swd_main m
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+          total: 500
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS swd_main"
+  - sql: "DROP TABLE IF EXISTS swd_hist"
