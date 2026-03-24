@@ -2769,8 +2769,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */
 				(if is_dedup (error "DISTINCT on joined tables not yet supported"))
+				/* exclude partition-staged tables from prejoin (same as single-table path) */
+				(define _pj_tables (filter tables (lambda (t) (match t '(tv _ _ _ _) (not (has? _grp_ps_aliases tv)) true))))
+				(define _pj_ps_tables (filter tables (lambda (t) (match t '(tv _ _ _ _) (has? _grp_ps_aliases tv) false))))
 				/* resolve condition and fields */
 				(set condition (replace_find_column (coalesceNil condition true)))
+				/* split condition: partition-staged table refs go to grouped_plan */
+				(define _pj_cond_split (split_condition condition _pj_ps_tables))
+				(define _pj_ps_condition (match _pj_cond_split '(_ later) later))
+				(set condition (match _pj_cond_split '(now _) now))
 				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
 				/* extract all get_column refs from group, fields, having, order */
 				(define mat_cols_raw (merge
@@ -2779,6 +2786,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
 				))
+				/* filter out columns from partition-staged tables (they're not part of the prejoin) */
+				(define _pj_tblvar_list (map _pj_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
+				(define mat_cols_raw (filter mat_cols_raw (lambda (mc) (match mc
+					'(name '((symbol get_column) alias_ _ _ _)) (has? _pj_tblvar_list alias_)
+					'(name '((quote get_column) alias_ _ _ _)) (has? _pj_tblvar_list alias_)
+					true))))
 				(define mat_cols (reduce mat_cols_raw (lambda (acc mc)
 					(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false)
 						acc
@@ -2787,14 +2800,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* compute prejoin table name and alias */
 				(define pjvar ".pj")
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
-				(define prejoin_alias_map (map tables (lambda (t)
+				(define prejoin_alias_map (map _pj_tables (lambda (t)
 					(match t '(tv tschema ttbl _ _)
 						(list tv (concat tschema "." ttbl)))))
 				)
 				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
 				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
 				(define prejointbl (concat ".prejoin:"
-					(map tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
+					(map _pj_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* capture outer schema and table name for trigger code generation */
 				(define pj_schema schema)
@@ -2851,10 +2864,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define pj_stage (make_group_stage pj_group pj_having pj_order stage_limit stage_offset))
 				(define pj_all_groups (cons pj_stage rest_groups))
 				/* recursive call with single prejoin table */
-				(define grouped_result (build_queryplan schema '('(pjvar schema prejointbl false nil))
+				/* combine partition-staged table conditions with prejoin output */
+				(define _pj_gp_condition (if (equal? _pj_ps_condition true) nil
+					(pj_rewrite _pj_ps_condition)))
+				(define grouped_result (build_queryplan schema
+					(merge (list (list pjvar schema prejointbl false nil)) _pj_ps_tables)
 					pj_fields
-					nil /* condition already applied during materialization */
-					pj_all_groups
+					_pj_gp_condition
+					(merge pj_all_groups partition_stages)
 					schemas
 					replace_find_column
 					nil))
