@@ -267,11 +267,13 @@ to avoid matching outer tables which would break scope resolution. */
 	'((symbol get_column) alias_ ti col ci) (if (or ti ci)
 		(begin
 			(define resolved_alias (if (nil? alias_)
-				/* unqualified: search non-prefixed aliases only (local tables) */
-				(reduce_assoc all_schemas (lambda (a alias cols)
-					(if (and (equal? (replace (string alias) "\0" "") (string alias))
+				/* unqualified: search main table aliases only (no '\0' prefix, no '_unn_' prefix) */
+				(reduce_assoc all_schemas (lambda (a alias cols) (begin
+					(define _s (string alias))
+					(if (and (equal? (replace _s "\0" "") _s)
+						(not (and (>= (strlen _s) 5) (equal? (substr _s 0 5) "_unn_")))
 						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
-						alias a)) nil)
+						alias a))) nil)
 				/* qualified: search all schemas including outer */
 				(reduce_assoc all_schemas (lambda (a alias cols)
 					(if (and ((if ti equal?? equal?) alias_ alias)
