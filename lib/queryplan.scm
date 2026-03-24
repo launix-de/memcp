@@ -1401,8 +1401,7 @@ WHAT IT MUST NOT DO:
 						more complex handling, fall back for now */
 						(define us_outer_in_fields (not (equal?
 							(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v)))) '())))
-						(if (not us_has_outer) nil /* non-correlated: use existing path */
-							(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
+						(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
 								(begin
 									/* === Neumann unnesting: nD domain, single or multi-table === */
 									(define us_sq_idx (coalesceNil (sq_cache "idx") 0))
@@ -1497,8 +1496,11 @@ WHAT IT MUST NOT DO:
 											/* domain columns + original GROUP BY → scoped GROUP stage */
 											(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car groups2_us)) '()) '()))
 											(define us_orig_having (if us_has_stages (stage_having_expr (car groups2_us)) nil))
-											(define us_new_group (merge (map us_domain_cols (lambda (dc) (_us_prefix_ria (nth dc 0))))
-												(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1))) '()
+											(define _us_dom_group_cols (map us_domain_cols (lambda (dc) (_us_prefix_ria (nth dc 0)))))
+											(define us_new_group (merge _us_dom_group_cols
+												(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1)))
+													/* keep (1) for static aggregation if no domain cols */
+													(if (equal? _us_dom_group_cols '()) us_orig_group '())
 													(map us_orig_group _us_prefix_ria))))
 											(define us_new_having (if (nil? us_orig_having) nil (_us_prefix_ria us_orig_having)))
 											/* scoped GROUP stage: partition-aliases = prefixed inner table aliases */
@@ -1589,7 +1591,6 @@ WHAT IT MUST NOT DO:
 									)
 								)
 							)
-						)
 					)
 					nil /* untangle failed */
 				)
@@ -2337,7 +2338,9 @@ WHAT IT MUST NOT DO:
 					(merge_unique
 						(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
 						(extract_tblvars (coalesceNil (stage_having_expr stage) true))
-						(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))))))
+						(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))
+						/* scoped stages: their partition-aliases are "used" tables */
+						(coalesceNil (stage_partition_aliases stage) '())))))
 				/* include condition-referenced tables: unnested subqueries may create
 				cross-table dependencies (e.g., d.did = _sq0.did) that must prevent pruning */
 				(extract_tblvars _canon_condition)))
