@@ -390,8 +390,8 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "session", ParamDesc: "the session to install"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "the function to execute"},
+				{Kind: "func", ParamName: "session", ParamDesc: "the session to install", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "fn", ParamDesc: "the function to execute", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},

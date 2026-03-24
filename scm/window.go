@@ -99,7 +99,7 @@ func init_window() {
 				return NewSlice(result)
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest"}, &TypeDescriptor{Kind: "list", ParamName: "vals", ParamDesc: "list of stride values to insert"}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", ParamName: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "list", ParamName: "vals", ParamDesc: "list of stride values to insert"}},
 			Return: &TypeDescriptor{Kind: "list"},
 		},
 	})
@@ -145,7 +145,7 @@ func init_window() {
 				return NewNil()
 			},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest"}, &TypeDescriptor{Kind: "number", ParamName: "count", ParamDesc: "number of nil positions to shift in"}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", ParamName: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", ParamName: "count", ParamDesc: "number of nil positions to shift in"}},
 			Return: &TypeDescriptor{Kind: "nil"},
 		},
 	})
