@@ -555,7 +555,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 		(cons (symbol aggregate) rest) (if is_dedup
 			expr
 			'('get_column grouptbl false (concat (colname rest) "|" (colname condition)) false))
-		'((symbol get_column) src_tblvar ti col ci) '('get_column grouptbl ti (colname '('get_column src_tblvar ti col ci)) ci)
+		'((symbol get_column) (eval src_tblvar) ti col ci) '('get_column grouptbl ti (colname '('get_column src_tblvar ti col ci)) ci)
 		/* rewrite (outer tblvar.col) inside scalar subselects to reference keytable column */
 		'('outer sym) (begin
 			(define symStr (concat sym))
@@ -1517,6 +1517,10 @@ WHAT IT MUST NOT DO:
 													(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
 													(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
 												(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim)))
+												/* register schema for _sq0 so GROUP BY grouped_plan can resolve columns */
+												(define _us_inner_schema (schemas2_us us_tblvar))
+												(if (not (nil? _us_inner_schema))
+													(sq_cache "schemas" (merge (list us_sq_prefix _us_inner_schema) (coalesceNil (sq_cache "schemas") '()))))
 												(define us_subst (list (quote get_column) us_sq_prefix false us_value_key false))
 												(list us_subst us_tbl_entries))
 											/* === C: Non-agg without LIMIT → nil (inline fallback with promise "once") === */
@@ -2506,7 +2510,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 		/* TODO: replace (get_column nil ti col ci) in group, having and order with (coalesce (fields col) '('get_column nil false col false)) */
 
-		(match tables
+		/* exclude partition-staged tables from GROUP BY table set — they are
+		scanned independently via build_scan with partition limits. Only exclude
+		when their order is purely on their own columns (not mixed). */
+		(define _grp_ps_aliases (merge (map partition_stages (lambda (s) (coalesceNil (stage_partition_aliases s) '())))))
+		(define _grp_tables (filter tables (lambda (t) (match t '(tv _ _ _ _) (not (has? _grp_ps_aliases tv)) true))))
+		(define _grp_ps_tables (filter tables (lambda (t) (match t '(tv _ _ _ _) (has? _grp_ps_aliases tv) false))))
+		(match _grp_tables
 			/* TODO: allow for more than just group by single table */
 			/* TODO: outer tables that only join on group */
 			'('(tblvar schema tbl isOuter _)) (begin
@@ -2523,6 +2533,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* preparation */
 				(define tblvar_cols (merge_unique (map stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
 				(set condition (replace_find_column (coalesceNil condition true)))
+				/* split condition: parts referencing partition-staged tables go to grouped_plan,
+				rest stays as keytable filter */
+				(define _grp_cond_split (split_condition condition _grp_ps_tables))
+				(define _grp_ps_condition (match _grp_cond_split '(_ later) later))
+				(set condition (match _grp_cond_split '(now _) now))
 				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
 				/* make_collect: builds collect plan with optional WHERE filter
@@ -2620,10 +2635,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(list 'and replaced_having count_check)))
 							(replace_group_key_or_fetch stage_having)))
 
-						(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
+						/* combine HAVING with partition-staged table conditions (join conditions deferred from GROUP BY) */
+						(define _gp_condition (if (equal? _grp_ps_condition true) effective_having
+							(if (or (nil? effective_having) (equal? effective_having true)) (replace_group_key_or_fetch _grp_ps_condition)
+								(list (quote and) effective_having (replace_group_key_or_fetch _grp_ps_condition)))))
+						(define grouped_plan (build_queryplan schema
+							(merge (list (list grouptbl schema grouptbl false nil)) _grp_ps_tables)
 							(map_assoc fields (lambda (k v) (replace_group_key_or_fetch v)))
-							effective_having
-							next_groups
+							_gp_condition
+							(merge next_groups partition_stages)
 							schemas
 							replace_find_column
 							nil))
