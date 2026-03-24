@@ -358,7 +358,14 @@ func init_sync() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "list", ParamDesc: "optional: ≥2-element slice to use as backing", Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
+				Params: []*TypeDescriptor{
+					{Kind: "string", ParamName: "operation", ParamDesc: "one of: value, state, fail, once"},
+					{Kind: "any", ParamName: "value", ParamDesc: "value to store (for value/once/fail)", Optional: true},
+					{Kind: "string", ParamName: "msg", ParamDesc: "custom panic message (for once)", Optional: true},
+				},
+				Return: &TypeDescriptor{Kind: "any"},
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -366,7 +373,13 @@ func init_sync() {
 		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
 		Fn: NewSession,
 		Type: &TypeDescriptor{
-			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
+				Params: []*TypeDescriptor{
+					{Kind: "string", ParamName: "key", ParamDesc: "key to get or set", Optional: true},
+					{Kind: "any", ParamName: "value", ParamDesc: "value to store", Optional: true},
+				},
+				Return: &TypeDescriptor{Kind: "any"},
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{

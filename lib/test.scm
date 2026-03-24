@@ -1459,6 +1459,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p9 (newpromise))
 	(p9 "once" 1)
 	(assert (equal? (try (lambda () (begin (p9 "once" 2 "scalar subselect returned more than one row") false)) (lambda (e) (equal? e "scalar subselect returned more than one row"))) true) true "once custom error message")
+	/* promise interface error handling */
+	(define p10 (newpromise))
+	(assert (equal? (try (lambda () (p10)) (lambda (e) "caught")) "caught") true "promise: 0 args panics")
+	(assert (equal? (try (lambda () (p10 "nonexistent")) (lambda (e) "caught")) "caught") true "promise: unknown operation panics")
+	(assert (equal? (try (lambda () (p10 "value" 1 2 3)) (lambda (e) "caught")) "caught") true "promise: too many args panics")
+
+	/* newsession interface tests */
+	(print "testing session interface ...")
+	(define s1 (newsession))
+	(assert (equal? (s1) (list)) true "session: empty session lists no keys")
+	(s1 "x" 42)
+	(assert (equal? (s1 "x") 42) true "session: get returns stored value")
+	(s1 "y" "hello")
+	(assert (equal? (s1 "y") "hello") true "session: get returns string value")
+	(assert (nil? (s1 "missing")) true "session: nonexistent key returns nil")
+	(s1 "x" 99)
+	(assert (equal? (s1 "x") 99) true "session: overwrite works")
+	(define s1_keys (s1))
+	(assert (contains? s1_keys "x") true "session: lists key x")
+	(assert (contains? s1_keys "y") true "session: lists key y")
+	(assert (equal? (try (lambda () (s1 "a" "b" "c")) (lambda (e) "caught")) "caught") true "session: too many args panics")
 
 	/* dashboard metrics (metrics.go) */
 	(print "testing dashboard metrics ...")
