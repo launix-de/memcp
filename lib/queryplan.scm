@@ -2230,8 +2230,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define _remaining_pstages (filter partition_stages (lambda (ps)
 							(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 								(or acc (has? (coalesceNil _stage_scope '()) a))) false)))))
+						/* scoped GROUPs: outer tables come FIRST, keytable is LEFT JOINed
+						AFTER them. This ensures outer rows without keytable matches still
+						appear (with NULL aggregates → coalesceNil → 0).
+						Essential for NOT EXISTS / NOT IN semantics. */
+						(define _kt_is_outer (and (not (nil? _stage_scope)) (not (equal? stage_group '(1)))))
+						(define _kt_je (if _kt_is_outer
+							/* build join condition: keytable group-key columns = outer domain expressions */
+							(begin
+								(define _kt_je_parts (map stage_group (lambda (g) (list (quote equal??) (replace_group_key_or_fetch g) g))))
+								(if (equal? 1 (count _kt_je_parts)) (car _kt_je_parts)
+									(if (> (count _kt_je_parts) 1) (cons (quote and) _kt_je_parts) true)))
+							nil))
 						(define grouped_plan (build_queryplan schema
-							(merge (list (list grouptbl schema grouptbl false nil)) _grp_ps_tables)
+							(if _kt_is_outer
+								(merge _grp_ps_tables (list (list grouptbl schema grouptbl true _kt_je)))
+								(merge (list (list grouptbl schema grouptbl false nil)) _grp_ps_tables))
 							(map_assoc fields (lambda (k v) (replace_group_key_or_fetch v)))
 							_gp_condition
 							(merge next_groups _remaining_pstages)
