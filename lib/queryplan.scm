@@ -962,15 +962,15 @@ WHAT IT MUST NOT DO:
 						(define promise_sym (symbol (concat "__unnest_promise:" sq_id)))
 
 						/* inline pre-computation: evaluate modified subquery, capture scalar value */
-						(list (quote !begin)
+						(list (quote begin)
 							(list (quote define) promise_sym (list (quote newpromise)))
-														(list (quote define) (symbol "resultrow")
+							(list (quote define) (symbol "resultrow")
 								(list (quote lambda) (list (symbol "item"))
 									(list promise_sym "once"
 										(list (quote nth) (symbol "item") 1)
 										"scalar subselect returned more than one row")))
 							(build_queryplan_term modified_subquery)
-														(list promise_sym "value"))
+							(list promise_sym "value"))
 				))
 		))
 	)))
