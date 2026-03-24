@@ -168,6 +168,45 @@ oder _:identifier
 )))
 
 
+/* helper: parse TTL into list of (s p o) triples without loading */
+(define parse_ttl_triples (lambda (schema s) (match (ttl_header s)
+	'("prefixes" definitions "rest" rest)
+	(begin
+		(define rdf_constant_pfx (parser (or
+			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x))
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post)))
+			rdf_constant
+		)))
+		(define ttl_fact (parser '(
+			(define facts
+				(parser '(
+					(define s rdf_constant_pfx)
+					(define ps (+ (parser '((define p rdf_constant_pfx) (define os (+ rdf_constant_pfx ",")) (? ";")) (map os (lambda (o) '(p o))))))
+					"."
+				) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
+			)
+			(define rest rest)
+		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+		(set _pt (newsession))
+		(_pt "triples" '())
+		(define process_fact (lambda (rest) (match (ttl_fact rest)
+			'("facts" facts "rest" (regex "^[ \\n\\r\\t]*$" _)) (_pt "triples" (merge (_pt "triples") facts))
+			'("facts" facts "rest" rest) (!begin (_pt "triples" (merge (_pt "triples") facts)) (process_fact rest))
+			rest (error "couldnt parse: " rest)
+		)))
+		(process_fact rest)
+		(_pt "triples")
+	)
+)))
+
+/* delete triples from the store that match the given TTL */
+(define delete_ttl (lambda (schema s) (begin
+	(set triples (parse_ttl_triples schema s))
+	(map triples (lambda (triple) (match triple '(subj pred obj)
+		(scan schema "rdf" '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
+	)))
+)))
+
 (define load_ttl (lambda (schema s) (match (ttl_header s)
 	'("prefixes" definitions "rest" rest)
 	(begin
