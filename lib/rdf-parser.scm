@@ -24,11 +24,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(regex "[a-zA-Z0-9_]*:[a-zA-Z0-9_]*" false false) /* ^^prefix:name */
 	(regex "[a-zA-Z0-9_]+" false false) /* ^^barename */
 )))
+/* unescape standard TTL/JSON escape sequences in a string */
+(define rdf_unescape (lambda (s)
+	(replace (replace (replace (replace (replace s "\\n" "\n") "\\t" "\t") "\\\\" "\\") "\\\"" "\"") "\\r" "\r")
+))
 (define rdf_constant (parser (or
 	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* IRI */
 	(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x) /* triple-quoted string, optional datatype ignored */
-	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) x) /* string with language, ignore language */
-	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x) /* string, optional datatype ignored */
+	(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x)) /* string with language */
+	(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) (rdf_unescape x)) /* string with escapes */
 	(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node _:identifier */
 	(regex "[a-zA-Z0-9_]+" true) /* bare name */
 )))
