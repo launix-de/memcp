@@ -2394,10 +2394,7 @@ WHAT IT MUST NOT DO:
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(begin
-				(define _ir (apply join_reorder (apply untangle_query (merge query (list nil)))))
-				(match _ir '(_ir_schema _ir_tables _ir_fields _ir_condition _ir_groups _ir_schemas _ir_rfc) (begin
-				(apply build_queryplan (merge _ir (list nil))))
+			(apply build_queryplan (merge (apply join_reorder (apply untangle_query (merge query (list nil)))) (list nil)))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
