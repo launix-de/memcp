@@ -1613,11 +1613,16 @@ or generate runtime scan code (build_queryplan).
 							(cons (replace_find_column a) (cons (replace_find_column b) (cons c '()))))
 					)
 				)
-				/* Unqualified column: prefer main tables (no ':' prefix) over subquery tables (prefixed with ':') */
+				/* Unqualified column: prefer main tables over unnested/subquery tables.
+				Main tables have no ':' prefix and no '_unn_' prefix in their alias. */
 				'((symbol get_column) nil _ col ci) (begin
-					/* First try main tables (aliases without ':') */
+					/* First try main tables (aliases without ':' or '_unn_' prefix) */
+					(define _is_main_alias (lambda (alias) (begin
+						(define s (string alias))
+						(and (not (strlike s "%:%"))
+							(not (and (>= (strlen s) 5) (equal? (substr s 0 5) "_unn_")))))))
 					(define main_match (reduce_assoc schemas (lambda (a alias cols)
-						(if (and (not (strlike (string alias) "%:%")) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+						(if (and (_is_main_alias alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 							alias a)) nil))
 					/* If not found in main tables, try subquery tables (aliases with ':') */
 					(define any_match (if (nil? main_match)
