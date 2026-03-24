@@ -1178,7 +1178,8 @@ WHAT IT MUST NOT DO:
 								groups2)
 							groups2))
 						(define has_stage (and (not (nil? groups2)) (not (equal? groups2 '()))))
-						(if (and has_stage (not (equal? (cdr groups2) '()))) (error "multiple group stages not supported yet in EXISTS subselects"))
+						/* multiple stages: drop partition stages, keep only first regular stage */
+						(if (and has_stage (not (equal? (cdr groups2) '()))) (set groups2 (list (reduce groups2 (lambda (a s) (if (nil? a) (if (nil? (stage_partition_aliases s)) s nil) a)) nil))))
 						(define stage (if has_stage (car groups2) nil))
 						(define stage_group (if stage (coalesceNil (stage_group_cols stage) '()) nil))
 						(define stage_having (if stage (stage_having_expr stage) nil))
@@ -1572,13 +1573,7 @@ WHAT IT MUST NOT DO:
 					(define ue_outer_refs (_ue_eor condition2_ue))
 					(define ue_has_outer (not (equal? ue_outer_refs '())))
 					(if (not ue_has_outer) nil /* non-correlated: use inline path */
-						/* EXISTS on single table: use scan_order with limitPartitionCols=N
-						to get at most 1 row per domain value, avoiding row multiplication */
-						(if (not (and (list? tables2_ue) (equal? (count tables2_ue) 1))) nil
-							/* skip if condition has inline scalar code (opaque scopes) —
-							scan_order filter can't execute inline scalar subselect code */
-							(if (begin (define _ue_has_opaque (lambda (expr) (match expr (cons sym args) (if (_is_opaque_scope_sym sym) true (reduce args (lambda (a b) (or a (_ue_has_opaque b))) false)) false))) (_ue_has_opaque condition2_ue)) nil
-								(begin
+						(begin
 									/* Generate unique alias */
 									(define ue_sq_idx (coalesce (sq_cache "idx") 0))
 									(sq_cache "idx" (+ ue_sq_idx 1))
@@ -1640,34 +1635,28 @@ WHAT IT MUST NOT DO:
 										'((symbol equal??) a b) (if (_ue_hor a) (if (not (_ue_hor b)) (list b (_ue_ror a)) nil) (if (_ue_hor b) (list a (_ue_ror b)) nil))
 										'((quote equal??) a b) (if (_ue_hor a) (if (not (_ue_hor b)) (list b (_ue_ror a)) nil) (if (_ue_hor b) (list a (_ue_ror b)) nil))
 										nil))) (lambda (x) (not (nil? x)))))
-									/* Materialize DISTINCT domain values via scan_order with limitPartitionCols.
-									Sort by domain cols, limit 1 per partition → each domain value appears once. */
-									(define ue_tdesc (car tables2_ue))
-									(define ue_tblvar (nth ue_tdesc 0))
-									(define ue_schema3 (nth ue_tdesc 1))
-									(define ue_tbl3 (nth ue_tdesc 2))
-									/* domain column field names in the inner table */
-									(define ue_dom_inner_cols (map ue_domain_cols (lambda (dc) (match (nth dc 0)
-										'((symbol get_column) _ _ col _) col
-										'((quote get_column) _ _ col _) col
-										"__unknown__"))))
-									/* all columns needed: filter cols + domain cols + outer refs from opaque scopes */
-									(define ue_all_cols (merge_unique
-										(extract_columns_for_tblvar ue_tblvar condition2_ue)
-										(extract_outer_columns_for_tblvar ue_tblvar condition2_ue)
-										ue_dom_inner_cols))
-
-
-
-
-									/* build scan_order: sort by domain cols, limitPartitionCols=N, limit=1 */
+									/* Materialize DISTINCT domain values via build_queryplan_term.
+									Produces SELECT DISTINCT domain_cols FROM <exists_body> WHERE <inner_cond>.
+									Uses keytable (single-table) or prejoin (multi-table) automatically. */
 									(define ue_dom_count (count ue_domain_cols))
 									(define ue_dom_idx 0)
 									(define ue_dom_field_names (map ue_domain_cols (lambda (dc) (begin
 										(define dname (concat "__domain_" ue_dom_idx))
 										(set ue_dom_idx (+ ue_dom_idx 1))
 										dname))))
-									/* resultrow collector */
+									/* build domain fields: inner expressions named as __domain_N */
+									(set ue_dom_idx 0)
+									(define ue_dom_fields (merge (map ue_domain_cols (lambda (dc) (begin
+										(define dname (concat "__domain_" ue_dom_idx))
+										(set ue_dom_idx (+ ue_dom_idx 1))
+										(list dname (nth dc 0)))))))
+									/* GROUP BY domain expressions = DISTINCT domain values */
+									(define ue_dom_group (map ue_domain_cols (lambda (dc) (nth dc 0))))
+									/* clean table entries (remove joinexprs to avoid duplicate condition) */
+									(define ue_clean_tables (map tables2_ue (lambda (td) (match td '(a s t io _) (list a s t io nil) td))))
+									/* build derived AST: SELECT DISTINCT domain_cols FROM tables WHERE inner_cond GROUP BY domain_cols */
+									(define ue_derived_ast (list schema2_ue ue_clean_tables ue_dom_fields (if (nil? ue_inner_cond) true ue_inner_cond) ue_dom_group nil nil nil nil))
+									/* resultrow collector (same pattern as Path A aggregate unnesting) */
 									(define ue_rows_sym (symbol (concat "__ue_rows:" ue_sq_prefix)))
 									(define ue_rr_sym (symbol (concat "__ue_rr:" ue_sq_prefix)))
 									(define ue_materialized (list (quote begin)
@@ -1678,21 +1667,7 @@ WHAT IT MUST NOT DO:
 											(list (quote lambda) (list (symbol "item"))
 												(list ue_rows_sym "rows"
 													(list (quote cons) (symbol "item") (list ue_rows_sym "rows")))))
-										(list (quote scan_order)
-											ue_schema3 ue_tbl3
-											(cons list ue_all_cols)
-											(list (quote lambda)
-												(map ue_all_cols (lambda (col) (symbol (concat ue_tblvar "." col))))
-												(optimize (replace_columns_from_expr (coalesceNil ue_inner_cond true))))
-											(cons list ue_dom_inner_cols)
-											(cons list (map ue_dom_inner_cols (lambda (_) '<)))
-											ue_dom_count 0 1
-											(cons list ue_dom_inner_cols)
-											(list (quote lambda)
-												(map ue_dom_inner_cols (lambda (col) (symbol (concat ue_tblvar "." col))))
-												(list (symbol "resultrow")
-													(cons (quote list) (merge (map ue_dom_inner_cols (lambda (col) (list col (symbol (concat ue_tblvar "." col)))))))))
-											nil nil false)
+										(build_queryplan_term ue_derived_ast)
 										(list (quote set) (symbol "resultrow") ue_rr_sym)
 										(list ue_rows_sym "rows")))
 									/* domain join condition */
@@ -1713,8 +1688,6 @@ WHAT IT MUST NOT DO:
 										(list (quote get_column) ue_sq_prefix false (car ue_dom_field_names) false))))
 									(list ue_subst ue_tbl_entries)
 								)
-							)
-						)
 					)
 					nil /* untangle failed */
 				)
