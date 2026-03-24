@@ -1813,7 +1813,7 @@ WHAT IT MUST NOT DO:
 											(if (nil? _nin_count_sq) nil (unnest_subselect _nin_count_sq outer_schemas)))
 											nil))
 										(if (nil? _nin_count_result)
-											(list (quote not) (build_in_subselect target_expr subquery outer_schemas))
+											expr /* leave as-is for build_queryplan */
 											(match _nin_count_result '(_nin_subst _nin_tbls) (begin
 												(sq_cache "tables" (merge _nin_tbls (coalesceNil (sq_cache "tables") '())))
 												(list (quote equal?) (list (quote coalesceNil) _nin_subst 0) 0)))))
@@ -1831,7 +1831,7 @@ WHAT IT MUST NOT DO:
 												(unnest_subselect _nex_count_sq outer_schemas))
 												nil))
 											(if (nil? _nex_count_result)
-												(list (quote not) (build_exists_subselect subquery outer_schemas))
+												expr /* leave as-is for build_queryplan */
 												(match _nex_count_result '(_nex_subst _nex_tbls) (begin
 													(sq_cache "tables" (merge _nex_tbls (coalesceNil (sq_cache "tables") '())))
 													(list (quote equal?) (list (quote coalesceNil) _nex_subst 0) 0)))))
@@ -1847,10 +1847,10 @@ WHAT IT MUST NOT DO:
 				(match kind
 					(quote inner_select) (match args
 						(cons subquery '()) (begin
-							/* try Neumann unnesting first; fall back to inline code */
+							/* Neumann unnesting — no fallback to inline code */
 							(define _us_r (unnest_subselect subquery outer_schemas))
 							(if (nil? _us_r)
-								(build_scalar_subselect subquery outer_schemas)
+								expr /* leave as-is for build_queryplan */
 								(match _us_r '(_us_subst _us_tbls) (begin
 									(sq_cache "tables" (merge _us_tbls (coalesceNil (sq_cache "tables") '())))
 									_us_subst))))
@@ -1875,7 +1875,7 @@ WHAT IT MUST NOT DO:
 								(if (nil? _in_count_sq) nil (unnest_subselect _in_count_sq outer_schemas)))
 								nil))
 							(if (nil? _in_count_result)
-								(build_in_subselect target_expr subquery outer_schemas)
+								expr /* leave as-is for build_queryplan */
 								(match _in_count_result '(_in_subst _in_tbls) (begin
 									(sq_cache "tables" (merge _in_tbls (coalesceNil (sq_cache "tables") '())))
 									(list (quote >) (list (quote coalesceNil) _in_subst 0) 0)))))
@@ -1893,7 +1893,7 @@ WHAT IT MUST NOT DO:
 								(unnest_subselect _ex_count_sq outer_schemas))
 								nil))
 							(if (nil? _ex_count_result)
-								(build_exists_subselect subquery outer_schemas)
+								expr /* leave as-is for build_queryplan */
 								(match _ex_count_result '(_ex_subst _ex_tbls) (begin
 									(sq_cache "tables" (merge _ex_tbls (coalesceNil (sq_cache "tables") '())))
 									(list (quote >) (list (quote coalesceNil) _ex_subst 0) 0)))))
