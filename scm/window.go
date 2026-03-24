@@ -146,6 +146,7 @@ func init_window() {
 			},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest"}, &TypeDescriptor{Kind: "number", ParamName: "count", ParamDesc: "number of nil positions to shift in"}},
+			Return: &TypeDescriptor{Kind: "nil"},
 		},
 	})
 }

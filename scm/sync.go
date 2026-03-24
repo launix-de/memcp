@@ -443,7 +443,12 @@ func init_sync() {
 			Params: []*TypeDescriptor{
 				{Kind: "func", ParamName: "f", ParamDesc: "function that produces the result value"},
 			},
-			Return: &TypeDescriptor{Kind: "func"},
+			Return: &TypeDescriptor{Kind: "func",
+				Params: []*TypeDescriptor{
+					{Kind: "any", ParamName: "args", ParamDesc: "arguments forwarded to the wrapped function on first call", Variadic: true},
+				},
+				Return: &TypeDescriptor{Kind: "any"},
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -467,7 +472,13 @@ func init_sync() {
 			})
 		},
 		Type: &TypeDescriptor{
-			Return: &TypeDescriptor{Kind: "func"},
+			Params: []*TypeDescriptor{},
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
+				Params: []*TypeDescriptor{
+					{Kind: "func", ParamName: "fn", ParamDesc: "parameterless function to execute under the lock"},
+				},
+				Return: &TypeDescriptor{Kind: "any"},
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
