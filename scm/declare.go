@@ -400,9 +400,84 @@ func types_match(given string, required string) bool {
 	if given == "int" && required == "number" {
 		return true // we allow int to number but not otherwise
 	}
-	// TODO: in case of func: compare signatures??
 	// TODO: list(subtype)
 	return false // not a single match
+}
+
+// validateCallbackSignature checks whether a lambda literal matches the
+// expected callback signature (parameter count). Returns "" on success
+// or an error description.
+func validateCallbackSignature(lambdaSlice []Scmer, expectedSig *TypeDescriptor, source_info SourceInfo) string {
+	if expectedSig == nil || expectedSig.Kind != "func" || len(expectedSig.Params) == 0 {
+		return ""
+	}
+	// lambdaSlice is (lambda (params...) body [numvars])
+	if len(lambdaSlice) < 3 {
+		return ""
+	}
+	if !lambdaSlice[0].IsSymbol() || !lambdaSlice[0].SymbolEquals("lambda") {
+		return ""
+	}
+	paramList, ok := scmerSlice(lambdaSlice[1])
+	if !ok {
+		return ""
+	}
+
+	// Count expected required/max params
+	expectedMin := 0
+	expectedMax := 0
+	hasVariadic := false
+	for _, p := range expectedSig.Params {
+		if p == nil {
+			expectedMax++
+			expectedMin++
+			continue
+		}
+		if p.Variadic {
+			hasVariadic = true
+		} else if !p.Optional {
+			expectedMin++
+		}
+		expectedMax++
+	}
+
+	lambdaParams := len(paramList)
+	if hasVariadic {
+		// variadic: lambda must have at least expectedMin params
+		if lambdaParams < expectedMin {
+			return fmt.Sprintf("%s: callback expects at least %d parameters, but lambda has %d",
+				source_info.String(), expectedMin, lambdaParams)
+		}
+	} else {
+		// fixed arity: lambda must have between expectedMin and expectedMax
+		if lambdaParams < expectedMin {
+			return fmt.Sprintf("%s: callback expects at least %d parameters, but lambda has %d",
+				source_info.String(), expectedMin, lambdaParams)
+		}
+		if lambdaParams > expectedMax {
+			return fmt.Sprintf("%s: callback expects at most %d parameters, but lambda has %d",
+				source_info.String(), expectedMax, lambdaParams)
+		}
+	}
+
+	// Validate lambda body against expected return type
+	if expectedSig.Return != nil && expectedSig.Return.Kind != "" && expectedSig.Return.Kind != "any" {
+		// Recursively validate the body (last expression before optional numvars)
+		bodyIdx := 2
+		if len(lambdaSlice) > 3 {
+			// has numvars suffix — body is at index 2
+			bodyIdx = 2
+		}
+		if bodyIdx < len(lambdaSlice) {
+			bodyType := Validate(lambdaSlice[bodyIdx], expectedSig.Return.Kind)
+			if !types_match(bodyType, expectedSig.Return.Kind) {
+				return fmt.Sprintf("%s: callback should return %s, but body has type %s",
+					source_info.String(), expectedSig.Return.Kind, bodyType)
+			}
+		}
+	}
+
+	return ""
 }
 
 func types_merge(given, newtype string) string {
@@ -494,6 +569,28 @@ func Validate(val Scmer, require string) string {
 					typ := Validate(slice[i], subrequired)
 					if !types_match(typ, subrequired) {
 						panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source_info.String(), def.Name, i, subrequired, typ))
+					}
+					// Deep callback signature validation: if param expects func with Params,
+					// and the argument is a lambda literal, validate arity and return type.
+					if subrequired == "func" && def != nil && def.Type != nil {
+						j := i - 1
+						if j >= len(def.Type.Params) {
+							j = len(def.Type.Params) - 1
+						}
+						if j >= 0 && j < len(def.Type.Params) && def.Type.Params[j] != nil {
+							paramTD := def.Type.Params[j]
+							if paramTD.Kind == "func" && len(paramTD.Params) > 0 {
+								argVal := slice[i]
+								if argVal.IsSourceInfo() {
+									argVal = argVal.SourceInfo().value
+								}
+								if argSlice, ok2 := scmerSlice(argVal); ok2 && len(argSlice) >= 3 {
+									if errMsg := validateCallbackSignature(argSlice, paramTD, source_info); errMsg != "" {
+										panic(errMsg)
+									}
+								}
+							}
+						}
 					}
 					if isReturntype {
 						returntype = types_merge(returntype, typ)

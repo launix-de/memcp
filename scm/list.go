@@ -1130,7 +1130,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be checked", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "func(string any)->any that flattens down each element", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "list"}},
+				{Kind: "func", ParamName: "map", ParamDesc: "func(key, value)->any that extracts one element per key-value pair", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
