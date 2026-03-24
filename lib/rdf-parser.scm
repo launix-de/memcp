@@ -215,16 +215,14 @@ oder _:identifier
 	'("prefixes" definitions "rest" rest)
 	(begin
 		/* blank node registry: maps _:id to urn:uuid:... per load */
-		(set blank_nodes (newsession))
+		(set _bn (newsession))
 		(define resolve_blank (lambda (val)
-			(match val (regex "^_:(.+)$" _ id) (begin
-				(set existing (blank_nodes id))
-				(if (nil? existing) (begin
-					(set generated (concat "urn:uuid:" (uuid)))
-					(blank_nodes id generated)
-					generated
-				) existing)
-			) val)
+			(if (nil? val) val
+				(match val (regex "^_:(.+)$" _ bname) (begin
+					(if (nil? (_bn bname)) (_bn bname (concat "urn:uuid:" (uuid))))
+					(_bn bname)
+				) val)
+			)
 		))
 		(define rdf_constant_pfx (parser (or
 			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node before prefix match */
@@ -241,10 +239,9 @@ oder _:identifier
 			)
 			(define rest rest)
 		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
-		(set load (lambda (facts) (!begin
-			/* resolve blank nodes to UUIDs */
-			(set resolved_facts (map facts (lambda (triple) (match triple '(s p o) '((resolve_blank s) (resolve_blank p) (resolve_blank o))))))
-			(insert schema "rdf" '("s" "p" "o") resolved_facts '() (lambda () true))
+		(set load (lambda (facts) (begin
+			/* resolve blank nodes to UUIDs and insert */
+			(insert schema "rdf" '("s" "p" "o") (map facts (lambda (triple) (list (resolve_blank (car triple)) (resolve_blank (car (cdr triple))) (resolve_blank (car (cdr (cdr triple))))))) '() (lambda () true))
 		)))
 		(define process_fact (lambda (rest) (match (ttl_fact rest)
 			'("facts" facts "rest" (regex "^[ \\n\\r\\t]*$" _)) (load facts)

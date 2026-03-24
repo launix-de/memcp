@@ -860,7 +860,7 @@ func init_strings() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const: false, /* NOT const — each call must return a unique value */
 		},
 	})
 
