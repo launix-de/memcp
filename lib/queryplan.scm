@@ -1522,22 +1522,20 @@ WHAT IT MUST NOT DO:
 											(define us_dom_je (if (equal? (count us_dom_je_parts) 0) true
 												(if (equal? (count us_dom_je_parts) 1) (car us_dom_je_parts)
 													(cons (quote and) us_dom_je_parts))))
-											/* add inner condition to overall condition via first table's joinexpr */
-											(if (and (not (nil? us_inner_cond_prefixed)) (not (nil? us_prefixed_tables)))
+											/* set first inner table to LEFT JOIN with domain+inner condition as joinexpr */
+											(define _us_full_je (if (nil? us_inner_cond_prefixed) us_dom_je
+												(if (equal? us_dom_je true) us_inner_cond_prefixed
+													(list (quote and) us_dom_je us_inner_cond_prefixed))))
+											(if (not (nil? us_prefixed_tables))
 												(sq_cache "tables" (begin
 													(define _all_tbls (sq_cache "tables"))
 													(define _first_inner (car us_prefixed_tables))
 													(define _first_alias (match _first_inner '(a _ _ _ _) a ""))
 													(map _all_tbls (lambda (td) (match td
 														'(a s t io je) (if (equal? a _first_alias)
-															(list a s t io (if (nil? je) us_inner_cond_prefixed
-																(list (quote and) je us_inner_cond_prefixed)))
+															(list a s t true _us_full_je)
 															td)
 														td))))))
-											/* add join condition to overall condition */
-											(set condition (if (nil? condition) us_dom_je
-												(if (equal? condition true) us_dom_je
-													(list (quote and) condition us_dom_je))))
 											/* substitution: reference the prefixed value column */
 																			(define us_subst_raw (_us_prefix_ria us_value_expr))
 											(define us_is_count (match us_value_expr
@@ -2396,7 +2394,10 @@ WHAT IT MUST NOT DO:
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(apply build_queryplan (merge (apply join_reorder (apply untangle_query (merge query (list nil)))) (list nil)))
+			(begin
+				(define _ir (apply join_reorder (apply untangle_query (merge query (list nil)))))
+				(match _ir '(_ir_schema _ir_tables _ir_fields _ir_condition _ir_groups _ir_schemas _ir_rfc) (begin
+				(apply build_queryplan (merge _ir (list nil))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
