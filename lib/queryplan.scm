@@ -1763,7 +1763,26 @@ WHAT IT MUST NOT DO:
 							(define inner_kind (inner_select_kind inner_sym))
 							(if (equal?? inner_kind (quote inner_select_in))
 								(match inner_args
-									(cons target_expr (cons subquery '())) (list (quote not) (build_in_subselect target_expr subquery outer_schemas))
+									(cons target_expr (cons subquery '())) (begin
+										/* Rewrite NOT IN → (= COALESCE(COUNT(*),0) 0) with target equality */
+										(define _nin_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
+										(define _nin_first_field (match subquery '(_ _ flds _ _ _ _ _ _)
+											(match flds (cons k (cons v _)) v nil) nil))
+										(define _nin_count_result (if (and _nin_has_tables (not (nil? _nin_first_field))) (begin
+											(define _nin_count_sq (match subquery
+												'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+													(if (or (nil? c) (equal? c true))
+														(list (quote equal??) _nin_first_field target_expr)
+														(list (quote and) c (list (quote equal??) _nin_first_field target_expr)))
+													(list 1) nil nil nil nil)
+												nil))
+											(if (nil? _nin_count_sq) nil (unnest_subselect _nin_count_sq outer_schemas)))
+											nil))
+										(if (nil? _nin_count_result)
+											(list (quote not) (build_in_subselect target_expr subquery outer_schemas))
+											(match _nin_count_result '(_nin_subst _nin_tbls) (begin
+												(sq_cache "tables" (merge _nin_tbls (coalesceNil (sq_cache "tables") '())))
+												(list (quote equal?) (list (quote coalesceNil) _nin_subst 0) 0)))))
 									_ nil
 								)
 								(if (equal?? inner_kind (quote inner_select_exists))
@@ -1804,7 +1823,28 @@ WHAT IT MUST NOT DO:
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_in) (match args
-						(cons target_expr (cons subquery '())) (build_in_subselect target_expr subquery outer_schemas)
+						(cons target_expr (cons subquery '())) (begin
+							/* Rewrite IN → (> COALESCE(COUNT(*),0) 0) with target equality added to condition.
+							WHERE x IN (SELECT y FROM t WHERE cond) → WHERE COALESCE(COUNT(1) FROM t WHERE cond AND y=x, 0) > 0 */
+							(define _in_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
+							(define _in_first_field (match subquery '(_ _ flds _ _ _ _ _ _)
+								(match flds (cons k (cons v _)) v nil) nil))
+							(define _in_count_result (if (and _in_has_tables (not (nil? _in_first_field))) (begin
+								/* build COUNT subquery: add (equal?? first_field target_expr) to condition */
+								(define _in_count_sq (match subquery
+									'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+										(if (or (nil? c) (equal? c true))
+											(list (quote equal??) _in_first_field target_expr)
+											(list (quote and) c (list (quote equal??) _in_first_field target_expr)))
+										(list 1) nil nil nil nil)
+									nil))
+								(if (nil? _in_count_sq) nil (unnest_subselect _in_count_sq outer_schemas)))
+								nil))
+							(if (nil? _in_count_result)
+								(build_in_subselect target_expr subquery outer_schemas)
+								(match _in_count_result '(_in_subst _in_tbls) (begin
+									(sq_cache "tables" (merge _in_tbls (coalesceNil (sq_cache "tables") '())))
+									(list (quote >) (list (quote coalesceNil) _in_subst 0) 0)))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_exists) (match args
