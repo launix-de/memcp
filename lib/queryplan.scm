@@ -1467,54 +1467,91 @@ WHAT IT MUST NOT DO:
 										nil))) (lambda (x) (not (nil? x)))))
 									/* === Three-way branch: aggregate / non-agg+LIMIT / non-agg-no-LIMIT === */
 									(if (or us_has_agg us_has_grp)
-										/* === A: Aggregate → materialized derived table with GROUP BY === */
+										/* === A: Aggregate → flatten inner tables + scoped GROUP stage ===
+										Neumann Γ_{A∪D;f}: add domain cols to GROUP BY, flatten inner tables
+										with prefix into outer table list. No materialization. */
 										(begin
-											(define us_dom_idx 0)
-
-											(define us_dom_fields (merge (map us_domain_cols (lambda (dc) (begin
-												(define dname (concat "__domain_" us_dom_idx))
-												(set us_dom_idx (+ us_dom_idx 1))
-												(list dname (nth dc 0)))))))
+											/* rename inner aliases: alias → _sq0\0alias (recursive in all exprs) */
+											(define _us_prefix_ria (lambda (expr) (match expr
+												'((symbol get_column) alias_ ti col ci) (begin
+													(define na (_us_lookup alias_))
+													(if (nil? na) expr (list (quote get_column) na false col false)))
+												'((quote get_column) alias_ ti col ci) (begin
+													(define na (_us_lookup alias_))
+													(if (nil? na) expr (list (quote get_column) na false col false)))
+												(cons sym args) (cons (_us_prefix_ria sym) (map args _us_prefix_ria))
+												expr)))
+											/* prefix inner tables: alias → _sq0\0alias, tbl stays string */
+											(define us_prefixed_tables (map tables2_us (lambda (td) (match td
+												'(a s t io je) (list (coalesceNil (_us_lookup a) a) s t io
+													(if (nil? je) nil (_us_prefix_ria je)))
+												td))))
+											/* inner condition (non-correlated), prefixed */
+											(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
+											/* domain columns + original GROUP BY → scoped GROUP stage */
 											(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car groups2_us)) '()) '()))
 											(define us_orig_having (if us_has_stages (stage_having_expr (car groups2_us)) nil))
-											(define us_new_group (merge (map us_domain_cols (lambda (dc) (nth dc 0)))
-												(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1))) '() us_orig_group)))
-											(define us_mod_fields (merge fields2_us us_dom_fields))
-											(define us_mod_cond (if (nil? us_inner_cond_raw) true us_inner_cond_raw))
-											(define us_clean_tables (map tables2_us (lambda (td) (match td '(a s t io _) (list a s t io nil) td))))
-											(define us_derived_ast (list schema2_us us_clean_tables us_mod_fields us_mod_cond us_new_group us_orig_having nil nil nil))
-											(define us_dom_je_idx 0)
-											(define us_dom_je_parts (map us_domain_cols (lambda (dc) (begin
-												(define dname (concat "__domain_" us_dom_je_idx))
-												(set us_dom_je_idx (+ us_dom_je_idx 1))
-												(list (quote equal??) (list (quote get_column) us_sq_prefix false dname false) (nth dc 1))))))
+											(define us_new_group (merge (map us_domain_cols (lambda (dc) (_us_prefix_ria (nth dc 0))))
+												(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1))) '()
+													(map us_orig_group _us_prefix_ria))))
+											(define us_new_having (if (nil? us_orig_having) nil (_us_prefix_ria us_orig_having)))
+											/* scoped GROUP stage: partition-aliases = prefixed inner table aliases */
+											(define us_inner_aliases (map us_prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
+											/* use partition stage with group-cols to scope the GROUP BY to inner tables */
+											(define us_group_stage (list
+												(cons (quote group-cols) us_new_group)
+												(list (quote having) us_new_having)
+												(list (quote order) '())
+												(list (quote limit-partition-cols) 0)
+												(list (quote limit) nil)
+												(list (quote offset) nil)
+												(list (quote dedup) false)
+												(list (quote partition-aliases) us_inner_aliases)
+												(list (quote init) nil)))
+											/* register prefixed tables */
+											(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
+											/* register scoped GROUP stage */
+											(sq_cache "groups" (cons us_group_stage (coalesceNil (sq_cache "groups") '())))
+											/* register schemas for prefixed aliases */
+											(define us_prefixed_schemas (merge (map us_prefixed_tables (lambda (td) (match td
+												'(a _ _ _ _) (begin
+													(define _orig_a (reduce us_alias_map (lambda (acc p) (if (nil? acc) (if (equal? (nth p 1) a) (nth p 0) nil) acc)) nil))
+													(define _s_cols (if (nil? _orig_a) nil (schemas2_us _orig_a)))
+													(if (nil? _s_cols) '() (list a _s_cols)))
+												'())))))
+											(sq_cache "schemas" (merge us_prefixed_schemas (coalesceNil (sq_cache "schemas") '())))
+											/* join condition: domain equalities (outer_expr = prefixed_inner_expr) */
+											(define us_dom_je_parts (map us_domain_cols (lambda (dc)
+												(list (quote equal??) (_us_prefix_ria (nth dc 0)) (nth dc 1)))))
 											(define us_dom_je (if (equal? (count us_dom_je_parts) 0) true
 												(if (equal? (count us_dom_je_parts) 1) (car us_dom_je_parts)
 													(cons (quote and) us_dom_je_parts))))
-											(define us_output_cols (extract_assoc us_mod_fields (lambda (k v) k)))
-											(define us_rows_sym (symbol (concat "__us_rows:" us_sq_prefix)))
-											(define us_rr_sym (symbol (concat "__us_rr:" us_sq_prefix)))
-											(define us_materialized (list (quote begin)
-												(list (quote set) us_rows_sym (list (quote newsession)))
-												(list us_rows_sym "rows" '())
-												(list (quote set) us_rr_sym (symbol "resultrow"))
-												(list (quote set) (symbol "resultrow")
-													(list (quote lambda) (list (symbol "item"))
-														(list us_rows_sym "rows" (list (quote cons) (symbol "item") (list us_rows_sym "rows")))))
-												(build_queryplan_term us_derived_ast)
-												(list (quote set) (symbol "resultrow") us_rr_sym)
-												(list us_rows_sym "rows")))
-											(define us_tbl_entries (list (list us_sq_prefix schema2_us us_materialized true us_dom_je)))
-											(define us_sch (list us_sq_prefix (map us_output_cols (lambda (col) (list "Field" col "Type" "any")))))
-											(sq_cache "schemas" (merge us_sch (coalesceNil (sq_cache "schemas") '())))
-											(define us_subst_raw (list (quote get_column) us_sq_prefix false us_value_key false))
+											/* add inner condition to overall condition via first table's joinexpr */
+											(if (and (not (nil? us_inner_cond_prefixed)) (not (nil? us_prefixed_tables)))
+												(sq_cache "tables" (begin
+													(define _all_tbls (sq_cache "tables"))
+													(define _first_inner (car us_prefixed_tables))
+													(define _first_alias (match _first_inner '(a _ _ _ _) a ""))
+													(map _all_tbls (lambda (td) (match td
+														'(a s t io je) (if (equal? a _first_alias)
+															(list a s t io (if (nil? je) us_inner_cond_prefixed
+																(list (quote and) je us_inner_cond_prefixed)))
+															td)
+														td))))))
+											/* add join condition to overall condition */
+											(set condition (if (nil? condition) us_dom_je
+												(if (equal? condition true) us_dom_je
+													(list (quote and) condition us_dom_je))))
+											/* substitution: reference the prefixed value column */
+											(define us_subst_raw (_us_prefix_ria us_value_expr))
 											(define us_is_count (match us_value_expr
 												'((symbol aggregate) _ (symbol +) 0) true
 												'((quote aggregate) _ (symbol +) 0) true
 												'((quote aggregate) _ '(symbol +) 0) true
 												false))
 											(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
-											(list us_subst us_tbl_entries))
+											/* return substitution + empty table entries (tables already in sq_cache) */
+											(list us_subst '()))
 										/* === B/C: Non-aggregate === */
 										(begin
 										/* value must be a simple column (not computed expression) for direct table entry */
@@ -2204,7 +2241,9 @@ WHAT IT MUST NOT DO:
 			(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
 			/* integrate partition stages from non-aggregate LIMIT unnesting */
 			(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
+			(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
 			(set groups (if (equal? _sq_pstages '()) groups (merge _sq_pstages (coalesceNil groups '()))))
+			(set groups (if (equal? _sq_prop_groups '()) groups (merge _sq_prop_groups (coalesceNil groups '()))))
 			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 			but ONLY for columns referencing derived table aliases (keys in renamelist).
 			Uses schemas to find canonical column name without calling replace_find_column. */
@@ -2272,6 +2311,7 @@ WHAT IT MUST NOT DO:
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename (canonicalize_for_rename col)) dir)))))
 			(define groups (merge
 				(coalesceNil _sq_pstages '())
+				(coalesceNil _sq_prop_groups '())
 				(if (coalesce _cd_distinct_exprs false)
 				/* COUNT(DISTINCT): two group stages - first dedup, then aggregate */
 				(list
