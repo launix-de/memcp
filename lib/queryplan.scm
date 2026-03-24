@@ -2308,9 +2308,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 						(list 'begin keytable_init cleanup_plan
 							(if is_fk_reuse nil
-								(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
+								(if (not (nil? _stage_scope))
+									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
 									(make_collect false)
-									nil))
+									(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
+										(make_collect false)
+										nil)))
 							invalidation_plan compute_plan
 							/* window+GROUP BY injection: after keytable is computed,
 							scan it to fill promises with global totals, then wrap
