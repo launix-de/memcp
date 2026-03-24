@@ -2219,10 +2219,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* Phase 2: replace aggregates in the separated agg-condition parts,
 						then combine everything: HAVING + replaced agg-parts + ps-table conditions */
 						(define _replaced_agg_parts (map _cond_agg_parts replace_group_key_or_fetch))
+						/* when _kt_is_outer, _grp_ps_condition becomes the keytable joinexpr
+						and must not also appear in _gp_condition (would double-filter) */
 						(define _gp_parts (filter (merge
 							(if (or (nil? effective_having) (equal? effective_having true)) '() (list effective_having))
 							_replaced_agg_parts
-							(if (equal? _grp_ps_condition true) '() (list (replace_group_key_or_fetch _grp_ps_condition))))
+							(if (or _kt_is_outer (equal? _grp_ps_condition true)) '() (list (replace_group_key_or_fetch _grp_ps_condition))))
 							(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
 						(define _gp_condition (if (equal? 0 (count _gp_parts)) nil
 							(if (equal? 1 (count _gp_parts)) (car _gp_parts)
@@ -2237,12 +2239,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						appear (with NULL aggregates → coalesceNil → 0).
 						Essential for NOT EXISTS / NOT IN semantics. */
 						(define _kt_is_outer (and (not (nil? _stage_scope)) (not (equal? stage_group '(1)))))
+						/* keytable join condition: rewrite _grp_ps_condition so scoped-table
+						refs become keytable column refs (e.g. _unn_.did → keytable.did) */
 						(define _kt_je (if _kt_is_outer
-							/* build join condition: keytable group-key columns = outer domain expressions */
-							(begin
-								(define _kt_je_parts (map stage_group (lambda (g) (list (quote equal??) (replace_group_key_or_fetch g) g))))
-								(if (equal? 1 (count _kt_je_parts)) (car _kt_je_parts)
-									(if (> (count _kt_je_parts) 1) (cons (quote and) _kt_je_parts) true)))
+							(replace_group_key_or_fetch _grp_ps_condition)
 							nil))
 						(define grouped_plan (build_queryplan schema
 							(if _kt_is_outer
