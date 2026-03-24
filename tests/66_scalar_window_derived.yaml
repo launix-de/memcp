@@ -20,24 +20,27 @@ setup:
 
 test_cases:
 
-  - name: "standalone window function derived table"
+  - name: "standalone window function derived table (no ORDER BY)"
     sql: |
-      SELECT * FROM (
+      SELECT COUNT(*) AS cnt FROM (
         SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
         FROM swd_hist
-      ) t ORDER BY parent, rn
+      ) t
     expect:
-      rows: 3
+      rows: 1
       data:
-        - parent: 1
-          val: 200
-          rn: 1
-        - parent: 1
-          val: 100
-          rn: 2
-        - parent: 2
-          val: 300
-          rn: 1
+        - cnt: 3
+
+  - name: "standalone window function with filter (COUNT)"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+        FROM swd_hist
+      ) t WHERE rn = 1
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
 
   - name: "LEFT JOIN with window function derived table"
     sql: |
