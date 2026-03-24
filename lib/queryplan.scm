@@ -2088,8 +2088,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* preparation */
 				(define tblvar_cols (merge_unique (map stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
 				(set condition (replace_find_column (coalesceNil condition true)))
-				/* split condition: parts referencing partition-staged tables go to grouped_plan,
-				rest stays as keytable filter */
+				/* 2-phase condition split:
+				Phase 1: separate aggregate-containing AND-parts from non-aggregate parts.
+				Aggregates cannot be evaluated as row filters — they need the keytable.
+				Phase 2 (after keytable creation): replace aggregates with get_column refs,
+				then split by table references for pushdown. */
+				(define _has_agg_expr (lambda (expr) (match expr
+					(cons (symbol aggregate) _) true
+					(cons sym args) (reduce args (lambda (a b) (or a (_has_agg_expr b))) false)
+					false)))
+				(define _flatten_and_parts (lambda (expr) (match expr
+					(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
+						(merge (map parts _flatten_and_parts))
+						(list expr))
+					(list expr))))
+				(define _cond_parts (_flatten_and_parts condition))
+				(define _cond_agg_parts (filter _cond_parts _has_agg_expr))
+				(define _cond_non_agg (filter _cond_parts (lambda (p) (not (_has_agg_expr p)))))
+				/* non-aggregate condition = keytable scan filter */
+				(set condition (if (equal? 0 (count _cond_non_agg)) true
+					(if (equal? 1 (count _cond_non_agg)) (car _cond_non_agg)
+						(cons (quote and) _cond_non_agg))))
+				/* split non-aggregate condition: parts referencing partition-staged tables go to grouped_plan */
 				(define _grp_cond_split (split_condition condition _grp_ps_tables))
 				(define _grp_ps_condition (match _grp_cond_split '(_ later) later))
 				(set condition (match _grp_cond_split '(now _) now))
@@ -2192,10 +2212,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(list 'and replaced_having count_check)))
 							(replace_group_key_or_fetch stage_having)))
 
-						/* combine HAVING with partition-staged table conditions (join conditions deferred from GROUP BY) */
-						(define _gp_condition (if (equal? _grp_ps_condition true) effective_having
-							(if (or (nil? effective_having) (equal? effective_having true)) (replace_group_key_or_fetch _grp_ps_condition)
-								(list (quote and) effective_having (replace_group_key_or_fetch _grp_ps_condition)))))
+						/* Phase 2: replace aggregates in the separated agg-condition parts,
+						then combine everything: HAVING + replaced agg-parts + ps-table conditions */
+						(define _replaced_agg_parts (map _cond_agg_parts replace_group_key_or_fetch))
+						(define _gp_parts (filter (merge
+							(if (or (nil? effective_having) (equal? effective_having true)) '() (list effective_having))
+							_replaced_agg_parts
+							(if (equal? _grp_ps_condition true) '() (list (replace_group_key_or_fetch _grp_ps_condition))))
+							(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+						(define _gp_condition (if (equal? 0 (count _gp_parts)) nil
+							(if (equal? 1 (count _gp_parts)) (car _gp_parts)
+								(cons (quote and) _gp_parts))))
 						(define grouped_plan (build_queryplan schema
 							(merge (list (list grouptbl schema grouptbl false nil)) _grp_ps_tables)
 							(map_assoc fields (lambda (k v) (replace_group_key_or_fetch v)))
