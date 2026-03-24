@@ -7,7 +7,7 @@ setup: []
 test_cases:
 
   - name: "FILTER: equality"
-    noncritical: true
+
     ttl_data: |
       @prefix f01: <http://filter01.org/> .
       f01:a f01:val "yes" .
@@ -21,7 +21,7 @@ test_cases:
         - "?s": "http://filter01.org/a"
 
   - name: "FILTER: inequality"
-    noncritical: true
+
     ttl_data: |
       @prefix f02: <http://filter02.org/> .
       f02:a f02:n "10" .
@@ -34,7 +34,7 @@ test_cases:
       rows: 2
 
   - name: "FILTER: numeric comparison"
-    noncritical: true
+
     ttl_data: |
       @prefix f03: <http://filter03.org/> .
       f03:a f03:age "25" .
@@ -47,7 +47,7 @@ test_cases:
       rows: 2
 
   - name: "FILTER: regex"
-    noncritical: true
+
     ttl_data: |
       @prefix f04: <http://filter04.org/> .
       f04:a f04:name "Alice" .
@@ -60,7 +60,7 @@ test_cases:
       rows: 2
 
   - name: "FILTER: boolean AND"
-    noncritical: true
+
     ttl_data: |
       @prefix f05: <http://filter05.org/> .
       f05:a f05:x "1" ; f05:y "1" .
@@ -73,7 +73,7 @@ test_cases:
       rows: 1
 
   - name: "FILTER: boolean OR"
-    noncritical: true
+
     ttl_data: |
       @prefix f06: <http://filter06.org/> .
       f06:a f06:type "cat" .
@@ -86,7 +86,7 @@ test_cases:
       rows: 2
 
   - name: "FILTER: NOT"
-    noncritical: true
+
     ttl_data: |
       @prefix f07: <http://filter07.org/> .
       f07:a f07:active "true" .

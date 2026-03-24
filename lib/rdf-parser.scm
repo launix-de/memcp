@@ -48,12 +48,36 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* TODO: CONCAT() */
 )))
 
-/* TODO: blank nodes
-[ p o ]
-oder [] p o
-oder _:identifier
-
-*/
+/* SPARQL filter expressions — no bare names (would eat keywords) */
+(define rdf_filter_atom (parser (or
+	rdf_variable
+	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x)
+	(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false)) (rdf_unescape x))
+	(parser '("(" (define e rdf_filter_or) ")") e)
+	(parser '((atom "regex" true) "(" (define a rdf_filter_or) "," (define b rdf_filter_or) ")") '('regexp_test a b))
+	(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) '('concat '('definitions pfx) post))
+)))
+(define rdf_filter_not (parser (or
+	(parser '("!" (define e rdf_filter_atom)) '('not e))
+	rdf_filter_atom
+)))
+(define rdf_filter_cmp (parser (or
+	(parser '((define a rdf_filter_not) "!=" (define b rdf_filter_not)) '('not '('equal? a b)))
+	(parser '((define a rdf_filter_not) "=" (define b rdf_filter_not)) '('equal? a b))
+	(parser '((define a rdf_filter_not) "<=" (define b rdf_filter_not)) '('<= a b))
+	(parser '((define a rdf_filter_not) ">=" (define b rdf_filter_not)) '('>= a b))
+	(parser '((define a rdf_filter_not) "<" (define b rdf_filter_not)) '('< a b))
+	(parser '((define a rdf_filter_not) ">" (define b rdf_filter_not)) '('> a b))
+	rdf_filter_not
+)))
+(define rdf_filter_and (parser (or
+	(parser '((define a rdf_filter_cmp) "&&" (define b rdf_filter_and)) '('and a b))
+	rdf_filter_cmp
+)))
+(define rdf_filter_or (parser (or
+	(parser '((define a rdf_filter_and) "||" (define b rdf_filter_or)) '('or a b))
+	rdf_filter_and
+)))
 
 (define rdf_number (parser (define x (regex "[0-9]+" true)) (simplify x)))
 (define rdf_select (parser '(
@@ -68,7 +92,7 @@ oder _:identifier
 		(atom "{" true)
 		(define conditions (* (or
 			(parser '((define s rdf_expression) (define ps (+ (parser '((define p rdf_expression) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
-			/* TODO: FILTER regex(?var "pattern") */
+			(parser '((atom "FILTER" true) "(" (define expr rdf_filter_or) ")") (list (list "__filter__" expr)))
 			/* TODO: OPTIONAL {subquery} */
 		) "."))
 		(? (atom "." true))
@@ -96,7 +120,7 @@ oder _:identifier
 
 (define rdf_replace_ctx (lambda (expr ctx) (match expr
 	'('get_var sym) (coalesce (ctx sym) (error "SPARQL error: variable " sym " is used in SELECT but not bound in WHERE clause"))
-	(cons head tail) (cons head (map tail (lambda (x) (replace_ctx x ctx))))
+	(cons head tail) (cons head (map tail (lambda (x) (rdf_replace_ctx x ctx))))
 	expr
 )))
 
@@ -105,6 +129,12 @@ oder _:identifier
 		/* ctx: array with predefined variables */
 		/* no join reordering yet */
 		(define build_scan (lambda (conditions ctx) (match conditions
+			(cons '(s p) tail) (if (equal? (concat s) "__filter__")
+				/* FILTER: wrap inner plan in if-check */
+				'('if (rdf_replace_ctx p ctx) (build_scan tail ctx))
+				/* 2-element: error */
+				(error "SPARQL error: expected triple pattern (s p o), got 2 elements")
+			)
 			(cons '(s p o) tail) (begin
 				(define process (lambda (v sym conditions vars) (match v
 					'('get_var var) (if (ctx var)
