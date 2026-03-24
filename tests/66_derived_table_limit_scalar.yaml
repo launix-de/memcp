@@ -1,0 +1,103 @@
+# Derived table containing correlated scalar subselects with ORDER BY LIMIT.
+# Pattern: SELECT t.* FROM (SELECT m.*, COALESCE((SELECT h.col
+#   FROM hist h WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0)
+#   AS dynamic_val FROM main m LEFT JOIN ...) t
+#
+# When the outer derived table contains ORDER BY or LIMIT from
+# unsupported_groups, it triggers materialization. The materialized
+# rows variable must be accessible to scan.
+
+metadata:
+  version: "1.0"
+  description: "Derived table with ORDER BY LIMIT scalar subselects"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dtl_main"
+  - sql: "DROP TABLE IF EXISTS dtl_hist"
+  - sql: "DROP TABLE IF EXISTS dtl_ref"
+  - sql: "CREATE TABLE dtl_main (ID INT PRIMARY KEY, name TEXT, category INT)"
+  - sql: "CREATE TABLE dtl_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
+  - sql: "CREATE TABLE dtl_ref (ID INT PRIMARY KEY, label TEXT)"
+  - sql: "INSERT INTO dtl_main VALUES (1, 'Alice', 10), (2, 'Bob', 20)"
+  - sql: "INSERT INTO dtl_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000)"
+  - sql: "INSERT INTO dtl_ref VALUES (10, 'Cat A'), (20, 'Cat B')"
+
+test_cases:
+
+  - name: "scalar subselect with ORDER BY LIMIT (baseline)"
+    sql: |
+      SELECT m.ID,
+        COALESCE((SELECT h.val FROM dtl_hist h
+          WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS latest
+      FROM dtl_main m ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          latest: 200
+        - ID: 2
+          latest: 300
+
+  - name: "wrapped in SELECT t.* FROM (...) t"
+    sql: |
+      SELECT t.* FROM (
+        SELECT m.ID AS ID, m.name AS name,
+          COALESCE((SELECT h.val FROM dtl_hist h
+            WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS latest
+        FROM dtl_main m
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          latest: 200
+        - ID: 2
+          name: "Bob"
+          latest: 300
+
+  - name: "with LEFT JOIN and multiple scalar subselects"
+    sql: |
+      SELECT t.* FROM (
+        SELECT m.ID AS ID, m.name AS name,
+          r.label AS cat_label,
+          COALESCE((SELECT h.val FROM dtl_hist h
+            WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS latest_val,
+          COALESCE((SELECT h.ts FROM dtl_hist h
+            WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS latest_ts
+        FROM dtl_main m
+        LEFT JOIN dtl_ref r ON r.ID = m.category
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          cat_label: "Cat A"
+          latest_val: 200
+          latest_ts: 2000
+        - ID: 2
+          name: "Bob"
+          cat_label: "Cat B"
+          latest_val: 300
+          latest_ts: 3000
+
+  - name: "COUNT over derived table with scalar subselects"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.latest_val) AS total FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT h.val FROM dtl_hist h
+            WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS latest_val
+        FROM dtl_main m
+        LEFT JOIN dtl_ref r ON r.ID = m.category
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+          total: 500
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dtl_main"
+  - sql: "DROP TABLE IF EXISTS dtl_hist"
+  - sql: "DROP TABLE IF EXISTS dtl_ref"

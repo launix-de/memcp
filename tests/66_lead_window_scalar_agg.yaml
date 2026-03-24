@@ -1,0 +1,117 @@
+# Correlated scalar subselect with SUM aggregate over a LEAD() window function
+# derived table. Pattern from ERPL User-Listview:
+#   COALESCE((SELECT SUM(m.dayFactor * ...) FROM (SELECT parent AS ID, val,
+#     LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS partEnd
+#     FROM hist) m WHERE m.ID = main.ID AND ...), 0)
+#
+# The SUM triggers the direct aggregate scan path in build_scalar_subselect,
+# which must propagate _init2 (window materialization code) or __mat:m is nil.
+
+metadata:
+  version: "1.0"
+  description: "SUM aggregate over LEAD window function derived table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS lwsa_main"
+  - sql: "DROP TABLE IF EXISTS lwsa_hist"
+  - sql: "CREATE TABLE lwsa_main (ID INT PRIMARY KEY, name TEXT, startval INT)"
+  - sql: "CREATE TABLE lwsa_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
+  - sql: "INSERT INTO lwsa_main VALUES (1, 'Alice', 10), (2, 'Bob', 20)"
+  - sql: "INSERT INTO lwsa_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 1, 50, 3000), (4, 2, 300, 4000), (5, 2, 400, 5000)"
+
+test_cases:
+
+  - name: "LEAD standalone (baseline)"
+    sql: |
+      SELECT parent, val, ts,
+        LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+      FROM lwsa_hist
+      ORDER BY parent, ts
+    expect:
+      rows: 5
+      data:
+        - parent: 1
+          val: 100
+          ts: 1000
+          next_ts: 2000
+        - parent: 1
+          val: 200
+          ts: 2000
+          next_ts: 3000
+        - parent: 1
+          val: 50
+          ts: 3000
+          next_ts: null
+        - parent: 2
+          val: 300
+          ts: 4000
+          next_ts: 5000
+        - parent: 2
+          val: 400
+          ts: 5000
+          next_ts: null
+
+  - name: "SUM over LEAD derived table (correlated scalar subselect)"
+    sql: |
+      SELECT m2.ID, m2.name,
+        COALESCE((SELECT SUM(m.val)
+          FROM (SELECT parent, val, ts,
+            LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+          FROM lwsa_hist) m
+          WHERE m.parent = m2.ID AND m.next_ts IS NOT NULL
+        ), 0) AS total_with_next
+      FROM lwsa_main m2
+      ORDER BY m2.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          total_with_next: 300
+        - ID: 2
+          name: "Bob"
+          total_with_next: 300
+
+  - name: "COUNT over LEAD derived table (correlated)"
+    sql: |
+      SELECT m2.ID,
+        COALESCE((SELECT COUNT(*)
+          FROM (SELECT parent, val, ts,
+            LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+          FROM lwsa_hist) m
+          WHERE m.parent = m2.ID AND m.next_ts IS NOT NULL
+        ), 0) AS cnt_with_next
+      FROM lwsa_main m2
+      ORDER BY m2.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          cnt_with_next: 2
+        - ID: 2
+          cnt_with_next: 1
+
+  - name: "SUM with DATEDIFF-like expression over LEAD derived table"
+    sql: |
+      SELECT m2.ID, m2.name,
+        COALESCE((SELECT SUM(m.val * (COALESCE(m.next_ts, 9999) - m.ts))
+          FROM (SELECT parent, val, ts,
+            LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+          FROM lwsa_hist) m
+          WHERE m.parent = m2.ID AND m.next_ts IS NOT NULL
+        ), 0) AS weighted_sum
+      FROM lwsa_main m2
+      ORDER BY m2.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          weighted_sum: 300000
+        - ID: 2
+          name: "Bob"
+          weighted_sum: 300000
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS lwsa_main"
+  - sql: "DROP TABLE IF EXISTS lwsa_hist"
