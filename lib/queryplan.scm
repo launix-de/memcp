@@ -296,7 +296,7 @@ to avoid matching outer tables which would break scope resolution. */
 			/* partition stage: preserve partition-aliases and limit-partition-cols */
 			(make_partition_stage spa
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff)
+				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage))
 			(make_group_stage
 				(map sg canon)
 				(canon sh)
@@ -318,7 +318,7 @@ to avoid matching outer tables which would break scope resolution. */
 		(list (quote dedup) false)
 	)
 ))
-(define make_partition_stage (lambda (aliases order partition_cols limit offset)
+(define make_partition_stage (lambda (aliases order partition_cols limit offset init)
 	(list
 		(cons (quote group-cols) '())
 		(list (quote having) nil)
@@ -328,6 +328,7 @@ to avoid matching outer tables which would break scope resolution. */
 		(list (quote offset) offset)
 		(list (quote dedup) false)
 		(list (quote partition-aliases) aliases)
+		(list (quote init) init)
 	)
 ))
 (define make_dedup_stage (lambda (group)
@@ -380,6 +381,12 @@ to avoid matching outer tables which would break scope resolution. */
 (define stage_partition_aliases (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
 		(cons (quote partition-aliases) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_init_code (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote init) rest) (if (nil? rest) nil (car rest))
 		_ nil
 	) acc)
 ) nil)))
@@ -1509,7 +1516,7 @@ WHAT IT MUST NOT DO:
 												(define us_part_order (merge us_dom_order us_renamed_order))
 												(define us_dom_count (count us_domain_cols))
 												/* register partition stage in sq_cache → merged into groups by untangle_query */
-												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesce us_orig_limit 1) (coalesceNil us_orig_offset 0)))
+												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesce us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
 												(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '())))
 												/* direct table entry with join condition (like non-agg non-LIMIT path) */
 												(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
@@ -3319,7 +3326,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ord_scan_mapfn_params (if is_update_target_ord
 										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
-									(scan_wrapper 'scan_order schema tbl
+									/* emit init code from partition stage if present */
+									(define _ps_init (if (nil? _ps_ord) nil (stage_init_code _ps_ord)))
+									(define _ord_scan (scan_wrapper 'scan_order schema tbl
 										/* condition */
 										(cons list filtercols)
 										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
@@ -3336,7 +3345,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(if is_update_target_ord (symbol "+") nil)
 										(if is_update_target_ord 0 nil)
 										isOuter
-									)
+									))
+									(if (nil? _ps_init) _ord_scan (list (quote begin) _ps_init _ord_scan))
 								))
 							)
 							'() /* final inner */ (if (nil? update_target)
@@ -3414,7 +3424,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
 													'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
 													_ '()))))))
-												(scan_wrapper 'scan_order schema tbl
+												/* emit init code from partition stage if present */
+												(define _ps_init2 (stage_init_code _ps))
+												(define _ps_scan (scan_wrapper 'scan_order schema tbl
 													(cons list (merge_unique filtercols cols))
 													'((quote lambda) (map (merge_unique filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 													(cons list _ps_ordercols)
@@ -3423,6 +3435,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													scan_mapcols
 													(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later))
 													nil nil isOuter))
+												(if (nil? _ps_init2) _ps_scan (list (quote begin) _ps_init2 _ps_scan)))
 											/* === regular scan === */
 											(scan_wrapper 'scan schema tbl
 												(cons list filtercols)
