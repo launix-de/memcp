@@ -899,8 +899,8 @@ WHAT IT MUST NOT DO:
 							(begin
 								(define sq_num (unnest_acc "counter"))
 								(unnest_acc "counter" (+ sq_num 1))
-								/* include query hash in sq_id so different conditions get different temp tables */
-								(define _sq_hash (fnv_hash (concat raw_tables "|" new_fields "|" new_condition)))
+								/* hash ensures different conditions get different temp tables (concurrent queries share name otherwise) */
+								(define _sq_hash (substr (fnv_hash (concat raw_tables "|" new_fields "|" new_condition)) 0 8))
 								(define sq_id (concat "$sq" sq_num "_" _sq_hash))
 								/* build remaining inner condition */
 								(define _inner_parts (filter (map _classified (lambda (c) (if (equal? (car c) "inner") (nth c 1) nil))) (lambda (x) (not (nil? x)))))
@@ -945,7 +945,7 @@ WHAT IT MUST NOT DO:
 								/* register: use string table name, prepend materialize_code to unnest_acc init */
 								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema temp_tbl_name true joinexpr))))
 								(unnest_acc "schemas" (merge (unnest_acc "schemas") (list sq_id sq_schema_cols)))
-								/* register init code for materialization (executed before scan by build_queryplan) */
+								/* register init code: fill if empty (hash in sq_id ensures different queries get different tables) */
 								(define guarded_init (list (quote if) (list (quote equal?) 0 (list (quote scan_estimate) schema temp_tbl_name))
 									materialize_code nil))
 								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) (list guarded_init)))
