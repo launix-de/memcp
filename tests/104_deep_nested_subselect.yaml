@@ -1,0 +1,265 @@
+# Deep nested correlated scalar subselects (no GROUP BY)
+# Tests nesting depths 3, 4, and 5 using a chain of lookup tables.
+# Each level resolves a foreign key via a correlated scalar subselect.
+# Pattern: t_a.ref_b -> t_b.ref_c -> t_c.ref_d -> t_d.ref_e -> t_e.val
+
+metadata:
+  version: "1.0"
+  description: "Deeply nested correlated scalar subselects without aggregation"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dn_a"
+  - sql: "DROP TABLE IF EXISTS dn_b"
+  - sql: "DROP TABLE IF EXISTS dn_c"
+  - sql: "DROP TABLE IF EXISTS dn_d"
+  - sql: "DROP TABLE IF EXISTS dn_e"
+  - sql: |
+      CREATE TABLE dn_e (id INT PRIMARY KEY, val VARCHAR(20))
+  - sql: |
+      CREATE TABLE dn_d (id INT PRIMARY KEY, ref_e INT, label VARCHAR(20))
+  - sql: |
+      CREATE TABLE dn_c (id INT PRIMARY KEY, ref_d INT)
+  - sql: |
+      CREATE TABLE dn_b (id INT PRIMARY KEY, ref_c INT)
+  - sql: |
+      CREATE TABLE dn_a (id INT PRIMARY KEY, ref_b INT)
+  - sql: "INSERT INTO dn_e (id, val) VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')"
+  - sql: "INSERT INTO dn_d (id, ref_e, label) VALUES (10, 1, 'D10'), (20, 2, 'D20'), (30, 3, 'D30')"
+  - sql: "INSERT INTO dn_c (id, ref_d) VALUES (100, 10), (200, 20), (300, 30)"
+  - sql: "INSERT INTO dn_b (id, ref_c) VALUES (1000, 100), (2000, 200), (3000, 300)"
+  - sql: "INSERT INTO dn_a (id, ref_b) VALUES (1, 1000), (2, 2000), (3, 3000)"
+
+test_cases:
+
+  # === Depth 3: a -> b -> c ===
+
+  - name: "Depth 3: a -> b -> c via nested scalar subselects"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS resolved_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          resolved_d: 10
+        - id: 2
+          resolved_d: 20
+        - id: 3
+          resolved_d: 30
+
+  - name: "Depth 3: a -> b -> c with WHERE filter on inner result"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.id FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS c_id
+      FROM dn_a a
+      WHERE a.id <= 2
+      ORDER BY a.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          c_id: 100
+        - id: 2
+          c_id: 200
+
+  - name: "Depth 3: innermost references outermost (skip middle)"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c WHERE c.id = b.ref_c AND c.ref_d = a.id * 10 LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS matched_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          matched_d: 10
+        - id: 2
+          matched_d: 20
+        - id: 3
+          matched_d: 30
+
+  # === Depth 4: a -> b -> c -> d ===
+
+  - name: "Depth 4: a -> b -> c -> d via nested scalar subselects"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS d_label
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          d_label: "D10"
+        - id: 2
+          d_label: "D20"
+        - id: 3
+          d_label: "D30"
+
+  - name: "Depth 4: a -> b -> c -> d with NULL chain (missing ref)"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b AND b.id = 9999 LIMIT 1) AS d_label
+      FROM dn_a a
+      WHERE a.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          d_label: null
+
+  - name: "Depth 4: innermost references outermost"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM dn_d d WHERE d.id = c.ref_d AND d.id = a.id * 10 LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS d_label
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          d_label: "D10"
+        - id: 2
+          d_label: "D20"
+        - id: 3
+          d_label: "D30"
+
+  # === Depth 5: a -> b -> c -> d -> e ===
+
+  - name: "Depth 5: a -> b -> c -> d -> e full chain"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT
+              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          e_val: "alpha"
+        - id: 2
+          e_val: "beta"
+        - id: 3
+          e_val: "gamma"
+
+  - name: "Depth 5: innermost references outermost directly"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT
+              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e AND e.id = a.id LIMIT 1)
+             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          e_val: "alpha"
+        - id: 2
+          e_val: "beta"
+        - id: 3
+          e_val: "gamma"
+
+  - name: "Depth 5: partial NULL at depth 3 (c has no match)"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT
+              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c AND c.id = 999 LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
+      FROM dn_a a
+      WHERE a.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          e_val: null
+
+  - name: "Depth 5: two sibling depth-5 subselects"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT
+              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val,
+        (SELECT
+          (SELECT
+            (SELECT
+              (SELECT e.id FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_id
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          e_val: "alpha"
+          e_id: 1
+        - id: 2
+          e_val: "beta"
+          e_id: 2
+        - id: 3
+          e_val: "gamma"
+          e_id: 3
+
+  # === Depth 5 with WHERE-style nesting (not in SELECT list) ===
+
+  - name: "Depth 5 in WHERE: chain resolves to filter value"
+    sql: |
+      SELECT a.id FROM dn_a a
+      WHERE (SELECT
+              (SELECT
+                (SELECT
+                  (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
+                 FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+               FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+             FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) = 'beta'
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dn_a"
+  - sql: "DROP TABLE IF EXISTS dn_b"
+  - sql: "DROP TABLE IF EXISTS dn_c"
+  - sql: "DROP TABLE IF EXISTS dn_d"
+  - sql: "DROP TABLE IF EXISTS dn_e"
