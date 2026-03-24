@@ -210,6 +210,16 @@ reference ONLY tblvar columns (no outer refs). Returns the AND of those parts, o
 	_ (if (equal? (has_only_tblvar_refs expr tblvar) true) expr true)
 )))
 
+/* extract_non_pure_tblvar_conditions: from an AND expression, extract parts that
+reference OTHER tables too (not only tblvar). Complement of extract_pure_tblvar_conditions. */
+(define extract_non_pure_tblvar_conditions (lambda (expr tblvar) (match expr
+	(cons (symbol and) parts) (reduce parts (lambda (acc part)
+		(if (not (equal? (has_only_tblvar_refs part tblvar) true))
+			(if (equal? acc true) part (list (quote and) acc part))
+			acc)) true)
+	_ (if (not (equal? (has_only_tblvar_refs expr tblvar) true)) expr true)
+)))
+
 /* helper to collect all column references in an expression */
 (define collect_all_column_refs (lambda (expr) (match expr
 	'((symbol get_column) tblvar _ col _) (list (list tblvar col))
@@ -1759,12 +1769,15 @@ WHAT IT MUST NOT DO:
 								(if (equal?? inner_kind (quote inner_select_exists))
 									(match inner_args
 										(cons subquery '()) (begin
-											/* Rewrite NOT EXISTS → (= COUNT(*) 0) */
-											(define _nex_count_sq (match subquery
-												'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
-												subquery))
-											(define _nex_count_expr (list (quote inner_select) _nex_count_sq))
-											(list (quote equal?) (list (quote coalesceNil) (replace_inner_selects _nex_count_expr outer_schemas) 0) 0))
+											/* Rewrite NOT EXISTS → (= COALESCE(COUNT(*),0) 0). Only for subqueries with tables. */
+											(define _nex_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
+											(if _nex_has_tables (begin
+												(define _nex_count_sq (match subquery
+													'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
+													subquery))
+												(define _nex_count_expr (list (quote inner_select) _nex_count_sq))
+												(list (quote equal?) (list (quote coalesceNil) (replace_inner_selects _nex_count_expr outer_schemas) 0) 0))
+											(list (quote not) (build_exists_subselect subquery outer_schemas))))
 										_ nil)
 									nil))
 						)
@@ -1792,13 +1805,17 @@ WHAT IT MUST NOT DO:
 					)
 					(quote inner_select_exists) (match args
 						(cons subquery '()) (begin
-							/* Rewrite EXISTS → (> COUNT(*) 0) and process as scalar subselect.
-							This leverages the existing Neumann aggregate unnesting (Path A). */
-							(define _ex_count_sq (match subquery
-								'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
-								subquery))
-							(define _ex_count_expr (list (quote inner_select) _ex_count_sq))
-							(list (quote >) (list (quote coalesceNil) (replace_inner_selects _ex_count_expr outer_schemas) 0) 0))
+							/* Rewrite EXISTS → (> COALESCE(COUNT(*),0) 0) and process as scalar subselect.
+							This leverages the existing Neumann aggregate unnesting (Path A).
+							Only for subqueries with tables (correlated); uncorrelated uses legacy path. */
+							(define _ex_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
+							(if _ex_has_tables (begin
+								(define _ex_count_sq (match subquery
+									'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
+									subquery))
+								(define _ex_count_expr (list (quote inner_select) _ex_count_sq))
+								(list (quote >) (list (quote coalesceNil) (replace_inner_selects _ex_count_expr outer_schemas) 0) 0))
+							(build_exists_subselect subquery outer_schemas)))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
@@ -3297,13 +3314,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									)
 								))
 								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-									/* LEFT JOIN post-filter (ordered path): duplicate pure-tblvar conditions into later */
+									/* LEFT JOIN filter split (ordered path): move pure-tblvar conditions to post-filter */
 									(define effective_later (if isOuter (begin
 										(define _pure_cond (extract_pure_tblvar_conditions now_condition tblvar))
 										(if (equal? _pure_cond true) later_condition
 											(if (equal? later_condition true) _pure_cond
 												(list (quote and) later_condition _pure_cond))))
 										later_condition))
+									(define now_condition (if isOuter
+										(extract_non_pure_tblvar_conditions now_condition tblvar)
+										now_condition))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* check partition_stages for this table (non-first tables may have per-table partition limits) */
 									(define _ps_ord (if is_first nil
@@ -3407,15 +3427,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-										/* LEFT JOIN post-filter: for isOuter tables, conditions that reference ONLY
-										this table's columns (no outer refs) must also be checked after the NULL-emit.
-										We duplicate them into later_condition so the mapfn's (if ...) catches the NULL case. */
+										/* LEFT JOIN filter split: for isOuter tables, conditions that reference ONLY
+										this table's columns (no outer refs) must be MOVED to the post-filter.
+										The scan filter keeps only join-correlation conditions (with outer refs).
+										This ensures hadValue correctly reflects join partner existence. */
 										(define effective_later (if isOuter (begin
 											(define _pure_cond (extract_pure_tblvar_conditions now_condition tblvar))
 											(if (equal? _pure_cond true) later_condition
 												(if (equal? later_condition true) _pure_cond
 													(list (quote and) later_condition _pure_cond))))
 											later_condition))
+										(define now_condition (if isOuter
+											(extract_non_pure_tblvar_conditions now_condition tblvar)
+											now_condition))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 										/* check partition_stages: does this table have a per-table partition limit? */
 										(define _ps (reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil))
