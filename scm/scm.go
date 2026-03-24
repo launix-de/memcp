@@ -924,8 +924,8 @@ func init() {
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "func", ParamDesc: "function with no parameters that will be called"},
-				{Kind: "func", ParamName: "errorhandler", ParamDesc: "function that takes the error as parameter"},
+				{Kind: "func", ParamName: "func", ParamDesc: "function with no parameters that will be called", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "errorhandler", ParamDesc: "function that takes the error as parameter", Params: []*TypeDescriptor{{Kind: "any", ParamName: "error"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const: true,
@@ -1006,8 +1006,8 @@ func init() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "init", ParamDesc: "initial state as a list"},
-				{Kind: "func", ParamName: "condition", ParamDesc: "func that receives the current state as parameters and must return true if the loop shall be continued"},
-				{Kind: "func", ParamName: "step", ParamDesc: "step func that returns the next state as a list"},
+				{Kind: "func", ParamName: "condition", ParamDesc: "func that receives the current state as parameters and must return true if the loop shall be continued", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "step", ParamDesc: "step func that returns the next state as a list", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
@@ -1033,9 +1033,9 @@ func init() {
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "init", ParamDesc: "owned initial state"},
-				{Kind: "func", ParamName: "condition", ParamDesc: "func(state...) -> bool"},
-				{Kind: "func", ParamName: "step", ParamDesc: "step func returning next state as list"},
+				{Kind: "list", ParamName: "init", ParamDesc: "owned initial state", Transfer: true},
+				{Kind: "func", ParamName: "condition", ParamDesc: "func(state...) -> bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "step", ParamDesc: "step func returning next state as list", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
 			Return: FreshAlloc,
 			Const: true,

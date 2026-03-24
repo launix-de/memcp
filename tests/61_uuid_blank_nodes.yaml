@@ -1,0 +1,120 @@
+metadata:
+  version: "1.0"
+  description: "UUID function and blank node handling"
+
+setup: []
+
+test_cases:
+
+  # uuid() generates valid format
+  - name: "uuid() returns valid UUID v4 format"
+    ttl_data: |
+      @prefix u01: <http://uuid01.org/> .
+      u01:item u01:id "placeholder" .
+    sparql: |
+      @prefix u01: <http://uuid01.org/> .
+      SELECT ?v WHERE { u01:item u01:id ?v }
+    expect:
+      rows: 1
+
+  # Blank nodes get different UUIDs
+  - name: "Blank nodes: two distinct _: get different URIs"
+    ttl_data: |
+      @prefix u02: <http://uuid02.org/> .
+      _:a a u02:TypeA .
+      _:b a u02:TypeB .
+      _:a u02:link _:b .
+    sparql: |
+      @prefix u02: <http://uuid02.org/> .
+      SELECT ?a, ?b WHERE { ?a u02:link ?b }
+    expect:
+      rows: 1
+
+  # Blank nodes: same _:id in one document maps to same UUID
+  - name: "Blank nodes: same _:id reuses same UUID"
+    ttl_data: |
+      @prefix u03: <http://uuid03.org/> .
+      _:x a u03:Thing .
+      _:x u03:name "test" .
+    sparql: |
+      @prefix u03: <http://uuid03.org/> .
+      SELECT ?name WHERE { ?s a u03:Thing . ?s u03:name ?name }
+    expect:
+      rows: 1
+      data:
+        - "?name": "test"
+
+  # Blank nodes produce urn:uuid: prefix
+  - name: "Blank nodes: generated IRI starts with urn:uuid:"
+    ttl_data: |
+      @prefix u04: <http://uuid04.org/> .
+      _:node a u04:Item .
+    sparql: |
+      @prefix u04: <http://uuid04.org/> .
+      SELECT ?s WHERE { ?s a u04:Item }
+    expect:
+      rows: 1
+      contains: "urn:uuid:"
+
+  # Multiple blank nodes in one statement
+  - name: "Blank nodes: multiple in one statement stay distinct"
+    ttl_data: |
+      @prefix u05: <http://uuid05.org/> .
+      _:parent u05:left _:child1 .
+      _:parent u05:right _:child2 .
+      _:child1 a u05:Left .
+      _:child2 a u05:Right .
+    sparql: |
+      @prefix u05: <http://uuid05.org/> .
+      SELECT ?l, ?r WHERE { ?p u05:left ?l . ?p u05:right ?r }
+    expect:
+      rows: 1
+
+  # Verify left and right are different
+  - name: "Blank nodes: left != right child"
+    ttl_data: |
+      @prefix u06: <http://uuid06.org/> .
+      _:p u06:left _:a .
+      _:p u06:right _:b .
+      _:a u06:type "left" .
+      _:b u06:type "right" .
+    sparql: |
+      @prefix u06: <http://uuid06.org/> .
+      SELECT ?tl, ?tr WHERE { ?p u06:left ?l . ?p u06:right ?r . ?l u06:type ?tl . ?r u06:type ?tr }
+    expect:
+      rows: 1
+      data:
+        - {"?tl": "left", "?tr": "right"}
+
+  # UUID IRIs work in SPARQL queries
+  - name: "UUID IRI: queryable after blank node load"
+    ttl_data: |
+      @prefix u07: <http://uuid07.org/> .
+      _:item a u07:Thing .
+      _:item u07:name "findme" .
+    sparql: |
+      @prefix u07: <http://uuid07.org/> .
+      SELECT ?n WHERE { ?s a u07:Thing . ?s u07:name ?n }
+    expect:
+      rows: 1
+      data:
+        - "?n": "findme"
+
+  # UUID IRIs: join across blank node references
+  - name: "UUID IRI: join across blank node references"
+    ttl_data: |
+      @prefix u08: <http://uuid08.org/> .
+      _:tab a u08:Tab .
+      _:tab u08:label "Welcome" .
+      _:tab u08:content _:view .
+      _:view a u08:HTMLView .
+      _:view u08:html "hello" .
+    sparql: |
+      @prefix u08: <http://uuid08.org/> .
+      SELECT ?label, ?html WHERE { ?tab u08:label ?label . ?tab u08:content ?view . ?view u08:html ?html }
+    expect:
+      rows: 1
+      data:
+        - {"?label": "Welcome", "?html": "hello"}
+
+cleanup: []

@@ -236,7 +236,7 @@ func init_scheduler() {
 		Desc: "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
 		Fn: setTimeout,
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "callback", ParamDesc: "function to execute once the timeout expires"}, &TypeDescriptor{Kind: "number", ParamName: "milliseconds", ParamDesc: "milliseconds until execution"}, &TypeDescriptor{Kind: "any", ParamName: "args...", ParamDesc: "optional arguments forwarded to the callback", Variadic: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "callback", ParamDesc: "function to execute once the timeout expires", Params: []*TypeDescriptor{{Kind: "any", ParamName: "args", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", ParamName: "milliseconds", ParamDesc: "milliseconds until execution"}, &TypeDescriptor{Kind: "any", ParamName: "args...", ParamDesc: "optional arguments forwarded to the callback", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "int"},
 		},
 	})

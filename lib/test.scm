@@ -1459,6 +1459,50 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p9 (newpromise))
 	(p9 "once" 1)
 	(assert (equal? (try (lambda () (begin (p9 "once" 2 "scalar subselect returned more than one row") false)) (lambda (e) (equal? e "scalar subselect returned more than one row"))) true) true "once custom error message")
+	/* promise interface error handling */
+	(define p10 (newpromise))
+	(assert (equal? (try (lambda () (p10)) (lambda (e) "caught")) "caught") true "promise: 0 args panics")
+	(assert (equal? (try (lambda () (p10 "nonexistent")) (lambda (e) "caught")) "caught") true "promise: unknown operation panics")
+	(assert (equal? (try (lambda () (p10 "value" 1 2 3)) (lambda (e) "caught")) "caught") true "promise: too many args panics")
+
+	/* newsession interface tests */
+	(print "testing session interface ...")
+	(define s1 (newsession))
+	(assert (equal? (s1) (list)) true "session: empty session lists no keys")
+	(s1 "x" 42)
+	(assert (equal? (s1 "x") 42) true "session: get returns stored value")
+	(s1 "y" "hello")
+	(assert (equal? (s1 "y") "hello") true "session: get returns string value")
+	(assert (nil? (s1 "missing")) true "session: nonexistent key returns nil")
+	(s1 "x" 99)
+	(assert (equal? (s1 "x") 99) true "session: overwrite works")
+	(define s1_keys (s1))
+	(assert (contains? s1_keys "x") true "session: lists key x")
+	(assert (contains? s1_keys "y") true "session: lists key y")
+	(assert (equal? (try (lambda () (s1 "a" "b" "c")) (lambda (e) "caught")) "caught") true "session: too many args panics")
+
+	/* deep callback signature validation */
+	(print "testing callback signature validation ...")
+	/* too many params rejected (lambda declares more params than caller provides) */
+	(assert (equal? (try (lambda () (eval '(filter '(1 2 3) (lambda (x y) true)))) (lambda (e) "caught")) "caught") true "validate: filter callback with 2 params rejected (expects max 1)")
+	(assert (equal? (try (lambda () (eval '(map '(1 2 3) (lambda (x y z) 1)))) (lambda (e) "caught")) "caught") true "validate: map callback with 3 params rejected (expects max 1)")
+	(assert (equal? (try (lambda () (eval '(reduce '(1 2 3) (lambda (a b c) a) 0))) (lambda (e) "caught")) "caught") true "validate: reduce callback with 3 params rejected (expects max 2)")
+	/* fewer params is valid (excess args silently ignored in this dialect) */
+	(assert (equal? (filter '(1 2 3) (lambda () true)) '(1 2 3)) true "validate: filter callback with 0 params accepted")
+	/* correct callbacks pass validation */
+	(assert (equal? (filter '(1 2 3) (lambda (x) (> x 1))) '(2 3)) true "validate: filter with correct callback works")
+	(assert (equal? (map '(1 2 3) (lambda (x) (+ x 10))) '(11 12 13)) true "validate: map with correct callback works")
+	(assert (equal? (reduce '(1 2 3) (lambda (a b) (+ a b)) 0) 6) true "validate: reduce with correct callback works")
+
+	/* return-type propagation: optimizer preserves newpromise/newsession through optimization */
+	(print "testing return-type propagation ...")
+	/* Verify that newpromise/newsession survive optimization and remain callable */
+	(define rtp (newpromise))
+	(rtp "value" 42)
+	(assert (equal? (rtp "value") 42) true "return-type propagation: newpromise callable after define")
+	(define rts (newsession))
+	(rts "k" 99)
+	(assert (equal? (rts "k") 99) true "return-type propagation: newsession callable after define")
 
 	/* dashboard metrics (metrics.go) */
 	(print "testing dashboard metrics ...")
