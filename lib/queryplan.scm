@@ -1664,14 +1664,17 @@ WHAT IT MUST NOT DO:
 								(list (quote set) (symbol "resultrow")
 									(list (quote lambda) (list (symbol "item"))
 										(list rows_sym "rows"
-											(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+											(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 								)
 								(build_queryplan_term subquery)
 								(list (quote set) (symbol "resultrow") resultrow_sym)
 								(list rows_sym "rows")
 							))
+							(define _mat_var (symbol (concat "__mat:" id)))
+							(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
+								(list (list (quote set) _mat_var materialized_rows))))
 							(list
-								(list (list id schemax materialized_rows isOuter joinexpr))
+								(list (list id schemax _mat_var isOuter joinexpr))
 								'()
 								true
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
@@ -1815,7 +1818,7 @@ WHAT IT MUST NOT DO:
 											(list (quote set) mat_rr_sym
 												(list (quote lambda) (list (symbol "item"))
 													(list rows_sym "rows"
-														(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+														(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 											)
 											/* with limit: stop collecting after mat_limit rows */
 											(list (quote begin)
@@ -1826,14 +1829,20 @@ WHAT IT MUST NOT DO:
 															(list (quote begin)
 																(list (quote set) cnt_sym (list (quote +) cnt_sym 1))
 																(list rows_sym "rows"
-																	(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+																	(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 															nil))))
 										)
 										mat_inner_plan
-										(list (quote apply) (quote list) (list rows_sym "rows"))
+										(list rows_sym "rows")
 									))
+									/* Store materialized rows in a variable via init code.
+									   The variable (a symbol) is used as tbl — at runtime,
+									   scan evaluates the symbol to get the row list. */
+									(define _mat_var (symbol (concat "__mat:" id)))
+									(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
+										(list (list (quote set) _mat_var materialized_rows))))
 									(list
-										(list (list id schemax materialized_rows isOuter joinexpr))
+										(list (list id schemax _mat_var isOuter joinexpr))
 										'()
 										true
 										(list id (map output_cols_sub (lambda (col) '("Field" col "Type" "any"))))
