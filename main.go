@@ -339,7 +339,13 @@ func setupIO(wd string) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "directory", ParamDesc: "folder with the files to serve"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "func"},
+			Return: &scm.TypeDescriptor{Kind: "func",
+				Params: []*scm.TypeDescriptor{
+					{Kind: "any", ParamName: "req", ParamDesc: "HTTP request object"},
+					{Kind: "any", ParamName: "res", ParamDesc: "HTTP response object"},
+				},
+				Return: &scm.TypeDescriptor{Kind: "any"},
+			},
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{

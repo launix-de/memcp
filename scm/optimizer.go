@@ -369,6 +369,33 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 	}
 }
 
+// canEliminateFromBegin checks whether a constant-folded expression in a
+// begin block (non-last position, result unused) can safely be removed.
+// Literals and pure function results can be dropped. Expressions from
+// functions with HasSideEffects or without type info are kept.
+func canEliminateFromBegin(val Scmer) bool {
+	// Literals are always safe to eliminate
+	switch val.GetTag() {
+	case tagNil, tagBool, tagInt, tagFloat, tagString:
+		return true
+	}
+	// For function call results that were constant-folded: check the original
+	// declaration. If it has HasSideEffects: true, keep it.
+	// Since the expression was already folded to a constant value by this point,
+	// we can safely eliminate it — the fold already executed the side effect.
+	// But if it was NOT foldable and still appears as a call, check the decl.
+	if slice, ok := scmerSlice(val); ok && len(slice) > 0 {
+		if d := DeclarationForValue(slice[0]); d != nil {
+			if d.Type == nil {
+				return false // no type info → conservative, keep
+			}
+			return !d.Type.HasSideEffects
+		}
+		return false // unknown function → conservative, keep
+	}
+	return true // constant value, safe to eliminate
+}
+
 func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
 	if len(v) == 0 {
 		return NewSlice(v), transferOwnership, false
@@ -559,7 +586,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if constant {
 				if i == len(v)-1 {
 					isConstant = true
-				} else {
+				} else if canEliminateFromBegin(v[i]) {
 					v = append(v[:i], v[i+1:]...)
 					i--
 				}
@@ -712,6 +739,18 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		value, valueTransfer, _ := OptimizeEx(v[1], env, ome, true)
 		v[1] = value
 		transferOwnership = valueTransfer
+		// NthLocalVar doesn't carry transfer info — check ownedVars
+		if !valueTransfer && value.IsNthLocalVar() && ome.ownedVars != nil {
+			for sym, owned := range ome.ownedVars {
+				if owned {
+					if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == value.NthLocalVar() {
+						valueTransfer = true
+						transferOwnership = true
+						break
+					}
+				}
+			}
+		}
 		if headSym == Symbol("match") && valueTransfer {
 			v[0] = NewSymbol("match_mut")
 		}

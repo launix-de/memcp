@@ -639,8 +639,8 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in"}},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -661,8 +661,8 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in"}},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -686,8 +686,8 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state"}},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -707,8 +707,8 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state"}},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -723,10 +723,10 @@ func initTransaction(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return WithAutocommit(a[0].Func(), a[1])
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "func", ParamName: "session", ParamDesc: "the session function holding tx state"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "zero-argument function to execute"},
+				{Kind: "func", ParamName: "session", ParamDesc: "the session function holding tx state", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "fn", ParamDesc: "zero-argument function to execute", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
