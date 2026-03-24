@@ -1494,6 +1494,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (map '(1 2 3) (lambda (x) (+ x 10))) '(11 12 13)) true "validate: map with correct callback works")
 	(assert (equal? (reduce '(1 2 3) (lambda (a b) (+ a b)) 0) 6) true "validate: reduce with correct callback works")
 
+	/* return-type propagation: optimizer preserves newpromise/newsession through optimization */
+	(print "testing return-type propagation ...")
+	/* Verify that newpromise/newsession survive optimization and remain callable */
+	(define rtp (newpromise))
+	(rtp "value" 42)
+	(assert (equal? (rtp "value") 42) true "return-type propagation: newpromise callable after define")
+	(define rts (newsession))
+	(rts "k" 99)
+	(assert (equal? (rts "k") 99) true "return-type propagation: newsession callable after define")
+
 	/* dashboard metrics (metrics.go) */
 	(print "testing dashboard metrics ...")
 	(define _stat (stat))

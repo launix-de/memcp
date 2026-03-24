@@ -950,15 +950,37 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if scmerIsSymbol(v[0], "!begin") && allConstArgs {
 		return v[len(v)-1], &TypeDescriptor{Transfer: true, Const: true}
 	}
-	if d := DeclarationForValue(v[0]); d != nil && d.IsFoldable() && allConstArgs && d.Fn != nil {
-		for i := range v {
-			v[i] = unwrapConstListFromCode(v[i])
+
+	// Look up declaration return type for propagation
+	var retTD *TypeDescriptor
+	if d := DeclarationForValue(v[0]); d != nil {
+		if d.IsFoldable() && allConstArgs && d.Fn != nil {
+			for i := range v {
+				v[i] = unwrapConstListFromCode(v[i])
+			}
+			result := d.Fn(v[1:]...)
+			result = wrapConstListForCode(result)
+			td := &TypeDescriptor{Transfer: true, Const: true}
+			if d.Type != nil && d.Type.Return != nil {
+				td = &TypeDescriptor{Transfer: true, Const: true, Kind: d.Type.Return.Kind,
+					Params: d.Type.Return.Params, Return: d.Type.Return.Return,
+					HasSideEffects: d.Type.Return.HasSideEffects}
+			}
+			return result, td
 		}
-		result := d.Fn(v[1:]...)
-		result = wrapConstListForCode(result)
-		return result, &TypeDescriptor{Transfer: true, Const: true}
+		if d.Type != nil && d.Type.Return != nil {
+			retTD = d.Type.Return
+		}
 	}
-	return NewSlice(v), &TypeDescriptor{Transfer: transferOwnership}
+
+	td := &TypeDescriptor{Transfer: transferOwnership}
+	if retTD != nil {
+		td.Kind = retTD.Kind
+		td.Params = retTD.Params
+		td.Return = retTD.Return
+		td.HasSideEffects = retTD.HasSideEffects
+	}
+	return NewSlice(v), td
 }
 
 // wrapConstListForCode wraps a constant-folded Scmer value so it can safely
