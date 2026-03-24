@@ -1206,10 +1206,22 @@ WHAT IT MUST NOT DO:
 									false
 									condition2)
 							)
+							(if (not (and (list? tables2) (equal? (count tables2) 1)))
+								/* multi-table EXISTS: use full query plan to check row existence.
+								Redirect resultrow to count matches, then check count > 0. */
+								(begin
+									(define _ex_cnt (symbol "__exists_cnt"))
+									(define _ex_rr (symbol "__exists_rr"))
+									(list (quote >) (list (quote begin)
+										(list (quote set) _ex_cnt 0)
+										(list (quote set) _ex_rr (symbol "resultrow"))
+										(list (quote set) (symbol "resultrow")
+											(list (quote lambda) (list (symbol "_"))
+												(list (quote set) _ex_cnt (list (quote +) _ex_cnt 1))))
+										(build_queryplan_term (list schema2 tables2 '("__x" 1) condition2 nil nil nil nil nil))
+										(list (quote set) (symbol "resultrow") _ex_rr)
+										_ex_cnt) 0))
 							(begin
-								(if (not (and (list? tables2) (equal? (count tables2) 1)))
-									(error "EXISTS subselect with multiple tables not supported yet")
-								)
 								(define tdesc (car tables2))
 								(if (not (and (list? tdesc) (equal? (count tdesc) 5)))
 									(error "EXISTS subselect with multiple tables not supported yet")
@@ -1273,7 +1285,7 @@ WHAT IT MUST NOT DO:
 										exists_reduce
 									)
 								)
-							)
+							))
 						))
 						exists_expr
 					)
