@@ -302,11 +302,12 @@ to avoid matching outer tables which would break scope resolution. */
 	(define spa (stage_partition_aliases stage))
 	(if (stage_is_dedup stage)
 		(make_dedup_stage (map sg canon) spa)
-		(if (not (nil? spa))
-			/* partition stage: preserve partition-aliases and limit-partition-cols */
+		(if (and (not (nil? spa)) (or (nil? sg) (equal? sg '())))
+			/* partition stage (aliases but no group): preserve partition-aliases and limit-partition-cols */
 			(make_partition_stage spa
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage))
+			/* group stage (possibly scoped with aliases) */
 			(make_group_stage
 				(map sg canon)
 				(canon sh)
