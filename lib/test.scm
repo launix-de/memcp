@@ -1483,12 +1483,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* deep callback signature validation */
 	(print "testing callback signature validation ...")
-	/* filter: callback must take 1 arg */
-	(assert (equal? (try (lambda () (eval '(filter '(1 2 3) (lambda () true)))) (lambda (e) "caught")) "caught") true "validate: filter callback with 0 params rejected")
-	/* map: callback must take 1 arg */
-	(assert (equal? (try (lambda () (eval '(map '(1 2 3) (lambda () 1)))) (lambda (e) "caught")) "caught") true "validate: map callback with 0 params rejected")
-	/* reduce: callback must take 2 args */
-	(assert (equal? (try (lambda () (eval '(reduce '(1 2 3) (lambda (a) a) 0))) (lambda (e) "caught")) "caught") true "validate: reduce callback with 1 param rejected")
+	/* too many params rejected (lambda declares more params than caller provides) */
+	(assert (equal? (try (lambda () (eval '(filter '(1 2 3) (lambda (x y) true)))) (lambda (e) "caught")) "caught") true "validate: filter callback with 2 params rejected (expects max 1)")
+	(assert (equal? (try (lambda () (eval '(map '(1 2 3) (lambda (x y z) 1)))) (lambda (e) "caught")) "caught") true "validate: map callback with 3 params rejected (expects max 1)")
+	(assert (equal? (try (lambda () (eval '(reduce '(1 2 3) (lambda (a b c) a) 0))) (lambda (e) "caught")) "caught") true "validate: reduce callback with 3 params rejected (expects max 2)")
+	/* fewer params is valid (excess args silently ignored in this dialect) */
+	(assert (equal? (filter '(1 2 3) (lambda () true)) '(1 2 3)) true "validate: filter callback with 0 params accepted")
 	/* correct callbacks pass validation */
 	(assert (equal? (filter '(1 2 3) (lambda (x) (> x 1))) '(2 3)) true "validate: filter with correct callback works")
 	(assert (equal? (map '(1 2 3) (lambda (x) (+ x 10))) '(11 12 13)) true "validate: map with correct callback works")

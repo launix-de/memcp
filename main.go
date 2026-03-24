@@ -228,7 +228,7 @@ func setupIO(wd string) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "value...", ParamDesc: "values to print", Variadic: true},
 			},
@@ -276,7 +276,7 @@ func setupIO(wd string) {
 		Name: "import",
 		Desc: "Imports a file .scm file into current namespace",
 		Fn: (func(...scm.Scmer) scm.Scmer)(getImport(wd)),
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file"},
 			},
@@ -287,10 +287,10 @@ func setupIO(wd string) {
 		Name: "load",
 		Desc: "Loads a file or stream and returns the string or iterates line-wise",
 		Fn: (func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string|stream", ParamName: "filenameOrStream", ParamDesc: "filename relative to folder of source file or stream to read from"},
-				{Kind: "func", ParamName: "linehandler", ParamDesc: "handler that reads each line; each line may end with delimiter", Optional: true},
+				{Kind: "func", ParamName: "linehandler", ParamDesc: "handler that reads each line; each line may end with delimiter", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "line"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "string", ParamName: "delimiter", ParamDesc: "delimiter to extract; if no delimiter is given, the file is read as whole and returned or passed to linehandler", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string|bool"},
@@ -311,10 +311,10 @@ func setupIO(wd string) {
 		Name: "watch",
 		Desc: "Loads a file and calls the callback. Whenever the file changes on disk, the file is load again.",
 		Fn: (func(...scm.Scmer) scm.Scmer)(getWatch(wd)),
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file"},
-				{Kind: "func", ParamName: "updatehandler", ParamDesc: "handler that receives the file content func(content)"},
+				{Kind: "func", ParamName: "updatehandler", ParamDesc: "handler that receives the file content func(content)", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "content"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -323,10 +323,10 @@ func setupIO(wd string) {
 		Name: "serve",
 		Desc: "Opens a HTTP server at a given port",
 		Fn: scm.HTTPServe,
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", ParamName: "port", ParamDesc: "port number for HTTP server"},
-				{Kind: "func", ParamName: "handler", ParamDesc: "handler: lambda(req res) that handles the http request (TODO: detailed documentation)"},
+				{Kind: "func", ParamName: "handler", ParamDesc: "handler: lambda(req res) that handles the http request", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "req"}, {Kind: "any", ParamName: "res"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -335,7 +335,7 @@ func setupIO(wd string) {
 		Name: "serveStatic",
 		Desc: "creates a static handler for use as a callback in (serve) - returns a handler lambda(req res)",
 		Fn: (func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "directory", ParamDesc: "folder with the files to serve"},
 			},
@@ -346,12 +346,12 @@ func setupIO(wd string) {
 		Name: "mysql",
 		Desc: "Imports a file .scm file into current namespace",
 		Fn: scm.MySQLServe,
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", ParamName: "port", ParamDesc: "port number for MySQL server"},
-				{Kind: "func", ParamName: "getPassword", ParamDesc: "lambda(username string) string|nil has to return the password for a user or nil to deny login"},
-				{Kind: "func", ParamName: "schemacallback", ParamDesc: "lambda(username schema) bool handler check whether user is allowed to schem (string) - you should check access rights here"},
-				{Kind: "func", ParamName: "handler", ParamDesc: "lambda(schema sql resultrow session) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
+				{Kind: "func", ParamName: "getPassword", ParamDesc: "lambda(username string) string|nil has to return the password for a user or nil to deny login", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "username"}}, Return: &scm.TypeDescriptor{Kind: "string|nil"}},
+				{Kind: "func", ParamName: "schemacallback", ParamDesc: "lambda(username schema) bool handler check whether user is allowed to schema - you should check access rights here", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "username"}, {Kind: "string", ParamName: "schema"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "handler", ParamDesc: "lambda(schema sql resultrow session) handler to process sql query in schema. resultrow is a lambda(list)", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "schema"}, {Kind: "string", ParamName: "sql"}, {Kind: "func", ParamName: "resultrow"}, {Kind: "func", ParamName: "session"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -360,12 +360,12 @@ func setupIO(wd string) {
 		Name: "mysql_socket",
 		Desc: "Listen on a Unix domain socket for MySQL protocol",
 		Fn: scm.MySQLServeSocket,
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "socketpath", ParamDesc: "path to the Unix domain socket"},
-				{Kind: "func", ParamName: "getPassword", ParamDesc: "lambda(username string) string|nil has to return the password for a user or nil to deny login"},
-				{Kind: "func", ParamName: "schemacallback", ParamDesc: "lambda(username schema) bool handler check whether user is allowed to schema (string) - you should check access rights here"},
-				{Kind: "func", ParamName: "handler", ParamDesc: "lambda(schema sql resultrow session) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
+				{Kind: "func", ParamName: "getPassword", ParamDesc: "lambda(username string) string|nil has to return the password for a user or nil to deny login", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "username"}}, Return: &scm.TypeDescriptor{Kind: "string|nil"}},
+				{Kind: "func", ParamName: "schemacallback", ParamDesc: "lambda(username schema) bool handler check whether user is allowed to schema - you should check access rights here", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "username"}, {Kind: "string", ParamName: "schema"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "handler", ParamDesc: "lambda(schema sql resultrow session) handler to process sql query in schema. resultrow is a lambda(list)", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "schema"}, {Kind: "string", ParamName: "sql"}, {Kind: "func", ParamName: "resultrow"}, {Kind: "func", ParamName: "session"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -396,7 +396,7 @@ func setupIO(wd string) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -409,7 +409,7 @@ func setupIO(wd string) {
 			os.Exit(137) // 128 + SIGKILL(9)
 			return scm.NewBool(false) // unreachable
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})

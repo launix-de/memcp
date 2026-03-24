@@ -442,22 +442,12 @@ func validateCallbackSignature(lambdaSlice []Scmer, expectedSig *TypeDescriptor,
 	}
 
 	lambdaParams := len(paramList)
-	if hasVariadic {
-		// variadic: lambda must have at least expectedMin params
-		if lambdaParams < expectedMin {
-			return fmt.Sprintf("%s: callback expects at least %d parameters, but lambda has %d",
-				source_info.String(), expectedMin, lambdaParams)
-		}
-	} else {
-		// fixed arity: lambda must have between expectedMin and expectedMax
-		if lambdaParams < expectedMin {
-			return fmt.Sprintf("%s: callback expects at least %d parameters, but lambda has %d",
-				source_info.String(), expectedMin, lambdaParams)
-		}
-		if lambdaParams > expectedMax {
-			return fmt.Sprintf("%s: callback expects at most %d parameters, but lambda has %d",
-				source_info.String(), expectedMax, lambdaParams)
-		}
+	// In this Scheme dialect, excess arguments are silently ignored,
+	// so a lambda with FEWER params than the caller provides is valid.
+	// Only reject lambdas with MORE params than the caller will provide.
+	if !hasVariadic && lambdaParams > expectedMax {
+		return fmt.Sprintf("%s: callback provides at most %d arguments, but lambda declares %d parameters",
+			source_info.String(), expectedMax, lambdaParams)
 	}
 
 	// Validate lambda body against expected return type
