@@ -1,0 +1,79 @@
+# Prejoin with Neumann-decorrelated scalar subselect must not cause
+# stack overflow when the source table is repartitioned.
+# Pattern: multi-table GROUP BY query with COALESCE((SELECT SUM(...) FROM detail WHERE ...))
+# creates a prejoin that registers triggers on .unnest: temp tables.
+# When repartitioning fires these triggers, infinite recursion occurs.
+
+metadata:
+  version: "1.0"
+  description: "Prejoin + Neumann .unnest trigger interaction"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS put_vehicle"
+  - sql: "DROP TABLE IF EXISTS put_trip"
+  - sql: "DROP TABLE IF EXISTS put_event"
+  - sql: "CREATE TABLE put_vehicle (ID INT PRIMARY KEY, plate TEXT, model TEXT)"
+  - sql: "CREATE TABLE put_trip (ID INT PRIMARY KEY, vehicle INT, km INT, driver INT)"
+  - sql: "CREATE TABLE put_event (ID INT PRIMARY KEY, vehicle INT, cost INT, etype TEXT)"
+  - sql: "INSERT INTO put_vehicle VALUES (1, 'AB-CD-123', 'Golf'), (2, 'XY-ZZ-789', 'Polo')"
+  - sql: "INSERT INTO put_trip VALUES (1, 1, 100, 1), (2, 1, 200, 1), (3, 2, 50, 2)"
+  - sql: "INSERT INTO put_event VALUES (1, 1, 500, 'service'), (2, 1, 200, 'tire'), (3, 2, 300, 'service')"
+
+test_cases:
+
+  - name: "multi-table with scalar subselect (triggers prejoin path)"
+    sql: |
+      SELECT v.ID, v.plate,
+        COALESCE((SELECT SUM(t.km) FROM put_trip t WHERE t.vehicle = v.ID), 0) AS total_km,
+        COALESCE((SELECT SUM(e.cost) FROM put_event e WHERE e.vehicle = v.ID), 0) AS total_cost
+      FROM put_vehicle v
+      ORDER BY v.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          plate: "AB-CD-123"
+          total_km: 300
+          total_cost: 700
+        - ID: 2
+          plate: "XY-ZZ-789"
+          total_km: 50
+          total_cost: 300
+
+  - name: "COUNT + SUM wrapper (outer GROUP BY forces prejoin)"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.total_km) AS grand_km FROM (
+        SELECT v.ID AS ID,
+          COALESCE((SELECT SUM(tr.km) FROM put_trip tr WHERE tr.vehicle = v.ID), 0) AS total_km
+        FROM put_vehicle v
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+          grand_km: 350
+
+  - name: "insert more data then re-query (triggers repartitioning)"
+    sql: |
+      INSERT INTO put_trip VALUES (4, 1, 150, 1), (5, 2, 75, 2)
+    expect:
+      rows_affected: 2
+
+  - name: "re-query after insert"
+    sql: |
+      SELECT v.ID,
+        COALESCE((SELECT SUM(t.km) FROM put_trip t WHERE t.vehicle = v.ID), 0) AS total_km
+      FROM put_vehicle v
+      ORDER BY v.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          total_km: 450
+        - ID: 2
+          total_km: 125
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS put_vehicle"
+  - sql: "DROP TABLE IF EXISTS put_trip"
+  - sql: "DROP TABLE IF EXISTS put_event"
