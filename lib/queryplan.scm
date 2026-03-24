@@ -2010,7 +2010,7 @@ WHAT IT MUST NOT DO:
 
 
 			/* expand *-columns */
-			(define fields_expanded (merge (extract_assoc fields_inner_resolved (lambda (col expr) (match col
+			(define fields_expanded (merge (extract_assoc fields (lambda (col expr) (match col
 				"*" (match expr
 					/* *.* */
 					'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas_with_unnested (lambda (alias def) (merge (map def (lambda (coldesc) /* all columns of each table */
@@ -2082,7 +2082,7 @@ WHAT IT MUST NOT DO:
 					(if (equal? 0 (count _kept_parts)) true
 						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 							(cons 'and _kept_parts))))))
-			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column (coalesceNil (unnest_acc "init") '()) condition_canonical_pre_expansion)
+			(list schema _pruned_tables _canon_fields _canon_condition_pruned _canon_groups schemas_with_unnested replace_find_column (coalesceNil (unnest_acc "init") '()) condition_canonical_pre_expansion)
 		)
 	)
 )
