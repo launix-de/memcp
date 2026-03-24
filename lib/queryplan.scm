@@ -1540,7 +1540,7 @@ WHAT IT MUST NOT DO:
 												(if (equal? condition true) us_dom_je
 													(list (quote and) condition us_dom_je))))
 											/* substitution: reference the prefixed value column */
-											(define us_subst_raw (_us_prefix_ria us_value_expr))
+																			(define us_subst_raw (_us_prefix_ria us_value_expr))
 											(define us_is_count (match us_value_expr
 												'((symbol aggregate) _ (symbol +) 0) true
 												'((quote aggregate) _ (symbol +) 0) true
