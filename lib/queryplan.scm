@@ -1246,7 +1246,8 @@ WHAT IT MUST NOT DO:
 										expr
 									)))
 									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil nil)))
-									(list (quote !begin)
+									(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+									(cons (quote !begin) (merge _init_stmts (list
 										(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
 										(list (quote set) (symbol _sq_rr_name)
 											(list (quote lambda) (list (symbol "row"))
@@ -1257,7 +1258,7 @@ WHAT IT MUST NOT DO:
 										)
 										subplan
 										(list (symbol _sq_promise_name) "value")
-									)
+									)))
 								)
 							)
 						) /* close fallback begin */
