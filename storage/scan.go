@@ -424,6 +424,17 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		return scm.NewNil(), outCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
+		// Release exclusive lock before map+reduce phase: mapFn may contain
+		// nested scans on the same table (e.g. EXISTS inside UPDATE).
+		// The mapper re-acquires mu.Lock() per batch internally via
+		// processMainBlock/processDeltaBlock when shardWriteLocked=false.
+		// Table-level mutationMu still serializes concurrent mutations.
+		if writeLocked {
+			t.exitWriteOwner()
+			t.mu.Unlock()
+			writeLocked = false
+			mapper.SetShardWriteLocked(false)
+		}
 		for i := 0; i < len(pendingRecids); i += len(buf) {
 			j := i + len(buf)
 			if j > len(pendingRecids) {
