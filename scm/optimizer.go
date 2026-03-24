@@ -187,7 +187,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
 	}
 	result.setBlacklist = ome.setBlacklist
-	result.definedInScope = make(map[Symbol]bool) // new lambda = fresh scope
+	result.definedInScope = make(map[Symbol]bool)
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
 }
@@ -207,7 +207,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.setBlacklist = ome.setBlacklist
 	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
 	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
-	result.definedInScope = make(map[Symbol]bool) // new scope = fresh tracking
+	result.definedInScope = make(map[Symbol]bool)
 	return
 }
 
@@ -305,40 +305,6 @@ func expressionContainsEvalOrImportCall(v Scmer) bool {
 		}
 	}
 	return false
-}
-
-// exprHasSideEffects returns true if the expression may have side effects.
-// Conservative: returns true for unknown functions. Only returns false when the
-// called function has an explicit Declaration with Type.HasSideEffects == false,
-// AND all callback arguments (lambdas) are also side-effect-free.
-func exprHasSideEffects(val Scmer) bool {
-	list, ok := scmerSlice(val)
-	if !ok || len(list) == 0 {
-		return false // literals, symbols — no side effects
-	}
-	head := list[0]
-	// set/define always has side effects (scope mutation)
-	if scmerIsSymbol(head, "set") || scmerIsSymbol(head, "define") || scmerIsSymbol(head, "setN") {
-		return true
-	}
-	// begin/!begin: check all sub-expressions
-	if scmerIsSymbol(head, "begin") || scmerIsSymbol(head, "!begin") {
-		for _, sub := range list[1:] {
-			if exprHasSideEffects(sub) {
-				return true
-			}
-		}
-		return false
-	}
-	// Known function: check Declaration type info
-	decl := DeclarationForValue(head)
-	if decl == nil {
-		return true // unknown function — conservative
-	}
-	if decl.Type != nil {
-		return decl.Type.HasSideEffects
-	}
-	return true // no type info — conservative
 }
 
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
@@ -595,14 +561,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		for i := 1; i < len(v); i++ {
 			var constant bool
 			v[i], transferOwnership, constant = OptimizeEx(v[i], env, &ome2, i == len(v)-1 && useResult)
-			if i < len(v)-1 {
-				// Non-last statement: eliminate if constant OR side-effect-free
-				if constant || !exprHasSideEffects(v[i]) {
+			if constant {
+				if i == len(v)-1 {
+					isConstant = true
+				} else {
 					v = append(v[:i], v[i+1:]...)
 					i--
 				}
-			} else if constant {
-				isConstant = true
 			}
 		}
 		// Flatten nested !begin blocks
@@ -839,11 +804,13 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	for i := 0; i < len(v); i++ {
 		if i > 0 && callDecl != nil {
 			paramIdx := i - 1
-			if paramIdx >= len(callDecl.Params) {
-				paramIdx = len(callDecl.Params) - 1
+			if callDecl.Type == nil || len(callDecl.Type.Params) == 0 {
+				// no type info
+			} else if paramIdx >= len(callDecl.Type.Params) {
+				paramIdx = len(callDecl.Type.Params) - 1
 			}
-			if paramIdx >= 0 {
-				if ti := callDecl.Params[paramIdx].TypeInfo; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
+			if paramIdx >= 0 && callDecl.Type != nil && paramIdx < len(callDecl.Type.Params) {
+				if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
 					owned := make([]bool, len(ti.Params))
 					hasAny := false
 					for pi, pt := range ti.Params {
@@ -898,20 +865,20 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	}
 
 	// !list rewrite: when an argument is (list expr...) passed to a function
-	// whose parameter is annotated Escape:false, replace with (!list start count expr...)
+	// whose parameter is annotated NoEscape:true, replace with (!list start count expr...)
 	// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
 	if headOk && ome.nextSlot != nil {
-		if decl := DeclarationForValue(v[0]); decl != nil {
+		if decl := DeclarationForValue(v[0]); decl != nil && decl.Type != nil && len(decl.Type.Params) > 0 {
 			for i := 1; i < len(v); i++ {
 				paramIdx := i - 1
-				if paramIdx >= len(decl.Params) {
-					paramIdx = len(decl.Params) - 1 // variadic: use last param
+				if paramIdx >= len(decl.Type.Params) {
+					paramIdx = len(decl.Type.Params) - 1 // variadic: use last param
 				}
 				if paramIdx < 0 {
 					continue
 				}
-				ti := decl.Params[paramIdx].TypeInfo
-				if ti == nil || ti.Escape {
+				ti := decl.Type.Params[paramIdx]
+				if ti == nil || !ti.NoEscape {
 					continue // unknown or escaping parameter
 				}
 				// Check if this argument is a (list ...) call
@@ -936,7 +903,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if scmerIsSymbol(v[0], "!begin") && allConstArgs {
 		return v[len(v)-1], &TypeDescriptor{Transfer: true, Const: true}
 	}
-	if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
+	if d := DeclarationForValue(v[0]); d != nil && d.IsFoldable() && allConstArgs && d.Fn != nil {
 		for i := range v {
 			v[i] = unwrapConstListFromCode(v[i])
 		}

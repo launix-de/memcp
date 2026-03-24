@@ -1,0 +1,59 @@
+metadata:
+  version: "1.0"
+  description: "SPARQL OPTIONAL support"
+
+setup: []
+
+test_cases:
+
+  - name: "OPTIONAL: left join with match"
+    noncritical: true
+    ttl_data: |
+      @prefix o01: <http://opt01.org/> .
+      o01:alice o01:name "Alice" .
+      o01:alice o01:email "alice@example.org" .
+    sparql: |
+      @prefix o01: <http://opt01.org/> .
+      SELECT ?n, ?e WHERE { o01:alice o01:name ?n . OPTIONAL { o01:alice o01:email ?e } }
+    expect:
+      rows: 1
+      data:
+        - {"?n": "Alice", "?e": "alice@example.org"}
+
+  - name: "OPTIONAL: left join without match"
+    noncritical: true
+    ttl_data: |
+      @prefix o02: <http://opt02.org/> .
+      o02:bob o02:name "Bob" .
+    sparql: |
+      @prefix o02: <http://opt02.org/> .
+      SELECT ?n, ?e WHERE { o02:bob o02:name ?n . OPTIONAL { o02:bob o02:email ?e } }
+    expect:
+      rows: 1
+      contains: "Bob"
+
+  - name: "OPTIONAL: mixed — some have optional, some don't"
+    noncritical: true
+    ttl_data: |
+      @prefix o03: <http://opt03.org/> .
+      o03:alice o03:name "Alice" ; o03:email "alice@ex.org" .
+      o03:bob o03:name "Bob" .
+    sparql: |
+      @prefix o03: <http://opt03.org/> .
+      SELECT ?n, ?e WHERE { ?s o03:name ?n . OPTIONAL { ?s o03:email ?e } }
+    expect:
+      rows: 2
+
+  - name: "OPTIONAL: multiple optional blocks"
+    noncritical: true
+    ttl_data: |
+      @prefix o04: <http://opt04.org/> .
+      o04:alice o04:name "Alice" ; o04:age "30" .
+    sparql: |
+      @prefix o04: <http://opt04.org/> .
+      SELECT ?n, ?a, ?e WHERE { o04:alice o04:name ?n . OPTIONAL { o04:alice o04:age ?a } . OPTIONAL { o04:alice o04:email ?e } }
+    expect:
+      rows: 1
+      contains: "Alice"
+
+cleanup: []

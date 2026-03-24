@@ -24,9 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
-
-	"github.com/jtolds/gls"
 )
+import "github.com/jtolds/gls"
 
 // cachedMemStats provides a cached version of runtime.ReadMemStats.
 // The cache is refreshed when older than 1 minute. Between refreshes,
@@ -68,14 +67,12 @@ func AdjustMemStats(delta int64) {
 	cachedStatsMu.Unlock()
 }
 
-/* promise: single-value cell, lock-free via atomic CAS on state tag */
+/* promise: single-value cell */
 
-// Thread-safe via lock-free CAS on cells[1].aux:
-// To mutate, CAS cells[1].aux from current to lockSentinel (tagBool|false).
-// On success: read/write cells[0], then store the new state tag.
-// On failure (already locked or failed): spin-retry.
-// Fresh promises use a dedicated [2]Scmer backing; (newpromise list) reuses
-// an existing >=2-element slice with zero extra allocation.
+// NOTE: current implementation is intentionally not thread-safe.
+// It is sufficient for sequential query-plan execution. Fresh promises use a
+// dedicated [2]Scmer backing; (newpromise list) reuses an existing >=2-element
+// slice with zero extra allocation.
 func NewPromise(a ...Scmer) Scmer {
 	var cells []Scmer
 	if len(a) == 0 {
@@ -91,23 +88,14 @@ func NewPromise(a ...Scmer) Scmer {
 	return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 1)}
 }
 
-// promiseLockSentinel is the aux value used as a spin-lock marker on cells[1].
-// Uses tagBool|false (auxVal=0). The "failed" state uses tagBool|auxVal=2
-// to distinguish it from the lock sentinel while keeping the same tag byte.
 var promiseLockSentinel = makeAux(tagBool, 0)
-
-// promiseFailedAux is the aux value for a failed promise state.
-// Distinct from promiseLockSentinel (auxVal=0) to avoid deadlock on failed reads.
 var promiseFailedAux = makeAux(tagBool, 2)
 
-// promiseLock acquires the CAS spin-lock on cells[1].aux.
-// Returns the previous aux value (the state before locking).
 func promiseLock(cells *[2]Scmer) uint64 {
 	statePtr := (*uint64)(unsafe.Pointer(&cells[1].aux))
 	for {
 		old := atomic.LoadUint64(statePtr)
 		if old == promiseLockSentinel {
-			// Already locked (or failed) — spin
 			runtime.Gosched()
 			continue
 		}
@@ -118,13 +106,11 @@ func promiseLock(cells *[2]Scmer) uint64 {
 	}
 }
 
-// promiseUnlock releases the lock by storing the new state aux.
 func promiseUnlock(cells *[2]Scmer, newStateAux uint64) {
 	atomic.StoreUint64(&cells[1].aux, newStateAux)
 }
 
-// ApplyPromise dispatches a tagPromise call. Called from ApplyEx.
-// Thread-safe via CAS spin-lock on cells[1].aux.
+// ApplyPromise dispatches a tagPromise call. Thread-safe via CAS spin-lock.
 func ApplyPromise(p Scmer, args []Scmer) Scmer {
 	cells := (*[2]Scmer)(unsafe.Pointer(p.ptr))
 	if len(args) == 0 {
@@ -362,49 +348,53 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
-		"newpromise", "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
-		0, 1,
-		[]DeclarationParameter{
-			{"list", "any", "optional: ≥2-element slice to use as backing", nil},
-		}, "func",
-		NewPromise, false, false, &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "func", HasSideEffects: true}},
-		nil,
+		Name: "newpromise",
+		Desc: "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
+		Fn: NewPromise,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "list", ParamDesc: "optional: ≥2-element slice to use as backing", Optional: true},
+			},
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"newsession", "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
-		0, 0,
-		[]DeclarationParameter{}, "func",
-		NewSession, false, false, &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "func", HasSideEffects: true}},
-		nil,
+		Name: "newsession",
+		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
+		Fn: NewSession,
+		Type: &TypeDescriptor{
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"with_session", "Executes a function with the given session installed in the execution context, so storage operations can access the session's transaction state.",
-		2, 2,
-		[]DeclarationParameter{
-			{"session", "func", "the session to install", nil},
-			{"fn", "func", "the function to execute", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
+		Name: "with_session",
+		Desc: "Executes a function with the given session installed in the execution context, so storage operations can access the session's transaction state.",
+		Fn: func(a ...Scmer) Scmer {
 			return WithSession(a[0], a[1])
-		}, false, false, nil,
-		nil,
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "func", ParamName: "session", ParamDesc: "the session to install"},
+				{Kind: "func", ParamName: "fn", ParamDesc: "the function to execute"},
+			},
+			Return: &TypeDescriptor{Kind: "any"},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"context", "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"args...", "any", "depends on the usage", nil},
-		}, "any",
-		Context, false, false, nil,
-		nil,
+		Name: "context",
+		Desc: "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
+		Fn: Context,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "args...", ParamDesc: "depends on the usage", Variadic: true},
+			},
+			Return: &TypeDescriptor{Kind: "any"},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"sleep", "sleeps the amount of seconds",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"duration", "number", "number of seconds to sleep", nil},
-		}, "bool",
-		func(a ...Scmer) Scmer {
+		Name: "sleep",
+		Desc: "sleeps the amount of seconds",
+		Fn: func(a ...Scmer) Scmer {
 			ctx := GetContext()
 			select {
 			case <-ctx.Done():
@@ -412,16 +402,18 @@ func init_sync() {
 			case <-time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
 				return NewBool(true)
 			}
-		}, false, false, nil,
-		nil,
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "number", ParamName: "duration", ParamDesc: "number of seconds to sleep"},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"f", "func", "function that produces the result value", nil},
-		}, "func",
-		func(a ...Scmer) Scmer {
+		Name: "once",
+		Desc: "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
+		Fn: func(a ...Scmer) Scmer {
 			var params []Scmer
 			once := sync.OnceValue[Scmer](func() Scmer {
 				return Apply(a[0], params...)
@@ -430,14 +422,18 @@ func init_sync() {
 				params = a
 				return once()
 			})
-		}, false, false, nil,
-		nil,
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "func", ParamName: "f", ParamDesc: "function that produces the result value"},
+			},
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
-		0, 0,
-		[]DeclarationParameter{}, "func",
-		func(a ...Scmer) Scmer {
+		Name: "mutex",
+		Desc: "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
+		Fn: func(a ...Scmer) Scmer {
 			var mutex sync.Mutex
 			return NewFunc(func(a ...Scmer) Scmer {
 				mutex.Lock()
@@ -453,23 +449,26 @@ func init_sync() {
 				// execute serially
 				return Apply(a[0])
 			})
-		}, false, false, nil,
-		nil,
+		},
+		Type: &TypeDescriptor{
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"numcpu", "Returns the number of logical CPUs available for parallel execution",
-		0, 0,
-		[]DeclarationParameter{}, "number",
-		func(a ...Scmer) Scmer {
+		Name: "numcpu",
+		Desc: "Returns the number of logical CPUs available for parallel execution",
+		Fn: func(a ...Scmer) Scmer {
 			return NewInt(int64(runtime.NumCPU()))
-		}, true, false, nil,
-		nil,
+		},
+		Type: &TypeDescriptor{
+			Return: &TypeDescriptor{Kind: "number"},
+			Const: true,
+		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"memstats", "Returns memory statistics as a dict with keys: alloc, total_alloc, sys, heap_alloc, heap_sys (all in bytes)",
-		0, 0,
-		[]DeclarationParameter{}, "dict",
-		func(a ...Scmer) Scmer {
+		Name: "memstats",
+		Desc: "Returns memory statistics as a dict with keys: alloc, total_alloc, sys, heap_alloc, heap_sys (all in bytes)",
+		Fn: func(a ...Scmer) Scmer {
 			m := CachedMemStats()
 			fd := NewFastDictValue(5)
 			fd.Set(NewString("alloc"), NewInt(int64(m.Alloc)), nil)
@@ -478,7 +477,10 @@ func init_sync() {
 			fd.Set(NewString("heap_alloc"), NewInt(int64(m.HeapAlloc)), nil)
 			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
 			return NewFastDict(fd)
-		}, true, false, nil,
-		nil,
+		},
+		Type: &TypeDescriptor{
+			Return: &TypeDescriptor{Kind: "dict"},
+			Const: true,
+		},
 	})
 }

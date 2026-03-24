@@ -1,0 +1,139 @@
+metadata:
+  version: "1.0"
+  description: "Advanced SPARQL — subqueries, property paths, ASK, CONSTRUCT, VALUES"
+
+setup: []
+
+test_cases:
+
+  # ==========================================================
+  # Subqueries
+  # ==========================================================
+
+  - name: "SPARQL: subquery in WHERE"
+    noncritical: true
+    ttl_data: |
+      @prefix a01: <http://adv01.org/> .
+      a01:alice a01:score "90" .
+      a01:bob a01:score "80" .
+      a01:carol a01:score "95" .
+    sparql: |
+      @prefix a01: <http://adv01.org/> .
+      SELECT ?s WHERE {
+        ?s a01:score ?sc .
+        { SELECT (MAX(?v) AS ?maxv) WHERE { ?x a01:score ?v } }
+        FILTER(?sc = ?maxv)
+      }
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # Property Paths
+  # ==========================================================
+
+  - name: "SPARQL: property path sequence (/)"
+    noncritical: true
+    ttl_data: |
+      @prefix a02: <http://adv02.org/> .
+      a02:alice a02:knows a02:bob .
+      a02:bob a02:name "Bob" .
+    sparql: |
+      @prefix a02: <http://adv02.org/> .
+      SELECT ?name WHERE { a02:alice a02:knows/a02:name ?name }
+    expect:
+      rows: 1
+      data:
+        - "?name": "Bob"
+
+  - name: "SPARQL: property path transitive closure (*)"
+    noncritical: true
+    ttl_data: |
+      @prefix a03: <http://adv03.org/> .
+      a03:a a03:parent a03:b .
+      a03:b a03:parent a03:c .
+      a03:c a03:parent a03:d .
+    sparql: |
+      @prefix a03: <http://adv03.org/> .
+      SELECT ?ancestor WHERE { a03:a a03:parent* ?ancestor }
+    expect:
+      rows: 4
+
+  - name: "SPARQL: property path one-or-more (+)"
+    noncritical: true
+    ttl_data: |
+      @prefix a04: <http://adv04.org/> .
+      a04:a a04:next a04:b .
+      a04:b a04:next a04:c .
+    sparql: |
+      @prefix a04: <http://adv04.org/> .
+      SELECT ?end WHERE { a04:a a04:next+ ?end }
+    expect:
+      rows: 2
+
+  - name: "SPARQL: property path alternative (|)"
+    noncritical: true
+    ttl_data: |
+      @prefix a05: <http://adv05.org/> .
+      a05:alice a05:name "Alice" .
+      a05:alice a05:label "A" .
+    sparql: |
+      @prefix a05: <http://adv05.org/> .
+      SELECT ?v WHERE { a05:alice (a05:name|a05:label) ?v }
+    expect:
+      rows: 2
+
+  # ==========================================================
+  # ASK / CONSTRUCT / DESCRIBE
+  # ==========================================================
+
+  - name: "ASK: true"
+    noncritical: true
+    ttl_data: |
+      @prefix a06: <http://adv06.org/> .
+      a06:item a06:exists "yes" .
+    sparql: |
+      @prefix a06: <http://adv06.org/> .
+      ASK WHERE { a06:item a06:exists ?v }
+    expect:
+      contains: "true"
+
+  - name: "ASK: false"
+    noncritical: true
+    sparql: |
+      @prefix a07: <http://adv07.org/> .
+      ASK WHERE { a07:nothing a07:here ?v }
+    expect:
+      contains: "false"
+
+  - name: "CONSTRUCT: build new triples"
+    noncritical: true
+    ttl_data: |
+      @prefix a08: <http://adv08.org/> .
+      a08:alice a08:name "Alice" .
+    sparql: |
+      @prefix a08: <http://adv08.org/> .
+      CONSTRUCT { ?s a08:label ?n } WHERE { ?s a08:name ?n }
+    expect:
+      contains: "Alice"
+
+  # ==========================================================
+  # VALUES
+  # ==========================================================
+
+  - name: "VALUES: inline data"
+    noncritical: true
+    ttl_data: |
+      @prefix a09: <http://adv09.org/> .
+      a09:a a09:name "Alice" .
+      a09:b a09:name "Bob" .
+      a09:c a09:name "Carol" .
+    sparql: |
+      @prefix a09: <http://adv09.org/> .
+      SELECT ?n WHERE {
+        VALUES ?s { a09:a a09:c }
+        ?s a09:name ?n
+      }
+    expect:
+      rows: 2
+
+cleanup: []

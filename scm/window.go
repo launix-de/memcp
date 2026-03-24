@@ -38,121 +38,114 @@ package scm
 func init_window() {
 	DeclareTitle("Window Functions")
 
-	Declare(&Globalenv, &Declaration{
-		"window_mut", "Ring buffer shift-insert for window functions. (window_mut window emit_fn vals) writes vals (a list of stride values) into the current slot, increments counter. If skip>0, decrements skip. Otherwise calls (emit_fn oldest_v0 oldest_v1 ... newest_v0 newest_v1) with all slot values ordered oldest-to-newest. Returns updated window.",
-		3, 3,
-		[]DeclarationParameter{
-			{"window", "list", "ring buffer accumulator", nil},
-			{"emit_fn", "func", "callback receiving all window values oldest-to-newest", nil},
-			{"vals", "list", "list of stride values to insert", nil},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			win := asSlice(a[0], "window_mut")
-			emitFn := a[1]
-			vals := asSlice(a[2], "window_mut vals")
-
-			if len(win) < 3 {
-				panic("window_mut: window must have at least 3 elements (skip, counter, stride)")
-			}
-
-			skip := int(win[0].Int())
-			counter := int(win[1].Int())
-			stride := int(win[2].Int())
-			slots := win[3:] // flat: window_size * stride values
-			windowSize := len(slots) / stride
-
-			if windowSize == 0 || stride == 0 {
-				panic("window_mut: invalid window dimensions")
-			}
-
-			// write vals into current slot
-			writePos := (counter % windowSize) * stride
-			for i := 0; i < stride; i++ {
-				if i < len(vals) {
-					slots[writePos+i] = vals[i]
-				} else {
-					slots[writePos+i] = NewNil()
+		Declare(&Globalenv, &Declaration{
+		Name: "window_mut",
+		Desc: "Ring buffer shift-insert for window functions. (window_mut window emit_fn vals) writes vals (a list of stride values) into the current slot, increments counter. If skip>0, decrements skip. Otherwise calls (emit_fn oldest_v0 oldest_v1 ... newest_v0 newest_v1) with all slot values ordered oldest-to-newest. Returns updated window.",
+		Fn: func(a ...Scmer) Scmer {
+				win := asSlice(a[0], "window_mut")
+				emitFn := a[1]
+				vals := asSlice(a[2], "window_mut vals")
+	
+				if len(win) < 3 {
+					panic("window_mut: window must have at least 3 elements (skip, counter, stride)")
 				}
-			}
-			counter++
-
-			// build result window
-			result := make([]Scmer, len(win))
-			if skip > 0 {
-				result[0] = NewInt(int64(skip - 1))
-			} else {
-				result[0] = NewInt(0)
-			}
-			result[1] = NewInt(int64(counter))
-			result[2] = NewInt(int64(stride))
-			copy(result[3:], slots)
-
-			// emit if not skipping
-			if skip <= 0 {
-				// build args: all values oldest-to-newest
-				args := make([]Scmer, len(slots))
-				for i := 0; i < windowSize; i++ {
-					srcPos := ((counter + i) % windowSize) * stride
-					dstPos := i * stride
-					for j := 0; j < stride; j++ {
-						args[dstPos+j] = slots[srcPos+j]
-					}
+	
+				skip := int(win[0].Int())
+				counter := int(win[1].Int())
+				stride := int(win[2].Int())
+				slots := win[3:] // flat: window_size * stride values
+				windowSize := len(slots) / stride
+	
+				if windowSize == 0 || stride == 0 {
+					panic("window_mut: invalid window dimensions")
 				}
-				Apply(emitFn, args...)
-			}
-
-			return NewSlice(result)
-		},
-		false, false, nil,
-		nil,
-	})
-
-	Declare(&Globalenv, &Declaration{
-		"window_flush", "Flush remaining window buffer by shifting in nils. (window_flush window emit_fn count) shifts in count positions of nils, calling emit_fn for each displaced position. Returns nil.",
-		3, 3,
-		[]DeclarationParameter{
-			{"window", "list", "ring buffer accumulator", nil},
-			{"emit_fn", "func", "callback receiving all window values oldest-to-newest", nil},
-			{"count", "number", "number of nil positions to shift in", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			win := asSlice(a[0], "window_flush")
-			emitFn := a[1]
-			count := int(a[2].Int())
-
-			if len(win) < 3 {
-				panic("window_flush: window must have at least 3 elements")
-			}
-
-			counter := int(win[1].Int())
-			stride := int(win[2].Int())
-			slots := make([]Scmer, len(win)-3)
-			copy(slots, win[3:])
-			windowSize := len(slots) / stride
-
-			for n := 0; n < count; n++ {
-				// write nils into current slot
+	
+				// write vals into current slot
 				writePos := (counter % windowSize) * stride
 				for i := 0; i < stride; i++ {
-					slots[writePos+i] = NewNil()
-				}
-				counter++
-
-				// build args: all values oldest-to-newest
-				args := make([]Scmer, len(slots))
-				for i := 0; i < windowSize; i++ {
-					srcPos := ((counter + i) % windowSize) * stride
-					dstPos := i * stride
-					for j := 0; j < stride; j++ {
-						args[dstPos+j] = slots[srcPos+j]
+					if i < len(vals) {
+						slots[writePos+i] = vals[i]
+					} else {
+						slots[writePos+i] = NewNil()
 					}
 				}
-				Apply(emitFn, args...)
-			}
-
-			return NewNil()
+				counter++
+	
+				// build result window
+				result := make([]Scmer, len(win))
+				if skip > 0 {
+					result[0] = NewInt(int64(skip - 1))
+				} else {
+					result[0] = NewInt(0)
+				}
+				result[1] = NewInt(int64(counter))
+				result[2] = NewInt(int64(stride))
+				copy(result[3:], slots)
+	
+				// emit if not skipping
+				if skip <= 0 {
+					// build args: all values oldest-to-newest
+					args := make([]Scmer, len(slots))
+					for i := 0; i < windowSize; i++ {
+						srcPos := ((counter + i) % windowSize) * stride
+						dstPos := i * stride
+						for j := 0; j < stride; j++ {
+							args[dstPos+j] = slots[srcPos+j]
+						}
+					}
+					Apply(emitFn, args...)
+				}
+	
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest"}, &TypeDescriptor{Kind: "list", ParamName: "vals", ParamDesc: "list of stride values to insert"}},
+			Return: &TypeDescriptor{Kind: "list"},
 		},
-		false, false, nil,
-		nil,
+	})
+
+		Declare(&Globalenv, &Declaration{
+		Name: "window_flush",
+		Desc: "Flush remaining window buffer by shifting in nils. (window_flush window emit_fn count) shifts in count positions of nils, calling emit_fn for each displaced position. Returns nil.",
+		Fn: func(a ...Scmer) Scmer {
+				win := asSlice(a[0], "window_flush")
+				emitFn := a[1]
+				count := int(a[2].Int())
+	
+				if len(win) < 3 {
+					panic("window_flush: window must have at least 3 elements")
+				}
+	
+				counter := int(win[1].Int())
+				stride := int(win[2].Int())
+				slots := make([]Scmer, len(win)-3)
+				copy(slots, win[3:])
+				windowSize := len(slots) / stride
+	
+				for n := 0; n < count; n++ {
+					// write nils into current slot
+					writePos := (counter % windowSize) * stride
+					for i := 0; i < stride; i++ {
+						slots[writePos+i] = NewNil()
+					}
+					counter++
+	
+					// build args: all values oldest-to-newest
+					args := make([]Scmer, len(slots))
+					for i := 0; i < windowSize; i++ {
+						srcPos := ((counter + i) % windowSize) * stride
+						dstPos := i * stride
+						for j := 0; j < stride; j++ {
+							args[dstPos+j] = slots[srcPos+j]
+						}
+					}
+					Apply(emitFn, args...)
+				}
+	
+				return NewNil()
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest"}, &TypeDescriptor{Kind: "number", ParamName: "count", ParamDesc: "number of nil positions to shift in"}},
+		},
 	})
 }

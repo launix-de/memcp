@@ -1,0 +1,75 @@
+metadata:
+  version: "1.0"
+  description: "SPARQL Update — INSERT/DELETE"
+
+setup: []
+
+test_cases:
+
+  - name: "INSERT DATA: simple"
+    noncritical: true
+    ttl_data: |
+      @prefix su1: <http://supd01.org/> .
+      su1:existing su1:val "before" .
+    sparql: |
+      @prefix su1: <http://supd01.org/> .
+      INSERT DATA { su1:new su1:val "inserted" }
+    expect:
+      rows: 0
+
+  - name: "INSERT DATA: verify"
+    noncritical: true
+    sparql: |
+      @prefix su1: <http://supd01.org/> .
+      SELECT ?v WHERE { su1:new su1:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "inserted"
+
+  - name: "DELETE DATA: simple"
+    noncritical: true
+    ttl_data: |
+      @prefix su2: <http://supd02.org/> .
+      su2:item su2:val "to-delete" .
+      su2:item su2:keep "yes" .
+    sparql: |
+      @prefix su2: <http://supd02.org/> .
+      DELETE DATA { su2:item su2:val "to-delete" }
+    expect:
+      rows: 0
+
+  - name: "DELETE DATA: verify"
+    noncritical: true
+    sparql: |
+      @prefix su2: <http://supd02.org/> .
+      SELECT ?p, ?o WHERE { su2:item ?p ?o }
+    expect:
+      rows: 1
+      data:
+        - "?p": "http://supd02.org/keep"
+
+  - name: "DELETE/INSERT WHERE: update pattern"
+    noncritical: true
+    ttl_data: |
+      @prefix su3: <http://supd03.org/> .
+      su3:item su3:status "draft" .
+    sparql: |
+      @prefix su3: <http://supd03.org/> .
+      DELETE { su3:item su3:status ?old }
+      INSERT { su3:item su3:status "published" }
+      WHERE { su3:item su3:status ?old }
+    expect:
+      rows: 0
+
+  - name: "DELETE/INSERT WHERE: verify"
+    noncritical: true
+    sparql: |
+      @prefix su3: <http://supd03.org/> .
+      SELECT ?v WHERE { su3:item su3:status ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "published"
+
+cleanup: []

@@ -81,6 +81,10 @@ this is how rdf works:
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")
+			(regex "^/rdf/([^/]+)/load_ttl$" url schema) (begin
+				(set ttl_data ((req "body")))
+				(handle_ttl_load req res schema ttl_data)
+			)
 			(regex "^/rdf/([^/]+)$" url schema) (begin
 				(define query ((req "body")))
 				(handle_query req res schema query)
@@ -88,10 +92,6 @@ this is how rdf works:
 			(regex "^/rdf/([^/]+)/(.*)$" url schema query_un) (begin
 				(define query (urldecode query_un))
 				(handle_query req res schema query)
-			)
-			(regex "^/rdf/([^/]+)/load_ttl$" url schema) (begin
-				(define ttl_data ((req "body")))
-				(handle_ttl_load req res schema ttl_data)
 			)
 			/* default */
 			(!begin

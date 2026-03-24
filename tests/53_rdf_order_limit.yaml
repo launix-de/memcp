@@ -1,0 +1,88 @@
+metadata:
+  version: "1.0"
+  description: "SPARQL ORDER BY, LIMIT, OFFSET, DISTINCT"
+
+setup: []
+
+test_cases:
+
+  - name: "ORDER BY: ascending"
+    noncritical: true
+    ttl_data: |
+      @prefix ol1: <http://ordlim01.org/> .
+      ol1:c ol1:n "3" .
+      ol1:a ol1:n "1" .
+      ol1:b ol1:n "2" .
+    sparql: |
+      @prefix ol1: <http://ordlim01.org/> .
+      SELECT ?s, ?n WHERE { ?s ol1:n ?n } ORDER BY ?n
+    expect:
+      rows: 3
+
+  - name: "ORDER BY DESC"
+    noncritical: true
+    ttl_data: |
+      @prefix ol2: <http://ordlim02.org/> .
+      ol2:a ol2:n "1" .
+      ol2:b ol2:n "2" .
+      ol2:c ol2:n "3" .
+    sparql: |
+      @prefix ol2: <http://ordlim02.org/> .
+      SELECT ?n WHERE { ?s ol2:n ?n } ORDER BY DESC(?n)
+    expect:
+      rows: 3
+
+  - name: "LIMIT"
+    noncritical: true
+    ttl_data: |
+      @prefix ol3: <http://ordlim03.org/> .
+      ol3:a ol3:v "1" .
+      ol3:b ol3:v "2" .
+      ol3:c ol3:v "3" .
+    sparql: |
+      @prefix ol3: <http://ordlim03.org/> .
+      SELECT ?s WHERE { ?s ol3:v ?v } LIMIT 2
+    expect:
+      rows: 2
+
+  - name: "OFFSET"
+    noncritical: true
+    ttl_data: |
+      @prefix ol4: <http://ordlim04.org/> .
+      ol4:a ol4:v "1" .
+      ol4:b ol4:v "2" .
+      ol4:c ol4:v "3" .
+    sparql: |
+      @prefix ol4: <http://ordlim04.org/> .
+      SELECT ?s WHERE { ?s ol4:v ?v } LIMIT 2 OFFSET 1
+    expect:
+      rows: 2
+
+  - name: "DISTINCT"
+    noncritical: true
+    ttl_data: |
+      @prefix ol5: <http://ordlim05.org/> .
+      ol5:a ol5:type ol5:X .
+      ol5:b ol5:type ol5:X .
+      ol5:c ol5:type ol5:Y .
+    sparql: |
+      @prefix ol5: <http://ordlim05.org/> .
+      SELECT DISTINCT ?t WHERE { ?s ol5:type ?t }
+    expect:
+      rows: 2
+
+  - name: "ORDER BY + LIMIT combined"
+    noncritical: true
+    ttl_data: |
+      @prefix ol6: <http://ordlim06.org/> .
+      ol6:a ol6:score "90" .
+      ol6:b ol6:score "70" .
+      ol6:c ol6:score "85" .
+      ol6:d ol6:score "95" .
+    sparql: |
+      @prefix ol6: <http://ordlim06.org/> .
+      SELECT ?s, ?sc WHERE { ?s ol6:score ?sc } ORDER BY DESC(?sc) LIMIT 2
+    expect:
+      rows: 2
+
+cleanup: []
