@@ -1,0 +1,58 @@
+# UPDATE referencing own columns on the right-hand side of SET without table prefix.
+# Pattern from ERPL migration:
+#   UPDATE tbl SET col1 = col2 OR col3, col4 = IF(col4 = 0, COALESCE(col5, 0), col4)
+# The unqualified column names on the RHS must resolve to the same table being updated.
+
+metadata:
+  version: "1.0"
+  description: "UPDATE with unqualified self-column references in SET expressions"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS uscr_tax"
+  - sql: "DROP TABLE IF EXISTS uscr_journal"
+  - sql: "CREATE TABLE uscr_tax (ID INT PRIMARY KEY, allnet BOOLEAN, innercom BOOLEAN, service13b BOOLEAN, rate INT, rate2 INT)"
+  - sql: "CREATE TABLE uscr_journal (ID INT PRIMARY KEY, journal INT, journalManual INT, ref1 INT, ref2 INT)"
+  - sql: "INSERT INTO uscr_tax VALUES (1, false, true, false, 19, 0), (2, false, false, true, 0, 7)"
+  - sql: "INSERT INTO uscr_journal VALUES (1, NULL, 42, 10, 20), (2, 99, NULL, 30, 40)"
+
+test_cases:
+
+  - name: "UPDATE SET with OR of own columns"
+    sql: |
+      UPDATE uscr_tax SET allnet = innercom OR service13b, rate = IF(rate = 0, COALESCE(rate2, 0), rate)
+    expect:
+      rows_affected: 2
+
+  - name: "verify UPDATE OR result"
+    sql: |
+      SELECT ID, allnet, rate FROM uscr_tax ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          allnet: 1
+          rate: 19
+        - ID: 2
+          allnet: 1
+          rate: 7
+
+  - name: "UPDATE SET with COALESCE of own columns"
+    sql: |
+      UPDATE uscr_journal SET journal = COALESCE(journal, journalManual, ref1, ref2)
+    expect:
+      rows_affected: 2
+
+  - name: "verify COALESCE result"
+    sql: |
+      SELECT ID, journal FROM uscr_journal ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          journal: 42
+        - ID: 2
+          journal: 99
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS uscr_tax"
+  - sql: "DROP TABLE IF EXISTS uscr_journal"

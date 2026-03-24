@@ -407,10 +407,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(define kt_cols (cons
 				'("unique" "group" key_names)
 				(map key_names (lambda (colname) '("column" colname "any" '() '())))))
-			(define kt_partition (merge (map (produceN (count keys)) (lambda (i)
+			(define kt_partition (if (not (string? tbl)) '() (merge (map (produceN (count keys)) (lambda (i)
 				(match (key_at i)
 					'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
-					'())))))
+					'()))))))
 			/* create at compile time (needed for recursive build_queryplan) */
 			(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
 			(partitiontable schema keytable_name kt_partition)
@@ -419,10 +419,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				(cons
 					(cons 'list (cons "unique" (cons "group" (list (cons 'list key_names)))))
 					(map key_names (lambda (colname) (list 'list "column" colname "any" '(list) '(list)))))))
-			(define kt_partition_code (cons 'list (merge (map (produceN (count keys)) (lambda (i)
+			(define kt_partition_code (if (not (string? tbl)) '(list) (cons 'list (merge (map (produceN (count keys)) (lambda (i)
 				(match (key_at i)
 					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
-					'()))))))
+					'())))))))
 			(define init_code (list 'begin
 				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
 				(list 'partitiontable schema keytable_name kt_partition_code)
@@ -1226,7 +1226,10 @@ WHAT IT MUST NOT DO:
 										'() (replace_columns_from_expr agg_item)
 									)
 								))
-								(build_scalar_agg_scan tables2 condition2)
+								(define _init_stmts_agg (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+								(if (equal? _init_stmts_agg '())
+									(build_scalar_agg_scan tables2 condition2)
+									(cons (quote !begin) (merge _init_stmts_agg (list (build_scalar_agg_scan tables2 condition2)))))
 							)
 							/* fallback: build_queryplan for non-aggregate or complex aggregate cases */
 							(begin
