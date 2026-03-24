@@ -1481,6 +1481,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (contains? s1_keys "y") true "session: lists key y")
 	(assert (equal? (try (lambda () (s1 "a" "b" "c")) (lambda (e) "caught")) "caught") true "session: too many args panics")
 
+	/* deep callback signature validation */
+	(print "testing callback signature validation ...")
+	/* filter: callback must take 1 arg */
+	(assert (equal? (try (lambda () (eval '(filter '(1 2 3) (lambda () true)))) (lambda (e) "caught")) "caught") true "validate: filter callback with 0 params rejected")
+	/* map: callback must take 1 arg */
+	(assert (equal? (try (lambda () (eval '(map '(1 2 3) (lambda () 1)))) (lambda (e) "caught")) "caught") true "validate: map callback with 0 params rejected")
+	/* reduce: callback must take 2 args */
+	(assert (equal? (try (lambda () (eval '(reduce '(1 2 3) (lambda (a) a) 0))) (lambda (e) "caught")) "caught") true "validate: reduce callback with 1 param rejected")
+	/* correct callbacks pass validation */
+	(assert (equal? (filter '(1 2 3) (lambda (x) (> x 1))) '(2 3)) true "validate: filter with correct callback works")
+	(assert (equal? (map '(1 2 3) (lambda (x) (+ x 10))) '(11 12 13)) true "validate: map with correct callback works")
+	(assert (equal? (reduce '(1 2 3) (lambda (a b) (+ a b)) 0) 6) true "validate: reduce with correct callback works")
+
 	/* dashboard metrics (metrics.go) */
 	(print "testing dashboard metrics ...")
 	(define _stat (stat))

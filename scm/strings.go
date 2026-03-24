@@ -222,6 +222,7 @@ func init_strings() {
 			},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to simplify"}},
+			Return: &TypeDescriptor{Kind: "any"},
 			Const: true,
 		},
 	})
@@ -613,7 +614,13 @@ func init_strings() {
 			},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", ParamName: "reverse", ParamDesc: "whether to reverse the order like in ORDER BY DESC", Optional: true}},
-			Return: &TypeDescriptor{Kind: "func"},
+			Return: &TypeDescriptor{Kind: "func",
+				Params: []*TypeDescriptor{
+					{Kind: "any", ParamName: "a", ParamDesc: "left operand"},
+					{Kind: "any", ParamName: "b", ParamDesc: "right operand"},
+				},
+				Return: &TypeDescriptor{Kind: "bool"},
+			},
 			Const: true,
 		},
 	})
@@ -730,6 +737,7 @@ func init_strings() {
 			},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
+			Return: &TypeDescriptor{Kind: "any"},
 			Const: true,
 		},
 	})
