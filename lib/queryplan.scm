@@ -1759,14 +1759,12 @@ WHAT IT MUST NOT DO:
 								(if (equal?? inner_kind (quote inner_select_exists))
 									(match inner_args
 										(cons subquery '()) (begin
-											/* try Neumann NOT EXISTS unnesting */
-											(define _une_r (unnest_exists_subselect subquery outer_schemas))
-											(if (nil? _une_r)
-												(list (quote not) (build_exists_subselect subquery outer_schemas))
-												(match _une_r '(_une_subst _une_tbls) (begin
-													(sq_cache "tables" (merge _une_tbls (coalesceNil (sq_cache "tables") '())))
-													/* invert: EXISTS→true becomes NOT EXISTS→false */
-													(list (quote not) _une_subst)))))
+											/* Rewrite NOT EXISTS → (= COUNT(*) 0) */
+											(define _nex_count_sq (match subquery
+												'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
+												subquery))
+											(define _nex_count_expr (list (quote inner_select) _nex_count_sq))
+											(list (quote equal?) (list (quote coalesceNil) (replace_inner_selects _nex_count_expr outer_schemas) 0) 0))
 										_ nil)
 									nil))
 						)
@@ -1794,13 +1792,13 @@ WHAT IT MUST NOT DO:
 					)
 					(quote inner_select_exists) (match args
 						(cons subquery '()) (begin
-							/* try Neumann EXISTS unnesting; fall back to inline code */
-							(define _ue_r (unnest_exists_subselect subquery outer_schemas))
-							(if (nil? _ue_r)
-								(build_exists_subselect subquery outer_schemas)
-								(match _ue_r '(_ue_subst _ue_tbls) (begin
-									(sq_cache "tables" (merge _ue_tbls (coalesceNil (sq_cache "tables") '())))
-									_ue_subst))))
+							/* Rewrite EXISTS → (> COUNT(*) 0) and process as scalar subselect.
+							This leverages the existing Neumann aggregate unnesting (Path A). */
+							(define _ex_count_sq (match subquery
+								'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
+								subquery))
+							(define _ex_count_expr (list (quote inner_select) _ex_count_sq))
+							(list (quote >) (list (quote coalesceNil) (replace_inner_selects _ex_count_expr outer_schemas) 0) 0))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
