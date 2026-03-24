@@ -303,6 +303,7 @@ func init_list() {
 			},
 			Return: FreshAlloc,
 			Const: true,
+			Optimize: optimizeCons,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -418,6 +419,7 @@ func init_list() {
 			},
 			Return: FreshAlloc,
 			Const: true,
+			Optimize: optimizeMerge,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -570,6 +572,31 @@ func init_list() {
 			Return: FreshAlloc,
 			Const: true,
 			Optimize: FirstParameterMutable("mapIndex_mut"),
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "flatmap",
+		Desc: "applies fn to each element and flattens the results into a single list (map+merge in one pass, no intermediate allocation)",
+		Fn: func(a ...Scmer) Scmer {
+			list := asSlice(a[0], "flatmap")
+			fn := OptimizeProcToSerialFunction(a[1])
+			result := make([]Scmer, 0, len(list))
+			for _, v := range list {
+				mapped := fn(v)
+				if mapped.IsNil() {
+					continue
+				}
+				result = append(result, asSlice(mapped, "flatmap result")...)
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "list to map and flatten", NoEscape: true},
+				{Kind: "func", ParamName: "fn", ParamDesc: "func(item)->list that returns a list per element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "list"}},
+			},
+			Return: FreshAlloc,
+			Const: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1553,4 +1580,47 @@ func init_list() {
 			Forbidden: true,
 		},
 	})
+}
+
+// optimizeMerge rewrites merge calls to avoid intermediate allocations:
+//   (merge (map list fn)) → (flatmap list fn)           — single-arg merge over map
+//   (merge (extract_assoc dict fn)) → (flatmap_assoc...) — not yet, but same idea
+//   (merge a b (map list fn)) → flatten map result inline
+func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	// First: apply default optimization to all args
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if rSlice, ok := scmerSlice(result); ok && len(rSlice) == 2 {
+		// (merge X) where X is a single argument
+		arg := rSlice[1]
+		if inner, ok2 := scmerSlice(arg); ok2 && len(inner) == 3 {
+			// Check if arg is (map list fn) or (map_mut list fn)
+			if scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut") {
+				// Rewrite to (flatmap list fn) — flatmap does map+flatten in one pass
+				flatmapCall := []Scmer{NewSymbol("flatmap"), inner[1], inner[2]}
+				return NewSlice(flatmapCall), FreshAlloc
+			}
+		}
+	}
+	return result, td
+}
+
+// optimizeCons rewrites cons when the tail is a freshly allocated list:
+//   (cons head (map list fn)) → (cons head (map_mut list fn))  — already handled by _mut
+//   (cons head (list a b c))  → (list head a b c)              — avoid double allocation
+func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if rSlice, ok := scmerSlice(result); ok && len(rSlice) == 3 {
+		tail := rSlice[2]
+		if inner, ok2 := scmerSlice(tail); ok2 && len(inner) >= 1 {
+			// (cons head (list a b c)) → (list head a b c)
+			if scmerIsSymbol(inner[0], "list") {
+				merged := make([]Scmer, 0, len(inner)+1)
+				merged = append(merged, NewSymbol("list"))
+				merged = append(merged, rSlice[1]) // head
+				merged = append(merged, inner[1:]...) // tail items
+				return NewSlice(merged), FreshAlloc
+			}
+		}
+	}
+	return result, td
 }
