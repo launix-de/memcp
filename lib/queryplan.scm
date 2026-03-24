@@ -901,7 +901,7 @@ WHAT IT MUST NOT DO:
 								(unnest_acc "counter" (+ sq_num 1))
 								/* include query hash in sq_id so different conditions get different temp tables */
 								(define _sq_hash (fnv_hash (concat raw_tables "|" new_fields "|" new_condition)))
-								(define sq_id (concat "$sq" sq_num ":" _sq_hash))
+								(define sq_id (concat "$sq" sq_num "_" _sq_hash))
 								/* build remaining inner condition */
 								(define _inner_parts (filter (map _classified (lambda (c) (if (equal? (car c) "inner") (nth c 1) nil))) (lambda (x) (not (nil? x)))))
 								(define remaining_cond (_rebuild_and _inner_parts))
