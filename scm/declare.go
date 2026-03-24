@@ -344,16 +344,27 @@ func WriteDocumentation(folder string) error {
 				fmt.Fprintln(f, "_This function has no parameters._")
 			} else if d, ok := declarations[def.Name]; ok && !d.IsForbidden() {
 				for _, p := range def.Type.Params {
-					fmt.Fprintf(f, "- **%s** (`%s`): %s\n", p.ParamName, p.Kind, p.ParamDesc)
+					kind := p.Kind
+					if kind == "func" && len(p.Params) > 0 {
+						kind = FormatTypeSignature(p)
+					}
+					flags := ""
+					if p.Optional {
+						flags += " _(optional)_"
+					}
+					if p.Variadic {
+						flags += " _(variadic)_"
+					}
+					fmt.Fprintf(f, "- **%s** (`%s`): %s%s\n", p.ParamName, kind, p.ParamDesc, flags)
 				}
 				fmt.Fprintln(f)
 			}
 
-			retKind := "any"
-			if def.Type != nil && def.Type.Return != nil && def.Type.Return.Kind != "" {
-				retKind = def.Type.Return.Kind
+			retStr := "any"
+			if def.Type != nil && def.Type.Return != nil {
+				retStr = FormatTypeSignature(def.Type.Return)
 			}
-			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", retKind)
+			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", retStr)
 		}
 
 		_ = f.Close()
@@ -521,6 +532,65 @@ func Validate(val Scmer, require string) string {
 	return "any"
 }
 
+// FormatTypeSignature returns a human-readable type string for a TypeDescriptor.
+// For func types with Params, it produces "func(name:type, ...) -> returntype".
+func FormatTypeSignature(td *TypeDescriptor) string {
+	if td == nil {
+		return "any"
+	}
+	if td.Kind != "func" || len(td.Params) == 0 {
+		if td.Kind == "" {
+			return "any"
+		}
+		return td.Kind
+	}
+	var b strings.Builder
+	b.WriteString("func(")
+	for i, p := range td.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if p == nil {
+			b.WriteString("any")
+			continue
+		}
+		if p.ParamName != "" {
+			b.WriteString(p.ParamName)
+			b.WriteString(":")
+		}
+		b.WriteString(FormatTypeSignature(p))
+		if p.Optional {
+			b.WriteString("?")
+		}
+		if p.Variadic {
+			b.WriteString("...")
+		}
+	}
+	b.WriteString(")")
+	if td.Return != nil {
+		b.WriteString(" -> ")
+		b.WriteString(FormatTypeSignature(td.Return))
+	}
+	return b.String()
+}
+
+// formatParamLine formats a single parameter for Help/Docs output,
+// including callback signature details when Kind is "func".
+func formatParamLine(p *TypeDescriptor) string {
+	kind := p.Kind
+	if kind == "func" && len(p.Params) > 0 {
+		kind = FormatTypeSignature(p)
+	}
+	line := " - " + p.ParamName + " (" + kind + "): " + p.ParamDesc
+	if p.Optional {
+		line += " [optional]"
+	}
+	if p.Variadic {
+		line += " [variadic]"
+	}
+	return line
+}
+
 func Help(fn Scmer) string {
 	var b strings.Builder
 	if fn.IsNil() {
@@ -542,9 +612,13 @@ func Help(fn Scmer) string {
 			if def.Type != nil {
 				for _, p := range def.Type.Params {
 					if p != nil {
-						b.WriteString(" - " + p.ParamName + " (" + p.Kind + "): " + p.ParamDesc + "\n")
+						b.WriteString(formatParamLine(p) + "\n")
 					}
 				}
+			}
+			if def.Type != nil && def.Type.Return != nil {
+				retStr := FormatTypeSignature(def.Type.Return)
+				b.WriteString("\nReturns: " + retStr + "\n")
 			}
 			b.WriteString("\n")
 		} else {

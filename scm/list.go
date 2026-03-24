@@ -495,7 +495,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be filtered", NoEscape: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(any)->bool"},
+				{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(item)->bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
@@ -521,7 +521,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list to search", NoEscape: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(any)->bool that is applied until the first match"},
+				{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(any)->bool that is applied until the first match", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
 				{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
@@ -543,7 +543,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(any)->any that is applied to each item"},
+				{Kind: "func", ParamName: "map", ParamDesc: "map function func(any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
@@ -565,7 +565,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any that is applied to each item"},
+				{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}, {Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
@@ -595,7 +595,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item"},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
@@ -620,8 +620,8 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "startstate", ParamDesc: "start state to begin with"},
-				{Kind: "func", ParamName: "condition", ParamDesc: "func that returns true whether the state will be inserted into the result or the loop is stopped"},
-				{Kind: "func", ParamName: "iterator", ParamDesc: "func that produces the next state"},
+				{Kind: "func", ParamName: "condition", ParamDesc: "func that returns true whether the state will be inserted into the result or the loop is stopped", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "iterator", ParamDesc: "func that produces the next state", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
@@ -652,7 +652,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "(optional) map function applied to each index", Optional: true},
+				{Kind: "func", ParamName: "fn", ParamDesc: "(optional) map function applied to each index", Optional: true, Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
@@ -720,7 +720,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel"},
+				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 			Const: true,
@@ -755,7 +755,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index"},
+				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", NoEscape: true, Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
@@ -861,7 +861,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel"},
+				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", NoEscape: true, Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
@@ -936,7 +936,7 @@ func init_list() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be filtered", NoEscape: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(string any)->bool where the first parameter is the key, the second is the value"},
+				{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(string any)->bool where the first parameter is the key, the second is the value", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return: FreshAlloc,
 			Const: true,

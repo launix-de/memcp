@@ -737,6 +737,7 @@ func init_strings() {
 			},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
+			Return: &TypeDescriptor{Kind: "any"},
 			Const: true,
 		},
 	})
