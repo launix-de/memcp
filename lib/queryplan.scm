@@ -188,6 +188,28 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 /* helper to check list membership */
 (define list_contains (lambda (lst item) (reduce lst (lambda (acc x) (or acc (equal? x item))) false)))
 
+/* has_only_tblvar_refs: returns true if expr contains get_column refs and ALL of them
+reference only the given tblvar. Returns false if any get_column references another alias,
+or if expr has no get_column refs at all (pure literal → not a tblvar-only condition). */
+(define has_only_tblvar_refs (lambda (expr tblvar) (match expr
+	'((symbol get_column) alias_ _ _ _) (equal? alias_ tblvar)
+	'((quote get_column) alias_ _ _ _) (equal? alias_ tblvar)
+	(cons sym args) (reduce args (lambda (acc arg) (begin
+		(define child (has_only_tblvar_refs arg tblvar))
+		(if (nil? acc) child (if (nil? child) acc (and acc child))))) nil)
+	nil /* literal: no refs → nil (unknown) */
+)))
+
+/* extract_pure_tblvar_conditions: from an AND expression, extract parts that
+reference ONLY tblvar columns (no outer refs). Returns the AND of those parts, or true. */
+(define extract_pure_tblvar_conditions (lambda (expr tblvar) (match expr
+	(cons (symbol and) parts) (reduce parts (lambda (acc part)
+		(if (equal? (has_only_tblvar_refs part tblvar) true)
+			(if (equal? acc true) part (list (quote and) acc part))
+			acc)) true)
+	_ (if (equal? (has_only_tblvar_refs expr tblvar) true) expr true)
+)))
+
 /* helper to collect all column references in an expression */
 (define collect_all_column_refs (lambda (expr) (match expr
 	'((symbol get_column) tblvar _ col _) (list (list tblvar col))
@@ -3265,6 +3287,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									)
 								))
 								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
+									/* LEFT JOIN post-filter (ordered path): duplicate pure-tblvar conditions into later */
+									(define effective_later (if isOuter (begin
+										(define _pure_cond (extract_pure_tblvar_conditions now_condition tblvar))
+										(if (equal? _pure_cond true) later_condition
+											(if (equal? later_condition true) _pure_cond
+												(list (quote and) later_condition _pure_cond))))
+										later_condition))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* check partition_stages for this table (non-first tables may have per-table partition limits) */
 									(define _ps_ord (if is_first nil
@@ -3309,7 +3338,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										scan_limit
 										/* extract columns and store them into variables */
 										ord_scan_mapcols
-										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables later_condition false))
+										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables effective_later false))
 										/* reduce+neutral for DML */
 										(if is_update_target_ord (symbol "+") nil)
 										(if is_update_target_ord 0 nil)
@@ -3365,6 +3394,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
+										/* LEFT JOIN post-filter: for isOuter tables, conditions that reference ONLY
+										this table's columns (no outer refs) must also be checked after the NULL-emit.
+										We duplicate them into later_condition so the mapfn's (if ...) catches the NULL case. */
+										(define effective_later (if isOuter (begin
+											(define _pure_cond (extract_pure_tblvar_conditions now_condition tblvar))
+											(if (equal? _pure_cond true) later_condition
+												(if (equal? later_condition true) _pure_cond
+													(list (quote and) later_condition _pure_cond))))
+											later_condition))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 										/* check partition_stages: does this table have a per-table partition limit? */
 										(define _ps (reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil))
@@ -3390,14 +3428,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													(cons list _ps_dirs)
 													_ps_partcols _ps_offset _ps_limit
 													scan_mapcols
-													(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+													(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later))
 													nil nil isOuter))
 											/* === regular scan === */
 											(scan_wrapper 'scan schema tbl
 												(cons list filtercols)
 												'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 												scan_mapcols
-												(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
+												(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later))
 												(if is_update_target (symbol "+") nil)
 												(if is_update_target 0 nil)
 												nil
@@ -3406,14 +3444,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									))
 								)
 								'() /* final inner (=scalar) */ (if (nil? update_target)
-									'('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+									'('if (optimize (replace_columns_from_expr (coalesceNil condition true))) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
 									/* DML mode */
 									(begin (define _ut_cols (nth update_target 1))
 										(if (equal? _ut_cols '())
 											/* DELETE */
-											'('if (coalesceNil condition true) '('$update) 0)
+											'('if (optimize (replace_columns_from_expr (coalesceNil condition true))) '('$update) 0)
 											/* UPDATE */
-											'('if (coalesceNil condition true) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
+											'('if (optimize (replace_columns_from_expr (coalesceNil condition true))) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
 							)
 						))
 						(build_scan tables (replace_find_column condition))
