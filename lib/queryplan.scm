@@ -860,7 +860,7 @@ WHAT IT MUST NOT DO:
 						and if outer has GROUP BY, domain cols must be expressible via group keys
 						(Neumann: D ⋈ Γ_{A;f} ≡ Γ_{A∪D;f}(D ⋈ T) requires D compatible with A) */
 						(define _outer_has_incompatible_group (and (not (nil? group)) (not (equal? group '()))))
-						(if (or (nil? _agg_info) _has_fail (equal? _domain_joins '()) (nil? _value_col) _outer_has_incompatible_group)
+						(if true /* always use build_scalar_subselect — Neumann decorrelation disabled until .unnest: caching/invalidation is resolved */
 							(build_scalar_subselect subquery outer_schemas)
 							/* TODO (Neumann next steps to eliminate this fallback):
 
@@ -945,19 +945,10 @@ WHAT IT MUST NOT DO:
 								/* register: use string table name, prepend materialize_code to unnest_acc init */
 								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema temp_tbl_name true joinexpr))))
 								(unnest_acc "schemas" (merge (unnest_acc "schemas") (list sq_id sq_schema_cols)))
-								/* register init code: fill if empty + invalidation triggers on source tables.
-								   When source data changes, triggers drop the .unnest: table so the next
-								   query re-fills it via guarded_init. This avoids stale cached data while
-								   keeping queries fast (no drop+recreate per execution). */
+								/* register init code for materialization (executed before scan by build_queryplan) */
 								(define guarded_init (list (quote if) (list (quote equal?) 0 (list (quote scan_estimate) schema temp_tbl_name))
 									materialize_code nil))
 								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) (list guarded_init)))
-								/* register invalidation triggers on all source tables in the decorrelated subquery */
-								(map raw_tables (lambda (src_tbl_desc) (match src_tbl_desc
-									'(_ src_schema src_tbl _ _) (if (string? src_tbl)
-										(register_prejoin_invalidation src_schema src_tbl schema temp_tbl_name)
-										true)
-									_ true)))
 								/* substitution: pure query term */
 								(define agg_neutral (nth _agg_info 2))
 								(list (quote coalesceNil) (list (quote get_column) sq_id false _value_col false) agg_neutral)
