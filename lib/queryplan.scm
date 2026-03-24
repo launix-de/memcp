@@ -2196,8 +2196,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							nil))
 						/* COUNT column replaces the old exists column: always add (1 + 0) to ags
 						so we have a row count per group. HAVING filters on COUNT > 0 to exclude
-						empty groups after DELETE. This also enables incremental DELETE maintenance. */
-						(define needs_count (not (equal? stage_group '(1))))
+						empty groups after DELETE. This also enables incremental DELETE maintenance.
+						Scoped GROUPs (from Neumann unnesting) are temporary — no stale groups,
+						and NOT EXISTS needs COUNT=0 groups to survive. */
+						(define needs_count (and (not (equal? stage_group '(1))) (nil? _stage_scope)))
 						(define count_ag '(1 + 0))
 						(define ags (if needs_count (merge_unique ags (list count_ag)) ags))
 						(define count_col_name (if needs_count (agg_col_name count_ag) nil))
@@ -2223,11 +2225,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define _gp_condition (if (equal? 0 (count _gp_parts)) nil
 							(if (equal? 1 (count _gp_parts)) (car _gp_parts)
 								(cons (quote and) _gp_parts))))
+						/* drop partition-stages covered by this scoped GROUP: the keytable
+						guarantees 1 row per group key, making the partition LIMIT redundant */
+						(define _remaining_pstages (filter partition_stages (lambda (ps)
+							(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
+								(or acc (has? (coalesceNil _stage_scope '()) a))) false)))))
 						(define grouped_plan (build_queryplan schema
 							(merge (list (list grouptbl schema grouptbl false nil)) _grp_ps_tables)
 							(map_assoc fields (lambda (k v) (replace_group_key_or_fetch v)))
 							_gp_condition
-							(merge next_groups partition_stages)
+							(merge next_groups _remaining_pstages)
 							schemas
 							replace_find_column
 							nil))
