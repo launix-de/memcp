@@ -1399,7 +1399,7 @@ WHAT IT MUST NOT DO:
 							(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
 								(begin
 									/* === Neumann unnesting: nD domain, single or multi-table === */
-									(define us_sq_idx (coalesce (sq_cache "idx") 0))
+									(define us_sq_idx (coalesceNil (sq_cache "idx") 0))
 									(sq_cache "idx" (+ us_sq_idx 1))
 									(define us_sq_prefix (concat "_sq" us_sq_idx))
 									/* build alias rename map for all inner tables */
@@ -1411,7 +1411,7 @@ WHAT IT MUST NOT DO:
 									(define us_value_key (car (extract_assoc fields2_us (lambda (k v) k))))
 									(define us_value_expr (car (extract_assoc fields2_us (lambda (k v) v))))
 									(define us_value_src (match us_value_expr '((symbol get_column) a _ _ _) a '((quote get_column) a _ _ _) a nil))
-									(define us_value_new (if (nil? us_value_src) us_sq_prefix (coalesce (_us_lookup us_value_src) us_sq_prefix)))
+									(define us_value_new (if (nil? us_value_src) us_sq_prefix (coalesceNil (_us_lookup us_value_src) us_sq_prefix)))
 									/* helper: does expr contain outer refs? Detects both (outer ...) and
 									bare get_column refs to non-inner tables. Skip opaque scopes. */
 									(define _us_hor (lambda (expr) (match expr
@@ -1534,11 +1534,11 @@ WHAT IT MUST NOT DO:
 												(define us_orig_offset (if us_has_stages (stage_offset_val (car groups2_us)) nil))
 												/* domain inner expressions as order-cols, renamed to use the new alias */
 												(define us_dom_order (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<))))
-												(define us_renamed_order (map (coalesce us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
+												(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
 												(define us_part_order (merge us_dom_order us_renamed_order))
 												(define us_dom_count (count us_domain_cols))
 												/* register partition stage in sq_cache → merged into groups by untangle_query */
-												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesce us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
+												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
 												(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '())))
 												/* direct table entry with join condition (like non-agg non-LIMIT path) */
 												(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
@@ -1604,7 +1604,7 @@ WHAT IT MUST NOT DO:
 					(if (not ue_has_outer) nil /* non-correlated: use inline path */
 						(begin
 									/* Generate unique alias */
-									(define ue_sq_idx (coalesce (sq_cache "idx") 0))
+									(define ue_sq_idx (coalesceNil (sq_cache "idx") 0))
 									(sq_cache "idx" (+ ue_sq_idx 1))
 									(define ue_sq_prefix (concat "_sq" ue_sq_idx))
 									(define ue_single_tbl true)
