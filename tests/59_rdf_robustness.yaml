@@ -1,0 +1,162 @@
+metadata:
+  version: "1.0"
+  description: "RDF robustness — queries that must not crash the server"
+
+setup: []
+
+test_cases:
+
+  # ==========================================================
+  # Multi-pattern joins (must complete without crash)
+  # ==========================================================
+
+  - name: "5-pattern join with semicolon syntax"
+    ttl_data: |
+      @prefix r01: <http://robust01.org/> .
+      r01:comp a r01:EditorComponent ;
+        r01:forTypes r01:HTMLView ;
+        r01:componentName "view" ;
+        r01:componentTemplate "hello" .
+      r01:main a r01:HTMLView .
+    sparql: |
+      @prefix r01: <http://robust01.org/> .
+      SELECT ?tpl WHERE {
+        ?comp a r01:EditorComponent ;
+          r01:forTypes ?type ;
+          r01:componentName "view" ;
+          r01:componentTemplate ?tpl .
+        r01:main a ?type
+      }
+    expect:
+      rows: 1
+      data:
+        - "?tpl": "hello"
+
+  - name: "5-pattern join with dot syntax"
+    ttl_data: |
+      @prefix r02: <http://robust02.org/> .
+      r02:comp a r02:EditorComponent .
+      r02:comp r02:forTypes r02:HTMLView .
+      r02:comp r02:componentName "view" .
+      r02:comp r02:componentTemplate "hello2" .
+      r02:main a r02:HTMLView .
+    sparql: |
+      @prefix r02: <http://robust02.org/> .
+      SELECT ?tpl WHERE {
+        ?comp a r02:EditorComponent .
+        ?comp r02:forTypes ?type .
+        ?comp r02:componentName "view" .
+        ?comp r02:componentTemplate ?tpl .
+        r02:main a ?type
+      }
+    expect:
+      rows: 1
+      data:
+        - "?tpl": "hello2"
+
+  - name: "Query with no matches (empty result, no crash)"
+    sparql: |
+      @prefix r03: <http://robust03.org/> .
+      SELECT ?x WHERE {
+        ?a a r03:Nothing .
+        ?a r03:foo ?b .
+        ?b r03:bar ?c .
+        ?c r03:baz ?x
+      }
+    expect:
+      rows: 0
+
+  # ==========================================================
+  # Large-ish dataset (must not OOM)
+  # ==========================================================
+
+  - name: "Load 20 triples and query all"
+    ttl_data: |
+      @prefix r04: <http://robust04.org/> .
+      r04:a1 r04:v "1" .
+      r04:a2 r04:v "2" .
+      r04:a3 r04:v "3" .
+      r04:a4 r04:v "4" .
+      r04:a5 r04:v "5" .
+      r04:a6 r04:v "6" .
+      r04:a7 r04:v "7" .
+      r04:a8 r04:v "8" .
+      r04:a9 r04:v "9" .
+      r04:a10 r04:v "10" .
+      r04:a11 r04:v "11" .
+      r04:a12 r04:v "12" .
+      r04:a13 r04:v "13" .
+      r04:a14 r04:v "14" .
+      r04:a15 r04:v "15" .
+      r04:a16 r04:v "16" .
+      r04:a17 r04:v "17" .
+      r04:a18 r04:v "18" .
+      r04:a19 r04:v "19" .
+      r04:a20 r04:v "20" .
+    sparql: |
+      @prefix r04: <http://robust04.org/> .
+      SELECT ?s, ?v WHERE { ?s r04:v ?v }
+    expect:
+      rows: 20
+
+  # ==========================================================
+  # Strings with special characters (must not crash parser)
+  # ==========================================================
+
+  - name: "String with single quotes"
+    ttl_data: |
+      @prefix r05: <http://robust05.org/> .
+      r05:item r05:val "it's a test" .
+    sparql: |
+      @prefix r05: <http://robust05.org/> .
+      SELECT ?v WHERE { r05:item r05:val ?v }
+    expect:
+      rows: 1
+
+  - name: "String with angle brackets (HTML)"
+    ttl_data: |
+      @prefix r06: <http://robust06.org/> .
+      r06:item r06:html "<h1>Hello</h1><p>World</p>" .
+    sparql: |
+      @prefix r06: <http://robust06.org/> .
+      SELECT ?v WHERE { r06:item r06:html ?v }
+    expect:
+      rows: 1
+      contains: "<h1>"
+
+  - name: "String with backslashes"
+    ttl_data: |
+      @prefix r07: <http://robust07.org/> .
+      r07:item r07:path "C:\\Users\\test\\file.txt" .
+    sparql: |
+      @prefix r07: <http://robust07.org/> .
+      SELECT ?v WHERE { r07:item r07:path ?v }
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # Error queries (must return error, not crash)
+  # ==========================================================
+
+  - name: "Selecting unbound variable returns error, not crash"
+    ttl_data: |
+      @prefix r08: <http://robust08.org/> .
+      r08:a r08:b r08:c .
+    sparql: |
+      @prefix r08: <http://robust08.org/> .
+      SELECT ?x, ?unbound WHERE { r08:a r08:b ?x }
+    expect:
+      error: true
+
+  - name: "Empty WHERE clause returns error, not crash"
+    sparql: "SELECT ?x WHERE { }"
+    expect:
+      error: true
+
+  - name: "Malformed TTL does not crash load endpoint"
+    ttl_data: "this is not valid TTL @@@ {{{ }}} ."
+    sparql: "SELECT ?s WHERE { ?s a nocrash }"
+    expect:
+      rows: 0
+
+cleanup: []
