@@ -246,10 +246,9 @@ reference OTHER tables too (not only tblvar). Complement of extract_pure_tblvar_
 
 /* symbols that canonicalize_columns must NOT recurse into — they have their own scope */
 (define _is_opaque_scope_sym (lambda (sym) (match sym
-	(symbol inner_select) true '(quote inner_select) true
-	(symbol inner_select_in) true '(quote inner_select_in) true
-	(symbol inner_select_exists) true '(quote inner_select_exists) true
-	/* runtime code produced by build_scalar_subselect — has inner scan context */
+	/* inner_select markers are NOT opaque — they are logical markers that
+	must be transparent for outer-ref detection during Neumann decorrelation.
+	Only physical runtime code (scan, !begin, etc.) is opaque. */
 	(symbol !begin) true '(quote !begin) true '!begin true
 	(symbol scan) true '(quote scan) true 'scan true
 	(symbol scan_order) true '(quote scan_order) true 'scan_order true
