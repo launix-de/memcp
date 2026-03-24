@@ -127,9 +127,61 @@ func (ti TypeInfo) Const() bool    { return ti.flags&FlagConst != 0 }
 func (ti TypeInfo) Escape() bool   { return ti.flags&FlagEscape != 0 }
 func (ti TypeInfo) Kind() uint8    { return ti.kind }
 
-func (ti TypeInfo) WithTransfer() TypeInfo { ti.flags |= FlagTransfer; return ti }
-func (ti TypeInfo) WithConst() TypeInfo    { ti.flags |= FlagConst; return ti }
+func (ti TypeInfo) WithTransfer() TypeInfo   { ti.flags |= FlagTransfer; return ti }
+func (ti TypeInfo) WithoutTransfer() TypeInfo { ti.flags &^= FlagTransfer; return ti }
+func (ti TypeInfo) WithConst() TypeInfo      { ti.flags |= FlagConst; return ti }
 func (ti TypeInfo) WithKind(k uint8) TypeInfo { ti.kind = k; return ti }
+func (ti TypeInfo) WithExtra(td *TypeDescriptor) TypeInfo { ti.Extra = td; return ti }
+
+// MakeTypeInfo builds a TypeInfo from transfer/const bools (no heap allocation).
+func MakeTypeInfo(transfer, constant bool) TypeInfo {
+	var ti TypeInfo
+	if transfer {
+		ti.flags |= FlagTransfer
+	}
+	if constant {
+		ti.flags |= FlagConst
+	}
+	return ti
+}
+
+// TypeInfoFromTD converts a *TypeDescriptor to a stack-allocated TypeInfo.
+func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
+	if td == nil {
+		return TypeInfo{}
+	}
+	var ti TypeInfo
+	if td.Transfer {
+		ti.flags |= FlagTransfer
+	}
+	if td.Const {
+		ti.flags |= FlagConst
+	}
+	switch td.Kind {
+	case "string":
+		ti.kind = KindString
+	case "int":
+		ti.kind = KindInt
+	case "number":
+		ti.kind = KindFloat
+	case "bool":
+		ti.kind = KindBool
+	case "nil":
+		ti.kind = KindNil
+	case "symbol":
+		ti.kind = KindSymbol
+	case "func":
+		ti.kind = KindFunc
+	case "list":
+		ti.kind = KindList
+	case "assoc":
+		ti.kind = KindAssoc
+	}
+	if len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
+		ti.Extra = td
+	}
+	return ti
+}
 
 // ToTypeDescriptor converts to a heap-allocated TypeDescriptor (for APIs that need it).
 func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
