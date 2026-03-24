@@ -18,6 +18,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import "sync"
+import "sync/atomic"
 import "time"
 import "unsafe"
 import "context"
@@ -64,12 +65,38 @@ func AdjustMemStats(delta int64) {
 	cachedStatsMu.Unlock()
 }
 
-/* promise: single-value cell */
+/* promise: single-value cell (thread-safe via CAS spin-lock on cells[1].aux) */
 
-// NOTE: current implementation is intentionally not thread-safe.
-// It is sufficient for sequential query-plan execution. Fresh promises use a
-// dedicated [2]Scmer backing; (newpromise list) reuses an existing >=2-element
-// slice with zero extra allocation.
+var (
+	promiseLockSentinel = makeAux(tagBool, 0) // tagBool|false = Lock
+	promiseFailedAux    = makeAux(tagBool, 2) // tagBool|2 = Failed (NOT tagBool|0!)
+	promisePendingAux   = makeAux(tagNil, 0)  // pending (nil)
+	promiseResolvedAux  = makeAux(tagBool, 1) // fulfilled (true)
+)
+
+// promiseLock spins until it acquires the lock. Returns the previous state aux.
+func promiseLock(cells *[2]Scmer) uint64 {
+	statePtr := (*uint64)(unsafe.Pointer(&cells[1].aux))
+	for {
+		old := atomic.LoadUint64(statePtr)
+		if old == promiseLockSentinel {
+			runtime.Gosched()
+			continue
+		}
+		if atomic.CompareAndSwapUint64(statePtr, old, promiseLockSentinel) {
+			return old
+		}
+		runtime.Gosched()
+	}
+}
+
+// promiseUnlock releases the lock by storing the new state.
+func promiseUnlock(cells *[2]Scmer, newStateAux uint64) {
+	atomic.StoreUint64(&cells[1].aux, newStateAux)
+}
+
+// Fresh promises use a dedicated [2]Scmer backing; (newpromise list) reuses
+// an existing >=2-element slice with zero extra allocation.
 func NewPromise(a ...Scmer) Scmer {
 	var cells []Scmer
 	if len(a) == 0 {
@@ -96,46 +123,66 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 	case 1:
 		switch key {
 		case "value":
-			if cells[1].IsNil() {
+			old := promiseLock(cells)
+			if old == promisePendingAux {
+				promiseUnlock(cells, old)
 				return NewNil()
 			}
-			return cells[0]
+			val := cells[0]
+			promiseUnlock(cells, old)
+			return val
 		case "state":
-			return cells[1]
+			old := promiseLock(cells)
+			promiseUnlock(cells, old)
+			switch old {
+			case promisePendingAux:
+				return NewNil()
+			case promiseResolvedAux:
+				return NewBool(true)
+			default:
+				return NewBool(false)
+			}
 		case "fail":
+			promiseLock(cells)
 			cells[0] = NewNil()
-			cells[1] = NewBool(false)
+			promiseUnlock(cells, promiseFailedAux)
 			return NewBool(false)
 		default:
 			panic("promise: unknown operation: " + key)
 		}
 	case 2:
 		if key == "value" {
+			promiseLock(cells)
 			cells[0] = args[1]
-			cells[1] = NewBool(true)
+			promiseUnlock(cells, promiseResolvedAux)
 			return args[1]
 		}
 		if key == "once" {
-			if !cells[1].IsNil() {
+			old := promiseLock(cells)
+			if old != promisePendingAux {
+				promiseUnlock(cells, old)
 				panic("promise already fulfilled/failed")
 			}
 			cells[0] = args[1]
-			cells[1] = NewBool(true)
+			promiseUnlock(cells, promiseResolvedAux)
 			return args[1]
 		}
 		if key == "fail" {
+			promiseLock(cells)
 			cells[0] = args[1]
-			cells[1] = NewBool(false)
+			promiseUnlock(cells, promiseFailedAux)
 			return args[1]
 		}
 		panic("promise: unknown operation: " + key)
 	case 3:
 		if key == "once" {
-			if !cells[1].IsNil() {
+			old := promiseLock(cells)
+			if old != promisePendingAux {
+				promiseUnlock(cells, old)
 				panic(args[2].String())
 			}
 			cells[0] = args[1]
-			cells[1] = NewBool(true)
+			promiseUnlock(cells, promiseResolvedAux)
 			return args[1]
 		}
 		panic("promise: unknown operation: " + key)
@@ -305,13 +352,13 @@ func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
 		Name: "newpromise",
-		Desc: "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
+		Desc: "Creates a single-value promise cell (thread-safe via CAS spin-lock). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
 		Fn: NewPromise,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "list", ParamDesc: "optional: ≥2-element slice to use as backing", Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "func"},
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -319,7 +366,7 @@ func init_sync() {
 		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
 		Fn: NewSession,
 		Type: &TypeDescriptor{
-			Return: &TypeDescriptor{Kind: "func"},
+			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
