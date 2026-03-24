@@ -1,0 +1,71 @@
+metadata:
+  version: "1.0"
+  description: "RDFHP templates with UUID IRIs in SPARQL queries"
+
+setup: []
+
+test_cases:
+
+  # Baseline: bare name subject works
+  - name: "RDFHP render: bare name subject"
+    ttl_data: |
+      @prefix rdfop: <http://rdfhp01.org/> .
+      rdfop:MyType a rdfop:EntityType .
+      rdfop:MyType rdfop:viewTemplate "@PREFIX rdfop: <http://rdfhp01.org/> . SELECT ?v WHERE { main rdfop:val ?v } BEGIN PRINT RAW ?v END" .
+      main a rdfop:MyType .
+      main rdfop:val "hello" .
+    sparql: |
+      @prefix rdfop: <http://rdfhp01.org/> .
+      SELECT ?tpl WHERE { rdfop:MyType rdfop:viewTemplate ?tpl }
+    expect:
+      rows: 1
+      contains: "PRINT RAW"
+
+  # UUID IRI in SPARQL within RDFHP template (the pattern render_component uses)
+  - name: "RDFHP render: UUID IRI subject in template"
+    ttl_data: |
+      @prefix rdfop: <http://rdfhp02.org/> .
+      rdfop:MyType a rdfop:EntityType .
+      rdfop:MyType rdfop:viewTemplate "@PREFIX rdfop: <http://rdfhp02.org/> . SELECT ?v WHERE { <urn:uuid:d358d7b0-c27d-491d-be2b-528f9796c15c> rdfop:val ?v } BEGIN PRINT RAW ?v END" .
+      <urn:uuid:d358d7b0-c27d-491d-be2b-528f9796c15c> a rdfop:MyType .
+      <urn:uuid:d358d7b0-c27d-491d-be2b-528f9796c15c> rdfop:val "uuid-works" .
+    sparql: |
+      @prefix rdfop: <http://rdfhp02.org/> .
+      SELECT ?tpl WHERE { rdfop:MyType rdfop:viewTemplate ?tpl }
+    expect:
+      rows: 1
+      contains: "urn:uuid"
+
+  # Prefix + UUID IRI + BEGIN/END loop
+  - name: "RDFHP render: prefix + UUID + BEGIN/END"
+    ttl_data: |
+      @prefix rdfop: <http://rdfhp03.org/> .
+      rdfop:Comp a rdfop:EntityType .
+      rdfop:Comp rdfop:viewTemplate "@PREFIX rdfop: <http://rdfhp03.org/> . SELECT ?v WHERE { <urn:uuid:d358d7b0-c27d-491d-be2b-528f9796c15c> rdfop:val ?v } BEGIN PRINT RAW ?v END" .
+      <urn:uuid:d358d7b0-c27d-491d-be2b-528f9796c15c> a rdfop:Comp .
+      <urn:uuid:d358d7b0-c27d-491d-be2b-528f9796c15c> rdfop:val "rendered" .
+    sparql: |
+      @prefix rdfop: <http://rdfhp03.org/> .
+      SELECT ?v WHERE { <urn:uuid:d358d7b0-c27d-491d-be2b-528f9796c15c> rdfop:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "rendered"
+
+  # Prefix + UUID IRI + HTML in BEGIN/END (the real use case)
+  - name: "RDFHP render: prefix + UUID + HTML output"
+    ttl_data: |
+      @prefix rdfop: <http://rdfhp04.org/> .
+      rdfop:View a rdfop:EntityType .
+      rdfop:View rdfop:viewTemplate "@PREFIX rdfop: <http://rdfhp04.org/> . SELECT ?h WHERE { <urn:uuid:aaaa-bbbb> rdfop:html ?h } BEGIN ?><div><?rdf PRINT RAW ?h ?></div><?rdf END" .
+      <urn:uuid:aaaa-bbbb> a rdfop:View .
+      <urn:uuid:aaaa-bbbb> rdfop:html "it works" .
+    sparql: |
+      @prefix rdfop: <http://rdfhp04.org/> .
+      SELECT ?h WHERE { <urn:uuid:aaaa-bbbb> rdfop:html ?h }
+    expect:
+      rows: 1
+      data:
+        - "?h": "it works"
+
+cleanup: []
