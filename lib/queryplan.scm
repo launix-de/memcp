@@ -1372,17 +1372,23 @@ WHAT IT MUST NOT DO:
 							(_us_eor condition2_us)))
 						/* feasibility checks */
 						(define us_has_outer (not (equal? us_outer_refs '())))
-						(define us_single_tbl (and (list? tables2_us) (equal? (count tables2_us) 1)))
+						/* count only OWN tables (not inner scoped ones from nested decorrelation) */
+						(define _us_inner_aliases (merge (map _us_inner_stages (lambda (s) (coalesceNil (stage_partition_aliases s) '())))))
+						(define _us_own_tables (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (not (has? _us_inner_aliases a)) true))))
+						(define us_single_tbl (and (list? _us_own_tables) (equal? (count _us_own_tables) 1)))
 						/* check for aggregates in fields */
 						(define _us_agg (lambda (expr) (match expr
 							'((symbol aggregate) _ _ _) true
 							(cons sym args) (reduce args (lambda (a b) (or a (_us_agg b))) false)
 							false)))
 						(define us_has_agg (reduce_assoc fields2_us (lambda (a k v) (or a (_us_agg v))) false))
-						/* check for GROUP/HAVING in stages */
-						(define us_has_stages (and (not (nil? groups2_us)) (not (equal? groups2_us '()))))
+						/* separate own stages from inner scoped stages (from nested decorrelation) */
+						(define _us_own_stages (filter (coalesceNil groups2_us '()) (lambda (s) (nil? (stage_partition_aliases s)))))
+						(define _us_inner_stages (filter (coalesceNil groups2_us '()) (lambda (s) (not (nil? (stage_partition_aliases s))))))
+						/* check for GROUP/HAVING in OWN stages only */
+						(define us_has_stages (not (equal? _us_own_stages '())))
 						(define us_has_grp (if us_has_stages
-							(reduce groups2_us (lambda (acc stage) (or acc
+							(reduce _us_own_stages (lambda (acc stage) (or acc
 								(begin
 									(define g (stage_group_cols stage))
 									(or (and (not (nil? g)) (not (equal? g '())) (not (equal? g '(1))))
@@ -1390,7 +1396,7 @@ WHAT IT MUST NOT DO:
 							false))
 						/* check for LIMIT/ORDER/OFFSET stages — deferred until 1-row constraint handling */
 						(define us_has_limit (if us_has_stages
-							(reduce groups2_us (lambda (acc stage) (or acc
+							(reduce _us_own_stages (lambda (acc stage) (or acc
 								(not (nil? (stage_limit_val stage)))
 								(not (nil? (stage_offset_val stage)))
 								(begin
@@ -1494,8 +1500,8 @@ WHAT IT MUST NOT DO:
 											/* inner condition (non-correlated), prefixed */
 											(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
 											/* domain columns + original GROUP BY → scoped GROUP stage */
-											(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car groups2_us)) '()) '()))
-											(define us_orig_having (if us_has_stages (stage_having_expr (car groups2_us)) nil))
+											(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
+											(define us_orig_having (if us_has_stages (stage_having_expr (car _us_own_stages)) nil))
 											(define _us_dom_group_cols (map us_domain_cols (lambda (dc) (_us_prefix_ria (nth dc 0)))))
 											(define us_new_group (merge _us_dom_group_cols
 												(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1)))
@@ -1506,10 +1512,17 @@ WHAT IT MUST NOT DO:
 											/* scoped GROUP stage: partition-aliases = prefixed inner table aliases */
 											(define us_inner_aliases (map us_prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
 											(define us_group_stage (make_group_stage us_new_group us_new_having '() nil nil us_inner_aliases nil))
+											/* propagate inner scoped stages with prefix */
+											(define _us_prefixed_inner_stages (map _us_inner_stages (lambda (s) (begin
+												(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_prefix_ria))
+												(define _psh (if (nil? (stage_having_expr s)) nil (_us_prefix_ria (stage_having_expr s))))
+												(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_prefix_ria c) d) o))))
+												(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
+												(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s))))))
 											/* register prefixed tables */
 											(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
-											/* register scoped GROUP stage */
-											(sq_cache "groups" (cons us_group_stage (coalesceNil (sq_cache "groups") '())))
+											/* register scoped GROUP stage + propagated inner stages */
+											(sq_cache "groups" (merge (list us_group_stage) _us_prefixed_inner_stages (coalesceNil (sq_cache "groups") '())))
 											/* register schemas for prefixed aliases */
 											(define us_prefixed_schemas (merge (map us_prefixed_tables (lambda (td) (match td
 												'(a _ _ _ _) (begin
@@ -1562,9 +1575,9 @@ WHAT IT MUST NOT DO:
 												(define us_tblvar (nth us_tdesc 0))
 												(define us_tbl_schema (nth us_tdesc 1))
 												(define us_tbl_name (nth us_tdesc 2))
-												(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car groups2_us)) '()) '()))
-												(define us_orig_limit (if us_has_stages (stage_limit_val (car groups2_us)) nil))
-												(define us_orig_offset (if us_has_stages (stage_offset_val (car groups2_us)) nil))
+												(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
+												(define us_orig_limit (if us_has_stages (stage_limit_val (car _us_own_stages)) nil))
+												(define us_orig_offset (if us_has_stages (stage_offset_val (car _us_own_stages)) nil))
 												/* domain inner expressions as order-cols, renamed to use the new alias */
 												(define us_dom_order (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<))))
 												(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
@@ -1573,6 +1586,16 @@ WHAT IT MUST NOT DO:
 												/* register partition stage in sq_cache → merged into groups by untangle_query */
 												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
 												(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '())))
+												/* propagate inner scoped stages with renaming */
+												(if (not (equal? _us_inner_stages '()))
+													(sq_cache "groups" (merge
+														(map _us_inner_stages (lambda (s) (begin
+															(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_ria))
+															(define _psh (if (nil? (stage_having_expr s)) nil (_us_ria (stage_having_expr s))))
+															(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_ria c) d) o))))
+															(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
+															(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s)))))
+														(coalesceNil (sq_cache "groups") '()))))
 												/* direct table entry with join condition (like non-agg non-LIMIT path) */
 												(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
 												(define us_inner_lim (_us_ria us_inner_cond_raw))
@@ -2397,7 +2420,9 @@ WHAT IT MUST NOT DO:
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(apply build_queryplan (merge (apply join_reorder (apply untangle_query (merge query (list nil)))) (list nil)))
+			(begin (define _ir (apply join_reorder (apply untangle_query (merge query (list nil)))))
+				(match _ir '(_s _t _f _c _g _sch _rfc) (print "[IR] t=" (map _t (lambda (t) (match t '(a s tbl io je) (list a tbl io (not (nil? je))) t)))))
+				(apply build_queryplan (merge _ir (list nil))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
