@@ -18,11 +18,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* RDF parser according to: https://www.w3.org/TR/sparql11-query/ */
 
 (define rdf_variable (parser (define x (regex "\?[a-zA-Z0-9_]+" true)) '('get_var (symbol x))))
+/* datatype suffix parser: consumes ^^<IRI> or ^^prefix:name or ^^barename */
+(define rdf_datatype_suffix (parser (or
+	(parser '((atom "<" false false) (regex "[^>]*" false false) (atom ">" false false)) nil) /* ^^<IRI> */
+	(regex "[a-zA-Z0-9_]*:[a-zA-Z0-9_]*" false false) /* ^^prefix:name */
+	(regex "[a-zA-Z0-9_]+" false false) /* ^^barename */
+)))
 (define rdf_constant (parser (or
-	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* string */
-	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) x) /* string with language, ignore language, TODO: escape tbnrf */
-	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"" false false)) x) /* string, TODO: escape tbnrf */
-	(regex "[a-zA-Z0-9_]+" true) /* string, TODO: handle prefixing */
+	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* IRI */
+	(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x) /* triple-quoted string, optional datatype ignored */
+	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) x) /* string with language, ignore language */
+	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x) /* string, optional datatype ignored */
+	(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node _:identifier */
+	(regex "[a-zA-Z0-9_]+" true) /* bare name */
 )))
 (define rdf_expression (parser (or
 	(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) '('concat '('definitions pfx) post)) /* as expression */
@@ -39,8 +47,10 @@ oder _:identifier
 
 */
 
+(define rdf_number (parser (define x (regex "[0-9]+" true)) (simplify x)))
 (define rdf_select (parser '(
 	(atom "SELECT" true)
+	(? (define distinct (atom "DISTINCT" true)))
 	(define cols (+ (or
 		(parser '((define v rdf_expression) (atom "AS" true) (define v2 rdf_variable)) (match v2 '('get_var s) '((concat s) v))) /* rdf_variable AS rdf_variable */
 		(parser (define v rdf_variable) (match v '('get_var s) '((concat s) v))) /* rdf_variable */
@@ -61,24 +71,29 @@ oder _:identifier
 		(atom "BY" true)
 		(define group (+ rdf_variable ","))
 	)
-	/* TODO: OFFSET xyz LIMIT xyz */
-) '("select" (merge cols) /* TODO: merge cols -> AS */ "where" (merge (coalesce conditions '('())))) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+	(? (atom "ORDER" true) (atom "BY" true) (+ (or (parser '((atom "DESC" true) "(" rdf_expression ")") nil) (parser '((atom "ASC" true) "(" rdf_expression ")") nil) rdf_expression) ",")) /* ORDER BY parsed but not yet executed */
+	(? (atom "LIMIT" true) (define limit rdf_number))
+	(? (atom "OFFSET" true) (define offset rdf_number))
+) '("select" (merge cols) "where" (merge (coalesce conditions '('()))) "limit" limit "offset" offset "distinct" distinct) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define ttl_header (parser '(
 	(define definitions (*
-		(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant) ".") '(pfx content))
+		(or
+			(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant) ".") '(pfx content))
+			(parser '((atom "@base" true) (define content rdf_constant) ".") '("" content)) /* @base sets the empty prefix */
+		)
 	))
 	(define rest rest)
-) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define rdf_replace_ctx (lambda (expr ctx) (match expr
-	'('get_var sym) (coalesce (ctx sym) (error "unknown symbol " sym " in " ctx))
+	'('get_var sym) (coalesce (ctx sym) (error "SPARQL error: variable " sym " is used in SELECT but not bound in WHERE clause"))
 	(cons head tail) (cons head (map tail (lambda (x) (replace_ctx x ctx))))
 	expr
 )))
 
 (define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */) (begin
-	(match query '("select" cols "where" conditions) (begin
+	(match query '("select" cols "where" conditions "limit" limit "offset" offset "distinct" distinct) (begin
 		/* ctx: array with predefined variables */
 		/* no join reordering yet */
 		(define build_scan (lambda (conditions ctx) (match conditions
@@ -89,7 +104,7 @@ oder _:identifier
 						'(conditions (append vars sym (symbol var)))) /* variable is free: collect in scope */
 					(string? s) '((append conditions sym s) vars)
 					(list? l) '((append conditions sym (eval l)) vars)
-					(print "undetected " v)
+					(error "SPARQL error: unsupported expression type in WHERE clause: " v)
 				)))
 				(match (process s "s" '() '()) '(conditions vars)
 					(match (process p "p" conditions vars) '(conditions vars)
@@ -107,19 +122,74 @@ oder _:identifier
 )))
 
 (define parse_sparql (lambda (schema s) (match (ttl_header s)
-	'("prefixes" definitions "rest" rest) (rdf_queryplan schema (rdf_select rest) definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))))
+	'("prefixes" definitions "rest" rest) (begin
+		(set parsed (rdf_select rest))
+		(set qlimit (parsed "limit"))
+		(set qoffset (parsed "offset"))
+		(set qdistinct (parsed "distinct"))
+		(set needs_wrap (or (not (nil? qlimit)) (not (nil? qoffset)) (not (nil? qdistinct))))
+		(set effective_offset (coalesce qoffset 0))
+		(set effective_limit (coalesce qlimit 999999999))
+		/* build resultfunc that includes limit/offset/distinct logic */
+		(if needs_wrap (begin
+			/* state session is created at compile time, initialized here, used at eval time */
+			(set _st (newsession))
+			(_st "cnt" 0)
+			(if qdistinct (_st "seen" (newsession)))
+			(rdf_queryplan schema parsed definitions '() (lambda (cols ctx) (begin
+				(set row_expr (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))
+				(if qdistinct
+					/* DISTINCT + LIMIT/OFFSET: check seen, then count */
+					'('begin
+						'('set '_row row_expr)
+						'('set '_dkey '('json_encode '_row))
+						'('if '('not '((_st "seen") '_dkey)) '('begin
+							'((_st "seen") '_dkey true)
+							'('set '_c '(_st "cnt"))
+							'('if '('and '('>= '_c effective_offset) '('< '_c '('+ effective_offset effective_limit)))
+								'('resultrow '_row)
+							)
+							'(_st "cnt" '('+ '_c 1))
+						))
+					)
+					/* LIMIT/OFFSET only: just count */
+					'('begin
+						'('set '_row row_expr)
+						'('set '_c '(_st "cnt"))
+						'('if '('and '('>= '_c effective_offset) '('< '_c '('+ effective_offset effective_limit)))
+							'('resultrow '_row)
+						)
+						'(_st "cnt" '('+ '_c 1))
+					)
+				)
+			)))
+		) (rdf_queryplan schema parsed definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx))))))))
+	)
 )))
 
 
 (define load_ttl (lambda (schema s) (match (ttl_header s)
 	'("prefixes" definitions "rest" rest)
 	(begin
+		/* blank node registry: maps _:id to urn:uuid:... per load */
+		(set blank_nodes (newsession))
+		(define resolve_blank (lambda (val)
+			(match val (regex "^_:(.+)$" _ id) (begin
+				(set existing (blank_nodes id))
+				(if (nil? existing) (begin
+					(set generated (concat "urn:uuid:" (uuid)))
+					(blank_nodes id generated)
+					generated
+				) existing)
+			) val)
+		))
 		(define rdf_constant_pfx (parser (or
+			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node before prefix match */
 			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))) /* add prefix with validation */
 			rdf_constant
 		)))
 		(define ttl_fact (parser '(
-			(define facts 
+			(define facts
 				(parser '(
 					(define s rdf_constant_pfx)
 					(define ps (+ (parser '((define p rdf_constant_pfx) (define os (+ rdf_constant_pfx ",")) (? ";")) (map os (lambda (o) '(p o))))))
@@ -127,13 +197,14 @@ oder _:identifier
 				) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 			)
 			(define rest rest)
-		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 		(set load (lambda (facts) (!begin
-			/* (print "start ======== " facts "-- end") */
-			(insert schema "rdf" '("s" "p" "o") facts '() (lambda () true))
+			/* resolve blank nodes to UUIDs */
+			(set resolved_facts (map facts (lambda (triple) (match triple '(s p o) '((resolve_blank s) (resolve_blank p) (resolve_blank o))))))
+			(insert schema "rdf" '("s" "p" "o") resolved_facts '() (lambda () true))
 		)))
 		(define process_fact (lambda (rest) (match (ttl_fact rest)
-			'("facts" facts "rest" (regex "[ \\n\\r\\t]*" _)) (load facts)
+			'("facts" facts "rest" (regex "^[ \\n\\r\\t]*$" _)) (load facts)
 			'("facts" facts "rest" rest) (!begin (load facts) (process_fact rest))
 			rest (error "couldnt parse: " rest)
 		)))

@@ -33,6 +33,7 @@ import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
 import "sync"
 import "reflect"
+import "github.com/google/uuid"
 
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
@@ -811,16 +812,35 @@ func init_strings() {
 			Const: true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
+		Name: "bin2hex",
+		Desc: "turns binary data into hex with lowercase letters",
+		Fn: func(a ...Scmer) Scmer {
+			input := String(a[0])
+			result := make([]byte, 2*len(input))
+			hexmap := "0123456789abcdef"
+			for i := 0; i < len(input); i++ {
+				result[2*i] = hexmap[input[i]/16]
+				result[2*i+1] = hexmap[input[i]%16]
+			}
+			return NewString(string(result))
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to encode"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "hex2bin",
 		Desc: "decodes a hex string into binary data",
 		Fn: func(a ...Scmer) Scmer {
-				decoded, err := hex.DecodeString(String(a[0]))
-				if err != nil {
-					panic("error while decoding hex: " + fmt.Sprint(err))
-				}
-				return NewString(string(decoded))
-			},
+			decoded, err := hex.DecodeString(String(a[0]))
+			if err != nil {
+				panic("error while decoding hex: " + fmt.Sprint(err))
+			}
+			return NewString(string(decoded))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "hex string (even length)"}},
 			Return: &TypeDescriptor{Kind: "string"},
@@ -828,22 +848,38 @@ func init_strings() {
 		},
 	})
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
+		Name: "uuid",
+		Desc: "generates a new random UUID v4 string",
+		Fn: func(a ...Scmer) Scmer {
+			id, err := uuid.NewRandom()
+			if err != nil {
+				panic("error generating UUID: " + fmt.Sprint(err))
+			}
+			return NewString(id.String())
+		},
+		Type: &TypeDescriptor{
+			Return: &TypeDescriptor{Kind: "string"},
+			Const: true,
+		},
+	})
+
+	Declare(&Globalenv, &Declaration{
 		Name: "randomBytes",
 		Desc: "returns a string with numBytes cryptographically secure random bytes",
 		Fn: func(a ...Scmer) Scmer {
-				n := ToInt(a[0])
-				if n < 0 {
-					panic("randomBytes: numBytes must be non-negative")
+			n := ToInt(a[0])
+			if n < 0 {
+				panic("randomBytes: numBytes must be non-negative")
+			}
+			buf := make([]byte, n)
+			if n > 0 {
+				if _, err := crand.Read(buf); err != nil {
+					panic("error generating random bytes: " + fmt.Sprint(err))
 				}
-				buf := make([]byte, n)
-				if n > 0 {
-					if _, err := crand.Read(buf); err != nil {
-						panic("error generating random bytes: " + fmt.Sprint(err))
-					}
-				}
-				return NewString(string(buf))
-			},
+			}
+			return NewString(string(buf))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "numBytes", ParamDesc: "number of random bytes"}},
 			Return: &TypeDescriptor{Kind: "string"},
