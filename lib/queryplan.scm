@@ -153,7 +153,10 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	)
 ))
 
-/* split_condition returns a tuple (now, later) according to what can be checked now and what has to be waited for tables '('(tblvar ...) ...) */
+/* split_condition: selection pushdown for nested-loop join planning.
+Splits an AND-condition into (now, later): predicates evaluatable with currently
+bound tables vs predicates that must wait for inner tables to be scanned.
+Enables index-based filtering in scan/scan_order by pushing predicates down. */
 (define split_condition (lambda (expr tables) (match expr
 	'((symbol get_column) tblvar _ col _) /* a column */ (match tables
 		'() '(expr true) /* last condition: compute now */
@@ -703,29 +706,31 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 ))
 
 /*
-=== CONTRACT: untangle_query ===
+=== untangle_query: Neumann query decorrelation ===
 
-PURPOSE: Flatten a parsed SQL query into a logical structure (Neumann unnesting).
-Recursively resolves derived tables, expression subqueries, and stages.
-Goal: all correlated subqueries become LEFT JOIN LIMIT 1 table entries
-so the output is a flat table list with predicates — no nested runtime code.
+Implements the algebraic unnesting transformation from Neumann/Kemper (BTW 2015)
+and the holistic top-down extension (Neumann BTW 2025). Transforms a parsed SQL
+query with arbitrarily nested correlated subqueries into a flat relational IR:
 
-INPUT:  parsed query tuple (schema tables fields condition group having order limit offset outer_schemas_param)
-OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_column)
+INPUT:  parsed query (schema tables fields condition group having order limit offset)
+OUTPUT: (schema tables fields condition groups schemas replace_find_column)
 
-WHAT IT DOES:
-- Flattens FROM (SELECT ...) derived tables into the parent tables list
-- Unnests correlated scalar/IN/EXISTS subqueries into flat table entries
-(currently via build_scalar_subselect which produces inline runtime code;
-the goal is LEFT JOIN LIMIT 1 table entries instead)
-- Pushes domain columns through GROUP BY barriers when decorrelating
-(Neumann: D ⋈ Γ_A(T) == Γ_{A∪D}(D ⋈ T))
-- Canonicalizes get_column markers (ti/ci → false/false)
-- Collects group/having/order/limit/offset into a stages pipeline
+The output is a single flat table list where every correlated subquery has been
+replaced by a LEFT JOIN table entry. Dependencies between nesting levels are
+expressed as join conditions; aggregation boundaries are expressed as group-stages
+with partition-aliases (scoping). There is no nested runtime code in the output.
 
-WHAT IT MUST NOT DO:
-- Choose join order (that is join_reorder's job)
-- Create keytables or aggregate infrastructure (that is build_queryplan's job)
+Key transformations:
+- Derived tables (FROM subqueries): flattened into parent table list with column renaming
+- Scalar subselects: decorrelated via unnest_subselect into LEFT JOIN + partition-stage (Path B)
+or LEFT JOIN + scoped GROUP-stage (Path A for aggregates)
+- IN/EXISTS/NOT IN/NOT EXISTS: rewritten to COUNT(*) aggregates, then decorrelated via Path A
+- Domain column extension: Neumann Γ_{A∪D;f} — outer correlation columns added to GROUP BY
+- Condition merging: WHERE and JOIN ON conditions unified into a single condition list
+- Unused LEFT JOIN pruning: tables not referenced in output are eliminated
+
+Does NOT: choose join order (join_reorder), create keytables (build_queryplan),
+or generate runtime scan code (build_queryplan).
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
 	(set rename_prefix (coalesce rename_prefix ""))
@@ -873,14 +878,21 @@ WHAT IT MUST NOT DO:
 		replace_find_column_subselect
 	)))
 
-	/* === Neumann subquery unnesting (1D domain) ===
-	unnest_subselect: takes a scalar subquery and outer_schemas,
-	returns (substitution table_entry schema_entry) or nil if not unnestable.
-	- substitution: get_column referencing the unnested table's value column
-	- table_entry: (alias schema tblname true joinexpr) for LEFT JOIN
-	- schema_entry: (alias coldefs) for the schemas assoc
-	For correlated single-table non-aggregated subselects, this replaces
-	the inline dependent join with a regular LEFT JOIN. */
+	/* unnest_subselect: core Neumann decorrelation for a single subquery.
+	Transforms a correlated scalar subquery into a LEFT JOIN table entry,
+	eliminating the dependent join. Returns (substitution tables) or nil.
+
+	Three paths based on subquery shape:
+	Path A (aggregate): adds domain columns to GROUP BY (Neumann Γ_{A∪D}),
+	flattens inner tables with scoped GROUP-stage. Handles COUNT/SUM/AVG/etc.
+	Path B (non-agg + LIMIT): creates partition-stage for LIMIT per outer row,
+	direct LEFT JOIN table entry. Handles ORDER BY + LIMIT 1 pattern.
+	Path C (non-agg, no LIMIT): returns nil (fallback to inline evaluation).
+
+	Recursive nesting: inner subqueries are decorrelated first by untangle_query.
+	Their tables become "inner-scoped" (identified via partition-aliases) and are
+	passed through to the outer level with joinexpr rewriting. Dependencies on
+	tables outside the current scope stay as bare get_column references. */
 	(define unnest_subselect (lambda (subquery outer_schemas) (begin
 		(define union_parts_us (query_union_all_parts subquery))
 		(if (not (nil? union_parts_us))
@@ -1262,6 +1274,12 @@ WHAT IT MUST NOT DO:
 									(sq_cache "tables" (merge _tbls (coalesceNil (sq_cache "tables") '())))
 									(list comparison (list (quote coalesceNil) _subst 0) 0)))))))))
 	)))
+	/* replace_inner_selects: walks an expression tree and replaces inner_select markers
+	with their Neumann-decorrelated equivalents. Scalar subselects go through
+	unnest_subselect directly; IN/EXISTS/NOT IN/NOT EXISTS are first rewritten to
+	COUNT(*) aggregates via _unnest_count_subselect, then decorrelated via Path A.
+	Returns the rewritten expression with subselects replaced by get_column refs
+	or comparison expressions on the unnested aggregate columns. */
 	(define replace_inner_selects (lambda (expr outer_schemas) (match expr
 		(cons sym args) (begin
 			(define kind (inner_select_kind sym))
@@ -1944,21 +1962,32 @@ GROUP BY AGGREGATE PIPELINE:
 store results as keytable columns named "expr|condition"
 3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
 */
+/*
+=== build_queryplan: physical plan generation ===
+
+Translates the flat relational IR from untangle_query into executable scan code.
+Consumes the table list, conditions, and group-stages and produces nested scan/scan_order
+calls, keytable materialization (GROUP BY), and prejoin materialization (multi-table GROUP).
+
+Processing order (recursive — each stage peels off one layer):
+1. Group-stages with partition-aliases (scoped): separate into keytable fill + post-group scan
+- Single-table group: make_keytable + collect keys + createcolumn per aggregate
+- Multi-table group: prejoin materialization + keytable on the prejoin
+- Aggregates are discovered in fields, order, having, AND condition (Neumann EXISTS/IN rewrite)
+2. Partition-stages (LIMIT per partition): scan_order with partition columns
+3. ORDER BY / LIMIT / OFFSET: scan_order on the remaining tables
+4. Unordered scan: nested-loop scan over remaining tables
+
+Key helpers:
+- make_keytable: creates sloppy temp table for group keys + computed aggregate columns
+- split_condition: selection pushdown — splits AND-parts by which tables they reference
+- replace_columns_from_expr: rewrites get_column markers to runtime variable references
+- scan_wrapper: generates scan/scan_order calls with filter/map/reduce structure
+*/
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
 When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
-	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
-	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
-	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
 	/*(print "build queryplan " '(schema tables fields condition groups schemas))*/
-	/*
-	Query builder masterplan:
-	1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with fields, conditions, and group-stages)
-	2. process group-stages: split queryplan into filling grouped table(s) and scanning them
-	3. order/limit stages become ordered scans on the current table set
-	4. scan the rest of the tables
-
-	*/
 
 	/* TODO: order tables: outer joins behind */
 	(set groups (coalesceNil groups '()))
@@ -2018,6 +2047,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define ags (if is_dedup '() (merge_unique ags_raw))) /* aggregates in fields */
 		(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
 		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_having true))))) /* aggregates in having */
+		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce condition true))))) /* aggregates in condition (from Neumann EXISTS/IN rewrite) */
 
 		/* TODO: replace (get_column nil ti col ci) in group, having and order with (coalesce (fields col) '('get_column nil false col false)) */
 
