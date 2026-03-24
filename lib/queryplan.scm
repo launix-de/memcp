@@ -1145,10 +1145,10 @@ or generate runtime scan code (build_queryplan).
 										/* value must be a simple column (not computed expression) for direct table entry */
 										(define _us_val_is_col (match us_value_expr
 											'((symbol get_column) _ _ _ _) true '((quote get_column) _ _ _ _) true false))
-										(if (and us_single_tbl us_has_limit _us_val_is_col)
-											/* === B: Non-agg + LIMIT → direct table entry + partition stage in groups ===
-											build_queryplan reads the partition stage and emits scan_order for the
-											aliased table when it's pulled in build_scan. */
+										(if (and us_single_tbl _us_val_is_col)
+											/* === B/C: Non-agg → direct LEFT JOIN table entry ===
+											Path B (has LIMIT): adds partition-stage for ORDER BY + LIMIT per outer row.
+											Path C (no LIMIT): plain LEFT JOIN, no partition-stage. */
 											(begin
 												(define us_tdesc (car tables2_us))
 												(define us_tblvar (nth us_tdesc 0))
@@ -1157,11 +1157,6 @@ or generate runtime scan code (build_queryplan).
 												(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
 												(define us_orig_limit (if us_has_stages (stage_limit_val (car _us_own_stages)) nil))
 												(define us_orig_offset (if us_has_stages (stage_offset_val (car _us_own_stages)) nil))
-												/* domain inner expressions as order-cols, renamed to use the new alias */
-												(define us_dom_order (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<))))
-												(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
-												(define us_part_order (merge us_dom_order us_renamed_order))
-												(define us_dom_count (count us_domain_cols))
 												/* pass through inner-scoped tables (from nested decorrelation) with joinexpr rewriting */
 												(define _us_inner_tbls (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (has? _us_inner_aliases a) false))))
 												(define _us_inner_tbls_rewritten (map _us_inner_tbls (lambda (td) (match td
@@ -1169,9 +1164,15 @@ or generate runtime scan code (build_queryplan).
 													td))))
 												(if (not (equal? _us_inner_tbls_rewritten '()))
 													(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
-												/* register partition stage in sq_cache → merged into groups by untangle_query */
-												(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
-												(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '())))
+												/* Always register partition stage: Path B uses explicit LIMIT,
+												Path C uses implicit LIMIT 1 (scalar subselect = at most one row) */
+												(begin
+													(define us_dom_order (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<))))
+													(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
+													(define us_part_order (merge us_dom_order us_renamed_order))
+													(define us_dom_count (count us_domain_cols))
+													(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
+													(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '()))))
 												/* propagate inner scoped stages with renaming */
 												(if (not (equal? _us_inner_stages '()))
 													(sq_cache "groups" (merge
@@ -1205,8 +1206,8 @@ or generate runtime scan code (build_queryplan).
 												If value comes from inner-scoped table, it stays unchanged. */
 												(define us_subst (_us_ria us_value_expr))
 												(list us_subst us_tbl_entries))
-											/* === C: Non-agg without LIMIT → nil (inline fallback with promise "once") === */
-											nil))
+											nil /* multi-table or computed value: not yet handled */
+									))
 								)
 							)
 						)
