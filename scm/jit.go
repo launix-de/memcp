@@ -231,14 +231,14 @@ func (e *execBuf) makeRX() error {
 func init_jit() {
 	DeclareTitle("JIT Compilation")
 
-	Declare(&Globalenv, &Declaration{
-		"jit", "compiles a lambda to optimized native code; passes through already compiled functions",
-		1, 1,
-		[]DeclarationParameter{
-			{"fn", "procedure", "the function to compile", nil},
-		}, "procedure",
-		jitCompile,
-		false, false, nil, nil, // not pure because it allocates executable memory
+		Declare(&Globalenv, &Declaration{
+		Name: "jit",
+		Desc: "compiles a lambda to optimized native code; passes through already compiled functions",
+		Fn: jitCompile,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "procedure", ParamName: "fn", ParamDesc: "the function to compile"}},
+			Return: &TypeDescriptor{Kind: "procedure"},
+		},
 	})
 }
 

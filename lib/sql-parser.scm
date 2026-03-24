@@ -129,7 +129,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(match (car (cdr captured_result))
 			'((symbol get_column) nil _ col _) col
 			'((symbol get_column) tblvar _ col _) col /* x.y -> col */
-			_ (car captured_result) /* for complex expressions, use captured SQL */
+			_ (begin
+				(define raw_sql (car captured_result))
+				/* hash overly long auto-generated column names to avoid
+				   exceeding MySQL protocol packet limits */
+				(if (> (strlen raw_sql) 256)
+					(concat (substr raw_sql 0 200) "..." (fnv_hash raw_sql))
+					raw_sql))
 		)
 	))
 
@@ -168,10 +174,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 		(cons head tail) (if (or (equal?? head "inner_select") (equal?? head (quote inner_select)))
 			/* scalar subselect in trigger: compile via build_queryplan_term.
-			   Wrap result in a promise pattern to extract the scalar value. */
+			Wrap result in a promise pattern to extract the scalar value. */
 			(match tail (cons subquery '()) (begin
 				/* Transform NEW/OLD refs in the subselect before passing to query planner.
-				   Use a shallow transform that does NOT recurse into nested inner_selects. */
+				Use a shallow transform that does NOT recurse into nested inner_selects. */
 				(define transform_new_old_shallow (lambda (e) (match e
 					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
@@ -1029,7 +1035,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
 			/* Route ALL UPDATE (single + multi-table) through the query planner.
-			   The planner handles column resolution, inner_selects, joins. */
+			The planner handles column resolution, inner_selects, joins. */
 			(build_dml_plan schema tbl tblalias all_defs (merge cols) (coalesceNil condition true) order limit offset)
 	)))
 
@@ -1071,7 +1077,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			/* Route single-table DELETE through the query planner pipeline.
-			   cols = nil signals DELETE mode. */
+			cols = nil signals DELETE mode. */
 			(define del_schema (coalesce schema2 schema))
 			(define del_defs (list (list tbl del_schema tbl false nil)))
 			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset)
