@@ -1769,15 +1769,19 @@ WHAT IT MUST NOT DO:
 								(if (equal?? inner_kind (quote inner_select_exists))
 									(match inner_args
 										(cons subquery '()) (begin
-											/* Rewrite NOT EXISTS → (= COALESCE(COUNT(*),0) 0). Only for subqueries with tables. */
+											/* Rewrite NOT EXISTS → (= COALESCE(COUNT(*),0) 0) via Neumann. */
 											(define _nex_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
-											(if _nex_has_tables (begin
+											(define _nex_count_result (if _nex_has_tables (begin
 												(define _nex_count_sq (match subquery
 													'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
 													subquery))
-												(define _nex_count_expr (list (quote inner_select) _nex_count_sq))
-												(list (quote equal?) (list (quote coalesceNil) (replace_inner_selects _nex_count_expr outer_schemas) 0) 0))
-											(list (quote not) (build_exists_subselect subquery outer_schemas))))
+												(unnest_subselect _nex_count_sq outer_schemas))
+												nil))
+											(if (nil? _nex_count_result)
+												(list (quote not) (build_exists_subselect subquery outer_schemas))
+												(match _nex_count_result '(_nex_subst _nex_tbls) (begin
+													(sq_cache "tables" (merge _nex_tbls (coalesceNil (sq_cache "tables") '())))
+													(list (quote equal?) (list (quote coalesceNil) _nex_subst 0) 0)))))
 										_ nil)
 									nil))
 						)
@@ -1805,17 +1809,20 @@ WHAT IT MUST NOT DO:
 					)
 					(quote inner_select_exists) (match args
 						(cons subquery '()) (begin
-							/* Rewrite EXISTS → (> COALESCE(COUNT(*),0) 0) and process as scalar subselect.
-							This leverages the existing Neumann aggregate unnesting (Path A).
-							Only for subqueries with tables (correlated); uncorrelated uses legacy path. */
+							/* Rewrite EXISTS → (> COALESCE(COUNT(*),0) 0) via Neumann aggregate unnesting.
+							If unnesting fails, fall back to legacy build_exists_subselect. */
 							(define _ex_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
-							(if _ex_has_tables (begin
+							(define _ex_count_result (if _ex_has_tables (begin
 								(define _ex_count_sq (match subquery
 									'(s t f c g h o l off) (list s t (list "__cnt" (list (quote aggregate) 1 (symbol "+") 0)) c (list 1) nil nil nil nil)
 									subquery))
-								(define _ex_count_expr (list (quote inner_select) _ex_count_sq))
-								(list (quote >) (list (quote coalesceNil) (replace_inner_selects _ex_count_expr outer_schemas) 0) 0))
-							(build_exists_subselect subquery outer_schemas)))
+								(unnest_subselect _ex_count_sq outer_schemas))
+								nil))
+							(if (nil? _ex_count_result)
+								(build_exists_subselect subquery outer_schemas)
+								(match _ex_count_result '(_ex_subst _ex_tbls) (begin
+									(sq_cache "tables" (merge _ex_tbls (coalesceNil (sq_cache "tables") '())))
+									(list (quote >) (list (quote coalesceNil) _ex_subst 0) 0)))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
