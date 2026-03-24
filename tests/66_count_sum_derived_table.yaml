@@ -1,0 +1,58 @@
+# COUNT(*) + SUM over a derived table with scalar subselects.
+# Triggers NthLocalVar index out of range when the inner derived table
+# contains correlated scalar subselects that are Neumann-decorrelated.
+
+metadata:
+  version: "1.0"
+  description: "COUNT + SUM over derived table with scalar subselects"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS csd_main"
+  - sql: "DROP TABLE IF EXISTS csd_detail"
+  - sql: "CREATE TABLE csd_main (ID INT PRIMARY KEY, name TEXT, hours INT)"
+  - sql: "CREATE TABLE csd_detail (ID INT PRIMARY KEY, parent INT, val INT)"
+  - sql: "INSERT INTO csd_main VALUES (1, 'Alice', 10), (2, 'Bob', 20), (3, 'Carol', 30)"
+  - sql: "INSERT INTO csd_detail VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300)"
+
+test_cases:
+
+  - name: "COUNT + SUM over simple derived table"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.hours) AS total FROM (
+        SELECT ID, name, hours FROM csd_main
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          total: 60
+
+  - name: "COUNT + SUM over derived table with scalar subselect"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.total_val) AS grand_total FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT SUM(d.val) FROM csd_detail d WHERE d.parent = m.ID), 0) AS total_val
+        FROM csd_main m
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          grand_total: 600
+
+  - name: "COUNT + SUM with EXISTS in derived table"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.hours) AS total FROM (
+        SELECT m.ID AS ID, m.hours AS hours,
+          EXISTS (SELECT 1 FROM csd_detail d WHERE d.parent = m.ID) AS has_detail
+        FROM csd_main m
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          total: 60
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS csd_main"
+  - sql: "DROP TABLE IF EXISTS csd_detail"

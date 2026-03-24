@@ -1,0 +1,86 @@
+# Neumann decorrelation: domain join column must be created in the temp table.
+# Pattern: COALESCE((SELECT SUM(k.val) FROM detail k WHERE k.parent = m.ID AND ...), 0)
+# The domain-join column (parent) becomes a column in .unnest:$sq0.
+
+metadata:
+  version: "1.0"
+  description: "Neumann decorrelation domain column in temp table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ndc_main"
+  - sql: "DROP TABLE IF EXISTS ndc_detail"
+  - sql: "CREATE TABLE ndc_main (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE ndc_detail (ID INT PRIMARY KEY, parent INT, val INT, dt INT)"
+  - sql: "INSERT INTO ndc_main VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO ndc_detail VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000)"
+
+test_cases:
+
+  - name: "simple SUM with domain join"
+    sql: |
+      SELECT m.ID, m.name,
+        COALESCE((SELECT SUM(k.val) FROM ndc_detail k WHERE k.parent = m.ID), 0) AS total
+      FROM ndc_main m
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          total: 300
+        - ID: 2
+          name: "Bob"
+          total: 300
+
+  - name: "SUM with domain join and additional filter"
+    sql: |
+      SELECT m.ID, m.name,
+        COALESCE((SELECT SUM(k.val) FROM ndc_detail k WHERE k.parent = m.ID AND k.dt < 2500), 0) AS total
+      FROM ndc_main m
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          total: 300
+        - ID: 2
+          name: "Bob"
+          total: 0
+
+  - name: "multiple SUM with different domain joins (triggers $sq1)"
+    sql: |
+      SELECT m.ID, m.name,
+        COALESCE((SELECT SUM(k.val) FROM ndc_detail k WHERE k.parent = m.ID AND k.dt < 2500), 0) AS total_early,
+        COALESCE((SELECT SUM(k.val) FROM ndc_detail k WHERE k.parent = m.ID AND k.dt >= 2000), 0) AS total_late
+      FROM ndc_main m
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          total_early: 300
+          total_late: 200
+        - ID: 2
+          name: "Bob"
+          total_early: 0
+          total_late: 300
+
+  - name: "aliased table in scalar subselect"
+    sql: |
+      SELECT m.ID,
+        COALESCE((SELECT SUM(k.val) FROM ndc_detail `k` WHERE `k`.`parent` = m.`ID` AND (`k`.`dt`) < 2500), 0) AS total
+      FROM ndc_main m
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          total: 300
+        - ID: 2
+          total: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ndc_main"
+  - sql: "DROP TABLE IF EXISTS ndc_detail"

@@ -574,6 +574,11 @@ func (t *storageShard) exitWriteOwner() {
 	t.writeOwnMu.Unlock()
 }
 
+// SetShardWriteLocked updates the mapper's lock state after an external lock release.
+func (m *ShardMapReducer) SetShardWriteLocked(locked bool) {
+	m.shardWriteLocked = locked
+}
+
 func (t *storageShard) hasWriteOwner() bool {
 	goid := currentGoroutineID()
 	if goid == 0 {
@@ -1330,30 +1335,27 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32) scm.Scmer {
 // processMainBlock is a tight loop over main-storage records – no branching
 // on main vs delta, direct ColumnStorage.GetValue calls. JIT candidate.
 func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
-	// Hoist write-lock acquisition out of the per-row loop.
-	// shardWriteLocked is set by openMapReducerEx when the caller (scan.go) already
-	// holds shard.mu; in that case we must NOT re-acquire it. For the rare case
-	// where a mapper is opened without the shard being locked (e.g. NEW. columns
-	// outside a mutation scan), acquire once for the whole batch instead of per-row.
-	if (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked {
-		currentTx := CurrentTx()
-		m.shard.mu.Lock()
-		defer m.shard.mu.Unlock()
-		m.shard.enterWriteOwner()
-		defer m.shard.exitWriteOwner()
-		if currentTx != nil {
-			currentTx.EnterShardWrite(m.shard)
-			defer currentTx.ExitShardWrite(m.shard)
-		}
-	}
+	// Per-row lock: acquire write lock only around each row's mutation,
+	// not for the whole batch. This allows nested read scans (e.g. EXISTS
+	// inside UPDATE on the same table) to acquire RLock between rows.
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
 	for _, id := range recids {
 		func() {
 			effectiveID := id
+			// Acquire write lock per-row for mutation scans
+			if needsPerRowLock {
+				m.shard.mu.Lock()
+				m.shard.enterWriteOwner()
+			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
+							if needsPerRowLock {
+								m.shard.exitWriteOwner()
+								m.shard.mu.Unlock()
+							}
 							return
 						}
 						effectiveID = followedID
@@ -1382,7 +1384,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				} else if m.isBreak[i] {
 					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
 				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, m.hasUpdateCol, m.deleteBatch))
+					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, !needsPerRowLock && m.hasUpdateCol, m.deleteBatch))
 				} else {
 					if effectiveID < m.mainCount {
 						m.args[i] = col.GetValue(effectiveID)
@@ -1390,6 +1392,12 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 						m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), m.colNames[i])
 					}
 				}
+			}
+			// Release write lock before mapFn: allows nested scans on same shard.
+			// $update closures will re-acquire the lock when called.
+			if needsPerRowLock {
+				m.shard.exitWriteOwner()
+				m.shard.mu.Unlock()
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
 		}()
@@ -1400,25 +1408,23 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 // processDeltaBlock handles delta-storage records via getDelta. JIT candidate.
 func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	// Same hoisting as processMainBlock (see comment there).
-	if (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked {
-		currentTx := CurrentTx()
-		m.shard.mu.Lock()
-		defer m.shard.mu.Unlock()
-		m.shard.enterWriteOwner()
-		defer m.shard.exitWriteOwner()
-		if currentTx != nil {
-			currentTx.EnterShardWrite(m.shard)
-			defer currentTx.ExitShardWrite(m.shard)
-		}
-	}
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
 	for _, id := range recids {
 		func() {
 			effectiveID := id
+			if needsPerRowLock {
+				m.shard.mu.Lock()
+				m.shard.enterWriteOwner()
+			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
+							if needsPerRowLock {
+								m.shard.exitWriteOwner()
+								m.shard.mu.Unlock()
+							}
 							return
 						}
 						effectiveID = followedID
@@ -1427,33 +1433,32 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 			}
 			for i, col := range m.colNames {
 				if m.isSet[i] {
-					// $set: works on delta rows too — proxy stores values
-					// in its delta map keyed by effectiveID (any row index).
 					if fnptr := m.setClosureFn[i]; fnptr != nil {
 						m.args[i] = scm.NewClosure(fnptr, effectiveID)
 					} else {
 						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
 					}
 				} else if m.isInvalidate[i] || m.isIncrement[i] {
-					// invalidate/increment on delta rows outside proxy range — no-op
 					m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
 				} else if m.isBreak[i] {
 					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
 				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, m.hasUpdateCol, m.deleteBatch))
+					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, !needsPerRowLock && m.hasUpdateCol, m.deleteBatch))
 				} else if len(col) >= 4 && col[:4] == "NEW." {
 					m.args[i] = scm.NewNil()
 				} else {
 					if effectiveID < m.mainCount {
 						m.args[i] = m.mainCols[i].GetValue(effectiveID)
 					} else if _, isProxy := m.mainCols[i].(*StorageComputeProxy); isProxy {
-						// Proxy columns (computed/ORC): read from proxy even for delta rows.
-						// The proxy stores values in its delta map keyed by row index.
 						m.args[i] = m.mainCols[i].GetValue(effectiveID)
 					} else {
 						m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), col)
 					}
 				}
+			}
+			if needsPerRowLock {
+				m.shard.exitWriteOwner()
+				m.shard.mu.Unlock()
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
 		}()

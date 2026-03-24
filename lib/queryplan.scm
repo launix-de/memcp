@@ -407,10 +407,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(define kt_cols (cons
 				'("unique" "group" key_names)
 				(map key_names (lambda (colname) '("column" colname "any" '() '())))))
-			(define kt_partition (merge (map (produceN (count keys)) (lambda (i)
+			(define kt_partition (if (not (string? tbl)) '() (merge (map (produceN (count keys)) (lambda (i)
 				(match (key_at i)
 					'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
-					'())))))
+					'()))))))
 			/* create at compile time (needed for recursive build_queryplan) */
 			(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
 			(partitiontable schema keytable_name kt_partition)
@@ -419,10 +419,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				(cons
 					(cons 'list (cons "unique" (cons "group" (list (cons 'list key_names)))))
 					(map key_names (lambda (colname) (list 'list "column" colname "any" '(list) '(list)))))))
-			(define kt_partition_code (cons 'list (merge (map (produceN (count keys)) (lambda (i)
+			(define kt_partition_code (if (not (string? tbl)) '(list) (cons 'list (merge (map (produceN (count keys)) (lambda (i)
 				(match (key_at i)
 					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
-					'()))))))
+					'())))))))
 			(define init_code (list 'begin
 				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
 				(list 'partitiontable schema keytable_name kt_partition_code)
@@ -899,7 +899,9 @@ WHAT IT MUST NOT DO:
 							(begin
 								(define sq_num (unnest_acc "counter"))
 								(unnest_acc "counter" (+ sq_num 1))
-								(define sq_id (concat "$sq" sq_num))
+								/* hash ensures different conditions get different temp tables (concurrent queries share name otherwise) */
+								(define _sq_hash (substr (fnv_hash (concat raw_tables "|" new_fields "|" new_condition)) 0 8))
+								(define sq_id (concat "$sq" sq_num "_" _sq_hash))
 								/* build remaining inner condition */
 								(define _inner_parts (filter (map _classified (lambda (c) (if (equal? (car c) "inner") (nth c 1) nil))) (lambda (x) (not (nil? x)))))
 								(define remaining_cond (_rebuild_and _inner_parts))
@@ -943,7 +945,7 @@ WHAT IT MUST NOT DO:
 								/* register: use string table name, prepend materialize_code to unnest_acc init */
 								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema temp_tbl_name true joinexpr))))
 								(unnest_acc "schemas" (merge (unnest_acc "schemas") (list sq_id sq_schema_cols)))
-								/* register init code for materialization (executed before scan by build_queryplan) */
+								/* register init code: fill if empty (hash in sq_id ensures different queries get different tables) */
 								(define guarded_init (list (quote if) (list (quote equal?) 0 (list (quote scan_estimate) schema temp_tbl_name))
 									materialize_code nil))
 								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) (list guarded_init)))
@@ -1226,7 +1228,10 @@ WHAT IT MUST NOT DO:
 										'() (replace_columns_from_expr agg_item)
 									)
 								))
-								(build_scalar_agg_scan tables2 condition2)
+								(define _init_stmts_agg (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+								(if (equal? _init_stmts_agg '())
+									(build_scalar_agg_scan tables2 condition2)
+									(cons (quote !begin) (merge _init_stmts_agg (list (build_scalar_agg_scan tables2 condition2)))))
 							)
 							/* fallback: build_queryplan for non-aggregate or complex aggregate cases */
 							(begin
@@ -1246,7 +1251,8 @@ WHAT IT MUST NOT DO:
 										expr
 									)))
 									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil nil)))
-									(list (quote !begin)
+									(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+									(cons (quote !begin) (merge _init_stmts (list
 										(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
 										(list (quote set) (symbol _sq_rr_name)
 											(list (quote lambda) (list (symbol "row"))
@@ -1257,7 +1263,7 @@ WHAT IT MUST NOT DO:
 										)
 										subplan
 										(list (symbol _sq_promise_name) "value")
-									)
+									)))
 								)
 							)
 						) /* close fallback begin */
@@ -1417,7 +1423,10 @@ WHAT IT MUST NOT DO:
 										'() (list (quote equal??) (replace_columns_from_expr target_expr) (replace_columns_from_expr value_expr))
 									)
 								))
-								(build_in_scan tables2 condition2)
+								(define _init_stmts_in (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+								(if (equal? _init_stmts_in '())
+									(build_in_scan tables2 condition2)
+									(cons (quote !begin) (merge _init_stmts_in (list (build_in_scan tables2 condition2)))))
 							)
 						))
 						in_expr
@@ -1548,7 +1557,10 @@ WHAT IT MUST NOT DO:
 								)
 							)
 						))
-						exists_expr
+						(define _init_stmts_exists (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+						(if (equal? _init_stmts_exists '())
+							exists_expr
+							(cons (quote !begin) (merge _init_stmts_exists (list exists_expr))))
 					)
 				)
 			)
@@ -1664,20 +1676,26 @@ WHAT IT MUST NOT DO:
 								(list (quote set) (symbol "resultrow")
 									(list (quote lambda) (list (symbol "item"))
 										(list rows_sym "rows"
-											(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+											(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 								)
 								(build_queryplan_term subquery)
 								(list (quote set) (symbol "resultrow") resultrow_sym)
 								(list rows_sym "rows")
 							))
+							(define _mat_var (symbol (concat "__mat:" id)))
+							(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
+								(list (list (quote set) _mat_var materialized_rows))))
 							(list
-								(list (list id schemax materialized_rows isOuter joinexpr))
+								(list (list id schemax _mat_var isOuter joinexpr))
 								'()
 								true
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 							)
 						))
 						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2 _) (begin
+							/* propagate _init2 (e.g. window materialization code) from inner untangle_query */
+							(if (and (not (nil? _init2)) (not (equal? _init2 '())))
+								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) _init2)))
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -1815,7 +1833,7 @@ WHAT IT MUST NOT DO:
 											(list (quote set) mat_rr_sym
 												(list (quote lambda) (list (symbol "item"))
 													(list rows_sym "rows"
-														(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+														(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 											)
 											/* with limit: stop collecting after mat_limit rows */
 											(list (quote begin)
@@ -1826,14 +1844,20 @@ WHAT IT MUST NOT DO:
 															(list (quote begin)
 																(list (quote set) cnt_sym (list (quote +) cnt_sym 1))
 																(list rows_sym "rows"
-																	(list (quote cons) (symbol "item") (list rows_sym "rows"))))
+																	(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
 															nil))))
 										)
 										mat_inner_plan
-										(list (quote apply) (quote list) (list rows_sym "rows"))
+										(list rows_sym "rows")
 									))
+									/* Store materialized rows in a variable via init code.
+									   The variable (a symbol) is used as tbl — at runtime,
+									   scan evaluates the symbol to get the row list. */
+									(define _mat_var (symbol (concat "__mat:" id)))
+									(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
+										(list (list (quote set) _mat_var materialized_rows))))
 									(list
-										(list (list id schemax materialized_rows isOuter joinexpr))
+										(list (list id schemax _mat_var isOuter joinexpr))
 										'()
 										true
 										(list id (map output_cols_sub (lambda (col) '("Field" col "Type" "any"))))

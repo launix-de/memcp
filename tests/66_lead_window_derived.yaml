@@ -1,0 +1,91 @@
+# Derived table with LEAD() window function used in a correlated context.
+# Pattern: SELECT ... FROM main LEFT JOIN (SELECT id, val,
+#   LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+#   FROM hist) m ON m.id = main.ID WHERE ...
+
+metadata:
+  version: "1.0"
+  description: "LEAD window function in derived table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS lwd_main"
+  - sql: "DROP TABLE IF EXISTS lwd_hist"
+  - sql: "CREATE TABLE lwd_main (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE lwd_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
+  - sql: "INSERT INTO lwd_main VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO lwd_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000), (4, 2, 400, 4000)"
+
+test_cases:
+
+  - name: "LEAD window function standalone"
+    sql: |
+      SELECT parent, val, ts,
+        LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+      FROM lwd_hist
+      ORDER BY parent, ts
+    expect:
+      rows: 4
+      data:
+        - parent: 1
+          val: 100
+          ts: 1000
+          next_ts: 2000
+        - parent: 1
+          val: 200
+          ts: 2000
+          next_ts: null
+        - parent: 2
+          val: 300
+          ts: 3000
+          next_ts: 4000
+        - parent: 2
+          val: 400
+          ts: 4000
+          next_ts: null
+
+  - name: "LEAD in derived table with correlated WHERE"
+    sql: |
+      SELECT m.ID, m.name, h.val, h.next_ts
+      FROM lwd_main m
+      LEFT JOIN (
+        SELECT parent, val, ts,
+          LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+        FROM lwd_hist
+      ) h ON h.parent = m.ID AND h.ts = 1000
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          val: 100
+          next_ts: 2000
+        - ID: 2
+          name: "Bob"
+          val: null
+          next_ts: null
+
+  - name: "wrapped in SELECT t.* FROM (...) t with LEAD derived table"
+    sql: |
+      SELECT t.* FROM (
+        SELECT m.ID AS ID, m.name AS name, h.val AS hist_val
+        FROM lwd_main m
+        LEFT JOIN (
+          SELECT parent, val,
+            LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+          FROM lwd_hist
+        ) h ON h.parent = m.ID AND h.next_ts IS NOT NULL
+      ) t ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "Alice"
+          hist_val: 100
+        - ID: 2
+          name: "Bob"
+          hist_val: 300
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS lwd_main"
+  - sql: "DROP TABLE IF EXISTS lwd_hist"
