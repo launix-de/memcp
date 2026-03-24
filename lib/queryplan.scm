@@ -1423,7 +1423,10 @@ WHAT IT MUST NOT DO:
 										'() (list (quote equal??) (replace_columns_from_expr target_expr) (replace_columns_from_expr value_expr))
 									)
 								))
-								(build_in_scan tables2 condition2)
+								(define _init_stmts_in (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+								(if (equal? _init_stmts_in '())
+									(build_in_scan tables2 condition2)
+									(cons (quote !begin) (merge _init_stmts_in (list (build_in_scan tables2 condition2)))))
 							)
 						))
 						in_expr
@@ -1554,7 +1557,10 @@ WHAT IT MUST NOT DO:
 								)
 							)
 						))
-						exists_expr
+						(define _init_stmts_exists (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+						(if (equal? _init_stmts_exists '())
+							exists_expr
+							(cons (quote !begin) (merge _init_stmts_exists (list exists_expr))))
 					)
 				)
 			)
