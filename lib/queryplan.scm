@@ -945,10 +945,19 @@ WHAT IT MUST NOT DO:
 								/* register: use string table name, prepend materialize_code to unnest_acc init */
 								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema temp_tbl_name true joinexpr))))
 								(unnest_acc "schemas" (merge (unnest_acc "schemas") (list sq_id sq_schema_cols)))
-								/* register init code: fill if empty (hash in sq_id ensures different queries get different tables) */
+								/* register init code: fill if empty + invalidation triggers on source tables.
+								   When source data changes, triggers drop the .unnest: table so the next
+								   query re-fills it via guarded_init. This avoids stale cached data while
+								   keeping queries fast (no drop+recreate per execution). */
 								(define guarded_init (list (quote if) (list (quote equal?) 0 (list (quote scan_estimate) schema temp_tbl_name))
 									materialize_code nil))
 								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) (list guarded_init)))
+								/* register invalidation triggers on all source tables in the decorrelated subquery */
+								(map raw_tables (lambda (src_tbl_desc) (match src_tbl_desc
+									'(_ src_schema src_tbl _ _) (if (string? src_tbl)
+										(register_prejoin_invalidation src_schema src_tbl schema temp_tbl_name)
+										true)
+									_ true)))
 								/* substitution: pure query term */
 								(define agg_neutral (nth _agg_info 2))
 								(list (quote coalesceNil) (list (quote get_column) sq_id false _value_col false) agg_neutral)
