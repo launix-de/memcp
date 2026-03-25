@@ -3109,6 +3109,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(if (not (nil? _ps))
 											/* === partition-limited scan_order === */
 											(begin
+												/* For partition scans: use FULL condition (undo LEFT JOIN filter split).
+												The filter must be applied BEFORE the LIMIT, not after — otherwise
+												scan_order emits wrong rows and the post-filter discards them. */
+												(define _ps_now_cond (if isOuter
+													(if (equal? effective_later later_condition) now_condition
+														/* reconstruct: merge pure conditions back into now_condition */
+														(if (equal? now_condition true) (extract_pure_tblvar_conditions (match (split_condition (coalesceNil condition true) tables) '(n _) n) tblvar)
+															(list (quote and) now_condition (extract_pure_tblvar_conditions (match (split_condition (coalesceNil condition true) tables) '(n _) n) tblvar))))
+													now_condition))
+												(define _ps_filtercols (merge_unique (list (extract_columns_for_tblvar tblvar _ps_now_cond) (extract_outer_columns_for_tblvar tblvar _ps_now_cond))))
 												(define _ps_order (coalesceNil (stage_order_list _ps) '()))
 												(define _ps_partcols (coalesceNil (stage_limit_partition_cols _ps) 0))
 												(define _ps_limit (coalesceNil (stage_limit_val _ps) -1))
@@ -3124,8 +3134,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												/* emit init code from partition stage if present */
 												(define _ps_init2 (stage_init_code _ps))
 												(define _ps_scan (scan_wrapper 'scan_order schema tbl
-													(cons list (merge_unique filtercols cols))
-													'((quote lambda) (map (merge_unique filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+													(cons list (merge_unique _ps_filtercols cols))
+													'((quote lambda) (map (merge_unique _ps_filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr _ps_now_cond)))
 													(cons list _ps_ordercols)
 													(cons list _ps_dirs)
 													_ps_partcols _ps_offset _ps_limit
