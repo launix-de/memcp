@@ -1109,7 +1109,12 @@ or generate runtime scan code (build_queryplan).
 										(define us_new_having (if (nil? us_orig_having) nil (_us_prefix_ria us_orig_having)))
 										/* scoped GROUP stage: partition-aliases = prefixed inner table aliases */
 										(define us_inner_aliases (map us_prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
-										(define us_group_stage (make_group_stage us_new_group us_new_having '() nil nil us_inner_aliases nil))
+										/* preserve ORDER+LIMIT from original stage (prefix-renamed) */
+									(define us_orig_order_a (if us_has_stages (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
+									(define us_orig_limit_a (if us_has_stages (stage_limit_val (car _us_own_stages)) nil))
+									(define us_orig_offset_a (if us_has_stages (stage_offset_val (car _us_own_stages)) nil))
+									(define us_new_order (map us_orig_order_a (lambda (oi) (match oi '(col dir) (list (_us_prefix_ria col) dir) oi))))
+									(define us_group_stage (make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_inner_aliases nil))
 										/* propagate inner scoped stages with prefix */
 										(define _us_prefixed_inner_stages (map _us_inner_stages (lambda (s) (begin
 											(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_prefix_ria))
