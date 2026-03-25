@@ -860,7 +860,7 @@ WHAT IT MUST NOT DO:
 						and if outer has GROUP BY, domain cols must be expressible via group keys
 						(Neumann: D ⋈ Γ_{A;f} ≡ Γ_{A∪D;f}(D ⋈ T) requires D compatible with A) */
 						(define _outer_has_incompatible_group (and (not (nil? group)) (not (equal? group '()))))
-						(if (or (nil? _agg_info) _has_fail (equal? _domain_joins '()) (nil? _value_col) _outer_has_incompatible_group)
+						(if true /* always use build_scalar_subselect — Neumann decorrelation disabled until .unnest: caching/invalidation is resolved */
 							(build_scalar_subselect subquery outer_schemas)
 							/* TODO (Neumann next steps to eliminate this fallback):
 
@@ -945,7 +945,7 @@ WHAT IT MUST NOT DO:
 								/* register: use string table name, prepend materialize_code to unnest_acc init */
 								(unnest_acc "tables" (merge (unnest_acc "tables") (list (list sq_id schema temp_tbl_name true joinexpr))))
 								(unnest_acc "schemas" (merge (unnest_acc "schemas") (list sq_id sq_schema_cols)))
-								/* register init code: fill if empty (hash in sq_id ensures different queries get different tables) */
+								/* register init code for materialization (executed before scan by build_queryplan) */
 								(define guarded_init (list (quote if) (list (quote equal?) 0 (list (quote scan_estimate) schema temp_tbl_name))
 									materialize_code nil))
 								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) (list guarded_init)))
@@ -1747,7 +1747,12 @@ WHAT IT MUST NOT DO:
 									(replace_column_alias (list (quote get_column) nil ti col ci))
 									/* reference to outer table -> keep as-is */
 									expr)
-								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects have their own scope */ (cons sym (map args transform_joinexpr)))
+								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym)))
+									/* resolve scalar inner_selects in joinexpr via build_scalar_subselect */
+									(if (equal?? (inner_select_kind sym) (quote inner_select))
+										(match args (cons subquery '()) (build_scalar_subselect subquery schemas2) expr)
+										expr)
+									(cons sym (map args transform_joinexpr)))
 								expr
 							)))
 							/* transform and attach joinexpr to first table in tablesPrefixed */

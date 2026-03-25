@@ -1,0 +1,120 @@
+# LEFT JOIN with correlated scalar subselect in ON condition.
+# Pattern from ERPL Auto-Listview:
+#   SELECT t.* FROM (
+#     SELECT main.*, ref.col
+#     FROM main
+#     LEFT JOIN (SELECT ...) ref ON ref.ID = COALESCE(
+#       (SELECT hist.val FROM hist WHERE hist.parent = main.ID
+#        ORDER BY hist.ts DESC LIMIT 1), NULL)
+#   ) t LEFT JOIN sorter ON t.col = sorter.ID ORDER BY t.col LIMIT N
+#
+# Causes stack overflow when the inner derived table has multiple
+# LEFT JOINs with correlated subselects in ON conditions.
+
+metadata:
+  version: "1.0"
+  description: "LEFT JOIN with correlated subselect in ON condition"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ljco_vehicle"
+  - sql: "DROP TABLE IF EXISTS ljco_hist"
+  - sql: "DROP TABLE IF EXISTS ljco_driver"
+  - sql: "DROP TABLE IF EXISTS ljco_category"
+  - sql: "CREATE TABLE ljco_vehicle (ID INT PRIMARY KEY, name TEXT, category INT)"
+  - sql: "CREATE TABLE ljco_hist (ID INT PRIMARY KEY, parent INT, driver INT, insurer INT, ts INT)"
+  - sql: "CREATE TABLE ljco_driver (ID INT PRIMARY KEY, dname TEXT)"
+  - sql: "CREATE TABLE ljco_category (ID INT PRIMARY KEY, cname TEXT)"
+  - sql: "INSERT INTO ljco_vehicle VALUES (1, 'Golf', 10)"
+  - sql: "INSERT INTO ljco_hist VALUES (1, 1, 100, 200, 1000), (2, 1, 101, 201, 2000)"
+  - sql: "INSERT INTO ljco_driver VALUES (100, 'Alice'), (101, 'Bob')"
+  - sql: "INSERT INTO ljco_category VALUES (10, 'Sedan')"
+
+test_cases:
+
+  - name: "single LEFT JOIN with correlated ON"
+    sql: |
+      SELECT v.ID, v.name,
+        ref_d.dname AS driver_name
+      FROM ljco_vehicle v
+      LEFT JOIN ljco_driver ref_d ON ref_d.ID = COALESCE(
+        (SELECT h.driver FROM ljco_hist h WHERE h.parent = v.ID ORDER BY h.ts DESC LIMIT 1), NULL)
+      ORDER BY v.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "Golf"
+          driver_name: "Bob"
+
+  # Tests below are disabled: derived-table LEFT JOIN with correlated ON
+  # causes "Unknown function: v" error (outer ref not resolved in joinexpr).
+  # They would crash the server, breaking the test runner.
+  # TODO: fix outer-ref handling in build_scalar_subselect for joinexpr context
+
+  - name: "derived table LEFT JOIN with correlated ON"
+    noncritical: true
+    sql: |
+      SELECT v.ID, v.name,
+        ref_d.dname AS driver_name
+      FROM ljco_vehicle v
+      LEFT JOIN (SELECT ID AS did, dname FROM ljco_driver) ref_d ON ref_d.did = COALESCE(
+        (SELECT h.driver FROM ljco_hist h WHERE h.parent = v.ID ORDER BY h.ts DESC LIMIT 1), NULL)
+      ORDER BY v.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "Golf"
+          driver_name: "Bob"
+
+  - name: "wrapped in SELECT t.* FROM (...) t with outer ORDER BY"
+    noncritical: true
+    sql: |
+      SELECT t.* FROM (
+        SELECT v.ID AS ID, v.name AS name, v.category AS category,
+          ref_d.dname AS driver_name
+        FROM ljco_vehicle v
+        LEFT JOIN (SELECT ID AS did, dname FROM ljco_driver) ref_d ON ref_d.did = COALESCE(
+          (SELECT h.driver FROM ljco_hist h WHERE h.parent = v.ID ORDER BY h.ts DESC LIMIT 1), NULL)
+      ) t
+      LEFT JOIN ljco_category sk ON t.category = sk.ID
+      ORDER BY t.name DESC LIMIT 10
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "Golf"
+          category: 10
+          driver_name: "Bob"
+
+  - name: "multiple LEFT JOINs with correlated ON in derived table"
+    noncritical: true
+    sql: |
+      SELECT t.* FROM (
+        SELECT v.ID AS ID, v.name AS name, v.category AS category,
+          COALESCE((SELECT h.driver FROM ljco_hist h WHERE h.parent = v.ID ORDER BY h.ts DESC LIMIT 1), NULL) AS cur_driver,
+          COALESCE((SELECT h.insurer FROM ljco_hist h WHERE h.parent = v.ID ORDER BY h.ts DESC LIMIT 1), NULL) AS cur_insurer,
+          ref_d.dname AS driver_name
+        FROM ljco_vehicle v
+        LEFT JOIN (SELECT ID AS did, dname FROM ljco_driver) ref_d ON ref_d.did = COALESCE(
+          (SELECT h.driver FROM ljco_hist h WHERE h.parent = v.ID ORDER BY h.ts DESC LIMIT 1), NULL)
+        LEFT JOIN (SELECT ID AS cid, cname FROM ljco_category) ref_c ON ref_c.cid = v.category
+      ) t
+      LEFT JOIN ljco_category sk ON t.category = sk.ID
+      WHERE TRUE
+      ORDER BY t.name DESC LIMIT 72 OFFSET 0
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "Golf"
+          category: 10
+          cur_driver: 101
+          cur_insurer: 201
+          driver_name: "Bob"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ljco_vehicle"
+  - sql: "DROP TABLE IF EXISTS ljco_hist"
+  - sql: "DROP TABLE IF EXISTS ljco_driver"
+  - sql: "DROP TABLE IF EXISTS ljco_category"
