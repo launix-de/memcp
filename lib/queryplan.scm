@@ -1747,7 +1747,12 @@ WHAT IT MUST NOT DO:
 									(replace_column_alias (list (quote get_column) nil ti col ci))
 									/* reference to outer table -> keep as-is */
 									expr)
-								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects have their own scope */ (cons sym (map args transform_joinexpr)))
+								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym)))
+									/* resolve scalar inner_selects in joinexpr via build_scalar_subselect */
+									(if (equal?? (inner_select_kind sym) (quote inner_select))
+										(match args (cons subquery '()) (build_scalar_subselect subquery schemas2) expr)
+										expr)
+									(cons sym (map args transform_joinexpr)))
 								expr
 							)))
 							/* transform and attach joinexpr to first table in tablesPrefixed */
