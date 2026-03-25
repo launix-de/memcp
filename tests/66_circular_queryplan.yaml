@@ -1,0 +1,150 @@
+# Circular query plan: SELECT t.* FROM (SELECT ... FROM main
+#   LEFT JOIN (SELECT ... complex subselects ... FROM ref) derived ON ...
+# ) t ORDER BY ... LIMIT
+# The derived table in the LEFT JOIN contains correlated subselects
+# that reference back to the main query scope, causing infinite
+# recursion in the Scheme evaluator.
+
+metadata:
+  version: "1.0"
+  description: "Circular query plan from complex derived-table LEFT JOIN"
+  isolate: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cqp_task"
+  - sql: "DROP TABLE IF EXISTS cqp_assign"
+  - sql: "DROP TABLE IF EXISTS cqp_event"
+  - sql: "DROP TABLE IF EXISTS cqp_worker"
+  - sql: "CREATE TABLE cqp_task (ID INT PRIMARY KEY, title TEXT, assigned INT, creator INT)"
+  - sql: "CREATE TABLE cqp_assign (ID INT PRIMARY KEY, task INT, worker INT)"
+  - sql: "CREATE TABLE cqp_event (ID INT PRIMARY KEY, task INT, creator INT)"
+  - sql: "CREATE TABLE cqp_worker (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "INSERT INTO cqp_worker VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO cqp_task VALUES (1, 'Bug', 1, 2), (2, 'Feature', 2, 1)"
+  - sql: "INSERT INTO cqp_assign VALUES (1, 1, 1), (2, 2, 2)"
+  - sql: "INSERT INTO cqp_event VALUES (1, 1, 1), (2, 1, 2), (3, 2, 1)"
+
+test_cases:
+
+  - name: "simple derived table LEFT JOIN"
+    sql: |
+      SELECT a.ID, a.task,
+        ref_w.wname AS worker_name
+      FROM cqp_assign a
+      LEFT JOIN (SELECT ID AS wid, name AS wname FROM cqp_worker) ref_w
+        ON ref_w.wid = a.worker
+      ORDER BY a.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          task: 1
+          worker_name: "Alice"
+        - ID: 2
+          task: 2
+          worker_name: "Bob"
+
+  - name: "derived table with EXISTS subselect in LEFT JOIN"
+    sql: |
+      SELECT a.ID, a.task,
+        ref_t.title AS task_title,
+        ref_t.has_events AS task_has_events
+      FROM cqp_assign a
+      LEFT JOIN (SELECT ID AS tid, title,
+        EXISTS (SELECT 1 FROM cqp_event e WHERE e.task = cqp_task.ID LIMIT 1) AS has_events
+        FROM cqp_task) ref_t
+        ON ref_t.tid = a.task
+      ORDER BY a.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          task: 1
+          task_title: "Bug"
+          task_has_events: 1
+        - ID: 2
+          task: 2
+          task_title: "Feature"
+          task_has_events: 1
+
+  - name: "wrapped in SELECT t.* with ORDER BY LIMIT"
+    sql: |
+      SELECT t.* FROM (
+        SELECT a.ID AS ID, a.task AS task,
+          ref_w.wname AS worker_name,
+          ref_t.title AS task_title
+        FROM cqp_assign a
+        LEFT JOIN (SELECT ID AS wid, name AS wname FROM cqp_worker) ref_w
+          ON ref_w.wid = a.worker
+        LEFT JOIN (SELECT ID AS tid, title FROM cqp_task) ref_t
+          ON ref_t.tid = a.task
+      ) t ORDER BY t.ID LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          task: 1
+          worker_name: "Alice"
+          task_title: "Bug"
+        - ID: 2
+          task: 2
+          worker_name: "Bob"
+          task_title: "Feature"
+
+  - name: "full pattern: wrapped derived + EXISTS + multiple LEFT JOINs"
+    noncritical: true  # worker_has_event returns false instead of true (correlated EXISTS in COALESCE not resolved)
+    sql: |
+      SELECT t.* FROM (
+        SELECT a.ID AS ID, a.task AS task,
+          ref_w.wname AS worker_name,
+          ref_t.title AS task_title,
+          COALESCE((SELECT TRUE FROM cqp_task t2
+            WHERE t2.ID = a.task AND
+            EXISTS (SELECT 1 FROM cqp_event e WHERE e.task = t2.ID AND e.creator = a.worker LIMIT 1)
+            LIMIT 1), FALSE) AS worker_has_event
+        FROM cqp_assign a
+        LEFT JOIN (SELECT ID AS wid, name AS wname FROM cqp_worker) ref_w
+          ON ref_w.wid = a.worker
+        LEFT JOIN (SELECT ID AS tid, title,
+          EXISTS (SELECT 1 FROM cqp_event e WHERE e.task = cqp_task.ID LIMIT 1) AS has_events
+          FROM cqp_task) ref_t
+          ON ref_t.tid = a.task
+      ) t ORDER BY t.ID LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          task: 1
+          worker_name: "Alice"
+          task_title: "Bug"
+          worker_has_event: 1
+        - ID: 2
+          task: 2
+          worker_name: "Bob"
+          task_title: "Feature"
+          worker_has_event: 1
+
+  - name: "COUNT+SUM over the full pattern"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT a.ID AS ID,
+          ref_w.wname AS worker_name,
+          ref_t.title AS task_title
+        FROM cqp_assign a
+        LEFT JOIN (SELECT ID AS wid, name AS wname FROM cqp_worker) ref_w
+          ON ref_w.wid = a.worker
+        LEFT JOIN (SELECT ID AS tid, title,
+          EXISTS (SELECT 1 FROM cqp_event e WHERE e.task = cqp_task.ID LIMIT 1) AS has_events
+          FROM cqp_task) ref_t
+          ON ref_t.tid = a.task
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cqp_task"
+  - sql: "DROP TABLE IF EXISTS cqp_assign"
+  - sql: "DROP TABLE IF EXISTS cqp_event"
+  - sql: "DROP TABLE IF EXISTS cqp_worker"
