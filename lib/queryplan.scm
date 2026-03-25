@@ -1376,28 +1376,25 @@ or generate runtime scan code (build_queryplan).
 		expr
 	)))
 
-	/* check if we have FROM selects -> returns '(tables renamelist condition schemas) */
+	/* no-FROM rewrite: inject virtual one-row table "(1)" (like Oracle DUAL).
+	This eliminates the no-table special case — all Neumann transformations
+	apply uniformly. The table is created at compile time (sloppy engine,
+	idempotent) and touched at runtime for cache lease renewal. */
 	(if (or (nil? tables) (equal? tables '()))
 		(begin
-			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v '()))))
-			(set condition (replace_inner_selects condition '()))
-			(set group (map group (lambda (g) (replace_inner_selects g '()))))
-			(set having (replace_inner_selects having '()))
-			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col '()) dir)))))
-			/* integrate unnested tables from scalar subselects (same as main path) */
-			(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
-			(set tables (if (equal? _sq_tbls '()) tables (merge (coalesceNil tables '()) _sq_tbls)))
-			(define _sq_schs (coalesceNil (sq_cache "schemas") '()))
-			(define schemas (if (equal? _sq_schs '()) '() _sq_schs))
-			(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
-			(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
-			(set groups (merge
-				_sq_pstages
-				_sq_prop_groups
-				(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '())))
-			(list schema tables fields condition groups schemas (lambda (expr) expr))
-		)
-		(begin
+			/* create and populate at compile time (like make_keytable) */
+			(createtable schema "(1)"
+				(list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '()))
+				'("engine" "sloppy") true)
+			(insert schema "(1)" '("1") '((1)) '() (lambda () true) true)
+			(set tables (list (list "_dual" schema "(1)" false nil)))
+			(set condition (if (nil? condition) true condition))
+			(define _efa (lambda (expr) (match expr '((symbol aggregate) _ _ _) true (cons sym args) (reduce args (lambda (a b) (or a (_efa b))) false) false)))
+			(set group (coalesceNil group (if (reduce_assoc fields (lambda (a key v) (or a (_efa v))) false) '(1) nil)))
+			(if (or group having order limit offset)
+				(set groups (list (make_group_stage group having order limit offset nil nil)))
+				(set groups nil))
+			(set group nil) (set having nil) (set order nil) (set limit nil) (set offset nil)))
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
 				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 				'(id schemax subquery isOuter joinexpr) (begin
@@ -1860,8 +1857,6 @@ or generate runtime scan code (build_queryplan).
 						(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 							(cons 'and _kept_parts))))))
 			(list schema _pruned_tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
-		)
-	)
 )
 ))
 
