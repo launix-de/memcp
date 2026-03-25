@@ -1376,32 +1376,17 @@ or generate runtime scan code (build_queryplan).
 		expr
 	)))
 
-	/* no-FROM rewrite: inject virtual one-row table "(1)" (like Oracle DUAL).
-	This eliminates the no-table special case — all Neumann transformations
-	apply uniformly. The table is created at compile time (sloppy engine,
-	idempotent) and touched at runtime for cache lease renewal. */
-	(if (or (nil? tables) (equal? tables '()))
+	/* no-FROM rewrite: inject virtual one-row table ".(1)" (like Oracle DUAL).
+	Dot prefix hides from SHOW TABLES. Eliminates the no-table special case.
+	set tables= must wrap the if (set is scope-local in this Scheme dialect). */
+	(set tables (if (or (nil? tables) (equal? tables '()))
 		(begin
-			/* create and populate at compile time (like make_keytable) */
-			(createtable schema "(1)"
-				(list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '()))
-				'("engine" "sloppy") true)
-			(insert schema "(1)" '("1") '((1)) '() (lambda () true) true)
-			(set tables (list (list "_dual" schema "(1)" false nil)))
-			(set condition (if (nil? condition) true condition))
-			(define _efa (lambda (expr) (match expr '((symbol aggregate) _ _ _) true (cons sym args) (reduce args (lambda (a b) (or a (_efa b))) false) false)))
-			(set group (coalesceNil group (if (reduce_assoc fields (lambda (a key v) (or a (_efa v))) false) '(1) nil)))
-			/* runtime init_code for cache lease renewal */
-			(define _dual_init (list (quote begin)
-				(list (quote createtable) schema "(1)"
-					(list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '()))
-					(list "engine" "sloppy") true)
-				(list (quote insert) schema "(1)" (list "1") (list (list 1)) '() (list (quote lambda) '() true) true)))
-			/* always create a partition stage for _dual with init_code */
-			(set groups (merge
-				(list (make_partition_stage '("_dual") '() 0 -1 0 _dual_init))
-				(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '())))
-			(set group nil) (set having nil) (set order nil) (set limit nil) (set offset nil)))
+			(createtable schema ".(1)"
+				(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
+				(list "engine" "sloppy") true)
+			(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+			(list (list ".(1)" schema ".(1)" false nil)))
+		tables))
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
 				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 				'(id schemax subquery isOuter joinexpr) (begin
