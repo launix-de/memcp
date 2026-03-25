@@ -1748,7 +1748,10 @@ WHAT IT MUST NOT DO:
 									/* reference to outer table -> keep as-is */
 									expr)
 								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym)))
-									expr /* leave inner_selects for post-loop resolution when all schemas are known */
+									/* resolve scalar inner_selects in joinexpr via build_scalar_subselect */
+									(if (equal?? (inner_select_kind sym) (quote inner_select))
+										(match args (cons subquery '()) (build_scalar_subselect subquery schemas2) expr)
+										expr)
 									(cons sym (map args transform_joinexpr)))
 								expr
 							)))
