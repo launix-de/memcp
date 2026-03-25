@@ -1109,10 +1109,12 @@ or generate runtime scan code (build_queryplan).
 										(define us_new_having (if (nil? us_orig_having) nil (_us_prefix_ria us_orig_having)))
 										/* scoped GROUP stage: partition-aliases = prefixed inner table aliases */
 										(define us_inner_aliases (map us_prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
-										/* preserve ORDER+LIMIT from original stage (prefix-renamed) */
-									(define us_orig_order_a (if us_has_stages (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
-									(define us_orig_limit_a (if us_has_stages (stage_limit_val (car _us_own_stages)) nil))
-									(define us_orig_offset_a (if us_has_stages (stage_offset_val (car _us_own_stages)) nil))
+										/* preserve ORDER+LIMIT only for explicit GROUP BY subselects.
+									For pure aggregates (Neumann domain extension), the LIMIT refers
+									to the inner result per outer row, not the keytable total. */
+									(define us_orig_order_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
+									(define us_orig_limit_a (if (and us_has_grp us_has_stages) (stage_limit_val (car _us_own_stages)) nil))
+									(define us_orig_offset_a (if (and us_has_grp us_has_stages) (stage_offset_val (car _us_own_stages)) nil))
 									(define us_new_order (map us_orig_order_a (lambda (oi) (match oi '(col dir) (list (_us_prefix_ria col) dir) oi))))
 									(define us_group_stage (make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_inner_aliases nil))
 										/* propagate inner scoped stages with prefix */
@@ -1833,8 +1835,12 @@ or generate runtime scan code (build_queryplan).
 				/* include condition-referenced tables: unnested subqueries may create
 				cross-table dependencies (e.g., d.did = _sq0.did) that must prevent pruning */
 				(extract_tblvars _canon_condition)))
+			/* prune unused LEFT JOINs and unreferenced .(1) DUAL tables.
+			.(1) is only pruned if other tables remain (it's the scan driver otherwise). */
+			(define _has_non_dual (reduce tables (lambda (a t) (or a (match t '(_ _ tbl _ _) (not (equal? tbl ".(1)")) true))) false))
 			(define _pruned_tables (filter tables (lambda (t) (match t
-				'(alias _ _ isOuter _) (if isOuter (has? _used_tvs alias) true)
+				'(alias _ tbl isOuter _) (if isOuter (has? _used_tvs alias)
+					(if (and _has_non_dual (equal? tbl ".(1)")) (has? _used_tvs alias) true))
 				true))))
 			/* rebuild condition: drop AND-parts that reference ONLY eliminated aliases */
 			(define _elim_aliases (filter (map tables (lambda (t) (match t
