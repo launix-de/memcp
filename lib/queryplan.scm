@@ -1301,8 +1301,9 @@ or generate runtime scan code (build_queryplan).
 			(cons sym args) (cons (_resolve_outer sym) (map args _resolve_outer))
 			expr)))
 		(define target_expr (if (nil? target_expr) nil (_resolve_outer target_expr)))
-		(if (and (not _has_tables) (nil? target_expr)) nil
-			(if (and (not (nil? target_expr)) (nil? _first_field)) nil
+		/* no early bail-out for no-table subqueries: the DUAL .(1) rewrite in
+		untangle_query ensures every subquery gets at least one table */
+		(if (and (not (nil? target_expr)) (nil? _first_field)) nil
 				(begin
 					(define _count_sq (match subquery
 						'(s t f c g h o l off) (list s t
@@ -1319,7 +1320,7 @@ or generate runtime scan code (build_queryplan).
 							(if (nil? _result) nil
 								(match _result '(_subst _tbls) (begin
 									(sq_cache "tables" (merge _tbls (coalesceNil (sq_cache "tables") '())))
-									(list comparison (list (quote coalesceNil) _subst 0) 0)))))))))
+									(list comparison (list (quote coalesceNil) _subst 0) 0))))))))
 	)))
 	/* replace_inner_selects: walks an expression tree and replaces inner_select markers
 	with their Neumann-decorrelated equivalents. Scalar subselects go through
