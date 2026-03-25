@@ -141,8 +141,8 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 ))
 
 /* extract_all_outer_columns: return all (outer tblvar.col) refs as ("tblvar.col" (get_column tblvar false col false)) pairs.
-   Used alongside extract_all_get_columns to ensure prejoin materialization includes
-   columns referenced by scalar subselects via outer scope. */
+Used alongside extract_all_get_columns to ensure prejoin materialization includes
+columns referenced by scalar subselects via outer scope. */
 (define extract_all_outer_columns (lambda (expr)
 	(match expr
 		(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
@@ -1808,23 +1808,23 @@ WHAT IT MUST NOT DO:
 									(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
 									(define resultrow_sym (symbol (concat "__from_subquery_resultrow:" id)))
 									/* Materialization: collect rows from build_queryplan_term into a list.
-								   Use a unique resultrow name (__mat_rr:id) so that replace_resultrow in
-								   build_scalar_subselect does NOT accidentally replace the collector —
-								   otherwise correlated scalar subselects break because the inner
-								   query's resultrow gets rewritten to the promise handler. */
-								(define mat_rr_sym (symbol (concat "__mat_rr:" id)))
-								(define mat_inner_plan (build_queryplan_term subquery))
-								/* Replace resultrow → mat_rr_sym in the inner plan, so the inner
-								   query feeds into our collector instead of the outer resultrow */
-								(define replace_rr_mat (lambda (expr) (match expr
-									(cons sym args) (if (equal? sym (quote resultrow))
-										(cons mat_rr_sym (map args replace_rr_mat))
-										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-											(list (quote symbol) (concat "__mat_rr:" id))
-											(cons (replace_rr_mat sym) (map args replace_rr_mat))))
-									expr)))
-								(define mat_inner_plan (replace_rr_mat mat_inner_plan))
-								(define materialized_rows (list (quote begin)
+									Use a unique resultrow name (__mat_rr:id) so that replace_resultrow in
+									build_scalar_subselect does NOT accidentally replace the collector —
+									otherwise correlated scalar subselects break because the inner
+									query's resultrow gets rewritten to the promise handler. */
+									(define mat_rr_sym (symbol (concat "__mat_rr:" id)))
+									(define mat_inner_plan (build_queryplan_term subquery))
+									/* Replace resultrow → mat_rr_sym in the inner plan, so the inner
+									query feeds into our collector instead of the outer resultrow */
+									(define replace_rr_mat (lambda (expr) (match expr
+										(cons sym args) (if (equal? sym (quote resultrow))
+											(cons mat_rr_sym (map args replace_rr_mat))
+											(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+												(list (quote symbol) (concat "__mat_rr:" id))
+												(cons (replace_rr_mat sym) (map args replace_rr_mat))))
+										expr)))
+									(define mat_inner_plan (replace_rr_mat mat_inner_plan))
+									(define materialized_rows (list (quote begin)
 										(list (quote set) rows_sym (list (quote newsession)))
 										(list rows_sym "rows" '())
 										(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
@@ -1851,8 +1851,8 @@ WHAT IT MUST NOT DO:
 										(list rows_sym "rows")
 									))
 									/* Store materialized rows in a variable via init code.
-									   The variable (a symbol) is used as tbl — at runtime,
-									   scan evaluates the symbol to get the row list. */
+									The variable (a symbol) is used as tbl — at runtime,
+									scan evaluates the symbol to get the row list. */
 									(define _mat_var (symbol (concat "__mat:" id)))
 									(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
 										(list (list (quote set) _mat_var materialized_rows))))
@@ -1895,8 +1895,8 @@ WHAT IT MUST NOT DO:
 
 			/* at first: extract additional join exprs into condition list */
 			/* Outer-to-inner join conversion: if the WHERE clause references any column
-			   of a LEFT JOIN table, that LEFT JOIN can be safely converted to INNER JOIN
-			   because NULL-padded rows would be rejected by the WHERE anyway. */
+			of a LEFT JOIN table, that LEFT JOIN can be safely converted to INNER JOIN
+			because NULL-padded rows would be rejected by the WHERE anyway. */
 			(set tables (map tables (lambda (t) (match t
 				'(a s tbl true je) (if (has? (extract_tblvars condition) a)
 					(list a s tbl false je) /* WHERE references this table -> convert LEFT to INNER */
@@ -1996,8 +1996,8 @@ WHAT IT MUST NOT DO:
 
 			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
 			/* Snapshot condition string BEFORE inner_select expansion for stable
-			   prejoin/keytable naming. After expansion, the condition contains
-			   promise/scan code that inflates canonical names. */
+			prejoin/keytable naming. After expansion, the condition contains
+			promise/scan code that inflates canonical names. */
 			(define condition_canonical_pre_expansion (concat condition))
 			(set condition (replace_inner_selects condition schemas))
 			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
@@ -2308,7 +2308,7 @@ store results as keytable columns named "expr|condition"
 3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
 */
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
-   When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
+When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target condition_canonical_pre_expansion) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
@@ -2608,7 +2608,7 @@ store results as keytable columns named "expr|condition"
 				(set condition (replace_find_column (coalesceNil condition true)))
 				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
 				/* extract all get_column AND outer refs from group, fields, having, order, condition.
-			   outer refs come from scalar subselects that were expanded by replace_inner_selects. */
+				outer refs come from scalar subselects that were expanded by replace_inner_selects. */
 				(define mat_cols_raw (merge
 					(merge (map stage_group extract_all_get_columns))
 					(merge (map stage_group extract_all_outer_columns))
@@ -2635,8 +2635,8 @@ store results as keytable columns named "expr|condition"
 				)
 				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
 				/* Use pre-expansion condition for stable prejoin naming.
-				   condition_canonical_pre_expansion is (concat condition) from BEFORE
-				   replace_inner_selects — it doesn't contain promise/scan code. */
+				condition_canonical_pre_expansion is (concat condition) from BEFORE
+				replace_inner_selects — it doesn't contain promise/scan code. */
 				(define prejoin_condition_name (if (nil? condition_canonical_pre_expansion)
 					(canonical_expr_name condition '(list) '(list) prejoin_alias_map)
 					(fnv_hash condition_canonical_pre_expansion)))
@@ -2644,8 +2644,8 @@ store results as keytable columns named "expr|condition"
 					(map tables (lambda (t) (match t '(tv tschema ttbl _ _) (concat tschema "." (if (string? ttbl) ttbl tv))))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* Use a short hash-based name to prevent explosively long keytable column names
-				   in the recursive build_queryplan call (canon_alias_map embeds the prejoin name
-				   into every keytable column). The full name is used for debugging only. */
+				in the recursive build_queryplan call (canon_alias_map embeds the prejoin name
+				into every keytable column). The full name is used for debugging only. */
 				(define prejointbl (concat ".pj:" (fnv_hash prejointbl_full)))
 				/* capture outer schema and table name for trigger code generation */
 				(define pj_schema schema)
