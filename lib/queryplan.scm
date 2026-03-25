@@ -1391,9 +1391,16 @@ or generate runtime scan code (build_queryplan).
 			(set condition (if (nil? condition) true condition))
 			(define _efa (lambda (expr) (match expr '((symbol aggregate) _ _ _) true (cons sym args) (reduce args (lambda (a b) (or a (_efa b))) false) false)))
 			(set group (coalesceNil group (if (reduce_assoc fields (lambda (a key v) (or a (_efa v))) false) '(1) nil)))
-			(if (or group having order limit offset)
-				(set groups (list (make_group_stage group having order limit offset nil nil)))
-				(set groups nil))
+			/* runtime init_code for cache lease renewal */
+			(define _dual_init (list (quote begin)
+				(list (quote createtable) schema "(1)"
+					(list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '()))
+					(list "engine" "sloppy") true)
+				(list (quote insert) schema "(1)" (list "1") (list (list 1)) '() (list (quote lambda) '() true) true)))
+			/* always create a partition stage for _dual with init_code */
+			(set groups (merge
+				(list (make_partition_stage '("_dual") '() 0 -1 0 _dual_init))
+				(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '())))
 			(set group nil) (set having nil) (set order nil) (set limit nil) (set offset nil)))
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
 				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
