@@ -910,15 +910,27 @@ or generate runtime scan code (build_queryplan).
 				(define raw_offset_us (nth raw_vals_us 4))
 				(match (apply untangle_query subquery)
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us) (begin
-						/* no-table subselect: extract field expression directly as substitution.
-						No dependent join to eliminate — just return the value. */
-						(if (or (nil? tables2_us) (equal? tables2_us '()))
+						/* no-table subselect without aggregates: return field expression directly */
+						(if (and (or (nil? tables2_us) (equal? tables2_us '()))
+							(not (reduce_assoc fields2_us (lambda (a k v) (or a
+								(begin (define _nta (lambda (e) (match e (cons (symbol aggregate) _) true (cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false) false))) (_nta v)))) false)))
 							(list (car (extract_assoc fields2_us (lambda (k v) v))) '())
 							(begin
+						/* no-table with aggregates: inject virtual "(1)" one-row table.
+						Only mutate tables2_us and schemas2_us — groups2_us is set below. */
+						(define _nt_virtual_init (list (quote begin)
+							(list (quote createtable) schema2_us "(1)"
+								(list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '()))
+								(list "engine" "sloppy") true)
+							(list (quote insert) schema2_us "(1)" (list "1") (list (list 1)) '() (list (quote lambda) '() true) true)))
+						(if (or (nil? tables2_us) (equal? tables2_us '()))
+							(begin
+								(set tables2_us (list (list "(1)" schema2_us "(1)" false nil)))
+								(set schemas2_us (list "(1)" (list (list "Field" "1" "Type" "any"))))))
 						(define groups2_us (coalesceNil groups2_us '()))
 						(define groups2_us (if (or (nil? groups2_us) (equal? groups2_us '()))
 							(if (or raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
-								(list (make_group_stage raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us nil nil))
+								(list (make_group_stage raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us nil _nt_virtual_init))
 								groups2_us)
 							groups2_us))
 						/* resolve columns against inner and outer schemas */
@@ -1346,30 +1358,7 @@ or generate runtime scan code (build_queryplan).
 						(cons subquery '()) (begin
 							(define _us_r (unnest_subselect subquery outer_schemas))
 							(if (nil? _us_r)
-								/* fallback: build inline query plan with promise for scalar result */
-								(begin
-									(define _sq_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
-									(if (not _sq_has_tables)
-										/* no-table subselect: evaluate fields directly */
-										(match (apply untangle_query (merge subquery (list nil)))
-											'(_ _ _sq_fields _ _ _ _) (car (extract_assoc _sq_fields (lambda (k v) v)))
-											nil)
-										/* table subselect: build full plan with promise */
-										(begin
-											(define _sq_hash (fnv_hash (concat subquery)))
-											(define _sq_pn (concat "__scalar_promise_" _sq_hash))
-											(define _sq_rr (concat "__scalar_rr_" _sq_hash))
-											(list (quote !begin)
-												(list (quote set) (symbol _sq_pn) (list (quote newpromise)))
-												(list (quote set) (symbol _sq_rr) (symbol "resultrow"))
-												(list (quote set) (symbol "resultrow")
-													(list (quote lambda) (list (symbol "row"))
-														(list (symbol _sq_pn) "once"
-															(list (quote nth) (symbol "row") 1)
-															"scalar subselect returned more than one row")))
-												(build_queryplan_term subquery)
-												(list (quote set) (symbol "resultrow") (symbol _sq_rr))
-												(list (symbol _sq_pn) "value")))))
+								(error (concat "unnest_subselect failed — every query must be unnestable. Subquery: " subquery))
 								(match _us_r '(_us_subst _us_tbls) (begin
 									(sq_cache "tables" (merge _us_tbls (coalesceNil (sq_cache "tables") '())))
 									_us_subst))))
@@ -1395,8 +1384,18 @@ or generate runtime scan code (build_queryplan).
 			(set group (map group (lambda (g) (replace_inner_selects g '()))))
 			(set having (replace_inner_selects having '()))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col '()) dir)))))
-			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) nil))
-			(list schema tables fields condition groups '() (lambda (expr) expr))
+			/* integrate unnested tables from scalar subselects (same as main path) */
+			(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
+			(set tables (if (equal? _sq_tbls '()) tables (merge (coalesceNil tables '()) _sq_tbls)))
+			(define _sq_schs (coalesceNil (sq_cache "schemas") '()))
+			(define schemas (if (equal? _sq_schs '()) '() _sq_schs))
+			(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
+			(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
+			(set groups (merge
+				_sq_pstages
+				_sq_prop_groups
+				(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '())))
+			(list schema tables fields condition groups schemas (lambda (expr) expr))
 		)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
