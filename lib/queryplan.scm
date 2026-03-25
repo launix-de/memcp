@@ -910,6 +910,11 @@ or generate runtime scan code (build_queryplan).
 				(define raw_offset_us (nth raw_vals_us 4))
 				(match (apply untangle_query subquery)
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us) (begin
+						/* no-table subselect: extract field expression directly as substitution.
+						No dependent join to eliminate — just return the value. */
+						(if (or (nil? tables2_us) (equal? tables2_us '()))
+							(list (car (extract_assoc fields2_us (lambda (k v) v))) '())
+							(begin
 						(define groups2_us (coalesceNil groups2_us '()))
 						(define groups2_us (if (or (nil? groups2_us) (equal? groups2_us '()))
 							(if (or raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
@@ -1224,7 +1229,7 @@ or generate runtime scan code (build_queryplan).
 								)
 							)
 						)
-					)
+					)))
 					nil /* untangle failed */
 				)
 			)
