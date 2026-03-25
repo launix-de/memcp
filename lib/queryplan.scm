@@ -3109,6 +3109,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											(extract_non_pure_tblvar_conditions now_condition tblvar)
 											now_condition))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
+											/* optimize: skip .(1) DUAL scan when no columns needed (1 row, no data) */
+											(if (and (equal? tbl ".(1)") (equal? cols (list)) (equal? filtercols (list)))
+												(build_scan tables effective_later))
 										/* check partition_stages: does this table have a per-table partition limit? */
 										(define _ps (reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil))
 										(if (not (nil? _ps))
