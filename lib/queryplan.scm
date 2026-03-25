@@ -1169,12 +1169,23 @@ or generate runtime scan code (build_queryplan).
 												/* Always register partition stage: Path B uses explicit LIMIT,
 												Path C uses implicit LIMIT 1 (scalar subselect = at most one row) */
 												(begin
-													(define us_dom_order (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<))))
+													/* domain order: only include cols that reference the own table after rename.
+													Indirect correlations (through inner-scoped tables) are handled by their
+													own partition-stages and must not appear here (wrong table → crash). */
+													(define us_dom_order (filter (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<)))
+														(lambda (oi) (match oi '(col _) (match col
+															'((symbol get_column) a _ _ _) (equal? a us_sq_prefix)
+															'((quote get_column) a _ _ _) (equal? a us_sq_prefix)
+															false) false))))
 													(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
 													(define us_part_order (merge us_dom_order us_renamed_order))
-													(define us_dom_count (count us_domain_cols))
-													(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
-													(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '()))))
+													(define us_dom_count (count us_dom_order))
+													/* only register partition stage if there are own-table sort columns.
+													If all domain cols were indirect (inner-scoped), the join chain already
+													guarantees at most 1 row per outer binding — no extra LIMIT needed. */
+													(if (or (not (equal? us_part_order '())) us_has_limit) (begin
+														(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
+														(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '()))))))
 												/* propagate inner scoped stages with renaming */
 												(if (not (equal? _us_inner_stages '()))
 													(sq_cache "groups" (merge
