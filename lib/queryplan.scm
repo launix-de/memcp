@@ -1266,6 +1266,11 @@ or generate runtime scan code (build_queryplan).
 		_ false
 	)))
 	/* _unnest_count_subselect: shared helper for IN/EXISTS/NOT IN/NOT EXISTS rewrite.
+	Rewrites semi-joins (EXISTS/IN) and anti-joins (NOT EXISTS/NOT IN) as COUNT(*)
+	aggregates instead of direct semi/anti-join operators. This is intentional:
+	the COUNT-based approach produces a keytable computed column that benefits from
+	MemCP's incremental aggregate cache — DML triggers invalidate only affected
+	groups, so subsequent queries skip recomputation for unchanged partitions.
 	Builds a COUNT(*) subquery from the original, optionally adding an equality condition
 	(for IN/NOT IN: first_field = target_expr). Returns (substitution tables) or nil.
 	comparison: (quote >) for positive match, (quote equal?) for negated match */
