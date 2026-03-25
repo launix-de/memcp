@@ -1336,7 +1336,30 @@ or generate runtime scan code (build_queryplan).
 						(cons subquery '()) (begin
 							(define _us_r (unnest_subselect subquery outer_schemas))
 							(if (nil? _us_r)
-								expr
+								/* fallback: build inline query plan with promise for scalar result */
+								(begin
+									(define _sq_has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
+									(if (not _sq_has_tables)
+										/* no-table subselect: evaluate fields directly */
+										(match (apply untangle_query (merge subquery (list nil)))
+											'(_ _ _sq_fields _ _ _ _) (car (extract_assoc _sq_fields (lambda (k v) v)))
+											nil)
+										/* table subselect: build full plan with promise */
+										(begin
+											(define _sq_hash (fnv_hash (concat subquery)))
+											(define _sq_pn (concat "__scalar_promise_" _sq_hash))
+											(define _sq_rr (concat "__scalar_rr_" _sq_hash))
+											(list (quote !begin)
+												(list (quote set) (symbol _sq_pn) (list (quote newpromise)))
+												(list (quote set) (symbol _sq_rr) (symbol "resultrow"))
+												(list (quote set) (symbol "resultrow")
+													(list (quote lambda) (list (symbol "row"))
+														(list (symbol _sq_pn) "once"
+															(list (quote nth) (symbol "row") 1)
+															"scalar subselect returned more than one row")))
+												(build_queryplan_term subquery)
+												(list (quote set) (symbol "resultrow") (symbol _sq_rr))
+												(list (symbol _sq_pn) "value")))))
 								(match _us_r '(_us_subst _us_tbls) (begin
 									(sq_cache "tables" (merge _us_tbls (coalesceNil (sq_cache "tables") '())))
 									_us_subst))))
