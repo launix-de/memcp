@@ -2208,6 +2208,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			} else {
 				b.WriteString(", ")
 			}
+
 			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
 			var i uint32
 			var reader ColumnReader
