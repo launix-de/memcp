@@ -2281,7 +2281,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										reduce
 										neutral
 										nil
-										isOuter
+										false /* never isOuter in createcolumn: COUNT=0 for empty matches, not COUNT=1 */
 									)
 							))
 						)))))
