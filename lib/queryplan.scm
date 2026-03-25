@@ -1379,6 +1379,7 @@ or generate runtime scan code (build_queryplan).
 	set tables= must wrap the if (set is scope-local in this Scheme dialect). */
 	(set tables (if (or (nil? tables) (equal? tables '()))
 		(begin
+			(createdatabase schema true)
 			(createtable schema ".(1)"
 				(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
 				(list "engine" "sloppy") true)
