@@ -1292,6 +1292,22 @@ or generate runtime scan code (build_queryplan).
 	(for IN/NOT IN: first_field = target_expr). Returns (substitution tables) or nil.
 	comparison: (quote >) for positive match, (quote equal?) for negated match */
 	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
+		/* UNION ALL: recurse into each branch, combine with OR (positive) or AND (negated) */
+		(define _union_parts (query_union_all_parts subquery))
+		(if (not (nil? _union_parts))
+			(match _union_parts '(branches order limit offset)
+				(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+					nil /* UNION ALL with ORDER/LIMIT/OFFSET: not supported */
+					(begin
+						(define _branch_results (filter (map branches (lambda (branch)
+							(_unnest_count_subselect branch outer_schemas target_expr comparison)))
+							(lambda (r) (not (nil? r)))))
+						(if (or (equal? _branch_results '()) (not (equal? (count _branch_results) (count branches))))
+							nil
+							(if (equal? 1 (count _branch_results)) (car _branch_results)
+								(cons (if (equal?? comparison (quote >)) (quote or) (quote and)) _branch_results))))))
+		/* single subquery (non-UNION) path */
+		(begin
 		(define _has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
 		(define _first_field (if (nil? target_expr) nil
 			(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons k (cons v _)) v nil) nil)))
@@ -1327,7 +1343,7 @@ or generate runtime scan code (build_queryplan).
 							(if (nil? _result) nil
 								(match _result '(_subst _tbls) (begin
 									(sq_cache "tables" (merge _tbls (coalesceNil (sq_cache "tables") '())))
-									(list comparison (list (quote coalesceNil) _subst 0) 0))))))))
+									(list comparison (list (quote coalesceNil) _subst 0) 0))))))))))
 	)))
 	/* replace_inner_selects: walks an expression tree and replaces inner_select markers
 	with their Neumann-decorrelated equivalents. Scalar subselects go through
