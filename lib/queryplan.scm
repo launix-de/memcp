@@ -1257,6 +1257,19 @@ or generate runtime scan code (build_queryplan).
 		(define _has_tables (match subquery '(_ t _ _ _ _ _ _ _) (and (not (nil? t)) (not (equal? t '()))) false))
 		(define _first_field (if (nil? target_expr) nil
 			(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons k (cons v _)) v nil) nil)))
+		/* resolve target_expr against outer schemas so the inner untangle
+		doesn't bind it to the subquery's own tables (e.g., unqualified 'did'
+		must resolve to sq_emp.did, not to sq_dept.did inside the subquery) */
+		(define _resolve_outer (lambda (expr) (match expr
+			'((symbol get_column) nil ti col ci) (begin
+				/* unqualified: resolve against outer_schemas */
+				(define _resolved (reduce_assoc outer_schemas (lambda (a alias cols)
+					(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) nil))
+				(if (nil? _resolved) expr
+					(list (quote get_column) _resolved false col false)))
+			(cons sym args) (cons (_resolve_outer sym) (map args _resolve_outer))
+			expr)))
+		(define target_expr (if (nil? target_expr) nil (_resolve_outer target_expr)))
 		(if (and (not _has_tables) (nil? target_expr)) nil
 			(if (and (not (nil? target_expr)) (nil? _first_field)) nil
 				(begin
