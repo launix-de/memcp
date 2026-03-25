@@ -52,7 +52,6 @@ test_cases:
   # TODO: fix outer-ref handling in build_scalar_subselect for joinexpr context
 
   - name: "derived table LEFT JOIN with correlated ON"
-    noncritical: true
     sql: |
       SELECT v.ID, v.name,
         ref_d.dname AS driver_name
@@ -88,7 +87,6 @@ test_cases:
           driver_name: "Bob"
 
   - name: "multiple LEFT JOINs with correlated ON in derived table"
-    noncritical: true
     sql: |
       SELECT t.* FROM (
         SELECT v.ID AS ID, v.name AS name, v.category AS category,
