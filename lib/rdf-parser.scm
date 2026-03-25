@@ -103,10 +103,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(atom "BY" true)
 		(define group (+ rdf_variable ","))
 	)
-	(? (atom "ORDER" true) (atom "BY" true) (+ (or (parser '((atom "DESC" true) "(" rdf_expression ")") nil) (parser '((atom "ASC" true) "(" rdf_expression ")") nil) rdf_expression) ",")) /* ORDER BY parsed but not yet executed */
+	(define order (parser (? (atom "ORDER" true) (atom "BY" true) (define ordercols (+ (or (parser '((define dir (or (atom "DESC" true) (atom "ASC" true))) "(" (define expr rdf_expression) ")") '(expr dir)) (parser (define expr rdf_expression) '(expr "ASC"))) ","))) ordercols))
 	(? (atom "LIMIT" true) (define limit rdf_number))
 	(? (atom "OFFSET" true) (define offset rdf_number))
-) '("select" (merge cols) "where" (merge (coalesce conditions '('()))) "limit" limit "offset" offset "distinct" distinct) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+) '("select" (merge cols) "where" (merge (coalesce conditions '('()))) "order" order "limit" limit "offset" offset "distinct" distinct) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define ttl_header (parser '(
 	(define definitions (*
@@ -125,13 +125,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 (define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */) (begin
-	(match query '("select" cols "where" conditions "limit" limit "offset" offset "distinct" distinct) (begin
+	(match query '("select" cols "where" conditions "order" order "limit" limit "offset" offset "distinct" distinct) (begin
 		/* ctx: array with predefined variables */
 		/* no join reordering yet */
-		(define build_scan (lambda (conditions ctx) (match conditions
+		(define build_scan (lambda (conditions order ctx) (match conditions
 			(cons '(s p) tail) (if (equal? (concat s) "__filter__")
 				/* FILTER: wrap inner plan in if-check */
-				'('if (rdf_replace_ctx p ctx) (build_scan tail ctx))
+				'('if (rdf_replace_ctx p ctx) (build_scan tail order ctx))
 				/* 2-element: error */
 				(error "SPARQL error: expected triple pattern (s p o), got 2 elements")
 			)
@@ -146,16 +146,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				)))
 				(match (process s "s" '() '()) '(conditions vars)
 					(match (process p "p" conditions vars) '(conditions vars)
-						(match (process o "o" conditions vars) '(conditions vars)
-							'('scan schema "rdf"
-								/* condition */ (cons list (extract_assoc conditions (lambda (k v) k))) '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v)))))
-								/* map */ (cons list (extract_assoc vars (lambda (k v) k))) '('lambda (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (merge ctx (merge (extract_assoc vars (lambda (k v) '(v (symbol v))))))))
+						(match (process o "o" conditions vars) '(conditions vars) (begin
+							/* check if one of the orders matches (currently only raw-variable support) */
+							/* TODO: for general expressions: two cases: s/p/o is bound to a variable and we bind against only variables from s/p/o: use scan_order; otherwise: collect all results in a list and use scm's sort */
+							(set order_head (match order
+								(cons '(expr dir) order_rest)
+								(match expr (eval s) '("s" dir) (eval p) '("p" dir) (eval o) '("o" dir))
+							))
+
+							(set inner_ctx (merge ctx (merge (extract_assoc vars (lambda (k v) '(v (symbol v)))))))
+							(set filter_cols (cons list (extract_assoc conditions (lambda (k v) k))))
+							(set filter_fn '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v))))))
+							(set map_cols (cons list (extract_assoc vars (lambda (k v) k))))
+							(set map_fn '('lambda (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (if order_head order_rest order) inner_ctx)))
+							(match order_head
+								'(col dir)
+								/* ordered scan */
+								'('scan_order schema "rdf"
+									filter_cols filter_fn
+									'(list col) '(list (match dir "DESC" > <)) 0 0 -1
+									map_cols map_fn 'cons nil)
+								/* normal scan */
+								'('scan schema "rdf" filter_cols filter_fn map_cols map_fn)
 							)
-				)))
+				))))
 			)
-			'() (resultfunc cols ctx)
+			'() (match order (cons _ _) (error (concat "order not consumed: " order)) (resultfunc cols ctx))
 		)))
-		(build_scan conditions ctx)
+		(build_scan conditions order ctx)
 	) (error "wrong rdf layout " query))
 )))
 
