@@ -6,21 +6,23 @@ setup: []
 
 test_cases:
 
-  - name: "ORDER BY: ascending"
-    noncritical: true
+  - name: "ORDER BY: ascending (reversed insert)"
     ttl_data: |
       @prefix ol1: <http://ordlim01.org/> .
       ol1:c ol1:n "3" .
-      ol1:a ol1:n "1" .
       ol1:b ol1:n "2" .
+      ol1:a ol1:n "1" .
     sparql: |
       @prefix ol1: <http://ordlim01.org/> .
-      SELECT ?s, ?n WHERE { ?s ol1:n ?n } ORDER BY ?n
+      SELECT ?n WHERE { ?s ol1:n ?n } ORDER BY ?n
     expect:
       rows: 3
+      data:
+        - "?n": "1"
+        - "?n": "2"
+        - "?n": "3"
 
-  - name: "ORDER BY DESC"
-    noncritical: true
+  - name: "ORDER BY DESC (ascending insert)"
     ttl_data: |
       @prefix ol2: <http://ordlim02.org/> .
       ol2:a ol2:n "1" .
@@ -31,9 +33,28 @@ test_cases:
       SELECT ?n WHERE { ?s ol2:n ?n } ORDER BY DESC(?n)
     expect:
       rows: 3
+      data:
+        - "?n": "3"
+        - "?n": "2"
+        - "?n": "1"
+
+  - name: "ORDER BY ASC explicit (reversed insert)"
+    ttl_data: |
+      @prefix ol2b: <http://ordlim02b.org/> .
+      ol2b:c ol2b:n "3" .
+      ol2b:b ol2b:n "2" .
+      ol2b:a ol2b:n "1" .
+    sparql: |
+      @prefix ol2b: <http://ordlim02b.org/> .
+      SELECT ?n WHERE { ?s ol2b:n ?n } ORDER BY ASC(?n)
+    expect:
+      rows: 3
+      data:
+        - "?n": "1"
+        - "?n": "2"
+        - "?n": "3"
 
   - name: "LIMIT"
-    noncritical: true
     ttl_data: |
       @prefix ol3: <http://ordlim03.org/> .
       ol3:a ol3:v "1" .
@@ -46,7 +67,6 @@ test_cases:
       rows: 2
 
   - name: "OFFSET"
-    noncritical: true
     ttl_data: |
       @prefix ol4: <http://ordlim04.org/> .
       ol4:a ol4:v "1" .
@@ -59,7 +79,6 @@ test_cases:
       rows: 2
 
   - name: "DISTINCT"
-    noncritical: true
     ttl_data: |
       @prefix ol5: <http://ordlim05.org/> .
       ol5:a ol5:type ol5:X .
@@ -72,17 +91,19 @@ test_cases:
       rows: 2
 
   - name: "ORDER BY + LIMIT combined"
-    noncritical: true
     ttl_data: |
       @prefix ol6: <http://ordlim06.org/> .
-      ol6:a ol6:score "90" .
-      ol6:b ol6:score "70" .
-      ol6:c ol6:score "85" .
-      ol6:d ol6:score "95" .
+      ol6:a ol6:score "70" .
+      ol6:b ol6:score "85" .
+      ol6:c ol6:score "95" .
+      ol6:d ol6:score "90" .
     sparql: |
       @prefix ol6: <http://ordlim06.org/> .
-      SELECT ?s, ?sc WHERE { ?s ol6:score ?sc } ORDER BY DESC(?sc) LIMIT 2
+      SELECT ?sc WHERE { ?s ol6:score ?sc } ORDER BY DESC(?sc) LIMIT 2
     expect:
       rows: 2
+      data:
+        - "?sc": "95"
+        - "?sc": "90"
 
 cleanup: []
