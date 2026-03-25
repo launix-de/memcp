@@ -1,0 +1,47 @@
+# UPDATE with CASE WHEN ... EXISTS (SELECT ... FROM same_table alias WHERE alias.col = outer.ID).
+# Pattern from ERPL migration:
+#   UPDATE `campaignState` s1 SET contactmode = CASE
+#     WHEN aftercontact IS NOT NULL THEN 1
+#     WHEN EXISTS (SELECT * FROM `campaignState` s2 WHERE s2.aftercontact = s1.`ID`) THEN 2
+#     ELSE 0 END
+# The alias s2 must resolve in the subquery scope.
+
+metadata:
+  version: "1.0"
+  description: "UPDATE with EXISTS subquery referencing same table via alias"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS uea_state"
+  - sql: "CREATE TABLE uea_state (ID INT PRIMARY KEY, aftercontact INT, contactmode INT)"
+  - sql: "INSERT INTO uea_state VALUES (1, NULL, 0), (2, 1, 0), (3, NULL, 0)"
+
+test_cases:
+
+  - name: "UPDATE with CASE WHEN EXISTS on same table"
+    sql: |
+      UPDATE `uea_state` s1 SET contactmode = CASE
+        WHEN aftercontact IS NOT NULL THEN 1
+        WHEN EXISTS (SELECT * FROM `uea_state` s2 WHERE s2.aftercontact = s1.`ID`) THEN 2
+        ELSE 0 END
+    expect:
+      rows_affected: 3
+
+  - name: "verify CASE WHEN EXISTS result"
+    noncritical: true  # EXISTS in UPDATE reads stale data after per-row lock release (needs MVCC)
+    sql: |
+      SELECT ID, aftercontact, contactmode FROM uea_state ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          aftercontact: null
+          contactmode: 2
+        - ID: 2
+          aftercontact: 1
+          contactmode: 1
+        - ID: 3
+          aftercontact: null
+          contactmode: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS uea_state"

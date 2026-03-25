@@ -1,0 +1,198 @@
+# Tests for StorageComputeProxy behavior during rebuild and repartitioning.
+# Covers: (rebuild × repartitioning) × ($update × $increment × $invalidate) × (data × proxy)
+#
+# createcolumn creates a StorageComputeProxy on a keytable.
+# When the keytable is rebuilt or repartitioned, the proxy must be
+# correctly ported (not evaluated via computor, which causes infinite recursion).
+# $invalidate/$increment/$set callbacks must work on both old and new shards.
+
+metadata:
+  version: "1.0"
+  description: "StorageComputeProxy during rebuild/repartition"
+  isolate: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cpr_orders"
+  - sql: "DROP TABLE IF EXISTS cpr_items"
+  - sql: "CREATE TABLE cpr_orders (ID INT PRIMARY KEY, customer TEXT, total INT)"
+  - sql: "CREATE TABLE cpr_items (ID INT PRIMARY KEY, order_id INT, amount INT)"
+  - sql: "INSERT INTO cpr_orders VALUES (1, 'Alice', 0), (2, 'Bob', 0), (3, 'Carol', 0)"
+  - sql: "INSERT INTO cpr_items VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300), (4, 3, 50)"
+
+test_cases:
+
+  # ── Phase 1: baseline correctness ──
+
+  - name: "baseline: correlated SUM subselect"
+    sql: |
+      SELECT o.ID, o.customer,
+        COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+      FROM cpr_orders o
+      ORDER BY o.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          customer: "Alice"
+          item_total: 300
+        - ID: 2
+          customer: "Bob"
+          item_total: 300
+        - ID: 3
+          customer: "Carol"
+          item_total: 50
+
+  - name: "COUNT+SUM over derived table (triggers prejoin/keytable)"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.item_total) AS grand_total FROM (
+        SELECT o.ID AS ID,
+          COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+        FROM cpr_orders o
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          grand_total: 650
+
+  # ── Phase 2: DML on source table, verify cache invalidation ──
+
+  - name: "insert new items"
+    sql: "INSERT INTO cpr_items VALUES (5, 2, 150), (6, 3, 75)"
+    expect:
+      rows_affected: 2
+
+  - name: "verify SUM after insert"
+    sql: |
+      SELECT o.ID,
+        COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+      FROM cpr_orders o
+      ORDER BY o.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          item_total: 300
+        - ID: 2
+          item_total: 450
+        - ID: 3
+          item_total: 125
+
+  - name: "update source data"
+    sql: "UPDATE cpr_items SET amount = 500 WHERE ID = 1"
+    expect:
+      rows_affected: 1
+
+  - name: "verify SUM after update"
+    sql: |
+      SELECT o.ID,
+        COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+      FROM cpr_orders o WHERE o.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          item_total: 700
+
+  - name: "delete source data"
+    sql: "DELETE FROM cpr_items WHERE ID = 6"
+    expect:
+      rows_affected: 1
+
+  - name: "verify SUM after delete"
+    sql: |
+      SELECT o.ID,
+        COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+      FROM cpr_orders o WHERE o.ID = 3
+    expect:
+      rows: 1
+      data:
+        - ID: 3
+          item_total: 50
+
+  # ── Phase 3: rebuild, then verify proxy survives ──
+
+  - name: "trigger rebuild"
+    sql: |
+      SELECT 1 AS ok
+    scm: |
+      (rebuild)
+    expect:
+      data:
+        - ok: 1
+
+  - name: "verify SUM correct after rebuild"
+    sql: |
+      SELECT o.ID,
+        COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+      FROM cpr_orders o
+      ORDER BY o.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          item_total: 700
+        - ID: 2
+          item_total: 450
+        - ID: 3
+          item_total: 50
+
+  - name: "COUNT+SUM correct after rebuild"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.item_total) AS grand_total FROM (
+        SELECT o.ID AS ID,
+          COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+        FROM cpr_orders o
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          grand_total: 1200
+
+  # ── Phase 4: DML after rebuild, verify proxy still functional ──
+
+  - name: "insert after rebuild"
+    sql: "INSERT INTO cpr_items VALUES (7, 1, 100)"
+    expect:
+      rows_affected: 1
+
+  - name: "verify SUM after post-rebuild insert"
+    sql: |
+      SELECT o.ID,
+        COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+      FROM cpr_orders o WHERE o.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          item_total: 800
+
+  - name: "second rebuild"
+    sql: |
+      SELECT 1 AS ok
+    scm: |
+      (rebuild)
+    expect:
+      data:
+        - ok: 1
+
+  - name: "verify after second rebuild"
+    sql: |
+      SELECT o.ID,
+        COALESCE((SELECT SUM(i.amount) FROM cpr_items i WHERE i.order_id = o.ID), 0) AS item_total
+      FROM cpr_orders o
+      ORDER BY o.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          item_total: 800
+        - ID: 2
+          item_total: 450
+        - ID: 3
+          item_total: 50
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cpr_orders"
+  - sql: "DROP TABLE IF EXISTS cpr_items"
