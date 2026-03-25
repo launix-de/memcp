@@ -1162,8 +1162,12 @@ or generate runtime scan code (build_queryplan).
 									/* === B/C: Non-aggregate === */
 									(begin
 										/* value must be a simple column (not computed expression) for direct table entry */
+										/* value is column ref or literal (for no-table like SELECT 1) */
 										(define _us_val_is_col (match us_value_expr
-											'((symbol get_column) _ _ _ _) true '((quote get_column) _ _ _ _) true false))
+											'((symbol get_column) _ _ _ _) true '((quote get_column) _ _ _ _) true
+											(cons _ _) false /* computed expression: not handled */
+											_ true /* literal */
+										))
 										(if (and us_single_tbl _us_val_is_col)
 											/* === B/C: Non-agg → direct LEFT JOIN table entry ===
 											Path B (has LIMIT): adds partition-stage for ORDER BY + LIMIT per outer row.
