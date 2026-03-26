@@ -39,6 +39,19 @@ setup:
   - sql: "INSERT INTO dtr_child VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300), (4, 3, 50)"
 
 test_cases:
+  - name: "prime shared t materialization"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.total_val) AS total FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT SUM(c.val) FROM dtr_child c WHERE c.parent = p.ID), 0) AS total_val
+        FROM dtr_parent p
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          total: 650
+
   - name: "count over correlated scalar derived table keeps parent cardinality"
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.total_val) AS total FROM (
@@ -68,19 +81,6 @@ test_cases:
         - cnt: 2
           total: 500
 
-  - name: "different derived aggregate query does not reuse previous t materialization"
-    sql: |
-      SELECT COUNT(*) AS cnt, SUM(t.total_val) AS total FROM (
-        SELECT p.ID AS ID,
-          COALESCE((SELECT SUM(c.val) FROM dtr_child c WHERE c.parent = p.ID), 0) AS total_val
-        FROM dtr_parent p
-      ) t
-    expect:
-      rows: 1
-      data:
-        - cnt: 3
-          total: 650
-
   - name: "change underlying rows before rebuild"
     sql: |
       UPDATE dtr_child SET val = 500 WHERE ID = 1
@@ -103,7 +103,7 @@ test_cases:
       data:
         - ok: 1
 
-  - name: "derived aggregate recomputes after rebuild"
+  - name: "seed derived aggregate recomputes after rebuild"
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.total_val) AS total FROM (
         SELECT p.ID AS ID,

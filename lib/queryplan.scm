@@ -423,10 +423,19 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				(match (key_at i)
 					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
 					'())))))))
-			(define init_code (list 'begin
-				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
-				(list 'partitiontable schema keytable_name kt_partition_code)
-				(list 'touch_keytable schema keytable_name)))
+			/* Runtime/materialized row-list sources have no durable invalidation path for cached
+			keytable proxies. Recreate the keytable on every execution so repeated queries after
+			DML/rebuild do not observe stale aggregate state from an earlier run. */
+			(define init_code (if (string? tbl)
+				(list 'begin
+					(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
+					(list 'partitiontable schema keytable_name kt_partition_code)
+					(list 'touch_keytable schema keytable_name))
+				(list 'begin
+					(list 'droptable schema keytable_name true)
+					(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
+					(list 'partitiontable schema keytable_name kt_partition_code)
+					(list 'touch_keytable schema keytable_name))))
 			/* return (name init_code nil) — third element nil means no FK reuse */
 			(list keytable_name init_code nil)))
 )))
@@ -1671,8 +1680,9 @@ WHAT IT MUST NOT DO:
 								_ '()))
 							(if (or (nil? output_cols) (equal? output_cols '()))
 								(error "UNION ALL subquery must project at least one column"))
-							(define rows_sym (symbol (concat "__from_union_rows:" id)))
-							(define resultrow_sym (symbol (concat "__from_union_resultrow:" id)))
+							(define mat_tag (concat id ":" (fnv_hash (concat subquery))))
+							(define rows_sym (symbol (concat "__from_union_rows:" mat_tag)))
+							(define resultrow_sym (symbol (concat "__from_union_resultrow:" mat_tag)))
 							(define materialized_rows (list (quote begin)
 								(list (quote set) rows_sym (list (quote newsession)))
 								(list rows_sym "rows" '())
@@ -1686,7 +1696,7 @@ WHAT IT MUST NOT DO:
 								(list (quote set) (symbol "resultrow") resultrow_sym)
 								(list rows_sym "rows")
 							))
-							(define _mat_var (symbol (concat "__mat:" id)))
+							(define _mat_var (symbol (concat "__mat:" mat_tag)))
 							(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
 								(list (list (quote set) _mat_var materialized_rows))))
 							(list
@@ -1829,14 +1839,15 @@ WHAT IT MUST NOT DO:
 							(if use_materialize
 								(begin
 									(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
-									(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
+									(define mat_tag (concat id ":" (fnv_hash (concat subquery))))
+									(define rows_sym (symbol (concat "__from_subquery_rows:" mat_tag)))
 									(define resultrow_sym (symbol (concat "__from_subquery_resultrow:" id)))
 									/* Materialization: collect rows from build_queryplan_term into a list.
 									Use a unique resultrow name (__mat_rr:id) so that replace_resultrow in
 									build_scalar_subselect does NOT accidentally replace the collector —
 									otherwise correlated scalar subselects break because the inner
 									query's resultrow gets rewritten to the promise handler. */
-									(define mat_rr_sym (symbol (concat "__mat_rr:" id)))
+									(define mat_rr_sym (symbol (concat "__mat_rr:" mat_tag)))
 									(define mat_inner_plan (build_queryplan_term subquery))
 									/* Replace resultrow → mat_rr_sym in the inner plan, so the inner
 									query feeds into our collector instead of the outer resultrow */
@@ -1844,14 +1855,14 @@ WHAT IT MUST NOT DO:
 										(cons sym args) (if (equal? sym (quote resultrow))
 											(cons mat_rr_sym (map args replace_rr_mat))
 											(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-												(list (quote symbol) (concat "__mat_rr:" id))
+												(list (quote symbol) (concat "__mat_rr:" mat_tag))
 												(cons (replace_rr_mat sym) (map args replace_rr_mat))))
 										expr)))
 									(define mat_inner_plan (replace_rr_mat mat_inner_plan))
 									(define materialized_rows (list (quote begin)
 										(list (quote set) rows_sym (list (quote newsession)))
 										(list rows_sym "rows" '())
-										(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
+										(define cnt_sym (symbol (concat "__from_subquery_cnt:" mat_tag)))
 										(if (nil? mat_limit)
 											/* no limit */
 											(list (quote set) mat_rr_sym
@@ -1877,7 +1888,7 @@ WHAT IT MUST NOT DO:
 									/* Store materialized rows in a variable via init code.
 									The variable (a symbol) is used as tbl — at runtime,
 									scan evaluates the symbol to get the row list. */
-									(define _mat_var (symbol (concat "__mat:" id)))
+									(define _mat_var (symbol (concat "__mat:" mat_tag)))
 									(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
 										(list (list (quote set) _mat_var materialized_rows))))
 									(list
