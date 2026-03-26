@@ -1710,6 +1710,28 @@ WHAT IT MUST NOT DO:
 							/* propagate _init2 (e.g. window materialization code) from inner untangle_query */
 							(if (and (not (nil? _init2)) (not (equal? _init2 '())))
 								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) _init2)))
+							(define prefix_outer_ref (lambda (outer_arg) (begin
+								(define s (string outer_arg))
+								(define parts (split s "."))
+								(if (> (count parts) 1)
+									(begin
+										(define tbl (car parts))
+										(define col (reduce (cdr parts) (lambda (acc p) (if (equal? acc "") p (concat acc "." p))) ""))
+										(if (not (nil? (schemas2 tbl)))
+											(symbol (concat id "\0" tbl "." col))
+											outer_arg))
+									outer_arg)
+							)))
+							/* opaque runtime scopes keep their local code untouched, but free outer refs
+							still need the derived-table alias prefix after wrapper inlining. */
+							(define retarget_opaque_outer_refs (lambda (expr) (match expr
+								(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+									(match args
+										'(outer_arg) (list (quote outer) (prefix_outer_ref outer_arg))
+										(cons (retarget_opaque_outer_refs sym) (map args retarget_opaque_outer_refs)))
+									(cons (retarget_opaque_outer_refs sym) (map args retarget_opaque_outer_refs)))
+								expr
+							)))
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -1739,17 +1761,12 @@ WHAT IT MUST NOT DO:
 									expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
 								'((symbol outer) outer_arg) (begin
 									/* prefix outer variable reference if it refers to a table in schemas2 */
-									(define s (string outer_arg))
-									(define parts (split s "."))
-									(match parts
-										(list tbl col) (if (not (nil? (schemas2 tbl)))
-											(list (quote outer) (symbol (concat id "\0" tbl "." col)))
-											(list (quote outer) outer_arg))
-										_ (list (quote outer) (replace_column_alias outer_arg))
-									)
+									(list (quote outer) (prefix_outer_ref outer_arg))
 								)
 								(cons sym args) /* function call */ (if (or (not (nil? (inner_select_kind sym))) (_is_opaque_scope_sym sym))
-									expr /* keep inner subselects and precomputed/runtime scopes intact */
+									(if (_is_opaque_scope_sym sym)
+										(retarget_opaque_outer_refs expr)
+										expr) /* keep inner subselects intact; only retarget free outer refs in runtime scopes */
 									(cons sym (map args replace_column_alias)))
 								expr
 							)))
@@ -1790,7 +1807,8 @@ WHAT IT MUST NOT DO:
 							/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 							(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
 							/* Nested derived-table flattening must not descend into precomputed runtime blocks
-							from scalar subselects; materialize instead of flattening when such blocks are present. */
+							from scalar subselects. The alias wrapper itself should still inline; only the
+							rewrite passes are blocked from rewriting inside those opaque scopes. */
 							(define expr_has_runtime_scope (lambda (expr) (match expr
 								(cons sym args) (if (or (_is_opaque_scope_sym sym) (_is_precomputed sym))
 									true
@@ -1804,6 +1822,9 @@ WHAT IT MUST NOT DO:
 									'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_runtime_scope inner_joinexpr))
 									_ false))) false)
 							))
+							(define runtime_scope_in_outer_join (reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
+								'(_ _ _ inner_isOuter inner_joinexpr) (and inner_isOuter (not (nil? inner_joinexpr)) (expr_has_runtime_scope inner_joinexpr))
+								_ false))) false))
 							/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 							/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
 							(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
@@ -1820,7 +1841,7 @@ WHAT IT MUST NOT DO:
 									)
 								) false)
 								false))
-							(define use_materialize (or subquery_has_window unsupported_groups subquery_has_runtime_scope))
+							(define use_materialize (or subquery_has_window unsupported_groups runtime_scope_in_outer_join))
 							/* Window-function LIMIT pushdown */
 							(define mat_limit nil)
 							(if subquery_has_window (begin
