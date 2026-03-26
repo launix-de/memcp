@@ -487,10 +487,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	if !hadValue && isOuter {
 		callbackFn := scm.OptimizeProcToSerialFunction(callback)
 		aggregateFn := scm.OptimizeProcToSerialFunction(aggregate)
-		nullRow := make([]scm.Scmer, len(callbackCols))
-		for i := range nullRow {
-			nullRow[i] = scm.NewNil()
-		}
+		nullRow := buildOuterNullCallbackRow(callbackCols)
 		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...)) // outer join: call once with NULLs
 	}
 	execNs := time.Since(execStart).Nanoseconds()
@@ -739,10 +736,10 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					// prepare&call condition function
 					for i, k := range conditionCols { // iterate over columns
 						if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-						cdataset[i] = ccols[i].GetValue(idx)
-					} else {
-						cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
-					}
+							cdataset[i] = ccols[i].GetValue(idx)
+						} else {
+							cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
+						}
 					}
 				}
 				// check condition
