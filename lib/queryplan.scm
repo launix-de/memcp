@@ -2478,6 +2478,27 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define _pj_cond_split (split_condition condition _pj_ps_tables))
 				(define _pj_ps_condition (match _pj_cond_split '(_ later) later))
 				(set condition (match _pj_cond_split '(now _) now))
+				/* 2-phase: separate aggregate-containing parts from materialize condition.
+				Aggregates belong in the grouped_plan (evaluated after GROUP BY keytable),
+				not in the materialize_plan (which just fills the prejoin table). */
+				(define _pj_has_agg (lambda (expr) (match expr
+					(cons (symbol aggregate) _) true
+					(cons sym args) (reduce args (lambda (a b) (or a (_pj_has_agg b))) false)
+					false)))
+				(define _pj_cond_flat (match condition
+					(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)))
+						parts (list condition))
+					(list condition)))
+				(define _pj_agg_parts (filter _pj_cond_flat _pj_has_agg))
+				(define _pj_nonagg_parts (filter _pj_cond_flat (lambda (p) (not (_pj_has_agg p)))))
+				(set condition (if (equal? 0 (count _pj_nonagg_parts)) true
+					(if (equal? 1 (count _pj_nonagg_parts)) (car _pj_nonagg_parts)
+						(cons (quote and) _pj_nonagg_parts))))
+				/* merge aggregate parts into ps_condition (both go to grouped_plan) */
+				(define _pj_ps_condition (if (equal? 0 (count _pj_agg_parts)) _pj_ps_condition
+					(if (equal? _pj_ps_condition true)
+						(if (equal? 1 (count _pj_agg_parts)) (car _pj_agg_parts) (cons (quote and) _pj_agg_parts))
+						(cons (quote and) (cons _pj_ps_condition _pj_agg_parts)))))
 				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
 				/* extract all get_column refs from group, fields, having, order */
 				(define mat_cols_raw (merge
