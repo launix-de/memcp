@@ -88,6 +88,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 (define extract_columns_for_tblvar (lambda (tblvar expr)
 	(match expr
 		'((symbol get_column) (eval tblvar) _ col _) (if (equal? col "*") '() '(col)) /* TODO: case matching */
+		'((quote get_column) (eval tblvar) _ col _) (if (equal? col "*") '() '(col))
 		(cons sym args) /* function call */ (merge_unique (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg))))
 		'()
 	)
@@ -98,6 +99,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(match expr
 		(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
 		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (symbol (concat "__unresolved__." col)) (symbol (concat tblvar "." col)))
+		'((quote get_column) tblvar _ col _) (if (nil? tblvar) (symbol (concat "__unresolved__." col)) (symbol (concat tblvar "." col)))
 		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 		expr /* literals */
 	)
@@ -135,6 +137,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 (define extract_all_get_columns (lambda (expr)
 	(match expr
 		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
+		'((quote get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
 		(cons sym args) (merge (map args extract_all_get_columns))
 		'()
 	)
@@ -2077,6 +2080,7 @@ or generate runtime scan code (build_queryplan).
 	(define _used_tvs (merge_unique
 		_unnested_aliases
 		(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
+		(extract_tblvars _canon_condition)
 		(merge (map _canon_groups (lambda (stage)
 			(merge_unique
 				(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
@@ -2845,7 +2849,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							))
 						)
 						'() /* base case: produce one row wrapped in a list */
-						'('if (coalesceNil scan_condition true)
+						'('if (optimize (replace_columns_from_expr (coalesceNil scan_condition true)))
 							(list (quote list) (cons (quote list) (map prejoin_columns (lambda (mc) (replace_columns_from_expr (cadr mc))))))
 							'(list))
 					)
