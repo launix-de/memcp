@@ -895,7 +895,9 @@ or generate runtime scan code (build_queryplan).
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (apply untangle_query subquery)
+				/* pass full outer schema chain so nested subqueries inside this scalar
+				subselect can still resolve grandparent references (skip-level correlation) */
+				(match (apply untangle_query (merge subquery (list outer_schemas)))
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -2313,8 +2315,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define _later_terms (_flatten_and_terms later_condition))
 				(define _is_join_term (lambda (term) (reduce _join_terms (lambda (acc jt)
 					(or acc (equal? term jt))) false)))
+				/* LEFT JOIN semantics require the joinexpr to stay on the scan itself.
+				If the global condition is empty, relying on raw_now_condition alone drops
+				the ON predicate entirely and turns the keytable read into a cartesian scan. */
 				(define _pushed_terms (if (equal? _join_terms '()) '()
-					(filter _now_terms _is_join_term)))
+					(merge_unique _join_terms (filter _now_terms _is_join_term))))
 				(define _deferred_terms (if (equal? _join_terms '()) _now_terms
 					(filter _now_terms (lambda (term) (not (_is_join_term term))))))
 				(list
@@ -2401,10 +2406,38 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define _cond_parts (_flatten_and_parts condition))
 				(define _cond_agg_parts (filter _cond_parts _has_agg_expr))
 				(define _cond_non_agg (filter _cond_parts (lambda (p) (not (_has_agg_expr p)))))
+				(define _grp_refs_src_tbl (lambda (expr)
+					(reduce (extract_tblvars expr) (lambda (acc tv) (or acc (equal?? tv tblvar))) false)))
+				(define _grp_has_explicit_outer (lambda (expr) (match expr
+					(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+						true
+						(reduce args (lambda (acc arg) (or acc (_grp_has_explicit_outer arg))) false))
+					false)))
+				/* scoped GROUPs must not keep domain/key correlation equalities in the
+				aggregate compute filter. Those equalities are represented by the keytable
+				group key plus LEFT JOIN ON-clause; leaving them here leaks outer refs
+				into the cache formula and breaks skip-level COUNT reuse. Immediate
+				correlations to the current outer row still stay in the compute path. */
+				(define _grp_key_corr_part (lambda (part) (match part
+					'((symbol equal??) left right) (if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
+						(and (not (_grp_refs_src_tbl right)) (_grp_has_explicit_outer right))
+						(if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
+							(and (not (_grp_refs_src_tbl left)) (_grp_has_explicit_outer left))
+							false))
+					'((quote equal??) left right) (if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
+						(and (not (_grp_refs_src_tbl right)) (_grp_has_explicit_outer right))
+						(if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
+							(and (not (_grp_refs_src_tbl left)) (_grp_has_explicit_outer left))
+							false))
+					false)))
+				(define _cond_key_corr (if (nil? _stage_scope) '()
+					(filter _cond_non_agg _grp_key_corr_part)))
+				(define _cond_non_agg_effective (if (nil? _stage_scope) _cond_non_agg
+					(filter _cond_non_agg (lambda (p) (not (_grp_key_corr_part p))))))
 				/* non-aggregate condition = keytable scan filter */
-				(set condition (if (equal? 0 (count _cond_non_agg)) true
-					(if (equal? 1 (count _cond_non_agg)) (car _cond_non_agg)
-						(cons (quote and) _cond_non_agg))))
+				(set condition (if (equal? 0 (count _cond_non_agg_effective)) true
+					(if (equal? 1 (count _cond_non_agg_effective)) (car _cond_non_agg_effective)
+						(cons (quote and) _cond_non_agg_effective))))
 				/* split non-aggregate condition: parts referencing partition-staged tables go to grouped_plan */
 				(define _grp_cond_split (split_condition condition _grp_ps_tables))
 				(define _grp_ps_condition (match _grp_cond_split '(_ later) later))
@@ -2480,6 +2513,34 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
 							(replace_agg_with_fetch expr)
 						)))
+						/* normalize outer-side join expressions into column AST so scan
+						planning can request the needed outer columns even if they are not
+						part of the current projection/order list. */
+						(define _grp_join_outer_expr (lambda (expr) (match expr
+							(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+								expr
+								(cons sym (map args _grp_join_outer_expr)))
+							_ (begin
+								(define _parts (split (string expr) "."))
+								(match _parts
+									(list _tbl _col) (list (quote get_column) _tbl false _col false)
+									_ expr)))))
+						(define _grp_join_term (lambda (part) (match part
+							'((symbol equal??) left right) (if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
+								(if (_grp_refs_src_tbl right) nil
+									(list (quote equal??) (replace_group_key_or_fetch left) (_grp_join_outer_expr right)))
+								(if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
+									(if (_grp_refs_src_tbl left) nil
+										(list (quote equal??) (_grp_join_outer_expr left) (replace_group_key_or_fetch right)))
+									nil))
+							'((quote equal??) left right) (if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
+								(if (_grp_refs_src_tbl right) nil
+									(list (quote equal??) (replace_group_key_or_fetch left) (_grp_join_outer_expr right)))
+								(if (reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
+									(if (_grp_refs_src_tbl left) nil
+										(list (quote equal??) (_grp_join_outer_expr left) (replace_group_key_or_fetch right)))
+									nil))
+							nil)))
 
 						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_group_key_or_fetch col) dir))))))
 						(define next_groups (merge
@@ -2513,12 +2574,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* Phase 2: replace aggregates in the separated agg-condition parts,
 						then combine everything: HAVING + replaced agg-parts + ps-table conditions */
 						(define _replaced_agg_parts (map _cond_agg_parts replace_group_key_or_fetch))
-						/* when _kt_is_outer, _grp_ps_condition becomes the keytable joinexpr
-						and must not also appear in _gp_condition (would double-filter) */
+						/* partition-staged table predicates stay global filters.
+						The keytable LEFT JOIN must only use correlations against group/domain
+						keys, otherwise unrelated outer filters get attached to the wrong side. */
 						(define _gp_parts (filter (merge
 							(if (or (nil? effective_having) (equal? effective_having true)) '() (list effective_having))
 							_replaced_agg_parts
-							(if (or _kt_is_outer (equal? _grp_ps_condition true)) '() (list (replace_group_key_or_fetch _grp_ps_condition))))
+							(if (equal? _grp_ps_condition true) '() (list (replace_group_key_or_fetch _grp_ps_condition))))
 							(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
 						(define _gp_condition (if (equal? 0 (count _gp_parts)) nil
 							(if (equal? 1 (count _gp_parts)) (car _gp_parts)
@@ -2533,10 +2595,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						appear (with NULL aggregates → coalesceNil → 0).
 						Essential for NOT EXISTS / NOT IN semantics. */
 						(define _kt_is_outer (and (not (nil? _stage_scope)) (not (equal? stage_group '(1)))))
-						/* keytable join condition: rewrite _grp_ps_condition so scoped-table
-						refs become keytable column refs (e.g. _unn_.did → keytable.did) */
+						/* keytable join condition: only keep equalities that bind a group/domain
+						key to an outer expression. Filters on outer/prejoin tables stay in the
+						global condition; they are not ON-conditions of the keytable join. */
 						(define _kt_je (if _kt_is_outer
-							(replace_group_key_or_fetch _grp_ps_condition)
+							(begin
+								(define _kt_terms (filter (map _cond_non_agg _grp_join_term) (lambda (x) (not (nil? x)))))
+								(if (equal? _kt_terms '()) nil
+									(if (equal? 1 (count _kt_terms)) (car _kt_terms)
+										(cons (quote and) _kt_terms))))
 							nil))
 						(define grouped_plan (build_queryplan schema
 							(if _kt_is_outer
