@@ -3239,16 +3239,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									)
 								))
 								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-									/* LEFT JOIN filter split (ordered path): move pure-tblvar conditions to post-filter */
-									(define effective_later (if isOuter (begin
-										(define _pure_cond (extract_pure_tblvar_conditions now_condition tblvar))
-										(if (equal? _pure_cond true) later_condition
-											(if (equal? later_condition true) _pure_cond
-												(list (quote and) later_condition _pure_cond))))
-										later_condition))
-									(define now_condition (if isOuter
-										(extract_non_pure_tblvar_conditions now_condition tblvar)
-										now_condition))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* check partition_stages for this table (non-first tables may have per-table partition limits) */
 									(define _ps_ord (if is_first nil
@@ -3295,7 +3285,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										scan_limit
 										/* extract columns and store them into variables */
 										ord_scan_mapcols
-										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables effective_later false))
+										(list (symbol "lambda") ord_scan_mapfn_params (build_scan tables later_condition false))
 										/* reduce+neutral for DML */
 										(if is_update_target_ord (symbol "+") nil)
 										(if is_update_target_ord 0 nil)
@@ -3352,38 +3342,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-										/* LEFT JOIN filter split: for isOuter tables, conditions that reference ONLY
-										this table's columns (no outer refs) must be MOVED to the post-filter.
-										The scan filter keeps only join-correlation conditions (with outer refs).
-										This ensures hadValue correctly reflects join partner existence. */
-										(define effective_later (if isOuter (begin
-											(define _pure_cond (extract_pure_tblvar_conditions now_condition tblvar))
-											(if (equal? _pure_cond true) later_condition
-												(if (equal? later_condition true) _pure_cond
-													(list (quote and) later_condition _pure_cond))))
-											later_condition))
-										(define now_condition (if isOuter
-											(extract_non_pure_tblvar_conditions now_condition tblvar)
-											now_condition))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 										/* optimize: skip .(1) DUAL scan when no columns needed (1 row, no data) */
 										(if (and (equal? tbl ".(1)") (equal? cols (list)) (equal? filtercols (list)))
-											(build_scan tables effective_later))
+											(build_scan tables later_condition))
 										/* check partition_stages: does this table have a per-table partition limit? */
 										(define _ps (reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil))
 										(if (not (nil? _ps))
 											/* === partition-limited scan_order === */
 											(begin
-												/* For partition scans: use FULL condition (undo LEFT JOIN filter split).
-												The filter must be applied BEFORE the LIMIT, not after — otherwise
-												scan_order emits wrong rows and the post-filter discards them. */
-												(define _ps_now_cond (if isOuter
-													(if (equal? effective_later later_condition) now_condition
-														/* reconstruct: merge pure conditions back into now_condition */
-														(if (equal? now_condition true) (extract_pure_tblvar_conditions (match (split_condition (coalesceNil condition true) tables) '(n _) n) tblvar)
-															(list (quote and) now_condition (extract_pure_tblvar_conditions (match (split_condition (coalesceNil condition true) tables) '(n _) n) tblvar))))
-													now_condition))
-												(define _ps_filtercols (merge_unique (list (extract_columns_for_tblvar tblvar _ps_now_cond) (extract_outer_columns_for_tblvar tblvar _ps_now_cond))))
+												(define _ps_filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 												(define _ps_order (coalesceNil (stage_order_list _ps) '()))
 												(define _ps_partcols (coalesceNil (stage_limit_partition_cols _ps) 0))
 												(define _ps_limit (coalesceNil (stage_limit_val _ps) -1))
@@ -3400,12 +3368,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(define _ps_init2 (stage_init_code _ps))
 												(define _ps_scan (scan_wrapper 'scan_order schema tbl
 													(cons list (merge_unique _ps_filtercols cols))
-													'((quote lambda) (map (merge_unique _ps_filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr _ps_now_cond)))
+													'((quote lambda) (map (merge_unique _ps_filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 													(cons list _ps_ordercols)
 													(cons list _ps_dirs)
 													_ps_partcols _ps_offset _ps_limit
 													scan_mapcols
-													(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later))
+													(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
 													nil nil isOuter))
 												(if (nil? _ps_init2) _ps_scan (list (quote begin) _ps_init2 _ps_scan)))
 											/* === regular scan === */
@@ -3413,7 +3381,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(cons list filtercols)
 												'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 												scan_mapcols
-												(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later))
+												(list (symbol "lambda") scan_mapfn_params (build_scan tables later_condition))
 												(if is_update_target (symbol "+") nil)
 												(if is_update_target 0 nil)
 												nil
