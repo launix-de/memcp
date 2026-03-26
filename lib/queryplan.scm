@@ -2024,25 +2024,20 @@ or generate runtime scan code (build_queryplan).
 	(define _canon_fields (map_assoc fields (lambda (k v) (_canon (replace_rename v)))))
 	(define _canon_condition (_canon conditionAll))
 	(define _canon_groups (map (coalesceNil groups '()) (lambda (stage) (canonicalize_stage stage schemas))))
-	/* eliminate unused LEFT JOINs: if no column of a LEFT JOIN table
-	is referenced in fields, condition, or group stages, the join
-	cannot affect row count and can be safely removed */
 	/* eliminate unused LEFT JOINs: a LEFT JOIN is unused when none of its
-	columns appear in fields or group stages. The merged condition includes
-	joinexprs which reference the JOIN itself — those must not prevent
-	elimination. We only check fields + groups (the query's output). */
+	columns appear in fields or group stages. Join predicates reference the
+	JOIN alias by construction and must not keep it alive. Only unnested
+	aliases are protected explicitly because they may be referenced indirectly. */
+	(define _unnested_aliases (map _sq_tbls (lambda (t) (match t '(alias _ _ _ _) alias _ nil))))
 	(define _used_tvs (merge_unique
+		_unnested_aliases
 		(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
 		(merge (map _canon_groups (lambda (stage)
 			(merge_unique
 				(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
 				(extract_tblvars (coalesceNil (stage_having_expr stage) true))
 				(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))
-				/* scoped stages: their partition-aliases are "used" tables */
-				(coalesceNil (stage_partition_aliases stage) '())))))
-		/* include condition-referenced tables: unnested subqueries may create
-		cross-table dependencies (e.g., d.did = _sq0.did) that must prevent pruning */
-		(extract_tblvars _canon_condition)))
+				(coalesceNil (stage_partition_aliases stage) '())))))))
 	/* prune unused LEFT JOINs and unreferenced .(1) DUAL tables.
 	.(1) is only pruned if other tables remain (it's the scan driver otherwise). */
 	(define _has_non_dual (reduce tables (lambda (a t) (or a (match t '(_ _ tbl _ _) (not (equal? tbl ".(1)")) true))) false))
