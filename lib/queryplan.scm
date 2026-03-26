@@ -2471,37 +2471,37 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(if is_dedup (error "DISTINCT on joined tables not yet supported"))
 				/* ALL tables go into the prejoin — the GROUP BY needs all columns
 				materialized in one table. Partition-staged _unn_ tables are included
-				so their columns are available as pjvar.alias.col after rewrite. */
-				(define _pj_tables tables)
-				(define _pj_ps_tables '())
+				so their columns are available as prejoin_alias.alias.col after rewrite. */
+				(define prejoin_source_tables tables)
+				(define post_group_tables '())
 				/* resolve condition and fields */
 				(set condition (replace_find_column (coalesceNil condition true)))
-				(define _pj_ps_condition true)
+				(define post_group_condition true)
 				/* 2-phase: separate aggregate-containing parts from materialize condition.
 				Aggregates belong in the grouped_plan (evaluated after GROUP BY keytable),
-				not in the materialize_plan (which just fills the prejoin table). */
-				(define _pj_has_agg (lambda (expr) (match expr
+				not in the prejoin_materialize_plan (which just fills the prejoin table). */
+				(define contains_aggregate (lambda (expr) (match expr
 					(cons (symbol aggregate) _) true
-					(cons sym args) (reduce args (lambda (a b) (or a (_pj_has_agg b))) false)
+					(cons sym args) (reduce args (lambda (a b) (or a (contains_aggregate b))) false)
 					false)))
-				(define _pj_cond_flat (match condition
+				(define condition_parts (match condition
 					(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)))
 						parts (list condition))
 					(list condition)))
-				(define _pj_agg_parts (filter _pj_cond_flat _pj_has_agg))
-				(define _pj_nonagg_parts (filter _pj_cond_flat (lambda (p) (not (_pj_has_agg p)))))
-				(set condition (if (equal? 0 (count _pj_nonagg_parts)) true
-					(if (equal? 1 (count _pj_nonagg_parts)) (car _pj_nonagg_parts)
-						(cons (quote and) _pj_nonagg_parts))))
+				(define aggregate_condition_parts (filter condition_parts contains_aggregate))
+				(define materialize_condition_parts (filter condition_parts (lambda (p) (not (contains_aggregate p)))))
+				(set condition (if (equal? 0 (count materialize_condition_parts)) true
+					(if (equal? 1 (count materialize_condition_parts)) (car materialize_condition_parts)
+						(cons (quote and) materialize_condition_parts))))
 				/* merge aggregate parts into ps_condition (both go to grouped_plan) */
-				(define _pj_ps_condition (if (equal? 0 (count _pj_agg_parts)) _pj_ps_condition
-					(if (equal? _pj_ps_condition true)
-						(if (equal? 1 (count _pj_agg_parts)) (car _pj_agg_parts) (cons (quote and) _pj_agg_parts))
-						(cons (quote and) (cons _pj_ps_condition _pj_agg_parts)))))
+				(define post_group_condition (if (equal? 0 (count aggregate_condition_parts)) post_group_condition
+					(if (equal? post_group_condition true)
+						(if (equal? 1 (count aggregate_condition_parts)) (car aggregate_condition_parts) (cons (quote and) aggregate_condition_parts))
+						(cons (quote and) (cons post_group_condition aggregate_condition_parts)))))
 				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
 				/* extract all get_column refs from group, fields, having, order, AND condition
 				(condition may reference _unn_ tables whose columns must be in the prejoin) */
-				(define mat_cols_raw (merge
+				(define all_referenced_columns (merge
 					(merge (map stage_group extract_all_get_columns))
 					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
 					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
@@ -2509,45 +2509,45 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(extract_all_get_columns (coalesceNil condition true))
 				))
 				/* filter out columns from partition-staged tables (they're not part of the prejoin) */
-				(define _pj_tblvar_list (map _pj_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
-				(define mat_cols_raw (filter mat_cols_raw (lambda (mc) (match mc
-					'(name '((symbol get_column) alias_ _ _ _)) (has? _pj_tblvar_list alias_)
-					'(name '((quote get_column) alias_ _ _ _)) (has? _pj_tblvar_list alias_)
+				(define known_table_aliases (map prejoin_source_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
+				(define all_referenced_columns (filter all_referenced_columns (lambda (mc) (match mc
+					'(name '((symbol get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
+					'(name '((quote get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
 					true))))
-				(define mat_cols (reduce mat_cols_raw (lambda (acc mc)
+				(define prejoin_columns (reduce all_referenced_columns (lambda (acc mc)
 					(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false)
 						acc
 						(merge acc (list mc)))) '()))
-				(define mat_col_names (map mat_cols car))
+				(define prejoin_column_names (map prejoin_columns car))
 				/* compute prejoin table name and alias */
-				(define pjvar ".pj")
+				(define prejoin_alias ".pj")
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
-				(define prejoin_alias_map (map _pj_tables (lambda (t)
+				(define prejoin_alias_map (map prejoin_source_tables (lambda (t)
 					(match t '(tv tschema ttbl _ _)
 						(list tv (concat tschema "." ttbl)))))
 				)
-				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
+				(define prejoin_col_names (map prejoin_columns (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
 				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
 				(define prejointbl (concat ".prejoin:"
-					(map _pj_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
+					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* capture outer schema and table name for trigger code generation */
-				(define pj_schema schema)
-				(define pjtbl prejointbl)
+				(define prejoin_schema schema)
+				(define prejoin_table_name prejointbl)
 				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
 				(createtable schema prejointbl
-					(map mat_col_names (lambda (col) '("column" col "any" '() '())))
+					(map prejoin_column_names (lambda (col) '("column" col "any" '() '())))
 					'("engine" "sloppy") true)
 				/* build materialization scan: nested-loop join populating prejoin table */
-				(define build_mat_scan (lambda (scan_tables scan_condition is_outermost)
+				(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
 					(match scan_tables
 						(cons '(tblvar schema tbl isOuter _) rest) (begin
 							/* columns needed from this table for materialization + condition */
 							(set cols (merge_unique (list
 								(extract_columns_for_tblvar tblvar scan_condition)
-								(merge_unique (map mat_cols (lambda (mc) (extract_columns_for_tblvar tblvar (cadr mc)))))
+								(merge_unique (map prejoin_columns (lambda (mc) (extract_columns_for_tblvar tblvar (cadr mc)))))
 								(extract_outer_columns_for_tblvar tblvar scan_condition)
-								(merge_unique (map mat_cols (lambda (mc) (extract_outer_columns_for_tblvar tblvar (cadr mc)))))
+								(merge_unique (map prejoin_columns (lambda (mc) (extract_outer_columns_for_tblvar tblvar (cadr mc)))))
 							)))
 							(match (split_condition (coalesceNil scan_condition true) rest) '(now_condition later_condition) (begin
 								(set filtercols (merge_unique (list
@@ -2557,13 +2557,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(cons list filtercols)
 									'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 									(cons list cols)
-									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_mat_scan rest later_condition false))
+									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_materialize_scan rest later_condition false))
 									/* reduce: merge sub-results */
 									'('lambda '('acc 'sub) '('merge 'acc 'sub))
 									'(list)
 									/* reduce2: outermost inserts into prejoin, inner levels merge */
 									(if is_outermost
-										'('lambda '('acc 'shard_rows) '('insert pj_schema prejointbl (cons 'list mat_col_names) 'shard_rows '(list) '('lambda '() true) true))
+										'('lambda '('acc 'shard_rows) '('insert prejoin_schema prejointbl (cons 'list prejoin_column_names) 'shard_rows '(list) '('lambda '() true) true))
 										'('lambda '('acc 'shard_rows) '('merge 'acc 'shard_rows)))
 									isOuter
 								)
@@ -2571,34 +2571,34 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						)
 						'() /* base case: produce one row wrapped in a list */
 						'('if (coalesceNil scan_condition true)
-							(list (quote list) (cons (quote list) (map mat_cols (lambda (mc) (replace_columns_from_expr (cadr mc))))))
+							(list (quote list) (cons (quote list) (map prejoin_columns (lambda (mc) (replace_columns_from_expr (cadr mc))))))
 							'(list))
 					)
 				))
-				(define materialize_plan (build_mat_scan tables condition true))
+				(define prejoin_materialize_plan (build_materialize_scan tables condition true))
 				/* rewrite all column references to point at prejoin table */
-				(define pj_rewrite (lambda (expr) (rewrite_for_prejoin pjvar expr)))
-				(define pj_fields (map_assoc resolved_fields (lambda (k v) (pj_rewrite v))))
-				(define pj_group (map stage_group pj_rewrite))
-				(define pj_having (pj_rewrite stage_having))
-				(define pj_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (pj_rewrite col) dir))))))
+				(define rewrite_as_prejoin_column (lambda (expr) (rewrite_for_prejoin prejoin_alias expr)))
+				(define grouped_fields (map_assoc resolved_fields (lambda (k v) (rewrite_as_prejoin_column v))))
+				(define grouped_keys (map stage_group rewrite_as_prejoin_column))
+				(define grouped_having (rewrite_as_prejoin_column stage_having))
+				(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (rewrite_as_prejoin_column col) dir))))))
 				/* rebuild group stage for recursive call */
-				(define pj_stage (make_group_stage pj_group pj_having pj_order stage_limit stage_offset nil nil))
-				(define pj_all_groups (cons pj_stage rest_groups))
+				(define grouped_stage (make_group_stage grouped_keys grouped_having grouped_order stage_limit stage_offset nil nil))
+				(define grouped_all_stages (cons grouped_stage rest_groups))
 				/* recursive call with single prejoin table.
 				All tables are in the prejoin — rewrite aggregate condition to prejoin refs.
 				No partition-staged tables remain outside the prejoin. */
-				(define _pj_gp_condition (if (equal? _pj_ps_condition true) nil
-					(pj_rewrite _pj_ps_condition)))
+				(define grouped_plan_condition (if (equal? post_group_condition true) nil
+					(rewrite_as_prejoin_column post_group_condition)))
 				/* drop partition stages covered by the prejoin (all tables materialized) */
-				(define _pj_remaining_pstages (filter partition_stages (lambda (ps)
+				(define remaining_partition_stages (filter partition_stages (lambda (ps)
 					(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
-						(or acc (has? _pj_tblvar_list a))) false)))))
+						(or acc (has? known_table_aliases a))) false)))))
 				(define grouped_result (build_queryplan schema
-					(list (list pjvar schema prejointbl false nil))
-					pj_fields
-					_pj_gp_condition
-					(merge pj_all_groups _pj_remaining_pstages)
+					(list (list prejoin_alias schema prejointbl false nil))
+					grouped_fields
+					grouped_plan_condition
+					(merge grouped_all_stages remaining_partition_stages)
 					schemas
 					replace_find_column
 					nil))
@@ -2610,7 +2610,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(begin
 								/* collect (pj_col base_col) pairs for this source table */
 								(define ti_col_pairs
-									(reduce mat_cols (lambda (acc mc)
+									(reduce prejoin_columns (lambda (acc mc)
 										(match (cadr mc)
 											'((symbol get_column) tv _ col _)
 											(if (equal? tv trigger_tv)
@@ -2621,10 +2621,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(merge acc (list (list (car mc) col)))
 												acc)
 											acc)) (list)))
-								/* DELETE trigger: scan pjtbl, filter by OLD values for T_i cols, delete matching rows */
+								/* DELETE trigger: scan prejoin_table_name, filter by OLD values for T_i cols, delete matching rows */
 								(define delete_fn
 									(eval (list 'lambda (list 'OLD 'NEW)
-										(list 'scan pj_schema pjtbl
+										(list 'scan prejoin_schema prejoin_table_name
 											(cons 'list (map ti_col_pairs car))
 											(list 'lambda (map ti_col_pairs (lambda (p) (symbol (concat "_pj." (car p)))))
 												(if (equal? 1 (count ti_col_pairs))
@@ -2639,13 +2639,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows */
 								(define insert_fn
 									(eval (list 'lambda (list 'OLD 'NEW)
-										(build_pj_insert_scan tables condition trigger_tv true pj_schema pjtbl mat_cols mat_col_names))))
+										(build_pj_insert_scan tables condition trigger_tv true prejoin_schema prejoin_table_name prejoin_columns prejoin_column_names))))
 								/* UPDATE trigger: delete old prejoin rows + insert new for any row change.
 								Code-generator pattern: embed delete_fn/insert_fn as proc literals in body
 								so no closure capture — serializes cleanly for persistence. */
 								(define update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list insert_fn 'OLD 'NEW)))))
 								/* emit the register call as an S-expression to be executed at query time */
-								(list 'register_prejoin_incremental src_schema src_tbl pj_schema pjtbl
+								(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 									delete_fn insert_fn update_fn))))))
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
