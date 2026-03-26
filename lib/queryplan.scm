@@ -908,7 +908,8 @@ or generate runtime scan code (build_queryplan).
 				(define raw_order_us (nth raw_vals_us 2))
 				(define raw_limit_us (nth raw_vals_us 3))
 				(define raw_offset_us (nth raw_vals_us 4))
-				(match (apply untangle_query subquery)
+				/* pass outer_schemas chain to recursive untangle so grandparent refs resolve */
+			(match (apply untangle_query (merge subquery (list outer_schemas)))
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us) (begin
 						/* no-table subselect without aggregates: return field expression directly */
 						(if (and (or (nil? tables2_us) (equal? tables2_us '()))
@@ -1202,10 +1203,10 @@ or generate runtime scan code (build_queryplan).
 													(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
 													(define us_part_order (merge us_dom_order us_renamed_order))
 													(define us_dom_count (count us_dom_order))
-													/* only register partition stage if there are own-table sort columns.
-													If all domain cols were indirect (inner-scoped), the join chain already
-													guarantees at most 1 row per outer binding — no extra LIMIT needed. */
-													(if (or (not (equal? us_part_order '())) us_has_limit) (begin
+													/* register partition stage: (a) own-table sort cols for correlated LIMIT,
+													(b) explicit LIMIT from SQL, (c) uncorrelated needs global limit=1.
+													Indirect-only correlations skip: join chain guarantees 1 row. */
+													(if (or (not (equal? us_part_order '())) us_has_limit (not us_has_outer)) (begin
 														(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
 														(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '()))))))
 												/* propagate inner scoped stages with renaming */
@@ -1715,11 +1716,13 @@ or generate runtime scan code (build_queryplan).
 				expr
 			)))
 
-			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
-			(set condition (replace_inner_selects condition schemas))
-			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
+			/* pass full schema chain (current + ancestors) so nested subselects can resolve grandparent refs */
+			(define _ris_schemas (merge schemas outer_schemas_chain))
+			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v _ris_schemas))))
+			(set condition (replace_inner_selects condition _ris_schemas))
+			(set group (map group (lambda (g) (replace_inner_selects g _ris_schemas))))
 			(set having (begin
-				(define _hv_resolved (replace_inner_selects having schemas))
+				(define _hv_resolved (replace_inner_selects having _ris_schemas))
 				/* check if any inner_select nodes remain — HAVING with subqueries
 				requires post-group processing which is not yet implemented */
 				(define _hv_check (lambda (expr) (match expr
@@ -1729,7 +1732,7 @@ or generate runtime scan code (build_queryplan).
 				(if (and (not (nil? _hv_resolved)) (_hv_check _hv_resolved))
 					(error "HAVING with subqueries not yet supported")
 					_hv_resolved)))
-			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
+			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col _ris_schemas) dir)))))
 			/* integrate unnested scalar subselects from Neumann unnesting.
 			Tables from non-aggregate path (direct LEFT JOIN) do NOT need schema updates.
 			Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
