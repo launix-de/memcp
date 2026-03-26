@@ -127,9 +127,61 @@ func (ti TypeInfo) Const() bool    { return ti.flags&FlagConst != 0 }
 func (ti TypeInfo) Escape() bool   { return ti.flags&FlagEscape != 0 }
 func (ti TypeInfo) Kind() uint8    { return ti.kind }
 
-func (ti TypeInfo) WithTransfer() TypeInfo { ti.flags |= FlagTransfer; return ti }
-func (ti TypeInfo) WithConst() TypeInfo    { ti.flags |= FlagConst; return ti }
+func (ti TypeInfo) WithTransfer() TypeInfo   { ti.flags |= FlagTransfer; return ti }
+func (ti TypeInfo) WithoutTransfer() TypeInfo { ti.flags &^= FlagTransfer; return ti }
+func (ti TypeInfo) WithConst() TypeInfo      { ti.flags |= FlagConst; return ti }
 func (ti TypeInfo) WithKind(k uint8) TypeInfo { ti.kind = k; return ti }
+func (ti TypeInfo) WithExtra(td *TypeDescriptor) TypeInfo { ti.Extra = td; return ti }
+
+// MakeTypeInfo builds a TypeInfo from transfer/const bools (no heap allocation).
+func MakeTypeInfo(transfer, constant bool) TypeInfo {
+	var ti TypeInfo
+	if transfer {
+		ti.flags |= FlagTransfer
+	}
+	if constant {
+		ti.flags |= FlagConst
+	}
+	return ti
+}
+
+// TypeInfoFromTD converts a *TypeDescriptor to a stack-allocated TypeInfo.
+func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
+	if td == nil {
+		return TypeInfo{}
+	}
+	var ti TypeInfo
+	if td.Transfer {
+		ti.flags |= FlagTransfer
+	}
+	if td.Const {
+		ti.flags |= FlagConst
+	}
+	switch td.Kind {
+	case "string":
+		ti.kind = KindString
+	case "int":
+		ti.kind = KindInt
+	case "number":
+		ti.kind = KindFloat
+	case "bool":
+		ti.kind = KindBool
+	case "nil":
+		ti.kind = KindNil
+	case "symbol":
+		ti.kind = KindSymbol
+	case "func":
+		ti.kind = KindFunc
+	case "list":
+		ti.kind = KindList
+	case "assoc":
+		ti.kind = KindAssoc
+	}
+	if len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
+		ti.Extra = td
+	}
+	return ti
+}
 
 // ToTypeDescriptor converts to a heap-allocated TypeDescriptor (for APIs that need it).
 func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
@@ -344,16 +396,27 @@ func WriteDocumentation(folder string) error {
 				fmt.Fprintln(f, "_This function has no parameters._")
 			} else if d, ok := declarations[def.Name]; ok && !d.IsForbidden() {
 				for _, p := range def.Type.Params {
-					fmt.Fprintf(f, "- **%s** (`%s`): %s\n", p.ParamName, p.Kind, p.ParamDesc)
+					kind := p.Kind
+					if kind == "func" && len(p.Params) > 0 {
+						kind = FormatTypeSignature(p)
+					}
+					flags := ""
+					if p.Optional {
+						flags += " _(optional)_"
+					}
+					if p.Variadic {
+						flags += " _(variadic)_"
+					}
+					fmt.Fprintf(f, "- **%s** (`%s`): %s%s\n", p.ParamName, kind, p.ParamDesc, flags)
 				}
 				fmt.Fprintln(f)
 			}
 
-			retKind := "any"
-			if def.Type != nil && def.Type.Return != nil && def.Type.Return.Kind != "" {
-				retKind = def.Type.Return.Kind
+			retStr := "any"
+			if def.Type != nil && def.Type.Return != nil {
+				retStr = FormatTypeSignature(def.Type.Return)
 			}
-			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", retKind)
+			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", retStr)
 		}
 
 		_ = f.Close()
@@ -389,9 +452,74 @@ func types_match(given string, required string) bool {
 	if given == "int" && required == "number" {
 		return true // we allow int to number but not otherwise
 	}
-	// TODO: in case of func: compare signatures??
 	// TODO: list(subtype)
 	return false // not a single match
+}
+
+// validateCallbackSignature checks whether a lambda literal matches the
+// expected callback signature (parameter count). Returns "" on success
+// or an error description.
+func validateCallbackSignature(lambdaSlice []Scmer, expectedSig *TypeDescriptor, source_info SourceInfo) string {
+	if expectedSig == nil || expectedSig.Kind != "func" || len(expectedSig.Params) == 0 {
+		return ""
+	}
+	// lambdaSlice is (lambda (params...) body [numvars])
+	if len(lambdaSlice) < 3 {
+		return ""
+	}
+	if !lambdaSlice[0].IsSymbol() || !lambdaSlice[0].SymbolEquals("lambda") {
+		return ""
+	}
+	paramList, ok := scmerSlice(lambdaSlice[1])
+	if !ok {
+		return ""
+	}
+
+	// Count expected required/max params
+	expectedMin := 0
+	expectedMax := 0
+	hasVariadic := false
+	for _, p := range expectedSig.Params {
+		if p == nil {
+			expectedMax++
+			expectedMin++
+			continue
+		}
+		if p.Variadic {
+			hasVariadic = true
+		} else if !p.Optional {
+			expectedMin++
+		}
+		expectedMax++
+	}
+
+	lambdaParams := len(paramList)
+	// In this Scheme dialect, excess arguments are silently ignored,
+	// so a lambda with FEWER params than the caller provides is valid.
+	// Only reject lambdas with MORE params than the caller will provide.
+	if !hasVariadic && lambdaParams > expectedMax {
+		return fmt.Sprintf("%s: callback provides at most %d arguments, but lambda declares %d parameters",
+			source_info.String(), expectedMax, lambdaParams)
+	}
+
+	// Validate lambda body against expected return type
+	if expectedSig.Return != nil && expectedSig.Return.Kind != "" && expectedSig.Return.Kind != "any" {
+		// Recursively validate the body (last expression before optional numvars)
+		bodyIdx := 2
+		if len(lambdaSlice) > 3 {
+			// has numvars suffix — body is at index 2
+			bodyIdx = 2
+		}
+		if bodyIdx < len(lambdaSlice) {
+			bodyType := Validate(lambdaSlice[bodyIdx], expectedSig.Return.Kind)
+			if !types_match(bodyType, expectedSig.Return.Kind) {
+				return fmt.Sprintf("%s: callback should return %s, but body has type %s",
+					source_info.String(), expectedSig.Return.Kind, bodyType)
+			}
+		}
+	}
+
+	return ""
 }
 
 func types_merge(given, newtype string) string {
@@ -484,6 +612,28 @@ func Validate(val Scmer, require string) string {
 					if !types_match(typ, subrequired) {
 						panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source_info.String(), def.Name, i, subrequired, typ))
 					}
+					// Deep callback signature validation: if param expects func with Params,
+					// and the argument is a lambda literal, validate arity and return type.
+					if subrequired == "func" && def != nil && def.Type != nil {
+						j := i - 1
+						if j >= len(def.Type.Params) {
+							j = len(def.Type.Params) - 1
+						}
+						if j >= 0 && j < len(def.Type.Params) && def.Type.Params[j] != nil {
+							paramTD := def.Type.Params[j]
+							if paramTD.Kind == "func" && len(paramTD.Params) > 0 {
+								argVal := slice[i]
+								if argVal.IsSourceInfo() {
+									argVal = argVal.SourceInfo().value
+								}
+								if argSlice, ok2 := scmerSlice(argVal); ok2 && len(argSlice) >= 3 {
+									if errMsg := validateCallbackSignature(argSlice, paramTD, source_info); errMsg != "" {
+										panic(errMsg)
+									}
+								}
+							}
+						}
+					}
 					if isReturntype {
 						returntype = types_merge(returntype, typ)
 					}
@@ -521,6 +671,65 @@ func Validate(val Scmer, require string) string {
 	return "any"
 }
 
+// FormatTypeSignature returns a human-readable type string for a TypeDescriptor.
+// For func types with Params, it produces "func(name:type, ...) -> returntype".
+func FormatTypeSignature(td *TypeDescriptor) string {
+	if td == nil {
+		return "any"
+	}
+	if td.Kind != "func" || len(td.Params) == 0 {
+		if td.Kind == "" {
+			return "any"
+		}
+		return td.Kind
+	}
+	var b strings.Builder
+	b.WriteString("func(")
+	for i, p := range td.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if p == nil {
+			b.WriteString("any")
+			continue
+		}
+		if p.ParamName != "" {
+			b.WriteString(p.ParamName)
+			b.WriteString(":")
+		}
+		b.WriteString(FormatTypeSignature(p))
+		if p.Optional {
+			b.WriteString("?")
+		}
+		if p.Variadic {
+			b.WriteString("...")
+		}
+	}
+	b.WriteString(")")
+	if td.Return != nil {
+		b.WriteString(" -> ")
+		b.WriteString(FormatTypeSignature(td.Return))
+	}
+	return b.String()
+}
+
+// formatParamLine formats a single parameter for Help/Docs output,
+// including callback signature details when Kind is "func".
+func formatParamLine(p *TypeDescriptor) string {
+	kind := p.Kind
+	if kind == "func" && len(p.Params) > 0 {
+		kind = FormatTypeSignature(p)
+	}
+	line := " - " + p.ParamName + " (" + kind + "): " + p.ParamDesc
+	if p.Optional {
+		line += " [optional]"
+	}
+	if p.Variadic {
+		line += " [variadic]"
+	}
+	return line
+}
+
 func Help(fn Scmer) string {
 	var b strings.Builder
 	if fn.IsNil() {
@@ -542,9 +751,13 @@ func Help(fn Scmer) string {
 			if def.Type != nil {
 				for _, p := range def.Type.Params {
 					if p != nil {
-						b.WriteString(" - " + p.ParamName + " (" + p.Kind + "): " + p.ParamDesc + "\n")
+						b.WriteString(formatParamLine(p) + "\n")
 					}
 				}
+			}
+			if def.Type != nil && def.Type.Return != nil {
+				retStr := FormatTypeSignature(def.Type.Return)
+				b.WriteString("\nReturns: " + retStr + "\n")
 			}
 			b.WriteString("\n")
 		} else {

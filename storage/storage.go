@@ -291,9 +291,9 @@ func Init(en scm.Env) {
 				{Kind: "string|nil", ParamName: "schema", ParamDesc: "database where the table is located"},
 				{Kind: "string|list", ParamName: "table", ParamDesc: "name of the table to scan (or a list if you have temporary data)"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
-				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
+				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},
-				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
+				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
 				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
@@ -434,15 +434,15 @@ func Init(en scm.Env) {
 				{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to scan"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
-				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
+				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "sortcols", ParamDesc: "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
 				{Kind: "list", ParamName: "sortdirs", ParamDesc: "list of column directions to sort. Must be same length as sortcols. < means ascending, > means descending, (collate ...) will add collations"},
 				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "number of leading sort columns that form the partition key for per-partition offset/limit. 0 (default) means global offset/limit."},
 				{Kind: "number", ParamName: "offset", ParamDesc: "number of items to skip before the first one is fed into map"},
 				{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read"},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},
-				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
-				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true},
+				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc", Transfer: true}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
@@ -457,7 +457,7 @@ func Init(en scm.Env) {
 			ignoreexists := len(a) > 1 && scm.ToBool(a[1])
 			return scm.NewBool(CreateDatabase(scm.String(a[0]), ignoreexists))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the new database"},
 				{Kind: "bool", ParamName: "ignoreexists", ParamDesc: "if true, return false instead of throwing an error", Optional: true},
@@ -472,7 +472,7 @@ func Init(en scm.Env) {
 			ifexists := len(a) > 1 && scm.ToBool(a[1])
 			return scm.NewBool(DropDatabase(scm.String(a[0]), ifexists))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "bool", ParamName: "ifexists", ParamDesc: "if true, don't throw an error if it doesn't exist", Optional: true},
@@ -581,7 +581,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"},
@@ -669,7 +669,7 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(ok)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"},
@@ -678,7 +678,7 @@ func Init(en scm.Env) {
 				{Kind: "list", ParamName: "dimensions", ParamDesc: "dimensions of the type (e.g. for decimal)"},
 				{Kind: "list", ParamName: "options", ParamDesc: "assoc list: primary, unique, auto_increment, null, comment, default, collate; ORC: sortcols, sortdirs, partitioncount, mapcols, mapfn, reducefn, reduceinit"},
 				{Kind: "list", ParamName: "computorCols", ParamDesc: "list of columns that is passed into params of computor", Optional: true},
-				{Kind: "func", ParamName: "computor", ParamDesc: "lambda expression that can take other column values and computes the value of that column", Optional: true},
+				{Kind: "func", ParamName: "computor", ParamDesc: "lambda expression that can take other column values and computes the value of that column", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -716,7 +716,7 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"},
@@ -767,7 +767,7 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "keyname", ParamDesc: "name of the new key"},
@@ -957,7 +957,7 @@ func Init(en scm.Env) {
 				panic("unimplemented alter table operation: " + scm.String(a[2]))
 			}
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
@@ -1030,7 +1030,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
@@ -1053,7 +1053,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(t.DropColumn(scm.String(a[2])))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
@@ -1432,7 +1432,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "list", ParamName: "locks", ParamDesc: "flat list of schema, table, write? triples"},
 			},
@@ -1448,7 +1448,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -1488,7 +1488,7 @@ func Init(en scm.Env) {
 			RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "oldname", ParamDesc: "current name of the table"},
@@ -1543,16 +1543,16 @@ func Init(en scm.Env) {
 			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
 			return scm.NewInt(int64(inserted))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
 				{Kind: "list", ParamName: "columns", ParamDesc: "list of column names, e.g. '(\"ID\", \"value\")"},
 				{Kind: "list", ParamName: "datasets", ParamDesc: "list of list of column values, e.g. '('(1 10) '(2 15))"},
 				{Kind: "list", ParamName: "onCollisionCols", ParamDesc: "list of columns of the old dataset that have to be passed to onCollision. Can also request $update.", Optional: true},
-				{Kind: "func", ParamName: "onCollision", ParamDesc: "the function that is called on each collision dataset. The first parameter is filled with the $update function, the second parameter is the dataset as associative list. If not set, an error is thrown in case of a collision.", Optional: true},
+				{Kind: "func", ParamName: "onCollision", ParamDesc: "the function that is called on each collision dataset. The first parameter is filled with the $update function, the second parameter is the dataset as associative list. If not set, an error is thrown in case of a collision.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "$update"}, {Kind: "list", ParamName: "dataset"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "bool", ParamName: "mergeNull", ParamDesc: "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)", Optional: true},
-				{Kind: "func", ParamName: "onInsertid", ParamDesc: "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT", Optional: true},
+				{Kind: "func", ParamName: "onInsertid", ParamDesc: "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "number", ParamName: "id"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "number"},
 		},
@@ -1943,7 +1943,7 @@ func Init(en scm.Env) {
 
 			return scm.NewString(fmt.Sprint(time.Since(start)))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
@@ -1969,7 +1969,7 @@ func Init(en scm.Env) {
 
 			return scm.NewString(fmt.Sprint(time.Since(start)))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database where you want to put the tables in"},
 				{Kind: "stream", ParamName: "stream", ParamDesc: "stream of the .jsonl file, read with: (stream filename)"},
@@ -2048,7 +2048,7 @@ func Init(en scm.Env) {
 			t.schema.save()
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
@@ -2087,7 +2087,7 @@ func Init(en scm.Env) {
 			}
 			panic("trigger " + name + " does not exist")
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
 				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},

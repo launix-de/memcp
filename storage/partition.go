@@ -584,46 +584,114 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 					// Allocate column storage and build
 					values := make([]scm.Scmer, mainCount)
 					for _, col := range t.Columns {
-						var i uint32
-						for s2id, items := range datasetids[si] {
-							reader := oldshards[s2id].ColumnReader(col.Name)
-							for _, item := range items {
-								values[i] = reader(uint32(item))
-								i++
+						// Check if ANY old shard has a StorageComputeProxy for this column.
+						// If so, port the proxy (computor + validMask) instead of evaluating values.
+						var proxyTemplate *StorageComputeProxy
+						for _, os := range oldshards {
+							os.mu.RLock()
+							if cs, ok := os.columns[col.Name]; ok {
+								if p, ok := cs.(*StorageComputeProxy); ok {
+									proxyTemplate = p
+									os.mu.RUnlock()
+									break
+								}
 							}
+							os.mu.RUnlock()
 						}
-						// Compress into optimal storage format
-						var newcol ColumnStorage = new(StorageSCMER)
-						for {
-							newcol.prepare()
+
+						if proxyTemplate != nil {
+							// Port StorageComputeProxy: create new proxy for this PShard,
+							// copy valid values and validMask, leave invalid rows for lazy recompute.
+							newProxy := &StorageComputeProxy{
+								delta:     make(map[uint32]scm.Scmer),
+								computor:  proxyTemplate.computor,
+								inputCols: proxyTemplate.inputCols,
+								shard:     s, // back-reference to new PShard
+								colName:   proxyTemplate.colName,
+								count:     mainCount,
+								isOrdered: proxyTemplate.isOrdered,
+							}
+							// Port values and validMask from old shards
+							var newIdx uint32
+							for s2id, items := range datasetids[si] {
+								oldShard := oldshards[s2id]
+								oldShard.mu.RLock()
+								oldProxy, isProxy := oldShard.columns[col.Name].(*StorageComputeProxy)
+								oldShard.mu.RUnlock()
+								if !isProxy {
+									// Old shard has plain storage for this column — read values directly
+									reader := oldShard.ColumnReader(col.Name)
+									for _, item := range items {
+										val := reader(uint32(item))
+										newProxy.delta[newIdx] = val
+										newProxy.validMask.Set(uint(newIdx), true)
+										newIdx++
+									}
+								} else {
+									// Old shard has proxy — port valid/invalid status
+									for _, item := range items {
+										idx := uint32(item)
+										if oldProxy.compressed || oldProxy.validMask.Get(uint(idx)) {
+											// Valid: read cached value without triggering computor
+											oldProxy.mu.RLock()
+											val, inDelta := oldProxy.delta[idx]
+											oldProxy.mu.RUnlock()
+											if !inDelta && oldProxy.main != nil {
+												val = oldProxy.main.GetValue(idx)
+											}
+											newProxy.delta[newIdx] = val
+											newProxy.validMask.Set(uint(newIdx), true)
+										}
+										// else: invalid row — leave validMask=false for lazy recompute
+										newIdx++
+									}
+								}
+							}
+							built.columns[col.Name] = newProxy
+							// Compute proxies are not serialized to disk
+						} else {
+							// Normal column: read values and compress
+							var i uint32
+							for s2id, items := range datasetids[si] {
+								reader := oldshards[s2id].ColumnReader(col.Name)
+								for _, item := range items {
+									values[i] = reader(uint32(item))
+									i++
+								}
+							}
+							// Compress into optimal storage format
+							var newcol ColumnStorage = new(StorageSCMER)
+							for {
+								newcol.prepare()
+								for j, v := range values {
+									newcol.scan(uint32(j), v)
+								}
+								newcol2 := newcol.proposeCompression(uint32(i))
+								if newcol2 == nil {
+									break
+								}
+								newcol = newcol2
+							}
+							if blob, ok := newcol.(*OverlayBlob); ok {
+								blob.schema = s.t.schema
+							}
+							// TODO: when source column is OverlayBlob, shuffle raw
+							// compressed blob data without decompressing+recompressing.
+							// Copy hash references and blob files directly to avoid
+							// the gzip round-trip during repartition.
+							newcol.init(uint32(mainCount))
 							for j, v := range values {
-								newcol.scan(uint32(j), v)
+								newcol.build(uint32(j), v)
 							}
-							newcol2 := newcol.proposeCompression(uint32(i))
-							if newcol2 == nil {
-								break
+							newcol.finish()
+							// Store in temporary map (NOT on shard — shard is live for dual-write)
+							built.columns[col.Name] = newcol
+							// Write to disk
+							if s.t.PersistencyMode != Memory {
+								f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
+								newcol.Serialize(f)
+								f.Close()
 							}
-							newcol = newcol2
-						}
-						if blob, ok := newcol.(*OverlayBlob); ok {
-							blob.schema = s.t.schema
-						}
-						// TODO: when source column is OverlayBlob, shuffle raw
-						// compressed blob data without decompressing+recompressing.
-						// Copy hash references and blob files directly to avoid
-						// the gzip round-trip during repartition.
-						newcol.init(uint32(mainCount))
-						for j, v := range values {
-							newcol.build(uint32(j), v)
-						}
-						newcol.finish()
-						// Store in temporary map (NOT on shard — shard is live for dual-write)
-						built.columns[col.Name] = newcol
-						// Write to disk
-						if s.t.PersistencyMode != Memory {
-							f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
-							newcol.Serialize(f)
-							f.Close()
 						}
 					}
 				}()
