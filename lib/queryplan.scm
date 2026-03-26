@@ -1143,19 +1143,50 @@ or generate runtime scan code (build_queryplan).
 										(define us_dom_je (if (equal? (count us_dom_je_parts) 0) true
 											(if (equal? (count us_dom_je_parts) 1) (car us_dom_je_parts)
 												(cons (quote and) us_dom_je_parts))))
-										/* set first inner table to LEFT JOIN with domain+inner condition as joinexpr */
-										(define _us_full_je (if (nil? us_inner_cond_prefixed) us_dom_je
-											(if (equal? us_dom_je true) us_inner_cond_prefixed
-												(list (quote and) us_dom_je us_inner_cond_prefixed))))
+										/* distribute inner condition parts per table joinexpr.
+										Domain equalities go on the first table. Each inner condition
+										part goes on the last-referenced table in join order. */
+										(define _us_inner_parts_list (if (nil? us_inner_cond_prefixed) '()
+											(match us_inner_cond_prefixed
+												(cons (symbol and) parts) parts
+												(cons (quote and) parts) parts
+												(list us_inner_cond_prefixed))))
+										/* helper: extract tblvar refs from expression */
+										(define _us_expr_refs (lambda (expr) (match expr
+											'((symbol get_column) tv _ _ _) (if (nil? tv) '() (list tv))
+											'((quote get_column) tv _ _ _) (if (nil? tv) '() (list tv))
+											(cons _ args) (reduce args (lambda (acc a) (merge acc (_us_expr_refs a))) '())
+											'())))
+										(define _us_alias_list (map us_prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
+										/* find the last alias (in join order) referenced by a condition part */
+										(define _us_last_alias (lambda (part) (begin
+											(define _refs (_us_expr_refs part))
+											/* walk alias list; remember last alias that appears in _refs */
+											(reduce _us_alias_list (lambda (best al)
+												(if (reduce _refs (lambda (found r) (or found (equal?? r al))) false)
+													al best)) nil))))
+										/* collect parts assigned to a given alias */
+										(define _us_parts_for (lambda (alias) (begin
+											(define _my (filter _us_inner_parts_list (lambda (p) (equal?? (_us_last_alias p) alias))))
+											(if (equal? (count _my) 0) nil
+												(if (equal? (count _my) 1) (car _my)
+													(cons (quote and) _my))))))
+										/* set joinexpr per inner table */
 										(if (not (nil? us_prefixed_tables))
 											(sq_cache "tables" (begin
 												(define _all_tbls (sq_cache "tables"))
-												(define _first_inner (car us_prefixed_tables))
-												(define _first_alias (match _first_inner '(a _ _ _ _) a ""))
+												(define _first_alias (match (car us_prefixed_tables) '(a _ _ _ _) a ""))
 												(map _all_tbls (lambda (td) (match td
-													'(a s t io je) (if (equal? a _first_alias)
-														(list a s t true _us_full_je)
-														td)
+													'(a s t io je) (if (not (reduce _us_alias_list (lambda (f al) (or f (equal?? al a))) false)) td
+														(begin
+															(define _my_cond (_us_parts_for a))
+															(if (equal? a _first_alias)
+																(list a s t true (if (nil? _my_cond) us_dom_je
+																	(if (equal? us_dom_je true) _my_cond
+																		(list (quote and) us_dom_je _my_cond))))
+																(list a s t io (if (nil? _my_cond) je
+																	(if (nil? je) _my_cond
+																		(list (quote and) je _my_cond)))))))
 													td))))))
 										/* substitution: reference the prefixed value column */
 										(define us_subst_raw (_us_prefix_ria us_value_expr))
