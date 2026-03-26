@@ -2117,19 +2117,35 @@ WHAT IT MUST NOT DO:
 				expr
 			)))
 
+			/* expand a star-source alias. If the alias is a pure derived-table rename,
+			inline its projection expressions directly instead of emitting get_column alias.field.
+			This keeps wrapper aliases like t out of the logical field plan. */
+			(define expand_star_alias (lambda (alias def) (begin
+				(define rename_fn (if (has_assoc? renamelist alias)
+					(renamelist alias)
+					(if (has_assoc? renamelist (string alias))
+						(renamelist (string alias))
+						nil)))
+				(if (nil? rename_fn)
+					(merge (map def (lambda (coldesc)
+						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
+					)))
+					(merge (extract_assoc rename_fn (lambda (field_name field_expr)
+						(list field_name field_expr)
+					)))
+				)
+			)))
 
 			/* expand *-columns */
 			(set fields (merge (extract_assoc fields (lambda (col expr) (match col
 				"*" (match expr
 					/* *.* */
-					'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas (lambda (alias def) (merge (map def (lambda (coldesc) /* all columns of each table */
-						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
-					)))
-					)))
+					'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas (lambda (alias def) (expand_star_alias alias def))))
 					/* tbl.* */
-					'((symbol get_column) tblvar ignorecase "*" _) (merge (extract_assoc schemas (lambda (alias def) (if ((if ignorecase equal?? equal?) alias tblvar) (merge (map def (lambda (coldesc) /* all columns of each table */
-						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
-					))) '())
+					'((symbol get_column) tblvar ignorecase "*" _) (merge (extract_assoc schemas (lambda (alias def)
+						(if ((if ignorecase equal?? equal?) alias tblvar)
+							(expand_star_alias alias def)
+							'())
 					)))
 				)
 				(list col (replace_find_column expr))
