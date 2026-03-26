@@ -1157,7 +1157,11 @@ WHAT IT MUST NOT DO:
 						preserves them through replace_columns_from_expr and allows
 						replace_column_alias to prefix them during derived-table flattening. */
 						(define wrap_unresolved_outer (lambda (e) (match e
-							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci))
+							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci)
+									/* only wrap as (outer) if the alias is actually in outer_schemas;
+									   if not in outer_schemas either, leave as-is for scan-context resolution
+									   (e.g. joinexpr refs to sibling tables like v.ID) */
+									(not (nil? (reduce_assoc outer_schemas (lambda (a k v) (or a (equal?? k alias_))) false))))
 								(list (quote outer) (symbol (concat alias_ "." col)))
 								e)
 							(cons sym args) (cons (wrap_unresolved_outer sym) (map args wrap_unresolved_outer))
@@ -1748,10 +1752,8 @@ WHAT IT MUST NOT DO:
 									/* reference to outer table -> keep as-is */
 									expr)
 								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym)))
-									/* resolve scalar inner_selects in joinexpr via build_scalar_subselect */
-									(if (equal?? (inner_select_kind sym) (quote inner_select))
-										(match args (cons subquery '()) (build_scalar_subselect subquery schemas2) expr)
-										expr)
+									expr /* leave inner_selects in joinexpr — they will be resolved at line ~2018
+									   after all table schemas are available (including sibling tables like v) */
 									(cons sym (map args transform_joinexpr)))
 								expr
 							)))

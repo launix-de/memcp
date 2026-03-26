@@ -2209,6 +2209,15 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				b.WriteString(", ")
 			}
 
+			// StorageComputeProxy: read only VALID cached values, skip computor
+			// for invalid rows (use nil instead). This avoids infinite recursion
+			// when the computor scans other tables during concurrent rebuild.
+			// The proxy is NOT ported — values are materialized into static storage.
+			// After rebuild, createcolumn will re-create the proxy if needed.
+			if oldProxy, ok := c.(*StorageComputeProxy); ok {
+				c = &safeProxyReader{proxy: oldProxy}
+			}
+
 			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
 			var i uint32
 			var reader ColumnReader
