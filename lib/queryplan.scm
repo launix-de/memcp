@@ -2507,6 +2507,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
 					(extract_all_get_columns (coalesceNil condition true))
+					(extract_all_get_columns (coalesceNil post_group_condition true))
+					(merge (map tables (lambda (td) (match td
+						'(_ _ _ _ je) (if (nil? je) '() (extract_all_get_columns je))
+						'()))))
 				))
 				/* filter out columns from partition-staged tables (they're not part of the prejoin) */
 				(define known_table_aliases (map prejoin_source_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
@@ -2541,7 +2545,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* build materialization scan: nested-loop join populating prejoin table */
 				(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
 					(match scan_tables
-						(cons '(tblvar schema tbl isOuter _) rest) (begin
+						(cons '(tblvar schema tbl isOuter joinexpr) rest) (begin
+							(define scan_condition (if (or (nil? joinexpr) (equal? joinexpr true)) scan_condition
+								(if (or (nil? scan_condition) (equal? scan_condition true)) joinexpr
+									(list (quote and) scan_condition joinexpr))))
 							/* columns needed from this table for materialization + condition */
 							(set cols (merge_unique (list
 								(extract_columns_for_tblvar tblvar scan_condition)
@@ -2602,12 +2609,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					schemas
 					replace_find_column
 					nil))
-				/* build per-source-table incremental trigger functions entirely in Scheme,
-				then register them via a thin Go wrapper */
+				/* build per-source-table incremental trigger functions.
+				Deduplicate by physical table to avoid duplicate triggers. */
+				(define seen_trigger_tables (newsession))
 				(define pj_trigger_registrations
-					(map tables (lambda (trigger_tbl)
+					(filter (map tables (lambda (trigger_tbl)
 						(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
 							(begin
+								(define trigger_table_key (concat src_schema "." src_tbl))
+								(if (seen_trigger_tables trigger_table_key) nil
+									(begin (seen_trigger_tables trigger_table_key true)
 								/* collect (pj_col base_col) pairs for this source table */
 								(define ti_col_pairs
 									(reduce prejoin_columns (lambda (acc mc)
@@ -2646,7 +2657,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(define update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list insert_fn 'OLD 'NEW)))))
 								/* emit the register call as an S-expression to be executed at query time */
 								(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
-									delete_fn insert_fn update_fn))))))
+									delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
