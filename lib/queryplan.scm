@@ -2533,9 +2533,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define pj_stage (make_group_stage pj_group pj_having pj_order stage_limit stage_offset nil nil))
 				(define pj_all_groups (cons pj_stage rest_groups))
 				/* recursive call with single prejoin table */
-				/* combine partition-staged table conditions with prejoin output */
+				/* combine partition-staged table conditions with prejoin output.
+				Only rewrite refs to prejoin-materialized tables; leave partition-staged
+				table refs unchanged (they're separate tables in the grouped_plan). */
+				(define _pj_ps_tblvar_list (map _pj_ps_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
+				(define _pj_selective_rewrite (lambda (expr) (match expr
+					'((symbol get_column) tblvar _ col _) (if (or (nil? tblvar) (has? _pj_ps_tblvar_list tblvar)) expr
+						(list (quote get_column) pjvar false (concat tblvar "." col) false))
+					'((quote get_column) tblvar _ col _) (if (or (nil? tblvar) (has? _pj_ps_tblvar_list tblvar)) expr
+						(list (quote get_column) pjvar false (concat tblvar "." col) false))
+					(cons sym args) (cons sym (map args _pj_selective_rewrite))
+					expr)))
 				(define _pj_gp_condition (if (equal? _pj_ps_condition true) nil
-					(pj_rewrite _pj_ps_condition)))
+					(_pj_selective_rewrite _pj_ps_condition)))
 				(define grouped_result (build_queryplan schema
 					(merge (list (list pjvar schema prejointbl false nil)) _pj_ps_tables)
 					pj_fields
