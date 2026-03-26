@@ -66,6 +66,30 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "LIMIT repeated query first run"
+    ttl_data: |
+      @prefix ol3r: <http://ordlim03r.org/> .
+      ol3r:a ol3r:v "1" .
+      ol3r:b ol3r:v "2" .
+      ol3r:c ol3r:v "3" .
+    sparql: |
+      @prefix ol3r: <http://ordlim03r.org/> .
+      SELECT ?s WHERE { ?s ol3r:v ?v } LIMIT 2
+    expect:
+      rows: 2
+
+  - name: "LIMIT repeated query second run"
+    ttl_data: |
+      @prefix ol3r: <http://ordlim03r.org/> .
+      ol3r:a ol3r:v "1" .
+      ol3r:b ol3r:v "2" .
+      ol3r:c ol3r:v "3" .
+    sparql: |
+      @prefix ol3r: <http://ordlim03r.org/> .
+      SELECT ?s WHERE { ?s ol3r:v ?v } LIMIT 2
+    expect:
+      rows: 2
+
   - name: "OFFSET"
     ttl_data: |
       @prefix ol4: <http://ordlim04.org/> .

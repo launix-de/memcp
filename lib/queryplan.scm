@@ -423,10 +423,19 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				(match (key_at i)
 					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
 					'())))))))
-			(define init_code (list 'begin
-				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
-				(list 'partitiontable schema keytable_name kt_partition_code)
-				(list 'touch_keytable schema keytable_name)))
+			/* Runtime/materialized row-list sources have no durable invalidation path for cached
+			keytable proxies. Recreate the keytable on every execution so repeated queries after
+			DML/rebuild do not observe stale aggregate state from an earlier run. */
+			(define init_code (if (string? tbl)
+				(list 'begin
+					(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
+					(list 'partitiontable schema keytable_name kt_partition_code)
+					(list 'touch_keytable schema keytable_name))
+				(list 'begin
+					(list 'droptable schema keytable_name true)
+					(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
+					(list 'partitiontable schema keytable_name kt_partition_code)
+					(list 'touch_keytable schema keytable_name))))
 			/* return (name init_code nil) — third element nil means no FK reuse */
 			(list keytable_name init_code nil)))
 )))
@@ -1158,10 +1167,10 @@ WHAT IT MUST NOT DO:
 						replace_column_alias to prefix them during derived-table flattening. */
 						(define wrap_unresolved_outer (lambda (e) (match e
 							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci)
-									/* only wrap as (outer) if the alias is actually in outer_schemas;
-									   if not in outer_schemas either, leave as-is for scan-context resolution
-									   (e.g. joinexpr refs to sibling tables like v.ID) */
-									(not (nil? (reduce_assoc outer_schemas (lambda (a k v) (or a (equal?? k alias_))) false))))
+								/* only wrap as (outer) if the alias is actually in outer_schemas;
+								if not in outer_schemas either, leave as-is for scan-context resolution
+								(e.g. joinexpr refs to sibling tables like v.ID) */
+								(not (nil? (reduce_assoc outer_schemas (lambda (a k v) (or a (equal?? k alias_))) false))))
 								(list (quote outer) (symbol (concat alias_ "." col)))
 								e)
 							(cons sym args) (cons (wrap_unresolved_outer sym) (map args wrap_unresolved_outer))
@@ -1671,8 +1680,9 @@ WHAT IT MUST NOT DO:
 								_ '()))
 							(if (or (nil? output_cols) (equal? output_cols '()))
 								(error "UNION ALL subquery must project at least one column"))
-							(define rows_sym (symbol (concat "__from_union_rows:" id)))
-							(define resultrow_sym (symbol (concat "__from_union_resultrow:" id)))
+							(define mat_tag (concat id ":" (fnv_hash (concat subquery))))
+							(define rows_sym (symbol (concat "__from_union_rows:" mat_tag)))
+							(define resultrow_sym (symbol (concat "__from_union_resultrow:" mat_tag)))
 							(define materialized_rows (list (quote begin)
 								(list (quote set) rows_sym (list (quote newsession)))
 								(list rows_sym "rows" '())
@@ -1686,7 +1696,7 @@ WHAT IT MUST NOT DO:
 								(list (quote set) (symbol "resultrow") resultrow_sym)
 								(list rows_sym "rows")
 							))
-							(define _mat_var (symbol (concat "__mat:" id)))
+							(define _mat_var (symbol (concat "__mat:" mat_tag)))
 							(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
 								(list (list (quote set) _mat_var materialized_rows))))
 							(list
@@ -1700,6 +1710,28 @@ WHAT IT MUST NOT DO:
 							/* propagate _init2 (e.g. window materialization code) from inner untangle_query */
 							(if (and (not (nil? _init2)) (not (equal? _init2 '())))
 								(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '()) _init2)))
+							(define prefix_outer_ref (lambda (outer_arg) (begin
+								(define s (string outer_arg))
+								(define parts (split s "."))
+								(if (> (count parts) 1)
+									(begin
+										(define tbl (car parts))
+										(define col (reduce (cdr parts) (lambda (acc p) (if (equal? acc "") p (concat acc "." p))) ""))
+										(if (not (nil? (schemas2 tbl)))
+											(symbol (concat id "\0" tbl "." col))
+											outer_arg))
+									outer_arg)
+							)))
+							/* opaque runtime scopes keep their local code untouched, but free outer refs
+							still need the derived-table alias prefix after wrapper inlining. */
+							(define retarget_opaque_outer_refs (lambda (expr) (match expr
+								(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+									(match args
+										'(outer_arg) (list (quote outer) (prefix_outer_ref outer_arg))
+										(cons (retarget_opaque_outer_refs sym) (map args retarget_opaque_outer_refs)))
+									(cons (retarget_opaque_outer_refs sym) (map args retarget_opaque_outer_refs)))
+								expr
+							)))
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -1729,16 +1761,13 @@ WHAT IT MUST NOT DO:
 									expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
 								'((symbol outer) outer_arg) (begin
 									/* prefix outer variable reference if it refers to a table in schemas2 */
-									(define s (string outer_arg))
-									(define parts (split s "."))
-									(match parts
-										(list tbl col) (if (not (nil? (schemas2 tbl)))
-											(list (quote outer) (symbol (concat id "\0" tbl "." col)))
-											(list (quote outer) outer_arg))
-										_ (list (quote outer) (replace_column_alias outer_arg))
-									)
+									(list (quote outer) (prefix_outer_ref outer_arg))
 								)
-								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
+								(cons sym args) /* function call */ (if (or (not (nil? (inner_select_kind sym))) (_is_opaque_scope_sym sym))
+									(if (_is_opaque_scope_sym sym)
+										(retarget_opaque_outer_refs expr)
+										expr) /* keep inner subselects intact; only retarget free outer refs in runtime scopes */
+									(cons sym (map args replace_column_alias)))
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs */
@@ -1753,7 +1782,7 @@ WHAT IT MUST NOT DO:
 									expr)
 								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym)))
 									expr /* leave inner_selects in joinexpr — they will be resolved at line ~2018
-									   after all table schemas are available (including sibling tables like v) */
+									after all table schemas are available (including sibling tables like v) */
 									(cons sym (map args transform_joinexpr)))
 								expr
 							)))
@@ -1777,6 +1806,25 @@ WHAT IT MUST NOT DO:
 							)
 							/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 							(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
+							/* Nested derived-table flattening must not descend into precomputed runtime blocks
+							from scalar subselects. The alias wrapper itself should still inline; only the
+							rewrite passes are blocked from rewriting inside those opaque scopes. */
+							(define expr_has_runtime_scope (lambda (expr) (match expr
+								(cons sym args) (if (or (_is_opaque_scope_sym sym) (_is_precomputed sym))
+									true
+									(reduce args (lambda (a b) (or a (expr_has_runtime_scope b))) false))
+								false
+							)))
+							(define subquery_has_runtime_scope (or
+								(reduce_assoc fields2 (lambda (acc k v) (or acc (expr_has_runtime_scope v))) false)
+								(if (nil? condition2) false (expr_has_runtime_scope condition2))
+								(reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
+									'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_runtime_scope inner_joinexpr))
+									_ false))) false)
+							))
+							(define runtime_scope_in_outer_join (reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
+								'(_ _ _ inner_isOuter inner_joinexpr) (and inner_isOuter (not (nil? inner_joinexpr)) (expr_has_runtime_scope inner_joinexpr))
+								_ false))) false))
 							/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 							/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
 							(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
@@ -1793,7 +1841,7 @@ WHAT IT MUST NOT DO:
 									)
 								) false)
 								false))
-							(define use_materialize (or subquery_has_window unsupported_groups))
+							(define use_materialize (or subquery_has_window unsupported_groups runtime_scope_in_outer_join))
 							/* Window-function LIMIT pushdown */
 							(define mat_limit nil)
 							(if subquery_has_window (begin
@@ -1812,14 +1860,15 @@ WHAT IT MUST NOT DO:
 							(if use_materialize
 								(begin
 									(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
-									(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
+									(define mat_tag (concat id ":" (fnv_hash (concat subquery))))
+									(define rows_sym (symbol (concat "__from_subquery_rows:" mat_tag)))
 									(define resultrow_sym (symbol (concat "__from_subquery_resultrow:" id)))
 									/* Materialization: collect rows from build_queryplan_term into a list.
 									Use a unique resultrow name (__mat_rr:id) so that replace_resultrow in
 									build_scalar_subselect does NOT accidentally replace the collector —
 									otherwise correlated scalar subselects break because the inner
 									query's resultrow gets rewritten to the promise handler. */
-									(define mat_rr_sym (symbol (concat "__mat_rr:" id)))
+									(define mat_rr_sym (symbol (concat "__mat_rr:" mat_tag)))
 									(define mat_inner_plan (build_queryplan_term subquery))
 									/* Replace resultrow → mat_rr_sym in the inner plan, so the inner
 									query feeds into our collector instead of the outer resultrow */
@@ -1827,14 +1876,14 @@ WHAT IT MUST NOT DO:
 										(cons sym args) (if (equal? sym (quote resultrow))
 											(cons mat_rr_sym (map args replace_rr_mat))
 											(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-												(list (quote symbol) (concat "__mat_rr:" id))
+												(list (quote symbol) (concat "__mat_rr:" mat_tag))
 												(cons (replace_rr_mat sym) (map args replace_rr_mat))))
 										expr)))
 									(define mat_inner_plan (replace_rr_mat mat_inner_plan))
 									(define materialized_rows (list (quote begin)
 										(list (quote set) rows_sym (list (quote newsession)))
 										(list rows_sym "rows" '())
-										(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
+										(define cnt_sym (symbol (concat "__from_subquery_cnt:" mat_tag)))
 										(if (nil? mat_limit)
 											/* no limit */
 											(list (quote set) mat_rr_sym
@@ -1860,7 +1909,7 @@ WHAT IT MUST NOT DO:
 									/* Store materialized rows in a variable via init code.
 									The variable (a symbol) is used as tbl — at runtime,
 									scan evaluates the symbol to get the row list. */
-									(define _mat_var (symbol (concat "__mat:" id)))
+									(define _mat_var (symbol (concat "__mat:" mat_tag)))
 									(unnest_acc "init" (merge (coalesceNil (unnest_acc "init") '())
 										(list (list (quote set) _mat_var materialized_rows))))
 									(list
@@ -1997,7 +2046,9 @@ WHAT IT MUST NOT DO:
 						(define canonical_col (if ci (coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
 						'((quote get_column) resolved_alias false canonical_col false))
 					expr) /* omit false false, otherwise freshly created columns wont be found */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+				(cons sym args) /* function call */ (if (_is_opaque_scope_sym sym)
+					expr
+					(cons sym (map args replace_find_column)))
 				expr
 			)))
 
@@ -2035,7 +2086,9 @@ WHAT IT MUST NOT DO:
 							'((quote get_column) alias_ ti canonical_col ci))
 						expr)
 					expr)
-				(cons sym args) (cons sym (map args canonicalize_for_rename))
+				(cons sym args) (if (_is_opaque_scope_sym sym)
+					expr
+					(cons sym (map args canonicalize_for_rename)))
 				expr
 			)))
 
@@ -2058,23 +2111,41 @@ WHAT IT MUST NOT DO:
 						(if (nil? rename_fn) expr (rename_fn col))
 					)
 				)
-				(cons sym args) /* function call */ (cons sym (map args replace_rename))
+				(cons sym args) /* function call */ (if (_is_opaque_scope_sym sym)
+					expr
+					(cons sym (map args replace_rename)))
 				expr
 			)))
 
+			/* expand a star-source alias. If the alias is a pure derived-table rename,
+			inline its projection expressions directly instead of emitting get_column alias.field.
+			This keeps wrapper aliases like t out of the logical field plan. */
+			(define expand_star_alias (lambda (alias def) (begin
+				(define rename_fn (if (has_assoc? renamelist alias)
+					(renamelist alias)
+					(if (has_assoc? renamelist (string alias))
+						(renamelist (string alias))
+						nil)))
+				(if (nil? rename_fn)
+					(merge (map def (lambda (coldesc)
+						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
+					)))
+					(merge (extract_assoc rename_fn (lambda (field_name field_expr)
+						(list field_name field_expr)
+					)))
+				)
+			)))
 
 			/* expand *-columns */
 			(set fields (merge (extract_assoc fields (lambda (col expr) (match col
 				"*" (match expr
 					/* *.* */
-					'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas (lambda (alias def) (merge (map def (lambda (coldesc) /* all columns of each table */
-						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
-					)))
-					)))
+					'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas (lambda (alias def) (expand_star_alias alias def))))
 					/* tbl.* */
-					'((symbol get_column) tblvar ignorecase "*" _) (merge (extract_assoc schemas (lambda (alias def) (if ((if ignorecase equal?? equal?) alias tblvar) (merge (map def (lambda (coldesc) /* all columns of each table */
-						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
-					))) '())
+					'((symbol get_column) tblvar ignorecase "*" _) (merge (extract_assoc schemas (lambda (alias def)
+						(if ((if ignorecase equal?? equal?) alias tblvar)
+							(expand_star_alias alias def)
+							'())
 					)))
 				)
 				(list col (replace_find_column expr))
