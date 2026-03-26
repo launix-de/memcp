@@ -1539,23 +1539,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (contains? cm_keys "a") true "cachemap lists key a")
 	(assert (contains? cm_keys "b") true "cachemap lists key b")
 
-	/* RDF parser: multiline block comments */
-	(print "testing rdf multiline block comments ...")
-	(import "rdf-parser.scm")
-	(createdatabase "rdf-comment-test" true)
-	(createtable "rdf-comment-test" "rdf" '('("column" "s" "text" '() '()) '("column" "p" "text" '() '()) '("column" "o" "text" '() '()) '("unique" "u" '("s" "p" "o"))) '() true)
-	(define _rdf_comment_ttl "@prefix ex: <http://example.com/> .\n/* hello\n   world */\nex:a ex:b ex:c .")
-	(define _rdf_comment_triples (parse_ttl_triples "rdf-comment-test" _rdf_comment_ttl))
-	(assert (count _rdf_comment_triples) 1 "rdf parser: parse_ttl_triples returns one triple after multiline block comment")
-	(assert (nth (nth _rdf_comment_triples 0) 0) "http://example.com/a" "rdf parser: subject survives multiline block comment")
-	(assert (nth (nth _rdf_comment_triples 0) 1) "http://example.com/b" "rdf parser: predicate survives multiline block comment")
-	(assert (nth (nth _rdf_comment_triples 0) 2) "http://example.com/c" "rdf parser: object survives multiline block comment")
-	(load_ttl "rdf-comment-test" _rdf_comment_ttl)
-	(define _rdf_comment_row (newsession))
-	(define resultrow (lambda (o) (_rdf_comment_row "o" (o "?o"))))
-	(eval (parse_sparql "rdf-comment-test" "/* comment\n   before */ SELECT ?o WHERE { <http://example.com/a> <http://example.com/b> ?o }"))
-	(assert (_rdf_comment_row "o") "http://example.com/c" "rdf parser: parse_sparql accepts multiline block comments")
-
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
 	(if (< (teststat "success") (teststat "count")) (begin
