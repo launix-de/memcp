@@ -1158,10 +1158,10 @@ WHAT IT MUST NOT DO:
 						replace_column_alias to prefix them during derived-table flattening. */
 						(define wrap_unresolved_outer (lambda (e) (match e
 							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci)
-									/* only wrap as (outer) if the alias is actually in outer_schemas;
-									   if not in outer_schemas either, leave as-is for scan-context resolution
-									   (e.g. joinexpr refs to sibling tables like v.ID) */
-									(not (nil? (reduce_assoc outer_schemas (lambda (a k v) (or a (equal?? k alias_))) false))))
+								/* only wrap as (outer) if the alias is actually in outer_schemas;
+								if not in outer_schemas either, leave as-is for scan-context resolution
+								(e.g. joinexpr refs to sibling tables like v.ID) */
+								(not (nil? (reduce_assoc outer_schemas (lambda (a k v) (or a (equal?? k alias_))) false))))
 								(list (quote outer) (symbol (concat alias_ "." col)))
 								e)
 							(cons sym args) (cons (wrap_unresolved_outer sym) (map args wrap_unresolved_outer))
@@ -1738,7 +1738,9 @@ WHAT IT MUST NOT DO:
 										_ (list (quote outer) (replace_column_alias outer_arg))
 									)
 								)
-								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
+								(cons sym args) /* function call */ (if (or (not (nil? (inner_select_kind sym))) (_is_opaque_scope_sym sym))
+									expr /* keep inner subselects and precomputed/runtime scopes intact */
+									(cons sym (map args replace_column_alias)))
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs */
@@ -1753,7 +1755,7 @@ WHAT IT MUST NOT DO:
 									expr)
 								(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym)))
 									expr /* leave inner_selects in joinexpr — they will be resolved at line ~2018
-									   after all table schemas are available (including sibling tables like v) */
+									after all table schemas are available (including sibling tables like v) */
 									(cons sym (map args transform_joinexpr)))
 								expr
 							)))
@@ -1777,6 +1779,21 @@ WHAT IT MUST NOT DO:
 							)
 							/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 							(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
+							/* Nested derived-table flattening must not descend into precomputed runtime blocks
+							from scalar subselects; materialize instead of flattening when such blocks are present. */
+							(define expr_has_runtime_scope (lambda (expr) (match expr
+								(cons sym args) (if (or (_is_opaque_scope_sym sym) (_is_precomputed sym))
+									true
+									(reduce args (lambda (a b) (or a (expr_has_runtime_scope b))) false))
+								false
+							)))
+							(define subquery_has_runtime_scope (or
+								(reduce_assoc fields2 (lambda (acc k v) (or acc (expr_has_runtime_scope v))) false)
+								(if (nil? condition2) false (expr_has_runtime_scope condition2))
+								(reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
+									'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_runtime_scope inner_joinexpr))
+									_ false))) false)
+							))
 							/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 							/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
 							(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
@@ -1793,7 +1810,7 @@ WHAT IT MUST NOT DO:
 									)
 								) false)
 								false))
-							(define use_materialize (or subquery_has_window unsupported_groups))
+							(define use_materialize (or subquery_has_window unsupported_groups subquery_has_runtime_scope))
 							/* Window-function LIMIT pushdown */
 							(define mat_limit nil)
 							(if subquery_has_window (begin
@@ -1997,7 +2014,9 @@ WHAT IT MUST NOT DO:
 						(define canonical_col (if ci (coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
 						'((quote get_column) resolved_alias false canonical_col false))
 					expr) /* omit false false, otherwise freshly created columns wont be found */
-				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+				(cons sym args) /* function call */ (if (_is_opaque_scope_sym sym)
+					expr
+					(cons sym (map args replace_find_column)))
 				expr
 			)))
 
@@ -2035,7 +2054,9 @@ WHAT IT MUST NOT DO:
 							'((quote get_column) alias_ ti canonical_col ci))
 						expr)
 					expr)
-				(cons sym args) (cons sym (map args canonicalize_for_rename))
+				(cons sym args) (if (_is_opaque_scope_sym sym)
+					expr
+					(cons sym (map args canonicalize_for_rename)))
 				expr
 			)))
 
@@ -2058,7 +2079,9 @@ WHAT IT MUST NOT DO:
 						(if (nil? rename_fn) expr (rename_fn col))
 					)
 				)
-				(cons sym args) /* function call */ (cons sym (map args replace_rename))
+				(cons sym args) /* function call */ (if (_is_opaque_scope_sym sym)
+					expr
+					(cons sym (map args replace_rename)))
 				expr
 			)))
 
