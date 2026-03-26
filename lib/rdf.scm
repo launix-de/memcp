@@ -43,7 +43,10 @@ this is how rdf works:
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
 			/*(print "RDF query: " query)*/
-			(define formula (cached_parse sparql_queryplan_cache (lambda (schema query policy) (parse_sparql schema query)) schema query (lambda (schema table write) true) (req "username")))
+			/* parse_sparql currently embeds LIMIT/OFFSET/DISTINCT row-state in the generated
+			plan, so caching the compiled formula can leak counters across repeated requests.
+			Until the wrapper state is moved fully to eval time, keep SPARQL parsing uncached. */
+			(define formula (parse_sparql schema query))
 			(define resultrow (res "jsonl"))
 
 			(eval formula)
@@ -99,5 +102,4 @@ this is how rdf works:
 		)
 	))
 ))
-
 
