@@ -421,6 +421,23 @@ func setupIO(wd string) {
 	})
 
 	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "path",
+		Desc: "Joins path segments using the OS path separator and cleans the result",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			parts := make([]string, len(a))
+			for i, arg := range a {
+				parts[i] = scm.String(arg)
+			}
+			return scm.NewString(filepath.Join(parts...))
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "segments", ParamDesc: "path segments to join", Variadic: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "string"},
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "args",
 		Desc: "Returns command line arguments",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
