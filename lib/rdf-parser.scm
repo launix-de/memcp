@@ -106,7 +106,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define order (parser (? (atom "ORDER" true) (atom "BY" true) (define ordercols (+ (or (parser '((define dir (or (atom "DESC" true) (atom "ASC" true))) "(" (define expr rdf_expression) ")") '(expr dir)) (parser (define expr rdf_expression) '(expr "ASC"))) ","))) ordercols))
 	(? (atom "LIMIT" true) (define limit rdf_number))
 	(? (atom "OFFSET" true) (define offset rdf_number))
-) '("select" (merge cols) "where" (merge (coalesce conditions '('()))) "order" order "limit" limit "offset" offset "distinct" distinct) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+) '("select" (merge cols) "where" (merge (coalesce conditions '('()))) "order" order "limit" limit "offset" offset "distinct" distinct) "^(?:(?s:/\\*.*?\\*/)|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define ttl_header (parser '(
 	(define definitions (*
@@ -116,7 +116,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		)
 	))
 	(define rest rest)
-) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+) '("prefixes" (merge definitions) "rest" rest) "^(?:(?s:/\\*.*?\\*/)|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define rdf_replace_ctx (lambda (expr ctx) (match expr
 	'('get_var sym) (coalesce (ctx sym) (error "SPARQL error: variable " sym " is used in SELECT but not bound in WHERE clause"))
@@ -242,7 +242,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 			)
 			(define rest rest)
-		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+		) '("facts" facts "rest" rest) "^(?:(?s:/\\*.*?\\*/)|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 		(set _pt (newsession))
 		(_pt "triples" '())
 		(define process_fact (lambda (rest) (match (ttl_fact rest)
@@ -290,7 +290,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 			)
 			(define rest rest)
-		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+		) '("facts" facts "rest" rest) "^(?:(?s:/\\*.*?\\*/)|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 		(set load (lambda (facts) (begin
 			/* resolve blank nodes to UUIDs and insert */
 			(insert schema "rdf" '("s" "p" "o") (map facts (lambda (triple) (list (resolve_blank (car triple)) (resolve_blank (car (cdr triple))) (resolve_blank (car (cdr (cdr triple))))))) '() (lambda () true))
