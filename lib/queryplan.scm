@@ -2469,15 +2469,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */
 				(if is_dedup (error "DISTINCT on joined tables not yet supported"))
-				/* exclude partition-staged tables from prejoin (same as single-table path) */
-				(define _pj_tables (filter tables (lambda (t) (match t '(tv _ _ _ _) (not (has? _grp_ps_aliases tv)) true))))
-				(define _pj_ps_tables (filter tables (lambda (t) (match t '(tv _ _ _ _) (has? _grp_ps_aliases tv) false))))
+				/* ALL tables go into the prejoin — the GROUP BY needs all columns
+				materialized in one table. Partition-staged _unn_ tables are included
+				so their columns are available as pjvar.alias.col after rewrite. */
+				(define _pj_tables tables)
+				(define _pj_ps_tables '())
 				/* resolve condition and fields */
 				(set condition (replace_find_column (coalesceNil condition true)))
-				/* split condition: partition-staged table refs go to grouped_plan */
-				(define _pj_cond_split (split_condition condition _pj_ps_tables))
-				(define _pj_ps_condition (match _pj_cond_split '(_ later) later))
-				(set condition (match _pj_cond_split '(now _) now))
+				(define _pj_ps_condition true)
 				/* 2-phase: separate aggregate-containing parts from materialize condition.
 				Aggregates belong in the grouped_plan (evaluated after GROUP BY keytable),
 				not in the materialize_plan (which just fills the prejoin table). */
@@ -2500,12 +2499,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(if (equal? 1 (count _pj_agg_parts)) (car _pj_agg_parts) (cons (quote and) _pj_agg_parts))
 						(cons (quote and) (cons _pj_ps_condition _pj_agg_parts)))))
 				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
-				/* extract all get_column refs from group, fields, having, order */
+				/* extract all get_column refs from group, fields, having, order, AND condition
+				(condition may reference _unn_ tables whose columns must be in the prejoin) */
 				(define mat_cols_raw (merge
 					(merge (map stage_group extract_all_get_columns))
 					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
 					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
+					(extract_all_get_columns (coalesceNil condition true))
 				))
 				/* filter out columns from partition-staged tables (they're not part of the prejoin) */
 				(define _pj_tblvar_list (map _pj_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
@@ -2584,25 +2585,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* rebuild group stage for recursive call */
 				(define pj_stage (make_group_stage pj_group pj_having pj_order stage_limit stage_offset nil nil))
 				(define pj_all_groups (cons pj_stage rest_groups))
-				/* recursive call with single prejoin table */
-				/* combine partition-staged table conditions with prejoin output.
-				Only rewrite refs to prejoin-materialized tables; leave partition-staged
-				table refs unchanged (they're separate tables in the grouped_plan). */
-				(define _pj_ps_tblvar_list (map _pj_ps_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
-				(define _pj_selective_rewrite (lambda (expr) (match expr
-					'((symbol get_column) tblvar _ col _) (if (or (nil? tblvar) (has? _pj_ps_tblvar_list tblvar)) expr
-						(list (quote get_column) pjvar false (concat tblvar "." col) false))
-					'((quote get_column) tblvar _ col _) (if (or (nil? tblvar) (has? _pj_ps_tblvar_list tblvar)) expr
-						(list (quote get_column) pjvar false (concat tblvar "." col) false))
-					(cons sym args) (cons sym (map args _pj_selective_rewrite))
-					expr)))
+				/* recursive call with single prejoin table.
+				All tables are in the prejoin — rewrite aggregate condition to prejoin refs.
+				No partition-staged tables remain outside the prejoin. */
 				(define _pj_gp_condition (if (equal? _pj_ps_condition true) nil
-					(_pj_selective_rewrite _pj_ps_condition)))
+					(pj_rewrite _pj_ps_condition)))
+				/* drop partition stages covered by the prejoin (all tables materialized) */
+				(define _pj_remaining_pstages (filter partition_stages (lambda (ps)
+					(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
+						(or acc (has? _pj_tblvar_list a))) false)))))
 				(define grouped_result (build_queryplan schema
-					(merge (list (list pjvar schema prejointbl false nil)) _pj_ps_tables)
+					(list (list pjvar schema prejointbl false nil))
 					pj_fields
 					_pj_gp_condition
-					(merge pj_all_groups partition_stages)
+					(merge pj_all_groups _pj_remaining_pstages)
 					schemas
 					replace_find_column
 					nil))
