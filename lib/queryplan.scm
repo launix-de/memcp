@@ -2292,6 +2292,34 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	/* Case 10: window functions in WHERE clause */
 	(define window_in_condition (not (equal? (extract_window_funcs (coalesceNil condition true)) '())))
 	(if window_in_condition (error "window functions not allowed in WHERE clause"))
+	(define _flatten_and_terms (lambda (expr) (match expr
+		(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
+			(merge (map parts _flatten_and_terms))
+			(if (or (nil? expr) (equal? expr true)) '() (list expr)))
+		_ (if (or (nil? expr) (equal? expr true)) '() (list expr))
+	)))
+	(define _combine_and_terms (lambda (parts) (begin
+		(define _parts (filter parts (lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+		(if (equal? _parts '()) true
+			(if (equal? 1 (count _parts)) (car _parts)
+				(cons (quote and) _parts)))
+	)))
+	(define _split_outer_join_pushdown (lambda (isOuter joinexpr now_condition later_condition) (begin
+		(if (not isOuter)
+			(list now_condition later_condition)
+			(begin
+				(define _join_terms (_flatten_and_terms joinexpr))
+				(define _now_terms (_flatten_and_terms now_condition))
+				(define _later_terms (_flatten_and_terms later_condition))
+				(define _is_join_term (lambda (term) (reduce _join_terms (lambda (acc jt)
+					(or acc (equal? term jt))) false)))
+				(define _pushed_terms (if (equal? _join_terms '()) '()
+					(filter _now_terms _is_join_term)))
+				(define _deferred_terms (if (equal? _join_terms '()) _now_terms
+					(filter _now_terms (lambda (term) (not (_is_join_term term))))))
+				(list
+					(_combine_and_terms _pushed_terms)
+					(_combine_and_terms (merge _later_terms _deferred_terms))))))))
 
 	/* window functions with GROUP BY: strip window expressions to inner
 	aggregates so the normal GROUP BY path processes them. Save original
@@ -3221,7 +3249,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
 					(define build_scan (lambda (tables condition is_first)
 						(match tables
-							(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+							(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
 								(set cols (merge_unique
 									(list
 										(merge_unique
@@ -3238,7 +3266,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										)
 									)
 								))
-								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
+								(match (split_condition (coalesceNil condition true) tables) '(raw_now_condition raw_later_condition) (begin
+									(define _split_cond (_split_outer_join_pushdown isOuter (replace_find_column (coalesceNil joinexpr true)) raw_now_condition raw_later_condition))
+									(define now_condition (nth _split_cond 0))
+									(define later_condition (nth _split_cond 1))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* check partition_stages for this table (non-first tables may have per-table partition limits) */
 									(define _ps_ord (if is_first nil
@@ -3311,7 +3342,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* TODO: match tbl to inner query vs string */
 						(define build_scan (lambda (tables condition)
 							(match tables
-								(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+								(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
 									/* check if this table is the UPDATE target */
 									(define is_update_target (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
 									/* also extract cols needed for SET expressions in update_target */
@@ -3341,7 +3372,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
-									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
+									(match (split_condition (coalesceNil condition true) tables) '(raw_now_condition raw_later_condition) (begin
+										(define _split_cond (_split_outer_join_pushdown isOuter (replace_find_column (coalesceNil joinexpr true)) raw_now_condition raw_later_condition))
+										(define now_condition (nth _split_cond 0))
+										(define later_condition (nth _split_cond 1))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 										/* optimize: skip .(1) DUAL scan when no columns needed (1 row, no data) */
 										(if (and (equal? tbl ".(1)") (equal? cols (list)) (equal? filtercols (list)))
