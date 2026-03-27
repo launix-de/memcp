@@ -190,6 +190,17 @@ defines the physical prejoin column names. */
 	)
 ))
 
+/* session-sensitive COUNT/EXISTS stages must be classified before the physical
+planner starts splitting aggregate conditions apart. */
+(define expr_uses_session_state (lambda (expr)
+	(match expr
+		(cons (symbol session) _) true
+		(cons '(quote session) _) true
+		(cons sym args) (reduce args (lambda (acc arg) (or acc (expr_uses_session_state arg))) false)
+		false
+	)
+))
+
 /* returns a list of all window function nodes (fn args over) in this expr */
 (define extract_window_funcs (lambda (expr)
 	(match expr
@@ -414,18 +425,18 @@ to avoid matching outer tables which would break scope resolution. */
 	(define soff (stage_offset_val stage))
 	(define spa (stage_partition_aliases stage))
 	(if (stage_is_dedup stage)
-		(make_dedup_stage (map sg canon) spa)
+		(stage_preserve_cache_meta stage (make_dedup_stage (map sg canon) spa))
 		(if (and (not (nil? spa)) (or (nil? sg) (equal? sg '())))
 			/* partition stage (aliases but no group): preserve partition-aliases and limit-partition-cols */
-			(make_partition_stage spa
+			(stage_preserve_cache_meta stage (make_partition_stage spa
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage))
+				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
 			/* group stage (possibly scoped with aliases) */
-			(make_group_stage
+			(stage_preserve_cache_meta stage (make_group_stage
 				(map sg canon)
 				(canon sh)
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-				sl soff spa (stage_init_code stage))))
+				sl soff spa (stage_init_code stage)))))
 )))
 
 (import "sql-metadata.scm")
@@ -520,12 +531,44 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		_ nil
 	) acc)
 ) nil)))
+(define stage_cache_policy (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote cache-policy) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_cache_query (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote cache-query) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
 (define stage_is_dedup (lambda (stage) (reduce stage (lambda (acc item)
 	(if acc acc (match item
 		'((quote dedup) true) true
 		_ false
 	))
 ) false)))
+(define stage_with_cache_policy (lambda (stage policy)
+	(if (nil? policy) stage
+		(cons (list (quote cache-policy) policy)
+			(filter stage (lambda (item) (match item
+				(cons (quote cache-policy) _) false
+				true))))))
+)
+(define stage_with_cache_query (lambda (stage query)
+	(if (nil? query) stage
+		(cons (list (quote cache-query) query)
+			(filter stage (lambda (item) (match item
+				(cons (quote cache-query) _) false
+				true))))))
+)
+(define stage_preserve_cache_meta (lambda (old_stage new_stage)
+	(stage_with_cache_query
+		(stage_with_cache_policy new_stage (stage_cache_policy old_stage))
+		(stage_cache_query old_stage)
+	)
+))
 
 /* query term helpers */
 (define query_union_all_parts (lambda (query) (match query
@@ -1382,14 +1425,20 @@ or generate runtime scan code (build_queryplan).
 												(define us_orig_limit_a (if (and us_has_grp us_has_stages) (stage_limit_val (car _us_own_stages)) nil))
 												(define us_orig_offset_a (if (and us_has_grp us_has_stages) (stage_offset_val (car _us_own_stages)) nil))
 												(define us_new_order (map us_orig_order_a (lambda (oi) (match oi '(col dir) (list (_us_prefix_ria col) dir) oi))))
-												(define us_group_stage (make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_inner_aliases nil))
+												(define us_group_stage
+													(stage_with_cache_query
+														(stage_with_cache_policy
+															(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_inner_aliases nil)
+															(count_subquery_cache_policy subquery))
+														(if (nil? (count_subquery_cache_policy subquery)) nil subquery)))
 												/* propagate inner scoped stages with prefix */
 												(define _us_prefixed_inner_stages (map _us_inner_stages (lambda (s) (begin
 													(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_prefix_ria))
 													(define _psh (if (nil? (stage_having_expr s)) nil (_us_prefix_ria (stage_having_expr s))))
 													(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_prefix_ria c) d) o))))
 													(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
-													(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s))))))
+													(stage_preserve_cache_meta s
+														(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s)))))))
 												/* register prefixed tables */
 												(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
 												/* register scoped GROUP stage + propagated inner stages */
@@ -1513,7 +1562,8 @@ or generate runtime scan code (build_queryplan).
 																	(define _psh (if (nil? (stage_having_expr s)) nil (_us_ria (stage_having_expr s))))
 																	(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_ria c) d) o))))
 																	(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
-																	(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s)))))
+																	(stage_preserve_cache_meta s
+																		(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s))))))
 																(coalesceNil (sq_cache "groups") '()))))
 														/* direct table entry with join condition (like non-agg non-LIMIT path) */
 														(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
@@ -1579,6 +1629,17 @@ or generate runtime scan code (build_queryplan).
 		'(quote not) true
 		_ false
 	)))
+	(define count_subquery_cache_policy (lambda (query)
+		(match query
+			'(s t f c g h o l off) (begin
+				(define only_count (match f
+					'("__cnt" ((quote aggregate) 1 op 0)) (equal?? op (quote +))
+					'("__cnt" ((symbol aggregate) 1 op 0)) (equal?? op (quote +))
+					false))
+				(if (and only_count (equal? g '(1)) (expr_uses_session_state query))
+					(quote uncached-count)
+					nil))
+			nil)))
 	/* _unnest_count_subselect: shared helper for IN/EXISTS/NOT IN/NOT EXISTS rewrite.
 	Rewrites semi-joins (EXISTS/IN) and anti-joins (NOT EXISTS/NOT IN) as COUNT(*)
 	aggregates instead of direct semi/anti-join operators. This is intentional:
@@ -2665,14 +2726,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					first resolve nil -> tblvar via replace_find_column, then map tblvar -> grouptbl */
 					(define _dedup_resolve (lambda (e) (replace_col_for_dedup (replace_find_column e))))
 					(define transformed_rest_groups (map rest_groups (lambda (s)
-						(make_group_stage
+						(stage_preserve_cache_meta s (make_group_stage
 							(map (stage_group_cols s) _dedup_resolve)
 							(_dedup_resolve (stage_having_expr s))
 							(map (coalesce (stage_order_list s) '()) (lambda (o) (match o '(col dir) (list (_dedup_resolve col) dir))))
 							(stage_limit_val s)
 							(stage_offset_val s)
 							(stage_partition_aliases s)
-							(stage_init_code s))
+							(stage_init_code s)))
 					)))
 					(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
 						(map_assoc fields (lambda (k v) (_dedup_resolve v)))
