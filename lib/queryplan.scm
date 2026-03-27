@@ -1998,6 +1998,11 @@ or generate runtime scan code (build_queryplan).
 
 	/* pass full schema chain (current + ancestors) so nested subselects can resolve grandparent refs */
 	(define _ris_schemas (merge schemas outer_schemas_chain))
+	(set tables (map tables (lambda (td) (match td
+		'(tv tschema ttbl toisOuter tje)
+		(list tv tschema ttbl toisOuter
+			(if (nil? tje) nil (replace_inner_selects tje _ris_schemas)))
+		td))))
 	(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v _ris_schemas))))
 	(set condition (replace_inner_selects condition _ris_schemas))
 	(set group (map group (lambda (g) (replace_inner_selects g _ris_schemas))))
