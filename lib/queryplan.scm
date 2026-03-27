@@ -1593,7 +1593,11 @@ or generate runtime scan code (build_queryplan).
 	   stream instead of a reusable keytable cache.
 	2. Second iteration: enable memoizing caches for predicates that depend on a
 	   stable session key (for example fixed user-id). The cache key must then
-	   include both the logical domain D and the memoized session value.
+	   include both the logical domain D and the memoized session value, i.e.
+	   semantically the cache lives on D x SessionKey rather than on D alone.
+	   If those entries are managed independently, cache eviction may also need
+	   row-wise cleanup hooks so the cache manager can register a domain plus
+	   memory budget together with a callback/DELETE plan for affected rows only.
 	3. Third iteration: add cache-aware iterative rescans for monotone/session
 	   window predicates such as date <= @fop_time. Existing cached prefixes stay
 	   reusable and build_queryplan only schedules an incremental catch-up scan for
