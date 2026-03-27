@@ -379,6 +379,30 @@ These columns must still be mapped by the current scan so nested join filters ca
 	(symbol newpromise) true '(quote newpromise) true 'newpromise true
 	(symbol newsession) true '(quote newsession) true 'newsession true
 	_ false)))
+/* extract runtime-sensitive subexpressions that do not depend on table rows.
+Those terms must affect cache identity (temp column names) even if the
+relational key/domain stays unchanged. */
+(define extract_runtime_cache_terms (lambda (expr) (match expr
+	(cons sym args) (if (_is_opaque_scope_sym sym)
+		'()
+		(if (and (expr_uses_session_state expr) (equal? (extract_tblvars expr) '()))
+			(list expr)
+			(merge_unique (map args extract_runtime_cache_terms))))
+	'()
+)))
+/* runtime_cache_suffix_from_exprs: derive a stable, value-sensitive appendix for
+temp column names from session-/context-dependent terms. The suffix is computed
+at plan-build time, so repeated queries with the same runtime values reuse the
+same cache column while different session values get separate temp columns. */
+(define runtime_cache_suffix_from_exprs (lambda (exprs) (begin
+	(define terms (merge_unique (map exprs extract_runtime_cache_terms)))
+	(if (equal? terms '())
+		""
+		(concat "|rt:"
+			(canonical_expr_name
+				(map terms (lambda (term) (list term (eval term))))
+				'(list) '(list) '(list))))
+)))
 /* canonicalize_columns resolves ti/ci flags to canonical casing.
 all_schemas includes outer schemas (for qualified outer refs like src.ID).
 Unqualified refs are only resolved against local tables (non-prefixed aliases)
@@ -666,6 +690,10 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 	(define expr_name (lambda (expr)
 		(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar expr)) '(list) '(list) canon_alias_map)))
 	(set condition (replace_find_column (coalesceNil condition true)))
+	(define window_runtime_suffix (runtime_cache_suffix_from_exprs (merge
+		(list condition)
+		partition_exprs
+		(merge (map wf_resolved (lambda (wf) (match wf '(fn args _) args '())))))))
 	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
 	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
 		(define is_fk_reuse (not (nil? fk_pk_col)))
@@ -686,7 +714,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					'('lambda '('acc 'sharddict) '('insert schema grouptbl (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
 					isOuter))))
 		/* aggregate descriptors */
-		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))
+		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
 		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 			/* args already resolved via replace_find_column in wf_resolved */
@@ -746,12 +774,12 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table
 is_dedup=true: leave aggregates intact (for dedup stages)
 is_dedup=false: replace aggregates with column fetches (for normal group stages) */
-(define make_col_replacer (lambda (grouptbl condition is_dedup expr_name src_tblvar) (begin
+(define make_col_replacer (lambda (grouptbl condition is_dedup expr_name src_tblvar agg_col_name) (begin
 	(define colname (lambda (expr) (if (nil? expr_name) (concat expr) (expr_name expr))))
 	(define replacer (lambda (expr) (match expr
 		(cons (symbol aggregate) rest) (if is_dedup
 			expr
-			'('get_column grouptbl false (concat (colname rest) "|" (colname condition)) false))
+			'('get_column grouptbl false (agg_col_name rest) false))
 		'((symbol get_column) (eval src_tblvar) ti col ci) '('get_column grouptbl ti (colname '('get_column src_tblvar ti col ci)) ci)
 		/* rewrite (outer tblvar.col) inside scalar subselects to reference keytable column */
 		'('outer sym) (begin
@@ -1184,6 +1212,17 @@ or generate runtime scan code (build_queryplan).
 				)
 			)
 		)
+	)))
+	(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
+		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
+			(list (quote coalesceNil)
+				(build_scalar_subselect
+					(list schema2 tables2
+						(list "__exists" true)
+						condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
+					outer_schemas)
+				false)
+		false
 	)))
 
 	/* unnest_subselect: core Neumann decorrelation for a single subquery.
@@ -1748,7 +1787,10 @@ or generate runtime scan code (build_queryplan).
 								(if (equal?? inner_kind (quote inner_select_exists))
 									(match inner_args
 										(cons subquery '())
-										(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?)) expr)
+										(if (expr_uses_session_state subquery)
+											(list (quote not) (build_exists_subselect subquery outer_schemas))
+											(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?))
+												(list (quote not) (build_exists_subselect subquery outer_schemas))))
 										_ nil)
 									nil)))
 						_ nil)
@@ -1765,7 +1807,10 @@ or generate runtime scan code (build_queryplan).
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_exists) (match args
 						(cons subquery '())
-						(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >)) expr)
+						(if (expr_uses_session_state subquery)
+							(build_exists_subselect subquery outer_schemas)
+							(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >))
+								(build_exists_subselect subquery outer_schemas)))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 				not_expr))
@@ -2595,17 +2640,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define expr_name (lambda (expr)
 					(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar expr)) '(list) '(list) canon_alias_map)))
 				(define materialized_source (and (string? tbl) (>= (strlen tbl) 1) (equal? (substr tbl 0 1) ".")))
+				(define agg_col_name (lambda (ag)
+					(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
-						(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
+						(define target_col (agg_col_name agg_args))
 						(define materialized_cols (materialized_source_schema schema tbl tblvar schemas))
 						(define match_col (reduce materialized_cols (lambda (found coldef)
 							(if (not (nil? found)) found
 								(begin
 									(define field_name (coldef "Field"))
-									(if (and (>= (strlen field_name) (+ (strlen agg_name) 1))
-											(equal? (substr field_name 0 (strlen agg_name)) agg_name)
-											(equal? (substr field_name (strlen agg_name) 1) "|"))
+									(if (equal? field_name target_col)
 										field_name
 										nil))))
 						nil))
@@ -2614,6 +2659,34 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list (quote get_column) tblvar false match_col false)))
 						(cons sym args) (cons sym (map args rewrite_materialized_source_aggs_single))
 						expr)))
+				(define lower_visible_materialized_aggs_single (lambda (expr) (match expr
+					(cons (symbol aggregate) agg_args) (begin
+						(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
+						(define match_col (reduce tables (lambda (acc td)
+							(if (not (nil? acc))
+								acc
+								(match td '(tv tschema ttbl _ _)
+									(begin
+										(define source_cols (materialized_source_schema tschema ttbl tv schemas))
+										(reduce source_cols (lambda (found coldef)
+											(if (not (nil? found)) found
+												(begin
+													(define field_name (coldef "Field"))
+													(if (and (>= (strlen field_name) (+ (strlen agg_name) 1))
+															(equal? (substr field_name 0 (strlen agg_name)) agg_name)
+															(equal? (substr field_name (strlen agg_name) 1) "|"))
+														(list tv field_name)
+														nil))))
+										nil)))))
+						nil))
+						(if (nil? match_col)
+							(match agg_args
+								'(agg_expr agg_reduce agg_neutral)
+								(list (quote aggregate) (lower_visible_materialized_aggs_single agg_expr) agg_reduce agg_neutral)
+								_ expr)
+							(list (quote get_column) (car match_col) false (cadr match_col) false)))
+					(cons sym args) (cons sym (map args lower_visible_materialized_aggs_single))
+					expr)))
 
 				(define kt_result (make_keytable schema tbl stage_group tblvar (if is_dedup condition nil)))
 				(set grouptbl (car kt_result))
@@ -2624,6 +2697,42 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* preparation */
 				(define tblvar_cols (merge_unique (map stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
 				(set condition (replace_find_column (coalesceNil condition true)))
+				(set condition (lower_visible_materialized_aggs_single condition))
+				(define _flatten_and_parts (lambda (expr) (match expr
+					(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
+						(merge (map parts _flatten_and_parts))
+						(list expr))
+					(list expr))))
+				/* Runtime-sensitive row predicates that only depend on the current
+				source row plus session/context values must be materialized before the
+				group stage. Otherwise the later keytable aggregation loses the row
+				identity (e.g. a.user_id) they need and the predicate collapses away. */
+				(define runtime_local_col_name (lambda (expr)
+					(concat ".runtime_pred|" (expr_name expr) (runtime_cache_suffix_from_exprs (list expr)))))
+				(define _runtime_local_part (lambda (part)
+					(and (expr_uses_session_state part) (equal? (has_only_tblvar_refs part tblvar) true))))
+				(define _condition_parts0 (_flatten_and_parts condition))
+				(define _runtime_local_parts (filter _condition_parts0 _runtime_local_part))
+				(define _runtime_local_setup_expr (lambda (part) (begin
+					(define col_name (runtime_local_col_name part))
+					(define cols (extract_columns_for_tblvar tblvar part))
+					(list (quote createcolumn) schema tbl col_name "any" '(list) '(list "temp" true)
+						(cons (quote list) cols)
+						(list (quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col))))
+							(replace_columns_from_expr part))))))
+				(define _rewrite_runtime_local_part (lambda (part)
+					(if (_runtime_local_part part)
+						(list (quote get_column) tblvar false (runtime_local_col_name part) false)
+						part)))
+				(set condition (if (equal? _condition_parts0 '()) true
+					(begin
+						(define _rewritten_parts (map _condition_parts0 _rewrite_runtime_local_part))
+						(if (equal? 1 (count _rewritten_parts)) (car _rewritten_parts)
+							(cons (quote and) _rewritten_parts)))))
+				(define runtime_local_compute_plan (if (equal? _runtime_local_parts '()) nil
+					(list (quote time)
+						(cons (quote parallel) (map _runtime_local_parts _runtime_local_setup_expr))
+						"runtime-local")))
 				/* 2-phase condition split:
 				Phase 1: separate aggregate-containing AND-parts from non-aggregate parts.
 				Aggregates cannot be evaluated as row filters — they need the keytable.
@@ -2633,11 +2742,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(cons (symbol aggregate) _) true
 					(cons sym args) (reduce args (lambda (a b) (or a (_has_agg_expr b))) false)
 					false)))
-				(define _flatten_and_parts (lambda (expr) (match expr
-					(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
-						(merge (map parts _flatten_and_parts))
-						(list expr))
-					(list expr))))
 				(define _cond_parts (_flatten_and_parts condition))
 				(define _cond_agg_parts (filter _cond_parts _has_agg_expr))
 				(define _cond_non_agg (filter _cond_parts (lambda (p) (not (_has_agg_expr p)))))
@@ -2718,7 +2822,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 				(if is_dedup (begin
 					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
-					(define replace_col_for_dedup (make_col_replacer grouptbl condition true expr_name tblvar))
+					(define replace_col_for_dedup (make_col_replacer grouptbl condition true expr_name tblvar agg_col_name))
 					(define dedup_schema_def (map stage_group (lambda (expr)
 						(list "Field" (if is_fk_reuse fk_pk_col (expr_name expr)) "Type" "any"))))
 					(planned_materialized_fields grouptbl dedup_schema_def)
@@ -2742,13 +2846,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						schemas
 						replace_find_column
 						nil))
-					(list 'begin keytable_init (make_collect true) grouped_plan)
+					(cons 'begin (merge
+						(if (nil? keytable_init) '() (list keytable_init))
+						(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
+						(list (make_collect true))
+						(list grouped_plan)))
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
-						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar))
-						(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))
+						(define agg_col_name (lambda (ag)
+							(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))
+						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
 							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
@@ -2933,63 +3042,68 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
 
-						(list 'begin keytable_init cleanup_plan
-							(if is_fk_reuse nil
+						(cons 'begin (merge
+							(if (nil? keytable_init) '() (list keytable_init))
+							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
+							(if (nil? cleanup_plan) '() (list cleanup_plan))
+							(if is_fk_reuse '()
 								(if (not (nil? _stage_scope))
 									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
-									(make_collect false)
-									(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
+									(list (make_collect false))
+									(list (list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
 										(make_collect false)
-										nil)))
-							invalidation_plan compute_plan
-							/* window+GROUP BY injection: after keytable is computed,
-							scan it to fill promises with global totals, then wrap
-							grouped_plan's resultrow to inject promise values. */
-							(if (nil? (_wg_store "fields")) grouped_plan
-								(begin
-									(define _wg_ctr (newsession)) (_wg_ctr "n" 0)
-									(define _wg_nn (lambda () (begin (_wg_ctr "n" (+ (_wg_ctr "n") 1)) (concat "__wgp_" (_wg_ctr "n")))))
-									/* build promise info and output fields with promise refs */
-									(define _wg_pl (newsession)) (_wg_pl "l" '())
-									(define _wg_out_fields (map_assoc (_wg_store "fields") (lambda (k v)
-										(if (and (list? v) (> (count v) 0) (equal?? (car v) (quote window_func)))
+										nil))))
+							(if (nil? invalidation_plan) '() (list invalidation_plan))
+							(list compute_plan)
+							(list
+								/* window+GROUP BY injection: after keytable is computed,
+								scan it to fill promises with global totals, then wrap
+								grouped_plan's resultrow to inject promise values. */
+								(if (nil? (_wg_store "fields")) grouped_plan
+									(begin
+										(define _wg_ctr (newsession)) (_wg_ctr "n" 0)
+										(define _wg_nn (lambda () (begin (_wg_ctr "n" (+ (_wg_ctr "n") 1)) (concat "__wgp_" (_wg_ctr "n")))))
+										/* build promise info and output fields with promise refs */
+										(define _wg_pl (newsession)) (_wg_pl "l" '())
+										(define _wg_out_fields (map_assoc (_wg_store "fields") (lambda (k v)
+											(if (and (list? v) (> (count v) 0) (equal?? (car v) (quote window_func)))
+												(begin
+													(define pn (_wg_nn))
+													(define wfn (nth v 1))
+													(define wargs (nth v 2))
+													(define inner_agg (if (and (list? wargs) (> (count wargs) 0)) (car wargs) 1))
+													(define agg_tuple (match inner_agg (cons (symbol aggregate) rest) rest (list inner_agg (quote +) 0)))
+													(define acn (agg_col_name agg_tuple))
+													(_wg_pl "l" (cons (list pn acn wfn) (_wg_pl "l")))
+													(symbol pn))
+												v))))
+										/* scan keytable for each promise: aggregate the column globally */
+										(define _wg_scans (map (_wg_pl "l") (lambda (pi) (match pi '(pn acn wfn)
 											(begin
-												(define pn (_wg_nn))
-												(define wfn (nth v 1))
-												(define wargs (nth v 2))
-												(define inner_agg (if (and (list? wargs) (> (count wargs) 0)) (car wargs) 1))
-												(define agg_tuple (match inner_agg (cons (symbol aggregate) rest) rest (list inner_agg (quote +) 0)))
-												(define acn (agg_col_name agg_tuple))
-												(_wg_pl "l" (cons (list pn acn wfn) (_wg_pl "l")))
-												(symbol pn))
-											v))))
-									/* scan keytable for each promise: aggregate the column globally */
-									(define _wg_scans (map (_wg_pl "l") (lambda (pi) (match pi '(pn acn wfn)
-										(begin
-											(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
-											(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
-											(list (quote set) (symbol pn)
-												'('scan schema grouptbl
-													'(list acn)
-													'('lambda (list (symbol acn)) true)
-													'(list acn)
-													'('lambda (list (symbol acn)) (symbol acn))
-													reduce_op
-													neutral
-													nil false)))))))
-									/* wrap grouped_plan: replace resultrow to inject promise values */
-									(define _wg_rr_body (cons (quote list) (merge (extract_assoc _wg_out_fields (lambda (k v)
-										(if (not (list? v))
-											(list k v)
-											(list k (list (quote get_assoc) (symbol "__wgr") k))))))))
-									(cons 'begin (merge _wg_scans (list
-										(list (quote set) (symbol "__wg_orig_rr") (symbol "resultrow"))
-										(list (quote set) (symbol "resultrow")
-											(list (quote lambda) (list (symbol "__wgr"))
-												(list (symbol "__wg_orig_rr") _wg_rr_body)))
-										grouped_plan))))))
-				))
-			)
+												(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
+												(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
+												(list (quote set) (symbol pn)
+													'('scan schema grouptbl
+														'(list acn)
+														'('lambda (list (symbol acn)) true)
+														'(list acn)
+														'('lambda (list (symbol acn)) (symbol acn))
+														reduce_op
+														neutral
+														nil false)))))))
+										/* wrap grouped_plan: replace resultrow to inject promise values */
+										(define _wg_rr_body (cons (quote list) (merge (extract_assoc _wg_out_fields (lambda (k v)
+											(if (not (list? v))
+												(list k v)
+												(list k (list (quote get_assoc) (symbol "__wgr") k))))))))
+										(cons 'begin (merge _wg_scans (list
+											(list (quote set) (symbol "__wg_orig_rr") (symbol "resultrow"))
+											(list (quote set) (symbol "resultrow")
+												(list (quote lambda) (list (symbol "__wgr"))
+													(list (symbol "__wg_orig_rr") _wg_rr_body)))
+											grouped_plan))))))))
+						))
+					)
 			(begin /* multi-table GROUP BY via prejoin materialization */
 				(if is_dedup (error "DISTINCT on joined tables not yet supported"))
 				/* ALL tables go into the prejoin — the GROUP BY needs all columns
