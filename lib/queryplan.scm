@@ -92,11 +92,29 @@ source expressions, instead of baking the prejoin table name into the key name. 
 			(show tschema ttbl)
 			'()))
 		(merge alias_cols planned_cols shown_cols))))
+/* Some rewrite paths carry alias provenance as (visible_alias canonical_source).
+For physical scans the visible alias matters; for canonical naming / temp reuse the
+canonical source side must be used so equivalent queries share the same temp cols. */
+(define normalize_canonical_aliases (lambda (expr)
+	(match expr
+		'((symbol get_column) alias_ ti col ci)
+		(match alias_
+			'(_ canonical_alias) (list (quote get_column) canonical_alias ti col ci)
+			_ expr)
+		'((quote get_column) alias_ ti col ci)
+		(match alias_
+			'(_ canonical_alias) (list (quote get_column) canonical_alias ti col ci)
+			_ expr)
+		(cons sym args)
+		(cons sym (map args normalize_canonical_aliases))
+		expr
+	)
+))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
 (define rewrite_source_aliases (lambda (alias_map expr)
-	(match expr
+	(match (normalize_canonical_aliases expr)
 		'((symbol get_column) alias_ ti col ci)
 		(list (quote get_column) (coalesce (alias_map alias_) alias_) ti col ci)
 		'((quote get_column) alias_ ti col ci)
@@ -530,7 +548,7 @@ Does NOT handle FK→PK reuse (returns nil for that case — caller must check).
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
 	(define alias_map (list (list tblvar (concat schema "." tbl))))
 	(define key_names (map keys (lambda (k)
-		(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar k) '(list) '(list) alias_map))))
+		(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar k)) '(list) '(list) alias_map))))
 	(define keytable_name (concat "." tbl ":" key_names))
 	(define schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 	(list keytable_name key_names schema_def)
@@ -558,9 +576,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 		(begin
 			(define alias_map (list (list tblvar (concat schema "." tbl))))
 			(define key_names (map keys (lambda (k)
-				(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar k) '(list) '(list) alias_map))))
+				(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar k)) '(list) '(list) alias_map))))
 			(define condition_name (if (nil? condition_suffix) nil
-				(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar condition_suffix) '(list) '(list) alias_map)))
+				(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar condition_suffix)) '(list) '(list) alias_map)))
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
 			(define keytable_name (if (nil? condition_suffix)
@@ -603,7 +621,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 	(define group_keys (if has_partition partition_exprs '(1)))
 	(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
 	(define expr_name (lambda (expr)
-		(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar expr) '(list) '(list) canon_alias_map)))
+		(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar expr)) '(list) '(list) canon_alias_map)))
 	(set condition (replace_find_column (coalesceNil condition true)))
 	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
 	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
@@ -714,9 +732,9 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 (define rewrite_for_prejoin (lambda (pjvar alias_map expr)
 	(match expr
 		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) expr
-			'('get_column pjvar false (canonical_expr_name expr '(list) '(list) alias_map) false))
+			'('get_column pjvar false (canonical_expr_name (normalize_canonical_aliases expr) '(list) '(list) alias_map) false))
 		'((quote get_column) tblvar _ col _) (if (nil? tblvar) expr
-			'('get_column pjvar false (canonical_expr_name expr '(list) '(list) alias_map) false))
+			'('get_column pjvar false (canonical_expr_name (normalize_canonical_aliases expr) '(list) '(list) alias_map) false))
 		(cons sym args) (cons sym (map args (lambda (a) (rewrite_for_prejoin pjvar alias_map a))))
 		expr
 	)
@@ -1567,6 +1585,21 @@ or generate runtime scan code (build_queryplan).
 	the COUNT-based approach produces a keytable computed column that benefits from
 	MemCP's incremental aggregate cache — DML triggers invalidate only affected
 	groups, so subsequent queries skip recomputation for unchanged partitions.
+	Caching policy roadmap for session-sensitive predicates:
+	1. First iteration: if the COUNT/EXISTS condition depends on volatile session
+	   state (for example @current_user, @fop_time, Betrachtungszeit, username),
+	   build_queryplan must prefer a cache-free execution path where GROUP ==
+	   current subselect domain and the predicate is evaluated on the current row
+	   stream instead of a reusable keytable cache.
+	2. Second iteration: enable memoizing caches for predicates that depend on a
+	   stable session key (for example fixed user-id). The cache key must then
+	   include both the logical domain D and the memoized session value.
+	3. Third iteration: add cache-aware iterative rescans for monotone/session
+	   window predicates such as date <= @fop_time. Existing cached prefixes stay
+	   reusable and build_queryplan only schedules an incremental catch-up scan for
+	   the previously uncovered range.
+	Until those stages are implemented, volatile session-dependent predicates must
+	not be treated as freely reusable aggregate caches.
 	Builds a COUNT(*) subquery from the original, optionally adding an equality condition
 	(for IN/NOT IN: first_field = target_expr). Returns (substitution tables) or nil.
 	comparison: (quote >) for positive match, (quote equal?) for negated match */
@@ -2492,11 +2525,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* prepare preaggregate */
 				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
 				(define expr_name (lambda (expr)
-					(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar expr) '(list) '(list) canon_alias_map)))
+					(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar expr)) '(list) '(list) canon_alias_map)))
 				(define materialized_source (and (string? tbl) (>= (strlen tbl) 1) (equal? (substr tbl 0 1) ".")))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
-						(define agg_name (canonical_expr_name agg_args '(list) '(list) canon_alias_map))
+						(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
 						(define materialized_cols (materialized_source_schema schema tbl tblvar schemas))
 						(define match_col (reduce materialized_cols (lambda (found coldef)
 							(if (not (nil? found)) found
@@ -2904,7 +2937,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(cons (symbol aggregate) agg_args)
 					(if nested_agg
 						(begin
-							(define agg_name (canonical_expr_name agg_args '(list) '(list) prejoin_alias_map))
+							(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) prejoin_alias_map))
 							(define match_col (reduce prejoin_source_tables (lambda (acc td)
 								(if (not (nil? acc))
 									acc
@@ -2983,7 +3016,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
 				(define prejoin_columns (reduce all_referenced_columns (lambda (acc mc)
 					(begin
-						(define canon_name (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))
+						(define canon_name (canonical_expr_name (normalize_canonical_aliases (cadr mc)) '(list) '(list) prejoin_alias_map))
 						(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false)
 							acc
 							(merge acc (list (list canon_name (cadr mc))))))) '()))
@@ -2991,7 +3024,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
 					(list "Field" (car mc) "Type" "any" "Expr" (cadr mc)))))
-				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
+				(define prejoin_condition_name (canonical_expr_name (normalize_canonical_aliases condition) '(list) '(list) prejoin_alias_map))
 				(define prejointbl (concat ".prejoin:"
 					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
