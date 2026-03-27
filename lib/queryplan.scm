@@ -2094,6 +2094,11 @@ or generate runtime scan code (build_queryplan).
 
 	/* return parameter list for build_queryplan */
 	(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x))))))
+	(set tables (map tables (lambda (td) (match td
+		'(tv tschema ttbl toisOuter tje)
+		(list tv tschema ttbl toisOuter
+			(if (nil? tje) nil (replace_rename (canonicalize_for_rename tje))))
+		td))))
 	(set group (map group (lambda (g) (replace_rename (canonicalize_for_rename g)))))
 	(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename (canonicalize_for_rename col)) dir)))))
 
