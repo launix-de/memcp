@@ -2573,6 +2573,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
 							(replace_agg_with_fetch expr)
 						)))
+						(define _has_later_group_stage (reduce rest_groups (lambda (acc s)
+							(or acc (begin
+								(define _later_sg (stage_group_cols s))
+								(and (not (nil? _later_sg)) (not (equal? _later_sg '()))))))
+							false))
 						/* scoped GROUP stages from unnesting must not eagerly rewrite later
 						outer aggregates like COUNT(*) in the SELECT list. Those belong to
 						subsequent global group stages and carry no refs to the current
@@ -2581,7 +2586,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							'((symbol get_column) _ _ _ _) (replace_group_key_or_fetch expr)
 							'((quote get_column) _ _ _ _) (replace_group_key_or_fetch expr)
 							(cons (symbol aggregate) _)
-							(if (and (not (nil? _stage_scope)) (equal? (extract_tblvars expr) '()))
+							(if (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()))
 								expr
 								(replace_group_key_or_fetch expr))
 							(cons sym args) (if (_is_opaque_scope_sym sym)
