@@ -1,0 +1,101 @@
+# Regression coverage for isodoc revision/file metadata via nested scalar subselects.
+
+metadata:
+  version: "1.0"
+  description: "Isodoc latest revision metadata with nested scalar file lookups"
+  isolated: true
+
+test_cases:
+  - name: "Create isodoc table"
+    sql: "CREATE TABLE isodoc (ID INT PRIMARY KEY, archive BOOL, subject VARCHAR(100), employee INT)"
+
+  - name: "Create isodoc_revision table"
+    sql: "CREATE TABLE isodoc_revision (ID INT PRIMARY KEY, isodoc INT, created INT, file INT)"
+
+  - name: "Create file table"
+    sql: "CREATE TABLE fop_files (ID INT PRIMARY KEY, filename VARCHAR(100), type VARCHAR(100))"
+
+  - name: "Create employee table"
+    sql: "CREATE TABLE iso_user (ID INT PRIMARY KEY, vorname VARCHAR(50), nachname VARCHAR(50))"
+
+  - name: "Insert isodocs"
+    sql: |
+      INSERT INTO isodoc VALUES
+      (1, FALSE, 'Akte A', 7),
+      (2, FALSE, 'Akte B', NULL)
+
+  - name: "Insert revisions"
+    sql: |
+      INSERT INTO isodoc_revision VALUES
+      (1, 1, 100, 100),
+      (2, 1, 200, 101),
+      (3, 2, 150, 102)
+
+  - name: "Insert files"
+    sql: |
+      INSERT INTO fop_files VALUES
+      (100, 'scan-a1.png', 'image/png'),
+      (101, 'scan-a2.pdf', 'application/pdf'),
+      (102, 'scan-b1.pdf', 'application/pdf')
+
+  - name: "Insert employees"
+    sql: "INSERT INTO iso_user VALUES (7, 'Ada', 'Lovelace')"
+
+  - name: "Wrapped isodoc view keeps latest file metadata and employee join"
+    sql: |
+      SELECT t.ID, t.file, t.filename, t.`operation::pdf`, t.`employee::description`, t.`employee::canView`
+      FROM (
+        SELECT
+          isodoc.ID AS ID,
+          isodoc.archive AS archive,
+          (SELECT r.file FROM isodoc_revision r WHERE r.isodoc = isodoc.ID ORDER BY r.created DESC, r.ID DESC LIMIT 1) AS file,
+          (SELECT f.filename FROM fop_files f
+            WHERE f.ID = (
+              SELECT r.file FROM isodoc_revision r WHERE r.isodoc = isodoc.ID ORDER BY r.created DESC, r.ID DESC LIMIT 1
+            )
+            LIMIT 1) AS filename,
+          (((SELECT f.type FROM fop_files f
+            WHERE f.ID = (
+              SELECT r.file FROM isodoc_revision r WHERE r.isodoc = isodoc.ID ORDER BY r.created DESC, r.ID DESC LIMIT 1
+            )
+            LIMIT 1)) = ('application/pdf')) AS `operation::pdf`,
+          ref_employee.`employee:description` AS `employee::description`,
+          ref_employee.`employee:canView` AS `employee::canView`
+        FROM isodoc
+        LEFT JOIN (
+          SELECT ID AS `employee:ID`,
+            CONCAT(nachname, ', ', vorname) AS `employee:description`,
+            TRUE AS `employee:canView`
+          FROM iso_user
+        ) AS ref_employee ON ref_employee.`employee:ID` = isodoc.employee
+        WHERE TRUE
+      ) AS t
+      WHERE COALESCE(t.archive, FALSE) IN (FALSE, NULL)
+      ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          file: 101
+          filename: scan-a2.pdf
+          operation::pdf: true
+          employee::description: "Lovelace, Ada"
+          employee::canView: true
+        - ID: 2
+          file: 102
+          filename: scan-b1.pdf
+          operation::pdf: true
+          employee::description: null
+          employee::canView: null
+
+  - name: "Drop isodoc_revision table"
+    sql: "DROP TABLE IF EXISTS isodoc_revision"
+
+  - name: "Drop isodoc table"
+    sql: "DROP TABLE IF EXISTS isodoc"
+
+  - name: "Drop file table"
+    sql: "DROP TABLE IF EXISTS fop_files"
+
+  - name: "Drop employee table"
+    sql: "DROP TABLE IF EXISTS iso_user"

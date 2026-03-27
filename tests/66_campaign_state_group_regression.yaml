@@ -1,0 +1,117 @@
+# Regression for grouped derived tables over permission-style state joins.
+
+metadata:
+  version: "1.0"
+  description: "Campaign state grouping over derived table with permission-style joins"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS camp_company"
+  - sql: "DROP TABLE IF EXISTS camp_contact"
+  - sql: "DROP TABLE IF EXISTS camp_state"
+  - sql: "DROP TABLE IF EXISTS camp_target"
+  - sql: "CREATE TABLE camp_company (ID INT, name VARCHAR(50), name2 VARCHAR(50))"
+  - sql: "CREATE TABLE camp_contact (ID INT, firma INT, anrede VARCHAR(20), vname VARCHAR(20), nname VARCHAR(20), firmenkontakt INT, tel VARCHAR(20))"
+  - sql: "CREATE TABLE camp_state (ID INT, descr VARCHAR(50), ord INT, color VARCHAR(20))"
+  - sql: "CREATE TABLE camp_target (ID INT, campaign INT, target INT, state INT, creation INT, note VARCHAR(50))"
+  - sql: "INSERT INTO camp_company VALUES (1, 'Acme', 'GmbH'), (2, 'Beta', 'AG')"
+  - sql: "INSERT INTO camp_contact VALUES (10, 1, 'Mr', 'A', 'One', NULL, '111'), (11, 2, 'Ms', 'B', 'Two', NULL, '222')"
+  - sql: "INSERT INTO camp_state VALUES (1, 'new', 1, 'red'), (2, 'done', 2, 'green')"
+  - sql: "INSERT INTO camp_target VALUES (100, 1, 10, 1, 1, 'x'), (101, 1, 11, 1, 2, 'y'), (102, 1, 10, 2, 3, 'z')"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS camp_target"
+  - sql: "DROP TABLE IF EXISTS camp_state"
+  - sql: "DROP TABLE IF EXISTS camp_contact"
+  - sql: "DROP TABLE IF EXISTS camp_company"
+
+test_cases:
+  - name: "group by state inside derived table"
+    sql: |
+      SELECT COUNT(*) AS _count,
+        state AS state,
+        state_can_view AS state_can_view,
+        MAX(state_desc) AS state_desc
+      FROM (
+        SELECT ct.ID AS ID,
+          ct.state AS state,
+          rs.state_can_view AS state_can_view,
+          rs.state_desc AS state_desc,
+          rt.target_can_view AS target_can_view
+        FROM camp_target ct
+        LEFT JOIN (
+          SELECT ID AS state_id,
+            descr AS state_desc,
+            TRUE AS state_can_view
+          FROM camp_state
+        ) rs ON rs.state_id = ct.state
+        LEFT JOIN (
+          SELECT ID AS target_id,
+            CONCAT(anrede, ' ', vname, ' ', nname, ' (', (SELECT c.name FROM camp_company c WHERE c.ID = camp_contact.firma LIMIT 1), ')') AS target_desc,
+            TRUE AND COALESCE((SELECT TRUE FROM camp_company c WHERE c.ID = camp_contact.firma LIMIT 1), FALSE) AS target_can_view
+          FROM camp_contact
+        ) rt ON rt.target_id = ct.target
+        WHERE ct.campaign = 1
+          AND COALESCE((SELECT TRUE FROM camp_contact cx WHERE cx.ID = ct.target LIMIT 1), FALSE)
+      ) t
+      WHERE TRUE
+      GROUP BY state
+      ORDER BY state
+    expect:
+      rows: 2
+      data:
+        - _count: 2
+          state: 1
+          state_can_view: true
+          state_desc: new
+        - _count: 1
+          state: 2
+          state_can_view: true
+          state_desc: done
+
+  - name: "outer select t star over grouped state derived table"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT COUNT(*) AS _count,
+          state AS state,
+          state_can_view AS state_can_view,
+          MAX(state_desc) AS state_desc,
+          1
+        FROM (
+          SELECT ct.ID AS ID,
+            ct.state AS state,
+            rs.state_can_view AS state_can_view,
+            rs.state_desc AS state_desc,
+            rt.target_can_view AS target_can_view
+          FROM camp_target ct
+          LEFT JOIN (
+            SELECT ID AS state_id,
+              descr AS state_desc,
+              TRUE AS state_can_view
+            FROM camp_state
+          ) rs ON rs.state_id = ct.state
+          LEFT JOIN (
+            SELECT ID AS target_id,
+              CONCAT(anrede, ' ', vname, ' ', nname, ' (', (SELECT c.name FROM camp_company c WHERE c.ID = camp_contact.firma LIMIT 1), ')') AS target_desc,
+              TRUE AND COALESCE((SELECT TRUE FROM camp_company c WHERE c.ID = camp_contact.firma LIMIT 1), FALSE) AS target_can_view
+            FROM camp_contact
+          ) rt ON rt.target_id = ct.target
+          WHERE ct.campaign = 1
+            AND COALESCE((SELECT TRUE FROM camp_contact cx WHERE cx.ID = ct.target LIMIT 1), FALSE)
+        ) t
+        WHERE TRUE
+        GROUP BY state
+      ) t
+      WHERE TRUE
+      ORDER BY t.state
+    expect:
+      rows: 2
+      data:
+        - _count: 2
+          state: 1
+          state_can_view: true
+          state_desc: new
+        - _count: 1
+          state: 2
+          state_can_view: true
+          state_desc: done
