@@ -1599,9 +1599,12 @@ or generate runtime scan code (build_queryplan).
 	   row-wise cleanup hooks so the cache manager can register a domain plus
 	   memory budget together with a callback/DELETE plan for affected rows only.
 	3. Third iteration: add cache-aware iterative rescans for monotone/session
-	   window predicates such as date <= @fop_time. Existing cached prefixes stay
-	   reusable and build_queryplan only schedules an incremental catch-up scan for
-	   the previously uncovered range.
+	   predicates by reasoning in SQL predicate algebra instead of application
+	   semantics. Example: x < @y is disjoint from x >= @y, and if @y < @z then
+	   the cached result for x < @y can be reused while only the delta predicate
+	   x >= @y AND x < @z has to be scanned; their union is equivalent to x < @z.
+	   build_queryplan can therefore decompose a broader query into reusable cache
+	   fragments plus a catch-up scan over the previously uncovered range.
 	Until those stages are implemented, volatile session-dependent predicates must
 	not be treated as freely reusable aggregate caches.
 	Builds a COUNT(*) subquery from the original, optionally adding an equality condition
