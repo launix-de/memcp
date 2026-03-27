@@ -475,9 +475,17 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 		for i := partCount; i < nCols && i < len(rowVals) && cmp == 0; i++ {
 			desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
 			if scm.Less(rowVals[i], sortKeys[i]) {
-				if desc { cmp = 1 } else { cmp = -1 }
+				if desc {
+					cmp = 1
+				} else {
+					cmp = -1
+				}
 			} else if scm.Less(sortKeys[i], rowVals[i]) {
-				if desc { cmp = -1 } else { cmp = 1 }
+				if desc {
+					cmp = -1
+				} else {
+					cmp = 1
+				}
 			}
 		}
 		return cmp >= 0
@@ -945,10 +953,31 @@ func containsScan(expr scm.Scmer) bool {
 	return false
 }
 
+// scanMapColumns extracts the physical source column names from a scan's mapcols
+// list. These names are the authoritative keys for OLD/NEW trigger dicts and may
+// themselves be canonicalized expressions on materialized temp relations.
+func scanMapColumns(mapCols scm.Scmer) []string {
+	if !mapCols.IsSlice() {
+		return nil
+	}
+	items := mapCols.Slice()
+	if len(items) == 0 || !items[0].IsSymbol() || items[0].String() != "list" {
+		return nil
+	}
+	cols := make([]string, 0, len(items)-1)
+	for _, item := range items[1:] {
+		if !item.IsString() {
+			return nil
+		}
+		cols = append(cols, item.String())
+	}
+	return cols
+}
+
 // extractDeltaExpr transforms a scan's mapFn body by substituting parameter
 // references (symbols or NthLocalVar) with (get_assoc dictSym "col") to
 // reference OLD/NEW trigger dicts.
-func extractDeltaExpr(mapFn scm.Scmer, dictSym string) scm.Scmer {
+func extractDeltaExpr(mapCols, mapFn scm.Scmer, dictSym string) scm.Scmer {
 	var params []scm.Scmer
 	var body scm.Scmer
 	if mapFn.IsProc() {
@@ -973,6 +1002,7 @@ func extractDeltaExpr(mapFn scm.Scmer, dictSym string) scm.Scmer {
 		// No parameters (e.g. COUNT(*) mapFn = (lambda () 1)) — body is the delta
 		return body
 	}
+	sourceCols := scanMapColumns(mapCols)
 	// Build substitution maps: symbol name -> expr AND NthLocalVar index -> expr
 	// Compiled Procs use NthLocalVar for param references; uncompiled lambdas use symbols.
 	symSubs := make(map[string]scm.Scmer, len(params))
@@ -980,9 +1010,10 @@ func extractDeltaExpr(mapFn scm.Scmer, dictSym string) scm.Scmer {
 	for i, p := range params {
 		if p.IsSymbol() {
 			name := p.String()
-			// Extract column name: "tblvar.col" -> "col"
 			col := name
-			if dot := strings.LastIndex(name, "."); dot >= 0 {
+			if i < len(sourceCols) {
+				col = sourceCols[i]
+			} else if dot := strings.Index(name, "."); dot >= 0 {
 				col = name[dot+1:]
 			}
 			expr := fkGetAssocExpr(dictSym, col)
@@ -1090,18 +1121,18 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 // updates. For AfterInsert it adds the delta, for AfterUpdate it subtracts
 // OLD and adds NEW. For AfterDelete it falls back to selective invalidation
 // to ensure proper group removal when the last row in a group is deleted.
-func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, inputCols []string, mapFn scm.Scmer, timing TriggerTiming) scm.Scmer {
+func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, inputCols []string, mapCols, mapFn scm.Scmer, timing TriggerTiming) scm.Scmer {
 	switch timing {
 	case AfterInsert:
-		deltaExpr := extractDeltaExpr(mapFn, "NEW")
+		deltaExpr := extractDeltaExpr(mapCols, mapFn, "NEW")
 		return buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "NEW", deltaExpr, false)
 	case AfterUpdate:
 		// Build runtime check: if group key unchanged → $increment, else → invalidate.
 		// When the group key changes, keytable rows may be created/deleted by the
 		// cleanup trigger, making the old $increment targets stale. Full invalidation
 		// lets the next query recompute correctly.
-		oldDelta := extractDeltaExpr(mapFn, "OLD")
-		newDelta := extractDeltaExpr(mapFn, "NEW")
+		oldDelta := extractDeltaExpr(mapCols, mapFn, "OLD")
+		newDelta := extractDeltaExpr(mapCols, mapFn, "NEW")
 		incrementBody := scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("begin"),
 			buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD", oldDelta, true),
@@ -1142,7 +1173,7 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		// The COUNT column on the keytable naturally tracks group membership;
 		// when COUNT reaches 0, HAVING (COUNT > 0) excludes the empty group.
 		// The keytable cleanup trigger (priority 90) removes the row entirely.
-		oldDelta := extractDeltaExpr(mapFn, "OLD")
+		oldDelta := extractDeltaExpr(mapCols, mapFn, "OLD")
 		return buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD", oldDelta, true)
 	default:
 		// Fallback: full invalidation.
@@ -1281,7 +1312,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			if !exists {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
-					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[6], timing)
+					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[5], scanNode[6], timing)
 				} else {
 					// Full invalidation: for non-additive aggregates and AfterInvalidate propagation.
 					body = scm.NewSlice([]scm.Scmer{

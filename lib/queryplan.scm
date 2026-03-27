@@ -75,6 +75,43 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(createtrigger src_schema src_table (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
 	true)))
 
+/* prejoin_canonical_sources maps a materialized prejoin table name to an assoc
+of physical prejoin column name -> source expression. make_keytable uses this
+to canonicalize get_column markers on prejoin temps back to their original
+source expressions, instead of baking the prejoin table name into the key name. */
+(define prejoin_canonical_sources (newsession))
+
+/* rewrite_source_aliases: replace get_column table aliases according to alias_map.
+Used to store prejoin lineage in the same canonical source namespace that also
+defines the physical prejoin column names. */
+(define rewrite_source_aliases (lambda (alias_map expr)
+	(match expr
+		'((symbol get_column) alias_ ti col ci)
+		(list (quote get_column) (coalesce (alias_map alias_) alias_) ti col ci)
+		'((quote get_column) alias_ ti col ci)
+		(list (quote get_column) (coalesce (alias_map alias_) alias_) ti col ci)
+		(cons sym args)
+		(cons sym (map args (lambda (arg) (rewrite_source_aliases alias_map arg))))
+		expr
+	)
+))
+
+(define rewrite_materialized_source_columns (lambda (tbl tblvar expr)
+	(begin
+		(define source_alias_map (prejoin_canonical_sources tbl))
+		(if (or (nil? source_alias_map) (not (list? source_alias_map)))
+			expr
+			(match expr
+				'((symbol get_column) (eval tblvar) ti col ci)
+				(begin
+					(coalesce (source_alias_map col) expr))
+				'((quote get_column) (eval tblvar) ti col ci)
+				(begin
+					(coalesce (source_alias_map col) expr))
+				(cons sym args)
+				(cons sym (map args (lambda (arg) (rewrite_materialized_source_columns tbl tblvar arg))))
+				expr)))))
+
 /* returns a list of all tblvar aliases referenced via get_column in expr */
 (define extract_tblvars (lambda (expr)
 	(match expr
@@ -482,7 +519,8 @@ column descriptors suitable for the schemas assoc in untangle_query.
 Does NOT handle FK→PK reuse (returns nil for that case — caller must check). */
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
 	(define alias_map (list (list tblvar (concat schema "." tbl))))
-	(define key_names (map keys (lambda (k) (canonical_expr_name k '(list) '(list) alias_map))))
+	(define key_names (map keys (lambda (k)
+		(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar k) '(list) '(list) alias_map))))
 	(define keytable_name (concat "." tbl ":" key_names))
 	(define schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 	(list keytable_name key_names schema_def)
@@ -509,8 +547,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 		fk_result
 		(begin
 			(define alias_map (list (list tblvar (concat schema "." tbl))))
-			(define key_names (map keys (lambda (k) (canonical_expr_name k '(list) '(list) alias_map))))
-			(define condition_name (if (nil? condition_suffix) nil (canonical_expr_name condition_suffix '(list) '(list) alias_map)))
+			(define key_names (map keys (lambda (k)
+				(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar k) '(list) '(list) alias_map))))
+			(define condition_name (if (nil? condition_suffix) nil
+				(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar condition_suffix) '(list) '(list) alias_map)))
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
 			(define keytable_name (if (nil? condition_suffix)
@@ -552,7 +592,8 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 	(define partition_exprs (map over_partition replace_find_column))
 	(define group_keys (if has_partition partition_exprs '(1)))
 	(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
-	(define expr_name (lambda (expr) (canonical_expr_name expr '(list) '(list) canon_alias_map)))
+	(define expr_name (lambda (expr)
+		(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar expr) '(list) '(list) canon_alias_map)))
 	(set condition (replace_find_column (coalesceNil condition true)))
 	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
 	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
@@ -659,12 +700,14 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	replacer
 )))
 
-/* rewrite_for_prejoin: rewrite (get_column tblvar _ col _) -> (get_column pjvar false "tblvar.col" false) for prejoin materialization */
-(define rewrite_for_prejoin (lambda (pjvar expr)
+/* rewrite_for_prejoin: rewrite source get_column refs to canonical prejoin columns. */
+(define rewrite_for_prejoin (lambda (pjvar alias_map expr)
 	(match expr
 		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) expr
-			'('get_column pjvar false (concat tblvar "." col) false))
-		(cons sym args) (cons sym (map args (lambda (a) (rewrite_for_prejoin pjvar a))))
+			'('get_column pjvar false (canonical_expr_name expr '(list) '(list) alias_map) false))
+		'((quote get_column) tblvar _ col _) (if (nil? tblvar) expr
+			'('get_column pjvar false (canonical_expr_name expr '(list) '(list) alias_map) false))
+		(cons sym args) (cons sym (map args (lambda (a) (rewrite_for_prejoin pjvar alias_map a))))
 		expr
 	)
 ))
@@ -2394,7 +2437,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			'('(tblvar schema tbl isOuter _)) (begin
 				/* prepare preaggregate */
 				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
-				(define expr_name (lambda (expr) (canonical_expr_name expr '(list) '(list) canon_alias_map)))
+				(define expr_name (lambda (expr)
+					(canonical_expr_name (rewrite_materialized_source_columns tbl tblvar expr) '(list) '(list) canon_alias_map)))
 
 				(define kt_result (make_keytable schema tbl stage_group tblvar (if is_dedup condition nil)))
 				(set grouptbl (car kt_result))
@@ -2529,6 +2573,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
 							(replace_agg_with_fetch expr)
 						)))
+						/* scoped GROUP stages from unnesting must not eagerly rewrite later
+						outer aggregates like COUNT(*) in the SELECT list. Those belong to
+						subsequent global group stages and carry no refs to the current
+						scoped source table. */
+						(define replace_group_field_expr (lambda (expr) (match expr
+							'((symbol get_column) _ _ _ _) (replace_group_key_or_fetch expr)
+							'((quote get_column) _ _ _ _) (replace_group_key_or_fetch expr)
+							(cons (symbol aggregate) _)
+							(if (and (not (nil? _stage_scope)) (equal? (extract_tblvars expr) '()))
+								expr
+								(replace_group_key_or_fetch expr))
+							(cons sym args) (if (_is_opaque_scope_sym sym)
+								(replace_group_key_or_fetch expr)
+								(cons sym (map args replace_group_field_expr)))
+							(replace_group_key_or_fetch expr)
+						)))
 						/* normalize outer-side join expressions into column AST so scan
 						planning can request the needed outer columns even if they are not
 						part of the current projection/order list. */
@@ -2625,7 +2685,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(if _kt_is_outer
 								(merge _grp_ps_tables (list (list grouptbl schema grouptbl true _kt_je)))
 								(merge (list (list grouptbl schema grouptbl false nil)) _grp_ps_tables))
-							(map_assoc fields (lambda (k v) (replace_group_key_or_fetch v)))
+							(map_assoc fields (lambda (k v) (replace_group_field_expr v)))
 							_gp_condition
 							(merge next_groups _remaining_pstages)
 							schemas
@@ -2662,7 +2722,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									)
 							))
 						)))))
-
 						(define compute_plan
 							'('time (cons 'parallel agg_plans) "compute"))
 
@@ -2791,11 +2850,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					'(name '((symbol get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
 					'(name '((quote get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
 					true))))
-				(define prejoin_columns (reduce all_referenced_columns (lambda (acc mc)
-					(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false)
-						acc
-						(merge acc (list mc)))) '()))
-				(define prejoin_column_names (map prejoin_columns car))
 				/* compute prejoin table name and alias */
 				(define prejoin_alias ".pj")
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
@@ -2803,7 +2857,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(match t '(tv tschema ttbl _ _)
 						(list tv (concat tschema "." ttbl)))))
 				)
-				(define prejoin_col_names (map prejoin_columns (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
+				(define prejoin_columns (reduce all_referenced_columns (lambda (acc mc)
+					(begin
+						(define canon_name (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))
+						(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false)
+							acc
+							(merge acc (list (list canon_name (cadr mc))))))) '()))
+				(define prejoin_column_names (map prejoin_columns car))
+				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
 				(define prejointbl (concat ".prejoin:"
 					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
@@ -2812,11 +2873,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define prejoin_schema schema)
 				(define pj_schema schema) /* needed in quoted runtime code below */
 				(define prejoin_table_name prejointbl)
+				(define temp_source_table? (lambda (src_tbl)
+					(and (string? src_tbl) (>= (strlen src_tbl) 1) (equal? (substr src_tbl 0 1) "."))))
+				(prejoin_canonical_sources prejointbl
+					(merge (map prejoin_columns (lambda (mc)
+						(list (car mc) (rewrite_source_aliases prejoin_alias_map (cadr mc)))))))
 				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
 				(createtable schema prejointbl
 					(map prejoin_column_names (lambda (col) '("column" col "any" '() '())))
 					'("engine" "sloppy") true)
-				/* build materialization scan: nested-loop join populating prejoin table */
+				/* legacy nested-loop materializer retained temporarily for trigger backfill paths.
+				Query-time prejoin filling uses the canonical build_queryplan row stream below. */
 				(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
 					(match scan_tables
 						(cons '(tblvar schema tbl isOuter joinexpr) rest) (begin
@@ -2854,9 +2921,37 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							'(list))
 					)
 				))
-				(define prejoin_materialize_plan (build_materialize_scan tables condition true))
+				(define covered_partition_stages (filter partition_stages (lambda (ps)
+					(reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
+						(or acc (has? known_table_aliases a))) false))))
+				(define prejoin_materialize_fields (merge (map prejoin_columns (lambda (mc) (list (car mc) (cadr mc))))))
+				(define prejoin_materialize_rowplan (build_queryplan schema
+					tables
+					prejoin_materialize_fields
+					condition
+					covered_partition_stages
+					schemas
+					replace_find_column
+					nil))
+				(define prejoin_materialize_plan (begin
+					(define _pj_prev_rr (symbol "__pj_prev_resultrow"))
+					(define _pj_row_sym (symbol "__pj_row"))
+					(list 'begin
+						(list 'set _pj_prev_rr (symbol "resultrow"))
+						(list 'set (symbol "resultrow")
+							(list 'lambda (list _pj_row_sym)
+								(list 'insert prejoin_schema prejointbl
+									(cons 'list prejoin_column_names)
+									(list 'list
+										(cons 'list (map prejoin_column_names (lambda (col)
+											(list 'get_assoc _pj_row_sym col)))))
+									(list)
+									(list 'lambda (list) true)
+									true)))
+						prejoin_materialize_rowplan
+						(list 'set (symbol "resultrow") _pj_prev_rr))))
 				/* rewrite all column references to point at prejoin table */
-				(define rewrite_as_prejoin_column (lambda (expr) (rewrite_for_prejoin prejoin_alias expr)))
+				(define rewrite_as_prejoin_column (lambda (expr) (rewrite_for_prejoin prejoin_alias prejoin_alias_map expr)))
 				(define grouped_fields (map_assoc resolved_fields (lambda (k v) (rewrite_as_prejoin_column v))))
 				(define grouped_keys (map stage_group rewrite_as_prejoin_column))
 				(define grouped_having (rewrite_as_prejoin_column stage_having))
@@ -2889,7 +2984,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
 							(begin
 								(define trigger_table_key (concat src_schema "." src_tbl))
-								(if (seen_trigger_tables trigger_table_key) nil
+								(if (or (temp_source_table? src_tbl) (seen_trigger_tables trigger_table_key)) nil
 									(begin (seen_trigger_tables trigger_table_key true)
 										/* collect (pj_col base_col) pairs for this source table */
 										(define ti_col_pairs
@@ -2933,11 +3028,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
-						'('createtable pj_schema prejointbl
-							(cons 'list (map mat_col_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
+						(list 'createtable pj_schema prejointbl
+							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							'(list "engine" "sloppy") true)
 						(list 'if (list 'equal? 0 (list 'scan_estimate pj_schema prejointbl))
-							'('time materialize_plan "materialize")))
+							(list 'time prejoin_materialize_plan "materialize")))
 					pj_trigger_registrations
 					(list grouped_result)))
 			)
