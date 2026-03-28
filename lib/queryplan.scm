@@ -1218,6 +1218,7 @@ WHAT IT MUST NOT DO:
 						))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
+							(equal? (extract_aggregates value_expr) '())
 							(nil? stage2_having)
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(and (list? tables2) (equal? (count tables2) 1))
@@ -3708,12 +3709,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 									/* check if this table is the DML target (ordered path) */
 									(define is_update_target_ord (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
-									(define update_target_schema_cols_ord (if is_update_target_ord
-										(begin
-											(define _schema_alias (if (has_assoc? schemas tblvar) tblvar (if (has_assoc? schemas (string tblvar)) (string tblvar) nil)))
-											(if (nil? _schema_alias) '() (map (schemas _schema_alias) (lambda (coldef) (coldef "Field")))))
-										'()))
-									(set cols (merge_unique (list cols update_target_schema_cols_ord)))
 									(define ord_scan_mapcols (if is_update_target_ord (cons list (merge cols '("$update"))) (cons list cols)))
 									(define ord_scan_mapfn_params (if is_update_target_ord
 										(merge (map cols (lambda(col) (symbol (concat tblvar "." col)))) '((symbol "$update")))
@@ -3765,11 +3760,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ut_extra_cols (if is_update_target
 										(merge_unique (extract_assoc (nth update_target 1) (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 										'()))
-									(define update_target_schema_cols (if is_update_target
-										(begin
-											(define _schema_alias (if (has_assoc? schemas tblvar) tblvar (if (has_assoc? schemas (string tblvar)) (string tblvar) nil)))
-											(if (nil? _schema_alias) '() (map (schemas _schema_alias) (lambda (coldef) (coldef "Field")))))
-										'()))
 									/* For UPDATE target: append $update after real table columns so outer-var slots stay stable */
 									(define scan_mapcols nil)
 									(define scan_mapfn_params nil)
@@ -3810,7 +3800,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													)
 												)
 												ut_extra_cols
-												update_target_schema_cols
 											)
 										))
 										(set scan_mapcols (if is_update_target (cons list (merge cols '("$update"))) (cons list cols)))
