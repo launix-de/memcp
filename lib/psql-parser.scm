@@ -260,7 +260,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" psql_int ")" ")") '('concat p))
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) ")") '('concat p))
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p)) /* TODO: proper implement CAST; for now make vscode work */
-		(parser '((atom "CONCAT" true) "(" (define p (+ psql_expression ",")) ")") (cons 'concat p))
+		(parser '((atom "CONCAT" true) "(" (define p (+ psql_expression ",")) ")") (cons 'sql_concat p))
 		/* TRIM/LTRIM/RTRIM as explicit parser rules for reliable dispatch */
 		(parser '((atom "TRIM" true) "(" (define e psql_expression) ")") '((quote sql_trim) e))
 		(parser '((atom "LTRIM" true) "(" (define e psql_expression) ")") '((quote sql_ltrim) e))

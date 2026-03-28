@@ -71,6 +71,8 @@ test_cases:
     sql: "SELECT CONCAT(name, '-', tag) AS label FROM cce_data WHERE id = 4"
     expect:
       rows: 1
+      data:
+        - label: null
 
   # === Comparison expressions ===
 

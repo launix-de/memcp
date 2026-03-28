@@ -750,7 +750,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "UNSIGNED" true) ")") '('simplify p))
 		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "SIGNED" true) ")") '('simplify p))
 		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "INTEGER" true) ")") '('simplify p))
-		(parser '((atom "CONCAT" true) "(" (define p (+ sql_expression ",")) ")") (cons 'concat p))
+		(parser '((atom "CONCAT" true) "(" (define p (+ sql_expression ",")) ")") (cons 'sql_concat p))
 		/* TRIM/LTRIM/RTRIM as explicit parser rules for reliable dispatch */
 		(parser '((atom "TRIM" true) "(" (define e sql_expression) ")") '((quote sql_trim) e))
 		(parser '((atom "LTRIM" true) "(" (define e sql_expression) ")") '((quote sql_ltrim) e))
