@@ -1,6 +1,6 @@
 metadata:
   version: "1.0"
-  description: "Minimal grouped aggregate + window over grouped rows repro"
+  description: "Grouped LEAD over aggregate rows must fail cleanly instead of hanging"
   isolated: true
 
 test_cases:
@@ -16,17 +16,10 @@ test_cases:
       (4, 200, 200),
       (5, 200, 400)
 
-  - name: "Window over grouped aggregate uses grouped rows"
+  - name: "Window over grouped aggregate fails cleanly"
     sql: "SELECT parent, SUM(amount), LEAD(SUM(amount)) OVER (ORDER BY parent) FROM wg_reject GROUP BY parent"
     expect:
-      rows: 2
-      data:
-        - parent: 100
-          SUM(amount): 1500
-          LEAD(SUM(amount)) OVER (ORDER BY parent): 600
-        - parent: 200
-          SUM(amount): 600
-          LEAD(SUM(amount)) OVER (ORDER BY parent): null
+      error: true
 
   - name: "Drop grouped window test table"
     sql: "DROP TABLE IF EXISTS wg_reject"

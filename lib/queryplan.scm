@@ -1497,6 +1497,31 @@ WHAT IT MUST NOT DO:
 						)
 						(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
 						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+						(define exists_local_alias? (lambda (alias_name)
+							(not (nil? (reduce_assoc schemas2 (lambda (a k v) (or a (equal?? k alias_name))) false)))))
+						(define wrap_unresolved_outer_exists (lambda (e) (match e
+							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_))
+								(not (exists_local_alias? alias_)))
+								(list (quote outer) (symbol (concat alias_ "." col)))
+								e)
+							'((quote get_column) alias_ ti col ci) (if (and (not (nil? alias_))
+								(not (exists_local_alias? alias_)))
+								(list (quote outer) (symbol (concat alias_ "." col)))
+								e)
+							(cons sym args) (cons (wrap_unresolved_outer_exists sym) (map args wrap_unresolved_outer_exists))
+							sym (begin
+								(define parts (split (string sym) "."))
+								(if (and (> (count parts) 1)
+									(not (exists_local_alias? (car parts))))
+									(list (quote outer) sym)
+									sym))
+							e
+						)))
+						(set condition2 (wrap_unresolved_outer_exists condition2))
+						(set condition2 (match condition2
+							'((symbol outer) inner) inner
+							'((quote outer) inner) inner
+							condition2))
 						(define exists_expr (if (or (nil? tables2) (equal? tables2 '()))
 							(begin
 								(define limit_zero (and (not (nil? stage_limit)) (equal? stage_limit 0)))
@@ -1540,14 +1565,29 @@ WHAT IT MUST NOT DO:
 									(list (quote or) (quote acc) (quote v))
 								))
 								(define exists_neutral false)
+								(define wrap_generated_outer_refs (lambda (expr local_params) (match expr
+									(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+										(cons sym args)
+										(cons (wrap_generated_outer_refs sym local_params) (map args (lambda (arg) (wrap_generated_outer_refs arg local_params)))))
+									sym (begin
+										(define parts (split (string sym) "."))
+										(if (and (> (count parts) 1)
+											(nil? (reduce local_params (lambda (a p) (or a (equal?? p sym))) false)))
+											(list (quote outer) sym)
+											sym))
+									expr
+								)))
 								(if use_ordered
+									(begin
+										(define filterparams (map filtercols (lambda (col) (symbol (concat tblvar "." col)))))
+										(define filterbody (wrap_generated_outer_refs (optimize (replace_columns_from_expr condition2)) filterparams))
 									(list (quote scan_order)
 										schema3
 										tbl
 										(cons list filtercols)
 										(list (quote lambda)
-											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-											(optimize (replace_columns_from_expr condition2))
+											filterparams
+											filterbody
 										)
 										(cons list ordercols)
 										(cons list dirs)
@@ -1559,19 +1599,24 @@ WHAT IT MUST NOT DO:
 										exists_reduce
 										exists_neutral
 									)
+									)
+									(begin
+										(define filterparams (map filtercols (lambda (col) (symbol (concat tblvar "." col)))))
+										(define filterbody (wrap_generated_outer_refs (optimize (replace_columns_from_expr condition2)) filterparams))
 									(list (quote scan)
 										schema3
 										tbl
 										(cons list filtercols)
 										(list (quote lambda)
-											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-											(optimize (replace_columns_from_expr condition2))
+											filterparams
+											filterbody
 										)
 										(cons list '())
 										(list (quote lambda) '() true)
 										exists_reduce
 										exists_neutral
 										exists_reduce
+									)
 									)
 								)
 							)
@@ -2677,7 +2722,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
 							(replace_agg_with_fetch expr)
 						)))
-
 						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_group_key_or_fetch col) dir))))))
 						(define next_groups (merge
 							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset)) '())
@@ -3523,9 +3567,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 									/* check if this table is the DML target (ordered path) */
 									(define is_update_target_ord (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
-									(define ord_scan_mapcols (if is_update_target_ord (cons list (cons "$update" cols)) (cons list cols)))
+									(define update_target_schema_cols_ord (if is_update_target_ord
+										(begin
+											(define _schema_alias (if (has_assoc? schemas tblvar) tblvar (if (has_assoc? schemas (string tblvar)) (string tblvar) nil)))
+											(if (nil? _schema_alias) '() (map (schemas _schema_alias) (lambda (coldef) (coldef "Field")))))
+										'()))
+									(set cols (merge_unique (list cols update_target_schema_cols_ord)))
+									(define ord_scan_mapcols (if is_update_target_ord (cons list (merge cols '("$update"))) (cons list cols)))
 									(define ord_scan_mapfn_params (if is_update_target_ord
-										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
+										(merge (map cols (lambda(col) (symbol (concat tblvar "." col)))) '((symbol "$update")))
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
@@ -3574,7 +3624,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ut_extra_cols (if is_update_target
 										(merge_unique (extract_assoc (nth update_target 1) (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 										'()))
-									/* For UPDATE target: prepend $update to mapcols */
+									(define update_target_schema_cols (if is_update_target
+										(begin
+											(define _schema_alias (if (has_assoc? schemas tblvar) tblvar (if (has_assoc? schemas (string tblvar)) (string tblvar) nil)))
+											(if (nil? _schema_alias) '() (map (schemas _schema_alias) (lambda (coldef) (coldef "Field")))))
+										'()))
+									/* For UPDATE target: append $update after real table columns so outer-var slots stay stable */
 									(define scan_mapcols nil)
 									(define scan_mapfn_params nil)
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
@@ -3614,11 +3669,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													)
 												)
 												ut_extra_cols
+												update_target_schema_cols
 											)
 										))
-										(set scan_mapcols (if is_update_target (cons list (cons "$update" cols)) (cons list cols)))
+										(set scan_mapcols (if is_update_target (cons list (merge cols '("$update"))) (cons list cols)))
 										(set scan_mapfn_params (if is_update_target
-											(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
+											(merge (map cols (lambda(col) (symbol (concat tblvar "." col)))) '((symbol "$update")))
 											(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 										(scan_wrapper 'scan schema tbl
