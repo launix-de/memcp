@@ -110,6 +110,12 @@ canonical source side must be used so equivalent queries share the same temp col
 		expr
 	)
 ))
+/* temp table / keytable names must not embed NUL alias separators from flattened
+derived tables. Keep the canonical structure, but drop the separator byte in the
+physical storage name so partition files remain valid on disk. */
+(define sanitize_temp_name (lambda (name)
+	(if (string? name) (replace name "\0" "") name)
+))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
@@ -124,6 +130,33 @@ defines the physical prejoin column names. */
 		expr
 	)
 ))
+/* build_occurrence_alias_map: assign a stable canonical source namespace to query
+aliases. Single occurrences keep the physical table name for maximal reuse.
+If the same physical table appears multiple times in one query tree, append an
+occurrence index so self-joins do not collapse distinct roles. */
+(define build_occurrence_alias_map (lambda (tables) (begin
+	(define total_counts (newsession))
+	(map tables (lambda (td) (match td
+		'(_ tschema ttbl _ _) (begin
+			(define src (concat tschema "." ttbl))
+			(total_counts src (+ 1 (coalesceNil (total_counts src) 0)))
+			nil)
+		nil)))
+	(define seen_counts (newsession))
+	(define alias_pairs (map tables (lambda (td) (match td
+		'(tv tschema ttbl _ _) (begin
+			(define src (concat tschema "." ttbl))
+			(define idx (coalesceNil (seen_counts src) 0))
+			(define canon (if (> (coalesceNil (total_counts src) 0) 1)
+				(concat src "#" idx)
+				src))
+			(seen_counts src (+ idx 1))
+			(list tv canon))
+		(list "" "")))))
+	(merge alias_pairs (map alias_pairs (lambda (pair) (match pair
+		'(_ canon) (list canon canon)
+		(list "" ""))))))
+)))
 
 (define rewrite_materialized_source_columns (lambda (tbl tblvar expr)
 	(begin
@@ -615,7 +648,8 @@ Does NOT handle FK→PK reuse (returns nil for that case — caller must check).
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
 	(define alias_map (list (list tblvar (concat schema "." tbl))))
 	(define key_names (map keys (lambda (k)
-		(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar k)) '(list) '(list) alias_map))))
+		(sanitize_temp_name
+			(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar k)) '(list) '(list) alias_map)))))
 	(define keytable_name (concat "." tbl ":" key_names))
 	(define schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 	(list keytable_name key_names schema_def)
@@ -643,9 +677,11 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 		(begin
 			(define alias_map (list (list tblvar (concat schema "." tbl))))
 			(define key_names (map keys (lambda (k)
-				(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar k)) '(list) '(list) alias_map))))
+				(sanitize_temp_name
+					(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar k)) '(list) '(list) alias_map)))))
 			(define condition_name (if (nil? condition_suffix) nil
-				(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar condition_suffix)) '(list) '(list) alias_map)))
+				(sanitize_temp_name
+					(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar condition_suffix)) '(list) '(list) alias_map))))
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
 			(define keytable_name (if (nil? condition_suffix)
@@ -799,12 +835,14 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	replacer
 )))
 
-/* rewrite_for_prejoin: rewrite source get_column refs to canonical prejoin columns. */
+/* rewrite_for_prejoin: rewrite only columns coming from the prejoin source scope.
+Outer tables must stay untouched so scoped GROUP stages can still join the
+materialized prejoin/keytable back to the surrounding row stream. */
 (define rewrite_for_prejoin (lambda (pjvar alias_map expr)
-	(match expr
-		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) expr
+	(match (normalize_canonical_aliases expr)
+		'((symbol get_column) tblvar _ col _) (if (or (nil? tblvar) (nil? (alias_map tblvar))) expr
 			'('get_column pjvar false (canonical_expr_name (normalize_canonical_aliases expr) '(list) '(list) alias_map) false))
-		'((quote get_column) tblvar _ col _) (if (nil? tblvar) expr
+		'((quote get_column) tblvar _ col _) (if (or (nil? tblvar) (nil? (alias_map tblvar))) expr
 			'('get_column pjvar false (canonical_expr_name (normalize_canonical_aliases expr) '(list) '(list) alias_map) false))
 		(cons sym args) (cons sym (map args (lambda (a) (rewrite_for_prejoin pjvar alias_map a))))
 		expr
@@ -2659,6 +2697,41 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list (quote get_column) tblvar false match_col false)))
 						(cons sym args) (cons sym (map args rewrite_materialized_source_aggs_single))
 						expr)))
+				(define rewrite_materialized_source_cols_single (lambda (expr) (match expr
+					'((symbol get_column) _ _ _ _) (begin
+						(define materialized_cols (materialized_source_schema schema tbl tblvar schemas))
+						(define normalized_expr (normalize_canonical_aliases expr))
+						(define match_col (reduce materialized_cols (lambda (found coldef)
+							(if (not (nil? found))
+								found
+								(begin
+									(define source_expr (coalesceNil (coldef "Expr") nil))
+									(if (and (not (nil? source_expr))
+											(equal? (normalize_canonical_aliases source_expr) normalized_expr))
+										(coldef "Field")
+										nil))))
+						nil))
+						(if (nil? match_col)
+							expr
+							(list (quote get_column) tblvar false match_col false)))
+					'((quote get_column) _ _ _ _) (begin
+						(define materialized_cols (materialized_source_schema schema tbl tblvar schemas))
+						(define normalized_expr (normalize_canonical_aliases expr))
+						(define match_col (reduce materialized_cols (lambda (found coldef)
+							(if (not (nil? found))
+								found
+								(begin
+									(define source_expr (coalesceNil (coldef "Expr") nil))
+									(if (and (not (nil? source_expr))
+											(equal? (normalize_canonical_aliases source_expr) normalized_expr))
+										(coldef "Field")
+										nil))))
+						nil))
+						(if (nil? match_col)
+							expr
+							(list (quote get_column) tblvar false match_col false)))
+					(cons sym args) (cons sym (map args rewrite_materialized_source_cols_single))
+					expr)))
 				(define lower_visible_materialized_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
 						(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
@@ -2710,7 +2783,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define runtime_local_col_name (lambda (expr)
 					(concat ".runtime_pred|" (expr_name expr) (runtime_cache_suffix_from_exprs (list expr)))))
 				(define _runtime_local_part (lambda (part)
-					(and (expr_uses_session_state part) (equal? (has_only_tblvar_refs part tblvar) true))))
+					(and (equal? (has_only_tblvar_refs part tblvar) true)
+						(expr_uses_session_state part))))
 				(define _condition_parts0 (_flatten_and_parts condition))
 				(define _runtime_local_parts (filter _condition_parts0 _runtime_local_part))
 				(define _runtime_local_setup_expr (lambda (part) (begin
@@ -2868,8 +2942,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						subsequent global group stages and carry no refs to the current
 						scoped source table. */
 						(define replace_group_field_expr (lambda (expr) (match expr
-							'((symbol get_column) _ _ _ _) (replace_group_key_or_fetch expr)
-							'((quote get_column) _ _ _ _) (replace_group_key_or_fetch expr)
+							'((symbol get_column) _ _ _ _) (replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr))
+							'((quote get_column) _ _ _ _) (replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr))
 							(cons (symbol aggregate) agg_rest)
 							(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()))
 									(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
@@ -2999,7 +3073,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								'()))))
 
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
-							(define runtime_expr (rewrite_materialized_source_aggs_single expr))
+							(define runtime_expr (rewrite_materialized_source_cols_single (rewrite_materialized_source_aggs_single expr)))
 							(set cols (merge_unique (list
 								(extract_columns_for_tblvar tblvar runtime_expr)
 								(extract_outer_columns_for_tblvar tblvar runtime_expr)
@@ -3106,14 +3180,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					)
 			(begin /* multi-table GROUP BY via prejoin materialization */
 				(if is_dedup (error "DISTINCT on joined tables not yet supported"))
-				/* ALL tables go into the prejoin — the GROUP BY needs all columns
-				materialized in one table. Partition-staged _unn_ tables are included
-				so their columns are available as prejoin_alias.alias.col after rewrite. */
-				(define prejoin_source_tables tables)
-				(define prejoin_alias_map (map prejoin_source_tables (lambda (t)
-					(match t '(tv tschema ttbl _ _)
-						(list tv (concat tschema "." ttbl)))))
-				)
+				/* Scoped groups only materialize the tables inside their domain. Outer
+				tables stay outside so the recursive single-table GROUP path can keep the
+				keytable LEFT-joined to the surrounding row stream. Global multi-table
+				GROUPs still materialize all participating tables. */
+				(define prejoin_source_tables _grp_tables)
+				(define prejoin_alias_map (build_occurrence_alias_map prejoin_source_tables))
 				(define known_table_aliases (map prejoin_source_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
 				(define rewrite_materialized_source_aggs (lambda (expr nested_agg) (match expr
 					(cons (symbol aggregate) agg_args)
@@ -3169,6 +3241,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(set condition (if (equal? 0 (count materialize_condition_parts)) true
 					(if (equal? 1 (count materialize_condition_parts)) (car materialize_condition_parts)
 						(cons (quote and) materialize_condition_parts))))
+				/* Scoped prejoins must not consume outer-table predicates at materialize
+				time. Keep local predicates on the prejoin source and defer the rest to the
+				recursive grouped plan, where the keytable joins back to the outer row. */
+				(match (split_condition condition _grp_ps_tables) '(prejoin_condition deferred_condition)
+					(begin
+						(set condition prejoin_condition)
+						(if (not (equal? deferred_condition true))
+							(set post_group_condition (if (equal? post_group_condition true)
+								deferred_condition
+								(cons (quote and) (cons post_group_condition (list deferred_condition))))))))
 				/* merge aggregate parts into ps_condition (both go to grouped_plan) */
 				(define post_group_condition (if (equal? 0 (count aggregate_condition_parts)) post_group_condition
 					(if (equal? post_group_condition true)
@@ -3267,7 +3349,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(or acc (has? known_table_aliases a))) false))))
 				(define prejoin_materialize_fields (merge (map prejoin_columns (lambda (mc) (list (car mc) (cadr mc))))))
 				(define prejoin_materialize_rowplan (build_queryplan schema
-					tables
+					prejoin_source_tables
 					prejoin_materialize_fields
 					condition
 					covered_partition_stages
@@ -3298,24 +3380,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define grouped_having (rewrite_as_prejoin_column stage_having))
 				(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (rewrite_as_prejoin_column col) dir))))))
 				/* rebuild group stage for recursive call */
-				(define grouped_stage (make_group_stage grouped_keys grouped_having grouped_order stage_limit stage_offset nil nil))
+				(define grouped_stage (make_group_stage grouped_keys grouped_having grouped_order stage_limit stage_offset
+					(if (nil? _stage_scope) nil (list prejoin_alias))
+					nil))
 				(define grouped_all_stages (cons grouped_stage rest_groups))
 				/* recursive call with single prejoin table.
-				All tables are in the prejoin — rewrite aggregate condition to prejoin refs.
-				No partition-staged tables remain outside the prejoin. */
+				Scoped groups keep their outer tables outside the prejoin so later field
+				expressions can still read them after the keytable LEFT JOIN. */
 				(define grouped_plan_condition (if (equal? post_group_condition true) nil
 					(rewrite_as_prejoin_column post_group_condition)))
+				(define recursive_replace_find_column (lambda (expr)
+					(rewrite_as_prejoin_column (replace_find_column expr))))
 				/* drop partition stages covered by the prejoin (all tables materialized) */
 				(define remaining_partition_stages (filter partition_stages (lambda (ps)
 					(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 						(or acc (has? known_table_aliases a))) false)))))
 				(define grouped_result (build_queryplan schema
-					(list (list prejoin_alias schema prejointbl false nil))
+					(merge (list (list prejoin_alias schema prejointbl false nil)) _grp_ps_tables)
 					grouped_fields
 					grouped_plan_condition
 					(merge grouped_all_stages remaining_partition_stages)
 					(merge schemas (list prejoin_alias prejoin_schema_def))
-					replace_find_column
+					recursive_replace_find_column
 					nil))
 				/* build per-source-table incremental trigger functions.
 				Deduplicate by physical table to avoid duplicate triggers. */
