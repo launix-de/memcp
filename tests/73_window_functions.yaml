@@ -4,6 +4,9 @@ metadata:
 
 test_cases:
   # --- Setup ---
+  - name: "Drop window test table if exists"
+    sql: "DROP TABLE IF EXISTS win_emp"
+
   - name: "Create window test table"
     sql: "CREATE TABLE win_emp (id INT PRIMARY KEY, parent INT, time_val INT, amount INT)"
 

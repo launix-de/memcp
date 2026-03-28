@@ -1959,11 +1959,11 @@ WHAT IT MUST NOT DO:
 									(define _inner_aliases (map tablesPrefixed (lambda (t) (match t '(alias _ _ _ _) alias _ nil))))
 									(define wrap_outer_join_projection (lambda (expr)
 										(if (and isOuter
-												(not (equal? joinexpr true))
-												(not (nil? joinexpr2))
-												(not (equal? joinexpr2 true))
-												(not (_check_inner_select joinexpr2))
-												(equal? (filter (extract_tblvars expr) (lambda (tv) (has? _inner_aliases tv))) '()))
+											(not (equal? joinexpr true))
+											(not (nil? joinexpr2))
+											(not (equal? joinexpr2 true))
+											(not (_check_inner_select joinexpr2))
+											(equal? (filter (extract_tblvars expr) (lambda (tv) (has? _inner_aliases tv))) '()))
 											(list (quote if) joinexpr2 expr nil)
 											expr)))
 									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
@@ -2070,15 +2070,15 @@ WHAT IT MUST NOT DO:
 					fields like t.state_can_view instead of resolving directly to t\0rs.*. */
 					(define main_match (reduce_assoc schemas (lambda (a alias cols)
 						(if (and (equal? (replace alias "\0" "") alias)
-								(not (strlike (string alias) "%:%"))
-								(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+							(not (strlike (string alias) "%:%"))
+							(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 							alias a)) nil))
 					/* Then allow prefixed flattened aliases (contains \0 but no ':') if no wrapper matched. */
 					(define flattened_match (if (nil? main_match)
 						(reduce_assoc schemas (lambda (a alias cols)
 							(if (and (not (equal? (replace alias "\0" "") alias))
-									(not (strlike (string alias) "%:%"))
-									(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+								(not (strlike (string alias) "%:%"))
+								(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 								alias a)) nil)
 						main_match))
 					/* If not found in main tables, try subquery tables (aliases with ':') */
@@ -2259,11 +2259,11 @@ WHAT IT MUST NOT DO:
 				(list col (replace_find_column expr))
 			)))))
 
-				/* return parameter list for build_queryplan */
-				(set tables (map tables (lambda (t) (match t
-					'(a s tbl io je) (list a s tbl io (if (nil? je) nil (replace_find_column (replace_rename (canonicalize_for_rename je)))))
-					t))))
-				(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x)))))) /* TODO: append inner conditions to condition */
+			/* return parameter list for build_queryplan */
+			(set tables (map tables (lambda (t) (match t
+				'(a s tbl io je) (list a s tbl io (if (nil? je) nil (replace_find_column (replace_rename (canonicalize_for_rename je)))))
+				t))))
+			(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x)))))) /* TODO: append inner conditions to condition */
 			(set group (map group (lambda (g) (replace_rename (canonicalize_for_rename g)))))
 			(set having (replace_rename (canonicalize_for_rename having)))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename (canonicalize_for_rename col)) dir)))))
@@ -2770,100 +2770,110 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(make_collect false)
 									nil))
 							invalidation_plan compute_plan
-							/* window+GROUP BY injection: after keytable is computed,
-							scan it to fill promises with global totals, then wrap
-							grouped_plan's resultrow to inject promise values. */
-							(if (not (_wg_store "active")) grouped_plan
-								(begin
-									(define _wg_ctr (newsession)) (_wg_ctr "n" 0)
-									(define _wg_nn (lambda () (begin (_wg_ctr "n" (+ (_wg_ctr "n") 1)) (concat "__wgp_" (_wg_ctr "n")))))
-									/* build promise info and output fields with promise refs */
-									(define _wg_pl (newsession)) (_wg_pl "l" '())
-									(define _wg_has_window (lambda (expr)
-										(if (and (list? expr) (> (count expr) 0))
-											(if (equal?? (car expr) (quote window_func))
-												true
-												(reduce expr (lambda (a b) (or a (_wg_has_window b))) false))
-											false)))
-									(define _wg_replace_window_expr (lambda (expr)
-										(if (and (list? expr) (> (count expr) 0)
-												(or
-													(equal?? (car expr) (quote window_func))
-													(and (list? (car expr)) (> (count (car expr)) 0) (equal?? (car (car expr)) (quote window_func)))))
+								/* window+GROUP BY: plan the grouped keytable as a second-stage
+								single-table query so regular window handling runs on grouped rows. */
+								(if (not (_wg_store "active")) grouped_plan
+									(begin
+										(define _wg_over_empty (lambda (over)
+											(or
+												(nil? over)
+												(equal? over '())
+												(match over
+													'(() ()) true
+													'(partition_by order_by) (and (equal? partition_by '()) (equal? order_by '()))
+													_ false))))
+										(define _wg_windows (merge (extract_assoc (_wg_store "fields") (lambda (k v) (extract_window_funcs v)))))
+										(define _wg_nonagg_windows (reduce _wg_windows (lambda (acc wf) (or acc (match wf '(fn args over)
+											(not (has? '("SUM" "COUNT" "MIN" "MAX") fn))))) false))
+										(if (not _wg_nonagg_windows)
 											(begin
-												(define pn (_wg_nn))
-												(define wfexpr (if (and (list? (car expr)) (> (count (car expr)) 0) (equal?? (car (car expr)) (quote window_func)))
-													(car expr)
-													expr))
-												(define wfn (nth wfexpr 1))
-												(define wargs (nth wfexpr 2))
-												(define inner_agg (if (and (list? wargs) (> (count wargs) 0)) (car wargs) 1))
-												(define agg_tuple (match inner_agg (cons (symbol aggregate) rest) rest (list inner_agg (quote +) 0)))
-												(define acn (agg_col_name agg_tuple))
-												(_wg_pl "l" (cons (list pn acn wfn) (_wg_pl "l")))
-												(symbol pn))
-											(if (list? expr)
-												(map expr _wg_replace_window_expr)
-												expr))))
-									(define _wg_group_fields (map_assoc fields (lambda (k v) (replace_group_key_or_fetch v))))
-									(define _wg_bind_group_fetches (lambda (expr)
-										(match expr
-											'((symbol get_column) alias_ ti col ci) (if (and (equal?? alias_ grouptbl) (not ti) (not ci))
-												(begin
-													(define matched_alias (reduce_assoc _wg_group_fields (lambda (found fk fv)
-														(if (not (nil? found))
-															found
-															(if (equal? fv expr) fk nil))) nil))
-													(if (nil? matched_alias) expr
-														(list (quote get_assoc) (symbol "__wgr") matched_alias)))
-												expr)
-											'((quote get_column) alias_ ti col ci) (if (and (equal?? alias_ grouptbl) (not ti) (not ci))
-												(begin
-													(define matched_alias (reduce_assoc _wg_group_fields (lambda (found fk fv)
-														(if (not (nil? found))
-															found
-															(if (equal? fv expr) fk nil))) nil))
-													(if (nil? matched_alias) expr
-														(list (quote get_assoc) (symbol "__wgr") matched_alias)))
-												expr)
-											(cons sym args) (cons sym (map args _wg_bind_group_fetches))
-											expr)))
-									(define _wg_out_fields (map_assoc (_wg_store "fields") (lambda (k v)
-										(if (_wg_has_window v)
-											(_wg_bind_group_fetches (replace_group_key_or_fetch (_wg_replace_window_expr v)))
-											nil))))
-									/* scan keytable for each promise: aggregate the column globally */
-									(define _wg_scans (map (_wg_pl "l") (lambda (pi) (match pi '(pn acn wfn)
-										(begin
-											(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
-											(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
-											(list (quote set) (symbol pn)
-												'('scan schema grouptbl
-													'(list acn)
-													'('lambda (list (symbol acn)) true)
-													'(list acn)
-													'('lambda (list (symbol acn)) (symbol acn))
-													reduce_op
-													neutral
-													nil false)))))))
-									/* wrap grouped_plan: replace resultrow to inject promise values */
-									(define _wg_emit_sym (symbol "__wg_emit"))
-									(define _wg_replace_resultrow (lambda (expr) (match expr
-										(cons sym args) (if (equal? sym (quote resultrow))
-											(cons _wg_emit_sym (map args _wg_replace_resultrow))
-											(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-												(list (quote symbol) "__wg_emit")
-												(cons (_wg_replace_resultrow sym) (map args _wg_replace_resultrow))))
-										expr)))
-									(define _wg_rr_body (cons (quote list) (merge (extract_assoc (_wg_store "fields") (lambda (k v)
-										(list k (if (nil? (_wg_out_fields k))
-											(list (quote get_assoc) (symbol "__wgr") k)
-											(_wg_out_fields k))))))))
-									(cons 'begin (merge _wg_scans (list
-										(list (quote set) _wg_emit_sym
-											(list (quote lambda) (list (symbol "__wgr"))
-												(list (quote resultrow) _wg_rr_body)))
-										(_wg_replace_resultrow grouped_plan)))))))
+												(define _wg_ctr (newsession)) (_wg_ctr "n" 0)
+												(define _wg_nn (lambda () (begin (_wg_ctr "n" (+ (_wg_ctr "n") 1)) (concat "__wgp_" (_wg_ctr "n")))))
+												(define _wg_pl (newsession)) (_wg_pl "l" '())
+												(define _wg_has_window (lambda (expr)
+													(if (and (list? expr) (> (count expr) 0))
+														(if (equal?? (car expr) (quote window_func))
+															true
+															(reduce expr (lambda (a b) (or a (_wg_has_window b))) false))
+														false)))
+												(define _wg_replace_window_expr (lambda (expr)
+													(if (and (list? expr) (> (count expr) 0)
+															(or
+																(equal?? (car expr) (quote window_func))
+																(and (list? (car expr)) (> (count (car expr)) 0) (equal?? (car (car expr)) (quote window_func)))))
+														(begin
+															(define pn (_wg_nn))
+															(define wfexpr (if (and (list? (car expr)) (> (count (car expr)) 0) (equal?? (car (car expr)) (quote window_func)))
+																(car expr)
+																expr))
+															(define wfn (nth wfexpr 1))
+															(define wargs (nth wfexpr 2))
+															(define inner_agg (if (and (list? wargs) (> (count wargs) 0)) (car wargs) 1))
+															(define agg_tuple (match inner_agg (cons (symbol aggregate) rest) rest (list inner_agg (quote +) 0)))
+															(define acn (agg_col_name agg_tuple))
+															(_wg_pl "l" (cons (list pn acn wfn) (_wg_pl "l")))
+															(symbol pn))
+														(if (list? expr)
+															(map expr _wg_replace_window_expr)
+															expr))))
+												(define _wg_group_fields (map_assoc fields (lambda (k v) (replace_group_key_or_fetch v))))
+												(define _wg_bind_group_fetches (lambda (expr)
+													(match expr
+														'((symbol get_column) alias_ ti col ci) (if (and (equal?? alias_ grouptbl) (not ti) (not ci))
+															(begin
+																(define matched_alias (reduce_assoc _wg_group_fields (lambda (found fk fv)
+																	(if (not (nil? found))
+																		found
+																		(if (equal? fv expr) fk nil))) nil))
+																(if (nil? matched_alias) expr
+																	(list (quote get_assoc) (symbol "__wgr") matched_alias)))
+															expr)
+														'((quote get_column) alias_ ti col ci) (if (and (equal?? alias_ grouptbl) (not ti) (not ci))
+															(begin
+																(define matched_alias (reduce_assoc _wg_group_fields (lambda (found fk fv)
+																	(if (not (nil? found))
+																		found
+																		(if (equal? fv expr) fk nil))) nil))
+																(if (nil? matched_alias) expr
+																	(list (quote get_assoc) (symbol "__wgr") matched_alias)))
+															expr)
+														(cons sym args) (cons sym (map args _wg_bind_group_fetches))
+														expr)))
+												(define _wg_out_fields (map_assoc (_wg_store "fields") (lambda (k v)
+													(if (_wg_has_window v)
+														(_wg_bind_group_fetches (replace_group_key_or_fetch (_wg_replace_window_expr v)))
+														nil))))
+												(define _wg_scans (map (_wg_pl "l") (lambda (pi) (match pi '(pn acn wfn)
+													(begin
+														(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
+														(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
+														(list (quote set) (symbol pn)
+															'('scan schema grouptbl
+																'(list acn)
+																'('lambda (list (symbol acn)) true)
+																'(list acn)
+																'('lambda (list (symbol acn)) (symbol acn))
+																reduce_op
+																neutral
+																nil false)))))))
+												(define _wg_emit_sym (symbol "__wg_emit"))
+												(define _wg_replace_resultrow (lambda (expr) (match expr
+													(cons sym args) (if (equal? sym (quote resultrow))
+														(cons _wg_emit_sym (map args _wg_replace_resultrow))
+														(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+															(list (quote symbol) "__wg_emit")
+															(cons (_wg_replace_resultrow sym) (map args _wg_replace_resultrow))))
+													expr)))
+												(define _wg_rr_body (cons (quote list) (merge (extract_assoc (_wg_store "fields") (lambda (k v)
+													(list k (if (nil? (_wg_out_fields k))
+														(list (quote get_assoc) (symbol "__wgr") k)
+														(_wg_out_fields k))))))))
+												(cons 'begin (merge _wg_scans (list
+													(list (quote set) _wg_emit_sym
+														(list (quote lambda) (list (symbol "__wgr"))
+															(list (quote resultrow) _wg_rr_body)))
+													(_wg_replace_resultrow grouped_plan)))))
+											(error "non-aggregate window functions with GROUP BY not yet supported")))))
 				))
 			)
 			_ (begin /* multi-table GROUP BY via prejoin materialization */
@@ -3253,6 +3263,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								'('(tblvar schema tbl isOuter _)) (begin
 									(set condition (replace_find_column (coalesceNil condition true)))
 									(define has_partition (not (equal? over_partition '())))
+									(define extract_any_columns (lambda (expr) (match expr
+										'((symbol get_column) _ _ col _) (if (equal? col "*") '() '(col))
+										'((quote get_column) _ _ col _) (if (equal? col "*") '() '(col))
+										(cons sym args) (merge_unique (map args extract_any_columns))
+										'())))
 									/* compute stride_cols: all columns needed in output and window args */
 									(define non_window_cols (merge_unique (extract_assoc fields (lambda (k v)
 										(extract_columns_for_tblvar tblvar (replace_find_column v))))))
@@ -3263,6 +3278,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										'((quote get_column) _ _ col _) '(col)
 										'())))))
 									(define stride_cols (merge_unique (list non_window_cols wf_arg_cols partition_col_names)))
+									(define fallback_window_cols (if (equal? stride_cols '())
+										(merge_unique (list
+											(extract_assoc fields (lambda (k v) (extract_any_columns (replace_find_column v))))
+											(merge_unique (map wf_resolved (lambda (wf) (match wf '(fn args _)
+												(merge_unique (map args extract_any_columns))))))
+											partition_col_names
+											(merge_unique (map effective_sort (lambda (order_item) (match order_item '(col dir) (extract_any_columns col)))))))
+										'()))
+									(define stride_cols (if (equal? stride_cols '()) fallback_window_cols stride_cols))
+									(define single_table_window_fallback (not (equal? fallback_window_cols '())))
 									(define stride (count stride_cols))
 									/* window parameters */
 									(define max_lag (reduce wf_resolved (lambda (acc wf) (match wf '(fn args _)
@@ -3289,6 +3314,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											(rewrite_for_emit (replace_find_column (car wf_args)) wf_pos))
 										'((symbol get_column) (eval tblvar) _ col _) (nth emit_params (+ (* row_pos stride) (col_index col)))
 										'((quote get_column) (eval tblvar) _ col _) (nth emit_params (+ (* row_pos stride) (col_index col)))
+										'((symbol get_column) alias_ _ col _) (if single_table_window_fallback
+											(nth emit_params (+ (* row_pos stride) (col_index col)))
+											expr)
+										'((quote get_column) alias_ _ col _) (if single_table_window_fallback
+											(nth emit_params (+ (* row_pos stride) (col_index col)))
+											expr)
 										'((symbol get_column) nil _ col _) (rewrite_for_emit (replace_find_column expr) row_pos)
 										(cons sym args_) (cons sym (map args_ (lambda (a) (rewrite_for_emit a row_pos))))
 										expr)))
@@ -3307,6 +3338,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
 										'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
 										_ '()))))))
+									(define ordercols (if (and (equal? ordercols '()) single_table_window_fallback)
+										(merge (map effective_sort (lambda (order_item) (match order_item '(col dir) (extract_any_columns col)))))
+										ordercols))
+									(define sort_dirs (if (and (equal? sort_dirs '()) single_table_window_fallback)
+										(merge (map effective_sort (lambda (order_item) (match order_item '(col dir) '(dir)))))
+										sort_dirs))
 									/* filter setup */
 									(define filtercols (extract_columns_for_tblvar tblvar condition))
 									/* symbols for emit_fn and fresh neutral */
