@@ -1,0 +1,93 @@
+metadata:
+  version: "1.0"
+  description: "SPARQL aggregate functions with GROUP BY"
+
+setup: []
+
+test_cases:
+
+  - name: "COUNT"
+    noncritical: true
+    ttl_data: |
+      @prefix ag1: <http://agg01.org/> .
+      ag1:a a ag1:Person .
+      ag1:b a ag1:Person .
+      ag1:c a ag1:Person .
+    sparql: |
+      @prefix ag1: <http://agg01.org/> .
+      SELECT (COUNT(?s) AS ?cnt) WHERE { ?s a ag1:Person }
+    expect:
+      rows: 1
+      data:
+        - "?cnt": 3
+
+  - name: "COUNT with GROUP BY"
+    noncritical: true
+    ttl_data: |
+      @prefix ag2: <http://agg02.org/> .
+      ag2:a ag2:type "cat" .
+      ag2:b ag2:type "dog" .
+      ag2:c ag2:type "cat" .
+      ag2:d ag2:type "cat" .
+    sparql: |
+      @prefix ag2: <http://agg02.org/> .
+      SELECT ?t, (COUNT(?s) AS ?cnt) WHERE { ?s ag2:type ?t } GROUP BY ?t
+    expect:
+      rows: 2
+
+  - name: "SUM"
+    noncritical: true
+    ttl_data: |
+      @prefix ag3: <http://agg03.org/> .
+      ag3:a ag3:val "10" .
+      ag3:b ag3:val "20" .
+      ag3:c ag3:val "30" .
+    sparql: |
+      @prefix ag3: <http://agg03.org/> .
+      SELECT (SUM(?v) AS ?total) WHERE { ?s ag3:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?total": 60
+
+  - name: "AVG"
+    noncritical: true
+    ttl_data: |
+      @prefix ag4: <http://agg04.org/> .
+      ag4:a ag4:val "10" .
+      ag4:b ag4:val "20" .
+    sparql: |
+      @prefix ag4: <http://agg04.org/> .
+      SELECT (AVG(?v) AS ?avg) WHERE { ?s ag4:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?avg": 15
+
+  - name: "MIN / MAX"
+    noncritical: true
+    ttl_data: |
+      @prefix ag5: <http://agg05.org/> .
+      ag5:a ag5:val "5" .
+      ag5:b ag5:val "15" .
+      ag5:c ag5:val "10" .
+    sparql: |
+      @prefix ag5: <http://agg05.org/> .
+      SELECT (MIN(?v) AS ?lo), (MAX(?v) AS ?hi) WHERE { ?s ag5:val ?v }
+    expect:
+      rows: 1
+
+  - name: "GROUP_CONCAT"
+    noncritical: true
+    ttl_data: |
+      @prefix ag6: <http://agg06.org/> .
+      ag6:a ag6:tag "red" .
+      ag6:a ag6:tag "blue" .
+      ag6:a ag6:tag "green" .
+    sparql: |
+      @prefix ag6: <http://agg06.org/> .
+      SELECT (GROUP_CONCAT(?t; separator=", ") AS ?tags) WHERE { ag6:a ag6:tag ?t }
+    expect:
+      rows: 1
+
+cleanup: []

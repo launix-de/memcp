@@ -1,0 +1,193 @@
+metadata:
+  version: "1.0"
+  description: "RDF string escaping roundtrips — TTL load + SPARQL query"
+
+setup: []
+
+test_cases:
+
+  # Basic strings
+  - name: "String: plain text"
+    ttl_data: |
+      @prefix e: <http://esc01/> .
+      e:item e:val "hello world" .
+    sparql: |
+      @prefix e: <http://esc01/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "hello world"
+
+  - name: "String: empty"
+    ttl_data: |
+      @prefix e: <http://esc02/> .
+      e:item e:val "" .
+    sparql: |
+      @prefix e: <http://esc02/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": ""
+
+  # Escape sequences
+  - name: "String: escaped newline \\n"
+    ttl_data: |
+      @prefix e: <http://esc03/> .
+      e:item e:val "line1\nline2" .
+    sparql: |
+      @prefix e: <http://esc03/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      contains: "line1"
+
+  - name: "String: escaped tab \\t"
+    ttl_data: |
+      @prefix e: <http://esc04/> .
+      e:item e:val "col1\tcol2" .
+    sparql: |
+      @prefix e: <http://esc04/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      contains: "col1"
+
+  - name: "String: escaped backslash \\\\"
+    ttl_data: |
+      @prefix e: <http://esc05/> .
+      e:item e:val "path\\file" .
+    sparql: |
+      @prefix e: <http://esc05/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+
+  - name: "String: escaped quote \\\""
+    ttl_data: |
+      @prefix e: <http://esc06/> .
+      e:item e:val "say \"hello\"" .
+    sparql: |
+      @prefix e: <http://esc06/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      contains: "hello"
+
+  # HTML content (angle brackets in strings)
+  - name: "String: HTML tags"
+    ttl_data: |
+      @prefix e: <http://esc07/> .
+      e:item e:val "<h1>Hello</h1>" .
+    sparql: |
+      @prefix e: <http://esc07/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      contains: "<h1>"
+
+  - name: "String: HTML with attributes"
+    ttl_data: |
+      @prefix e: <http://esc08/> .
+      e:item e:val "<div class='test'>content</div>" .
+    sparql: |
+      @prefix e: <http://esc08/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      contains: "class="
+
+  # JSON-encoded strings (what rdfopCommit sends)
+  - name: "String: JSON-encoded with escaped quotes"
+    ttl_data: |
+      @prefix e: <http://esc09/> .
+      e:item e:val "line1\nline2" .
+    sparql: |
+      @prefix e: <http://esc09/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+
+  # Roundtrip: load + delete + re-load
+  - name: "Roundtrip: delete then insert same value"
+    ttl_data: |
+      @prefix e: <http://esc10/> .
+      e:item e:val "original" .
+    sparql: |
+      @prefix e: <http://esc10/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "original"
+
+  # Triple-quoted strings
+  - name: "Triple-quoted: embedded double quotes"
+    ttl_data: |
+      @prefix e: <http://esc11/> .
+      e:item e:val """say "hello" friend""" .
+    sparql: |
+      @prefix e: <http://esc11/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      contains: "hello"
+
+  - name: "Triple-quoted: multiline"
+    ttl_data: |
+      @prefix e: <http://esc12/> .
+      e:item e:val """line one
+      line two""" .
+    sparql: |
+      @prefix e: <http://esc12/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      contains: "line one"
+
+  - name: "Triple-quoted: HTML template with quotes"
+    ttl_data: |
+      @prefix e: <http://esc13/> .
+      e:item e:tpl """<div class="test" data-x="y">content</div>""" .
+    sparql: |
+      @prefix e: <http://esc13/> .
+      SELECT ?v WHERE { e:item e:tpl ?v }
+    expect:
+      rows: 1
+      contains: 'class="test"'
+
+  # Special characters
+  - name: "String: single quotes"
+    ttl_data: |
+      @prefix e: <http://esc14/> .
+      e:item e:val "it's fine" .
+    sparql: |
+      @prefix e: <http://esc14/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+
+  - name: "String: ampersand"
+    ttl_data: |
+      @prefix e: <http://esc15/> .
+      e:item e:val "a&b" .
+    sparql: |
+      @prefix e: <http://esc15/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+
+  - name: "String: unicode"
+    ttl_data: |
+      @prefix e: <http://esc16/> .
+      e:item e:val "Hallo Welt!" .
+    sparql: |
+      @prefix e: <http://esc16/> .
+      SELECT ?v WHERE { e:item e:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "Hallo Welt!"
+
+cleanup: []

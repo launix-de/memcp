@@ -1110,18 +1110,6 @@ func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
 // scan_order.go catches this type to implement early-exit (LIMIT semantics inside ORC).
 type breakSentinel struct{}
 
-func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
-	row := make([]scm.Scmer, len(callbackCols))
-	for i, col := range callbackCols {
-		if col == "$outer" {
-			row[i] = scm.NewBool(true)
-		} else {
-			row[i] = scm.NewNil()
-		}
-	}
-	return row
-}
-
 // ShardMapReducer pre-allocates args and applies map+reduce over batches of record IDs.
 // Local implementation of the streaming MapReducer pattern (see todos/cluster.md §15.7).
 // Stream() partitions recid batches into main/delta runs and dispatches to
@@ -1140,24 +1128,23 @@ type ShardMapReducer struct {
 	setProxy        []*StorageComputeProxy // proxy per $set col (nil if not found)
 	hasSetCol       bool
 	isBreak         []bool // true for $break column
-	isOuterPseudo   []bool // true for $outer pseudo-column
 	hasBreakCol     bool
 	// tagClosure hoisted fn ptrs — allocated once per mapper, reused per row
-	setClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
-	incrClosureFn  []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
-	invClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
-	noopClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
-	breakClosureFn *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
-	args           []scm.Scmer                             // pre-allocated args buffer
-	mapFn          func(...scm.Scmer) scm.Scmer
-	reduceFn       func(...scm.Scmer) scm.Scmer
-	mapScmer       scm.Scmer     // original Scmer for network serialization
-	deleteBatch    *triggerBatch // when set, DELETE triggers are batched instead of per-row
+	setClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
+	incrClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
+	invClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
+	noopClosureFn   *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
+	breakClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
+	args            []scm.Scmer                             // pre-allocated args buffer
+	mapFn           func(...scm.Scmer) scm.Scmer
+	reduceFn        func(...scm.Scmer) scm.Scmer
+	mapScmer        scm.Scmer // original Scmer for network serialization
+	deleteBatch     *triggerBatch // when set, DELETE triggers are batched instead of per-row
 	// Batched side effects: collected during scan, flushed after lock release.
 	// $increment calls are aggregated per (proxy, recid) → one update per unique target.
 	incrementBatch  map[*StorageComputeProxy]map[uint32]scm.Scmer // proxy → recid → accumulated delta
-	invalidateBatch map[*StorageComputeProxy]bool                 // proxies to InvalidateAll after scan
-	reduceScmer     scm.Scmer                                     // original Scmer for network serialization
+	invalidateBatch map[*StorageComputeProxy]bool                  // proxies to InvalidateAll after scan
+	reduceScmer     scm.Scmer // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
 	hasIncrementCol bool
@@ -1191,7 +1178,6 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		isSet:            make([]bool, len(cols)),
 		setProxy:         make([]*StorageComputeProxy, len(cols)),
 		isBreak:          make([]bool, len(cols)),
-		isOuterPseudo:    make([]bool, len(cols)),
 		setClosureFn:     make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
 		incrClosureFn:    make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
 		invClosureFn:     make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
@@ -1246,8 +1232,6 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		} else if col == "$break" {
 			mr.isBreak[i] = true
 			mr.hasBreakCol = true
-		} else if col == "$outer" {
-			mr.isOuterPseudo[i] = true
 		} else {
 			mr.mainCols[i] = t.getColumnStorageOrPanicEx(col, alreadyLocked)
 		}
@@ -1399,8 +1383,6 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 					}
 				} else if m.isBreak[i] {
 					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
-				} else if m.isOuterPseudo[i] {
-					m.args[i] = scm.NewBool(false)
 				} else if m.isUpdate[i] {
 					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, !needsPerRowLock && m.hasUpdateCol, m.deleteBatch))
 				} else {
@@ -1460,8 +1442,6 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 					m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
 				} else if m.isBreak[i] {
 					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
-				} else if m.isOuterPseudo[i] {
-					m.args[i] = scm.NewBool(false)
 				} else if m.isUpdate[i] {
 					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, !needsPerRowLock && m.hasUpdateCol, m.deleteBatch))
 				} else if len(col) >= 4 && col[:4] == "NEW." {
@@ -2227,6 +2207,15 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				isFirst = false
 			} else {
 				b.WriteString(", ")
+			}
+
+			// StorageComputeProxy: read only VALID cached values, skip computor
+			// for invalid rows (use nil instead). This avoids infinite recursion
+			// when the computor scans other tables during concurrent rebuild.
+			// The proxy is NOT ported — values are materialized into static storage.
+			// After rebuild, createcolumn will re-create the proxy if needed.
+			if oldProxy, ok := c.(*StorageComputeProxy); ok {
+				c = &safeProxyReader{proxy: oldProxy}
 			}
 
 			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages

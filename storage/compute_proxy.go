@@ -378,6 +378,48 @@ func (p *StorageComputeProxy) ResetInvalidationTelemetry(recomputeNs int64) {
 	}
 }
 
+// safeProxyReader wraps a StorageComputeProxy for use during shard rebuild.
+// It reads only cached/valid values without triggering the computor lambda,
+// preventing infinite recursion when the computor scans other tables that
+// are being concurrently rebuilt. Invalid rows return nil.
+type safeProxyReader struct {
+	proxy *StorageComputeProxy
+}
+
+func (s *safeProxyReader) GetValue(idx uint32) scm.Scmer {
+	p := s.proxy
+	if p.compressed {
+		if p.main != nil {
+			return p.main.GetValue(idx)
+		}
+		return scm.NewNil()
+	}
+	if p.validMask.Get(uint(idx)) {
+		p.mu.RLock()
+		if val, ok := p.delta[idx]; ok {
+			p.mu.RUnlock()
+			return val
+		}
+		p.mu.RUnlock()
+		if p.main != nil {
+			return p.main.GetValue(idx)
+		}
+	}
+	return scm.NewNil() // invalid row — skip computor, return nil
+}
+
+func (s *safeProxyReader) GetCachedReader() ColumnReader { return s }
+func (s *safeProxyReader) String() string                { return "safe-proxy-reader" }
+func (s *safeProxyReader) ComputeSize() uint             { return s.proxy.ComputeSize() }
+func (s *safeProxyReader) proposeCompression(i uint32) ColumnStorage { return nil }
+func (s *safeProxyReader) prepare()                      { /* delegated to outer rebuild loop */ }
+func (s *safeProxyReader) scan(i uint32, v scm.Scmer)    { /* delegated */ }
+func (s *safeProxyReader) init(i uint32)                  { /* delegated */ }
+func (s *safeProxyReader) build(i uint32, v scm.Scmer)   { /* delegated */ }
+func (s *safeProxyReader) finish()                        { /* delegated */ }
+func (s *safeProxyReader) Serialize(w io.Writer)             { /* not persisted */ }
+func (s *safeProxyReader) Deserialize(r io.Reader) uint      { return 0 }
+
 // proposeCompression returns nil — the proxy does not participate in shard
 // rebuild's compression loop. During rebuild, the old proxy is READ via
 // GetCachedReader/GetValue and a NEW storage is built by the rebuild loop.

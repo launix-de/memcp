@@ -129,393 +129,381 @@ func init_strings() {
 	// string functions
 	DeclareTitle("Strings")
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "string?",
 		Desc: "tells if the value is a string",
 		Fn: func(a ...Scmer) Scmer {
-				_, ok := a[0].Any().(string)
-				return NewBool(ok)
-			},
+			_, ok := a[0].Any().(string)
+			return NewBool(ok)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value"}},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "concat",
 		Desc: "concatenates stringable values and returns a string",
 		Fn: func(a ...Scmer) Scmer {
-				var sb strings.Builder
-				for _, s := range a {
-					if stream, ok := s.Any().(io.Reader); ok {
-						_, _ = io.Copy(&sb, stream)
-					} else {
-						sb.WriteString(String(s))
-					}
+			var sb strings.Builder
+			for _, s := range a {
+				if s.IsNil() {
+					return NewNil()
 				}
-				return NewString(sb.String())
-			},
+				if stream, ok := s.Any().(io.Reader); ok {
+					_, _ = io.Copy(&sb, stream)
+				} else {
+					sb.WriteString(String(s))
+				}
+			}
+			return NewString(sb.String())
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "first value to concat"}, &TypeDescriptor{Kind: "any", ParamName: "more...", ParamDesc: "additional values to concat", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
+		Name: "sql_concat",
+		Desc: "SQL CONCAT semantics: returns NULL if any argument is NULL",
+		Fn: func(a ...Scmer) Scmer {
+			return Globalenv.Vars["concat"].Func()(a...)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "first value to concat"}, &TypeDescriptor{Kind: "any", ParamName: "more...", ParamDesc: "additional values to concat", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "any"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "substr",
 		Desc: "returns a substring (0-based index)",
 		Fn: func(a ...Scmer) Scmer {
-				s := String(a[0])
-				i := ToInt(a[1])
-				if len(a) > 2 {
-					return NewString(s[i : i+ToInt(a[2])])
-				}
-				return NewString(s[i:])
-			},
+			s := String(a[0])
+			i := ToInt(a[1])
+			if len(a) > 2 {
+				return NewString(s[i : i+ToInt(a[2])])
+			}
+			return NewString(s[i:])
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to cut"}, &TypeDescriptor{Kind: "number", ParamName: "start", ParamDesc: "first character index (0-based)"}, &TypeDescriptor{Kind: "number", ParamName: "len", ParamDesc: "optional length", Optional: true}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sql_substr",
 		Desc: "SQL SUBSTR/SUBSTRING with 1-based index and bounds checking",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() {
-					return NewNil()
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			s := String(a[0])
+			slen := len(s)
+			start := ToInt(a[1]) - 1 // convert 1-based to 0-based
+			if start < 0 {
+				start = 0
+			}
+			if start >= slen {
+				return NewString("")
+			}
+			if len(a) > 2 {
+				n := ToInt(a[2])
+				if start+n > slen {
+					n = slen - start
 				}
-				s := String(a[0])
-				slen := len(s)
-				start := ToInt(a[1]) - 1 // convert 1-based to 0-based
-				if start < 0 {
-					start = 0
-				}
-				if start >= slen {
+				if n < 0 {
 					return NewString("")
 				}
-				if len(a) > 2 {
-					n := ToInt(a[2])
-					if start+n > slen {
-						n = slen - start
-					}
-					if n < 0 {
-						return NewString("")
-					}
-					return NewString(s[start : start+n])
-				}
-				return NewString(s[start:])
-			},
+				return NewString(s[start : start+n])
+			}
+			return NewString(s[start:])
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to cut"}, &TypeDescriptor{Kind: "number", ParamName: "start", ParamDesc: "first character position (1-based)"}, &TypeDescriptor{Kind: "number", ParamName: "len", ParamDesc: "optional length", Optional: true}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "simplify",
 		Desc: "turns a stringable input value in the easiest-most value (e.g. turn strings into numbers if they are numeric",
 		Fn: func(a ...Scmer) Scmer {
-				// turn string to number or so
-				return Simplify(String(a[0]))
-			},
+			// turn string to number or so
+			return Simplify(String(a[0]))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to simplify"}},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "strlen",
 		Desc: "returns the length of a string",
 		Fn: func(a ...Scmer) Scmer {
-				return NewInt(int64(len(String(a[0]))))
-			},
+			return NewInt(int64(len(String(a[0]))))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "int"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "strlike",
 		Desc: "matches the string against a wildcard pattern (SQL compliant)",
 		Fn: func(a ...Scmer) Scmer {
-				value := String(a[0])
-				pattern := String(a[1])
-				collation := "utf8mb4_general_ci"
-				if len(a) > 2 {
-					collation = strings.ToLower(String(a[2]))
-				}
-				if strings.Contains(collation, "_ci") {
-					value = strings.ToLower(value)
-					pattern = strings.ToLower(pattern)
-				}
-				return NewBool(StrLike(value, pattern))
-			},
+			value := String(a[0])
+			pattern := String(a[1])
+			collation := "utf8mb4_general_ci"
+			if len(a) > 2 {
+				collation = strings.ToLower(String(a[2]))
+			}
+			if strings.Contains(collation, "_ci") {
+				value = strings.ToLower(value)
+				pattern = strings.ToLower(pattern)
+			}
+			return NewBool(StrLike(value, pattern))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "pattern with % and _ in them"}, &TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "collation in which to compare them", Optional: true}},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "strlike_cs",
 		Desc: "matches the string against a wildcard pattern (case-sensitive)",
 		Fn: func(a ...Scmer) Scmer {
-				return NewBool(StrLike(String(a[0]), String(a[1])))
-			},
+			return NewBool(StrLike(String(a[0]), String(a[1])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "pattern with % and _ in them"}, &TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "ignored (present for parser compatibility)", Optional: true}},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "toLower",
 		Desc: "turns a string into lower case",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(strings.ToLower(String(a[0])))
-			},
+			return NewString(strings.ToLower(String(a[0])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "toUpper",
 		Desc: "turns a string into upper case",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(strings.ToUpper(String(a[0])))
-			},
+			return NewString(strings.ToUpper(String(a[0])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "replace",
 		Desc: "replaces all occurances in a string with another string",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
-			},
+			return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "s", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "find", ParamDesc: "search string"}, &TypeDescriptor{Kind: "string", ParamName: "replace", ParamDesc: "replace string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "strtrim",
 		Desc: "trims whitespace from both ends of a string",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(strings.TrimSpace(String(a[0])))
-			},
+			return NewString(strings.TrimSpace(String(a[0])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "strltrim",
 		Desc: "trims whitespace from the left of a string",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
-			},
+			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "strrtrim",
 		Desc: "trims whitespace from the right of a string",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
-			},
+			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sql_trim",
 		Desc: "SQL TRIM(): NULL-safe trim of whitespace from both ends",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() {
-					return NewNil()
-				}
-				return NewString(strings.TrimSpace(String(a[0])))
-			},
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			return NewString(strings.TrimSpace(String(a[0])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sql_ltrim",
 		Desc: "SQL LTRIM(): NULL-safe trim of whitespace from left",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() {
-					return NewNil()
-				}
-				return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
-			},
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sql_rtrim",
 		Desc: "SQL RTRIM(): NULL-safe trim of whitespace from right",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() {
-					return NewNil()
-				}
-				return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
-			},
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "split",
 		Desc: "splits a string using a separator or space",
 		Fn: func(a ...Scmer) Scmer {
-				split := " "
-				if len(a) > 1 {
-					split = String(a[1])
-				}
-				ar := strings.Split(String(a[0]), split)
-				result := make([]Scmer, len(ar))
-				for i, v := range ar {
-					result[i] = NewString(v)
-				}
-				return NewSlice(result)
-			},
+			split := " "
+			if len(a) > 1 {
+				split = String(a[1])
+			}
+			ar := strings.Split(String(a[0]), split)
+			result := make([]Scmer, len(ar))
+			for i, v := range ar {
+				result[i] = NewString(v)
+			}
+			return NewSlice(result)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "separator", ParamDesc: "(optional) parameter, defaults to \" \"", Optional: true}},
 			Return: &TypeDescriptor{Kind: "list"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "string_repeat",
 		Desc: "repeats a string n times",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() {
-					return NewNil()
-				}
-				n := ToInt(a[1])
-				if n <= 0 {
-					return NewString("")
-				}
-				return NewString(strings.Repeat(String(a[0]), int(n)))
-			},
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			n := ToInt(a[1])
+			if n <= 0 {
+				return NewString("")
+			}
+			return NewString(strings.Repeat(String(a[0]), int(n)))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to repeat"}, &TypeDescriptor{Kind: "number", ParamName: "count", ParamDesc: "number of repetitions"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
 	/* comparison */
 	collation_re := regexp.MustCompile("^([^_]+_)?(.+?)$") // caracterset_language_case
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "collate",
 		Desc: "returns the `<` operator for a given collation. MemCP allows natural sorting of numeric literals.",
 		Fn: func(a ...Scmer) Scmer {
-				collation := String(a[0])
-				ci := false
-				if strings.HasSuffix(collation, "_ci") {
-					ci = true
-					collation = collation[:len(collation)-3]
-				} else if strings.HasSuffix(collation, "_cs") {
-					collation = collation[:len(collation)-3]
-				}
-				if m := collation_re.FindStringSubmatch(collation); m != nil {
-					if m[2] == "bin" { // binary
-						// Return closures that compare raw UTF-8 byte order; register for serialization
-						if len(a) > 1 && ToBool(a[1]) {
-							f := func(a ...Scmer) Scmer { return GreaterScm(a...) }
-							collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
-								Collation string
-								Reverse   bool
-							}{Collation: String(a[0]), Reverse: true})
-							return NewFunc(f)
-						}
-						f := func(a ...Scmer) Scmer { return LessScm(a...) }
+			collation := String(a[0])
+			ci := false
+			if strings.HasSuffix(collation, "_ci") {
+				ci = true
+				collation = collation[:len(collation)-3]
+			} else if strings.HasSuffix(collation, "_cs") {
+				collation = collation[:len(collation)-3]
+			}
+			if m := collation_re.FindStringSubmatch(collation); m != nil {
+				if m[2] == "bin" { // binary
+					// Return closures that compare raw UTF-8 byte order; register for serialization
+					if len(a) > 1 && ToBool(a[1]) {
+						f := func(a ...Scmer) Scmer { return GreaterScm(a...) }
 						collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
 							Collation string
 							Reverse   bool
-						}{Collation: String(a[0]), Reverse: false})
+						}{Collation: String(a[0]), Reverse: true})
 						return NewFunc(f)
 					}
-					base := m[2]
-					// Special-case MySQL-style "general" to simple case-insensitive first-letter ordering
-					if strings.Contains(base, "general") {
-						reverse := len(a) > 1 && ToBool(a[1])
-						// general_ci heuristic:
-						// - ASCII letters sort before non-ASCII always (both ASC and DESC).
-						// - Treat leading "aa" as non-ASCII class to place after ASCII group in ASC and after ASCII even in DESC.
-						// - Within ASCII, compare by lowercase first letter; tie-break by case-insensitive string compare.
-						classify := func(s string) (isASCII bool, key byte, folded string) {
-							if s == "" {
-								return true, 0, s
-							}
-							sl := strings.ToLower(s)
-							// map leading "aa" to non-ASCII class
-							if len(sl) >= 2 && sl[0] == 'a' && sl[1] == 'a' {
-								return false, 0, sl
-							}
-							b := sl[0]
-							// check ASCII letter
-							if b >= 'a' && b <= 'z' && (s[0] < 128) {
-								return true, b, sl
-							}
+					f := func(a ...Scmer) Scmer { return LessScm(a...) }
+					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+						Collation string
+						Reverse   bool
+					}{Collation: String(a[0]), Reverse: false})
+					return NewFunc(f)
+				}
+				base := m[2]
+				// Special-case MySQL-style "general" to simple case-insensitive first-letter ordering
+				if strings.Contains(base, "general") {
+					reverse := len(a) > 1 && ToBool(a[1])
+					// general_ci heuristic:
+					// - ASCII letters sort before non-ASCII always (both ASC and DESC).
+					// - Treat leading "aa" as non-ASCII class to place after ASCII group in ASC and after ASCII even in DESC.
+					// - Within ASCII, compare by lowercase first letter; tie-break by case-insensitive string compare.
+					classify := func(s string) (isASCII bool, key byte, folded string) {
+						if s == "" {
+							return true, 0, s
+						}
+						sl := strings.ToLower(s)
+						// map leading "aa" to non-ASCII class
+						if len(sl) >= 2 && sl[0] == 'a' && sl[1] == 'a' {
 							return false, 0, sl
 						}
-						if reverse {
-							f := func(a ...Scmer) Scmer {
-								as := String(a[0])
-								bs := String(a[1])
-								aAsc, ak, af := classify(as)
-								bAsc, bk, bf := classify(bs)
-								var res bool
-								if aAsc != bAsc {
-									// ASCII ranks above non-ASCII for DESC too
-									res = aAsc && !bAsc
-								} else if aAsc { // both ASCII letters: reverse letter order
-									if ak != bk {
-										res = ak > bk
-									} else {
-										res = af > bf
-									}
-								} else {
-									// both non-ASCII: keep stable fallback
-									res = as > bs
-								}
-								return NewBool(res)
-							}
-							collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
-								Collation string
-								Reverse   bool
-							}{Collation: String(a[0]), Reverse: true})
-							return NewFunc(f)
+						b := sl[0]
+						// check ASCII letter
+						if b >= 'a' && b <= 'z' && (s[0] < 128) {
+							return true, b, sl
 						}
+						return false, 0, sl
+					}
+					if reverse {
 						f := func(a ...Scmer) Scmer {
 							as := String(a[0])
 							bs := String(a[1])
@@ -523,67 +511,17 @@ func init_strings() {
 							bAsc, bk, bf := classify(bs)
 							var res bool
 							if aAsc != bAsc {
-								// ASCII first for ASC
+								// ASCII ranks above non-ASCII for DESC too
 								res = aAsc && !bAsc
-							} else if aAsc { // both ASCII letters
+							} else if aAsc { // both ASCII letters: reverse letter order
 								if ak != bk {
-									res = ak < bk
+									res = ak > bk
 								} else {
-									res = af < bf
+									res = af > bf
 								}
 							} else {
-								// both non-ASCII: leave at end
-								res = as < bs
-							}
-							return NewBool(res)
-						}
-						collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
-							Collation string
-							Reverse   bool
-						}{Collation: String(a[0]), Reverse: false})
-						return NewFunc(f)
-					}
-					tag, err := language.Parse(base) // treat as BCP 47
-					if err != nil {
-						// language not detected, try one of the aliases
-						switch m[2] {
-						case "danish":
-							tag = language.Danish
-						case "german1":
-							tag = language.German
-						case "german2":
-							tag = language.German
-						case "spanish":
-							tag = language.Spanish
-						case "swedish":
-							tag = language.Swedish
-						default:
-							tag = language.Danish // default to danish for general-like collations (aa -> å semantics)
-						}
-					}
-					var c *collate.Collator
-					// the following options are available:
-					// IgnoreCase -> when string ends with _ci
-					// IgnoreDiacritics -> o == ö
-					// IgnoreWidth: half width == width
-					// Numeric -> sort numbers correctly
-					if ci {
-						c = collate.New(tag, collate.Numeric, collate.IgnoreCase)
-					} else {
-						c = collate.New(tag, collate.Numeric)
-					}
-	
-					// return a LESS function specialized to that language and register for serialization
-					reverse := len(a) > 1 && ToBool(a[1])
-					if reverse {
-						f := func(a ...Scmer) Scmer {
-							var res bool
-							// numeric fallback when both operands are numbers
-							if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
-								res = ToFloat(a[0]) > ToFloat(a[1])
-							}
-							if !res {
-								res = c.CompareString(String(a[0]), String(a[1])) == 1
+								// both non-ASCII: keep stable fallback
+								res = as > bs
 							}
 							return NewBool(res)
 						}
@@ -594,24 +532,101 @@ func init_strings() {
 						return NewFunc(f)
 					}
 					f := func(a ...Scmer) Scmer {
-						// numeric fallback when both operands are numbers
-						if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
-							return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
+						as := String(a[0])
+						bs := String(a[1])
+						aAsc, ak, af := classify(as)
+						bAsc, bk, bf := classify(bs)
+						var res bool
+						if aAsc != bAsc {
+							// ASCII first for ASC
+							res = aAsc && !bAsc
+						} else if aAsc { // both ASCII letters
+							if ak != bk {
+								res = ak < bk
+							} else {
+								res = af < bf
+							}
+						} else {
+							// both non-ASCII: leave at end
+							res = as < bs
 						}
-						return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
+						return NewBool(res)
 					}
 					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
 						Collation string
 						Reverse   bool
 					}{Collation: String(a[0]), Reverse: false})
 					return NewFunc(f)
-				} else {
-					if len(a) > 1 && ToBool(a[1]) {
-						return NewFunc(GreaterScm)
-					}
-					return NewFunc(LessScm)
 				}
-			},
+				tag, err := language.Parse(base) // treat as BCP 47
+				if err != nil {
+					// language not detected, try one of the aliases
+					switch m[2] {
+					case "danish":
+						tag = language.Danish
+					case "german1":
+						tag = language.German
+					case "german2":
+						tag = language.German
+					case "spanish":
+						tag = language.Spanish
+					case "swedish":
+						tag = language.Swedish
+					default:
+						tag = language.Danish // default to danish for general-like collations (aa -> å semantics)
+					}
+				}
+				var c *collate.Collator
+				// the following options are available:
+				// IgnoreCase -> when string ends with _ci
+				// IgnoreDiacritics -> o == ö
+				// IgnoreWidth: half width == width
+				// Numeric -> sort numbers correctly
+				if ci {
+					c = collate.New(tag, collate.Numeric, collate.IgnoreCase)
+				} else {
+					c = collate.New(tag, collate.Numeric)
+				}
+
+				// return a LESS function specialized to that language and register for serialization
+				reverse := len(a) > 1 && ToBool(a[1])
+				if reverse {
+					f := func(a ...Scmer) Scmer {
+						var res bool
+						// numeric fallback when both operands are numbers
+						if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
+							res = ToFloat(a[0]) > ToFloat(a[1])
+						}
+						if !res {
+							res = c.CompareString(String(a[0]), String(a[1])) == 1
+						}
+						return NewBool(res)
+					}
+					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+						Collation string
+						Reverse   bool
+					}{Collation: String(a[0]), Reverse: true})
+					return NewFunc(f)
+				}
+				f := func(a ...Scmer) Scmer {
+					// numeric fallback when both operands are numbers
+					if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
+						return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
+					}
+					return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
+				}
+				collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+					Collation string
+					Reverse   bool
+				}{Collation: String(a[0]), Reverse: false})
+				return NewFunc(f)
+			} else {
+				if len(a) > 1 && ToBool(a[1]) {
+					return NewFunc(GreaterScm)
+				}
+				return NewFunc(LessScm)
+			}
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", ParamName: "reverse", ParamDesc: "whether to reverse the order like in ORDER BY DESC", Optional: true}},
 			Return: &TypeDescriptor{Kind: "func",
@@ -626,198 +641,198 @@ func init_strings() {
 	})
 
 	/* escaping functions similar to PHP */
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "htmlentities",
 		Desc: "escapes the string for use in HTML",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(html.EscapeString(String(a[0])))
-			},
+			return NewString(html.EscapeString(String(a[0])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "urlencode",
 		Desc: "encodes a string according to URI coding schema",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(url.QueryEscape(String(a[0])))
-			},
+			return NewString(url.QueryEscape(String(a[0])))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "urldecode",
 		Desc: "decodes a string according to URI coding schema",
 		Fn: func(a ...Scmer) Scmer {
-				result, err := url.QueryUnescape(String(a[0]))
-				if err != nil {
-					panic("error while decoding URL: " + fmt.Sprint(err))
-				}
-				return NewString(result)
-			},
+			result, err := url.QueryUnescape(String(a[0]))
+			if err != nil {
+				panic("error while decoding URL: " + fmt.Sprint(err))
+			}
+			return NewString(result)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "json_encode",
 		Desc: "encodes a value in JSON, treats lists as lists",
 		Fn: func(a ...Scmer) Scmer {
-				b, err := json.Marshal(a[0])
-				if err != nil {
-					panic(err)
-				}
-				return NewString(string(b))
-			},
+			b, err := json.Marshal(a[0])
+			if err != nil {
+				panic(err)
+			}
+			return NewString(string(b))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "json_encode_assoc",
 		Desc: "encodes a value in JSON, treats lists as associative arrays",
 		Fn: func(a ...Scmer) Scmer {
-				// Build a Go structure where assoc lists (even-length lists or FastDict)
-				// are represented as map[string]any, and leaf values remain Scmer so
-				// Scmer.MarshalJSON applies for nested values.
-				var transform func(Scmer) any
-				transform = func(val Scmer) any {
-					if val.IsSlice() {
-						v := val.Slice()
-						result := make(map[string]any)
-						for i := 0; i < len(v)-1; i += 2 {
-							result[String(v[i])] = transform(v[i+1])
-						}
-						return result
+			// Build a Go structure where assoc lists (even-length lists or FastDict)
+			// are represented as map[string]any, and leaf values remain Scmer so
+			// Scmer.MarshalJSON applies for nested values.
+			var transform func(Scmer) any
+			transform = func(val Scmer) any {
+				if val.IsSlice() {
+					v := val.Slice()
+					result := make(map[string]any)
+					for i := 0; i < len(v)-1; i += 2 {
+						result[String(v[i])] = transform(v[i+1])
 					}
-					if val.IsFastDict() {
-						fd := val.FastDict()
-						result := make(map[string]any)
-						if fd != nil {
-							for i := 0; i < len(fd.Pairs)-1; i += 2 {
-								result[String(fd.Pairs[i])] = transform(fd.Pairs[i+1])
-							}
+					return result
+				}
+				if val.IsFastDict() {
+					fd := val.FastDict()
+					result := make(map[string]any)
+					if fd != nil {
+						for i := 0; i < len(fd.Pairs)-1; i += 2 {
+							result[String(fd.Pairs[i])] = transform(fd.Pairs[i+1])
 						}
-						return result
 					}
-					// Keep as Scmer so its MarshalJSON semantics apply
-					return val
+					return result
 				}
-				b, err := json.Marshal(transform(a[0]))
-				if err != nil {
-					panic(err)
-				}
-				return NewString(string(b))
-			},
+				// Keep as Scmer so its MarshalJSON semantics apply
+				return val
+			}
+			b, err := json.Marshal(transform(a[0]))
+			if err != nil {
+				panic(err)
+			}
+			return NewString(string(b))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "json_decode",
 		Desc: "parses JSON into a map",
 		Fn: func(a ...Scmer) Scmer {
-				var result any
-				err := json.Unmarshal([]byte(String(a[0])), &result)
-				if err != nil {
-					panic(err)
-				}
-				return TransformFromJSON(result)
-			},
+			var result any
+			err := json.Unmarshal([]byte(String(a[0])), &result)
+			if err != nil {
+				panic(err)
+			}
+			return TransformFromJSON(result)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "base64_encode",
 		Desc: "encodes a string as Base64 (standard encoding)",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
-			},
+			return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "binary string to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "base64_decode",
 		Desc: "decodes a Base64 string (standard encoding)",
 		Fn: func(a ...Scmer) Scmer {
-				decoded, err := base64.StdEncoding.DecodeString(String(a[0]))
-				if err != nil {
-					panic("error while decoding base64: " + fmt.Sprint(err))
-				}
-				return NewString(string(decoded))
-			},
+			decoded, err := base64.StdEncoding.DecodeString(String(a[0]))
+			if err != nil {
+				panic("error while decoding base64: " + fmt.Sprint(err))
+			}
+			return NewString(string(decoded))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "base64-encoded string"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sql_unescape",
 		Desc: "unescapes the inner part of a sql string",
 		Fn: func(a ...Scmer) Scmer {
-				input := String(a[0])
-				out := sql_escapings.ReplaceAllStringFunc(input, func(m string) string {
-					switch m {
-					case "\\\\":
-						return "\\"
-					case "\\'":
-						return "'"
-					case "\\\"":
-						return "\""
-					case "\\n":
-						return "\n"
-					case "\\r":
-						return "\r"
-					case "\\0":
-						return string([]byte{0})
-					}
-					return m
-				})
-				return NewString(out)
-			},
+			input := String(a[0])
+			out := sql_escapings.ReplaceAllStringFunc(input, func(m string) string {
+				switch m {
+				case "\\\\":
+					return "\\"
+				case "\\'":
+					return "'"
+				case "\\\"":
+					return "\""
+				case "\\n":
+					return "\n"
+				case "\\r":
+					return "\r"
+				case "\\0":
+					return string([]byte{0})
+				}
+				return m
+			})
+			return NewString(out)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "bin2hex",
 		Desc: "turns binary data into hex with lowercase letters",
 		Fn: func(a ...Scmer) Scmer {
-				input := String(a[0])
-				result := make([]byte, 2*len(input))
-				hexmap := "0123456789abcdef"
-				for i := 0; i < len(input); i++ {
-					result[2*i] = hexmap[input[i]/16]
-					result[2*i+1] = hexmap[input[i]%16]
-				}
-				return NewString(string(result))
-			},
+			input := String(a[0])
+			result := make([]byte, 2*len(input))
+			hexmap := "0123456789abcdef"
+			for i := 0; i < len(input); i++ {
+				result[2*i] = hexmap[input[i]/16]
+				result[2*i+1] = hexmap[input[i]%16]
+			}
+			return NewString(string(result))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -836,7 +851,7 @@ func init_strings() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -852,7 +867,7 @@ func init_strings() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "hex string (even length)"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
@@ -868,7 +883,7 @@ func init_strings() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: false, /* NOT const — each call must return a unique value */
+			Const:  false, /* NOT const — each call must return a unique value */
 		},
 	})
 
@@ -891,89 +906,89 @@ func init_strings() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "numBytes", ParamDesc: "number of random bytes"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "regexp_replace",
 		Desc: "replaces matches of a regex pattern in a string",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() {
-					return NewNil()
-				}
-				re, err := regexp.Compile(String(a[1]))
-				if err != nil {
-					panic("regexp_replace: invalid pattern: " + err.Error())
-				}
-				return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
-			},
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			re, err := regexp.Compile(String(a[1]))
+			if err != nil {
+				panic("regexp_replace: invalid pattern: " + err.Error())
+			}
+			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
+		},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "regex pattern"}, &TypeDescriptor{Kind: "string", ParamName: "replacement", ParamDesc: "replacement string"}},
-			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "regex pattern"}, &TypeDescriptor{Kind: "string", ParamName: "replacement", ParamDesc: "replacement string"}},
+			Return:   &TypeDescriptor{Kind: "string"},
+			Const:    true,
 			Optimize: optimizeRegexpReplace,
 		},
 	})
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "fnv_hash",
 		Desc: "computes a fast non-cryptographic 64-bit FNV-1a hash of a string, returns a 16-character hex string",
 		Fn: func(a ...Scmer) Scmer {
-				h := fnv.New64a()
-				h.Write([]byte(String(a[0])))
-				return NewString(fmt.Sprintf("%016x", h.Sum64()))
-			},
+			h := fnv.New64a()
+			h.Write([]byte(String(a[0])))
+			return NewString(fmt.Sprintf("%016x", h.Sum64()))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sha1",
 		Desc: "computes the SHA-1 digest of a string, returns a 40-character lowercase hex string",
 		Fn: func(a ...Scmer) Scmer {
-				sum := sha1.Sum([]byte(String(a[0])))
-				return NewString(hex.EncodeToString(sum[:]))
-			},
+			sum := sha1.Sum([]byte(String(a[0])))
+			return NewString(hex.EncodeToString(sum[:]))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sha256",
 		Desc: "computes the SHA-256 digest of a string, returns a 64-character lowercase hex string",
 		Fn: func(a ...Scmer) Scmer {
-				sum := sha256.Sum256([]byte(String(a[0])))
-				return NewString(hex.EncodeToString(sum[:]))
-			},
+			sum := sha256.Sum256([]byte(String(a[0])))
+			return NewString(hex.EncodeToString(sum[:]))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "regexp_test",
 		Desc: "tests if a string matches a regex pattern, returns true/false",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() || a[1].IsNil() {
-					return NewNil()
-				}
-				re, err := regexp.Compile(String(a[1]))
-				if err != nil {
-					panic("regexp_test: invalid pattern: " + err.Error())
-				}
-				return NewBool(re.MatchString(String(a[0])))
-			},
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
+			re, err := regexp.Compile(String(a[1]))
+			if err != nil {
+				panic("regexp_test: invalid pattern: " + err.Error())
+			}
+			return NewBool(re.MatchString(String(a[0])))
+		},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "regex pattern"}},
-			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "regex pattern"}},
+			Return:   &TypeDescriptor{Kind: "bool"},
+			Const:    true,
 			Optimize: optimizeRegexpTest,
 		},
 	})

@@ -31,6 +31,10 @@ func (s scanError) Error() string {
 	return fmt.Sprint(s.r) + "\n" + s.stack // room for improvement
 }
 
+func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
+	return make([]scm.Scmer, len(callbackCols))
+}
+
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
 // optimizeScan is the Optimize hook for the scan declaration.

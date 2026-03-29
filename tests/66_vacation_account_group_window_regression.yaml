@@ -1,0 +1,97 @@
+# Regression for grouped derived-table wrappers over a materialized inner SELECT.
+
+metadata:
+  version: "1.0"
+  description: "Vacation-account style grouped derived table with outer wrapper"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS vac_reg_aux"
+  - sql: "DROP TABLE IF EXISTS vac_reg_ref"
+  - sql: "DROP TABLE IF EXISTS vac_reg_main"
+  - sql: "CREATE TABLE vac_reg_main (ID INT, date INT, val INT, resultAz INT, istAz INT, sollAz INT)"
+  - sql: "CREATE TABLE vac_reg_ref (ID INT, label VARCHAR(20))"
+  - sql: "CREATE TABLE vac_reg_aux (ID INT, mid INT, ts INT, amount INT)"
+  - sql: "INSERT INTO vac_reg_main (ID, date, val, resultAz, istAz, sollAz) VALUES (1, 1704067200, 10, 2, 3, 4), (2, 1706745600, 20, 5, 7, 8), (3, 1735689600, 30, 11, 13, 17)"
+  - sql: "INSERT INTO vac_reg_ref (ID, label) VALUES (1, 'a'), (2, 'b')"
+  - sql: "INSERT INTO vac_reg_aux (ID, mid, ts, amount) VALUES (1, 1, 1704067200, 5), (2, 2, 1706745600, 7)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS vac_reg_aux"
+  - sql: "DROP TABLE IF EXISTS vac_reg_ref"
+  - sql: "DROP TABLE IF EXISTS vac_reg_main"
+
+test_cases:
+  - name: "grouped derived table without outer wrapper"
+    sql: |
+      SELECT COUNT(*) AS _count,
+        _year_date AS _year_date,
+        SUM(differenz) AS differenz,
+        SUM(istAz) AS istAz
+      FROM (
+        SELECT m.ID AS ID,
+          m.date AS date,
+          UNIX_TIMESTAMP((STR_TO_DATE(DATE_FORMAT(FROM_UNIXTIME((m.date)), '%Y-01-01'), '%Y-%m-%d'))) AS _year_date,
+          COALESCE(m.resultAz, 0) + COALESCE(m.istAz, 0) - COALESCE(m.sollAz, 0) AS differenz,
+          m.istAz AS istAz,
+          COALESCE((SELECT h.amount FROM vac_reg_aux h WHERE h.mid = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS score,
+          r.label AS ref_label
+        FROM vac_reg_main m
+        LEFT JOIN vac_reg_ref r
+          ON r.ID = m.ID
+          AND COALESCE((SELECT MAX(h2.ts) FROM vac_reg_aux h2 WHERE h2.mid = m.ID LIMIT 1), NULL) IS NOT NULL
+      ) t
+      WHERE (t.date >= '1704067200' AND t.date <= '1735689600' AND TRUE)
+      GROUP BY _year_date
+      ORDER BY _year_date
+    expect:
+      rows: 2
+      data:
+        - _count: 2
+          _year_date: 1704067200
+          differenz: 5
+          istAz: 10
+        - _count: 1
+          _year_date: 1735689600
+          differenz: 7
+          istAz: 13
+
+  - name: "outer select t star over grouped derived table with window percent"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT COUNT(*) AS _count,
+          COUNT(*)*100/GREATEST((SUM(COUNT(*)) OVER ()), 1) AS _count_percent,
+          _year_date AS _year_date,
+          SUM(differenz) AS differenz,
+          SUM(istAz) AS istAz
+        FROM (
+          SELECT m.ID AS ID,
+            m.date AS date,
+            UNIX_TIMESTAMP((STR_TO_DATE(DATE_FORMAT(FROM_UNIXTIME((m.date)), '%Y-01-01'), '%Y-%m-%d'))) AS _year_date,
+            COALESCE(m.resultAz, 0) + COALESCE(m.istAz, 0) - COALESCE(m.sollAz, 0) AS differenz,
+            m.istAz AS istAz,
+            COALESCE((SELECT h.amount FROM vac_reg_aux h WHERE h.mid = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS score,
+            r.label AS ref_label
+          FROM vac_reg_main m
+          LEFT JOIN vac_reg_ref r
+            ON r.ID = m.ID
+            AND COALESCE((SELECT MAX(h2.ts) FROM vac_reg_aux h2 WHERE h2.mid = m.ID LIMIT 1), NULL) IS NOT NULL
+        ) t
+        WHERE (t.date >= '1704067200' AND t.date <= '1735689600' AND TRUE)
+        GROUP BY _year_date
+      ) t
+      WHERE TRUE
+      ORDER BY t._year_date
+    expect:
+      rows: 2
+      data:
+        - _count: 2
+          _count_percent: 66.66666666666667
+          _year_date: 1704067200
+          differenz: 5
+          istAz: 10
+        - _count: 1
+          _count_percent: 33.333333333333336
+          _year_date: 1735689600
+          differenz: 7
+          istAz: 13

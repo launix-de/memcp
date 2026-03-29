@@ -1,19 +1,569 @@
 metadata:
   version: "1.0"
-  description: "RDF and SPARQL query testing with TTL data"
+  description: "RDF/SPARQL + TTL loading tests"
 
 setup: []
 
 test_cases:
-  # Error cases for SPARQL - parser should reject these
-  - name: "Invalid SPARQL syntax - missing braces"
+
+  # ==========================================================
+  # TTL Loading — Basic Syntax
+  # ==========================================================
+
+  - name: "TTL: bare names"
+    ttl_data: "t01_main a t01_Page ."
+    sparql: "SELECT ?o WHERE { t01_main a ?o }"
+    expect:
+      rows: 1
+      data:
+        - "?o": "t01_Page"
+
+  - name: "TTL: prefixed names"
+    ttl_data: |
+      @prefix t02: <http://test02.org/> .
+      t02:alice a t02:Person .
+    sparql: |
+      @prefix t02: <http://test02.org/> .
+      SELECT ?o WHERE { t02:alice a ?o }
+    expect:
+      rows: 1
+      data:
+        - "?o": "http://test02.org/Person"
+
+  - name: "TTL: IRI in angle brackets"
+    ttl_data: |
+      <http://test03.org/bob> <http://test03.org/name> "Bob" .
+    sparql: |
+      SELECT ?n WHERE { <http://test03.org/bob> <http://test03.org/name> ?n }
+    expect:
+      rows: 1
+      data:
+        - "?n": "Bob"
+
+  - name: "TTL: string literal object"
+    ttl_data: |
+      @prefix t04: <http://test04.org/> .
+      t04:item t04:label "Hello World" .
+    sparql: |
+      @prefix t04: <http://test04.org/> .
+      SELECT ?v WHERE { t04:item t04:label ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "Hello World"
+
+  - name: "TTL: string with angle brackets and RDFHP syntax"
+    ttl_data: |
+      @prefix t05: <http://test05.org/> .
+      t05:tpl t05:val "@PREFIX rdfop: <https://launix.de/rdfop/schema#> . SELECT ?h WHERE { ?id rdfop:html ?h } BEGIN PRINT RAW ?h END" .
+    sparql: |
+      @prefix t05: <http://test05.org/> .
+      SELECT ?v WHERE { t05:tpl t05:val ?v }
+    expect:
+      rows: 1
+      contains: "PRINT RAW"
+
+  # ==========================================================
+  # TTL Loading — Multiple Statements
+  # ==========================================================
+
+  - name: "TTL: two statements"
+    ttl_data: |
+      @prefix t06: <http://test06.org/> .
+      t06:first t06:n "1" .
+      t06:second t06:n "2" .
+    sparql: |
+      @prefix t06: <http://test06.org/> .
+      SELECT ?s, ?v WHERE { ?s t06:n ?v }
+    expect:
+      rows: 2
+
+  - name: "TTL: three statements"
+    ttl_data: |
+      @prefix t07: <http://test07.org/> .
+      t07:x1 t07:y "one" .
+      t07:x2 t07:y "two" .
+      t07:x3 t07:y "three" .
+    sparql: |
+      @prefix t07: <http://test07.org/> .
+      SELECT ?s, ?v WHERE { ?s t07:y ?v }
+    expect:
+      rows: 3
+
+  # ==========================================================
+  # TTL Loading — Semicolon and Comma Syntax
+  # ==========================================================
+
+  - name: "TTL: semicolon (multiple predicates)"
+    ttl_data: |
+      @prefix t08: <http://test08.org/> .
+      t08:person a t08:Person ;
+        t08:name "Alice" ;
+        t08:age "30" .
+    sparql: |
+      @prefix t08: <http://test08.org/> .
+      SELECT ?p, ?o WHERE { t08:person ?p ?o }
+    expect:
+      rows: 3
+
+  - name: "TTL: comma (multiple objects)"
+    ttl_data: |
+      @prefix t09: <http://test09.org/> .
+      t09:person t09:likes t09:cats, t09:dogs, t09:birds .
+    sparql: |
+      @prefix t09: <http://test09.org/> .
+      SELECT ?o WHERE { t09:person t09:likes ?o }
+    expect:
+      rows: 3
+
+  - name: "TTL: semicolon + comma combined"
+    ttl_data: |
+      @prefix t10: <http://test10.org/> .
+      t10:node a t10:Thing ;
+        t10:rel t10:a, t10:b ;
+        t10:label "test" .
+    sparql: |
+      @prefix t10: <http://test10.org/> .
+      SELECT ?p, ?o WHERE { t10:node ?p ?o }
+    expect:
+      rows: 4
+
+  # ==========================================================
+  # TTL Loading — Comments
+  # ==========================================================
+
+  - name: "TTL: hash comments"
+    ttl_data: |
+      @prefix t11: <http://test11.org/> .
+      # this is a comment
+      t11:item t11:val "works" .
+      # another comment
+    sparql: |
+      @prefix t11: <http://test11.org/> .
+      SELECT ?v WHERE { t11:item t11:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "works"
+
+  - name: "TTL: block comments"
+    ttl_data: |
+      @prefix t12: <http://test12.org/> .
+      /* block comment */
+      t12:item t12:val "also works" .
+    sparql: |
+      @prefix t12: <http://test12.org/> .
+      SELECT ?v WHERE { t12:item t12:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "also works"
+
+  - name: "TTL: comments between statements"
+    ttl_data: |
+      @prefix t13: <http://test13.org/> .
+      t13:first t13:n "1" .
+      # separator
+      t13:second t13:n "2" .
+      /* block separator */
+      t13:third t13:n "3" .
+    sparql: |
+      @prefix t13: <http://test13.org/> .
+      SELECT ?s, ?v WHERE { ?s t13:n ?v }
+    expect:
+      rows: 3
+
+  # ==========================================================
+  # TTL Loading — Multiple Prefixes
+  # ==========================================================
+
+  - name: "TTL: multiple prefixes"
+    ttl_data: |
+      @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix t14: <http://test14.org/> .
+      t14:MyClass a rdfs:Class .
+      t14:myProp a rdf:Property .
+    sparql: |
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix t14: <http://test14.org/> .
+      SELECT ?s WHERE { t14:MyClass a ?s }
+    expect:
+      rows: 1
+      data:
+        - "?s": "http://www.w3.org/2000/01/rdf-schema#Class"
+
+  # ==========================================================
+  # SPARQL Queries — Joins
+  # ==========================================================
+
+  - name: "SPARQL: two-pattern join"
+    ttl_data: |
+      @prefix t15: <http://test15.org/> .
+      t15:alice t15:worksAt t15:acme .
+      t15:acme t15:name "ACME Corp" .
+    sparql: |
+      @prefix t15: <http://test15.org/> .
+      SELECT ?company WHERE { t15:alice t15:worksAt ?org . ?org t15:name ?company }
+    expect:
+      rows: 1
+      data:
+        - "?company": "ACME Corp"
+
+  - name: "SPARQL: three-pattern chain"
+    ttl_data: |
+      @prefix t16: <http://test16.org/> .
+      t16:alice t16:worksAt t16:acme .
+      t16:acme t16:locatedIn t16:berlin .
+      t16:berlin t16:country "Germany" .
+    sparql: |
+      @prefix t16: <http://test16.org/> .
+      SELECT ?c WHERE { t16:alice t16:worksAt ?org . ?org t16:locatedIn ?city . ?city t16:country ?c }
+    expect:
+      rows: 1
+      data:
+        - "?c": "Germany"
+
+  - name: "SPARQL: multiple results"
+    ttl_data: |
+      @prefix t17: <http://test17.org/> .
+      t17:a1 a t17:Type1 .
+      t17:a2 a t17:Type1 .
+      t17:a3 a t17:Type1 .
+      t17:b1 a t17:Type2 .
+    sparql: |
+      @prefix t17: <http://test17.org/> .
+      SELECT ?s WHERE { ?s a t17:Type1 }
+    expect:
+      rows: 3
+
+  # ==========================================================
+  # RDFOP Component Pattern
+  # ==========================================================
+
+  - name: "RDFOP: EntityType with viewTemplate"
+    ttl_data: |
+      @prefix t18: <http://test18.org/> .
+      t18:HTMLView a t18:EntityType .
+      t18:HTMLView t18:viewTemplate "?><h1>Hello</h1><?rdf" .
+      t18:main a t18:HTMLView .
+    sparql: |
+      @prefix t18: <http://test18.org/> .
+      SELECT ?tpl WHERE { t18:main a ?t . ?t t18:viewTemplate ?tpl }
+    expect:
+      rows: 1
+      data:
+        - "?tpl": "?><h1>Hello</h1><?rdf"
+
+  - name: "RDFOP: type lookup resolves prefix"
+    ttl_data: |
+      @prefix t19: <http://test19.org/> .
+      t19:main a t19:HTMLView .
+    sparql: |
+      @prefix t19: <http://test19.org/> .
+      SELECT ?t WHERE { t19:main a ?t }
+    expect:
+      rows: 1
+      data:
+        - "?t": "http://test19.org/HTMLView"
+
+  # ==========================================================
+  # TTL — String Edge Cases
+  # ==========================================================
+
+  - name: "TTL: empty string"
+    ttl_data: |
+      @prefix t20: <http://test20.org/> .
+      t20:item t20:val "" .
+    sparql: |
+      @prefix t20: <http://test20.org/> .
+      SELECT ?v WHERE { t20:item t20:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": ""
+
+  - name: "TTL: language-tagged string (tag ignored)"
+    ttl_data: |
+      @prefix t21: <http://test21.org/> .
+      t21:item t21:label "Hallo Welt"@de .
+    sparql: |
+      @prefix t21: <http://test21.org/> .
+      SELECT ?v WHERE { t21:item t21:label ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "Hallo Welt"
+
+  - name: "TTL: IRI with fragment"
+    ttl_data: |
+      @prefix t22: <http://test22.org/> .
+      t22:item a <http://www.w3.org/2000/01/rdf-schema#Class> .
+    sparql: |
+      SELECT ?t WHERE { <http://test22.org/item> a ?t }
+    expect:
+      rows: 1
+      data:
+        - "?t": "http://www.w3.org/2000/01/rdf-schema#Class"
+
+  - name: "TTL: a is stored as literal a (rdf:type shorthand)"
+    ttl_data: |
+      @prefix t23: <http://test23.org/> .
+      t23:item a t23:Thing .
+    sparql: |
+      @prefix t23: <http://test23.org/> .
+      SELECT ?p WHERE { t23:item ?p t23:Thing }
+    expect:
+      rows: 1
+      data:
+        - "?p": "a"
+
+  # ==========================================================
+  # TTL — Prefix Edge Cases
+  # ==========================================================
+
+  # NOTE: empty local part (t24:) is a known limitation — skipped
+
+  - name: "TTL: prefix reused across statements"
+    ttl_data: |
+      @prefix t25: <http://test25.org/> .
+      t25:a t25:p "1" .
+      t25:b t25:p "2" .
+      t25:c t25:p "3" .
+    sparql: |
+      @prefix t25: <http://test25.org/> .
+      SELECT ?s, ?v WHERE { ?s t25:p ?v }
+    expect:
+      rows: 3
+
+  # ==========================================================
+  # TTL — Comment Edge Cases
+  # ==========================================================
+
+  - name: "TTL: hash comment after last statement"
+    ttl_data: |
+      @prefix t26: <http://test26.org/> .
+      t26:item t26:val "yes" .
+      # trailing comment
+    sparql: |
+      @prefix t26: <http://test26.org/> .
+      SELECT ?v WHERE { t26:item t26:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "yes"
+
+  - name: "TTL: double-dash comment"
+    ttl_data: |
+      @prefix t27: <http://test27.org/> .
+      -- SQL-style comment
+      t27:item t27:val "dash" .
+    sparql: |
+      @prefix t27: <http://test27.org/> .
+      SELECT ?v WHERE { t27:item t27:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "dash"
+
+  - name: "TTL: hash comment between prefixes"
+    ttl_data: |
+      @prefix t28a: <http://test28a.org/> .
+      # comment between prefixes
+      @prefix t28b: <http://test28b.org/> .
+      t28a:item t28b:val "mixed" .
+    sparql: |
+      @prefix t28a: <http://test28a.org/> .
+      @prefix t28b: <http://test28b.org/> .
+      SELECT ?v WHERE { t28a:item t28b:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "mixed"
+
+  # ==========================================================
+  # SPARQL — Semicolon/Comma Shorthand in WHERE
+  # ==========================================================
+
+  - name: "SPARQL: semicolon shorthand in WHERE"
+    ttl_data: |
+      @prefix t29: <http://test29.org/> .
+      t29:alice a t29:Person ;
+        t29:name "Alice" ;
+        t29:age "25" .
+    sparql: |
+      @prefix t29: <http://test29.org/> .
+      SELECT ?n, ?a WHERE { t29:alice t29:name ?n ; t29:age ?a }
+    expect:
+      rows: 1
+      data:
+        - {"?n": "Alice", "?a": "25"}
+
+  - name: "SPARQL: comma shorthand in WHERE"
+    ttl_data: |
+      @prefix t30: <http://test30.org/> .
+      t30:alice t30:knows t30:bob .
+      t30:alice t30:knows t30:carol .
+    sparql: |
+      @prefix t30: <http://test30.org/> .
+      SELECT ?who WHERE { t30:alice t30:knows ?who }
+    expect:
+      rows: 2
+
+  # ==========================================================
+  # SPARQL — Comments
+  # ==========================================================
+
+  - name: "SPARQL: hash comment in query"
+    ttl_data: |
+      @prefix t31: <http://test31.org/> .
+      t31:item t31:val "queried" .
+    sparql: |
+      @prefix t31: <http://test31.org/> .
+      # this is a SPARQL comment
+      SELECT ?v WHERE { t31:item t31:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "queried"
+
+  - name: "SPARQL: double-dash comment in query"
+    ttl_data: |
+      @prefix t32: <http://test32.org/> .
+      t32:item t32:val "also queried" .
+    sparql: |
+      @prefix t32: <http://test32.org/> .
+      -- SQL-style comment
+      SELECT ?v WHERE { t32:item t32:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?v": "also queried"
+
+  # ==========================================================
+  # SPARQL — Empty Results and Edge Cases
+  # ==========================================================
+
+  - name: "SPARQL: empty result set"
+    sparql: |
+      @prefix t33: <http://test33.org/> .
+      SELECT ?s WHERE { t33:nonexistent t33:nope ?s }
+    expect:
+      rows: 0
+
+  - name: "SPARQL: self-join (subject appears twice)"
+    ttl_data: |
+      @prefix t34: <http://test34.org/> .
+      t34:alice t34:name "Alice" .
+      t34:alice t34:age "30" .
+    sparql: |
+      @prefix t34: <http://test34.org/> .
+      SELECT ?n, ?a WHERE { t34:alice t34:name ?n . t34:alice t34:age ?a }
+    expect:
+      rows: 1
+      data:
+        - {"?n": "Alice", "?a": "30"}
+
+  - name: "SPARQL: variable in all three positions"
+    ttl_data: |
+      @prefix t35: <http://test35.org/> .
+      t35:a t35:b t35:c .
+    sparql: |
+      @prefix t35: <http://test35.org/> .
+      SELECT ?s, ?p, ?o WHERE { ?s ?p ?o . ?s a t35:nonexistent }
+    expect:
+      rows: 0
+
+  - name: "SPARQL: two free variables (subject + object)"
+    ttl_data: |
+      @prefix t36: <http://test36.org/> .
+      t36:x t36:y t36:z .
+    sparql: |
+      @prefix t36: <http://test36.org/> .
+      SELECT ?s, ?o WHERE { ?s t36:y ?o }
+    expect:
+      rows: 1
+      data:
+        - {"?s": "http://test36.org/x", "?o": "http://test36.org/z"}
+
+  - name: "SPARQL: trailing dot in WHERE clause"
+    ttl_data: |
+      @prefix t37: <http://test37.org/> .
+      t37:item t37:val "dotted" .
+    sparql: |
+      @prefix t37: <http://test37.org/> .
+      SELECT ?v WHERE { t37:item t37:val ?v . }
+    expect:
+      rows: 1
+      data:
+        - "?v": "dotted"
+
+  # ==========================================================
+  # SPARQL — SELECT AS alias
+  # ==========================================================
+
+  - name: "SPARQL: SELECT expression AS alias"
+    ttl_data: |
+      @prefix t38: <http://test38.org/> .
+      t38:item t38:val "aliased" .
+    sparql: |
+      @prefix t38: <http://test38.org/> .
+      SELECT ?v AS ?value WHERE { t38:item t38:val ?v }
+    expect:
+      rows: 1
+      data:
+        - "?value": "aliased"
+
+  # ==========================================================
+  # TTL Error Cases
+  # ==========================================================
+
+  # NOTE: undefined prefix causes TTL load failure (500), which the
+  # test runner reports as "TTL load failed" — not a SPARQL error.
+  # The runner cannot currently distinguish expected TTL load failures.
+  # Covered by unit-level testing of load_ttl.
+
+  # ==========================================================
+  # SPARQL Error Cases — Query Plan Builder
+  # ==========================================================
+
+  - name: "SPARQL error: SELECT unbound variable"
+    ttl_data: |
+      @prefix te1: <http://teste1.org/> .
+      te1:a te1:b te1:c .
+    sparql: |
+      @prefix te1: <http://teste1.org/> .
+      SELECT ?x WHERE { te1:a te1:b te1:c }
+    expect:
+      error: true
+
+  - name: "SPARQL error: SELECT unbound variable among bound"
+    ttl_data: |
+      @prefix te2: <http://teste2.org/> .
+      te2:a te2:b te2:c .
+    sparql: |
+      @prefix te2: <http://teste2.org/> .
+      SELECT ?s, ?unbound WHERE { ?s te2:b te2:c }
+    expect:
+      error: true
+
+  - name: "SPARQL error: all SELECT vars unbound (no WHERE patterns)"
+    sparql: "SELECT ?x, ?y WHERE { }"
+    expect:
+      error: true
+
+  # ==========================================================
+  # SPARQL Error Cases — Parser
+  # ==========================================================
+
+  - name: "SPARQL error: missing braces"
     sparql: |
       SELECT ?name WHERE
         ?person <http://example.org/name> ?name .
     expect:
       error: true
 
-  - name: "Invalid SPARQL syntax - malformed SELECT keyword"  
+  - name: "SPARQL error: malformed SELECT keyword"
     sparql: |
       SELCT ?name WHERE {
         ?person <http://example.org/name> ?name .
@@ -21,7 +571,7 @@ test_cases:
     expect:
       error: true
 
-  - name: "Invalid SPARQL syntax - missing WHERE clause"
+  - name: "SPARQL error: missing WHERE clause"
     sparql: |
       SELECT ?name {
         ?person <http://example.org/name> ?name .

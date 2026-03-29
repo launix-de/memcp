@@ -106,6 +106,9 @@ func (s *shardqueue) Len() int {
 	return len(s.items)
 }
 func (s *shardqueue) Less(i, j int) bool {
+	if i >= len(s.items) || j >= len(s.items) {
+		return i < j
+	}
 	cmpCount := len(s.scols)
 	if len(s.sortdirs) < cmpCount {
 		cmpCount = len(s.sortdirs)
@@ -135,6 +138,15 @@ func (s *globalqueue) Len() int {
 	return len(s.q)
 }
 func (s *globalqueue) Less(i, j int) bool {
+	if i >= len(s.q) || j >= len(s.q) {
+		return i < j
+	}
+	if len(s.q[i].items) == 0 {
+		return false
+	}
+	if len(s.q[j].items) == 0 {
+		return true
+	}
 	cmpCount := len(s.q[i].scols)
 	if len(s.q[j].scols) < cmpCount {
 		cmpCount = len(s.q[j].scols)

@@ -119,7 +119,7 @@ physical columns without guessing from aliases or suffixes. */
 			(string (normalize_canonical_aliases expr))
 			(sanitize_temp_name (string (normalize_canonical_aliases expr))))
 	)
-))
+			))
 (define planned_materialized_fields (newsession))
 (define expand_star_fields_with_schemas (lambda (fields schemas) (begin
 	(define _expand_alias_cols (lambda (alias def)
@@ -171,7 +171,7 @@ canonical source side must be used so equivalent queries share the same temp col
 		(cons sym (map args normalize_visible_aliases))
 		expr
 	)
-))
+			))
 (define normalize_canonical_aliases (lambda (expr)
 	(match expr
 		'((symbol get_column) alias_ ti col ci)
@@ -186,13 +186,13 @@ canonical source side must be used so equivalent queries share the same temp col
 		(cons sym (map args normalize_canonical_aliases))
 		expr
 	)
-))
+			)))
 /* temp table / keytable names must not embed NUL alias separators from flattened
 derived tables. Keep the canonical structure, but drop the separator byte in the
 physical storage name so partition files remain valid on disk. */
 (define sanitize_temp_name (lambda (name)
 	(if (string? name) (replace name "\0" "") name)
-))
+			)))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
@@ -1268,8 +1268,16 @@ or generate runtime scan code (build_queryplan).
 						))
 						(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+						/* wrap remaining unresolved qualified get_column refs as (outer tbl.col).
+						These are outer-outer refs that weren't in _s or _o — wrapping them
+						preserves them through replace_columns_from_expr and allows
+						replace_column_alias to prefix them during derived-table flattening. */
 						(define wrap_unresolved_outer (lambda (e) (match e
-							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci))
+							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci)
+								/* only wrap as (outer) if the alias is actually in outer_schemas;
+								if not in outer_schemas either, leave as-is for scan-context resolution
+								(e.g. joinexpr refs to sibling tables like v.ID) */
+								(not (nil? (reduce_assoc outer_schemas (lambda (a k v) (or a (equal?? k alias_))) false))))
 								(list (quote outer) (symbol (concat alias_ "." col)))
 								e)
 							(cons sym args) (cons (wrap_unresolved_outer sym) (map args wrap_unresolved_outer))
@@ -1277,6 +1285,7 @@ or generate runtime scan code (build_queryplan).
 						)))
 						(set fields2 (map_assoc fields2 (lambda (k v) (wrap_unresolved_outer v))))
 						(set condition2 (wrap_unresolved_outer condition2))
+						/* detect top-level aggregate for direct scan path */
 						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
 							(or (equal? sym (quote aggregate))
@@ -1291,6 +1300,21 @@ or generate runtime scan code (build_queryplan).
 						(define stage2 (if has_stage2 (car groups2) nil))
 						(define stage2_group (if stage2 (coalesceNil (stage_group_cols stage2) '()) '()))
 						(define stage2_having (if stage2 (stage_having_expr stage2) nil))
+						(define contains_noncolumn_outer_ref (lambda (expr) (match expr
+							'((quote outer) outer_sym) (equal? 1 (count (split (string outer_sym) ".")))
+							'((symbol outer) outer_sym) (equal? 1 (count (split (string outer_sym) ".")))
+							(cons sym args) (or (contains_noncolumn_outer_ref sym) (reduce args (lambda (a arg) (or a (contains_noncolumn_outer_ref arg))) false))
+							false
+						)))
+						(define has_noncolumn_outer_ref (or
+							(contains_noncolumn_outer_ref value_expr)
+							(contains_noncolumn_outer_ref condition2)
+						))
+						(define use_ordered_scalar (or
+							(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
+							(and has_stage2 (not (nil? (stage_limit_val stage2))))
+							(and has_stage2 (not (nil? (stage_offset_val stage2))))
+						))
 						(define use_direct_agg_scan (and
 							(not (nil? _agg_args))
 							(equal? (count _agg_args) 3)
@@ -1299,6 +1323,45 @@ or generate runtime scan code (build_queryplan).
 							(not (nil? tables2))
 							(not (equal? tables2 '()))
 						))
+						(define use_direct_scalar_scan (and
+							(not use_direct_agg_scan)
+							(equal? (extract_aggregates value_expr) '())
+							(not has_noncolumn_outer_ref)
+							(nil? stage2_having)
+							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
+							(and (list? tables2) (equal? (count tables2) 1))
+						))
+						(define build_scalar_subselect_fallback (lambda () (begin
+							(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
+							(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
+							(define _sq_rr_name (concat "__scalar_resultrow_" _sq_hash))
+							(begin
+								(define replace_resultrow (lambda (expr) (match expr
+									(cons sym args) (if (equal? sym (quote resultrow))
+										(cons (symbol _sq_rr_name) (map args replace_resultrow))
+										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+											(list (quote symbol) _sq_rr_name)
+											(cons (replace_resultrow sym) (map args replace_resultrow))
+										)
+									)
+									expr
+								)))
+								(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
+								(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+								(cons (quote !begin) (merge _init_stmts (list
+									(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+									(list (quote set) (symbol _sq_rr_name)
+										(list (quote lambda) (list (symbol "row"))
+											(list (symbol _sq_promise_name) "once"
+												(list (quote nth) (symbol "row") 1)
+												"scalar subselect returned more than one row")
+										)
+									)
+									subplan
+									(list (symbol _sq_promise_name) "value")
+								)))
+							)
+						)))
 						(if use_direct_agg_scan
 							(begin
 								(define agg_item (nth _agg_args 0))
@@ -1343,44 +1406,101 @@ or generate runtime scan code (build_queryplan).
 									(build_scalar_agg_scan tables2 condition2)
 									(cons (quote !begin) (merge _init_stmts_agg (list (build_scalar_agg_scan tables2 condition2)))))
 							)
-							(begin
-								(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
-								(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
-								(define _sq_rr_name (concat "__scalar_resultrow_" _sq_hash))
-								(begin
-									(define replace_resultrow (lambda (expr) (match expr
-										(cons sym args) (if (equal? sym (quote resultrow))
-											(cons (symbol _sq_rr_name) (map args replace_resultrow))
-											(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-												(list (quote symbol) _sq_rr_name)
-												(cons (replace_resultrow sym) (map args replace_resultrow))
-											)
-										)
-										expr
-									)))
-									(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
-									(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
-									(cons (quote !begin) (merge _init_stmts (list
-										(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
-										(list (quote set) (symbol _sq_rr_name)
-											(list (quote lambda) (list (symbol "row"))
-												(list (symbol _sq_promise_name) "once"
-													(list (quote nth) (symbol "row") 1)
-													"scalar subselect returned more than one row")
-											)
-										)
-										subplan
-										(list (symbol _sq_promise_name) "value")
-									)))
-								)
+								(if use_direct_scalar_scan
+									(begin
+										(match (car tables2) '(tblvar schema3 tbl3 isOuter3 joinexpr3) (begin
+											(if (not (nil? joinexpr3))
+												(error "scalar subselect joins not supported in direct scalar scan"))
+											(define stage2_order (if has_stage2 (coalesceNil (stage_order_list stage2) '()) '()))
+											(define stage2_limit (if has_stage2 (stage_limit_val stage2) nil))
+											(define stage2_offset (if has_stage2 (stage_offset_val stage2) nil))
+											(define filtercols (merge_unique (list
+												(extract_columns_for_tblvar tblvar condition2)
+												(extract_outer_columns_for_tblvar tblvar condition2)
+											)))
+											(define mapcols (merge_unique (list
+												(extract_columns_for_tblvar tblvar value_expr)
+												(extract_outer_columns_for_tblvar tblvar value_expr)
+											)))
+											(define ordercols (merge (map stage2_order (lambda (order_item) (match order_item '(col dir) (match col
+												'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+												'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+												_ '()
+											))))))
+											(define dirs (merge (map stage2_order (lambda (order_item) (match order_item '(col dir) (match col
+												'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+												'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+												_ '()
+											))))))
+											(if (and use_ordered_scalar (not (equal? stage2_order '())) (not (equal? (count ordercols) (count stage2_order))))
+												(error "scalar subselect ORDER BY must use direct columns"))
+											(define wrap_generated_outer_refs_scalar (lambda (expr local_params) (match expr
+												(cons sym args) (cons sym (map args (lambda (arg) (wrap_generated_outer_refs_scalar arg local_params))))
+												sym (begin
+													(define parts (split (string sym) "."))
+													(if (and (> (count parts) 1)
+														(nil? (reduce local_params (lambda (a p) (or a (equal?? p sym))) false)))
+														(list (quote outer) sym)
+														sym))
+												expr
+											)))
+												(define filterparams (map filtercols (lambda (col) (symbol (concat tblvar "." col)))))
+												(define mapparams (map mapcols (lambda (col) (symbol (concat tblvar "." col)))))
+												(define filterbody (wrap_generated_outer_refs_scalar (optimize (replace_columns_from_expr (coalesceNil condition2 true))) filterparams))
+												(define valuebody (wrap_generated_outer_refs_scalar (optimize (replace_columns_from_expr value_expr)) mapparams))
+												(define direct_has_noncolumn_outer_ref (or
+													(contains_noncolumn_outer_ref filterbody)
+													(contains_noncolumn_outer_ref valuebody)
+												))
+												(if direct_has_noncolumn_outer_ref
+													(build_scalar_subselect_fallback)
+													(begin
+														(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
+														(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
+														(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+														(cons (quote !begin) (merge _init_stmts (list
+															(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+															(if use_ordered_scalar
+																(list (quote scan_order)
+																	schema3
+																	tbl3
+																	(cons list filtercols)
+																	(list (quote lambda) filterparams filterbody)
+																	(cons list ordercols)
+																	(cons list dirs)
+																	0
+																	(coalesceNil stage2_offset 0)
+																	(coalesceNil stage2_limit 1)
+																	(cons list mapcols)
+																	(list (quote lambda) mapparams
+																		(list (symbol _sq_promise_name) "once" valuebody "scalar subselect returned more than one row"))
+																	nil
+																	nil
+																	false)
+																(list (quote scan)
+																	schema3
+																	tbl3
+																	(cons list filtercols)
+																	(list (quote lambda) filterparams filterbody)
+																	(cons list mapcols)
+																	(list (quote lambda) mapparams
+																		(list (symbol _sq_promise_name) "once" valuebody "scalar subselect returned more than one row"))
+																	nil
+																	nil
+																	false))
+															(list (symbol _sq_promise_name) "value")
+														)))
+													))
+											)))
+										(build_scalar_subselect_fallback))
 							)
 						)
 					)
 				)
 			)
 		)
-	)))
-	(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
+		))
+		(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
 		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
 			(list (quote coalesceNil)
 				(build_scalar_subselect

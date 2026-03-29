@@ -1,0 +1,125 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Minimal derived-table COUNT and reuse regressions"
+  isolate: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dtc_parent"
+  - sql: "DROP TABLE IF EXISTS dtc_child"
+  - sql: "DROP TABLE IF EXISTS dtw_main"
+  - sql: "DROP TABLE IF EXISTS dtw_hist"
+  - sql: "DROP TABLE IF EXISTS dtr_parent"
+  - sql: "DROP TABLE IF EXISTS dtr_child"
+  - sql: "CREATE TABLE dtc_parent (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE dtc_child (ID INT PRIMARY KEY, parent INT, val INT)"
+  - sql: "CREATE TABLE dtw_main (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE dtw_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
+  - sql: "CREATE TABLE dtr_parent (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE dtr_child (ID INT PRIMARY KEY, parent INT, val INT)"
+  - sql: "INSERT INTO dtc_parent VALUES (1), (2)"
+  - sql: "INSERT INTO dtc_child VALUES (1, 1, 100), (2, 1, 200), (3, 2, 50)"
+  - sql: "INSERT INTO dtw_main VALUES (1), (2)"
+  - sql: "INSERT INTO dtw_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000)"
+  - sql: "INSERT INTO dtr_parent VALUES (1), (2), (3)"
+  - sql: "INSERT INTO dtr_child VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300), (4, 3, 50)"
+
+test_cases:
+  - name: "prime shared t materialization"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.total_val) AS total FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT SUM(c.val) FROM dtr_child c WHERE c.parent = p.ID), 0) AS total_val
+        FROM dtr_parent p
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          total: 650
+
+  - name: "count over correlated scalar derived table keeps parent cardinality"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.total_val) AS total FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT SUM(c.val) FROM dtc_child c WHERE c.parent = p.ID), 0) AS total_val
+        FROM dtc_parent p
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+          total: 350
+
+  - name: "count over window scalar derived table keeps parent cardinality"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.latest_val) AS total FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT sub.val FROM (
+            SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+            FROM dtw_hist
+          ) sub WHERE sub.parent = m.ID AND sub.rn = 1), 0) AS latest_val
+        FROM dtw_main m
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+          total: 500
+
+  - name: "change underlying rows before rebuild"
+    sql: |
+      UPDATE dtr_child SET val = 500 WHERE ID = 1
+    expect:
+      rows_affected: 1
+
+  - name: "insert extra row before rebuild"
+    sql: |
+      INSERT INTO dtr_child VALUES (5, 2, 150)
+    expect:
+      rows_affected: 1
+
+  - name: "rebuild storage"
+    sql: |
+      SELECT 1 AS ok
+    scm: |
+      (rebuild)
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  - name: "seed derived aggregate recomputes after rebuild"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.total_val) AS total FROM (
+        SELECT p.ID AS ID,
+          COALESCE((SELECT SUM(c.val) FROM dtr_child c WHERE c.parent = p.ID), 0) AS total_val
+        FROM dtr_parent p
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          total: 1200
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dtc_parent"
+  - sql: "DROP TABLE IF EXISTS dtc_child"
+  - sql: "DROP TABLE IF EXISTS dtw_main"
+  - sql: "DROP TABLE IF EXISTS dtw_hist"
+  - sql: "DROP TABLE IF EXISTS dtr_parent"
+  - sql: "DROP TABLE IF EXISTS dtr_child"

@@ -1,0 +1,100 @@
+metadata:
+  version: "1.0"
+  description: "SPARQL FILTER support"
+
+setup: []
+
+test_cases:
+
+  - name: "FILTER: equality"
+
+    ttl_data: |
+      @prefix f01: <http://filter01.org/> .
+      f01:a f01:val "yes" .
+      f01:b f01:val "no" .
+    sparql: |
+      @prefix f01: <http://filter01.org/> .
+      SELECT ?s WHERE { ?s f01:val ?v . FILTER(?v = "yes") }
+    expect:
+      rows: 1
+      data:
+        - "?s": "http://filter01.org/a"
+
+  - name: "FILTER: inequality"
+
+    ttl_data: |
+      @prefix f02: <http://filter02.org/> .
+      f02:a f02:n "10" .
+      f02:b f02:n "20" .
+      f02:c f02:n "30" .
+    sparql: |
+      @prefix f02: <http://filter02.org/> .
+      SELECT ?s WHERE { ?s f02:n ?n . FILTER(?n != "10") }
+    expect:
+      rows: 2
+
+  - name: "FILTER: numeric comparison"
+
+    ttl_data: |
+      @prefix f03: <http://filter03.org/> .
+      f03:a f03:age "25" .
+      f03:b f03:age "17" .
+      f03:c f03:age "30" .
+    sparql: |
+      @prefix f03: <http://filter03.org/> .
+      SELECT ?s WHERE { ?s f03:age ?a . FILTER(?a > "18") }
+    expect:
+      rows: 2
+
+  - name: "FILTER: regex"
+
+    ttl_data: |
+      @prefix f04: <http://filter04.org/> .
+      f04:a f04:name "Alice" .
+      f04:b f04:name "Bob" .
+      f04:c f04:name "Anna" .
+    sparql: |
+      @prefix f04: <http://filter04.org/> .
+      SELECT ?s WHERE { ?s f04:name ?n . FILTER(regex(?n, "^A")) }
+    expect:
+      rows: 2
+
+  - name: "FILTER: boolean AND"
+
+    ttl_data: |
+      @prefix f05: <http://filter05.org/> .
+      f05:a f05:x "1" ; f05:y "1" .
+      f05:b f05:x "1" ; f05:y "0" .
+      f05:c f05:x "0" ; f05:y "1" .
+    sparql: |
+      @prefix f05: <http://filter05.org/> .
+      SELECT ?s WHERE { ?s f05:x ?x ; f05:y ?y . FILTER(?x = "1" && ?y = "1") }
+    expect:
+      rows: 1
+
+  - name: "FILTER: boolean OR"
+
+    ttl_data: |
+      @prefix f06: <http://filter06.org/> .
+      f06:a f06:type "cat" .
+      f06:b f06:type "dog" .
+      f06:c f06:type "fish" .
+    sparql: |
+      @prefix f06: <http://filter06.org/> .
+      SELECT ?s WHERE { ?s f06:type ?t . FILTER(?t = "cat" || ?t = "dog") }
+    expect:
+      rows: 2
+
+  - name: "FILTER: NOT"
+
+    ttl_data: |
+      @prefix f07: <http://filter07.org/> .
+      f07:a f07:active "true" .
+      f07:b f07:active "false" .
+    sparql: |
+      @prefix f07: <http://filter07.org/> .
+      SELECT ?s WHERE { ?s f07:active ?a . FILTER(!(?a = "true")) }
+    expect:
+      rows: 1
+
+cleanup: []

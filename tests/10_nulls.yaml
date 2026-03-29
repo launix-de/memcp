@@ -64,6 +64,8 @@ test_cases:
     sql: "SELECT CONCAT(name, ' suffix') AS v FROM null_test WHERE id = 2"
     expect:
       rows: 1
+      data:
+        - v: null
 
   - name: "SUM ignores NULL"
     sql: "SELECT SUM(id) AS s FROM null_test"

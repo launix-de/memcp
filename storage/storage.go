@@ -382,9 +382,9 @@ func Init(en scm.Env) {
 						a := scols[c](uint32(i))
 						b := scols[c](uint32(j))
 						if scm.ToBool(sortdirs[c](a, b)) {
-							return false
-						} else if scm.ToBool(sortdirs[c](b, a)) {
 							return true
+						} else if scm.ToBool(sortdirs[c](b, a)) {
+							return false
 						}
 					}
 					return false

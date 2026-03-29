@@ -1,0 +1,54 @@
+metadata:
+  version: "1.0"
+  description: "Wrapped derived table must preserve NULL on unmatched LEFT JOIN projections"
+  isolated: true
+
+test_cases:
+  - name: "Create document table"
+    sql: "CREATE TABLE lj_doc (ID INT PRIMARY KEY, employee INT)"
+
+  - name: "Create employee table"
+    sql: "CREATE TABLE lj_employee (ID INT PRIMARY KEY, vorname VARCHAR(50), nachname VARCHAR(50))"
+
+  - name: "Insert documents"
+    sql: |
+      INSERT INTO lj_doc VALUES
+      (1, 7),
+      (2, NULL)
+
+  - name: "Insert employees"
+    sql: "INSERT INTO lj_employee VALUES (7, 'Ada', 'Lovelace')"
+
+  - name: "Wrapped LEFT JOIN keeps unmatched CONCAT projection NULL"
+    sql: |
+      SELECT t.ID, t.`employee::description`, t.`employee::canView`
+      FROM (
+        SELECT
+          d.ID AS ID,
+          ref_employee.`employee:description` AS `employee::description`,
+          ref_employee.`employee:canView` AS `employee::canView`
+        FROM lj_doc d
+        LEFT JOIN (
+          SELECT ID AS `employee:ID`,
+            CONCAT(nachname, ', ', vorname) AS `employee:description`,
+            TRUE AS `employee:canView`
+          FROM lj_employee
+        ) AS ref_employee ON ref_employee.`employee:ID` = d.employee
+        WHERE TRUE
+      ) AS t
+      ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          employee::description: "Lovelace, Ada"
+          employee::canView: true
+        - ID: 2
+          employee::description: null
+          employee::canView: null
+
+  - name: "Drop employee table"
+    sql: "DROP TABLE IF EXISTS lj_employee"
+
+  - name: "Drop document table"
+    sql: "DROP TABLE IF EXISTS lj_doc"
