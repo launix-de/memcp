@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "UUID function and blank node handling"
+  isolated: true
 
 setup: []
 

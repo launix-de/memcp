@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "Advanced SPARQL — subqueries, property paths, ASK, CONSTRUCT, VALUES"
+  isolated: true
 
 setup: []
 

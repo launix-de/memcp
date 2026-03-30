@@ -499,10 +499,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	if !hadValue && isOuter {
 		callbackFn := scm.OptimizeProcToSerialFunction(callback)
 		aggregateFn := scm.OptimizeProcToSerialFunction(aggregate)
-		nullRow := make([]scm.Scmer, len(callbackCols))
-		for i := range nullRow {
-			nullRow[i] = scm.NewNil()
-		}
+		nullRow := buildOuterNullCallbackRow(callbackCols)
 		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...)) // outer join: call once with NULLs
 	}
 	execNs := time.Since(execStart).Nanoseconds()

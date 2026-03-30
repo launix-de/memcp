@@ -31,6 +31,10 @@ func (s scanError) Error() string {
 	return fmt.Sprint(s.r) + "\n" + s.stack // room for improvement
 }
 
+func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
+	return make([]scm.Scmer, len(callbackCols))
+}
+
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
 // optimizeScan is the Optimize hook for the scan declaration.
@@ -164,10 +168,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := make([]scm.Scmer, len(callbackCols))
-			for i := range nullRow {
-				nullRow[i] = scm.NewNil()
-			}
+			nullRow := buildOuterNullCallbackRow(callbackCols)
 			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
 	} else if !aggregate.IsNil() {
@@ -190,10 +191,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := make([]scm.Scmer, len(callbackCols))
-			for i := range nullRow {
-				nullRow[i] = scm.NewNil()
-			}
+			nullRow := buildOuterNullCallbackRow(callbackCols)
 			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
 	} else {
@@ -212,10 +210,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			hadValue = hadValue || msg.outCount > 0
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := make([]scm.Scmer, len(callbackCols))
-			for i := range nullRow {
-				nullRow[i] = scm.NewNil()
-			}
+			nullRow := buildOuterNullCallbackRow(callbackCols)
 			scm.Apply(callback, nullRow...) // outer join: push one NULL row
 		}
 	}
@@ -269,9 +264,17 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	if lockMutationExclusively {
 		t.mu.Lock()
 		writeLocked = true
-		defer func() { if writeLocked { t.mu.Unlock() } }()
+		defer func() {
+			if writeLocked {
+				t.mu.Unlock()
+			}
+		}()
 		t.enterWriteOwner()
-		defer func() { if writeLocked { t.exitWriteOwner() } }()
+		defer func() {
+			if writeLocked {
+				t.exitWriteOwner()
+			}
+		}()
 		if currentTx != nil {
 			currentTx.EnterShardWrite(t)
 			defer currentTx.ExitShardWrite(t)

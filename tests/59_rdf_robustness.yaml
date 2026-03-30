@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "RDF robustness — queries that must not crash the server"
+  isolated: true
 
 setup: []
 

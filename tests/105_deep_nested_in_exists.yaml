@@ -1,0 +1,423 @@
+# Deep nested IN / EXISTS / NOT IN at arbitrary depths
+# Reuses the dn_* chain tables from 104 plus adds a tags table for set membership.
+# Tests that IN/EXISTS/NOT IN rewrite candidates (→ COUNT-based Neumann unnesting)
+# work correctly when buried inside scalar subselect nesting at various depths.
+
+metadata:
+  version: "1.0"
+  description: "IN, EXISTS, NOT IN inside deeply nested correlated subselects"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dn_a"
+  - sql: "DROP TABLE IF EXISTS dn_b"
+  - sql: "DROP TABLE IF EXISTS dn_c"
+  - sql: "DROP TABLE IF EXISTS dn_d"
+  - sql: "DROP TABLE IF EXISTS dn_e"
+  - sql: "DROP TABLE IF EXISTS dn_tags"
+  - sql: |
+      CREATE TABLE dn_e (id INT PRIMARY KEY, val VARCHAR(20))
+  - sql: |
+      CREATE TABLE dn_d (id INT PRIMARY KEY, ref_e INT, label VARCHAR(20))
+  - sql: |
+      CREATE TABLE dn_c (id INT PRIMARY KEY, ref_d INT)
+  - sql: |
+      CREATE TABLE dn_b (id INT PRIMARY KEY, ref_c INT)
+  - sql: |
+      CREATE TABLE dn_a (id INT PRIMARY KEY, ref_b INT)
+  - sql: |
+      CREATE TABLE dn_tags (id INT PRIMARY KEY, ref_id INT, tag VARCHAR(20))
+  - sql: "INSERT INTO dn_e (id, val) VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')"
+  - sql: "INSERT INTO dn_d (id, ref_e, label) VALUES (10, 1, 'D10'), (20, 2, 'D20'), (30, 3, 'D30')"
+  - sql: "INSERT INTO dn_c (id, ref_d) VALUES (100, 10), (200, 20), (300, 30)"
+  - sql: "INSERT INTO dn_b (id, ref_c) VALUES (1000, 100), (2000, 200), (3000, 300)"
+  - sql: "INSERT INTO dn_a (id, ref_b) VALUES (1, 1000), (2, 2000), (3, 3000)"
+  - sql: |
+      INSERT INTO dn_tags (id, ref_id, tag) VALUES
+        (1, 1, 'important'), (2, 1, 'urgent'),
+        (3, 2, 'important'),
+        (4, 3, 'archived'),
+        (5, 10, 'category_a'), (6, 20, 'category_b'),
+        (7, 100, 'active'), (8, 200, 'active'), (9, 300, 'inactive')
+
+test_cases:
+
+  # ============================================================
+  # EXISTS inside scalar subselect nesting
+  # ============================================================
+
+  - name: "Depth 2: EXISTS as innermost filter"
+    sql: |
+      SELECT a.id,
+        (SELECT b.ref_c FROM dn_b b
+         WHERE b.id = a.ref_b
+         AND EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = b.ref_c AND t.tag = 'active')
+         LIMIT 1) AS active_ref
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          active_ref: 100
+        - id: 2
+          active_ref: 200
+        - id: 3
+          active_ref: null
+
+  - name: "Depth 3: EXISTS buried inside 2 scalar levels"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = c.id AND t.tag = 'active')
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS active_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          active_d: 10
+        - id: 2
+          active_d: 20
+        - id: 3
+          active_d: null
+
+  - name: "Depth 3: EXISTS references outermost table (skip 2 levels)"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = a.id AND t.tag = 'important')
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS important_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          important_d: 10
+        - id: 2
+          important_d: 20
+        - id: 3
+          important_d: null
+
+  - name: "Depth 4: EXISTS at bottom of 3-level scalar chain"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM dn_d d
+             WHERE d.id = c.ref_d
+             AND EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = d.id AND t.tag = 'category_a')
+             LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS cat_a_label
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          cat_a_label: "D10"
+        - id: 2
+          cat_a_label: null
+        - id: 3
+          cat_a_label: null
+
+  # ============================================================
+  # NOT EXISTS inside scalar subselect nesting
+  # ============================================================
+
+  - name: "Depth 2: NOT EXISTS as innermost filter"
+    sql: |
+      SELECT a.id,
+        (SELECT b.ref_c FROM dn_b b
+         WHERE b.id = a.ref_b
+         AND NOT EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = b.ref_c AND t.tag = 'inactive')
+         LIMIT 1) AS not_inactive_ref
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          not_inactive_ref: 100
+        - id: 2
+          not_inactive_ref: 200
+        - id: 3
+          not_inactive_ref: null
+
+  - name: "Depth 3: NOT EXISTS buried inside 2 scalar levels"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND NOT EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = c.id AND t.tag = 'inactive')
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS not_inactive_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          not_inactive_d: 10
+        - id: 2
+          not_inactive_d: 20
+        - id: 3
+          not_inactive_d: null
+
+  # ============================================================
+  # IN inside scalar subselect nesting
+  # ============================================================
+
+  - name: "Depth 2: IN as innermost filter"
+    sql: |
+      SELECT a.id,
+        (SELECT b.ref_c FROM dn_b b
+         WHERE b.id = a.ref_b
+         AND b.ref_c IN (SELECT t.ref_id FROM dn_tags t WHERE t.tag = 'active')
+         LIMIT 1) AS active_ref
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          active_ref: 100
+        - id: 2
+          active_ref: 200
+        - id: 3
+          active_ref: null
+
+  - name: "Depth 3: IN buried inside 2 scalar levels"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND c.id IN (SELECT t.ref_id FROM dn_tags t WHERE t.tag = 'active')
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS active_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          active_d: 10
+        - id: 2
+          active_d: 20
+        - id: 3
+          active_d: null
+
+  - name: "Depth 3: correlated IN references middle level"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND c.ref_d IN (SELECT t.ref_id FROM dn_tags t WHERE t.ref_id = b.ref_c - 90)
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS tagged_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          tagged_d: 10
+        - id: 2
+          tagged_d: null
+        - id: 3
+          tagged_d: null
+
+  # ============================================================
+  # NOT IN inside scalar subselect nesting
+  # ============================================================
+
+  - name: "Depth 2: NOT IN as innermost filter"
+    sql: |
+      SELECT a.id,
+        (SELECT b.ref_c FROM dn_b b
+         WHERE b.id = a.ref_b
+         AND b.ref_c NOT IN (SELECT t.ref_id FROM dn_tags t WHERE t.tag = 'inactive')
+         LIMIT 1) AS not_inactive_ref
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          not_inactive_ref: 100
+        - id: 2
+          not_inactive_ref: 200
+        - id: 3
+          not_inactive_ref: null
+
+  - name: "Depth 3: NOT IN buried inside 2 scalar levels"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND c.id NOT IN (SELECT t.ref_id FROM dn_tags t WHERE t.tag = 'inactive')
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS not_inactive_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          not_inactive_d: 10
+        - id: 2
+          not_inactive_d: 20
+        - id: 3
+          not_inactive_d: null
+
+  # ============================================================
+  # Mixed: different rewrite types at different nesting levels
+  # ============================================================
+
+  - name: "Mixed depth 3: EXISTS at level 2, scalar at level 3"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND EXISTS (SELECT 1 FROM dn_d d WHERE d.id = c.ref_d AND d.ref_e = a.id)
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS matched_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          matched_d: 10
+        - id: 2
+          matched_d: 20
+        - id: 3
+          matched_d: 30
+
+  - name: "Mixed depth 3: IN at level 2, scalar at level 3"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM dn_c c
+           WHERE c.id = b.ref_c
+           AND c.ref_d IN (SELECT d.id FROM dn_d d WHERE d.ref_e = a.id)
+           LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS matched_d
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          matched_d: 10
+        - id: 2
+          matched_d: 20
+        - id: 3
+          matched_d: 30
+
+  - name: "Mixed depth 4: scalar + EXISTS + scalar chain"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM dn_d d
+             WHERE d.id = c.ref_d
+             AND EXISTS (SELECT 1 FROM dn_e e WHERE e.id = d.ref_e AND e.val != 'gamma')
+             LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS non_gamma_label
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          non_gamma_label: "D10"
+        - id: 2
+          non_gamma_label: "D20"
+        - id: 3
+          non_gamma_label: null
+
+  - name: "Mixed depth 4: NOT IN skipping 2 levels to outermost"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM dn_d d
+             WHERE d.id = c.ref_d
+             AND d.ref_e NOT IN (SELECT t.ref_id FROM dn_tags t WHERE t.ref_id = a.id AND t.tag = 'archived')
+             LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS not_archived_label
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          not_archived_label: "D10"
+        - id: 2
+          not_archived_label: "D20"
+        - id: 3
+          not_archived_label: null
+
+  # ============================================================
+  # EXISTS / IN as the SELECT-level expression (not just filter)
+  # ============================================================
+
+  - name: "Depth 2: EXISTS result as select column via scalar"
+    sql: |
+      SELECT a.id,
+        (SELECT EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = a.id AND t.tag = 'important')
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS is_important
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          is_important: true
+        - id: 2
+          is_important: true
+        - id: 3
+          is_important: false
+
+  - name: "Depth 3: EXISTS result propagated through 2 scalar levels"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = a.id AND t.tag = 'urgent')
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS is_urgent
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          is_urgent: true
+        - id: 2
+          is_urgent: false
+        - id: 3
+          is_urgent: false
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dn_tags"
+  - sql: "DROP TABLE IF EXISTS dn_a"
+  - sql: "DROP TABLE IF EXISTS dn_b"
+  - sql: "DROP TABLE IF EXISTS dn_c"
+  - sql: "DROP TABLE IF EXISTS dn_d"
+  - sql: "DROP TABLE IF EXISTS dn_e"

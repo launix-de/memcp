@@ -611,7 +611,7 @@ class SQLTestRunner:
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
             if not self.load_ttl(database, test_case["ttl_data"]):
-                return self._record_fail(name, "TTL load failed", query, None, None)
+                return self._record_fail(name, "TTL load failed", query, None, None, is_noncritical)
 
         # Special handling: SHUTDOWN command triggers graceful restart flow
         response: Optional[requests.Response]

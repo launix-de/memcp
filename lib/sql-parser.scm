@@ -29,6 +29,11 @@ Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
 (sql_aggregates "COUNT" '(+ 0 false))
 /* GROUP_CONCAT is order-sensitive: ORDER BY in OVER matters (running concatenation) */
 (sql_aggregates "GROUP_CONCAT" (list (lambda (a b) (if (nil? a) b (concat a "," b))) nil true))
+/* SQL NULL must survive parsing as an explicit expression node. Using raw nil
+would collapse it with parser-level "no value" and optional-clause defaults. */
+(sql_builtins "SQL_NULL" (lambda () nil))
+(define sql_null_literal (lambda ()
+	(list (sql_builtins "SQL_NULL"))))
 
 (define sql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
@@ -104,7 +109,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 /* lightweight literal parser for top-level contexts (before sql_expression is defined) */
 (define sql_literal (parser (or
-	(parser (atom "NULL" true) 'nil)
+	(parser (atom "NULL" true) (sql_null_literal))
 	(parser (atom "TRUE" true) true)
 	(parser (atom "FALSE" true) false)
 	sql_number
@@ -769,7 +774,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" sql_expression "," sql_expression "," sql_expression ")") nil) /* ignore */
 		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn schema tbl col "auto_increment" val) (error "unknown pg_catalog key: " key)))
 
-		(parser (atom "NULL" true) 'nil)
+		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
 		(parser (atom "ON" true) true)
@@ -809,9 +814,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(parser '((atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
 			(parser '((? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) r)
 		))) (merge l x))
-		(parser '((define l tabledef) (atom "RIGHT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledefs) (atom "ON" true) (define e sql_expression)) (match l '(id schema tbl _ nil) (cons '(id schema tbl true e) r)))
+		/* Normalize RIGHT JOIN to the existing LEFT JOIN execution contract:
+		the preserved row stream must come first, and the nullable side is marked
+		as outer on the right. */
+		(parser '((define l tabledef) (atom "RIGHT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledefs) (atom "ON" true) (define e sql_expression))
+			(match l '(id schema tbl _ nil)
+				(merge r '('(id schema tbl true e)))))
 		(parser (define t tabledef) '(t))
-	)))
+)))
 	(define tabledef (parser (or
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */

@@ -152,6 +152,270 @@ test_cases:
     expect:
       rows: 0
 
+  # === nD domain: correlated on one column + inner filter ===
+
+  - name: "1D domain with inner filter"
+    sql: |
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d WHERE d.did = e.did AND d.did > 0) AS dept
+      FROM sq_emp e WHERE e.eid <= 3
+      ORDER BY e.eid
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+        - name: "Bob"
+          dept: "Engineering"
+        - name: "Carol"
+          dept: "Marketing"
+
+  # === Multi-table unnested subquery ===
+
+  - name: "Multi-table scalar subselect unnested"
+    sql: |
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d JOIN sq_dept d2 ON d.did = d2.did WHERE d.did = e.did) AS dept
+      FROM sq_emp e WHERE e.eid = 1
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+
+  # === Nested subselect: inner subselect unnested, then outer level ===
+
+  - name: "Nested correlated subselect - inner unnested, outer inline"
+    sql: |
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d
+         WHERE d.did = (SELECT t.did FROM sq_emp t WHERE t.eid = e.eid) LIMIT 1) AS dept
+      FROM sq_emp e WHERE e.eid = 1
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+
+  # === nD domain: multiple outer references ===
+
+  - name: "2D domain: two correlated equality conditions"
+    sql: |
+      SELECT e.eid, e.did,
+        (SELECT d.dname FROM sq_dept d WHERE d.did = e.did AND d.did = e.eid) AS self_dept
+      FROM sq_emp e WHERE e.eid <= 4
+      ORDER BY e.eid
+    expect:
+      rows: 4
+      data:
+        - eid: 1
+          did: 1
+          self_dept: "Engineering"
+        - eid: 2
+          did: 1
+          self_dept: null
+        - eid: 3
+          did: 2
+          self_dept: null
+        - eid: 4
+          did: 2
+          self_dept: null
+
+  # === GROUP BY extension (Neumann Γ_{A∪D}) ===
+
+  - name: "Aggregate COUNT correlated subselect (1D domain)"
+    sql: |
+      SELECT d.dname,
+        (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did) AS emp_count
+      FROM sq_dept d WHERE d.did <= 3
+      ORDER BY d.did
+    expect:
+      rows: 3
+      data:
+        - dname: "Engineering"
+          emp_count: 3
+        - dname: "Marketing"
+          emp_count: 2
+        - dname: "Sales"
+          emp_count: 2
+
+  - name: "Aggregate SUM correlated subselect"
+    sql: |
+      SELECT d.dname,
+        (SELECT SUM(e.salary) FROM sq_emp e WHERE e.did = d.did) AS total_sal
+      FROM sq_dept d WHERE d.did = 1
+    expect:
+      rows: 1
+      data:
+        - dname: "Engineering"
+          total_sal: 265000
+
+  - name: "Aggregate correlated subselect with no match returns 0"
+    sql: |
+      SELECT d.dname,
+        (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did) AS emp_count
+      FROM sq_dept d WHERE d.did = 4
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+          emp_count: 0
+
+  - name: "Aggregate correlated subselect in WHERE comparison"
+    sql: |
+      SELECT d.dname
+      FROM sq_dept d
+      WHERE (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did) >= 3
+    expect:
+      rows: 1
+      data:
+        - dname: "Engineering"
+
+  - name: "2D domain with aggregate"
+    sql: |
+      SELECT e.eid,
+        (SELECT COUNT(1) FROM sq_dept d WHERE d.did = e.did AND d.did = e.eid) AS matching
+      FROM sq_emp e WHERE e.eid <= 4
+      ORDER BY e.eid
+    expect:
+      rows: 4
+      data:
+        - eid: 1
+          matching: 1
+        - eid: 2
+          matching: 0
+        - eid: 3
+          matching: 0
+        - eid: 4
+          matching: 0
+
+  - name: "Nested subselect: inner unnested, outer is aggregate"
+    noncritical: true
+    sql: |
+      SELECT d.dname,
+        (SELECT COUNT(1) FROM sq_emp e
+         WHERE e.did = d.did
+         AND e.salary > (SELECT AVG(salary) FROM sq_emp) LIMIT 1) AS above_avg
+      FROM sq_dept d WHERE d.did <= 2
+      ORDER BY d.did
+    expect:
+      rows: 2
+      data:
+        - dname: "Engineering"
+          above_avg: 3
+        - dname: "Marketing"
+          above_avg: 1
+
+  # === Doubly-nested: innermost references outermost ===
+
+  - name: "Doubly-nested scalar: inner references outermost table"
+    sql: |
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d
+         WHERE d.did = (SELECT t.did FROM sq_emp t WHERE t.eid = e.eid LIMIT 1) LIMIT 1) AS dept
+      FROM sq_emp e WHERE e.eid <= 3
+      ORDER BY e.eid
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+        - name: "Bob"
+          dept: "Engineering"
+        - name: "Carol"
+          dept: "Marketing"
+
+  # === 1-row constraint: LIMIT 1 on non-unique keys ===
+
+  - name: "LIMIT 1 correlated subselect on non-unique key"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did ORDER BY e.salary DESC LIMIT 1) AS top_earner
+      FROM sq_dept d WHERE d.did <= 3
+      ORDER BY d.did
+    expect:
+      rows: 3
+      data:
+        - dname: "Engineering"
+          top_earner: "Frank"
+        - dname: "Marketing"
+          top_earner: "Dave"
+        - dname: "Sales"
+          top_earner: "Grace"
+
+  - name: "LIMIT 1 correlated subselect without ORDER BY"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did LIMIT 1) AS any_emp
+      FROM sq_dept d WHERE d.did = 4
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+          any_emp: null
+
+  - name: "Correlated subselect without LIMIT returns one row (implicit LIMIT 1)"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did) AS emp
+      FROM sq_dept d WHERE d.did = 1
+    expect:
+      rows: 1
+
+  - name: "COUNT correlated subselect with LIMIT 1 (redundant LIMIT)"
+    sql: |
+      SELECT d.dname,
+        (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did LIMIT 1) AS cnt
+      FROM sq_dept d WHERE d.did <= 2
+      ORDER BY d.did
+    expect:
+      rows: 2
+      data:
+        - dname: "Engineering"
+          cnt: 3
+        - dname: "Marketing"
+          cnt: 2
+
+  # === 1-row constraint: COUNT NULL vs 0 ===
+
+  - name: "COUNT correlated returns 0 not NULL for empty match"
+    noncritical: true
+    sql: |
+      SELECT d.dname,
+        COALESCE((SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did), 0) AS cnt
+      FROM sq_dept d WHERE d.did = 4
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+          cnt: 0
+
+  # === 1-row constraint: OFFSET ===
+
+  - name: "Correlated subselect with OFFSET skips first match"
+    sql: |
+      SELECT d.dname,
+        (SELECT e.name FROM sq_emp e WHERE e.did = d.did ORDER BY e.salary DESC LIMIT 1 OFFSET 1) AS second_earner
+      FROM sq_dept d WHERE d.did = 1
+    expect:
+      rows: 1
+      data:
+        - dname: "Engineering"
+          second_earner: "Alice"
+
+  # === Aggregate in WHERE with correct 0-semantics ===
+
+  - name: "Aggregate in WHERE with zero check"
+    noncritical: true
+    sql: |
+      SELECT d.dname
+      FROM sq_dept d
+      WHERE (SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did) = 0
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sq_emp"
   - sql: "DROP TABLE IF EXISTS sq_dept"

@@ -122,7 +122,7 @@ test_cases:
           task: 2
           worker_name: "Bob"
           task_title: "Feature"
-          worker_has_event: 1
+          worker_has_event: 0
 
   - name: "COUNT+SUM over the full pattern"
     sql: |

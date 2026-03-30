@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "RDF/SPARQL + TTL loading tests"
+  isolated: true
 
 setup: []
 

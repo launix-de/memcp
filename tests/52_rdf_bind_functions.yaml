@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "SPARQL BIND, built-in functions, IF/BOUND/COALESCE"
+  isolated: true
 
 setup: []
 
@@ -83,7 +84,8 @@ test_cases:
     sparql: |
       @prefix b07: <http://bind07.org/> .
       SELECT ?label WHERE {
-        ?s a ?any .
+        ?s ?p ?any .
+        FILTER(?p = b07:name || ?p = b07:nick)
         OPTIONAL { ?s b07:name ?n }
         OPTIONAL { ?s b07:nick ?k }
         BIND(COALESCE(?n, ?k, "unknown") AS ?label)

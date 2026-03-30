@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "SPARQL Update — INSERT/DELETE"
+  isolated: true
 
 setup: []
 

@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "SPARQL aggregate functions with GROUP BY"
+  isolated: true
 
 setup: []
 
