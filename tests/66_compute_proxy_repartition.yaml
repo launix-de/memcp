@@ -9,7 +9,7 @@
 metadata:
   version: "1.0"
   description: "StorageComputeProxy during rebuild/repartition"
-  isolate: true
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS cpr_orders"

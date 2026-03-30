@@ -505,6 +505,12 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 // repartitionActive is already set to true by the caller under t.mu before
 // releasing it, so this guard only catches direct calls from outside db.rebuild.
 func (t *table) repartition(shardCandidates []shardDimension) {
+	t.ddlMu.RLock()
+	defer t.ddlMu.RUnlock()
+	t.repartitionDDLReadLocked(shardCandidates)
+}
+
+func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// Safety-net: if somehow called directly without the flag being set.
 	if t.repartitionActive && t.PShards != nil {
 		return
@@ -687,23 +693,11 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 										newIdx++
 									}
 								} else {
-									// Old shard has proxy — port valid/invalid status
-									for _, item := range items {
-										idx := uint32(item)
-										if oldProxy.compressed || oldProxy.validMask.Get(uint(idx)) {
-											// Valid: read cached value without triggering computor
-											oldProxy.mu.RLock()
-											val, inDelta := oldProxy.delta[idx]
-											oldProxy.mu.RUnlock()
-											if !inDelta && oldProxy.main != nil {
-												val = oldProxy.main.GetValue(idx)
-											}
-											newProxy.delta[newIdx] = val
-											newProxy.validMask.Set(uint(newIdx), true)
-										}
-										// else: invalid row — leave validMask=false for lazy recompute
-										newIdx++
+									oldRowIDs := make([]uint32, len(items))
+									for i, item := range items {
+										oldRowIDs[i] = uint32(item)
 									}
+									newIdx = appendComputeProxyRows(newProxy, oldProxy, oldRowIDs, newIdx)
 								}
 							}
 							built.columns[col.Name] = newProxy
@@ -903,9 +897,6 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		}
 	}
 
-	// Phase E complete — all deletions reconciled. Now safe to clear dual-write.
-	t.repartitionActive = false
-
 	// Verify transformation result
 	total_count2 := uint64(0)
 	for _, s := range newshards {
@@ -921,13 +912,16 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 	// ── Phase G: Cleanup ──
 	t.schema.schemalock.Lock()
-	t.schema.saveLockedAndUnlock()
+	t.schema.saveLockedWithDurabilityAndUnlock(t.schemaWriteDurable())
 
 	// Nil out old shards after the schema is saved, so no FreeShard
 	// code path can reference them. At this point, ShardMode is Partition,
-	// so new inserts use PShards exclusively.
+	// so new inserts use PShards exclusively. Clearing repartitionActive here
+	// keeps the dual-write contract alive until the new schema is published.
 	t.mu.Lock()
 	t.Shards = nil
+	t.repartitionActive = false
+	t.getRepartitionCond().Broadcast()
 	t.mu.Unlock()
 
 	for _, s := range oldshards {

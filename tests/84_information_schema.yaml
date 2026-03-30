@@ -7,6 +7,7 @@ metadata:
 
 setup:
   - sql: "CREATE TABLE IF NOT EXISTS is_test_tbl (id INT, name VARCHAR(50), score DOUBLE)"
+  - scm: '(createtable "memcp-tests" ".is_hidden_meta" (list (list "column" "id" "int" (list) (list))) (list "engine" "sloppy") true)'
 
 test_cases:
 
@@ -43,6 +44,11 @@ test_cases:
 
   - name: "TABLES: non-existent table returns empty"
     sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'nonexistent_xyz_99' LIMIT 1"
+    expect:
+      rows: 0
+
+  - name: "TABLES: hidden dot-table is not listed"
+    sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '.is_hidden_meta' LIMIT 1"
     expect:
       rows: 0
 
@@ -122,3 +128,4 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS is_test_tbl"
+  - sql: "DROP TABLE IF EXISTS `.is_hidden_meta`"

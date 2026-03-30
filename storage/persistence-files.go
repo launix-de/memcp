@@ -59,6 +59,10 @@ func (f *FileStorage) ReadSchema() []byte {
 }
 
 func (s *FileStorage) WriteSchema(jsonbytes []byte) {
+	s.WriteSchemaWithMode(jsonbytes, true)
+}
+
+func (s *FileStorage) WriteSchemaWithMode(jsonbytes []byte, durable bool) {
 	os.MkdirAll(s.path, 0750)
 	if stat, err := os.Stat(s.path + "schema.json"); err == nil && stat.Size() > 0 {
 		// rescue a copy of schema.json in case the schema is not serializable
@@ -72,13 +76,15 @@ func (s *FileStorage) WriteSchema(jsonbytes []byte) {
 	if _, err := f.Write(jsonbytes); err != nil {
 		panic(err)
 	}
-	if err := f.Sync(); err != nil {
-		panic(err)
-	}
-	if dir, err := os.Open(s.path); err == nil {
-		defer dir.Close()
-		if err := dir.Sync(); err != nil {
+	if durable {
+		if err := f.Sync(); err != nil {
 			panic(err)
+		}
+		if dir, err := os.Open(s.path); err == nil {
+			defer dir.Close()
+			if err := dir.Sync(); err != nil {
+				panic(err)
+			}
 		}
 	}
 }
