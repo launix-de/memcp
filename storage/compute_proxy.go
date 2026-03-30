@@ -80,12 +80,25 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 	defer oldProxy.mu.RUnlock()
 	newIdx := startIdx
 	for _, oldIdx := range oldRowIDs {
-		if !oldProxy.compressed && !oldProxy.validMask.Get(uint(oldIdx)) {
-			newIdx++
-			continue
-		}
 		val, inDelta := oldProxy.delta[oldIdx]
-		if !inDelta && oldProxy.main != nil {
+		if !inDelta {
+			// Proxy row ids may refer to forwarded delta rows that were inserted
+			// after the proxy's main storage was materialized. Those rows are only
+			// safe to port if they have an explicit cached delta entry; otherwise
+			// they must stay lazy-invalid on the rebuilt shard instead of reading
+			// past the old main storage.
+			if oldIdx >= oldProxy.count {
+				newIdx++
+				continue
+			}
+			if !oldProxy.compressed && !oldProxy.validMask.Get(uint(oldIdx)) {
+				newIdx++
+				continue
+			}
+			if oldProxy.main == nil {
+				newIdx++
+				continue
+			}
 			val = oldProxy.main.GetValue(oldIdx)
 		}
 		newProxy.delta[newIdx] = val
@@ -156,34 +169,37 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 			return val
 		}
 		p.mu.RUnlock()
-		if p.main != nil {
+		if idx < p.count && p.main != nil {
 			return p.main.GetValue(idx)
 		}
 		return scm.NewNil()
 	}
 
-	// Fast path 1: fully compressed → all values in main
-	if p.compressed {
+	// Delta entries shadow main storage and are also used for rows appended
+	// after the proxy's materialized main storage was built.
+	p.mu.RLock()
+	if val, ok := p.delta[idx]; ok {
+		p.mu.RUnlock()
+		return val
+	}
+	p.mu.RUnlock()
+
+	// Fast path 1: fully compressed → value is in main storage for main rows.
+	if p.compressed && idx < p.count && p.main != nil {
 		return p.main.GetValue(idx)
 	}
 
-	// Fast path 2: valid bit set → value in delta or main
-	if p.validMask.Get(uint(idx)) {
-		p.mu.RLock()
-		if val, ok := p.delta[idx]; ok {
-			p.mu.RUnlock()
-			return val
-		}
-		p.mu.RUnlock()
-		if p.main != nil {
-			return p.main.GetValue(idx)
-		}
+	// Fast path 2: valid bit set → value is cached in main storage for main rows.
+	if p.validMask.Get(uint(idx)) && idx < p.count && p.main != nil {
+		return p.main.GetValue(idx)
 	}
 
 	// Slow path: compute on demand
 	colvalues := make([]scm.Scmer, len(p.inputCols))
 	for i, col := range p.inputCols {
-		colvalues[i] = p.shard.getColumnStorageOrPanic(col).GetValue(idx)
+		// Delta rows must be read via the shard-level ColumnReader; direct
+		// ColumnStorage access only understands main-row indexes.
+		colvalues[i] = p.shard.ColumnReader(col)(idx)
 	}
 	val := scm.Apply(p.computor, colvalues...)
 

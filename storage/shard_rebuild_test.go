@@ -131,7 +131,7 @@ func TestDatabaseRebuildSkipsEphemeralQueryTables(t *testing.T) {
 	ephemeralUUID := ephemeral.Shards[0].uuid
 	durableInternalUUID := durableInternal.Shards[0].uuid
 
-	result := db.rebuild(true, false)
+	result := db.rebuild(true, false, false)
 	if len(result.errors) > 0 {
 		t.Fatalf("rebuild errors: %v", result.errors)
 	}
@@ -248,7 +248,7 @@ func TestDatabaseRebuildDoesNotForceFreeTableIntoSingleShardPartition(t *testing
 		{scm.NewInt(3), scm.NewInt(3)},
 	}, nil, scm.NewNil(), false, nil)
 
-	result := db.rebuild(true, true)
+	result := db.rebuild(true, true, false)
 	if len(result.errors) > 0 {
 		t.Fatalf("rebuild errors: %v", result.errors)
 	}
@@ -437,7 +437,7 @@ func TestDatabaseRebuildWaitsForTableDDL(t *testing.T) {
 	tbl.ddlMu.Lock()
 	done := make(chan rebuildDatabaseResult, 1)
 	go func() {
-		done <- db.rebuild(true, false)
+		done <- db.rebuild(true, false, false)
 	}()
 
 	select {
@@ -831,6 +831,50 @@ func TestShardRebuildWaitsForOrderedProxySnapshot(t *testing.T) {
 	}
 	if got := rebuiltProxy.delta[1].Int(); got != 300 {
 		t.Fatalf("rebuilt ordered proxy value[1] = %d, want 300", got)
+	}
+}
+
+func TestAppendComputeProxyRowsSkipsUncachedDeltaRecids(t *testing.T) {
+	proxy := &StorageComputeProxy{
+		delta: make(map[uint32]scm.Scmer),
+		count: 2,
+		main: &StorageSCMER{
+			values: []scm.Scmer{scm.NewString("a"), scm.NewString("b")},
+		},
+	}
+	proxy.validMask.Set(0, true)
+	proxy.validMask.Set(1, true)
+
+	newProxy := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer), count: 3}
+	newIdx := appendComputeProxyRows(newProxy, proxy, []uint32{0, 1, 2}, 0)
+	if newIdx != 3 {
+		t.Fatalf("appendComputeProxyRows returned %d, want 3", newIdx)
+	}
+	if !newProxy.validMask.Get(0) || !newProxy.validMask.Get(1) {
+		t.Fatal("valid main rows were not ported")
+	}
+	if newProxy.validMask.Get(2) {
+		t.Fatal("uncached forwarded delta row must stay invalid after port")
+	}
+	if !scm.Equal(newProxy.delta[0], scm.NewString("a")) {
+		t.Fatalf("row 0 = %v, want %v", newProxy.delta[0], scm.NewString("a"))
+	}
+	if !scm.Equal(newProxy.delta[1], scm.NewString("b")) {
+		t.Fatalf("row 1 = %v, want %v", newProxy.delta[1], scm.NewString("b"))
+	}
+}
+
+func TestComputeProxyGetValueUsesDeltaBeyondMainCount(t *testing.T) {
+	proxy := &StorageComputeProxy{
+		delta:      map[uint32]scm.Scmer{2: scm.NewString("delta")},
+		count:      2,
+		compressed: true,
+		main: &StorageSCMER{
+			values: []scm.Scmer{scm.NewString("a"), scm.NewString("b")},
+		},
+	}
+	if !scm.Equal(proxy.GetValue(2), scm.NewString("delta")) {
+		t.Fatalf("proxy.GetValue(2) = %v, want %v", proxy.GetValue(2), scm.NewString("delta"))
 	}
 }
 

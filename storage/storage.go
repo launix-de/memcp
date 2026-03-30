@@ -1416,19 +1416,14 @@ func Init(en scm.Env) {
 				})
 			}
 
-			// Keytable membership is a set, not a multiset. AFTER INSERT / UPDATE
-			// therefore only need to add a key when the base-table group transitions
-			// from empty -> non-empty. In AFTER triggers the mutated row is already
-			// visible, so COUNT==1 means this write created the first row of that
-			// group. This avoids redundant INSERT IGNORE traffic and removes the
-			// race where collect/materialize and trigger maintenance try to add the
-			// same key concurrently.
-			buildInsertIfFirst := func(dictSym string) scm.Scmer {
-				return scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("if"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(1), buildCountScan(dictSym)}),
-					buildInsert(dictSym),
-				})
+			// Keytable membership is a set, not a multiset. Always attempt an
+			// idempotent INSERT IGNORE on AFTER INSERT / UPDATE instead of trying
+			// to detect the first row via COUNT==1: a single logical source-row
+			// trigger may insert multiple base rows of the same group in one batch,
+			// so all rows are already visible when the first AFTER INSERT trigger
+			// fires. COUNT==1 would then miss the new group entirely.
+			buildInsertIfMissing := func(dictSym string) scm.Scmer {
+				return buildInsert(dictSym)
 			}
 
 			// AfterDelete body: if count=0 then delete from keytable
@@ -1440,7 +1435,7 @@ func Init(en scm.Env) {
 
 			// AfterInsert body: only add a key when this INSERT created the first
 			// row for the group. Existing groups already have their keytable row.
-			insertBody := buildInsertIfFirst("NEW")
+			insertBody := buildInsertIfMissing("NEW")
 
 			// AfterUpdate body: if key changed, clean up old + insert new
 			keyChangedCheck := buildAndEquals(getAssocs("OLD", baseCols), getAssocs("NEW", baseCols))
@@ -1454,7 +1449,7 @@ func Init(en scm.Env) {
 						scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(0), buildCountScan("OLD")}),
 						buildDeleteScan("OLD"),
 					}),
-					buildInsertIfFirst("NEW"),
+					buildInsertIfMissing("NEW"),
 				}),
 			})
 

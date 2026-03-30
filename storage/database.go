@@ -115,12 +115,16 @@ func recoverAsError(context string) (err error) {
 }
 
 func Rebuild(all bool, repartition bool) string {
+	return rebuildDatabases(all, repartition, false)
+}
+
+func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string {
 	start := time.Now()
 	dbs := databases.GetAll()
 	var errs []string
 	for _, db := range dbs {
 		func(db *database) {
-			result := db.rebuild(all, repartition)
+			result := db.rebuild(all, repartition, includeEphemeral)
 			if len(result.errors) > 0 {
 				errs = append(errs, result.errors...)
 				return
@@ -152,7 +156,10 @@ func Rebuild(all bool, repartition bool) string {
 }
 
 func UnloadDatabases() {
-	fmt.Println("table compression done in ", Rebuild(false, false))
+	// Clean shutdown may flush ephemeral query tables as well. They remain
+	// excluded from online/global rebuilds to avoid interfering with live
+	// query-local scratch state.
+	fmt.Println("table compression done in ", rebuildDatabases(false, false, true))
 	data, _ := json.Marshal(Settings)
 	if settings, err := os.OpenFile(Basepath+"/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {
 		defer settings.Close()
@@ -444,7 +451,7 @@ func (db *database) ShowTables() scm.Scmer {
 	return scm.NewSlice(result)
 }
 
-func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
+func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) rebuildDatabaseResult {
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
 		return rebuildDatabaseResult{}
@@ -488,7 +495,7 @@ func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
 				}
 				done.Done()
 			}()
-			if t.isEphemeralQueryTable() {
+			if t.isEphemeralQueryTable() && !includeEphemeral {
 				return
 			}
 			t.mu.Lock() // table lock
