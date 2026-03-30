@@ -574,14 +574,14 @@ func Validate(val Scmer, require string) string {
 					def = def2
 				}
 			}
-			if def != nil {
-				if len(slice)-1 < def.MinParams() {
-					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
+				if def != nil {
+					if len(slice)-1 < def.MinParams() {
+						panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
+					}
+					if len(slice)-1 > def.MaxParams() {
+						panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParams()) + " parameters")
+					}
 				}
-				if len(slice)-1 > def.MaxParams() {
-					panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParams()) + " parameters")
-				}
-			}
 			skipFirst := slice[0].IsSymbol() && (slice[0].SymbolEquals("lambda") || slice[0].SymbolEquals("parser"))
 			returntype := ""
 			for i := 1; i < len(slice); i++ {

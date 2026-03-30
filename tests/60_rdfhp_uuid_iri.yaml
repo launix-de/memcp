@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "RDFHP templates with UUID IRIs in SPARQL queries"
+  isolated: true
 
 setup: []
 

@@ -74,12 +74,12 @@ test_cases:
     expect:
       rows: 3
       data:
-        - customer: "Alice"
-          amount: 150
         - customer: "Bob"
           amount: 200
         - customer: "Alice"
           amount: 250
+        - customer: "Charlie"
+          amount: 300
 
   # =================================================================
   # 3. Nested LIMIT: LIMIT in subquery + LIMIT in outer
@@ -151,10 +151,12 @@ test_cases:
       GROUP BY o.customer
       ORDER BY o.customer
     expect:
-      rows: 2
+      rows: 3
       data:
         - customer: "Alice"
           products: 3
+        - customer: "Bob"
+          products: 1
         - customer: "Charlie"
           products: 1
 

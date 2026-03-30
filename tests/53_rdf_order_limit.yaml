@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "SPARQL ORDER BY, LIMIT, OFFSET, DISTINCT"
+  isolated: true
 
 setup: []
 

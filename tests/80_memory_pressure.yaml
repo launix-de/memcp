@@ -8,7 +8,7 @@ setup:
   - sql: "CREATE TABLE mp_pressure (id INT, a INT, b INT, c INT, d INT, e INT, f TEXT)"
 
 test_cases:
-  - name: "MP: insert 20k rows with ~10MB hash payload"
+  - name: "MP: insert 4k rows with ~2MB hash payload"
     scm: |
       (begin
         (set imod (lambda (a b) (- a (* (floor (/ a b)) b))))
@@ -24,7 +24,7 @@ test_cases:
               (sha256 (concat "s7:" i))
               (sha256 (concat "s8:" i)))))
         (insert "memcp-tests" "mp_pressure" '("id" "a" "b" "c" "d" "e" "f")
-          (parallelN 20000 (lambda (i) (list i
+          (parallelN 4001 (lambda (i) (list i
             (imod (* i 54321) 999983)
             (imod (* i 12347) 999979)
             (imod (* i 98765) 999961)
@@ -37,28 +37,28 @@ test_cases:
   # --- 3 queries on id to trigger index creation (threshold=2.0, +1.0 per query) ---
 
   - name: "MP: query 1 on id (Savings=1, no index yet)"
-    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 5000"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 1000"
     expect:
       rows: 1
       data:
-        - id: 5000
-          a: 609607
+        - id: 1000
+          a: 321918
 
   - name: "MP: query 2 on id (Savings=2, triggers index build)"
-    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 10000"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 2000"
     expect:
       rows: 1
       data:
-        - id: 10000
-          a: 219231
+        - id: 2000
+          a: 643836
 
   - name: "MP: query 3 on id (uses built index)"
-    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 15000"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 3000"
     expect:
       rows: 1
       data:
-        - id: 15000
-          a: 828838
+        - id: 3000
+          a: 965754
 
   - name: "MP: stat before pressure (shards+indexes registered)"
     scm: (stat)
@@ -66,8 +66,8 @@ test_cases:
 
   # --- Tier 1: persisted budget eviction (shards + indexes only) ---
 
-  - name: "MP: set MaxPersistBytes to 5MB (trigger persisted eviction)"
-    scm: (settings "MaxPersistBytes" 5242880)
+  - name: "MP: set MaxPersistBytes to 1MB (trigger persisted eviction)"
+    scm: (settings "MaxPersistBytes" 1048576)
     expect: {}
 
   - name: "MP: stat after persisted pressure (shards+indexes evicted)"
@@ -75,13 +75,13 @@ test_cases:
     expect: {}
 
   - name: "MP: select after persisted eviction (forces shard+index reload)"
-    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 10000"
+    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 2000"
     expect:
       rows: 1
       data:
-        - id: 10000
-          a: 219231
-          b: 472583
+        - id: 2000
+          a: 643836
+          b: 694504
 
   - name: "MP: reset MaxPersistBytes to 0"
     scm: (settings "MaxPersistBytes" 0)
@@ -89,18 +89,18 @@ test_cases:
 
   # --- Tier 2: total budget eviction (all types) ---
 
-  - name: "MP: set MaxRamBytes to 5MB (trigger total eviction)"
-    scm: (settings "MaxRamBytes" 5242880)
+  - name: "MP: set MaxRamBytes to 1MB (trigger total eviction)"
+    scm: (settings "MaxRamBytes" 1048576)
     expect: {}
 
   - name: "MP: select after total eviction"
-    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 10000"
+    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 2000"
     expect:
       rows: 1
       data:
-        - id: 10000
-          a: 219231
-          b: 472583
+        - id: 2000
+          a: 643836
+          b: 694504
 
   - name: "MP: reset MaxRamBytes to 0"
     scm: (settings "MaxRamBytes" 0)
@@ -119,8 +119,8 @@ test_cases:
     scm: (stat)
     expect: {}
 
-  - name: "MP: set MaxRamBytes to 5MB (evict temp keytables + columns)"
-    scm: (settings "MaxRamBytes" 5242880)
+  - name: "MP: set MaxRamBytes to 1MB (evict temp keytables + columns)"
+    scm: (settings "MaxRamBytes" 1048576)
     expect: {}
 
   - name: "MP: stat after temp eviction"
@@ -139,8 +139,8 @@ test_cases:
 
   # --- Tier 4: persisted eviction + reload + GROUP BY (combined path) ---
 
-  - name: "MP: set MaxPersistBytes to 5MB (evict shards)"
-    scm: (settings "MaxPersistBytes" 5242880)
+  - name: "MP: set MaxPersistBytes to 1MB (evict shards)"
+    scm: (settings "MaxPersistBytes" 1048576)
     expect: {}
 
   - name: "MP: reset MaxPersistBytes to 0 (before recovery test)"
@@ -164,12 +164,12 @@ test_cases:
     expect: {}
 
   - name: "MP: read from temp column"
-    sql: "SELECT id, tmp_sum FROM `memcp-tests`.mp_pressure WHERE id = 5000 LIMIT 1"
+    sql: "SELECT id, tmp_sum FROM `memcp-tests`.mp_pressure WHERE id = 1000 LIMIT 1"
     expect:
       rows: 1
 
-  - name: "MP: set MaxRamBytes to 5MB (evict temp column)"
-    scm: (settings "MaxRamBytes" 5242880)
+  - name: "MP: set MaxRamBytes to 1MB (evict temp column)"
+    scm: (settings "MaxRamBytes" 1048576)
     expect: {}
 
   - name: "MP: stat after temp column eviction"

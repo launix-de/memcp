@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "RDF string escaping roundtrips — TTL load + SPARQL query"
+  isolated: true
 
 setup: []
 

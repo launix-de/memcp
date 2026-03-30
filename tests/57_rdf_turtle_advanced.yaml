@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "Advanced Turtle syntax — numeric literals, booleans, blank nodes, datatypes, escapes, base, collections"
+  isolated: true
 
 setup: []
 
@@ -178,7 +179,7 @@ test_cases:
       t:item t:list ( t:a t:b t:c ) .
     sparql: |
       @prefix t: <http://ttladv13.org/> .
-      SELECT ?first WHERE { t:item t:list ?l }
+      SELECT ?l WHERE { t:item t:list ?l }
     expect:
       rows: 1
 

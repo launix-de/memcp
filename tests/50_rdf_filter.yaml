@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "SPARQL FILTER support"
+  isolated: true
 
 setup: []
 
