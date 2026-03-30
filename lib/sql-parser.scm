@@ -1684,7 +1684,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(define body sql_trigger_body)
 		) (begin
 				(define compiled (compile_trigger_body schema timing (car (cdr body))))
-				(list 'createtrigger schema tbl name timing (car body) (eval compiled) true)
+				(list 'createtrigger schema tbl name timing (car body) (list 'quote (list 'deferred_trigger compiled)) true)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))

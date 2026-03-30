@@ -1,5 +1,4 @@
 metadata:
-  isolated: true
   version: "1.0"
   description: "String compression: round-trip correctness for UUID, hex, phone, decimal, datetime, raw"
 

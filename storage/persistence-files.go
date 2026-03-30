@@ -69,7 +69,18 @@ func (s *FileStorage) WriteSchema(jsonbytes []byte) {
 		panic(err)
 	}
 	defer f.Close()
-	f.Write(jsonbytes)
+	if _, err := f.Write(jsonbytes); err != nil {
+		panic(err)
+	}
+	if err := f.Sync(); err != nil {
+		panic(err)
+	}
+	if dir, err := os.Open(s.path); err == nil {
+		defer dir.Close()
+		if err := dir.Sync(); err != nil {
+			panic(err)
+		}
+	}
 }
 
 func (s *FileStorage) ReadColumn(shard string, column string) io.ReadCloser {

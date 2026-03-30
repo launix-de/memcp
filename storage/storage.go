@@ -159,12 +159,38 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	if t == nil {
 		panic("LOCK TABLES: unknown table: " + schema + "." + name)
 	}
-	// Wait for any existing lock to be released, then claim ownership
-	t.waitTableLock(ss, true) // acquiring any lock requires exclusive wait
+	// LOCK TABLES itself is serialized FIFO per table. This avoids a thundering
+	// herd when many sessions repeatedly lock the same hot table (e.g. cron).
+	cond := t.getTableLockCond()
+	if ss != nil {
+		ss.SetState("Waiting for table lock")
+	}
+	t.tableLockMu.Lock()
+	myTicket := t.tableLockNext
+	t.tableLockNext++
+	for myTicket != t.tableLockServe || t.tableLockOwner.Load() != nil {
+		cond.Wait()
+	}
+	t.tableLockMu.Unlock()
 	// Drain in-flight shard readers by acquiring each shard's write lock.
 	// We MUST set tableLockOwner while still holding the last shard write lock
 	// so that any new scan that does RLock → tableLockOwner.Load() sees the
 	// owner set before it can proceed past its own RLock.
+	acquired := false
+	defer func() {
+		if acquired {
+			return
+		}
+		t.tableLockMu.Lock()
+		if t.tableLockServe == myTicket {
+			t.tableLockServe++
+		}
+		cond.Broadcast()
+		t.tableLockMu.Unlock()
+		if ss != nil {
+			ss.SetState("")
+		}
+	}()
 	shards := t.ActiveShards()
 	for _, s := range shards {
 		s.mu.Lock()
@@ -174,6 +200,7 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	for _, s := range shards {
 		s.mu.Unlock()
 	}
+	acquired = true
 	if ss != nil {
 		ss.SetState("")
 		ss.AddLock(t.unlockTable)
@@ -299,7 +326,7 @@ func Init(en scm.Env) {
 				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
-			Return: &scm.TypeDescriptor{Kind: "any"},
+			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScan,
 		},
 	})
@@ -446,7 +473,7 @@ func Init(en scm.Env) {
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
-			Return: &scm.TypeDescriptor{Kind: "any"},
+			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrder,
 		},
 	})
@@ -512,7 +539,13 @@ func Init(en scm.Env) {
 			pm := parsePersistencyMode(engine)
 
 			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
-			t, created := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			db.ensureLoaded()
+			db.schemalock.Lock()
+			t, created := db.createTableLocked(scm.String(a[1]), pm, ifnotexists)
 			t.Collation = collation
 			t.Charset = charset
 			t.Comment = comment
@@ -560,7 +593,9 @@ func Init(en scm.Env) {
 							dimensions[i] = scm.ToInt(d)
 						}
 						typeparams := mustScmerSlice(def[4], "column typeparams")
-						t.CreateColumn(colname, typename, dimensions, typeparams)
+						if _, ok := t.createColumnLocked(colname, typename, dimensions, typeparams); !ok {
+							panic("column " + t.Name + "." + colname + " already exists")
+						}
 					default:
 						panic("unknown column definition: " + head)
 					}
@@ -578,6 +613,10 @@ func Init(en scm.Env) {
 						}
 					}
 				}
+			}
+			db.saveLockedAndUnlock()
+			if created {
+				registerCreatedTable(t)
 			}
 			return scm.NewBool(true)
 		},
@@ -704,15 +743,15 @@ func Init(en scm.Env) {
 			name := scm.String(a[2])
 
 			db.schemalock.Lock()
-			defer db.schemalock.Unlock()
 			for _, u := range t.Unique {
 				if u.Id == name {
+					db.schemalock.Unlock()
 					return scm.NewBool(false)
 				}
 			}
 
 			t.Unique = append(t.Unique, uniqueKey{name, cols})
-			db.save()
+			db.saveLockedAndUnlock()
 
 			return scm.NewBool(true)
 		},
@@ -749,9 +788,9 @@ func Init(en scm.Env) {
 			cols2 := scmerSliceToStrings(mustScmerSlice(a[5], "foreign cols2"))
 
 			db.schemalock.Lock()
-			defer db.schemalock.Unlock()
 			for _, u := range t1.Foreign {
 				if u.Id == id {
+					db.schemalock.Unlock()
 					return scm.NewBool(false)
 				}
 			}
@@ -763,7 +802,7 @@ func Init(en scm.Env) {
 			// auto-generate system triggers for FK enforcement
 			installFKTriggers(db, t1, t2, k)
 
-			db.save()
+			db.saveLockedAndUnlock()
 
 			return scm.NewBool(true)
 		},
@@ -1599,7 +1638,7 @@ func Init(en scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{
 			Return: &scm.TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -1705,17 +1744,17 @@ func Init(en scm.Env) {
 						shardRows = append(shardRows, showBuildShardRow(t, i, s))
 					}
 					// build trigger info
-				triggerRows := make([]scm.Scmer, 0, len(t.Triggers))
-				for _, tr := range t.Triggers {
-					triggerRows = append(triggerRows, scm.NewSlice([]scm.Scmer{
-						scm.NewString("name"), scm.NewString(tr.Name),
-						scm.NewString("timing"), scm.NewString(string(tr.Timing)),
-						scm.NewString("hidden"), scm.NewBool(tr.Hidden),
-						scm.NewString("system"), scm.NewBool(tr.IsSystem),
-						scm.NewString("priority"), scm.NewInt(int64(tr.Priority)),
-					}))
-				}
-				return scm.NewSlice([]scm.Scmer{
+					triggerRows := make([]scm.Scmer, 0, len(t.Triggers))
+					for _, tr := range t.Triggers {
+						triggerRows = append(triggerRows, scm.NewSlice([]scm.Scmer{
+							scm.NewString("name"), scm.NewString(tr.Name),
+							scm.NewString("timing"), scm.NewString(string(tr.Timing)),
+							scm.NewString("hidden"), scm.NewBool(tr.Hidden),
+							scm.NewString("system"), scm.NewBool(tr.IsSystem),
+							scm.NewString("priority"), scm.NewInt(int64(tr.Priority)),
+						}))
+					}
+					return scm.NewSlice([]scm.Scmer{
 						scm.NewString("columns"), t.ShowColumns(),
 						scm.NewString("meta"), showBuildMeta(db, t),
 						scm.NewString("shards"), scm.NewSlice(shardRows),
@@ -1980,7 +2019,7 @@ func Init(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "settings",
 		Desc: "reads or writes a global settings value. This modifies your data/settings.json.",
-		Fn: ChangeSettings,
+		Fn:   ChangeSettings,
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "key", ParamDesc: "name of the key to set or get (for reference, rts)", Optional: true},
@@ -2031,21 +2070,23 @@ func Init(en scm.Env) {
 			}
 
 			sourceSQL := scm.String(a[4])
-			body := a[5]
+			body, deferredPlan := unwrapDeferredTriggerBody(a[5])
 			visible := scm.ToBool(a[6])
 
-			// Idempotent: replace any existing trigger with the same name
-			t.RemoveTrigger(name)
 			trigger := TriggerDescription{
 				Name:      name,
 				Timing:    timing,
 				Func:      body,
+				FuncPlan:  deferredPlan,
 				SourceSQL: sourceSQL,
 				Hidden:    !visible,
 				Priority:  0,
 			}
+			db.schemalock.Lock()
+			// Idempotent: replace any existing trigger with the same name
+			t.RemoveTrigger(name)
 			t.AddTrigger(trigger)
-			t.schema.save()
+			db.saveLockedAndUnlock()
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
@@ -2074,13 +2115,15 @@ func Init(en scm.Env) {
 			}
 
 			name := scm.String(a[1])
+			db.schemalock.Lock()
 			// Search all tables for the trigger
 			for _, t := range db.tables.GetAll() {
 				if t.RemoveTrigger(name) {
-					t.schema.save()
+					db.saveLockedAndUnlock()
 					return scm.NewBool(true)
 				}
 			}
+			db.schemalock.Unlock()
 
 			if scm.ToBool(a[2]) {
 				return scm.NewBool(false)
@@ -2104,7 +2147,7 @@ func Init(en scm.Env) {
 	scm.DeclareInSection("Sync", &en, &scm.Declaration{
 		Name: "newcachemap",
 		Desc: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
-		Fn: NewCacheMap,
+		Fn:   NewCacheMap,
 		Type: &scm.TypeDescriptor{
 			Return: &scm.TypeDescriptor{Kind: "func"},
 		},
@@ -2348,7 +2391,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", ParamName: "values", ParamDesc: "FK values to check"},
 				{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "nil"},
+			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
 		},
 	})
@@ -2393,7 +2436,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"},
 				{Kind: "string", ParamName: "mode", ParamDesc: "RESTRICT, CASCADE, or SETNULL"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "nil"},
+			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
 		},
 	})
@@ -2452,7 +2495,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"},
 				{Kind: "string", ParamName: "mode", ParamDesc: "RESTRICT, CASCADE, or SETNULL"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "nil"},
+			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
 		},
 	})

@@ -24,6 +24,7 @@ import "time"
 import "runtime"
 import "strings"
 import "github.com/jtolds/gls"
+import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/scm"
 
 type shardDimension struct {
@@ -349,6 +350,65 @@ type partitioningSet struct {
 	items   map[int][]uint // TODO: use uintrange instead, so we don't need so much allocations
 }
 
+type shardPartitionSnapshot struct {
+	deletions NonLockingReadMap.NonBlockingBitMap
+	inserts   [][]scm.Scmer
+	mainCount uint32
+	mainCols  []ColumnStorage
+	deltaCols []int
+}
+
+func (s *storageShard) snapshotPartitionState(schema []shardDimension) shardPartitionSnapshot {
+	snap := shardPartitionSnapshot{
+		mainCols:  make([]ColumnStorage, len(schema)),
+		deltaCols: make([]int, len(schema)),
+	}
+	s.mu.RLock()
+	snap.deletions = s.deletions.Copy()
+	snap.inserts = append([][]scm.Scmer(nil), s.inserts...)
+	snap.mainCount = s.main_count
+	for i, sd := range schema {
+		snap.mainCols[i], _ = s.columns[sd.Column]
+		snap.deltaCols[i], _ = s.deltaColumns[sd.Column]
+	}
+	s.mu.RUnlock()
+	return snap
+}
+
+func (snap shardPartitionSnapshot) count() uint64 {
+	return uint64(snap.mainCount) + uint64(len(snap.inserts)) - uint64(snap.deletions.Count())
+}
+
+func (snap shardPartitionSnapshot) partition(schema []shardDimension) (result map[int][]uint32) {
+	result = make(map[int][]uint32)
+	values := make([]scm.Scmer, len(schema))
+
+	for idx := uint32(0); idx < snap.mainCount; idx++ {
+		if snap.deletions.Get(uint(idx)) {
+			continue
+		}
+		for i, cs := range snap.mainCols {
+			values[i] = cs.GetValue(idx)
+		}
+		shardnum := computeShardIndex(schema, values)
+		result[shardnum] = append(result[shardnum], idx)
+	}
+
+	for idx, row := range snap.inserts {
+		recid := snap.mainCount + uint32(idx)
+		if snap.deletions.Get(uint(recid)) {
+			continue
+		}
+		for i, colIdx := range snap.deltaCols {
+			values[i] = row[colIdx]
+		}
+		shardnum := computeShardIndex(schema, values)
+		result[shardnum] = append(result[shardnum], recid)
+	}
+
+	return
+}
+
 func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimension, shouldChange bool) { // this happens inside t.mu.Lock()
 	// reevaluate partitioning schema
 	for _, c := range t.Columns {
@@ -520,28 +580,27 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// Take a brief RLock on each old shard to snapshot its deletion bitmap
 	// and inserts count. This gives us a consistent baseline for reconciliation.
 	type shardSnapshot struct {
-		deletions   interface{ Get(uint) bool } // deletion bitmap copy
-		insertCount int                         // number of delta inserts at snapshot time
-		mainCount   uint32                      // main_count at snapshot time
+		deletions   NonLockingReadMap.NonBlockingBitMap
+		insertCount int
+		mainCount   uint32
 	}
 	snapshots := make([]shardSnapshot, len(oldshards))
 	datasetids := make([][][]uint32, totalShards) // newshard -> oldshard -> []rowIdx
 	total_count := uint64(0)
 	for si, s := range oldshards {
-		s.mu.RLock()
-		total_count += uint64(s.Count())
+		snap := s.snapshotPartitionState(shardCandidates)
+		total_count += snap.count()
 		snapshots[si] = shardSnapshot{
-			deletions:   func() interface{ Get(uint) bool } { c := s.deletions.Copy(); return &c }(),
-			insertCount: len(s.inserts),
-			mainCount:   s.main_count,
+			deletions:   snap.deletions,
+			insertCount: len(snap.inserts),
+			mainCount:   snap.mainCount,
 		}
-		for idx, items := range s.partition(shardCandidates) {
+		for idx, items := range snap.partition(shardCandidates) {
 			if datasetids[idx] == nil {
 				datasetids[idx] = make([][]uint32, len(oldshards))
 			}
 			datasetids[idx][si] = items
 		}
-		s.mu.RUnlock()
 	}
 
 	// ── Phase C: Build main storage (no locks held — long phase) ──
@@ -802,10 +861,12 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// so any stragglers would still dual-write.
 	for si, s := range oldshards {
 		s.mu.RLock()
+		currentDeletions := s.deletions.Copy()
+		s.mu.RUnlock()
 		snap := snapshots[si]
 		// Check main storage deletions
 		for idx := uint32(0); idx < snap.mainCount; idx++ {
-			if s.deletions.Get(uint(idx)) && !snap.deletions.Get(uint(idx)) {
+			if currentDeletions.Get(uint(idx)) && !snap.deletions.Get(uint(idx)) {
 				for nsi, items := range datasetids {
 					if items == nil {
 						continue
@@ -824,7 +885,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		// Check delta storage deletions
 		for idx := 0; idx < snap.insertCount; idx++ {
 			absIdx := snap.mainCount + uint32(idx)
-			if s.deletions.Get(uint(absIdx)) && !snap.deletions.Get(uint(absIdx)) {
+			if currentDeletions.Get(uint(absIdx)) && !snap.deletions.Get(uint(absIdx)) {
 				for nsi, items := range datasetids {
 					if items == nil {
 						continue
@@ -840,7 +901,6 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 			nextDeltaDeletion:
 			}
 		}
-		s.mu.RUnlock()
 	}
 
 	// Phase E complete — all deletions reconciled. Now safe to clear dual-write.
@@ -861,8 +921,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 	// ── Phase G: Cleanup ──
 	t.schema.schemalock.Lock()
-	t.schema.save()
-	t.schema.schemalock.Unlock()
+	t.schema.saveLockedAndUnlock()
 
 	// Nil out old shards after the schema is saved, so no FreeShard
 	// code path can reference them. At this point, ShardMode is Partition,

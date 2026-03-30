@@ -2,7 +2,6 @@
 # IN (1,2,3) → range [min,max]; LIKE 'foo%' → range [prefix, prefix+1)
 
 metadata:
-  isolated: true
   version: "1.0"
   description: "IN-list and LIKE prefix boundary extraction"
 

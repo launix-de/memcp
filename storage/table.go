@@ -51,9 +51,9 @@ type column struct {
 	OrcSortCols   []string  `json:",omitempty"` // ORDER BY column names (partition cols first, then order cols)
 	OrcSortDirs   []bool    `json:",omitempty"` // false=ASC, true=DESC, one per OrcSortCol
 	OrcMapCols    []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
-	OrcMapFn      scm.Scmer                    // (lambda ($set mapcols...) ...) — passes data to reduceFn
-	OrcReduceFn   scm.Scmer                    // (lambda (acc mapped) ...) — accumulates and writes via $set
-	OrcReduceInit scm.Scmer                    // initial accumulator value (neutral element)
+	OrcMapFn      scm.Scmer // (lambda ($set mapcols...) ...) — passes data to reduceFn
+	OrcReduceFn   scm.Scmer // (lambda (acc mapped) ...) — accumulates and writes via $set
+	OrcReduceInit scm.Scmer // initial accumulator value (neutral element)
 }
 
 // OrcFirstSortCol returns the first sort column name.
@@ -226,15 +226,23 @@ type table struct {
 	uniquelock      sync.Mutex           // unique insert lock
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
+	// Software contract:
+	//   - tableLockOwner/tableLockWrite describe the currently granted user lock.
+	//   - tableLockNext/tableLockServe serialize LOCK TABLES acquisition FIFO per table,
+	//     so many concurrent waiters (e.g. cron workers) do not stampede on unlock.
+	//   - Regular scans/writes only consult waitTableLock; they never participate in
+	//     the FIFO queue and are released together once the owner unlocks.
 	// tableLockOwner and tableLockWrite are read from every shard goroutine on
 	// every scan; isolate them on their own cache line to prevent false sharing
 	// with Auto_increment (written on every INSERT).
 	tableLockMu    sync.Mutex                       // guards cond waits + acquisition
 	tableLockOnce  sync.Once                        // lazy-inits tableLockCond
 	tableLockCond  *sync.Cond                       // broadcast on unlock
+	tableLockNext  uint64                           // next FIFO ticket for LOCK TABLES acquisition
+	tableLockServe uint64                           // currently served FIFO ticket
 	tableLockOwner atomic.Pointer[scm.SessionState] // nil = no lock; points to owning *SessionState
 	tableLockWrite atomic.Bool                      // true = WRITE lock, false = READ lock
-	_              [55]byte                         // pad to cache-line boundary
+	_              [39]byte                         // pad to cache-line boundary
 	Auto_increment uint64                           // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 	Collation      string
 	Charset        string
@@ -252,13 +260,14 @@ type table struct {
 	mutationOwners map[uint64]uint32
 
 	// orcMu serializes ORC recomputes: only one full scan_order pass at a time per table.
-	orcMu         sync.Mutex
+	orcMu          sync.Mutex
 	orcRecomputing int32 // atomic: >0 means an ORC recompute is in progress (skip re-entry in GetValue)
 
 	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
+	rebuilding        bool
 	repartitionActive bool            // true when dual-write is in progress
 	shardModeMu       sync.RWMutex    // protects ShardMode reads in iterateShards vs Phase F flip
 	Shards            []*storageShard // unordered shards (used when ShardMode == ShardModeFree)
@@ -382,6 +391,7 @@ func (t *table) unlockTable() {
 	t.tableLockOwner.Store(nil)
 	cond := t.getTableLockCond()
 	t.tableLockMu.Lock()
+	t.tableLockServe++
 	cond.Broadcast()
 	t.tableLockMu.Unlock()
 }
@@ -744,20 +754,13 @@ func (d dataset) GetI(key string) (scm.Scmer, bool) { // case insensitive
 	return scm.NewNil(), false
 }
 
-func (t *table) CreateColumn(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
-	// one early out without schemalock (especially for computed columns)
+// createColumnLocked mutates table metadata while the database schemalock is
+// held. It does not persist schema.json yet; callers must follow up with a
+// single saveLockedAndUnlock once the whole DDL mutation is complete.
+func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) (*column, bool) {
 	for _, c := range t.Columns {
 		if c.Name == name {
-			return false // column already exists
-		}
-	}
-
-	t.schema.schemalock.Lock()
-
-	for _, c := range t.Columns {
-		if c.Name == name {
-			t.schema.schemalock.Unlock()
-			return false // column already exists
+			return nil, false // column already exists
 		}
 	}
 
@@ -819,40 +822,59 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 		s.columns[name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
-	isTemp := c.IsTemp
-	t.schema.save()
-	t.schema.schemalock.Unlock()
+	return cp, true
+}
+
+func (t *table) registerTempColumn(cp *column) {
 	// register temp column with CacheManager AFTER releasing schemalock
 	// to avoid deadlock: AddItem → run() → evict → cleanup → TryLock(schemalock)
-	if isTemp {
-		tbl := t
-		colName := name
-		GlobalCache.AddItem(cp, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
-			// We're inside the CacheManager goroutine. MUST NOT call GlobalCache.Remove.
-			// Use TryLock to avoid blocking the CacheManager if schema is locked.
-			if !tbl.schema.schemalock.TryLock() {
-				return false // busy, retry later
-			}
-			for i, col := range tbl.Columns {
-				if col.Name == colName {
-					tbl.Columns = append(tbl.Columns[:i], tbl.Columns[i+1:]...)
-					for _, s := range tbl.Shards {
-						s.mu.Lock()
-						delete(s.columns, colName)
-						s.mu.Unlock()
-					}
-					for _, s := range tbl.PShards {
-						s.mu.Lock()
-						delete(s.columns, colName)
-						s.mu.Unlock()
-					}
-					tbl.schema.save()
-					break
+	tbl := t
+	colName := cp.Name
+	GlobalCache.AddItem(cp, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
+		// We're inside the CacheManager goroutine. MUST NOT call GlobalCache.Remove.
+		// Use TryLock to avoid blocking the CacheManager if schema is locked.
+		if !tbl.schema.schemalock.TryLock() {
+			return false // busy, retry later
+		}
+		for i, col := range tbl.Columns {
+			if col.Name == colName {
+				tbl.Columns = append(tbl.Columns[:i], tbl.Columns[i+1:]...)
+				for _, s := range tbl.Shards {
+					s.mu.Lock()
+					delete(s.columns, colName)
+					s.mu.Unlock()
 				}
+				for _, s := range tbl.PShards {
+					s.mu.Lock()
+					delete(s.columns, colName)
+					s.mu.Unlock()
+				}
+				tbl.schema.saveLockedAndUnlock()
+				return true
 			}
-			tbl.schema.schemalock.Unlock()
-			return true
-		}, tempColumnLastUsed, nil)
+		}
+		tbl.schema.schemalock.Unlock()
+		return true
+	}, tempColumnLastUsed, nil)
+}
+
+func (t *table) CreateColumn(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
+	// one early out without schemalock (especially for computed columns)
+	for _, c := range t.Columns {
+		if c.Name == name {
+			return false // column already exists
+		}
+	}
+
+	t.schema.schemalock.Lock()
+	cp, ok := t.createColumnLocked(name, typ, typdimensions, extrainfo)
+	if !ok {
+		t.schema.schemalock.Unlock()
+		return false
+	}
+	t.schema.saveLockedAndUnlock()
+	if cp.IsTemp {
+		t.registerTempColumn(cp)
 	}
 	return true
 }
@@ -878,8 +900,7 @@ func (t *table) DropColumn(name string) bool {
 			// remove cache invalidation triggers from source tables
 			t.removeComputeTriggers(name)
 
-			t.schema.save()
-			t.schema.schemalock.Unlock()
+			t.schema.saveLockedAndUnlock()
 			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
 			// can invalidate without lock-ordering cycles.
 			t.ExecuteTableLifecycleTriggers(AfterDropColumn)
