@@ -25,8 +25,40 @@ if ! go build $build_flags -o memcp; then
     exit 1
 fi
 
-# Find all numbered test files (01_*.yaml, 02_*.yaml, etc.)
-test_files=$(find tests/ -name "[0-9][0-9]_*.yaml" | sort)
+resolve_test_selection() {
+  local selected=""
+  local pattern resolved
+  for pattern in "$@"; do
+    resolved=""
+    if [ -e "$pattern" ]; then
+      resolved="$pattern"
+    elif [ -e "tests/$pattern" ]; then
+      resolved="tests/$pattern"
+    else
+      resolved="$(compgen -G "$pattern" || true)"
+      if [ -z "$resolved" ]; then
+        resolved="$(compgen -G "tests/$pattern" || true)"
+      fi
+    fi
+    if [ -z "$resolved" ]; then
+      echo "❌ No test files matched: $pattern" >&2
+      return 1
+    fi
+    selected="$selected
+$resolved"
+  done
+  printf "%s\n" "$selected" | sed '/^$/d' | sort -u
+}
+
+# Find all numbered test files (01_*.yaml, 02_*.yaml, etc.) or use the selected subset.
+if [ "$#" -gt 0 ]; then
+    if ! test_files="$(resolve_test_selection "$@")"; then
+        exit 1
+    fi
+else
+    test_files=$(find tests/ -name "[0-9][0-9]_*.yaml" | sort)
+fi
+mapfile -t test_files_arr <<< "$test_files"
 
 if [ -z "$test_files" ]; then
     echo "❌ No test files found in tests/ directory"
@@ -34,81 +66,21 @@ if [ -z "$test_files" ]; then
 fi
 
 echo "Found test files:"
-echo "$test_files"
+printf '%s\n' "${test_files_arr[@]}"
 echo ""
 
 test_port=4480
-run_memcp_forever() {
-  trap 'kill $memcp_pid 2>/dev/null; exit 0' TERM INT
-  while true; do
-    echo "🚀 (re)Starting MemCP on port $test_port..."
-    pkill -f "memcp.*--api-port=$test_port" || true
-    sleep 1
-    memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
-    ./memcp --no-repl -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
-    memcp_pid=$!
-    # wait for process to exit; test loop will poll readiness
-    wait $memcp_pid
-    rc=$?
-    if [ $rc -ne 0 ]; then
-      echo "⚠️  MemCP exited unexpectedly (code=$rc). Restarting..."
-    fi
-    sleep 0.5
-  done
-}
-
-wait_for_sql_ready() {
-  local retries="${1:-60}"
-  local delay="${2:-1}"
-  for ((i=1; i<=retries; i++)); do
-    if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then
-      http_code=$(curl -s -o /dev/null -w "%{http_code}" -u root:admin "http://localhost:$test_port/sql/memcp-tests" -d "SELECT 1")
-      if [ "$http_code" = "200" ]; then
-        return 0
-      fi
-    fi
-    sleep "$delay"
-  done
-  return 1
-}
-
-# Prepare data dir and logfile once outside the loop
-rm -rf /tmp/memcp-pre-commit-tests || true
-echo -n > /tmp/memcp-test.log
-
-# Start supervisor loop
-run_memcp_forever &
-supervisor_pid=$!
-
-# Wait until ready once
-echo "⏳ Waiting for MemCP to be ready..."
-if wait_for_sql_ready 60 1; then
-  echo "✅ MemCP is ready!"
-else
-  echo "❌ MemCP did not become SQL-ready"
-  exit 1
-fi
+memcp_test_datadir="/tmp/memcp-pre-commit-tests"
+rm -rf "$memcp_test_datadir" || true
+export MEMCP_TEST_DATADIR="$memcp_test_datadir"
 
 cleanup() {
   # Make cleanup idempotent
   if [ "$did_cleanup" -eq 1 ]; then return; fi
   did_cleanup=1
   echo ""; echo "🛑 Stopping MemCP..."
-  # Stop any active test jobs we spawned
-  if [ ${#active_pids[@]} -gt 0 ]; then
-    kill "${active_pids[@]}" 2>/dev/null || true
-  fi
-  # Also stop any other background jobs (best-effort)
-  for pid in $(jobs -p 2>/dev/null); do
-    kill "$pid" 2>/dev/null || true
-  done
-  kill $supervisor_pid 2>/dev/null || true
-  # Also kill an active memcp if still running
   pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
-  # Remove temp directory if created
-  if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
-    rm -rf "$tmpdir" 2>/dev/null || true
-  fi
+  rm -rf "$memcp_test_datadir" 2>/dev/null || true
   echo "✅ MemCP stopped"
 }
 trap cleanup EXIT
@@ -119,117 +91,18 @@ trap 'cleanup; exit 129' HUP
 
 echo "🧪 Running SQL tests using single MemCP instance (parallel where safe)..."
 
-all_passed=true
-failed_files=""
-
-# Split tests: suites marked with metadata `isolated: true` run sequentially.
-# All other suites are worker-parallelized.
-parallel_tests=""
-sequential_tests=""
-for tf in $test_files; do
-  if grep -Eqi "^[[:space:]]*isolated:[[:space:]]*true([[:space:]]|$)" "$tf"; then
-    sequential_tests="$sequential_tests $tf"
-  else
-    parallel_tests="$parallel_tests $tf"
-  fi
-done
-
 # Run worker-parallel by default; override with MEMCP_TEST_JOBS.
 max_jobs="${MEMCP_TEST_JOBS:-4}"
 if ! [[ "$max_jobs" =~ ^[0-9]+$ ]] || [ "$max_jobs" -lt 1 ]; then
   max_jobs=4
 fi
 if [ "$max_jobs" -gt 16 ]; then max_jobs=16; fi
-
-tmpdir=$(mktemp -d)
-lockfile="/tmp/memcp-print.lock"
-
-run_one() {
-  local tf="$1"
-  local out="$2"
-  local statusf="$3"
-  # Wait for readiness before starting
-  if ! wait_for_sql_ready 60 1; then
-    echo "FAIL" > "$statusf"
-    {
-      flock -x 9
-      echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
-      echo ""
-    } 9>>"$lockfile"
-    return
-  fi
-  python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
-  rc=$?
-  # Determine status by exit code (0 => OK, nonzero => FAIL)
-  if [ $rc -eq 0 ]; then echo OK > "$statusf"; else echo FAIL > "$statusf"; fi
-  # Critical section: print output of this test
-  {
-    flock -x 9
-    cat "$out"
-    echo ""
-  } 9>>"$lockfile"
-}
-
-# Run parallel-safe tests (track only test PIDs)
-for tf in $parallel_tests; do
-  out="$tmpdir/$(basename "$tf").out"
-  statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf" &
-  active_pids+=("$!")
-  # Concurrency gate: wait for the oldest test PID when at limit
-  while [ ${#active_pids[@]} -ge $max_jobs ]; do
-    wait "${active_pids[0]}"
-    active_pids=("${active_pids[@]:1}")
-  done
-done
-# Wait for remaining test jobs (ignore supervisor)
-for pid in "${active_pids[@]}"; do
-  wait "$pid"
-done
-
-# Run disruptive tests sequentially
-for tf in $sequential_tests; do
-  out="$tmpdir/$(basename "$tf").out"
-  statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf"
-done
-
-# Stop supervisor and memcp now that all tests are done
-kill $supervisor_pid 2>/dev/null || true
-pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
-
-# Collect results in test file order
-for tf in $test_files; do
-  statusf="$tmpdir/$(basename "$tf").status"
-  if [ -f "$statusf" ] && grep -q OK "$statusf"; then :; else
-    all_passed=false
-    failed_files="$failed_files $tf"
-  fi
-done
-
-# Print detailed logs for failed test files again at the end
-if [ "$all_passed" != true ]; then
-  echo ""
-  echo "🔎 Detailed failure logs:"
-  for tf in $test_files; do
-    statusf="$tmpdir/$(basename "$tf").status"
-    if [ -f "$statusf" ] && grep -q OK "$statusf"; then
-      continue
-    fi
-    echo ""
-    echo "===== $(basename "$tf") ====="
-    out="$tmpdir/$(basename "$tf").out"
-    if [ -f "$out" ]; then
-      cat "$out"
-    else
-      echo "(no output captured)"
-    fi
-    echo "===== end $(basename "$tf") ====="
-  done
-  echo ""
+if python3 -u run_sql_tests.py "${test_files_arr[@]}" $test_port --jobs "$max_jobs"; then
+  all_passed=true
+else
+  all_passed=false
+  failed_files=" ${test_files_arr[*]}"
 fi
-
-rm -rf "$tmpdir"
 
 # Generate coverage report if coverage mode was enabled
 if [ "${MEMCP_COVERAGE:-}" = "1" ] && [ -d "$GOCOVERDIR" ]; then
