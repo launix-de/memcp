@@ -297,6 +297,26 @@ restart:
 				expression = list[len(list)-1]
 				en = en2
 				goto restart
+			case "begin_mut":
+				reserve := 0
+				if len(list) > 1 {
+					reserve = int(ToInt(Eval(list[1], en)))
+				}
+				if reserve < 0 {
+					reserve = 0
+				}
+				varsNumbered := en.VarsNumbered
+				if reserve > 0 {
+					varsNumbered = make([]Scmer, len(en.VarsNumbered)+reserve)
+					copy(varsNumbered, en.VarsNumbered)
+				}
+				en2 := &Env{Vars: make(Vars), VarsNumbered: varsNumbered, Outer: en, Nodefine: false}
+				for _, form := range list[2 : len(list)-1] {
+					Eval(form, en2)
+				}
+				expression = list[len(list)-1]
+				en = en2
+				goto restart
 			case "!begin":
 				for _, form := range list[1 : len(list)-1] {
 					Eval(form, en)

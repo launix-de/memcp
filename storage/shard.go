@@ -1470,7 +1470,7 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		}
 		if mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, !mr.shardWriteLocked && mr.hasUpdateCol, mr.deleteBatch))
+				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter

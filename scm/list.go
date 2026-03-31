@@ -136,13 +136,13 @@ func init_list() {
 	Declare(&Globalenv, &Declaration{
 		Name: "list",
 		Desc: "constructs a list from its arguments",
-		Fn: List,
+		Fn:   List,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "items", ParamDesc: "items to put into the list", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
@@ -167,7 +167,7 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "base list", NoEscape: true},
 			},
 			Return: &TypeDescriptor{Kind: "int"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -187,7 +187,30 @@ func init_list() {
 				{Kind: "number", ParamName: "index", ParamDesc: "index beginning from 0"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "nth_mut",
+		Desc: "sets the nth item of an owned list in-place and returns the mutated list",
+		Fn: func(a ...Scmer) Scmer {
+			list := asSlice(a[0], "nth_mut")
+			idx := int(a[1].Int())
+			if idx < 0 || idx >= len(list) {
+				panic("nth_mut index out of range")
+			}
+			list[idx] = a[2]
+			return NewSlice(list)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
+				{Kind: "number", ParamName: "index", ParamDesc: "index beginning from 0"},
+				{Kind: "any", ParamName: "value", ParamDesc: "new value"},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -217,7 +240,7 @@ func init_list() {
 				{Kind: "number", ParamName: "end", ParamDesc: "end index (exclusive)"},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -236,8 +259,8 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list to reverse", NoEscape: true},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("reverse_mut"),
 		},
 	})
@@ -254,8 +277,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "base list"},
 				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("append_mut"),
 		},
 	})
@@ -281,8 +304,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "base list"},
 				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("append_unique_mut"),
 		},
 	})
@@ -301,8 +324,8 @@ func init_list() {
 				{Kind: "any", ParamName: "car", ParamDesc: "new head element"},
 				{Kind: "list", ParamName: "cdr", ParamDesc: "tail that is appended after car", NoEscape: true},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: optimizeCons,
 		},
 	})
@@ -321,7 +344,7 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "list", NoEscape: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -339,7 +362,7 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "list", NoEscape: true},
 			},
 			Return: FreshAlloc,
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -357,7 +380,7 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "list", NoEscape: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -392,7 +415,7 @@ func init_list() {
 				{Kind: "any", ParamName: "list", ParamDesc: "list of lists of items", NoEscape: true, Variadic: true},
 			},
 			Return: FreshAlloc,
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -417,8 +440,8 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "list", ParamDesc: "list of lists of items", NoEscape: true, Variadic: true},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: optimizeMerge,
 		},
 	})
@@ -456,7 +479,7 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "list of lists of items", NoEscape: true, Variadic: true},
 			},
 			Return: FreshAlloc,
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -477,7 +500,7 @@ func init_list() {
 				{Kind: "any", ParamName: "needle", ParamDesc: "item to search for"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -499,8 +522,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be filtered", NoEscape: true},
 				{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(item)->bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("filter_mut"),
 		},
 	})
@@ -527,7 +550,7 @@ func init_list() {
 				{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -547,8 +570,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped", NoEscape: true},
 				{Kind: "func", ParamName: "map", ParamDesc: "map function func(any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: optimizeMap,
 		},
 	})
@@ -569,8 +592,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped", NoEscape: true},
 				{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}, {Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("mapIndex_mut"),
 		},
 	})
@@ -596,7 +619,7 @@ func init_list() {
 				{Kind: "func", ParamName: "fn", ParamDesc: "func(item)->list that returns a list per element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
 			Return: FreshAlloc,
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -626,7 +649,7 @@ func init_list() {
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
@@ -651,7 +674,7 @@ func init_list() {
 				{Kind: "func", ParamName: "iterator", ParamDesc: "func that produces the next state", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -681,8 +704,8 @@ func init_list() {
 				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
 				{Kind: "func", ParamName: "fn", ParamDesc: "(optional) map function applied to each index", Optional: true, Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: optimizeProduceN,
 		},
 	})
@@ -749,8 +772,8 @@ func init_list() {
 				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
 				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: optimizeParallelN,
 		},
 	})
@@ -785,8 +808,8 @@ func init_list() {
 				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", NoEscape: true, Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "list"},
-			Const: true,
+			Return:    &TypeDescriptor{Kind: "list"},
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -891,8 +914,8 @@ func init_list() {
 				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", NoEscape: true, Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "list"},
-			Const: true,
+			Return:    &TypeDescriptor{Kind: "list"},
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -910,7 +933,7 @@ func init_list() {
 				{Kind: "any", ParamName: "value", ParamDesc: "value to check"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -931,7 +954,7 @@ func init_list() {
 				{Kind: "any", ParamName: "value", ParamDesc: "value to check"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
@@ -965,8 +988,8 @@ func init_list() {
 				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be filtered", NoEscape: true},
 				{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(string any)->bool where the first parameter is the key, the second is the value", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("filter_assoc_mut"),
 		},
 	})
@@ -1008,7 +1031,7 @@ func init_list() {
 				{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1042,8 +1065,8 @@ func init_list() {
 				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be mapped", NoEscape: true},
 				{Kind: "func", ParamName: "map", ParamDesc: "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value.", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("map_assoc_mut"),
 		},
 	})
@@ -1069,7 +1092,7 @@ func init_list() {
 				{Kind: "any", ParamName: "neutral", ParamDesc: "initial value for the accumulator"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1095,7 +1118,7 @@ func init_list() {
 				{Kind: "string", ParamName: "key", ParamDesc: "key to test"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1126,7 +1149,7 @@ func init_list() {
 				{Kind: "any", ParamName: "default", ParamDesc: "optional default value if key not found", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1159,8 +1182,8 @@ func init_list() {
 				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be checked", NoEscape: true},
 				{Kind: "func", ParamName: "map", ParamDesc: "func(key, value)->any that extracts one element per key-value pair", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("extract_assoc_mut"),
 		},
 	})
@@ -1209,8 +1232,8 @@ func init_list() {
 				{Kind: "any", ParamName: "value", ParamDesc: "new value to set"},
 				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("set_assoc_mut"),
 		},
 	})
@@ -1243,8 +1266,8 @@ func init_list() {
 				{Kind: "list", ParamName: "dict2", ParamDesc: "input dictionary that contains the new values that have to be added"},
 				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("merge_assoc_mut"),
 		},
 	})
@@ -1268,8 +1291,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "owned list to map in-place"},
 				{Kind: "func", ParamName: "map", ParamDesc: "map function", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1290,8 +1313,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "owned list to map in-place"},
 				{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}, {Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1326,8 +1349,8 @@ func init_list() {
 				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to map in-place"},
 				{Kind: "func", ParamName: "map", ParamDesc: "map function func(key, value)->value", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1354,8 +1377,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "owned list to filter in-place"},
 				{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(any)->bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1374,8 +1397,8 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "owned list to reverse in-place"},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1411,8 +1434,8 @@ func init_list() {
 				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to filter in-place"},
 				{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(key, value)->bool", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1443,8 +1466,8 @@ func init_list() {
 				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to extract from in-place"},
 				{Kind: "func", ParamName: "map", ParamDesc: "func(key, value)->any that extracts each element", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1492,8 +1515,8 @@ func init_list() {
 				{Kind: "any", ParamName: "value", ParamDesc: "new value"},
 				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) merge function", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1513,8 +1536,8 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
 				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1540,8 +1563,28 @@ func init_list() {
 				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
 				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+		},
+	})
+
+	Declare(&Globalenv, &Declaration{
+		Name: "reset_mut",
+		Desc: "resets an owned list to len=0 while preserving capacity",
+		Fn: func(a ...Scmer) Scmer {
+			base := asSlice(a[0], "reset_mut")
+			if base == nil {
+				return NewSlice([]Scmer{})
+			}
+			return NewSlice(base[:0:cap(base)])
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1575,17 +1618,18 @@ func init_list() {
 				{Kind: "list", ParamName: "dict2", ParamDesc: "dictionary with new values"},
 				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) merge function", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
 }
 
 // optimizeMerge rewrites merge calls to avoid intermediate allocations:
-//   (merge (map list fn)) → (flatmap list fn)           — single-arg merge over map
-//   (merge (extract_assoc dict fn)) → (flatmap_assoc...) — not yet, but same idea
-//   (merge a b (map list fn)) → flatten map result inline
+//
+//	(merge (map list fn)) → (flatmap list fn)           — single-arg merge over map
+//	(merge (extract_assoc dict fn)) → (flatmap_assoc...) — not yet, but same idea
+//	(merge a b (map list fn)) → flatten map result inline
 func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	// First: apply default optimization to all args
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
@@ -1605,8 +1649,9 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 }
 
 // optimizeCons rewrites cons when the tail is a freshly allocated list:
-//   (cons head (map list fn)) → (cons head (map_mut list fn))  — already handled by _mut
-//   (cons head (list a b c))  → (list head a b c)              — avoid double allocation
+//
+//	(cons head (map list fn)) → (cons head (map_mut list fn))  — already handled by _mut
+//	(cons head (list a b c))  → (list head a b c)              — avoid double allocation
 func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
 	if rSlice, ok := scmerSlice(result); ok && len(rSlice) == 3 {
@@ -1616,7 +1661,7 @@ func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Type
 			if scmerIsSymbol(inner[0], "list") {
 				merged := make([]Scmer, 0, len(inner)+1)
 				merged = append(merged, NewSymbol("list"))
-				merged = append(merged, rSlice[1]) // head
+				merged = append(merged, rSlice[1])    // head
 				merged = append(merged, inner[1:]...) // tail items
 				return NewSlice(merged), FreshAlloc
 			}
