@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "Tests for KILL QUERY (panic-based cancel) and LOCK TABLES session locks"
+  isolated: true
 
 test_cases:
 

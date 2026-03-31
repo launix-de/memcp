@@ -78,6 +78,28 @@ test_cases:
           cnt: 1
           pname: "Beta"
 
+  - name: "derived alias mixed-case identifiers are normalized before prejoin naming"
+    sql: |
+      SELECT D.Parent_ID AS parent_id,
+        COUNT(*) AS cnt,
+        (SELECT P.Name FROM pjs_parent P WHERE P.ID = D.Parent_ID LIMIT 1) AS pname
+      FROM (
+        SELECT C.Parent_ID, C.State_ID
+        FROM pjs_child C
+      ) D
+      LEFT JOIN pjs_state S ON S.ID = D.State_ID
+      GROUP BY D.Parent_ID
+      ORDER BY D.Parent_ID
+    expect:
+      rows: 2
+      data:
+        - parent_id: 1
+          cnt: 2
+          pname: "Alpha"
+        - parent_id: 2
+          cnt: 1
+          pname: "Beta"
+
   - name: "JOIN + GROUP BY + EXISTS in WHERE with scalar subselect"
     sql: |
       SELECT c.parent_id,

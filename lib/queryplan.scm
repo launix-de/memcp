@@ -280,10 +280,32 @@ defines the physical prejoin column names. */
 			expr)
 	)
 ))
+/* Planner contract: schema-based case repair is an untangle_query concern.
+Once a logical expression leaves untangle_query, every get_column in planner IR
+must already be `(get_column exact_alias false exact_field false)`.
+canonical_expr_name and later physical plan stages therefore work strictly
+case-sensitively: they may rewrite aliases in a canonical source namespace, but
+they must not guess/fix alias or column casing anymore. */
+(define logical_expr_has_case_flags (lambda (expr) (match expr
+	'((symbol get_column) _ ti _ ci) (or ti ci)
+	'((quote get_column) _ ti _ ci) (or ti ci)
+	(cons sym args) (if (_is_opaque_scope_sym sym)
+		false
+		(or (logical_expr_has_case_flags sym)
+			(reduce args (lambda (found arg) (or found (logical_expr_has_case_flags arg))) false)))
+	false
+)))
+(define require_canonical_logical_expr (lambda (context expr)
+	(if (logical_expr_has_case_flags expr)
+		(error (concat "planner contract violated: " context " still contains case-insensitive get_column markers in " (serialize expr)))
+		expr)
+))
 /* canonical_expr_name stays in Scheme land on purpose: it is planner-local and
-only needs alias normalization plus stable serialization. */
+only needs alias normalization plus stable serialization once the logical IR is
+already canonical. */
 (define canonical_expr_name (lambda (expr columns params alias_map)
-	(serialize (rewrite_source_aliases alias_map expr))
+	(serialize (rewrite_source_aliases alias_map
+		(require_canonical_logical_expr "canonical_expr_name" expr)))
 ))
 /* build_occurrence_alias_map: assign a stable canonical source namespace to query
 aliases. Single occurrences keep the physical table name for maximal reuse.
@@ -686,45 +708,131 @@ same cache column while different session values get separate temp columns. */
 				(map terms (lambda (term) (list term (eval term))))
 				'(list) '(list) '(list))))
 )))
-/* canonicalize_columns resolves ti/ci flags to canonical casing.
-all_schemas includes outer schemas (for qualified outer refs like src.ID).
-Unqualified refs are only resolved against local tables (non-prefixed aliases)
-to avoid matching outer tables which would break scope resolution. */
-(define canonicalize_columns (lambda (expr all_schemas) (match expr
+/* Column-resolution contract:
+- parser-level get_column markers may still carry ti/ci flags inside untangle_query
+- they must be resolved against schema metadata exactly once before the logical IR
+crosses into build_queryplan
+- later planner stages operate strictly case-sensitively on canonical aliases and
+field names and must not re-run schema repair
+resolve_schema_column_ref_scoped is the shared lookup primitive for that boundary:
+it canonicalizes alias/field casing from schema metadata and keeps the preferred
+search order for unqualified refs (main tables before helper/unnested aliases). */
+(define main_scope_alias? (lambda (alias)
+	(begin
+		(define s (string alias))
+		(and (equal? (replace s "\0" "") s)
+			(not (and (>= (strlen s) 5) (equal? (substr s 0 5) "_unn_")))))))
+(define schema_alias_variants (lambda (alias)
+	(reduce
+		(filter
+			(list
+				alias
+				(visible_occurrence_alias alias)
+				(if (string? alias) (sanitize_temp_name alias) nil)
+				(if (string? (visible_occurrence_alias alias)) (sanitize_temp_name (visible_occurrence_alias alias)) nil))
+			(lambda (x) (not (nil? x))))
+		(lambda (acc alias_v) (append_unique acc alias_v))
+		'())))
+(define schema_alias_matches (lambda (query_alias schema_alias ti)
+	(reduce (schema_alias_variants schema_alias) (lambda (matched alias_v)
+		(or matched ((if ti equal?? equal?) query_alias alias_v)))
+		false)))
+(define schema_has_column? (lambda (cols col ci)
+	(reduce cols (lambda (found coldef)
+		(or found ((if ci equal?? equal?) (coldef "Field") col)))
+		false)))
+(define canonical_schema_column_name (lambda (cols col ci)
+	(if ci
+		(coalesce
+			(reduce cols (lambda (found coldef)
+				(if (not (nil? found)) found
+					(if (equal?? (coldef "Field") col) (coldef "Field") nil)))
+				nil)
+			col)
+		col)))
+(define resolve_schema_column_ref_scoped (lambda (local_schemas visible_schemas alias_ ti col ci) (begin
+	(define resolved_alias (if (nil? alias_)
+		(begin
+			(define main_match (reduce_assoc local_schemas (lambda (found alias cols)
+				(if (and (main_scope_alias? alias) (schema_has_column? cols col ci))
+					alias
+					found))
+				nil))
+			(if (nil? main_match)
+				(reduce_assoc local_schemas (lambda (found alias cols)
+					(if (schema_has_column? cols col ci) alias found))
+					nil)
+				main_match))
+		(reduce_assoc visible_schemas (lambda (found alias cols)
+			(if (and (schema_alias_matches alias_ alias ti) (schema_has_column? cols col ci))
+				alias
+				found))
+			nil)))
+	(if (nil? resolved_alias)
+		nil
+		(list resolved_alias
+			(canonical_schema_column_name (visible_schemas resolved_alias) col ci)))
+)))
+/* canonicalize_columns_scoped resolves ti/ci flags to canonical casing.
+Qualified refs may use the full visible schema chain (for outer refs like src.ID).
+Unqualified refs must only resolve against the local scope to avoid stealing
+columns from outer queries during decorrelation. */
+(define canonicalize_columns_scoped (lambda (expr local_schemas visible_schemas) (match expr
 	'((symbol get_column) alias_ ti col ci) (if (or ti ci)
 		(begin
-			(define resolved_alias (if (nil? alias_)
-				/* unqualified: search main table aliases only (no '\0' prefix, no '_unn_' prefix) */
-				(reduce_assoc all_schemas (lambda (a alias cols) (begin
-					(define _s (string alias))
-					(if (and (equal? (replace _s "\0" "") _s)
-						(not (and (>= (strlen _s) 5) (equal? (substr _s 0 5) "_unn_")))
-						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
-						alias a))) nil)
-				/* qualified: search all schemas including outer */
-				(reduce_assoc all_schemas (lambda (a alias cols)
-					(if (and ((if ti equal?? equal?) alias_ alias)
-						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
-						alias a)) nil)))
-			(if (nil? resolved_alias)
+			(define resolved (resolve_schema_column_ref_scoped local_schemas visible_schemas alias_ ti col ci))
+			(if (nil? resolved)
 				expr /* leave unresolved — replace_find_column will handle or error */
-				(begin
-					(define canonical_col (coalesce
-						(reduce (all_schemas resolved_alias) (lambda (a coldef)
-							(if (not (nil? a)) a
-								(if ((if ci equal?? equal?) (coldef "Field") col) (coldef "Field") nil))) nil)
-						col))
+				(match resolved
+					'(resolved_alias canonical_col)
+					(list (quote get_column) resolved_alias false canonical_col false))))
+		expr /* ti=false ci=false: already canonical */
+	)
+	'((quote get_column) alias_ ti col ci) (if (or ti ci)
+		(begin
+			(define resolved (resolve_schema_column_ref_scoped local_schemas visible_schemas alias_ ti col ci))
+			(if (nil? resolved)
+				expr /* leave unresolved — replace_find_column will handle or error */
+				(match resolved
+					'(resolved_alias canonical_col)
 					(list (quote get_column) resolved_alias false canonical_col false))))
 		expr /* ti=false ci=false: already canonical */
 	)
 	/* do not recurse into opaque scope nodes — inner_select, runtime code */
 	(cons sym args) (if (_is_opaque_scope_sym sym) expr
-		(cons (canonicalize_columns sym all_schemas) (map args (lambda (a) (canonicalize_columns a all_schemas)))))
+		(cons (canonicalize_columns_scoped sym local_schemas visible_schemas)
+			(map args (lambda (a) (canonicalize_columns_scoped a local_schemas visible_schemas)))))
 	expr
 )))
-/* canonicalize all get_column markers in a group stage */
-(define canonicalize_stage (lambda (stage all_schemas) (begin
-	(define canon (lambda (expr) (canonicalize_columns expr all_schemas)))
+/* canonicalize_columns keeps the old single-schema API for callers that do not
+cross a scope boundary. */
+(define canonicalize_columns (lambda (expr all_schemas)
+	(canonicalize_columns_scoped expr all_schemas all_schemas)
+))
+/* finalize_logical_expr is the only normalization gate from untangle_query into
+the downstream planner.
+Order matters:
+1. canonicalize_columns: resolve parser-level ti/ci flags against schemas
+2. rewrite_expr: lower visible derived-table aliases to their logical source expr
+3. canonicalize_columns again: any get_column introduced by rewrite_expr must
+also leave untangle_query in exact schema casing
+After this helper, later planner stages must only see exact/case-sensitive
+get_column markers and may no longer run schema-based repair heuristics. */
+(define finalize_logical_expr_scoped (lambda (expr local_schemas visible_schemas rewrite_expr enforce_contract) (begin
+	(define finalized
+		(canonicalize_columns_scoped
+			(rewrite_expr (canonicalize_columns_scoped expr local_schemas visible_schemas))
+			local_schemas
+			visible_schemas))
+	(if enforce_contract
+		(require_canonical_logical_expr "untangle_query output" finalized)
+		finalized))
+))
+(define finalize_logical_expr (lambda (expr all_schemas rewrite_expr enforce_contract)
+	(finalize_logical_expr_scoped expr all_schemas all_schemas rewrite_expr enforce_contract)
+))
+(define finalize_logical_stage_scoped (lambda (stage local_schemas visible_schemas rewrite_expr enforce_contract) (begin
+	(define fin (lambda (expr) (finalize_logical_expr_scoped expr local_schemas visible_schemas rewrite_expr enforce_contract)))
 	(define sg (coalesceNil (stage_group_cols stage) '()))
 	(define sh (stage_having_expr stage))
 	(define so (coalesceNil (stage_order_list stage) '()))
@@ -732,19 +840,20 @@ to avoid matching outer tables which would break scope resolution. */
 	(define soff (stage_offset_val stage))
 	(define spa (stage_partition_aliases stage))
 	(if (stage_is_dedup stage)
-		(stage_preserve_cache_meta stage (make_dedup_stage (map sg canon) spa))
+		(stage_preserve_cache_meta stage (make_dedup_stage (map sg fin) spa))
 		(if (and (not (nil? spa)) (or (nil? sg) (equal? sg '())))
-			/* partition stage (aliases but no group): preserve partition-aliases and limit-partition-cols */
 			(stage_preserve_cache_meta stage (make_partition_stage spa
-				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
+				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
-			/* group stage (possibly scoped with aliases) */
 			(stage_preserve_cache_meta stage (make_group_stage
-				(map sg canon)
-				(canon sh)
-				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
+				(map sg fin)
+				(fin sh)
+				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
 				sl soff spa (stage_init_code stage)))))
 )))
+(define finalize_logical_stage (lambda (stage all_schemas rewrite_expr enforce_contract)
+	(finalize_logical_stage_scoped stage all_schemas all_schemas rewrite_expr enforce_contract)
+))
 
 (import "sql-metadata.scm")
 
@@ -1297,7 +1406,12 @@ or generate runtime scan code (build_queryplan).
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
 	(set rename_prefix (coalesce rename_prefix ""))
-	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
+	(define untangle_opts (match outer_schemas_param
+		'((symbol untangle_options) outer_schemas enforce_contract) (list outer_schemas enforce_contract)
+		'((quote untangle_options) outer_schemas enforce_contract) (list outer_schemas enforce_contract)
+		_ (list outer_schemas_param true)))
+	(define outer_schemas_chain (coalesceNil (nth untangle_opts 0) '()))
+	(define enforce_planner_contract (coalesceNil (nth untangle_opts 1) true))
 	(define sq_cache (newsession))
 	(sq_cache "init" '())
 
@@ -1458,7 +1572,7 @@ or generate runtime scan code (build_queryplan).
 				(define raw_offset (nth raw_vals 4))
 				/* pass full outer schema chain so nested subqueries inside this scalar
 				subselect can still resolve grandparent references (skip-level correlation) */
-				(match (apply untangle_query (merge subquery (list outer_schemas)))
+				(match (apply untangle_query (merge subquery (list (list (quote untangle_options) outer_schemas false))))
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1756,7 +1870,7 @@ or generate runtime scan code (build_queryplan).
 				(define raw_limit_us (nth raw_vals_us 3))
 				(define raw_offset_us (nth raw_vals_us 4))
 				/* pass outer_schemas chain to recursive untangle so grandparent refs resolve */
-				(match (apply untangle_query (merge subquery (list outer_schemas)))
+				(match (apply untangle_query (merge subquery (list (list (quote untangle_options) outer_schemas false))))
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us _init2_us) (begin
 						(if (and (not (nil? _init2_us)) (not (equal? _init2_us '())))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) _init2_us)))
@@ -2219,7 +2333,7 @@ or generate runtime scan code (build_queryplan).
 	(for IN/NOT IN: first_field = target_expr). Returns (substitution tables) or nil.
 	comparison: (quote >) for positive match, (quote equal?) for negated match */
 	(define _subquery_outer_refs (lambda (query outer_schemas) (begin
-		(match (apply untangle_query (merge query (list outer_schemas)))
+		(match (apply untangle_query (merge query (list (list (quote untangle_options) outer_schemas false))))
 			'(_ tables2 fields2 condition2 _groups2 schemas2 _rfcol2 _init2) (begin
 				(define _inner_aliases (map tables2 (lambda (td) (match td '(a _ _ _ _) a ""))))
 				(define _eor (lambda (expr) (match expr
@@ -2703,20 +2817,6 @@ or generate runtime scan code (build_queryplan).
 	/* set group to 1 if fields contain aggregates even if not */
 	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
 
-	/* find those columns that have no table */
-	(define schema_alias_variants (lambda (alias)
-		(reduce (filter (list
-			alias
-			(visible_occurrence_alias alias)
-			(if (string? alias) (sanitize_temp_name alias) nil)
-			(if (string? (visible_occurrence_alias alias)) (sanitize_temp_name (visible_occurrence_alias alias)) nil))
-			(lambda (x) (not (nil? x))))
-			(lambda (acc alias_v) (append_unique acc alias_v))
-			'())))
-	(define schema_alias_matches (lambda (query_alias schema_alias ti)
-		(reduce (schema_alias_variants schema_alias) (lambda (matched alias_v)
-			(or matched ((if ti equal?? equal?) query_alias alias_v)))
-			false)))
 	(define replace_find_column (lambda (expr) (match expr
 		/* Ensure MySQL LIKE uses a collation at compile time:
 		- If lhs is a text column, take collation from schema metadata.
@@ -2774,59 +2874,35 @@ or generate runtime scan code (build_queryplan).
 		'((symbol get_column) _ _ "*" _) expr
 		'((quote get_column) _ _ "*" _) expr
 		'((symbol get_column) nil _ col ci) (begin
-			/* First try main tables (aliases without ':' or '_unn_' prefix) */
-			(define _is_main_alias (lambda (alias) (begin
-				(define s (string alias))
-				(and (not (strlike s "%:%"))
-					(not (strlike s "%\0%"))
-					(not (and (>= (strlen s) 5) (equal? (substr s 0 5) "_unn_")))))))
-			(define main_match (reduce_assoc schemas (lambda (a alias cols)
-				(if (and (_is_main_alias alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
-					alias a)) nil))
-			/* If not found in main tables, try subquery tables (aliases with ':') */
-			(define any_match (if (nil? main_match)
-				(reduce_assoc schemas (lambda (a alias cols)
-					(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
-						alias a)) nil)
-				main_match))
-			(begin
-				(define resolved_alias (coalesce any_match (error (concat "column " col " does not exist in tables"))))
-				(define canonical_col (if ci (coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
-				'((quote get_column) resolved_alias false canonical_col false))
+			(define resolved (resolve_schema_column_ref_scoped schemas schemas nil false col ci))
+			(if (nil? resolved)
+				(error (concat "column " col " does not exist in tables"))
+				(begin
+					(define resolved_alias (car resolved))
+					(define canonical_col (cadr resolved))
+					'((quote get_column) resolved_alias false canonical_col false)))
 		)
 		'((symbol get_column) alias_ ti col ci) (begin
-			(define resolved_alias (reduce_assoc schemas (lambda (a alias cols)
-				(if (and (schema_alias_matches alias_ alias ti)
-					(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
-					alias
-					a))
-				nil))
-			(if (nil? resolved_alias)
+			(define resolved (resolve_schema_column_ref_scoped schemas schemas alias_ ti col ci))
+			(if (nil? resolved)
 				expr
 				(begin
-					(define canonical_col (if ci
-						(coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col)
-						col))
+					(define resolved_alias (car resolved))
+					(define canonical_col (cadr resolved))
 					'((quote get_column) resolved_alias false canonical_col false))))
 		/* omit strict failure for false/false refs: freshly created temp columns are
 		allowed to pass through unresolved until their stage materializes them */
 		'((quote get_column) alias_ ti col ci) (begin
-			(define resolved_alias (reduce_assoc schemas (lambda (a alias cols)
-				(if (and (schema_alias_matches alias_ alias ti)
-					(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
-					alias
-					a))
-				nil))
-			(if (nil? resolved_alias)
+			(define resolved (resolve_schema_column_ref_scoped schemas schemas alias_ ti col ci))
+			(if (nil? resolved)
 				expr
 				(begin
-					(define canonical_col (if ci
-						(coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col)
-						col))
+					(define resolved_alias (car resolved))
+					(define canonical_col (cadr resolved))
 					'((quote get_column) resolved_alias false canonical_col false))))
 		(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 		expr
-	)))
+)))
 
 	/* pass full schema chain (current + ancestors) so nested subselects can resolve grandparent refs */
 	(define _ris_schemas (merge schemas outer_schemas_chain))
@@ -2894,30 +2970,26 @@ or generate runtime scan code (build_queryplan).
 	(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
 	(set groups (if (equal? _sq_pstages '()) groups (merge _sq_pstages (coalesceNil groups '()))))
 	(set groups (if (equal? _sq_prop_groups '()) groups (merge _sq_prop_groups (coalesceNil groups '()))))
-	/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
-	but ONLY for columns referencing derived table aliases (keys in renamelist).
-	Uses schemas to find canonical column name without calling replace_find_column. */
-	(define canonicalize_for_rename (lambda (expr) (match expr
-		'((symbol get_column) alias_ ti col ci) (if (and ci (not (nil? alias_)))
-			(if (has_assoc? renamelist (string alias_))
-				(begin
-					(define alias_cols (schemas (string alias_)))
-					(define canonical_col (if (nil? alias_cols) col
-						(coalesce (reduce alias_cols (lambda (found coldef)
-							(if (not (nil? found)) found
-								(if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col)))
-					'((quote get_column) alias_ ti canonical_col ci))
-				expr)
-			expr)
-		(cons sym args) (if (_is_opaque_scope_sym sym)
-			expr
-			(cons sym (map args canonicalize_for_rename)))
-		expr
-	)))
-
 	/* apply renamelist (assoc of assoc of expr) */
 	(define replace_rename (lambda (expr) (match expr
 		'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
+			/* no tblalias -> search the field in all tables */
+			(reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
+			/* tblalias -> look up the field */
+			(begin
+				(define alias_str (string alias_))
+				(define alias_sym (symbol alias_str))
+				(define rename_fn (if (has_assoc? renamelist alias_)
+					(renamelist alias_)
+					(if (has_assoc? renamelist alias_str)
+						(renamelist alias_str)
+						(if (has_assoc? renamelist alias_sym)
+							(renamelist alias_sym)
+							nil))))
+				(if (nil? rename_fn) expr (rename_fn col))
+			)
+		)
+		'((quote get_column) alias_ ti col ci) (if (nil? alias_)
 			/* no tblalias -> search the field in all tables */
 			(reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
 			/* tblalias -> look up the field */
@@ -2939,26 +3011,31 @@ or generate runtime scan code (build_queryplan).
 			(cons sym (map args replace_rename)))
 		expr
 	)))
+	(define planner_visible_schemas (merge schemas outer_schemas_chain))
+	(define finalize_visible_expr (lambda (expr)
+		(finalize_logical_expr_scoped expr schemas planner_visible_schemas replace_rename enforce_planner_contract)))
 
 
-	/* expand *-columns and lower derived-table aliases in visible field refs.
-	Fields must follow the same deterministic rename path as GROUP/HAVING/ORDER,
-	otherwise grouped wrappers can keep stale helper aliases like t\0rs.* alive
-	even though only the visible derived alias t should remain here. */
+	/* Contract boundary for user-visible expressions:
+	fields, WHERE, GROUP/HAVING/ORDER and JOIN conditions all go through the same
+	finalize_visible_expr gate exactly once here. After that the planner must only
+	see exact get_column markers and may no longer re-run schema casing repair. */
 	(set fields (map_assoc (expand_star_fields_with_schemas fields schemas) (lambda (col expr)
-		(replace_rename (replace_find_column expr)))))
+		(finalize_visible_expr (replace_find_column expr)))))
 
 	/* return parameter list for build_queryplan */
-	(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x))))))
+	(set conditionAll (cons 'and (filter
+		(cons (finalize_visible_expr condition) (map conditionList finalize_visible_expr))
+		(lambda (x) (not (nil? x))))))
 	(set tables (map tables (lambda (td) (match td
 		'(tv tschema ttbl toisOuter tje)
 		(list tv tschema ttbl toisOuter
-			(if (nil? tje) nil (replace_rename (canonicalize_for_rename tje))))
+			(if (nil? tje) nil (finalize_visible_expr tje)))
 		td))))
-	(set group (map group (lambda (g) (replace_rename (canonicalize_for_rename g)))))
-	(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename (canonicalize_for_rename col)) dir)))))
+	(set group (map group finalize_visible_expr))
+	(set order (map order (lambda (o) (match o '(col dir) (list (finalize_visible_expr col) dir)))))
 
-	(set having (replace_rename (canonicalize_for_rename having)))
+	(set having (finalize_visible_expr having))
 
 	(define groups (merge
 		(coalesceNil _sq_pstages '())
@@ -2967,20 +3044,24 @@ or generate runtime scan code (build_queryplan).
 			/* COUNT(DISTINCT): two group stages - first dedup, then aggregate */
 			(list
 				(make_dedup_stage
-					(merge (map (coalesce _cd_user_group '()) replace_rename) (map _cd_distinct_exprs (lambda (e) (replace_find_column (replace_rename e))))) nil)
+					(merge
+						(map (coalesce _cd_user_group '()) finalize_visible_expr)
+						(map _cd_distinct_exprs (lambda (e) (replace_find_column (finalize_visible_expr e)))))
+					nil)
 				(make_group_stage
-					(if (nil? _cd_user_group) '(1) (map _cd_user_group (lambda (e) (replace_find_column (replace_rename e)))))
-					(_cd_replace (replace_rename _cd_having))
-					(map (coalesce _cd_order '()) (lambda (o) (match o '(col dir) (list (_cd_replace (replace_rename col)) dir))))
+					(if (nil? _cd_user_group) '(1) (map _cd_user_group (lambda (e) (replace_find_column (finalize_visible_expr e)))))
+					(_cd_replace (finalize_visible_expr _cd_having))
+					(map (coalesce _cd_order '()) (lambda (o) (match o '(col dir) (list (_cd_replace (finalize_visible_expr col)) dir))))
 					_cd_limit _cd_offset nil nil))
 			/* normal: single group stage */
 			(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '()))))
-	/* canonicalize all get_column markers: resolve ti/ci flags to canonical casing.
-	After this, all get_column nodes have false false — no case ambiguity remains. */
-	(define _canon (lambda (expr) (canonicalize_columns expr schemas)))
-	(define _canon_fields (map_assoc fields (lambda (k v) (_canon (replace_rename v)))))
-	(define _canon_condition (_canon conditionAll))
-	(define _canon_groups (map (coalesceNil groups '()) (lambda (stage) (canonicalize_stage stage schemas))))
+	/* Contract boundary: untangle_query returns canonical logical IR.
+	All case-insensitive parser markers are resolved here, before build_queryplan
+	starts creating keytables/prejoins or serializing canonical_expr_name values. */
+	(define _canon_fields fields)
+	(define _canon_condition conditionAll)
+	(define _canon_groups (map (coalesceNil groups '()) (lambda (stage)
+		(finalize_logical_stage_scoped stage schemas planner_visible_schemas replace_rename enforce_planner_contract))))
 	/* eliminate unused LEFT JOINs: a LEFT JOIN is unused when none of its
 	columns appear in fields or group stages. Join predicates reference the
 	JOIN alias by construction and must not keep it alive. Only unnested
@@ -3208,6 +3289,12 @@ Translates the flat relational IR from untangle_query into executable scan code.
 Consumes the table list, conditions, and group-stages and produces nested scan/scan_order
 calls, keytable materialization (GROUP BY), and prejoin materialization (multi-table GROUP).
 
+Input contract inherited from untangle_query:
+- Every logical get_column is already canonicalized to `(get_column alias false field false)`
+- Alias and field casing already match `schemas`
+- Derived-table output aliases are already lowered; no late schema-based repair
+is allowed in build_queryplan or canonical_expr_name
+
 Processing order (recursive — each stage peels off one layer):
 1. Group-stages with partition-aliases (scoped): separate into keytable fill + post-group scan
 - Single-table group: make_keytable + collect keys + createcolumn per aggregate
@@ -3230,6 +3317,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 	/* TODO: order tables: outer joins behind */
 	(set groups (coalesceNil groups '()))
+	(define require_canonical_stage (lambda (stage) (begin
+		(map (coalesceNil (stage_group_cols stage) '()) (lambda (expr)
+			(require_canonical_logical_expr "build_queryplan stage group" expr)))
+		(require_canonical_logical_expr "build_queryplan stage having" (coalesceNil (stage_having_expr stage) true))
+		(map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(expr dir)
+			(require_canonical_logical_expr "build_queryplan stage order" expr)
+			true)))
+		stage
+	)))
+	(extract_assoc fields (lambda (_k expr)
+		(require_canonical_logical_expr "build_queryplan field" expr)))
+	(require_canonical_logical_expr "build_queryplan condition" (coalesceNil condition true))
+	(map groups require_canonical_stage)
 	/* separate partition stages (have partition-aliases) from regular stages */
 	/* separate partition stages (have aliases but NO group-cols) from regular/scoped group stages */
 	(define partition_stages (filter groups (lambda (s) (begin
@@ -3906,8 +4006,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(map _grp_ps_tables (lambda (td) (match td
 						'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)
 						"")))))
+				/* build_queryplan only sees canonical logical expressions now.
+				Outer grouped refs therefore use exact aliases/fields already; this
+				helper may only attach an omitted alias, not do late case repair. */
 				(define _resolve_outer_group_field (lambda (expr) (match expr
-					'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (has? _grp_outer_aliases alias_))
+					'((symbol get_column) alias_ _ col _) (if (and (not (nil? alias_)) (has? _grp_outer_aliases alias_))
 						expr
 						(if (nil? alias_)
 							(begin
@@ -3916,7 +4019,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(begin
 										(define lookup_alias (if (nil? tv) ttbl tv))
 										(reduce (coalesceNil (schemas lookup_alias) '()) (lambda (found coldef)
-											(or found ((if ci equal?? equal?) (coldef "Field") col))) false))
+											(or found (equal? (coldef "Field") col))) false))
 									false))))
 								(if (equal? 1 (count matches))
 									(match (car matches)
@@ -3925,7 +4028,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										nil)
 									nil))
 							nil))
-					'((quote get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (has? _grp_outer_aliases alias_))
+					'((quote get_column) alias_ _ col _) (if (and (not (nil? alias_)) (has? _grp_outer_aliases alias_))
 						expr
 						(if (nil? alias_)
 							(begin
@@ -3934,7 +4037,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(begin
 										(define lookup_alias (if (nil? tv) ttbl tv))
 										(reduce (coalesceNil (schemas lookup_alias) '()) (lambda (found coldef)
-											(or found ((if ci equal?? equal?) (coldef "Field") col))) false))
+											(or found (equal? (coldef "Field") col))) false))
 									false))))
 								(if (equal? 1 (count matches))
 									(match (car matches)
