@@ -318,6 +318,31 @@ restart:
 					en.VarsNumbered[start+i] = Eval(list[i+3], en)
 				}
 				return NewSlice(en.VarsNumbered[start : start+count])
+			case "!!list":
+				// Preallocated stack-backed list buffer.
+				// Internal optimized form: (!!list NthLocalVar(start) cap)
+				// Fallback surface form: (!!list cap) allocates a heap-backed buffer.
+				if len(list) == 3 && list[1].IsNthLocalVar() {
+					start := int(list[1].NthLocalVar())
+					capacity := int(ToInt(list[2]))
+					if capacity < 0 {
+						capacity = 0
+					}
+					if start+capacity > len(en.VarsNumbered) {
+						buf := make([]byte, 8192)
+						n := runtime.Stack(buf, false)
+						panic(fmt.Sprintf("!!list start=%d cap=%d out of range (len=%d)\n%s", start, capacity, len(en.VarsNumbered), buf[:n]))
+					}
+					return NewSlice(en.VarsNumbered[start : start : start+capacity])
+				}
+				if len(list) == 2 {
+					capacity := int(ToInt(Eval(list[1], en)))
+					if capacity < 0 {
+						capacity = 0
+					}
+					return NewSlice(make([]Scmer, 0, capacity))
+				}
+				panic("!!list expects either (!!list cap) or optimized (!!list NthLocalVar(start) cap)")
 			case "parallel":
 				// execute all childs parallely, return nil after finish
 				childExprs := list[1:]
@@ -738,19 +763,19 @@ func init() {
 	Declare(&Globalenv, &Declaration{
 		Name: "quote",
 		Desc: "returns a symbol or list without evaluating it",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "symbol", ParamName: "symbol", ParamDesc: "symbol to quote"},
 			},
 			Return: &TypeDescriptor{Kind: "symbol"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "eval",
 		Desc: "executes the given scheme program in the current environment",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"},
@@ -769,7 +794,7 @@ func init() {
 				{Kind: "any", ParamName: "value", ParamDesc: "value to examine"},
 			},
 			Return: &TypeDescriptor{Kind: "int"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -783,13 +808,13 @@ func init() {
 				{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "time",
 		Desc: "measures the time it takes to compute the first argument",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "code", ParamDesc: "code to execute"},
@@ -801,71 +826,71 @@ func init() {
 	Declare(&Globalenv, &Declaration{
 		Name: "if",
 		Desc: "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "condition...", ParamDesc: "condition to evaluate"},
 				{Kind: "returntype", ParamName: "true-branch...", ParamDesc: "code to evaluate if condition is true"},
 				{Kind: "any", ParamName: "false-branch", ParamDesc: "code to evaluate if condition is false", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "returntype"},
-			Const: true,
+			Return:   &TypeDescriptor{Kind: "returntype"},
+			Const:    true,
 			Optimize: optimizeIf,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "and",
 		Desc: "returns true if all conditions evaluate to true",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "bool", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Return:   &TypeDescriptor{Kind: "bool"},
+			Const:    true,
 			Optimize: optimizeAnd,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "or",
 		Desc: "returns true if at least one condition evaluates to true",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "coalesce",
 		Desc: "returns the first value that has a non-zero value",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "returntype", ParamName: "value", ParamDesc: "value to examine", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "returntype"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "coalesceNil",
 		Desc: "returns the first value that has a non-nil value",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "returntype", ParamName: "value", ParamDesc: "value to examine", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "returntype"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "define",
 		Desc: "defines or sets a variable in the current environment",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "symbol", ParamName: "variable", ParamDesc: "variable to set"},
@@ -877,7 +902,7 @@ func init() {
 	Declare(&Globalenv, &Declaration{
 		Name: "set",
 		Desc: "defines or sets a variable in the current environment",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "symbol", ParamName: "variable", ParamDesc: "variable to set"},
@@ -928,7 +953,7 @@ func init() {
 				{Kind: "func", ParamName: "errorhandler", ParamDesc: "function that takes the error as parameter", Params: []*TypeDescriptor{{Kind: "any", ParamName: "error"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -943,7 +968,7 @@ func init() {
 				{Kind: "list", ParamName: "arguments", ParamDesc: "list of arguments to apply"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -958,7 +983,7 @@ func init() {
 				{Kind: "list", ParamName: "arguments", ParamDesc: "assoc list of arguments to apply"},
 			},
 			Return: &TypeDescriptor{Kind: "symbol"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -977,13 +1002,13 @@ func init() {
 	Declare(&Globalenv, &Declaration{
 		Name: "list",
 		Desc: "returns a list containing the parameters as alements",
-		Fn: nil,
+		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "value...", ParamDesc: "value for the list", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1009,8 +1034,8 @@ func init() {
 				{Kind: "func", ParamName: "condition", ParamDesc: "func that receives the current state as parameters and must return true if the loop shall be continued", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
 				{Kind: "func", ParamName: "step", ParamDesc: "step func that returns the next state as a list", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:   FreshAlloc,
+			Const:    true,
 			Optimize: FirstParameterMutable("for_mut"),
 		},
 	})
@@ -1037,8 +1062,8 @@ func init() {
 				{Kind: "func", ParamName: "condition", ParamDesc: "func(state...) -> bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
 				{Kind: "func", ParamName: "step", ParamDesc: "step func returning next state as list", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
-			Return: FreshAlloc,
-			Const: true,
+			Return:    FreshAlloc,
+			Const:     true,
 			Forbidden: true,
 		},
 	})
@@ -1053,7 +1078,7 @@ func init() {
 				{Kind: "any", ParamName: "value", ParamDesc: "any value"},
 			},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1069,7 +1094,7 @@ Patterns can be any of:
  - (cons a b) will reverse the cons function, so it will match the head of the list with a and the rest with b
  - (regex "pattern" text var1 var2...) will match the given regex pattern, store the whole string into text and all capture groups into var1, var2...
 `,
-		Fn: // TODO: returntype as soon as repead validate is implemented */
+		Fn:// TODO: returntype as soon as repead validate is implemented */
 		nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
@@ -1079,13 +1104,13 @@ Patterns can be any of:
 				{Kind: "any", ParamName: "default", ParamDesc: "(optional) value that is returned when no pattern matches", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "lambda",
 		Desc: "returns a function (func) constructed from the given code",
-		Fn: // TODO: func(...)->returntype as soon as function types are implemented
+		Fn:// TODO: func(...)->returntype as soon as function types are implemented
 		nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
@@ -1099,7 +1124,7 @@ Patterns can be any of:
 	Declare(&Globalenv, &Declaration{
 		Name: "begin",
 		Desc: "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
-		Fn: // TODO: returntype as soon as repeat is implemented
+		Fn:// TODO: returntype as soon as repeat is implemented
 		nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
@@ -1111,7 +1136,7 @@ Patterns can be any of:
 	Declare(&Globalenv, &Declaration{
 		Name: "parallel",
 		Desc: "executes all parameters in parallel and returns nil if they are finished",
-		Fn: // TODO: returntype as soon as repeat is implemented
+		Fn:// TODO: returntype as soon as repeat is implemented
 		nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
@@ -1139,7 +1164,7 @@ Patterns can be any of:
 				{Kind: "returntype", ParamName: "code", ParamDesc: "code"},
 			},
 			Return: &TypeDescriptor{Kind: "returntype"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1158,7 +1183,7 @@ Patterns can be any of:
 				{Kind: "string", ParamName: "filename", ParamDesc: "optional filename", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

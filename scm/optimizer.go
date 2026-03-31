@@ -713,7 +713,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
 			slotIndex++
 		}
-		ome2.nextSlot = &slotIndex // allow !list to allocate extra slots
+		ome2.nextSlot = &slotIndex // allow !list/!!list to allocate extra slots
 		// Propagate callback parameter ownership from pendingCallbackOwned
 		if ome.pendingCallbackOwned != nil {
 			if ome2.ownedVars == nil {
@@ -909,6 +909,19 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			v[0] = NewSymbol(mutName)
 			transferOwnership = true
 		}
+	}
+
+	// !!list rewrite: turn surface (!!list cap) into the internal
+	// stack-backed form (!!list NthLocalVar(start) cap) when we are inside
+	// an optimizer-numbered lambda frame.
+	if scmerIsSymbol(v[0], "!!list") && len(v) == 2 && ome.nextSlot != nil {
+		capacity := int(ToInt(v[1]))
+		if capacity < 0 {
+			capacity = 0
+		}
+		start := *ome.nextSlot
+		*ome.nextSlot += capacity
+		return NewSlice([]Scmer{NewSymbol("!!list"), NewNthLocalVar(NthLocalVar(start)), NewInt(int64(capacity))}), &TypeDescriptor{Transfer: true}
 	}
 
 	// !list rewrite: when an argument is (list expr...) passed to a function
@@ -1227,7 +1240,10 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 
 // deoptimizeExpr rewrites optimizer-produced special forms back to plain equivalents
 // so that buildComputedFn lambdas do not depend on VarsNumbered slots beyond params.
-// Currently handles: (!list NthLocalVar(start) count expr...) -> (list expr...)
+// Currently handles:
+//
+//	(!list NthLocalVar(start) count expr...) -> (list expr...)
+//	(!!list NthLocalVar(start) cap) -> (list)
 func DeoptimizeExpr(expr Scmer) Scmer {
 	if !expr.IsSlice() {
 		return expr
@@ -1243,6 +1259,9 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 			}
 			return NewSlice(newItems)
 		}
+	}
+	if len(items) == 3 && items[0].IsSymbol() && items[0].String() == "!!list" && items[1].IsNthLocalVar() {
+		return NewSlice([]Scmer{NewSymbol("list")})
 	}
 	// recurse into sub-expressions
 	newItems := make([]Scmer, len(items))

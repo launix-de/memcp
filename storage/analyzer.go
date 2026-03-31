@@ -33,10 +33,10 @@ func mustSymbolValue(v scm.Scmer) scm.Symbol {
 // and on StorageIndex.ColMatchers as type markers.
 //
 // To add a new index-aware operation:
-//   1. Implement BoundaryMatcher.
-//   2. Add a singleton to boundaryMatchers below.
-//   3. Add detection logic in extractBoundaries (hardcoded for now).
-//   Future: generalize via TryMatch method for user-defined matchers.
+//  1. Implement BoundaryMatcher.
+//  2. Add a singleton to boundaryMatchers below.
+//  3. Add detection logic in extractBoundaries (hardcoded for now).
+//     Future: generalize via TryMatch method for user-defined matchers.
 type BoundaryMatcher interface {
 	// Kind returns a short identifier (e.g. "equal", "range", "like").
 	// Used for index deduplication: same column + same kind = same index.
@@ -210,12 +210,16 @@ func (m *likeMatcher) BuildSkipList(pattern string, count uint32, getRecid func(
 }
 
 type columnboundaries struct {
-	col            string
-	matcher        BoundaryMatcher // always set: EqualMatcher, RangeMatcher, LikeMatcher, ...
-	lower          scm.Scmer
-	lowerInclusive bool
-	upper          scm.Scmer
-	upperInclusive bool
+	col              string
+	matcher          BoundaryMatcher // always set: EqualMatcher, RangeMatcher, LikeMatcher, ...
+	lower            scm.Scmer
+	lowerInclusive   bool
+	upper            scm.Scmer
+	upperInclusive   bool
+	lowerBatch       bool
+	lowerBatchSubidx int
+	upperBatch       bool
+	upperBatchSubidx int
 	// for computed index columns (col starts with ".")
 	mapCols []string  // source columns needed to compute the value
 	mapFn   scm.Scmer // function: mapFn(mapCols values...) → index value
@@ -248,6 +252,8 @@ func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 			if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
 				in[i].lower = b2.lower
 				in[i].lowerInclusive = b2.lowerInclusive
+				in[i].lowerBatch = b2.lowerBatch
+				in[i].lowerBatchSubidx = b2.lowerBatchSubidx
 			} else if !b.lower.IsNil() && !b2.lower.IsNil() && boundaryValueEqual(b.lower, b2.lower) {
 				in[i].lowerInclusive = b.lowerInclusive && b2.lowerInclusive
 			}
@@ -255,6 +261,8 @@ func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 			if b.upper.IsNil() || (!b2.upper.IsNil() && scm.Less(b2.upper, b.upper)) {
 				in[i].upper = b2.upper
 				in[i].upperInclusive = b2.upperInclusive
+				in[i].upperBatch = b2.upperBatch
+				in[i].upperBatchSubidx = b2.upperBatchSubidx
 			} else if !b.upper.IsNil() && !b2.upper.IsNil() && boundaryValueEqual(b.upper, b2.upper) {
 				in[i].upperInclusive = b.upperInclusive && b2.upperInclusive
 			}
@@ -286,9 +294,13 @@ func widenBounds(a, b boundaries) boundaries {
 			} else if cb.lower.IsNil() {
 				a[i].lower = scm.NewNil()
 				a[i].lowerInclusive = false
+				a[i].lowerBatch = false
+				a[i].lowerBatchSubidx = 0
 			} else if scm.Less(cb.lower, a[i].lower) {
 				a[i].lower = cb.lower
 				a[i].lowerInclusive = cb.lowerInclusive
+				a[i].lowerBatch = cb.lowerBatch
+				a[i].lowerBatchSubidx = cb.lowerBatchSubidx
 			} else if boundaryValueEqual(cb.lower, a[i].lower) {
 				a[i].lowerInclusive = a[i].lowerInclusive || cb.lowerInclusive
 			}
@@ -298,9 +310,13 @@ func widenBounds(a, b boundaries) boundaries {
 			} else if cb.upper.IsNil() {
 				a[i].upper = scm.NewNil()
 				a[i].upperInclusive = false
+				a[i].upperBatch = false
+				a[i].upperBatchSubidx = 0
 			} else if scm.Less(a[i].upper, cb.upper) {
 				a[i].upper = cb.upper
 				a[i].upperInclusive = cb.upperInclusive
+				a[i].upperBatch = cb.upperBatch
+				a[i].upperBatchSubidx = cb.upperBatchSubidx
 			} else if boundaryValueEqual(a[i].upper, cb.upper) {
 				a[i].upperInclusive = a[i].upperInclusive || cb.upperInclusive
 			}
@@ -330,9 +346,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	if p.Params.IsSlice() {
 		params = p.Params.Slice()
 	}
-	// resolveColVar maps a node to a column name.
-	// Handles both symbol params (linear scan, no alloc) and NthLocalVar(i).
-	resolveColVar := func(node scm.Scmer) (string, bool) {
+	resolveParamName := func(node scm.Scmer) (string, bool) {
 		if node.IsSymbol() {
 			name := node.String()
 			for i, sym := range params {
@@ -348,6 +362,22 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			}
 		}
 		return "", false
+	}
+	// resolveColVar maps a node to a column name.
+	// Handles both symbol params (linear scan, no alloc) and NthLocalVar(i).
+	resolveColVar := func(node scm.Scmer) (string, bool) {
+		if name, ok := resolveParamName(node); ok {
+			if _, isBatch := parseBatchPseudoColName(name); !isBatch {
+				return name, true
+			}
+		}
+		return "", false
+	}
+	resolveBatchSubidx := func(node scm.Scmer) (int, bool) {
+		if name, ok := resolveParamName(node); ok {
+			return parseBatchPseudoColName(name)
+		}
+		return 0, false
 	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
@@ -411,11 +441,17 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				if v2, ok := extractConstant(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
+				if subidx, ok := resolveBatchSubidx(v[2]); ok {
+					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
+				}
 			}
 			// reversed: (equal? const col)
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
+				}
+				if subidx, ok := resolveBatchSubidx(v[1]); ok {
+					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// computed col: (equal? rawDataset independent) or reversed
@@ -426,6 +462,14 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
+						}
+					}
+				} else if isRawDataset(params, v[1]) {
+					if subidx, ok := resolveBatchSubidx(v[2]); ok {
+						canon := canonicalColName(v[1], params, conditionCols)
+						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -439,6 +483,14 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
+				} else if isRawDataset(params, v[2]) {
+					if subidx, ok := resolveBatchSubidx(v[1]); ok {
+						canon := canonicalColName(v[2], params, conditionCols)
+						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+						}
+					}
 				}
 			}
 			return nil
@@ -448,11 +500,17 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				if v2, ok := extractConstant(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
+				if subidx, ok := resolveBatchSubidx(v[2]); ok {
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
+				}
 			}
 			// reversed: (< const col) means col > const, (<= const col) means col >= const
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
+				}
+				if subidx, ok := resolveBatchSubidx(v[1]); ok {
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
 				}
 			}
 			// computed col: rawDataset < independent → rawDataset has upper bound
@@ -463,6 +521,14 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+						}
+					}
+				} else if isRawDataset(params, v[1]) {
+					if subidx, ok := resolveBatchSubidx(v[2]); ok {
+						canon := canonicalColName(v[1], params, conditionCols)
+						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -477,6 +543,14 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
+				} else if isRawDataset(params, v[2]) {
+					if subidx, ok := resolveBatchSubidx(v[1]); ok {
+						canon := canonicalColName(v[2], params, conditionCols)
+						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+						}
+					}
 				}
 			}
 			return nil
@@ -486,11 +560,17 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				if v2, ok := extractConstant(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
+				if subidx, ok := resolveBatchSubidx(v[2]); ok {
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
+				}
 			}
 			// reversed: (> const col) means col < const, (>= const col) means col <= const
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
+				}
+				if subidx, ok := resolveBatchSubidx(v[1]); ok {
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// computed col: rawDataset > independent → rawDataset has lower bound
@@ -503,6 +583,14 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
+				} else if isRawDataset(params, v[1]) {
+					if subidx, ok := resolveBatchSubidx(v[2]); ok {
+						canon := canonicalColName(v[1], params, conditionCols)
+						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+						}
+					}
 				}
 			}
 			// reversed computed: independent > rawDataset → rawDataset has upper bound
@@ -513,6 +601,14 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+						}
+					}
+				} else if isRawDataset(params, v[2]) {
+					if subidx, ok := resolveBatchSubidx(v[1]); ok {
+						canon := canonicalColName(v[2], params, conditionCols)
+						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -617,6 +713,29 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	return cols
 }
 
+func hasBatchBoundaries(bounds boundaries) bool {
+	for _, b := range bounds {
+		if b.lowerBatch || b.upperBatch {
+			return true
+		}
+	}
+	return false
+}
+
+func materializeBatchBoundaries(template boundaries, stride int, batchdata []scm.Scmer, batchid uint32) boundaries {
+	result := append(boundaries(nil), template...)
+	base := int(batchid) * stride
+	for i := range result {
+		if result[i].lowerBatch {
+			result[i].lower = batchdata[base+result[i].lowerBatchSubidx]
+		}
+		if result[i].upperBatch {
+			result[i].upper = batchdata[base+result[i].upperBatchSubidx]
+		}
+	}
+	return result
+}
+
 // reorderByFrequency re-sorts equality columns by query frequency (most-used first)
 // so that the most-queried columns appear first in the index key, maximizing prefix
 // overlap across queries. Also bumps the frequency counters for each boundary column.
@@ -639,7 +758,6 @@ func reorderByFrequency(bounds boundaries, t *table) {
 		return bounds[i].col < bounds[j].col // tiebreak alphabetically
 	})
 }
-
 
 // analyzeOrcPartition inspects reduceFn + reduceInit + sortCols to detect
 // whether the ORC uses a partition wrapper. Returns the number of leading
@@ -672,8 +790,8 @@ func analyzeOrcPartition(col *column) int {
 
 // ORC suffix recompute mode classification.
 const (
-	OrcSuffixOpaque         = 0 // can't analyze → full recompute only
-	OrcSuffixIdentity       = 1 // acc == emitted value (SUM, ROW_NUMBER) → stored value is accumulator
+	OrcSuffixOpaque          = 0 // can't analyze → full recompute only
+	OrcSuffixIdentity        = 1 // acc == emitted value (SUM, ROW_NUMBER) → stored value is accumulator
 	OrcSuffixReconstructible = 2 // acc = (emitted, ...state) → need extra state from row data
 )
 
@@ -686,7 +804,9 @@ type OrcAdditiveInfo struct {
 }
 
 // analyzeOrcAdditive inspects the ORC reduceFn to detect the additive pattern:
-//   return value = (+ acc X) where X depends only on mapped, not acc.
+//
+//	return value = (+ acc X) where X depends only on mapped, not acc.
+//
 // This enables O(N) delta propagation instead of O(N) suffix recompute.
 func analyzeOrcAdditive(reduceFn scm.Scmer) OrcAdditiveInfo {
 	if reduceFn.IsNil() {
@@ -812,7 +932,7 @@ func analyzeOrcSuffix(reduceFn scm.Scmer) int {
 
 	// Unwrap (begin ...) to find the last expression (= return value)
 	// and any setter call (= $set invocation).
-	var setArg scm.Scmer   // the value passed to $set
+	var setArg scm.Scmer    // the value passed to $set
 	var returnVal scm.Scmer // the return value of the reducer
 
 	if body.IsSlice() {
@@ -906,7 +1026,6 @@ func scmerStructEqual(a, b scm.Scmer) bool {
 	}
 	return false
 }
-
 
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
