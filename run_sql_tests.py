@@ -14,6 +14,7 @@ If missing, create a venv and install, e.g.:
 
 import sys
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Dependency checks with clear install hints
 try:
@@ -250,6 +251,9 @@ class SQLTestRunner:
             print(f"    Expected: {expect}")
         if on_fail_diag:
             print(f"    🔍 Diagnostic: {on_fail_diag}\n")
+
+    def _expect_interrupted_ok(self, expect) -> bool:
+        return bool(expect and expect.get("interrupted_ok"))
 
     def _run_on_fail(self, test_case: Dict, database: str) -> Optional[str]:
         """Execute on_fail diagnostic queries and return combined output."""
@@ -495,15 +499,24 @@ class SQLTestRunner:
                 url = f"{self.base_url}/scm"
                 resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=600)
             except Exception as e:
+                if self._expect_interrupted_ok(expect):
+                    self._record_success(name, is_noncritical)
+                    return True
                 if expect_error:
                     self._record_success(name, is_noncritical)
                     return True
                 return self._record_fail(name, f"SCM exception: {e}", scm_code, None, None, is_noncritical)
             if resp is None:
+                if self._expect_interrupted_ok(expect):
+                    self._record_success(name, is_noncritical)
+                    return True
                 if expect_error:
                     self._record_success(name, is_noncritical)
                     return True
                 return self._record_fail(name, "No response from /scm", scm_code, None, None, is_noncritical)
+            if self._expect_interrupted_ok(expect):
+                self._record_success(name, is_noncritical)
+                return True
             if expect_error:
                 if resp.status_code != 200:
                     self._record_success(name, is_noncritical)
@@ -551,6 +564,8 @@ class SQLTestRunner:
                 else:
                     resp = run_step_request(step)
                     if step_expect:
+                        if self._expect_interrupted_ok(step_expect):
+                            continue
                         if step_expect.get("error"):
                             if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
                                 return self._record_fail(name, f"Step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
@@ -573,10 +588,14 @@ class SQLTestRunner:
                 step_expect = step.get("expect", {})
                 step_sql = step.get("sql", "")
                 if isinstance(resp, Exception):
+                    if self._expect_interrupted_ok(step_expect):
+                        continue
                     if step_expect.get("error"):
                         continue
                     return self._record_fail(name, f"Background step '{step_sql[:60]}' raised: {resp}", step_sql, None, step_expect, is_noncritical)
                 if step_expect:
+                    if self._expect_interrupted_ok(step_expect):
+                        continue
                     if step_expect.get("error"):
                         if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
                             return self._record_fail(name, f"Background step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
@@ -668,6 +687,9 @@ class SQLTestRunner:
 
         if response is None:
             expect = test_case.get("expect", {})
+            if self._expect_interrupted_ok(expect):
+                self._record_success(name, is_noncritical)
+                return True
             if expect.get("error"):
                 self._record_success(name, is_noncritical)
                 return True
@@ -696,6 +718,9 @@ class SQLTestRunner:
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})
+
+        if self._expect_interrupted_ok(expect):
+            return True
 
         if expect.get("error"):
             return response.status_code != 200 or "Error" in response.text
@@ -1002,23 +1027,185 @@ def find_free_port(start: int = 20000, end: int = 60000) -> int:
     raise RuntimeError("No free port found in range %d-%d" % (start, end))
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only]")
-        sys.exit(1)
+def load_suite_metadata(spec_file: str) -> Dict[str, Any]:
+    with open(spec_file, 'r') as f:
+        spec = yaml.safe_load(f) or {}
+    metadata = spec.get('metadata', {}) if isinstance(spec, dict) else {}
+    return metadata if isinstance(metadata, dict) else {}
 
-    spec_file = sys.argv[1]
-    port = None
+
+def suite_requires_managed_restart(spec_file: str) -> bool:
+    with open(spec_file, 'r') as f:
+        spec = yaml.safe_load(f) or {}
+    test_cases = spec.get('test_cases', []) if isinstance(spec, dict) else []
+    for test_case in test_cases:
+        if not isinstance(test_case, dict):
+            continue
+        if test_case.get("action") == "restart":
+            return True
+        sql = test_case.get("sql")
+        if isinstance(sql, str) and sql.strip().upper() == "SHUTDOWN":
+            return True
+    return False
+
+
+def normalize_jobs(jobs: Optional[int]) -> int:
+    if jobs is None:
+        try:
+            jobs = int(os.environ.get("MEMCP_TEST_JOBS", "4"))
+        except ValueError:
+            jobs = 4
+    if jobs < 1:
+        jobs = 1
+    if jobs > 16:
+        jobs = 16
+    return jobs
+
+
+def run_spec_subprocess(spec_file: str, port: int, log_times: bool) -> Tuple[bool, str]:
+    cmd = [sys.executable, os.path.abspath(__file__), spec_file, str(port), "--connect-only"]
+    if log_times:
+        cmd.append("--log-times")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    output = proc.stdout
+    if proc.stderr:
+        output = f"{output}{proc.stderr}"
+    return proc.returncode == 0, output
+
+
+def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: bool, jobs: Optional[int],
+                   restart_handler=None, connect_only: bool = False) -> bool:
+    if len(spec_files) == 1:
+        runner = SQLTestRunner(base_url, log_times=log_times)
+        if restart_handler is not None:
+            runner.set_restart_handler(restart_handler)
+        return runner.run_test_spec(spec_files[0])
+
+    max_jobs = normalize_jobs(jobs)
+    print(f"🧪 Running {len(spec_files)} suites (parallel where safe, jobs={max_jobs})")
+
+    suite_status: Dict[str, bool] = {}
+    parallel_specs: List[str] = []
+    sequential_specs: List[Tuple[str, str]] = []
+    for spec_file in spec_files:
+        metadata = load_suite_metadata(spec_file)
+        if suite_requires_managed_restart(spec_file):
+            sequential_specs.append(("direct", spec_file))
+        elif metadata.get("isolated"):
+            sequential_specs.append(("subprocess", spec_file))
+        else:
+            parallel_specs.append(spec_file)
+
+    def record_result(spec_file: str, ok: bool, output: str) -> None:
+        suite_status[spec_file] = ok
+        if output:
+            print(output, end="" if output.endswith("\n") else "\n")
+
+    with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+        futures = {
+            executor.submit(run_spec_subprocess, spec_file, port, log_times): spec_file
+            for spec_file in parallel_specs
+        }
+        for future in as_completed(futures):
+            spec_file = futures[future]
+            ok, output = future.result()
+            record_result(spec_file, ok, output)
+
+    for mode, spec_file in sequential_specs:
+        if mode == "direct":
+            if restart_handler is None and connect_only:
+                suite_status[spec_file] = False
+                print(f"❌ {spec_file}: suite requires restart handling and cannot run with --connect-only")
+                continue
+            suite_status[spec_file] = True
+            runner = SQLTestRunner(base_url, log_times=log_times)
+            if restart_handler is not None:
+                runner.set_restart_handler(restart_handler)
+            ok = runner.run_test_spec(spec_file)
+            suite_status[spec_file] = ok
+        else:
+            ok, output = run_spec_subprocess(spec_file, port, log_times)
+            record_result(spec_file, ok, output)
+
+    failed_files = [spec_file for spec_file in spec_files if not suite_status.get(spec_file, False)]
+    if failed_files:
+        print("")
+        print("❌ Some test files failed:")
+        for spec_file in failed_files:
+            print(f"   ❌ {spec_file}")
+        return False
+
+    print("")
+    print("🎉 All test files passed!")
+    return True
+
+
+def print_usage() -> None:
+    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--port N] [--connect-only] [--jobs N]")
+
+
+def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, bool, Optional[int]]:
+    spec_files: List[str] = []
+    port: Optional[int] = None
     connect_only = False
     log_times = False
+    jobs: Optional[int] = None
 
-    for arg in sys.argv[2:]:
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg == "--connect-only":
             connect_only = True
         elif arg == "--log-times":
             log_times = True
-        elif arg.isdigit():
+        elif arg in ("--jobs", "--port"):
+            i += 1
+            if i >= len(argv):
+                print_usage()
+                sys.exit(1)
+            try:
+                value = int(argv[i])
+            except ValueError:
+                print_usage()
+                sys.exit(1)
+            if arg == "--jobs":
+                jobs = value
+            else:
+                port = value
+        elif arg.startswith("--jobs="):
+            try:
+                jobs = int(arg.split("=", 1)[1])
+            except ValueError:
+                print_usage()
+                sys.exit(1)
+        elif arg.startswith("--port="):
+            try:
+                port = int(arg.split("=", 1)[1])
+            except ValueError:
+                print_usage()
+                sys.exit(1)
+        elif arg.startswith("--"):
+            print_usage()
+            sys.exit(1)
+        elif arg.isdigit() and port is None:
             port = int(arg)
+        else:
+            spec_files.append(arg)
+        i += 1
+
+    return spec_files, port, connect_only, log_times, jobs
+
+
+def main():
+    if len(sys.argv) < 2:
+        print_usage()
+        sys.exit(1)
+
+    spec_files, port, connect_only, log_times, jobs = parse_cli_args(sys.argv[1:])
+
+    if not spec_files:
+        print_usage()
+        sys.exit(1)
 
     if port is None:
         if connect_only:
@@ -1054,7 +1241,10 @@ def main():
             memcp_process = start_memcp_process(port)
             return memcp_process is not None
         runner.set_restart_handler(restart_handler)
-    success = runner.run_test_spec(spec_file)
+    if len(spec_files) == 1:
+        success = runner.run_test_spec(spec_files[0])
+    else:
+        success = run_test_specs(spec_files, base_url, port, log_times, jobs, restart_handler if not connect_only else None, connect_only)
 
     if not connect_only and memcp_process:
         stop_memcp_process(memcp_process)

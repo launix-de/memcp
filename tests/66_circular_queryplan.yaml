@@ -92,7 +92,6 @@ test_cases:
           task_title: "Feature"
 
   - name: "full pattern: wrapped derived + EXISTS + multiple LEFT JOINs"
-    noncritical: true  # worker_has_event returns false instead of true (correlated EXISTS in COALESCE not resolved)
     sql: |
       SELECT t.* FROM (
         SELECT a.ID AS ID, a.task AS task,

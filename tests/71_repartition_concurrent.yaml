@@ -5,7 +5,6 @@
 metadata:
   version: "1.0"
   description: "Concurrent repartition: dual-write correctness"
-  disabled: true  # bulk insert of 61k rows with PK times out; needs unique check optimization
 
 setup:
   - sql: "DROP TABLE IF EXISTS `rc_data`"
@@ -56,6 +55,32 @@ test_cases:
     sql: "UPDATE rc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
     expect:
       affected_rows: 50
+
+  - name: "RC: concurrent stable COUNT on unaffected prefix"
+    parallel: repart
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 0 AND id < 100"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  - name: "RC: concurrent stable point lookup"
+    parallel: repart
+    sql: "SELECT id, val, tag FROM rc_data WHERE id = 42"
+    expect:
+      rows: 1
+      data:
+        - id: 42
+          val: 42
+          tag: "t42"
+
+  - name: "RC: concurrent stable SUM on unaffected prefix"
+    parallel: repart
+    sql: "SELECT SUM(val) AS s FROM rc_data WHERE id >= 100 AND id < 110"
+    expect:
+      rows: 1
+      data:
+        - s: 1045
 
   # ---- Post-parallel verification ----
   - name: "RC: count after concurrent ops"

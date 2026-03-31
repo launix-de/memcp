@@ -222,8 +222,20 @@ type table struct {
 	Foreign         []foreignKey         // foreign keys
 	Triggers        []TriggerDescription // triggers on this table
 	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
-	mu              sync.Mutex           // schema/sharding lock
-	uniquelock      sync.Mutex           // unique insert lock
+	// LOCK ORDER CONTRACT:
+	//   1. db.schemalock
+	//   2. t.ddlMu
+	//   3. t.mu
+	//   4. s.mu
+	// Never upgrade while already holding a read lock, and never take a table
+	// lock from inside a shard lock. Heavy rebuild/repartition work must
+	// snapshot under the narrowest lock and then release it before scanning.
+	//
+	// t.mu protects table-local storage topology and long-lived maintenance
+	// state: ShardMode, Shards/PShards, rebuilding, repartitionActive and the
+	// condition variables that coordinate table-level rebuild/repartition.
+	mu         sync.Mutex
+	uniquelock sync.Mutex // unique insert lock
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
 	// Software contract:
@@ -423,27 +435,20 @@ func (t *table) beginManualRepartition() bool {
 	return true
 }
 
-// isEphemeralQueryTable identifies query-local scratch tables (keytables,
-// prejoins, scalar helper tables, etc.). These are dot-prefixed and created
-// with non-durable engines so they can be recreated from the query plan after
-// eviction. Global rebuild/repartition must skip them; otherwise a background
-// "(rebuild)" can rebuild a live query's scratch tables and interfere with the
-// in-flight scan.
+const queryScratchComment = "__memcp_query_temp"
+
+// isEphemeralQueryTable identifies planner-owned query scratch tables
+// (keytables, prejoins, scalar helper tables, etc.). These relations are
+// explicitly marked at creation time so persistence/rebuild can skip them
+// without conflating them with user-created hidden tables.
 //
 // Contract:
 //   - durable internal tables such as ".blobs" are NOT ephemeral and must
 //     continue to participate in rebuild/persistence.
-//   - query-local temp tables are dot-prefixed AND use a non-durable engine.
+//   - user-created hidden tables (dot prefix) are still normal tables unless
+//     they carry the internal query scratch marker.
 func (t *table) isEphemeralQueryTable() bool {
-	if !strings.HasPrefix(t.Name, ".") {
-		return false
-	}
-	switch t.PersistencyMode {
-	case Sloppy, Memory, Cache:
-		return true
-	default:
-		return false
-	}
+	return strings.HasPrefix(t.Name, ".") && t.Comment == queryScratchComment
 }
 
 // schemaWriteDurable reports whether schema.json must be flushed with Sync for

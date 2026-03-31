@@ -8,7 +8,6 @@ setup: []
 test_cases:
 
   - name: "UNION: two alternatives"
-    noncritical: true
     ttl_data: |
       @prefix u01: <http://union01.org/> .
       u01:a a u01:Cat .
@@ -21,7 +20,6 @@ test_cases:
       rows: 2
 
   - name: "UNION: no overlap"
-    noncritical: true
     ttl_data: |
       @prefix u02: <http://union02.org/> .
       u02:a u02:x "1" .
@@ -33,7 +31,6 @@ test_cases:
       rows: 2
 
   - name: "NOT EXISTS: filter out"
-    noncritical: true
     ttl_data: |
       @prefix u03: <http://union03.org/> .
       u03:a u03:name "Alice" .
@@ -48,7 +45,6 @@ test_cases:
         - "?n": "Alice"
 
   - name: "EXISTS: keep only matching"
-    noncritical: true
     ttl_data: |
       @prefix u04: <http://union04.org/> .
       u04:a u04:name "Alice" ; u04:verified "true" .

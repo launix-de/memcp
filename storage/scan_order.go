@@ -608,7 +608,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 			}
 		}
 	}()
-	result = mapper.Stream(acc, recids)
+	result = mapper.Stream(acc, recids, nil)
 	return
 }
 

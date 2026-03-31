@@ -39,6 +39,10 @@ type Scmer struct {
 const (
 	scmerStructOverhead = uint(16)
 	goAllocOverhead     = uint(16)
+	sliceLenBits        = 28
+	sliceCapBits        = 28
+	sliceLenMask        = (uint64(1) << sliceLenBits) - 1
+	sliceCapMask        = (uint64(1) << sliceCapBits) - 1
 )
 
 // ComputeSize allows Scmer to satisfy storages that expect Sizable.
@@ -58,7 +62,7 @@ const (
 	tagFloat
 	tagInt
 	tagBool
-	tagSlice
+	tagSlice  // []Scmer; aux packs len (upper 28 bits) + cap (lower 28 bits)
 	tagVector // []float64
 	tagFunc
 	tagFuncEnv
@@ -119,6 +123,21 @@ func makeAux(tag uint16, val uint64) uint64 {
 }
 func auxTag(aux uint64) uint16 { return uint16(aux & 0xFF) }
 func auxVal(aux uint64) uint64 { return aux >> 8 }
+func makeSliceAux(length, capacity int) uint64 {
+	if length < 0 || capacity < 0 || length > capacity {
+		panic(fmt.Sprintf("invalid slice header len=%d cap=%d", length, capacity))
+	}
+	if uint64(length) > sliceLenMask || uint64(capacity) > sliceCapMask {
+		panic(fmt.Sprintf("slice too large len=%d cap=%d", length, capacity))
+	}
+	return (uint64(length) << sliceCapBits) | uint64(capacity)
+}
+func decodeSliceAux(aux uint64) (int, int) {
+	val := auxVal(aux)
+	capacity := int(val & sliceCapMask)
+	length := int((val >> sliceCapBits) & sliceLenMask)
+	return length, capacity
+}
 func (s Scmer) GetTag() uint16 {
 	if s.ptr == &scmerIntSentinel {
 		return tagInt
@@ -214,11 +233,11 @@ func NewSymbol(sym string) Scmer {
 }
 
 func NewSlice(slice []Scmer) Scmer {
-	if len(slice) == 0 {
-		return Scmer{nil, makeAux(tagSlice, 0)}
+	if cap(slice) == 0 {
+		return Scmer{nil, makeAux(tagSlice, makeSliceAux(0, 0))}
 	}
 	data := unsafe.SliceData(slice)
-	return Scmer{(*byte)(unsafe.Pointer(data)), makeAux(tagSlice, uint64(len(slice)))}
+	return Scmer{(*byte)(unsafe.Pointer(data)), makeAux(tagSlice, makeSliceAux(len(slice), cap(slice)))}
 }
 
 func NewVector(vec []float64) Scmer {
@@ -708,11 +727,15 @@ func (s Scmer) Slice() []Scmer {
 	if s.GetTag() != tagSlice {
 		panic("not slice")
 	}
-	ln := int(auxVal(s.aux))
-	if ln == 0 || s.ptr == nil {
+	ln, cp := decodeSliceAux(s.aux)
+	if ln > cp {
+		panic(fmt.Sprintf("corrupt slice header len=%d cap=%d", ln, cp))
+	}
+	if cp == 0 || s.ptr == nil {
 		return nil
 	}
-	return unsafe.Slice((*Scmer)(unsafe.Pointer(s.ptr)), ln)
+	base := unsafe.Slice((*Scmer)(unsafe.Pointer(s.ptr)), cp)
+	return base[:ln:cp]
 }
 
 func (s Scmer) Vector() []float64 {

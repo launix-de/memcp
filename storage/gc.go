@@ -55,7 +55,7 @@ func cleanBlobs(db *database) int {
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 			scm.NewNil(),
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
-			false,
+			false, 0, nil,
 		)
 	}
 
