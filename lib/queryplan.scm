@@ -756,7 +756,7 @@ search order for unqualified refs (main tables before helper/unnested aliases). 
 - the resolver itself is the only place that may interpret alias variants or
   schema-driven column casing inside queryplan.scm */
 (define schema_alias_matches (lambda (query_alias schema_alias ti)
-	(alias_variants_match query_alias schema_alias ti)
+	((if ti equal?? equal?) query_alias schema_alias)
 ))
 (define resolve_schema_alias_scoped (lambda (schemas alias_ ti)
 	(if (nil? alias_) nil
@@ -786,7 +786,7 @@ search order for unqualified refs (main tables before helper/unnested aliases). 
 	(define collect_matches (lambda (schemas alias_filter)
 		(reduce_assoc schemas (lambda (acc alias cols)
 			(if (and (alias_filter alias) (schema_has_column? cols col ci))
-				(append_unique acc (list alias (schema_column_def cols col ci)))
+				(merge acc (list (list alias (schema_column_def cols col ci))))
 				acc))
 			'())))
 	(if (nil? alias_)
@@ -808,19 +808,25 @@ search order for unqualified refs (main tables before helper/unnested aliases). 
 		_ nil
 )))
 (define resolve_schema_column_ref_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
-	(match (first_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci)
-		'(resolved_alias coldef) (list resolved_alias (coldef "Field"))
-		_ nil
+	(begin
+		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci))
+		(if (nil? resolved)
+			nil
+			(list (car resolved) ((cadr resolved) "Field")))
 )))
 (define resolve_unique_schema_column_ref_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
-	(match (unique_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci)
-		'(resolved_alias coldef) (list resolved_alias (coldef "Field"))
-		_ nil
+	(begin
+		(define resolved (unique_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci))
+		(if (nil? resolved)
+			nil
+			(list (car resolved) ((cadr resolved) "Field")))
 )))
 (define resolve_schema_column_expr_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
-	(match (first_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci)
-		'(resolved_alias coldef) (list (quote get_column) resolved_alias false (coldef "Field") false)
-		_ nil
+	(begin
+		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci))
+		(if (nil? resolved)
+			nil
+			(list (quote get_column) (car resolved) false ((cadr resolved) "Field") false))
 )))
 /* canonicalize_columns_scoped resolves ti/ci flags to canonical casing.
 Qualified refs may use the full visible schema chain (for outer refs like src.ID).
@@ -1533,19 +1539,26 @@ or generate runtime scan code (build_queryplan).
 			expr
 		)))
 		(define replace_get_column_subselect (lambda (alias_name table_insensitive column_name column_insensitive expr) (begin
-			(define inner_alias_exists (and (not (nil? alias_name)) (not (nil? (resolve_schema_alias_scoped _s alias_name table_insensitive)))))
-			(define inner_resolved (resolve_unique_schema_column_ref_scoped _s _s alias_name table_insensitive column_name column_insensitive))
+			(define inner_alias (if (nil? alias_name) nil (resolve_schema_alias_scoped _s alias_name table_insensitive)))
+			(define inner_alias_exists (and (not (nil? alias_name)) (not (nil? inner_alias))))
+			(define inner_resolved (if (nil? alias_name)
+				(resolve_schema_column_ref_scoped _s _s nil false column_name column_insensitive)
+				(begin
+					(define inner_coldef (if (nil? inner_alias) nil (schema_column_def (_s inner_alias) column_name column_insensitive)))
+					(if (nil? inner_coldef) nil (list inner_alias (inner_coldef "Field"))))))
 			(if (and inner_alias_exists (nil? inner_resolved))
 				(error (concat "column " alias_name "." column_name " does not exist in subquery"))
 				(if (not (nil? inner_resolved))
 					(if (or (nil? alias_name) table_insensitive column_insensitive)
-						(begin
-							(match inner_resolved
-								'(inner_alias inner_column)
-								'((quote get_column) inner_alias false inner_column false)))
+						(list (quote get_column) (car inner_resolved) false (cadr inner_resolved) false)
 						expr)
 					(begin
-						(define outer_resolved (resolve_unique_schema_column_ref_scoped _o _o alias_name table_insensitive column_name column_insensitive))
+						(define outer_alias (if (nil? alias_name) nil (resolve_schema_alias_scoped _o alias_name table_insensitive)))
+						(define outer_resolved (if (nil? alias_name)
+							(resolve_schema_column_ref_scoped _o _o nil false column_name column_insensitive)
+							(begin
+								(define outer_coldef (if (nil? outer_alias) nil (schema_column_def (_o outer_alias) column_name column_insensitive)))
+								(if (nil? outer_coldef) nil (list outer_alias (outer_coldef "Field"))))))
 						(if (nil? outer_resolved)
 							(if (nil? alias_name)
 								(error (concat "column " column_name " does not exist in outer query"))
@@ -2644,19 +2657,14 @@ or generate runtime scan code (build_queryplan).
 							and should not participate in unqualified column resolution. */
 							(define inner_visible_schemas (filter_assoc schemas2 (lambda (alias cols)
 								(equal? (replace alias "\0" "") alias))))
-							(define matches (collect_schema_column_matches_scoped inner_visible_schemas inner_visible_schemas nil false col ci))
-							(match matches
-								'((only coldef)) '('get_column (concat id "\0" only) false (coldef "Field") false)
-								'() (begin
+							(define resolved (resolve_schema_column_ref_scoped inner_visible_schemas inner_visible_schemas nil false col ci))
+							(if (nil? resolved)
+								(begin
 									/* column not in schemas2 - check if it's a SELECT alias in fields2 */
 									(if (nil? (fields2 col))
-										expr /* leave unresolved — inner subselect scope will handle it */
-										/* found in fields2 - resolve to the underlying expression */
-										(replace_column_alias (fields2 col))
-									)
-								)
-								_ (error (concat "ambiguous column " col " in subquery"))
-							)
+										expr
+										(replace_column_alias (fields2 col))))
+								'((quote get_column) (concat id "\0" (car resolved)) false (cadr resolved) false))
 						)
 						'((symbol get_column) alias_ ti col ci) (if (not (nil? (schemas2 alias_)))
 							'('get_column (concat id "\0" alias_) ti col ci)
@@ -2988,7 +2996,15 @@ or generate runtime scan code (build_queryplan).
 			(reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
 			/* tblalias -> look up the field */
 			(begin
-				(define rename_fn (assoc_lookup_variants renamelist (alias_lookup_variants alias_)))
+				(define alias_str (string alias_))
+				(define alias_sym (symbol alias_str))
+				(define rename_fn (if (has_assoc? renamelist alias_)
+					(renamelist alias_)
+					(if (has_assoc? renamelist alias_str)
+						(renamelist alias_str)
+						(if (has_assoc? renamelist alias_sym)
+							(renamelist alias_sym)
+							nil))))
 				(if (nil? rename_fn) expr (rename_fn col))
 			)
 		)
@@ -2997,7 +3013,15 @@ or generate runtime scan code (build_queryplan).
 			(reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
 			/* tblalias -> look up the field */
 			(begin
-				(define rename_fn (assoc_lookup_variants renamelist (alias_lookup_variants alias_)))
+				(define alias_str (string alias_))
+				(define alias_sym (symbol alias_str))
+				(define rename_fn (if (has_assoc? renamelist alias_)
+					(renamelist alias_)
+					(if (has_assoc? renamelist alias_str)
+						(renamelist alias_str)
+						(if (has_assoc? renamelist alias_sym)
+							(renamelist alias_sym)
+							nil))))
 				(if (nil? rename_fn) expr (rename_fn col))
 			)
 		)

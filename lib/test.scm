@@ -187,7 +187,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"(get_column \"memcp-tests.Ticket\" false \"ID\" false)") true "canonicalize_expr plus serialize_canonical_expr uses exact alias lookup after schema canonicalization")
 	(assert (equal? (resolve_schema_alias_scoped schema_case "ticket" true) "Ticket") true "resolve_schema_alias_scoped canonicalizes case-insensitive alias lookup")
 	(assert (equal? (resolve_schema_column_ref_scoped schema_case schema_case "ticket" true "id" true) '("Ticket" "ID")) true "resolve_schema_column_ref_scoped resolves alias and column")
-	(assert (equal? (resolve_schema_column_expr_scoped schema_case schema_case "ticket" true "id" true) '(get_column "Ticket" false "ID" false)) true "resolve_schema_column_expr_scoped returns canonical get_column")
+	(assert (equal? (serialize (resolve_schema_column_expr_scoped schema_case schema_case "ticket" true "id" true)) "(get_column \"Ticket\" false \"ID\" false)") true "resolve_schema_column_expr_scoped returns canonical get_column")
 	(define planner_contract (newsession))
 	(try (lambda () (require_canonical_logical_expr "unit" case_expr)) (lambda (e) (planner_contract "raw" true)))
 	(assert (planner_contract "raw") true "planner contract rejects raw case-insensitive get_column markers")
