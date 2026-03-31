@@ -1,7 +1,6 @@
 # GROUP BY SUM Test Suite
 
 metadata:
-  isolated: true
   version: "1.0"
   description: "Validate SELECT a, SUM(b) FROM tbl GROUP BY a"
 

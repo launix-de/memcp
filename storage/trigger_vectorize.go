@@ -16,8 +16,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
-import "fmt"
 import "github.com/launix-de/memcp/scm"
 
 // VectorizeTrigger analyzes a trigger body and produces a vectorized version
@@ -25,16 +23,18 @@ import "github.com/launix-de/memcp/scm"
 // body cannot be vectorized (falls back to per-row execution).
 //
 // Currently recognizes the prejoin DELETE pattern:
-//   (lambda (OLD NEW) (scan schema tbl condCols
-//       (lambda (cols...) (equal? col (get_assoc OLD key)))
-//       (list "$update") (lambda ($update) ($update)) + 0 nil false))
+//
+//	(lambda (OLD NEW) (scan schema tbl condCols
+//	    (lambda (cols...) (equal? col (get_assoc OLD key)))
+//	    (list "$update") (lambda ($update) ($update)) + 0 nil false))
 //
 // Vectorized form:
-//   (lambda (OLD_batch NEW_batch)
-//       (define vals (map OLD_batch (lambda (OLD) (get_assoc OLD key))))
-//       (scan schema tbl condCols
-//           (lambda (cols...) (has? vals col))
-//           (list "$update") (lambda ($update) ($update)) + 0 nil false))
+//
+//	(lambda (OLD_batch NEW_batch)
+//	    (define vals (map OLD_batch (lambda (OLD) (get_assoc OLD key))))
+//	    (scan schema tbl condCols
+//	        (lambda (cols...) (has? vals col))
+//	        (list "$update") (lambda ($update) ($update)) + 0 nil false))
 func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	// Extract the proc body
 	if !triggerFn.IsProc() {
@@ -156,13 +156,6 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 // Returns "" if the pattern is not found.
 func extractGetAssocOldKey(filterFn scm.Scmer) string {
 	var body scm.Scmer
-	fmt.Fprintln(os.Stderr, "  [extractKey] isProc:", filterFn.IsProc(), "isSlice:", filterFn.IsSlice())
-	if filterFn.IsSlice() {
-		sl := filterFn.Slice()
-		if len(sl) >= 3 {
-			fmt.Fprintln(os.Stderr, "  [extractKey] sl[0]:", scm.String(sl[0]), "isSymbol:", sl[0].IsSymbol(), "tag:", sl[0].GetTag())
-		}
-	}
 	if filterFn.IsProc() {
 		body = filterFn.Proc().Body
 	} else if filterFn.IsSlice() {

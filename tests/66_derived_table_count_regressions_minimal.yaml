@@ -16,7 +16,7 @@
 metadata:
   version: "1.0"
   description: "Minimal derived-table COUNT and reuse regressions"
-  isolate: true
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS dtc_parent"

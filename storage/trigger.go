@@ -16,7 +16,6 @@ Copyright (C) 2025, 2026  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
 import "fmt"
 import "errors"
 import "encoding/json"
@@ -131,27 +130,153 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 
 // TriggerDescription holds all information about a trigger
 type TriggerDescription struct {
-	Name      string        `json:"name"`                 // Trigger name (user-defined or auto-generated)
-	Timing    TriggerTiming `json:"timing"`               // BEFORE/AFTER INSERT/UPDATE/DELETE
-	Func      scm.Scmer     `json:"func"`                 // The trigger function (compiled Scheme procedure)
-	SourceSQL string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
-	IsSystem  bool          `json:"is_system,omitempty"`  // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
+	Name       string        `json:"name"`                 // Trigger name (user-defined or auto-generated)
+	Timing     TriggerTiming `json:"timing"`               // BEFORE/AFTER INSERT/UPDATE/DELETE
+	Func       scm.Scmer     `json:"func"`                 // The trigger function (compiled Scheme procedure)
+	FuncPlan   scm.Scmer     `json:"-"`                    // Unevaluated lambda AST for SQL triggers; compiled lazily on first use
+	SourceSQL  string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
+	IsSystem   bool          `json:"is_system,omitempty"`  // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
 	Hidden     bool          `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
 	Priority   int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
 	Async      bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
 	VectorFunc scm.Scmer     `json:"-"`                    // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
 }
 
+type persistedTriggerDescription struct {
+	Name      string        `json:"name"`
+	Timing    TriggerTiming `json:"timing"`
+	Func      *scm.Scmer    `json:"func,omitempty"`
+	SourceSQL string        `json:"source_sql,omitempty"`
+	IsSystem  bool          `json:"is_system,omitempty"`
+	Hidden    bool          `json:"hidden,omitempty"`
+	Priority  int           `json:"priority,omitempty"`
+	Async     bool          `json:"async,omitempty"`
+}
+
+func (tr TriggerDescription) MarshalJSON() ([]byte, error) {
+	persist := persistedTriggerDescription{
+		Name:      tr.Name,
+		Timing:    tr.Timing,
+		SourceSQL: tr.SourceSQL,
+		IsSystem:  tr.IsSystem,
+		Hidden:    tr.Hidden,
+		Priority:  tr.Priority,
+		Async:     tr.Async,
+	}
+	// SQL triggers can be restored from source_sql on load; persisting the
+	// compiled Scheme AST would bloat schema.json dramatically.
+	if tr.SourceSQL == "" {
+		fn := tr.Func
+		persist.Func = &fn
+	}
+	return json.Marshal(persist)
+}
+
+func (tr *TriggerDescription) UnmarshalJSON(data []byte) error {
+	var persist persistedTriggerDescription
+	if err := json.Unmarshal(data, &persist); err != nil {
+		return err
+	}
+	tr.Name = persist.Name
+	tr.Timing = persist.Timing
+	tr.SourceSQL = persist.SourceSQL
+	tr.IsSystem = persist.IsSystem
+	tr.Hidden = persist.Hidden
+	tr.Priority = persist.Priority
+	tr.Async = persist.Async
+	tr.FuncPlan = scm.NewNil()
+	tr.VectorFunc = scm.NewNil()
+	if persist.Func != nil {
+		tr.Func = *persist.Func
+	} else {
+		tr.Func = scm.NewNil()
+	}
+	return nil
+}
+
+func triggerScmerMissing(v scm.Scmer) bool {
+	return v.IsNil()
+}
+
+func unwrapDeferredTriggerBody(body scm.Scmer) (scm.Scmer, scm.Scmer) {
+	if !body.IsSlice() {
+		return body, scm.NewNil()
+	}
+	items := body.Slice()
+	if len(items) == 2 && scm.String(items[0]) == "quote" {
+		return unwrapDeferredTriggerBody(items[1])
+	}
+	if len(items) != 2 || scm.String(items[0]) != "deferred_trigger" {
+		return body, scm.NewNil()
+	}
+	return scm.NewNil(), items[1]
+}
+
+func finalizeTriggerCompilation(trigger *TriggerDescription) {
+	if triggerScmerMissing(trigger.Func) {
+		return
+	}
+	if (trigger.IsSystem || trigger.Hidden || trigger.SourceSQL == "") && trigger.VectorFunc.IsNil() {
+		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
+			trigger.VectorFunc = vf
+		}
+	}
+}
+
+func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescription) {
+	if !triggerScmerMissing(trigger.Func) {
+		finalizeTriggerCompilation(trigger)
+		return
+	}
+	if !triggerScmerMissing(trigger.FuncPlan) {
+		trigger.Func = scm.Eval(trigger.FuncPlan, &scm.Globalenv)
+		trigger.FuncPlan = scm.NewNil()
+		finalizeTriggerCompilation(trigger)
+		return
+	}
+	loadPersistedTriggerPlan(schemaName, tableName, trigger)
+	if !triggerScmerMissing(trigger.FuncPlan) {
+		trigger.Func = scm.Eval(trigger.FuncPlan, &scm.Globalenv)
+		trigger.FuncPlan = scm.NewNil()
+	}
+	finalizeTriggerCompilation(trigger)
+}
+
 // GetTriggers returns all triggers for a specific timing
 func (t *table) GetTriggers(timing TriggerTiming) []TriggerDescription {
 	t.mu.Lock()
 	result := make([]TriggerDescription, 0, len(t.Triggers))
-	for _, tr := range t.Triggers {
-		if tr.Timing == timing {
-			result = append(result, tr)
+	type lazyTrigger struct {
+		triggerIndex int
+		resultIndex  int
+	}
+	lazy := make([]lazyTrigger, 0)
+	for i, tr := range t.Triggers {
+		if tr.Timing != timing {
+			continue
+		}
+		result = append(result, tr)
+		if triggerScmerMissing(tr.Func) && (!triggerScmerMissing(tr.FuncPlan) || tr.SourceSQL != "") {
+			lazy = append(lazy, lazyTrigger{triggerIndex: i, resultIndex: len(result) - 1})
 		}
 	}
 	t.mu.Unlock()
+	for _, item := range lazy {
+		tr := result[item.resultIndex]
+		compileTriggerForUse(t.schema.Name, t.Name, &tr)
+		result[item.resultIndex] = tr
+
+		t.mu.Lock()
+		if item.triggerIndex < len(t.Triggers) {
+			current := &t.Triggers[item.triggerIndex]
+			if current.Name == tr.Name && current.Timing == tr.Timing && triggerScmerMissing(current.Func) {
+				current.Func = tr.Func
+				current.FuncPlan = tr.FuncPlan
+				current.VectorFunc = tr.VectorFunc
+			}
+		}
+		t.mu.Unlock()
+	}
 	return result
 }
 
@@ -159,51 +284,11 @@ func (t *table) GetTriggers(timing TriggerTiming) []TriggerDescription {
 // the trigger for batch execution (DELETE/INSERT patterns on prejoin tables).
 func (t *table) AddTrigger(trigger TriggerDescription) {
 	// Auto-vectorize: try to produce a batch-aware version of the trigger
-	if trigger.VectorFunc.IsNil() && !trigger.Func.IsNil() {
-		if trigger.Timing == AfterDelete {
-			fmt.Fprintln(os.Stderr, "[AT-DEL]", trigger.Name, "isProc:", trigger.Func.IsProc())
-			if trigger.Func.IsProc() {
-				b := trigger.Func.Proc().Body
-				fmt.Fprintln(os.Stderr, "  body isSlice:", b.IsSlice())
-				if b.IsSlice() {
-					items := b.Slice()
-					fmt.Fprintln(os.Stderr, "  len:", len(items))
-					if len(items) > 4 {
-						fmt.Fprintln(os.Stderr, "  head:", scm.String(items[0]), "isSymbol:", items[0].IsSymbol())
-						fmt.Fprintln(os.Stderr, "  items[4] tag:", items[4].GetTag(), "isSlice:", items[4].IsSlice())
-						if items[4].IsSlice() {
-							sl := items[4].Slice()
-							if len(sl) >= 3 {
-								fmt.Fprintln(os.Stderr, "  lambda body:", scm.String(sl[2]))
-								if sl[2].IsSlice() {
-									bs := sl[2].Slice()
-									fmt.Fprintln(os.Stderr, "  body[0]:", scm.String(bs[0]), "isSymbol:", bs[0].IsSymbol(), "declName:", declName(bs[0]))
-									if len(bs) == 3 {
-										fmt.Fprintln(os.Stderr, "  body[2]:", scm.String(bs[2]), "isSlice:", bs[2].IsSlice())
-										if bs[2].IsSlice() {
-											ga := bs[2].Slice()
-											fmt.Fprintln(os.Stderr, "  getassoc head:", scm.String(ga[0]), "declName:", declName(ga[0]))
-											fmt.Fprintln(os.Stderr, "  getassoc[1]:", scm.String(ga[1]), "isSymbol:", ga[1].IsSymbol())
-											fmt.Fprintln(os.Stderr, "  getassoc[2]:", scm.String(ga[2]), "isString:", ga[2].IsString(), "isSymbol:", ga[2].IsSymbol())
-										}
-									}
-								}
-							}
-						}
-						key := extractGetAssocOldKey(items[4])
-						fmt.Fprintln(os.Stderr, "  extracted key:", key)
-						if len(items) > 5 {
-							fmt.Fprintln(os.Stderr, "  containsUpdate:", containsUpdateCol(items[5]))
-						}
-					}
-				}
-			}
-		}
-		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
-			trigger.VectorFunc = vf
-			fmt.Fprintln(os.Stderr, "[VECTORIZED]", trigger.Name)
-		}
-	}
+	// Contract: only internal/system triggers participate in automatic
+	// vectorization. User-facing SQL triggers may have very large bodies;
+	// walking their full AST during CREATE TRIGGER would make schema setup
+	// disproportionately expensive without improving correctness.
+	finalizeTriggerCompilation(&trigger)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// Keep trigger list ordered by priority (lower = earlier). For equal

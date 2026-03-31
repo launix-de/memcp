@@ -8,7 +8,7 @@
 metadata:
   version: "1.0"
   description: "LEFT JOIN with correlated subselect in ON condition"
-  isolate: true
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS ljco_vehicle"

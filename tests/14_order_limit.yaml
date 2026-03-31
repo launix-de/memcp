@@ -1,9 +1,9 @@
 # ORDER BY and LIMIT/OFFSET
 
 metadata:
-  isolated: true
   version: "1.0"
   description: "Ordering by multiple keys with pagination"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS ord_t"

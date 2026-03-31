@@ -195,6 +195,72 @@ func (u *storageShard) load(t *table) {
 	}
 }
 
+func (u *storageShard) schemaColumn(colName string) *column {
+	for _, c := range u.t.Columns {
+		if c.Name == colName {
+			return c
+		}
+	}
+	return nil
+}
+
+func (u *storageShard) makeComputedColumnProxy(colName string, col *column) ColumnStorage {
+	if col == nil || len(col.OrcSortCols) == 0 {
+		return nil
+	}
+	return &StorageComputeProxy{
+		delta:     make(map[uint32]scm.Scmer),
+		shard:     u,
+		colName:   colName,
+		count:     u.main_count,
+		isOrdered: true,
+	}
+}
+
+func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnStorage) ColumnStorage {
+	if blob, ok := columnstorage.(*OverlayBlob); ok {
+		blob.SetSchema(u.t.schema)
+	}
+	col := u.schemaColumn(colName)
+	if proxy, ok := columnstorage.(*StorageComputeProxy); ok {
+		// StorageComputeProxy persists only durable state. Runtime bindings to
+		// the owning shard/column must be restored when the storage is loaded.
+		proxy.shard = u
+		proxy.colName = colName
+		if col != nil && len(col.OrcSortCols) > 0 {
+			proxy.isOrdered = true
+		}
+		return proxy
+	}
+	// ORC columns are a runtime contract, not a best-effort cache. Older or
+	// partially rebuilt shards may still have a plain placeholder storage on
+	// disk (`StorageSparse`, `const[nil]`, ...). Rehydrate those columns into an
+	// ordered proxy so readers/rebuilds never publish the placeholder as a real
+	// user-visible value column.
+	if proxy := u.makeComputedColumnProxy(colName, col); proxy != nil {
+		return proxy
+	}
+	return columnstorage
+}
+
+// Most loaded storages are already runtime-ready. Only blob/computed/ORC-backed
+// columns require a re-attach step on access. Keeping plain columns on the
+// read-only fast path avoids self-deadlocks when a scan callback recursively
+// scans the same shard while already holding u.mu.RLock().
+func (u *storageShard) needsRuntimeAttach(colName string, columnstorage ColumnStorage) bool {
+	if columnstorage == nil {
+		return false
+	}
+	if _, ok := columnstorage.(*OverlayBlob); ok {
+		return true
+	}
+	if _, ok := columnstorage.(*StorageComputeProxy); ok {
+		return true
+	}
+	col := u.schemaColumn(colName)
+	return col != nil && isRuntimeComputedColumn(col)
+}
+
 // ensureColumnLoaded loads a single column storage when first accessed.
 // If alreadyLocked is true, the caller must hold u.mu.Lock() and no locks
 // are taken inside this function. Otherwise, it acquires the appropriate
@@ -207,10 +273,16 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 			panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
 		}
 		if cs != nil {
+			cs = u.attachColumnRuntime(colName, cs)
+			u.columns[colName] = cs
 			return cs
 		}
 		if u.t.PersistencyMode == Memory || u.t.PersistencyMode == Cache {
-			u.columns[colName] = new(StorageSparse)
+			if proxy := u.makeComputedColumnProxy(colName, u.schemaColumn(colName)); proxy != nil {
+				u.columns[colName] = proxy
+			} else {
+				u.columns[colName] = new(StorageSparse)
+			}
 			return u.columns[colName]
 		}
 		release := acquireLoadSlot()
@@ -225,15 +297,10 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 		cnt := columnstorage.Deserialize(f)
 		f.Close()
-		if blob, ok := columnstorage.(*OverlayBlob); ok {
-			blob.SetSchema(u.t.schema)
-		}
-		if proxy, ok := columnstorage.(*StorageComputeProxy); ok {
-			proxy.shard = u
-		}
 		if uint32(cnt) > u.main_count {
 			u.main_count = uint32(cnt)
 		}
+		columnstorage = u.attachColumnRuntime(colName, columnstorage)
 		u.columns[colName] = columnstorage
 		return columnstorage
 	}
@@ -250,6 +317,13 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
 	}
 	if cs != nil {
+		if !u.needsRuntimeAttach(colName, cs) {
+			return cs
+		}
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		cs = u.attachColumnRuntime(colName, u.columns[colName])
+		u.columns[colName] = cs
 		return cs
 	}
 	// Acquire write lock and load
@@ -324,15 +398,22 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 			// column was added after the shard was created and the old shard was
 			// later reloaded from disk). Mirror the fallback from the unlocked
 			// path so scans can still proceed under the shard write lock.
-			for _, c := range u.t.Columns {
-				if c.Name == colName {
+			if col := u.schemaColumn(colName); col != nil {
+				if proxy := u.makeComputedColumnProxy(colName, col); proxy != nil {
+					u.columns[colName] = proxy
+				} else {
 					u.columns[colName] = new(StorageSparse)
-					return u.columns[colName]
 				}
+				return u.columns[colName]
 			}
 			panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
 		}
 		if cs != nil {
+			if !u.needsRuntimeAttach(colName, cs) {
+				return cs
+			}
+			cs = u.attachColumnRuntime(colName, cs)
+			u.columns[colName] = cs
 			return cs
 		}
 		return u.ensureColumnLoaded(colName, true)
@@ -345,20 +426,29 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
 	if !present {
-		for _, c := range u.t.Columns {
-			if c.Name == colName {
-				u.mu.Lock()
-				if _, present2 := u.columns[colName]; !present2 {
+		if col := u.schemaColumn(colName); col != nil {
+			u.mu.Lock()
+			if _, present2 := u.columns[colName]; !present2 {
+				if proxy := u.makeComputedColumnProxy(colName, col); proxy != nil {
+					u.columns[colName] = proxy
+				} else {
 					u.columns[colName] = new(StorageSparse)
 				}
-				cs2 := u.columns[colName]
-				u.mu.Unlock()
-				return cs2
 			}
+			cs2 := u.columns[colName]
+			u.mu.Unlock()
+			return cs2
 		}
 		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
 	}
 	if cs != nil {
+		if !u.needsRuntimeAttach(colName, cs) {
+			return cs
+		}
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		cs = u.attachColumnRuntime(colName, u.columns[colName])
+		u.columns[colName] = cs
 		return cs
 	}
 	return u.ensureColumnLoaded(colName, false)
@@ -641,6 +731,10 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil)
 }
 
+func isRuntimeComputedColumn(colDesc *column) bool {
+	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
+}
+
 func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch) func(...scm.Scmer) scm.Scmer {
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
@@ -720,6 +814,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// can write delta rows that miss PK/other fields.
 				d2 := make([]scm.Scmer, 0, len(t.t.Columns))
 				for _, colDesc := range t.t.Columns {
+					if isRuntimeComputedColumn(colDesc) {
+						continue
+					}
 					k := colDesc.Name
 					cs := t.getColumnStorageOrPanicEx(k, true)
 					colidx, ok := t.deltaColumns[k]
@@ -740,11 +837,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					pCols := make([]string, 0, len(t.t.Columns))
 					pRow := make([]scm.Scmer, 0, len(t.t.Columns))
 					for _, colDesc := range t.t.Columns {
+						if isRuntimeComputedColumn(colDesc) {
+							continue
+						}
 						colName := colDesc.Name
 						pos, ok := t.deltaColumns[colName]
 						if !ok || pos >= len(d2) {
-							pCols = append(pCols, colName)
-							pRow = append(pRow, scm.NewNil())
 							continue
 						}
 						pCols = append(pCols, colName)
@@ -1130,21 +1228,21 @@ type ShardMapReducer struct {
 	isBreak         []bool // true for $break column
 	hasBreakCol     bool
 	// tagClosure hoisted fn ptrs — allocated once per mapper, reused per row
-	setClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
-	incrClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
-	invClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
-	noopClosureFn   *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
-	breakClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
-	args            []scm.Scmer                             // pre-allocated args buffer
-	mapFn           func(...scm.Scmer) scm.Scmer
-	reduceFn        func(...scm.Scmer) scm.Scmer
-	mapScmer        scm.Scmer // original Scmer for network serialization
-	deleteBatch     *triggerBatch // when set, DELETE triggers are batched instead of per-row
+	setClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
+	incrClosureFn  []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
+	invClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
+	noopClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
+	breakClosureFn *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
+	args           []scm.Scmer                             // pre-allocated args buffer
+	mapFn          func(...scm.Scmer) scm.Scmer
+	reduceFn       func(...scm.Scmer) scm.Scmer
+	mapScmer       scm.Scmer     // original Scmer for network serialization
+	deleteBatch    *triggerBatch // when set, DELETE triggers are batched instead of per-row
 	// Batched side effects: collected during scan, flushed after lock release.
 	// $increment calls are aggregated per (proxy, recid) → one update per unique target.
 	incrementBatch  map[*StorageComputeProxy]map[uint32]scm.Scmer // proxy → recid → accumulated delta
-	invalidateBatch map[*StorageComputeProxy]bool                  // proxies to InvalidateAll after scan
-	reduceScmer     scm.Scmer // original Scmer for network serialization
+	invalidateBatch map[*StorageComputeProxy]bool                 // proxies to InvalidateAll after scan
+	reduceScmer     scm.Scmer                                     // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
 	hasIncrementCol bool
@@ -1883,6 +1981,14 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 			return item[colidx]
 		}
 	}
+	// Computed / ORC columns have no physical delta slot. Their value contract is
+	// defined by the column runtime, so delta rows must read through the proxy
+	// instead of silently degrading to NULL.
+	if cs, ok := t.columns[col]; ok {
+		if proxy, ok := cs.(*StorageComputeProxy); ok {
+			return proxy.GetValue(t.main_count + uint32(idx))
+		}
+	}
 	return scm.NewNil()
 }
 
@@ -2200,6 +2306,27 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		}
 		t.mu.RUnlock()
 
+		rowCap := int(t.main_count) + maxInsertIndex - int(deletions.Count())
+		if rowCap < 0 {
+			rowCap = 0
+		}
+		rebuiltRowIDs := make([]uint32, 0, rowCap)
+		if sortPerm != nil {
+			rebuiltRowIDs = append(rebuiltRowIDs, sortPerm...)
+		} else {
+			for idx := uint32(0); idx < t.main_count; idx++ {
+				if !deletions.Get(uint(idx)) {
+					rebuiltRowIDs = append(rebuiltRowIDs, idx)
+				}
+			}
+			for idx := 0; idx < maxInsertIndex; idx++ {
+				globalID := t.main_count + uint32(idx)
+				if !deletions.Get(uint(globalID)) {
+					rebuiltRowIDs = append(rebuiltRowIDs, globalID)
+				}
+			}
+		}
+
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
 		for col, c := range columnSnapshot {
@@ -2209,13 +2336,19 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				b.WriteString(", ")
 			}
 
-			// StorageComputeProxy: read only VALID cached values, skip computor
-			// for invalid rows (use nil instead). This avoids infinite recursion
-			// when the computor scans other tables during concurrent rebuild.
-			// The proxy is NOT ported — values are materialized into static storage.
-			// After rebuild, createcolumn will re-create the proxy if needed.
 			if oldProxy, ok := c.(*StorageComputeProxy); ok {
-				c = &safeProxyReader{proxy: oldProxy}
+				newProxy := cloneComputeProxyRows(oldProxy, result, rebuiltRowIDs)
+				result.columns[col] = newProxy
+				result.main_count = uint32(len(rebuiltRowIDs))
+				b.WriteString(col)
+				b.WriteString(" ")
+				b.WriteString(newProxy.String())
+				if t.t.PersistencyMode != Memory && t.t.PersistencyMode != Cache {
+					f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
+					newProxy.Serialize(f)
+					f.Close()
+				}
+				continue
 			}
 
 			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages

@@ -3,7 +3,6 @@
 # Uses the parallel test directive to launch rebuild and DML operations simultaneously.
 
 metadata:
-  isolated: true
   version: "1.0"
   description: "Concurrent repartition: dual-write correctness"
   disabled: true  # bulk insert of 61k rows with PK times out; needs unique check optimization

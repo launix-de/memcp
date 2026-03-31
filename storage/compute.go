@@ -36,7 +36,14 @@ func newCachedColumnReader(col ColumnStorage) ColumnReader {
 	return col.GetCachedReader()
 }
 
-func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+	t.schema.schemalock.Lock()
+	metadataLocked := true
+	defer func() {
+		if metadataLocked {
+			t.schema.schemalock.Unlock()
+		}
+	}()
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// found the column
@@ -44,6 +51,8 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 			t.Columns[i].ComputorInputCols = inputCols
 			// register cache invalidation triggers on source tables
 			t.registerComputeTriggers(name, computor)
+			t.schema.schemalock.Unlock()
+			metadataLocked = false
 			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
 			for i, s := range shardlist {
@@ -61,8 +70,6 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 							s = s.rebuild(false)
 							shardlist[i] = s
 							t.mu.Unlock()
-							// persist new shard UUID after publishing
-							t.schema.save()
 						}
 						done <- nil
 					}
@@ -82,10 +89,20 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 				}
 				GlobalCache.UpdateSize(c, totalRows*16) // ~16 bytes per value estimate
 			}
+			t.schema.schemalock.Lock()
+			metadataLocked = true
+			t.finishSchemaMutationLocked()
+			metadataLocked = false
 			return
 		}
 	}
 	panic("column " + t.Name + "." + name + " does not exist")
+}
+
+func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+	t.ddlMu.Lock()
+	defer t.ddlMu.Unlock()
+	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
 }
 
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool) bool {
@@ -159,9 +176,10 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 // mapFn:     (lambda ($set mapCols...) ...) — passes data through to reduceFn
 // reduceFn:  (lambda (acc mapped) ...) — calls ($set newVal), returns new acc
 // reduceInit: initial accumulator value
-func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
 	found := false
 	paramsChanged := false
+	t.schema.schemalock.Lock()
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// Detect parameter changes (different OVER clause on same column).
@@ -179,12 +197,19 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 		}
 	}
 	if !found {
+		t.schema.schemalock.Unlock()
 		panic("ComputeOrderedColumn: column " + t.Name + "." + name + " does not exist")
 	}
 
+	// Register triggers while the table-local DDL contract is held and persist
+	// the new ORC metadata atomically into schema.json before any rebuild can
+	// publish a stale shard snapshot of this table.
+	t.registerORCTriggers(name)
+	t.finishSchemaMutationLocked()
+
 	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
 	// If ORC params changed (different OVER clause), invalidate all proxies.
-	for _, s := range t.ActiveShards() {
+	for _, s := range t.maintenanceShards() {
 		t.initORCShard(s, name)
 		if paramsChanged {
 			s.mu.RLock()
@@ -195,12 +220,12 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 			}
 		}
 	}
+}
 
-	// Register triggers: mutations → partial invalidation.
-	t.registerORCTriggers(name)
-
-	// Persist ORC parameters and trigger registrations.
-	t.schema.save()
+func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+	t.ddlMu.Lock()
+	defer t.ddlMu.Unlock()
+	t.computeOrderedColumnDDLLocked(name, sortCols, sortDirs, partCount, mapCols, mapFn, reduceFn, reduceInit)
 }
 
 // initORCShard ensures a StorageComputeProxy with isOrdered=true exists on shard s.
@@ -243,7 +268,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	defer func() {
 		// Record recompute cost for invalidation telemetry
 		recomputeNs := time.Since(recomputeStart).Nanoseconds()
-		for _, s := range t.ActiveShards() {
+		for _, s := range t.maintenanceShards() {
 			s.mu.RLock()
 			if proxy, ok := s.columns[name].(*StorageComputeProxy); ok {
 				proxy.ResetInvalidationTelemetry(recomputeNs)
@@ -409,13 +434,13 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	// Telemetry debounce: if cumulative invalidation cost exceeds last recompute
 	// cost, skip selective invalidation — just mark all dirty. The next read will
 	// do a single full recompute instead of many small ones.
-	for _, s := range t.ActiveShards() {
+	for _, s := range t.maintenanceShards() {
 		s.mu.RLock()
 		if proxy, ok := s.columns[colName].(*StorageComputeProxy); ok {
 			if proxy.ShouldSkipSelectiveInvalidation() {
 				s.mu.RUnlock()
 				// Full invalidation is cheaper at this point
-				for _, s2 := range t.ActiveShards() {
+				for _, s2 := range t.maintenanceShards() {
 					s2.mu.RLock()
 					if p2, ok := s2.columns[colName].(*StorageComputeProxy); ok {
 						p2.InvalidateAll()
@@ -492,7 +517,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 
 	// Parallel invalidation across shards using index-accelerated iteration.
-	shards := t.ActiveShards()
+	shards := t.maintenanceShards()
 	var wg sync.WaitGroup
 	wg.Add(len(shards))
 	for _, s := range shards {

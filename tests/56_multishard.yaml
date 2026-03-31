@@ -6,9 +6,9 @@
 # - cross-shard DELETE, UPDATE, aggregation
 
 metadata:
-  isolated: true
   version: "1.0"
   description: "Multi-shard scan, order, and DML coverage"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS `ms_data`"

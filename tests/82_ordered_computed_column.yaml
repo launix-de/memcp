@@ -8,7 +8,6 @@
 metadata:
   version: "1.0"
   description: "ORC Phase 1: ROW_NUMBER, running SUM, post-mutation lazy recompute"
-  isolated: true
 
 test_cases:
 

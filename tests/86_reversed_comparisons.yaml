@@ -3,7 +3,6 @@
 # Also tests IS NULL boundary extraction for index usage.
 
 metadata:
-  isolated: true
   version: "1.0"
   description: "Reversed comparisons and IS NULL boundary extraction"
 

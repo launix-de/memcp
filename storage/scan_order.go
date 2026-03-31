@@ -133,6 +133,35 @@ type globalqueue struct {
 	q []*shardqueue
 }
 
+type topKHeap struct {
+	items []uint32
+	less  func(a, b uint32) bool
+}
+
+func (h *topKHeap) Len() int {
+	return len(h.items)
+}
+
+func (h *topKHeap) Less(i, j int) bool {
+	// Reverse the user-facing ordering so heap[0] stays the current worst item.
+	return h.less(h.items[j], h.items[i])
+}
+
+func (h *topKHeap) Swap(i, j int) {
+	h.items[i], h.items[j] = h.items[j], h.items[i]
+}
+
+func (h *topKHeap) Push(x any) {
+	h.items = append(h.items, x.(uint32))
+}
+
+func (h *topKHeap) Pop() any {
+	n := len(h.items)
+	item := h.items[n-1]
+	h.items = h.items[:n-1]
+	return item
+}
+
 // sort interface for global shard-queue
 func (s *globalqueue) Len() int {
 	return len(s.q)
@@ -181,6 +210,35 @@ func (s *globalqueue) Pop() any {
 	s.q[len(s.q)-1] = nil // already free the memory, so GC can also run during an uncompleted ordered scan
 	s.q = s.q[0 : len(s.q)-1]
 	return result
+}
+
+func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32 {
+	if keep <= 0 || len(items) == 0 {
+		return nil
+	}
+	if keep >= len(items) {
+		out := append([]uint32(nil), items...)
+		hybridsort.Slice(out, func(i, j int) bool {
+			return less(out[i], out[j])
+		})
+		return out
+	}
+	h := &topKHeap{less: less}
+	for _, item := range items {
+		if h.Len() < keep {
+			heap.Push(h, item)
+			continue
+		}
+		if less(item, h.items[0]) {
+			h.items[0] = item
+			heap.Fix(h, 0)
+		}
+	}
+	out := append([]uint32(nil), h.items...)
+	hybridsort.Slice(out, func(i, j int) bool {
+		return less(out[i], out[j])
+	})
+	return out
 }
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
@@ -778,6 +836,27 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// and now sort result!
 	result.sortdirs = adjustedSortdirs
+	itemPos := make(map[uint32]int, len(result.items))
+	for i, idx := range result.items {
+		itemPos[idx] = i
+	}
+	lessByID := func(a, b uint32) bool {
+		cmpCount := len(result.scols)
+		if len(result.sortdirs) < cmpCount {
+			cmpCount = len(result.sortdirs)
+		}
+		for c := 0; c < cmpCount; c++ {
+			av := result.scols[c](a)
+			bv := result.scols[c](b)
+			if scm.ToBool(result.sortdirs[c](av, bv)) {
+				return true
+			}
+			if scm.ToBool(result.sortdirs[c](bv, av)) {
+				return false
+			}
+		}
+		return itemPos[a] < itemPos[b]
+	}
 	// TODO: find conditions when exactly we don't need to sort anymore.
 	// The sort can be skipped when ALL of these hold:
 	// 1. The index used by iterateIndex covers the ORDER BY columns in
@@ -792,9 +871,18 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	//    order matches ORDER BY and there are no deltas, the sort is free.
 	// When these conditions are met, the same knowledge could also be
 	// used to exit early during iterateIndex (stop after OFFSET+LIMIT).
-	if (maxInsertIndex > 0 || true) && len(sortcols) > 0 {
-		hybridsort.Slice(result.items, result.Less)
-		// or: quicksort but those segments above offset+limit can be omitted
+	if len(sortcols) > 0 {
+		if limit >= 0 && limitPartitionCols == 0 {
+			// ORDER BY ... LIMIT only needs the best k rows from each shard.
+			// Keeping all matching rows and fully sorting them makes small-LIMIT
+			// queries degenerate into an expensive full sort with dynamic Scheme
+			// comparators, which dominated the multishard regression.
+			result.items = topKByOrder(result.items, offset+limit, lessByID)
+		} else {
+			hybridsort.Slice(result.items, func(i, j int) bool {
+				return lessByID(result.items[i], result.items[j])
+			})
+		}
 	}
 	// Shard-local per-partition pruning: keep at most offset+limit items per
 	// partition. This reduces what goes into the cross-shard globalqueue merge.

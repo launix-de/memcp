@@ -31,8 +31,27 @@ type database struct {
 	Name        string                                             `json:"name"`
 	persistence PersistenceEngine                                  `json:"-"`
 	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
-	schemalock  sync.RWMutex                                       `json:"-"` // TODO: rw-locks for schemalock
-	blobMu      sync.Mutex                                         `json:"-"` // serializes IncrBlobRefcount/DecrBlobRefcount
+	// schemalock protects database-local schema membership and metadata
+	// snapshots. Heavy table maintenance must snapshot under finer-grained
+	// locks and release schemalock before doing expensive work.
+	schemalock sync.RWMutex `json:"-"`
+	// saveMu/ saveCond serialize schema.json commits per database.
+	// Software contract:
+	//   - every caller still waits until its schema mutation is persisted
+	//   - concurrent callers may coalesce into one later snapshot write
+	//     instead of forcing N full schema.json rewrites in sequence
+	//   - durable=true (Safe engine metadata) upgrades the coalesced write to
+	//     a fully synced commit; non-durable callers may piggyback on it
+	saveMu          sync.Mutex `json:"-"`
+	saveCondOnce    sync.Once  `json:"-"`
+	saveCond        *sync.Cond `json:"-"`
+	saveRequested   uint64     `json:"-"`
+	saveCompleted   uint64     `json:"-"`
+	saveInFlight    bool       `json:"-"`
+	savePending     []byte     `json:"-"`
+	savePendingSync bool       `json:"-"`
+	savePanic       any        `json:"-"`
+	blobMu          sync.Mutex `json:"-"` // serializes IncrBlobRefcount/DecrBlobRefcount
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
@@ -41,6 +60,10 @@ type database struct {
 type rebuildDatabaseResult struct {
 	replaced []*storageShard
 	errors   []string
+}
+
+type schemaWriteOptions interface {
+	WriteSchemaWithMode(schema []byte, durable bool)
 }
 
 // Custom JSON to persist private tables field
@@ -92,12 +115,16 @@ func recoverAsError(context string) (err error) {
 }
 
 func Rebuild(all bool, repartition bool) string {
+	return rebuildDatabases(all, repartition, false)
+}
+
+func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string {
 	start := time.Now()
 	dbs := databases.GetAll()
 	var errs []string
 	for _, db := range dbs {
 		func(db *database) {
-			result := db.rebuild(all, repartition)
+			result := db.rebuild(all, repartition, includeEphemeral)
 			if len(result.errors) > 0 {
 				errs = append(errs, result.errors...)
 				return
@@ -129,7 +156,10 @@ func Rebuild(all bool, repartition bool) string {
 }
 
 func UnloadDatabases() {
-	fmt.Println("table compression done in ", Rebuild(false, false))
+	// Clean shutdown may flush ephemeral query tables as well. They remain
+	// excluded from online/global rebuilds to avoid interfering with live
+	// query-local scratch state.
+	fmt.Println("table compression done in ", rebuildDatabases(false, false, true))
 	data, _ := json.Marshal(Settings)
 	if settings, err := os.OpenFile(Basepath+"/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {
 		defer settings.Close()
@@ -202,14 +232,105 @@ func LoadDatabases() {
 	ensureSystemStatistic()
 }
 
+func (db *database) writeSchema(jsonbytes []byte, durable bool) {
+	if writer, ok := db.persistence.(schemaWriteOptions); ok {
+		writer.WriteSchemaWithMode(jsonbytes, durable)
+		return
+	}
+	db.persistence.WriteSchema(jsonbytes)
+}
+
+func (db *database) getSaveCond() *sync.Cond {
+	db.saveCondOnce.Do(func() {
+		db.saveCond = sync.NewCond(&db.saveMu)
+	})
+	return db.saveCond
+}
+
+func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool) {
+	db.saveMu.Lock()
+	cond := db.getSaveCond()
+	db.saveRequested++
+	seq := db.saveRequested
+	db.savePending = jsonbytes
+	db.savePendingSync = db.savePendingSync || durable
+	if db.savePanic != nil && !db.saveInFlight {
+		db.savePanic = nil
+	}
+	if db.saveInFlight {
+		for db.saveCompleted < seq && db.savePanic == nil {
+			cond.Wait()
+		}
+		panicVal := db.savePanic
+		db.saveMu.Unlock()
+		if panicVal != nil {
+			panic(panicVal)
+		}
+		return
+	}
+	db.saveInFlight = true
+	db.savePanic = nil
+	for {
+		snapshot := db.savePending
+		writeSync := db.savePendingSync
+		targetSeq := db.saveRequested
+		db.savePending = nil
+		db.savePendingSync = false
+		db.saveMu.Unlock()
+
+		var panicVal any
+		func() {
+			defer func() {
+				panicVal = recover()
+			}()
+			db.writeSchema(snapshot, writeSync)
+		}()
+
+		db.saveMu.Lock()
+		if panicVal != nil {
+			db.savePanic = panicVal
+			db.saveInFlight = false
+			cond.Broadcast()
+			db.saveMu.Unlock()
+			panic(panicVal)
+		}
+		db.saveCompleted = targetSeq
+		cond.Broadcast()
+		if db.savePending == nil {
+			db.saveInFlight = false
+			db.saveMu.Unlock()
+			return
+		}
+	}
+}
+
 func (db *database) save() {
 	if db.srState == COLD {
 		// Do not serialize a cold database; keep existing schema.json intact
 		return
 	}
+	db.schemalock.RLock()
 	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
-	db.persistence.WriteSchema(jsonbytes)
+	db.schemalock.RUnlock()
+	db.commitSchemaSnapshot(jsonbytes, true)
 	// shards are written while rebuild
+}
+
+// saveLockedAndUnlock snapshots the schema while schemalock is held, then
+// releases schemalock before performing the synchronous schema write.
+// Callers must already hold db.schemalock.Lock().
+func (db *database) saveLockedAndUnlock() {
+	db.saveLockedWithDurabilityAndUnlock(true)
+}
+
+func (db *database) saveLockedWithDurabilityAndUnlock(durable bool) {
+	if db.srState == COLD {
+		db.schemalock.Unlock()
+		return
+	}
+	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	db.schemalock.Unlock()
+	db.commitSchemaSnapshot(jsonbytes, durable)
 }
 
 // ensureLoaded loads schema.json into the database struct exactly once.
@@ -263,6 +384,49 @@ func (db *database) ensureLoaded() {
 	db.srState = SHARED
 }
 
+func triggerTimingSQL(timing TriggerTiming) string {
+	switch timing {
+	case BeforeInsert:
+		return "BEFORE INSERT"
+	case AfterInsert:
+		return "AFTER INSERT"
+	case BeforeUpdate:
+		return "BEFORE UPDATE"
+	case AfterUpdate:
+		return "AFTER UPDATE"
+	case BeforeDelete:
+		return "BEFORE DELETE"
+	case AfterDelete:
+		return "AFTER DELETE"
+	case AfterDropTable:
+		return "AFTER DROP TABLE"
+	case AfterDropColumn:
+		return "AFTER DROP COLUMN"
+	case AfterInvalidate:
+		return "AFTER INVALIDATE"
+	default:
+		panic("unknown trigger timing")
+	}
+}
+
+func loadPersistedTriggerPlan(schemaName, tableName string, trigger *TriggerDescription) {
+	if !triggerScmerMissing(trigger.Func) || !triggerScmerMissing(trigger.FuncPlan) || trigger.SourceSQL == "" {
+		return
+	}
+	parseSQL := scm.Globalenv.Vars[scm.Symbol("parse_sql")]
+	allow := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	sql := fmt.Sprintf("CREATE TRIGGER `%s` %s ON `%s` FOR EACH ROW %s", trigger.Name, triggerTimingSQL(trigger.Timing), tableName, trigger.SourceSQL)
+	plan := scm.Apply(parseSQL, scm.NewString(schemaName), scm.NewString(sql), allow)
+	if !plan.IsSlice() {
+		panic("persisted trigger parse did not return an AST")
+	}
+	items := plan.Slice()
+	if len(items) < 7 {
+		panic("persisted trigger AST is incomplete")
+	}
+	trigger.Func, trigger.FuncPlan = unwrapDeferredTriggerBody(items[6])
+}
+
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead() func()       { db.ensureLoaded(); return func() {} }
@@ -277,16 +441,17 @@ func (db *database) GetTable(name string) *table {
 func (db *database) ShowTables() scm.Scmer {
 	db.ensureLoaded()
 	tables := db.tables.GetAll()
-	result := make([]scm.Scmer, len(tables))
-	i := 0
+	result := make([]scm.Scmer, 0, len(tables))
 	for _, t := range tables {
-		result[i] = scm.NewString(t.Name)
-		i = i + 1
+		if t.isHiddenFromShowTables() {
+			continue
+		}
+		result = append(result, scm.NewString(t.Name))
 	}
 	return scm.NewSlice(result)
 }
 
-func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
+func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) rebuildDatabaseResult {
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
 		return rebuildDatabaseResult{}
@@ -305,7 +470,10 @@ func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
 	for _, t := range dbs {
 		go func(t *table) {
 			tableLocked := false
+			rebuildClaimed := false
+			t.ddlMu.RLock()
 			defer func() {
+				t.ddlMu.RUnlock()
 				if r := recover(); r != nil {
 					errmsg := fmt.Sprintf("rebuild failed for table %s.%s: %v", db.Name, t.Name, r)
 					fmt.Println("error:", errmsg)
@@ -317,15 +485,37 @@ func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
 						func() { defer func() { _ = recover() }(); t.mu.Unlock() }()
 					}
 				}
+				if rebuildClaimed {
+					func() {
+						defer func() { _ = recover() }()
+						t.mu.Lock()
+						t.rebuilding = false
+						t.mu.Unlock()
+					}()
+				}
 				done.Done()
 			}()
+			if t.isEphemeralQueryTable() && !includeEphemeral {
+				return
+			}
 			t.mu.Lock() // table lock
 			tableLocked = true
+			if t.rebuilding {
+				t.mu.Unlock()
+				tableLocked = false
+				return
+			}
+			t.rebuilding = true
+			rebuildClaimed = true
 			// TODO: check LRU statistics and remove unused computed columns
 
-			// rebuild shards without mutating the live shard list; swap when complete
+			// Snapshot the active shard list, then release t.mu while the
+			// expensive shard rebuild runs. Writers must not be blocked on
+			// the whole sdone.Wait() phase.
 			targetIsP := t.ShardMode == ShardModePartition
-			origShardList := t.ActiveShards()
+			origShardList := append([]*storageShard(nil), t.ActiveShards()...)
+			t.mu.Unlock()
+			tableLocked = false
 			newShardList := make([]*storageShard, len(origShardList))
 			// Track if any shard is still COLD to avoid triggering repartition logic
 			hasColdShard := false
@@ -413,31 +603,33 @@ func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
 				errMu.Lock()
 				rebuildErrors = append(rebuildErrors, shardErrors...)
 				errMu.Unlock()
+				t.mu.Lock()
+				t.rebuilding = false
 				t.mu.Unlock()
-				tableLocked = false
+				rebuildClaimed = false
 				return
 			}
+
+			t.mu.Lock()
+			tableLocked = true
 
 			// Collect pre-rebuild shards that were replaced so we can clean them up.
 			var replaced []*storageShard
 			// Publish the new shard list only after completion.
-			// To avoid slice header races for concurrent readers, update in place.
 			if targetIsP {
-				for i := range newShardList {
-					if origShardList[i] != nil && origShardList[i] != newShardList[i] && origShardList[i].uuid != newShardList[i].uuid {
-						replaced = append(replaced, origShardList[i])
+				for i, oldShard := range origShardList {
+					if oldShard != nil && oldShard != newShardList[i] && oldShard.uuid != newShardList[i].uuid {
+						replaced = append(replaced, oldShard)
 					}
-					origShardList[i] = newShardList[i]
 				}
-				t.PShards = origShardList
+				t.PShards = newShardList
 			} else {
-				for i := range newShardList {
-					if origShardList[i] != nil && origShardList[i] != newShardList[i] && origShardList[i].uuid != newShardList[i].uuid {
-						replaced = append(replaced, origShardList[i])
+				for i, oldShard := range origShardList {
+					if oldShard != nil && oldShard != newShardList[i] && oldShard.uuid != newShardList[i].uuid {
+						replaced = append(replaced, oldShard)
 					}
-					origShardList[i] = newShardList[i]
 				}
-				t.Shards = origShardList
+				t.Shards = newShardList
 			}
 
 			// Collect replaced shards for deferred cleanup (see comment above).
@@ -450,6 +642,15 @@ func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
 			// Decide on repartition while holding t.mu, but execute it
 			// OUTSIDE the table lock so concurrent inserts can proceed
 			// and the dual-write mechanism works correctly.
+			//
+			// Contract:
+			//   - manual/queryplan partitiontable drives explicit repartitioning
+			//   - db.rebuild() only repartitions when proposerepartition says the
+			//     physical layout should actually change
+			//   - a plain rebuild must not silently convert every free table into
+			//     "partitioned with one shard", because that touches unrelated
+			//     tables during shared rebuild tests without any layout benefit
+			//
 			// Also claim repartitionActive under t.mu so a concurrent
 			// rebuild (e.g. the 15-min scheduler) sees the flag and
 			// skips its own repartition instead of racing.
@@ -458,17 +659,35 @@ func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
 			if repartition && !hasColdShard && !t.repartitionActive {
 				var shouldChange bool
 				shardCandidates, shouldChange = t.proposerepartition(maincount)
-				doRepart = shouldChange || (t.ShardMode == ShardModeFree && t.Shards != nil)
+				if shouldChange {
+					if len(shardCandidates) > 0 {
+						doRepart = true
+					} else {
+						// No explicit partition dimensions means repartition() would
+						// fall back to generic parallel sharding. Only do that when
+						// it would actually create more than one shard; otherwise a
+						// small free table would be pointlessly converted into
+						// "partitioned with one shard" during a global rebuild.
+						desiredShards := int(1 + (2*maincount)/Settings.ShardSize)
+						minShards := 2 * runtime.NumCPU()
+						if desiredShards < minShards && maincount > Settings.ShardSize {
+							desiredShards = minShards
+						}
+						doRepart = desiredShards > 1
+					}
+				}
 			}
 			if doRepart {
 				t.repartitionActive = true // claim under t.mu — atomic with the doRepart decision
 			}
+			t.rebuilding = false
+			rebuildClaimed = false
 
 			t.mu.Unlock()
 			tableLocked = false
 
 			if doRepart {
-				t.repartition(shardCandidates)
+				t.repartitionDDLReadLocked(shardCandidates)
 			}
 		}(t)
 	}
@@ -698,14 +917,24 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	}
 	db.ensureLoaded()
 	db.schemalock.Lock()
+	t, created := db.createTableLocked(name, pm, ifnotexists)
+	if !created {
+		db.schemalock.Unlock()
+		return t, false
+	}
+	db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+	registerCreatedTable(t)
+	return t, true
+}
+
+// createTableLocked mutates db.tables while db.schemalock is held but does
+// not persist schema.json yet. Callers must follow up with saveLockedAndUnlock.
+func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexists bool) (*table, bool) {
 	t := db.tables.Get(name)
 	if t != nil {
-		db.schemalock.Unlock()
 		if ifnotexists {
-			// Touch table timestamp so CacheManager does not evict a
-			// keytable that is about to be used by the current query.
 			atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
-			return t, false // return the table found
+			return t, false
 		}
 		panic("Table " + name + " already exists")
 	}
@@ -718,27 +947,24 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	t.Auto_increment = 1
-	t2 := db.tables.Set(t)
-	if t2 != nil {
-		db.schemalock.Unlock()
-		// concurrent create
+	if existing := db.tables.Set(t); existing != nil {
 		panic("Table " + name + " already exists")
-	} else {
-		db.save()
 	}
-	db.schemalock.Unlock()
+	return t, true
+}
+
+func registerCreatedTable(t *table) {
 	// register temp keytable with CacheManager AFTER releasing schemalock
 	// to avoid deadlock: AddItem → run() → evict → keytableCleanup → TryLock(schemalock)
-	if strings.HasPrefix(name, ".") {
-		schemaName := schema
+	if strings.HasPrefix(t.Name, ".") {
+		schemaName := t.schema.Name
 		GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
 			return keytableCleanup(ptr.(*table), schemaName, freedByType)
 		}, keytableLastUsed, nil)
-	} else if pm == Cache {
+	} else if t.PersistencyMode == Cache {
 		// Register the initial shard so eviction can reach it before the first rebuild.
 		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 	}
-	return t, true
 }
 
 func DropTable(schema, name string, ifexists bool) {
@@ -757,8 +983,7 @@ func DropTable(schema, name string, ifexists bool) {
 		panic("Table " + schema + "." + name + " does not exist")
 	}
 	db.tables.Remove(name)
-	db.save()
-	db.schemalock.Unlock()
+	db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
 	// fire AfterDropTable triggers after releasing schemalock (avoids deadlock on cascading drops)
 	t.ExecuteTableLifecycleTriggers(AfterDropTable)
 
@@ -791,18 +1016,19 @@ func RenameTable(schema, oldname, newname string) {
 	}
 	db.ensureLoaded()
 	db.schemalock.Lock()
-	defer db.schemalock.Unlock()
 	t := db.tables.Get(oldname)
 	if t == nil {
+		db.schemalock.Unlock()
 		panic("Table " + schema + "." + oldname + " does not exist")
 	}
 	if db.tables.Get(newname) != nil {
+		db.schemalock.Unlock()
 		panic("Table " + schema + "." + newname + " already exists")
 	}
 	db.tables.Remove(oldname)
 	t.Name = newname
 	db.tables.Set(t)
-	db.save()
+	db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
 }
 
 // keytableCleanup is called by the CacheManager when evicting a temp keytable.
@@ -822,8 +1048,7 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 			return false // schemalock is held (e.g. by CreateTable); retry later
 		}
 		db.tables.Remove(tbl.Name) // no-op if already removed by DropTable
-		db.save()
-		db.schemalock.Unlock()
+		db.saveLockedWithDurabilityAndUnlock(tbl.PersistencyMode == Safe)
 	}
 	// remove all shard+index+temp column registrations for this table (recursive)
 	for _, c := range tbl.Columns {

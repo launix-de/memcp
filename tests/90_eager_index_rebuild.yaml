@@ -3,7 +3,6 @@
 # so the first query does not pay a cold-start full-scan penalty.
 
 metadata:
-  isolated: true
   version: "1.0"
   description: "Eager index rebuild after shard rebuild"
 
