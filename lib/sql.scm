@@ -27,6 +27,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* cached_parse: wraps a parser with cachemap-based caching.
 cache_key = username:schema:hash(query) — per-user isolation (policy checked at parse time).
 The query is hashed with FNV-1a (fnv_hash) so long SQL strings don't bloat the cache index.
+Session-sensitive plans must not be reused under that key because their lowered
+runtime helper names and cache domains may depend on current session variables.
 On parse error the result is not cached (e.g. table does not exist yet). */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username)
 	(begin
@@ -35,7 +37,9 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 		(if cached cached
 			(begin
 				(define formula (parse_fn schema query policy))
-				(queryplan_cache cache_key formula)
+				(if (expr_uses_session_state formula)
+					true
+					(queryplan_cache cache_key formula))
 				formula)))))
 
 /* helper: build a policy function for table-level access checks

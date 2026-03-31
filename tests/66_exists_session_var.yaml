@@ -83,6 +83,44 @@ test_cases:
         - ID: 1
           title: "Item A"
 
+  - name: "switch session var to second user"
+    session_id: "sess_esv"
+    sql: "SET @current_user = 2"
+
+  - name: "WHERE EXISTS with changed session var"
+    session_id: "sess_esv"
+    sql: |
+      SELECT i.ID, i.title FROM esv_items i
+      WHERE EXISTS (
+        SELECT TRUE FROM esv_access a
+        WHERE a.item_id = i.ID
+        AND (SELECT u.ID = @current_user FROM esv_users u WHERE u.ID = a.user_id LIMIT 1)
+        LIMIT 1
+      )
+      ORDER BY i.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 2
+          title: "Item B"
+
+  - name: "WHERE NOT EXISTS with changed session var"
+    session_id: "sess_esv"
+    sql: |
+      SELECT i.ID, i.title FROM esv_items i
+      WHERE NOT EXISTS (
+        SELECT TRUE FROM esv_access a
+        WHERE a.item_id = i.ID
+        AND (SELECT u.ID = @current_user FROM esv_users u WHERE u.ID = a.user_id LIMIT 1)
+        LIMIT 1
+      )
+      ORDER BY i.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          title: "Item A"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS esv_access"
   - sql: "DROP TABLE IF EXISTS esv_items"

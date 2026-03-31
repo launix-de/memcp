@@ -175,6 +175,17 @@ func scmerSliceToStrings(list []scm.Scmer) []string {
 	return out
 }
 
+func parseBatchPseudoColName(name string) (int, bool) {
+	if len(name) < 2 || name[0] != '#' {
+		return 0, false
+	}
+	n, err := strconv.Atoi(name[1:])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // lockTable acquires a user-level read or write lock on the named table.
 // The session's State is updated while waiting, and the unlock callback is
 // registered with the session so that ReleaseAllLocks() can free it later.
@@ -358,6 +369,119 @@ func Init(en scm.Env) {
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScan,
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_batch",
+		Desc: "does an unordered parallel filter-map-reduce pass on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
+			stride := int(scm.ToInt(a[6]))
+			batchdata := mustScmerSlice(a[7], "batchdata")
+			isOuter := len(a) > 11 && scm.ToBool(a[11])
+
+			if list, ok := scmerSlice(a[1]); ok {
+				neutral := scm.NewNil()
+				if len(a) > 9 {
+					neutral = a[9]
+				}
+				result := neutral
+				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterparams := make([]scm.Scmer, len(filtercols))
+				mapfn := scm.OptimizeProcToSerialFunction(a[5])
+				mapparams := make([]scm.Scmer, len(mapcols))
+				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+				if len(a) > 8 {
+					reducefn = scm.OptimizeProcToSerialFunction(a[8])
+				}
+				hadValue := false
+				batchCount := 0
+				if stride > 0 {
+					batchCount = len(batchdata) / stride
+				}
+				for batchid := 0; batchid < batchCount; batchid++ {
+					for _, val := range list {
+						row := mustScmerSlice(val, "scan_batch list row")
+						ds := dataset(row)
+						for i, col := range filtercols {
+							if subidx, ok := parseBatchPseudoColName(col); ok {
+								filterparams[i] = batchdata[batchid*stride+subidx]
+							} else {
+								filterparams[i], _ = ds.GetI(col)
+							}
+						}
+						if !scm.ToBool(filterfn(filterparams...)) {
+							continue
+						}
+						hadValue = true
+						for i, col := range mapcols {
+							if subidx, ok := parseBatchPseudoColName(col); ok {
+								mapparams[i] = batchdata[batchid*stride+subidx]
+							} else {
+								mapparams[i], _ = ds.GetI(col)
+							}
+						}
+						result = reducefn(result, mapfn(mapparams...))
+					}
+				}
+				if !hadValue && isOuter {
+					for i := range mapparams {
+						mapparams[i] = scm.NewNil()
+					}
+					result = reducefn(result, mapfn(mapparams...))
+				}
+				if len(a) > 10 && !a[10].IsNil() {
+					reduce2fn := scm.OptimizeProcToSerialFunction(a[10])
+					base := neutral
+					if len(a) > 9 {
+						base = a[9]
+					}
+					result = reduce2fn(base, result)
+				}
+				return result
+			}
+
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+
+			aggregate := scm.NewNil()
+			if len(a) > 8 {
+				aggregate = a[8]
+			}
+			neutral := scm.NewNil()
+			if len(a) > 9 {
+				neutral = a[9]
+			}
+			reduce2 := scm.NewNil()
+			if len(a) > 10 {
+				reduce2 = a[10]
+			}
+			return t.scanWithBatch(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter, stride, batchdata)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string|nil", ParamName: "schema", ParamDesc: "database where the table is located"},
+				{Kind: "string|list", ParamName: "table", ParamDesc: "name of the table to scan (or a list if you have temporary data)"},
+				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter; #0, #1, ... address batchdata slots"},
+				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map; #0, #1, ... address batchdata slots"},
+				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "int", ParamName: "stride", ParamDesc: "number of batchdata entries per batch row"},
+				{Kind: "list", ParamName: "batchdata", ParamDesc: "flat batch buffer accessed via #N pseudo columns"},
+				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results", Optional: true},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
+				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
+				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+			},
+			Return:   &scm.TypeDescriptor{Kind: "any"},
+			Optimize: optimizeScanBatch,
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
