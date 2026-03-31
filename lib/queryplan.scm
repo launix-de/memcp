@@ -254,12 +254,36 @@ createcolumn results bleed across queries. */
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
+(define alias_map_pair_list? (lambda (alias_map)
+	(and (list? alias_map) (> (count alias_map) 0) (list? (car alias_map)))))
+(define find_nested_alias_pair (lambda (alias_map alias_v)
+	(coalesce
+		(match (find alias_map (lambda (pair) (match pair
+			'(k v) (equal?? k alias_v)
+			false)) '(false false))
+			'(k v) v
+			nil)
+		(match (find alias_map (lambda (pair) (match pair
+			'(k v) (equal?? (toLower (string k)) (toLower (string alias_v)))
+			false)) '(false false))
+			'(k v) v
+			nil))))
+(define find_assoc_alias_value (lambda (alias_map alias_v)
+	(coalesce
+		(get_assoc alias_map alias_v)
+		(get_assoc alias_map (toLower (string alias_v)))
+		(match (find_assoc alias_map (lambda (k v)
+			(equal?? (toLower (string k)) (toLower (string alias_v)))) '(false false))
+			'(k v) v
+			nil))))
 (define resolve_source_alias (lambda (alias_map alias_)
 	(coalesce
 		(reduce (alias_lookup_variants alias_) (lambda (found alias_v)
 			(if (not (nil? found))
 				found
-				(coalesce (alias_map alias_v) nil)))
+				(if (alias_map_pair_list? alias_map)
+					(find_nested_alias_pair alias_map alias_v)
+					(find_assoc_alias_value alias_map alias_v))))
 			nil)
 		alias_)))
 (define rewrite_source_aliases (lambda (alias_map expr)
@@ -271,7 +295,19 @@ defines the physical prejoin column names. */
 		(cons sym args)
 		(cons sym (map args (lambda (arg) (rewrite_source_aliases alias_map arg))))
 		expr
+		(if (equal? expr (symbol (string expr)))
+			(begin
+				(define resolved (resolve_source_alias alias_map expr))
+				(if (equal? resolved expr)
+					expr
+					(symbol (string resolved))))
+			expr)
 	)
+))
+/* canonical_expr_name stays in Scheme land on purpose: it is planner-local and
+only needs alias normalization plus stable serialization. */
+(define canonical_expr_name (lambda (expr columns params alias_map)
+	(serialize (rewrite_source_aliases alias_map expr))
 ))
 /* build_occurrence_alias_map: assign a stable canonical source namespace to query
 aliases. Single occurrences keep the physical table name for maximal reuse.
@@ -1152,9 +1188,9 @@ Outer tables must stay untouched so scoped GROUP stages can still join the
 materialized prejoin/keytable back to the surrounding row stream. */
 (define rewrite_for_prejoin (lambda (pjvar alias_map expr)
 	(match expr
-		'((symbol get_column) tblvar _ col _) (if (or (nil? tblvar) (nil? (alias_map tblvar))) expr
+		'((symbol get_column) tblvar _ col _) (if (or (nil? tblvar) (nil? (resolve_source_alias alias_map tblvar))) expr
 			'('get_column pjvar false (canonical_expr_name (normalize_canonical_aliases expr) '(list) '(list) alias_map) false))
-		'((quote get_column) tblvar _ col _) (if (or (nil? tblvar) (nil? (alias_map tblvar))) expr
+		'((quote get_column) tblvar _ col _) (if (or (nil? tblvar) (nil? (resolve_source_alias alias_map tblvar))) expr
 			'('get_column pjvar false (canonical_expr_name (normalize_canonical_aliases expr) '(list) '(list) alias_map) false))
 		(cons sym args) (cons sym (map args (lambda (a) (rewrite_for_prejoin pjvar alias_map a))))
 		expr
@@ -4772,7 +4808,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						tv
 						(match tv '(visible _) visible nil)
 						(visible_occurrence_alias tv)
-						(coalesce (prejoin_alias_map tv) nil)
+						(coalesce (resolve_source_alias prejoin_alias_map tv) nil)
 						(if (equal? (visible_occurrence_alias tv) ttbl) (concat tschema "." ttbl) nil))
 						(lambda (x) (not (nil? x)))))
 					(reduce (merge _raw_aliases

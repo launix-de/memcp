@@ -1256,47 +1256,6 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		Name: "canonical_expr_name",
-		Desc: "builds a canonical string for an expression; maps var(n)/lambda params to column names and can normalize aliases",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			expr := a[0]
-
-			columns := []string{}
-			if len(a) >= 2 && !a[1].IsNil() {
-				for _, item := range mustScmerSlice(a[1], "columns") {
-					columns = append(columns, scm.String(item))
-				}
-			}
-
-			params := []scm.Scmer{}
-			if len(a) >= 3 && !a[2].IsNil() {
-				params = mustScmerSlice(a[2], "params")
-			}
-
-			aliasMap := map[string]string{}
-			if len(a) >= 4 && !a[3].IsNil() {
-				for _, pair := range mustScmerSlice(a[3], "alias_map") {
-					pp := mustScmerSlice(pair, "alias_map pair")
-					if len(pp) != 2 {
-						continue
-					}
-					aliasMap[strings.ToLower(scm.String(pp[0]))] = scm.String(pp[1])
-				}
-			}
-
-			return scm.NewString(canonicalizeScmerToString(expr, columns, params, aliasMap))
-		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "expr", ParamDesc: "expression to normalize"},
-				{Kind: "list", ParamName: "columns", ParamDesc: "optional list of column names for var(n) mapping", Optional: true},
-				{Kind: "list", ParamName: "params", ParamDesc: "optional list of lambda parameter symbols", Optional: true},
-				{Kind: "list", ParamName: "alias_map", ParamDesc: "optional list of (alias canonical) pairs", Optional: true},
-			},
-			Return: &scm.TypeDescriptor{Kind: "string"},
-		},
-	})
-	scm.Declare(&en, &scm.Declaration{
 		Name: "register_keytable_cleanup",
 		Desc: "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
