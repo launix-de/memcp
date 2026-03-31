@@ -12,7 +12,6 @@ test_cases:
   # ==========================================================
 
   - name: "TTL: integer literal"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv01.org/> .
       t:item t:count 42 .
@@ -23,7 +22,6 @@ test_cases:
       rows: 1
 
   - name: "TTL: decimal literal"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv02.org/> .
       t:item t:price 19.99 .
@@ -34,7 +32,6 @@ test_cases:
       rows: 1
 
   - name: "TTL: boolean true"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv03.org/> .
       t:item t:active true .
@@ -45,7 +42,6 @@ test_cases:
       rows: 1
 
   - name: "TTL: boolean false"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv04.org/> .
       t:item t:deleted false .
@@ -60,7 +56,6 @@ test_cases:
   # ==========================================================
 
   - name: "TTL: datatype annotation xsd:integer"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv05.org/> .
       @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -72,7 +67,6 @@ test_cases:
       rows: 1
 
   - name: "TTL: datatype annotation xsd:date"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv06.org/> .
       @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -88,7 +82,6 @@ test_cases:
   # ==========================================================
 
   - name: "TTL: blank node _:identifier"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv07.org/> .
       t:alice t:address _:addr1 .
@@ -102,7 +95,6 @@ test_cases:
         - "?city": "Berlin"
 
   - name: "TTL: anonymous blank node [ ... ]"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv08.org/> .
       t:alice t:address [ t:city "Munich" ; t:zip "80331" ] .
@@ -119,7 +111,6 @@ test_cases:
   # ==========================================================
 
   - name: "TTL: escape newline in string"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv09.org/> .
       t:item t:val "line1\nline2" .
@@ -131,7 +122,6 @@ test_cases:
       contains: "line1"
 
   - name: "TTL: escape tab in string"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv10.org/> .
       t:item t:val "col1\tcol2" .
@@ -142,7 +132,6 @@ test_cases:
       rows: 1
 
   - name: "TTL: escape backslash"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv11.org/> .
       t:item t:path "C:\\Users\\test" .
@@ -157,7 +146,6 @@ test_cases:
   # ==========================================================
 
   - name: "TTL: @base directive"
-    noncritical: true
     ttl_data: |
       @base <http://ttladv12.org/> .
       <item> <val> "based" .
@@ -173,7 +161,6 @@ test_cases:
   # ==========================================================
 
   - name: "TTL: collection syntax"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv13.org/> .
       t:item t:list ( t:a t:b t:c ) .
@@ -188,7 +175,6 @@ test_cases:
   # ==========================================================
 
   - name: "TTL: triple-quoted string with embedded quotes"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv14.org/> .
       t:item t:html """<div class="test">Hello</div>""" .
@@ -200,7 +186,6 @@ test_cases:
       contains: 'class="test"'
 
   - name: "TTL: triple-quoted multiline"
-    noncritical: true
     ttl_data: |
       @prefix t: <http://ttladv15.org/> .
       t:item t:text """line one

@@ -139,13 +139,12 @@ test_cases:
   # request first or the HTTP handler may already have returned. The durable
   # invariant is checked only after restart below.
   - name: "Large insert interrupted by crash"
-    noncritical: true
     parallel: crash_insert
     scm: |
       (insert "memcp-tests" "crash_insert" '("val")
         (map (produceN 100000) (lambda (i) (list (+ 20 i)))))
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Crash during large insert"
     parallel: crash_insert
@@ -184,11 +183,10 @@ test_cases:
   # transport failure or a completed HTTP response depending on the exact
   # crash point. The critical part is that recovery keeps the table readable.
   - name: "Bulk update interrupted by crash"
-    noncritical: true
     parallel: crash_update
     sql: "UPDATE crash_update SET status = 'updated', val = val * 10"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Crash during update"
     parallel: crash_update
@@ -700,7 +698,6 @@ test_cases:
   # sensitive at the transport layer. Recovery correctness is asserted by the
   # critical checks after restart.
   - name: "Rebuild + insert interrupted by crash"
-    noncritical: true
     parallel: crash_rebuild
     scm: |
       (begin
@@ -709,7 +706,7 @@ test_cases:
           (map (produceN 100) (lambda (i) (list (+ 200 i)))))
         "ok")
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Crash during rebuild"
     parallel: crash_rebuild

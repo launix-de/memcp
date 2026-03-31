@@ -251,6 +251,9 @@ class SQLTestRunner:
         if on_fail_diag:
             print(f"    🔍 Diagnostic: {on_fail_diag}\n")
 
+    def _expect_interrupted_ok(self, expect) -> bool:
+        return bool(expect and expect.get("interrupted_ok"))
+
     def _run_on_fail(self, test_case: Dict, database: str) -> Optional[str]:
         """Execute on_fail diagnostic queries and return combined output."""
         on_fail = test_case.get("on_fail")
@@ -495,15 +498,24 @@ class SQLTestRunner:
                 url = f"{self.base_url}/scm"
                 resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=600)
             except Exception as e:
+                if self._expect_interrupted_ok(expect):
+                    self._record_success(name, is_noncritical)
+                    return True
                 if expect_error:
                     self._record_success(name, is_noncritical)
                     return True
                 return self._record_fail(name, f"SCM exception: {e}", scm_code, None, None, is_noncritical)
             if resp is None:
+                if self._expect_interrupted_ok(expect):
+                    self._record_success(name, is_noncritical)
+                    return True
                 if expect_error:
                     self._record_success(name, is_noncritical)
                     return True
                 return self._record_fail(name, "No response from /scm", scm_code, None, None, is_noncritical)
+            if self._expect_interrupted_ok(expect):
+                self._record_success(name, is_noncritical)
+                return True
             if expect_error:
                 if resp.status_code != 200:
                     self._record_success(name, is_noncritical)
@@ -551,6 +563,8 @@ class SQLTestRunner:
                 else:
                     resp = run_step_request(step)
                     if step_expect:
+                        if self._expect_interrupted_ok(step_expect):
+                            continue
                         if step_expect.get("error"):
                             if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
                                 return self._record_fail(name, f"Step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
@@ -573,10 +587,14 @@ class SQLTestRunner:
                 step_expect = step.get("expect", {})
                 step_sql = step.get("sql", "")
                 if isinstance(resp, Exception):
+                    if self._expect_interrupted_ok(step_expect):
+                        continue
                     if step_expect.get("error"):
                         continue
                     return self._record_fail(name, f"Background step '{step_sql[:60]}' raised: {resp}", step_sql, None, step_expect, is_noncritical)
                 if step_expect:
+                    if self._expect_interrupted_ok(step_expect):
+                        continue
                     if step_expect.get("error"):
                         if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
                             return self._record_fail(name, f"Background step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
@@ -668,6 +686,9 @@ class SQLTestRunner:
 
         if response is None:
             expect = test_case.get("expect", {})
+            if self._expect_interrupted_ok(expect):
+                self._record_success(name, is_noncritical)
+                return True
             if expect.get("error"):
                 self._record_success(name, is_noncritical)
                 return True
@@ -696,6 +717,9 @@ class SQLTestRunner:
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})
+
+        if self._expect_interrupted_ok(expect):
+            return True
 
         if expect.get("error"):
             return response.status_code != 200 or "Error" in response.text

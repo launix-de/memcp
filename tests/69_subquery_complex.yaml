@@ -290,7 +290,6 @@ test_cases:
           matching: 0
 
   - name: "Nested subselect: inner unnested, outer is aggregate"
-    noncritical: true
     sql: |
       SELECT d.dname,
         (SELECT COUNT(1) FROM sq_emp e
@@ -379,7 +378,6 @@ test_cases:
   # === 1-row constraint: COUNT NULL vs 0 ===
 
   - name: "COUNT correlated returns 0 not NULL for empty match"
-    noncritical: true
     sql: |
       SELECT d.dname,
         COALESCE((SELECT COUNT(1) FROM sq_emp e WHERE e.did = d.did), 0) AS cnt
@@ -406,7 +404,6 @@ test_cases:
   # === Aggregate in WHERE with correct 0-semantics ===
 
   - name: "Aggregate in WHERE with zero check"
-    noncritical: true
     sql: |
       SELECT d.dname
       FROM sq_dept d
