@@ -12,7 +12,6 @@ test_cases:
   # ==========================================================
 
   - name: "SPARQL: subquery in WHERE"
-    noncritical: true
     ttl_data: |
       @prefix a01: <http://adv01.org/> .
       a01:alice a01:score "90" .
@@ -33,7 +32,6 @@ test_cases:
   # ==========================================================
 
   - name: "SPARQL: property path sequence (/)"
-    noncritical: true
     ttl_data: |
       @prefix a02: <http://adv02.org/> .
       a02:alice a02:knows a02:bob .
@@ -47,7 +45,6 @@ test_cases:
         - "?name": "Bob"
 
   - name: "SPARQL: property path transitive closure (*)"
-    noncritical: true
     ttl_data: |
       @prefix a03: <http://adv03.org/> .
       a03:a a03:parent a03:b .
@@ -60,7 +57,6 @@ test_cases:
       rows: 4
 
   - name: "SPARQL: property path one-or-more (+)"
-    noncritical: true
     ttl_data: |
       @prefix a04: <http://adv04.org/> .
       a04:a a04:next a04:b .
@@ -72,7 +68,6 @@ test_cases:
       rows: 2
 
   - name: "SPARQL: property path alternative (|)"
-    noncritical: true
     ttl_data: |
       @prefix a05: <http://adv05.org/> .
       a05:alice a05:name "Alice" .
@@ -88,7 +83,6 @@ test_cases:
   # ==========================================================
 
   - name: "ASK: true"
-    noncritical: true
     ttl_data: |
       @prefix a06: <http://adv06.org/> .
       a06:item a06:exists "yes" .
@@ -99,7 +93,6 @@ test_cases:
       contains: "true"
 
   - name: "ASK: false"
-    noncritical: true
     sparql: |
       @prefix a07: <http://adv07.org/> .
       ASK WHERE { a07:nothing a07:here ?v }
@@ -107,7 +100,6 @@ test_cases:
       contains: "false"
 
   - name: "CONSTRUCT: build new triples"
-    noncritical: true
     ttl_data: |
       @prefix a08: <http://adv08.org/> .
       a08:alice a08:name "Alice" .
@@ -122,7 +114,6 @@ test_cases:
   # ==========================================================
 
   - name: "VALUES: inline data"
-    noncritical: true
     ttl_data: |
       @prefix a09: <http://adv09.org/> .
       a09:a a09:name "Alice" .

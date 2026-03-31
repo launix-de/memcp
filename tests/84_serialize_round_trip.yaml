@@ -24,6 +24,28 @@ test_cases:
         (4, 'Beta', 50),
         (5, 'Gamma', 300)
 
+  - name: "Create hidden sloppy table"
+    scm: |
+      (createtable "memcp-tests" ".sr_hidden"
+        (list
+          (list "column" "id" "int" (list "primary") (list))
+          (list "column" "note" "text" (list) (list)))
+        (list "engine" "sloppy")
+        true)
+
+  - name: "Insert hidden sloppy rows"
+    sql: |
+      INSERT INTO `.sr_hidden` (id, note) VALUES
+        (1, 'ephemeral-a'),
+        (2, 'ephemeral-b')
+
+  - name: "Baseline: hidden sloppy table readable"
+    sql: "SELECT COUNT(*) AS c FROM `.sr_hidden`"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
   # --- Baseline GROUP BY (creates keytable + StorageComputeProxy) ---
   - name: "Baseline: SUM per category"
     sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
@@ -81,6 +103,16 @@ test_cases:
         - category: "Gamma"
           c: 1
 
+  - name: "After restart: hidden sloppy table survived shutdown rebuild"
+    sql: "SELECT id, note FROM `.sr_hidden` ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          note: "ephemeral-a"
+        - id: 2
+          note: "ephemeral-b"
+
   # --- DML after restart: verify invalidation still works ---
   - name: "Insert new row after restart"
     sql: "INSERT INTO sr_data (id, category, amount) VALUES (6, 'Alpha', 400)"
@@ -125,6 +157,24 @@ test_cases:
         - category: "Beta"
           s: 1049
 
+  - name: "Insert new hidden sloppy row after restart"
+    sql: "INSERT INTO `.sr_hidden` (id, note) VALUES (3, 'ephemeral-c')"
+
+  - name: "Second SHUTDOWN keeps hidden sloppy table durable"
+    sql: "SHUTDOWN"
+    restart_timeout: 300
+    expect:
+      rows: 0
+
+  - name: "After second restart: hidden sloppy rows still present"
+    sql: "SELECT COUNT(*) AS c FROM `.sr_hidden`"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
   # --- Cleanup ---
   - name: "Cleanup sr_data"
     sql: "DROP TABLE IF EXISTS sr_data"
+  - name: "Cleanup hidden sloppy table"
+    scm: '(droptable "memcp-tests" ".sr_hidden" true)'

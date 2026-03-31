@@ -37,7 +37,11 @@ type storageShard struct {
 	uuid uuid.UUID // uuid.String()
 	// main storage
 	main_count uint32 // size of main storage
-	columns    map[string]ColumnStorage
+	// columns, deltaColumns, inserts, deletions, Indexes and the unique
+	// hashmaps are shard-local internals guarded by mu. Code outside this file
+	// must treat s.mu as the only authority for shard-local state and must not
+	// read Go maps here lock-free.
+	columns map[string]ColumnStorage
 	// delta storage
 	deltaColumns map[string]int
 	inserts      [][]scm.Scmer                       // items added to storage
@@ -45,9 +49,15 @@ type storageShard struct {
 	writeOwners  map[uint64]uint32                   // goroutine-local write ownership marker
 	writeOwnMu   sync.Mutex                          // guards writeOwners
 	logfile      PersistenceLogfile                  // only in safe mode
-	mu           sync.RWMutex                        // delta write lock (working on main storage is lock free)
-	uniquelock   sync.Mutex                          // unique insert lock (only used in the sharded case)
-	next         atomic.Pointer[storageShard]        // rebuild successor published lock-free to concurrent writers
+	// mu protects shard-local topology/runtime state:
+	//   - columns / deltaColumns / inserts / deletions
+	//   - Indexes and unique hashmaps
+	//   - lazy-load attach state and next-shard dual-write publication helpers
+	// Reads take RLock snapshots; mutations, log replay, rebuild publish and
+	// repartition dual-write state updates take Lock.
+	mu         sync.RWMutex
+	uniquelock sync.Mutex                   // unique insert lock (only used in the sharded case)
+	next       atomic.Pointer[storageShard] // rebuild successor published lock-free to concurrent writers
 	// indexes
 	Indexes    []*StorageIndex // sorted keys
 	indexMutex sync.Mutex

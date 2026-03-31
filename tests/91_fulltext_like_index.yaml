@@ -319,7 +319,6 @@ test_cases:
         ) t WHERE rn <= 8
       ) s
     expect: { rows: 1, data: [{ result: "ok" }] }
-    noncritical: true
     on_fail:
       - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
 
@@ -347,14 +346,9 @@ test_cases:
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id <= 1337"
     expect: { rows: 1, data: [{ cnt: 2 }] }
 
-  # Known limitation: LIKE + upper-bound range loses rows on multi-shard tables
-  # due to shard partition pruning incorrectly skipping shards that contain
-  # matching rows. This is a pre-existing issue (confirmed on master).
-  # Correct result would be cnt=3 (ids 1337, 15000, 22777).
   - name: "LIKE + BETWEEN (id >= 1337 AND id <= 22777)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id >= 1337 AND id <= 22777"
-    noncritical: true
-    expect: { rows: 1 }
+    expect: { rows: 1, data: [{ cnt: 3 }] }
 
   - name: "LIKE + id = exact needle"
     sql: "SELECT name FROM ft_large WHERE name LIKE '%laus%' AND id = 22777"
