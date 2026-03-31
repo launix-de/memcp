@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "Incremental invalidation: SUM/COUNT DELETE, ORC partition-scoped, concurrency"
+  isolated: true
 
 test_cases:
 
