@@ -222,8 +222,20 @@ type table struct {
 	Foreign         []foreignKey         // foreign keys
 	Triggers        []TriggerDescription // triggers on this table
 	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
-	mu              sync.Mutex           // schema/sharding lock
-	uniquelock      sync.Mutex           // unique insert lock
+	// LOCK ORDER CONTRACT:
+	//   1. db.schemalock
+	//   2. t.ddlMu
+	//   3. t.mu
+	//   4. s.mu
+	// Never upgrade while already holding a read lock, and never take a table
+	// lock from inside a shard lock. Heavy rebuild/repartition work must
+	// snapshot under the narrowest lock and then release it before scanning.
+	//
+	// t.mu protects table-local storage topology and long-lived maintenance
+	// state: ShardMode, Shards/PShards, rebuilding, repartitionActive and the
+	// condition variables that coordinate table-level rebuild/repartition.
+	mu         sync.Mutex
+	uniquelock sync.Mutex // unique insert lock
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
 	// Software contract:

@@ -31,9 +31,9 @@ type database struct {
 	Name        string                                             `json:"name"`
 	persistence PersistenceEngine                                  `json:"-"`
 	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
-	// schemalock protects database-local schema membership and metadata
-	// snapshots. Heavy table maintenance must snapshot under finer-grained
-	// locks and release schemalock before doing expensive work.
+	// schemalock protects only database-local schema membership and schema.json
+	// snapshots. It must never cover long rebuild/repartition/blob work. The
+	// lock order continues with table.ddlMu -> table.mu -> shard.mu.
 	schemalock sync.RWMutex `json:"-"`
 	// saveMu/ saveCond serialize schema.json commits per database.
 	// Software contract:

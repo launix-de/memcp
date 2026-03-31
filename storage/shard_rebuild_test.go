@@ -147,6 +147,50 @@ func TestDatabaseRebuildSkipsEphemeralQueryTables(t *testing.T) {
 	}
 }
 
+func TestDatabaseShutdownRebuildIncludesEphemeralQueryTables(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-db-shutdown-ephemeral-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tshutdownephemeral")
+
+	CreateDatabase("tshutdownephemeral", false)
+	db := GetDatabase("tshutdownephemeral")
+	if db == nil {
+		t.Fatal("database not found")
+	}
+
+	ephemeral, _ := CreateTable("tshutdownephemeral", ".temp:key", Sloppy, false)
+	ephemeral.CreateColumn("id", "INT", nil, nil)
+	ephemeral.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+
+	durable, _ := CreateTable("tshutdownephemeral", "base", Safe, false)
+	durable.CreateColumn("id", "INT", nil, nil)
+	durable.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+
+	ephemeralUUID := ephemeral.Shards[0].uuid
+	durableUUID := durable.Shards[0].uuid
+
+	result := db.rebuild(true, false, true)
+	if len(result.errors) > 0 {
+		t.Fatalf("shutdown-style rebuild errors: %v", result.errors)
+	}
+
+	if ephemeral.Shards[0].uuid == ephemeralUUID {
+		t.Fatal("shutdown-style rebuild must flush ephemeral query tables too")
+	}
+	if durable.Shards[0].uuid == durableUUID {
+		t.Fatal("shutdown-style rebuild must still rebuild durable tables")
+	}
+}
+
 func TestManualRepartitionForwardsConcurrentInserts(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-manual-repartition-*")
 	if err != nil {
