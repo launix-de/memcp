@@ -1242,6 +1242,7 @@ Patterns can be any of:
 	init_strings()
 	init_streams()
 	init_list()
+	init_list_assoc_extra()
 	init_date()
 	init_timezone()
 	init_vector()

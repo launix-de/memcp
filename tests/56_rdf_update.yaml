@@ -8,7 +8,6 @@ setup: []
 test_cases:
 
   - name: "INSERT DATA: simple"
-    noncritical: true
     ttl_data: |
       @prefix su1: <http://supd01.org/> .
       su1:existing su1:val "before" .
@@ -19,7 +18,6 @@ test_cases:
       rows: 0
 
   - name: "INSERT DATA: verify"
-    noncritical: true
     sparql: |
       @prefix su1: <http://supd01.org/> .
       SELECT ?v WHERE { su1:new su1:val ?v }
@@ -29,7 +27,6 @@ test_cases:
         - "?v": "inserted"
 
   - name: "DELETE DATA: simple"
-    noncritical: true
     ttl_data: |
       @prefix su2: <http://supd02.org/> .
       su2:item su2:val "to-delete" .
@@ -41,7 +38,6 @@ test_cases:
       rows: 0
 
   - name: "DELETE DATA: verify"
-    noncritical: true
     sparql: |
       @prefix su2: <http://supd02.org/> .
       SELECT ?p, ?o WHERE { su2:item ?p ?o }
@@ -51,7 +47,6 @@ test_cases:
         - "?p": "http://supd02.org/keep"
 
   - name: "DELETE/INSERT WHERE: update pattern"
-    noncritical: true
     ttl_data: |
       @prefix su3: <http://supd03.org/> .
       su3:item su3:status "draft" .
@@ -64,7 +59,6 @@ test_cases:
       rows: 0
 
   - name: "DELETE/INSERT WHERE: verify"
-    noncritical: true
     sparql: |
       @prefix su3: <http://supd03.org/> .
       SELECT ?v WHERE { su3:item su3:status ?v }

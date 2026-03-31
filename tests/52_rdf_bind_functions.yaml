@@ -9,7 +9,6 @@ test_cases:
 
   # BIND
   - name: "BIND: constant"
-    noncritical: true
     sparql: |
       SELECT ?x WHERE { BIND("hello" AS ?x) }
     expect:
@@ -18,7 +17,6 @@ test_cases:
         - "?x": "hello"
 
   - name: "BIND: STR() on IRI"
-    noncritical: true
     ttl_data: |
       @prefix b02: <http://bind02.org/> .
       b02:item b02:val "x" .
@@ -31,7 +29,6 @@ test_cases:
         - "?str": "http://bind02.org/item"
 
   - name: "BIND: IRI() from string"
-    noncritical: true
     sparql: |
       SELECT ?i WHERE { BIND(IRI("http://example.org/test") AS ?i) }
     expect:
@@ -40,7 +37,6 @@ test_cases:
         - "?i": "http://example.org/test"
 
   - name: "BIND: CONCAT"
-    noncritical: true
     sparql: |
       SELECT ?c WHERE { BIND(CONCAT("hello", " ", "world") AS ?c) }
     expect:
@@ -50,7 +46,6 @@ test_cases:
 
   # IF / BOUND / COALESCE
   - name: "IF: true branch"
-    noncritical: true
     sparql: |
       SELECT ?r WHERE { BIND(IF(1 > 0, "yes", "no") AS ?r) }
     expect:
@@ -59,7 +54,6 @@ test_cases:
         - "?r": "yes"
 
   - name: "BOUND: with OPTIONAL"
-    noncritical: true
     ttl_data: |
       @prefix b06: <http://bind06.org/> .
       b06:alice b06:name "Alice" .
@@ -76,7 +70,6 @@ test_cases:
       rows: 2
 
   - name: "COALESCE"
-    noncritical: true
     ttl_data: |
       @prefix b07: <http://bind07.org/> .
       b07:a b07:name "Alice" .
@@ -95,7 +88,6 @@ test_cases:
 
   # String functions
   - name: "STRLEN"
-    noncritical: true
     ttl_data: |
       @prefix b08: <http://bind08.org/> .
       b08:item b08:val "hello" .
@@ -108,7 +100,6 @@ test_cases:
         - "?len": 5
 
   - name: "CONTAINS"
-    noncritical: true
     ttl_data: |
       @prefix b09: <http://bind09.org/> .
       b09:a b09:text "hello world" .
@@ -120,7 +111,6 @@ test_cases:
       rows: 1
 
   - name: "STRSTARTS / STRENDS"
-    noncritical: true
     ttl_data: |
       @prefix b10: <http://bind10.org/> .
       b10:a b10:name "Alice" .

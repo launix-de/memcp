@@ -8,7 +8,6 @@ setup: []
 test_cases:
 
   - name: "COUNT"
-    noncritical: true
     ttl_data: |
       @prefix ag1: <http://agg01.org/> .
       ag1:a a ag1:Person .
@@ -23,7 +22,6 @@ test_cases:
         - "?cnt": 3
 
   - name: "COUNT with GROUP BY"
-    noncritical: true
     ttl_data: |
       @prefix ag2: <http://agg02.org/> .
       ag2:a ag2:type "cat" .
@@ -37,7 +35,6 @@ test_cases:
       rows: 2
 
   - name: "SUM"
-    noncritical: true
     ttl_data: |
       @prefix ag3: <http://agg03.org/> .
       ag3:a ag3:val "10" .
@@ -52,7 +49,6 @@ test_cases:
         - "?total": 60
 
   - name: "AVG"
-    noncritical: true
     ttl_data: |
       @prefix ag4: <http://agg04.org/> .
       ag4:a ag4:val "10" .
@@ -66,7 +62,6 @@ test_cases:
         - "?avg": 15
 
   - name: "MIN / MAX"
-    noncritical: true
     ttl_data: |
       @prefix ag5: <http://agg05.org/> .
       ag5:a ag5:val "5" .
@@ -79,7 +74,6 @@ test_cases:
       rows: 1
 
   - name: "GROUP_CONCAT"
-    noncritical: true
     ttl_data: |
       @prefix ag6: <http://agg06.org/> .
       ag6:a ag6:tag "red" .

@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "ORC suffix recompute: correctness under INSERT/DELETE/UPDATE at various positions"
+  isolated: true
 
 test_cases:
 

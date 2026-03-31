@@ -95,58 +95,6 @@ func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 	}
 }
 
-func TestDatabaseRebuildSkipsEphemeralQueryTables(t *testing.T) {
-	dir, err := os.MkdirTemp("", "memcp-db-rebuild-ephemeral-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	oldBasepath := Basepath
-	Basepath = dir
-	defer func() { Basepath = oldBasepath }()
-
-	Init(scm.Globalenv)
-	LoadDatabases()
-	defer databases.Remove("trebuildephemeral")
-
-	CreateDatabase("trebuildephemeral", false)
-	db := GetDatabase("trebuildephemeral")
-	if db == nil {
-		t.Fatal("database not found")
-	}
-
-	base, _ := CreateTable("trebuildephemeral", "base", Safe, false)
-	base.CreateColumn("id", "INT", nil, nil)
-	base.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
-
-	ephemeral, _ := CreateTable("trebuildephemeral", ".temp:key", Sloppy, false)
-	ephemeral.CreateColumn("id", "INT", nil, nil)
-	ephemeral.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
-
-	durableInternal, _ := CreateTable("trebuildephemeral", ".blobs_like", Safe, false)
-	durableInternal.CreateColumn("id", "INT", nil, nil)
-	durableInternal.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
-
-	baseUUID := base.Shards[0].uuid
-	ephemeralUUID := ephemeral.Shards[0].uuid
-	durableInternalUUID := durableInternal.Shards[0].uuid
-
-	result := db.rebuild(true, false, false)
-	if len(result.errors) > 0 {
-		t.Fatalf("rebuild errors: %v", result.errors)
-	}
-
-	if base.Shards[0].uuid == baseUUID {
-		t.Fatal("durable user table was not rebuilt")
-	}
-	if ephemeral.Shards[0].uuid != ephemeralUUID {
-		t.Fatal("ephemeral query table should be skipped by global rebuild")
-	}
-	if durableInternal.Shards[0].uuid == durableInternalUUID {
-		t.Fatal("durable internal table must still participate in rebuild")
-	}
-}
-
 func TestManualRepartitionForwardsConcurrentInserts(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-manual-repartition-*")
 	if err != nil {

@@ -31,9 +31,9 @@ type database struct {
 	Name        string                                             `json:"name"`
 	persistence PersistenceEngine                                  `json:"-"`
 	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
-	// schemalock protects database-local schema membership and metadata
-	// snapshots. Heavy table maintenance must snapshot under finer-grained
-	// locks and release schemalock before doing expensive work.
+	// schemalock protects only database-local schema membership and schema.json
+	// snapshots. It must never cover long rebuild/repartition/blob work. The
+	// lock order continues with table.ddlMu -> table.mu -> shard.mu.
 	schemalock sync.RWMutex `json:"-"`
 	// saveMu/ saveCond serialize schema.json commits per database.
 	// Software contract:
@@ -156,9 +156,6 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 }
 
 func UnloadDatabases() {
-	// Clean shutdown may flush ephemeral query tables as well. They remain
-	// excluded from online/global rebuilds to avoid interfering with live
-	// query-local scratch state.
 	fmt.Println("table compression done in ", rebuildDatabases(false, false, true))
 	data, _ := json.Marshal(Settings)
 	if settings, err := os.OpenFile(Basepath+"/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {

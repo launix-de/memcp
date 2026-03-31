@@ -167,7 +167,6 @@ test_cases:
         - {id: 5, parent: 200, time_val: 25, next_amount: null}
 
   - name: "Case 4: ERPL subquery pattern"
-    noncritical: true
     sql: |
       SELECT m.id, m.partStart, m.partEnd
       FROM (
@@ -320,7 +319,6 @@ test_cases:
         - {id: 3, amount: 700, rn: 5}
 
   - name: "Case 12b: Nested ORDER BY LIMIT via ROW_NUMBER — top 3 by time, sort by amount"
-    noncritical: true
     sql: |
       SELECT id, amount, rn FROM (
         SELECT id, amount, ROW_NUMBER() OVER (ORDER BY time_val) AS rn FROM win_emp

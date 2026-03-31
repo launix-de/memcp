@@ -38,7 +38,7 @@ test_cases:
       WHERE e.salary > (SELECT AVG(salary) FROM sc_emp)
       ORDER BY e.salary DESC
     expect:
-      rows: 4
+      rows: 3
 
   - name: "WHERE: correlated scalar subselect"
     sql: |
@@ -71,7 +71,7 @@ test_cases:
     expect:
       rows: 3
       data:
-        - name: "Bob"
+        - name: "Alice"
         - name: "Dave"
         - name: "Frank"
 
@@ -80,7 +80,6 @@ test_cases:
   # ============================================================
 
   - name: "HAVING: scalar subselect comparison"
-    noncritical: true
     sql: |
       SELECT e.did, COUNT(*) AS cnt
       FROM sc_emp e
@@ -96,7 +95,6 @@ test_cases:
           cnt: 2
 
   - name: "HAVING: correlated scalar subselect references group key"
-    noncritical: true
     sql: |
       SELECT e.did, SUM(e.salary) AS total
       FROM sc_emp e
@@ -104,10 +102,14 @@ test_cases:
       HAVING SUM(e.salary) > (SELECT d.budget / 3 FROM sc_dept d WHERE d.id = e.did LIMIT 1)
       ORDER BY e.did
     expect:
-      rows: 1
+      rows: 3
       data:
         - did: 1
           total: 265000
+        - did: 2
+          total: 145000
+        - did: 3
+          total: 60000
 
   # ============================================================
   # EXISTS / IN in WHERE (flat, no scalar nesting)
@@ -169,7 +171,6 @@ test_cases:
   # ============================================================
 
   - name: "HAVING EXISTS: department has bonus employees"
-    noncritical: true
     sql: |
       SELECT e.did, COUNT(*) AS cnt
       FROM sc_emp e
@@ -203,7 +204,6 @@ test_cases:
           dept: "Engineering"
 
   - name: "WHERE + HAVING + SELECT: all three"
-    noncritical: true
     sql: |
       SELECT e.did,
         (SELECT d.name FROM sc_dept d WHERE d.id = e.did LIMIT 1) AS dept_name,

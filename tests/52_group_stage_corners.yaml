@@ -37,7 +37,6 @@ test_cases:
   # 1. GROUP BY inside FROM subquery (derived table with aggregation)
   # =================================================================
   - name: "Derived table with GROUP BY"
-    noncritical: true
     sql: |
       SELECT t.customer, t.total
       FROM (SELECT customer, SUM(amount) AS total FROM gs_orders GROUP BY customer) t
@@ -66,7 +65,6 @@ test_cases:
           amount: 300
 
   - name: "Derived table ORDER BY LIMIT 2 with outer ORDER BY"
-    noncritical: true
     sql: |
       SELECT t.customer, t.amount
       FROM (SELECT customer, amount FROM gs_orders ORDER BY amount DESC LIMIT 3) t
@@ -85,7 +83,6 @@ test_cases:
   # 3. Nested LIMIT: LIMIT in subquery + LIMIT in outer
   # =================================================================
   - name: "Nested LIMIT: inner LIMIT 4, outer LIMIT 2"
-    noncritical: true
     sql: |
       SELECT t.customer, t.amount
       FROM (SELECT customer, amount FROM gs_orders ORDER BY amount DESC LIMIT 4) t
@@ -103,7 +100,6 @@ test_cases:
   # 4. GROUP BY in FROM subquery + outer ORDER BY
   # =================================================================
   - name: "Aggregated subquery with outer ORDER BY and LIMIT"
-    noncritical: true
     sql: |
       SELECT t.customer, t.cnt
       FROM (SELECT customer, COUNT(*) AS cnt FROM gs_orders GROUP BY customer) t
@@ -121,7 +117,6 @@ test_cases:
   # 5. COUNT(DISTINCT) with JOIN
   # =================================================================
   - name: "COUNT DISTINCT on joined column"
-    noncritical: true
     sql: |
       SELECT o.customer, COUNT(DISTINCT i.product) AS products
       FROM gs_orders o
@@ -142,7 +137,6 @@ test_cases:
   # 6. COUNT(DISTINCT) with WHERE + JOIN
   # =================================================================
   - name: "COUNT DISTINCT joined with WHERE filter"
-    noncritical: true
     sql: |
       SELECT o.customer, COUNT(DISTINCT i.product) AS products
       FROM gs_orders o
@@ -298,7 +292,6 @@ test_cases:
   # 14. Outer ORDER BY on column from aggregated subquery in JOIN
   # =================================================================
   - name: "Outer ORDER BY on aggregated JOIN column"
-    noncritical: true
     sql: |
       SELECT o.customer, o.amount, t.total_qty
       FROM gs_orders o
