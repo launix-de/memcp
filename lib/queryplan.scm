@@ -493,7 +493,6 @@ raw _unn_* occurrence aliases into physical temp column names. */
 		expr /* literals */
 	)
 ))
-
 /* scalar subselect helper wrappers */
 (define scalar_scan (lambda (schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2) (begin
 	(define result (scan schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2))
@@ -1709,11 +1708,14 @@ or generate runtime scan code (build_queryplan).
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define untangle_opts (match outer_schemas_param
-		'((symbol untangle_options) outer_schemas enforce_contract) (list outer_schemas enforce_contract)
-		'((quote untangle_options) outer_schemas enforce_contract) (list outer_schemas enforce_contract)
-		_ (list outer_schemas_param true)))
+		'((symbol untangle_options) outer_schemas enforce_contract prefer_exists_fallback) (list outer_schemas enforce_contract prefer_exists_fallback)
+		'((quote untangle_options) outer_schemas enforce_contract prefer_exists_fallback) (list outer_schemas enforce_contract prefer_exists_fallback)
+		'((symbol untangle_options) outer_schemas enforce_contract) (list outer_schemas enforce_contract false)
+		'((quote untangle_options) outer_schemas enforce_contract) (list outer_schemas enforce_contract false)
+		_ (list outer_schemas_param true false)))
 	(define outer_schemas_chain (coalesceNil (nth untangle_opts 0) '()))
 	(define enforce_planner_contract (coalesceNil (nth untangle_opts 1) true))
+	(define prefer_exists_fallback_untangle (coalesceNil (nth untangle_opts 2) false))
 	(define sq_cache (newsession))
 	(sq_cache "init" '())
 
@@ -1876,6 +1878,34 @@ or generate runtime scan code (build_queryplan).
 		)))
 	)))
 
+	(define build_scalar_subselect_promise (lambda (subquery outer_schemas) (begin
+		(define union_parts (query_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error "scalar subselect UNION ALL is not supported yet")
+			(begin
+				(define raw_vals (if (and (list? subquery) (>= (count subquery) 9))
+					(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
+					(list nil nil nil nil nil)
+				))
+				(define raw_group (nth raw_vals 0))
+				(define raw_having (nth raw_vals 1))
+				(define raw_order (nth raw_vals 2))
+				(define raw_limit (nth raw_vals 3))
+				(define raw_offset (nth raw_vals 4))
+				(match (apply untangle_query (merge subquery (list (list (quote untangle_options) outer_schemas false true))))
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2) (begin
+						(define groups2 (coalesceNil groups2 '()))
+						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
+							(if (or raw_group raw_having raw_order raw_limit raw_offset)
+								(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset nil nil))
+								groups2)
+							groups2))
+						(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
+						(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
+						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+						(build_queryplan_scalar_subselect schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2))
+					(error "non matching return value for untangle_query")))))))
+
 	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
 		(if (not (nil? union_parts))
@@ -1892,7 +1922,7 @@ or generate runtime scan code (build_queryplan).
 				(define raw_offset (nth raw_vals 4))
 				/* pass full outer schema chain so nested subqueries inside this scalar
 				subselect can still resolve grandparent references (skip-level correlation) */
-				(match (apply untangle_query (merge subquery (list (list (quote untangle_options) outer_schemas false))))
+				(match (apply untangle_query (merge subquery (list (list (quote untangle_options) outer_schemas false true))))
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -2199,13 +2229,19 @@ or generate runtime scan code (build_queryplan).
 	))
 	(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
 		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
-		(list (quote coalesceNil)
-			(build_scalar_subselect
-				(list schema2 tables2
-					(list "__exists" true)
-					condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
-				outer_schemas)
-			false)
+		(begin
+			(define _exists_plan_name (symbol (concat "__exists_plan_" (fnv_hash (concat schema2 "|" tables2 "|" condition2 "|" group2 "|" having2 "|" order2 "|" limit2 "|" offset2)))))
+			(list (quote begin)
+				(list (quote set) _exists_plan_name
+					(list (quote quote)
+						(build_scalar_subselect_promise
+							(list schema2 tables2
+								(list "__exists" true)
+								condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
+							outer_schemas)))
+				(list (quote coalesceNil)
+					(list (quote eval) _exists_plan_name)
+					false)))
 		false
 	)))
 
@@ -3263,11 +3299,11 @@ or generate runtime scan code (build_queryplan).
 	(set tables (map tables (lambda (td) (match td
 		'(tv tschema ttbl toisOuter tje)
 		(list tv tschema ttbl toisOuter
-			(if (nil? tje) nil (replace_inner_selects tje _ris_schemas)))
+			(if (nil? tje) nil (replace_inner_selects_ex tje _ris_schemas prefer_exists_fallback_untangle)))
 		td))))
-	(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v _ris_schemas))))
-	(set condition (replace_inner_selects condition _ris_schemas))
-	(set group (map group (lambda (g) (replace_inner_selects g _ris_schemas))))
+	(set fields (map_assoc fields (lambda (k v) (replace_inner_selects_ex v _ris_schemas prefer_exists_fallback_untangle))))
+	(set condition (replace_inner_selects_ex condition _ris_schemas prefer_exists_fallback_untangle))
+	(set group (map group (lambda (g) (replace_inner_selects_ex g _ris_schemas prefer_exists_fallback_untangle))))
 	(set having (begin
 		(define _hv_resolved (replace_inner_selects_ex having _ris_schemas true))
 		/* check if any inner_select nodes remain — HAVING with subqueries
@@ -3279,7 +3315,7 @@ or generate runtime scan code (build_queryplan).
 		(if (and (not (nil? _hv_resolved)) (_hv_check _hv_resolved))
 			(error "HAVING with subqueries not yet supported")
 			_hv_resolved)))
-	(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col _ris_schemas) dir)))))
+	(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects_ex col _ris_schemas prefer_exists_fallback_untangle) dir)))))
 	/* Freeze visible top-level field refs against the currently visible tables
 	before unnested helper tables are merged into schemas. This prevents later
 	helper/keytable columns from stealing unrelated outer output bindings. */
