@@ -177,10 +177,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define schema_case (set_assoc '() "Ticket" (list (list "Field" "ID") (list "Field" "Title"))))
 	(define case_expr (list 'get_column "ticket" true "id" true))
 	(define case_expr_canon (canonicalize_columns case_expr schema_case))
+	(define case_expr_final (finalize_logical_expr case_expr schema_case (lambda (expr) expr) true))
 	(define case_alias_map (set_assoc '() "Ticket" "memcp-tests.Ticket"))
 	(assert (equal? (serialize case_expr_canon) "(get_column \"Ticket\" false \"ID\" false)") true "canonicalize_columns resolves schema casing")
+	(assert (equal? (serialize case_expr_final) "(get_column \"Ticket\" false \"ID\" false)") true "finalize_logical_expr resolves schema casing before planner stages")
 	(assert (equal? (canonical_expr_name case_expr_canon '(list) '(list) case_alias_map)
 		"(get_column \"memcp-tests.Ticket\" false \"ID\" false)") true "canonical_expr_name uses exact alias lookup after schema canonicalization")
+	(define planner_contract (newsession))
+	(try (lambda () (require_canonical_logical_expr "unit" case_expr)) (lambda (e) (planner_contract "raw" true)))
+	(assert (planner_contract "raw") true "planner contract rejects raw case-insensitive get_column markers")
+	(assert (equal? (require_canonical_logical_expr "unit" case_expr_canon) case_expr_canon) true "planner contract accepts canonical logical expr")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))
