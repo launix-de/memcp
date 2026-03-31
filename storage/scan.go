@@ -17,9 +17,9 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "sync"
 import "time"
 import "runtime/debug"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
@@ -115,42 +115,42 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		t.AddPartitioningScore([]string{b.col})
 	}
 
-	values := make(chan scanResult, 4)
 	analyzeNs := time.Since(analyzeStart).Nanoseconds()
 	// Measure execution time (parallel shard scans + collection)
 	execStart := time.Now()
 	var outCount int64
 	var inputCount int64
-	gls.Go(func() {
-		t.iterateShards(boundaries, func(s *storageShard) {
-			// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
-			// This keeps the worker pool draining quickly on tables with many shards.
-			if ss != nil && ss.IsKilled() {
-				panic("query killed")
+	results := make([]scanResult, 0, 8)
+	var resultsMu sync.Mutex
+	t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+		// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
+		// This keeps the worker pool draining quickly on tables with many shards.
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
+		msg := scanResult{}
+		defer func() {
+			if r := recover(); r != nil {
+				msg = scanResult{err: scanError{r, string(debug.Stack())}}
 			}
-			// parallel scan over shards
-			defer func() {
-				if r := recover(); r != nil {
-					values <- scanResult{err: scanError{r, string(debug.Stack())}}
-				}
-			}()
-			res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral)
-			values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
-		})
-		close(values) // last scan is finished
+			if solo {
+				results = append(results, msg)
+				return
+			}
+			resultsMu.Lock()
+			results = append(results, msg)
+			resultsMu.Unlock()
+		}()
+		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral)
+		msg = scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 	})
-	// collect values from parallel scan
-	// Drain the entire channel before acting on any error: this guarantees that
-	// all shard goroutines have finished (and therefore all LogInsert/LogDelete
-	// calls are complete) before a panic propagates to WithAutocommit's rollback.
-	// Exiting the loop early would leave goroutines blocked on a full channel
-	// (goroutine leak) and create a race between rollback and ongoing mutations.
+
 	akkumulator := neutral
 	hadValue := false
 	var scanErr scanError
 	if !aggregate2.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
-		for msg := range values {
+		for _, msg := range results {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
@@ -173,7 +173,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		}
 	} else if !aggregate.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
-		for msg := range values {
+		for _, msg := range results {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
@@ -195,7 +195,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
 	} else {
-		for msg := range values {
+		for _, msg := range results {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
