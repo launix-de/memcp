@@ -85,6 +85,9 @@ string -> physical field name. Later GROUP stages can then rewrite both original
 _unn_* get_column terms and their canonicalized forms onto the prejoin's actual
 physical columns without guessing from aliases or suffixes. */
 (define materialized_source_expr_lookup (newsession))
+/* session-sensitive runtime predicate columns must not be reused across plan
+builds, because their truth value depends on current session state. */
+(define session_runtime_plan_counter (newsession))
 (define alias_lookup_variants (lambda (alias_)
 	(reduce (filter (list
 		alias_
@@ -1689,6 +1692,75 @@ or generate runtime scan code (build_queryplan).
 						)))
 						(set fields2 (map_assoc fields2 (lambda (k v) (wrap_unresolved_outer v))))
 						(set condition2 (wrap_unresolved_outer condition2))
+						(define raw_contains_skip_level_nested_outer_ref (begin
+							(define raw_query_local_aliases (lambda (query) (match query
+								'(_ raw_tables _ _ _ _ _ _ _) (reduce raw_tables (lambda (acc td)
+									(match td
+										'(alias _ _ _ _) (append_unique acc alias)
+										acc))
+									'())
+								'())))
+							(define alias_in_list (lambda (aliases alias_name)
+								(reduce aliases (lambda (acc alias_) (or acc (equal?? alias_ alias_name))) false)))
+							(define raw_query_uses_alias_outside_current (lambda (query current_aliases) (match query
+								'(_ raw_tables raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+									(define nested_local_aliases (raw_query_local_aliases query))
+									(define raw_expr_uses_alias_outside_current (lambda (expr) (match expr
+										'((symbol get_column) alias_ _ _ _) (and (not (nil? alias_))
+											(not (alias_in_list nested_local_aliases alias_))
+											(not (alias_in_list current_aliases alias_)))
+										'((quote get_column) alias_ _ _ _) (and (not (nil? alias_))
+											(not (alias_in_list nested_local_aliases alias_))
+											(not (alias_in_list current_aliases alias_)))
+										(cons sym args) (reduce args (lambda (acc arg) (or acc (raw_expr_uses_alias_outside_current arg))) false)
+										false)))
+									(or
+										(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_uses_alias_outside_current v))) false)
+										(raw_expr_uses_alias_outside_current (coalesceNil raw_condition true))
+										(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_uses_alias_outside_current gexpr))) false)
+										(raw_expr_uses_alias_outside_current (coalesceNil raw_having true))
+										(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
+											(or acc (match order_item
+												'(col _dir) (raw_expr_uses_alias_outside_current col)
+												false)))
+											false)))
+								false)))
+							(define raw_query_contains_skip_level_nested_outer_ref (lambda (query current_aliases) (match query
+								'(_ _ raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+									(define raw_expr_contains_skip_level_nested_outer_ref (lambda (expr) (match expr
+										(cons sym args) (begin
+											(define kind (inner_select_kind sym))
+											(define nested_subquery (if (nil? kind) nil
+												(match kind
+													(quote inner_select) (match args
+														(cons inner_subquery '()) inner_subquery
+														nil)
+													(quote inner_select_in) (match args
+														(cons _target_expr (cons inner_subquery '())) inner_subquery
+														nil)
+													(quote inner_select_exists) (match args
+														(cons inner_subquery '()) inner_subquery
+														nil)
+													nil)))
+											(or
+												(and (not (nil? nested_subquery))
+													(or
+														(raw_query_uses_alias_outside_current nested_subquery current_aliases)
+														(raw_query_contains_skip_level_nested_outer_ref nested_subquery current_aliases)))
+												(reduce args (lambda (acc arg) (or acc (raw_expr_contains_skip_level_nested_outer_ref arg))) false)))
+										false)))
+									(or
+										(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_contains_skip_level_nested_outer_ref v))) false)
+										(raw_expr_contains_skip_level_nested_outer_ref (coalesceNil raw_condition true))
+										(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_contains_skip_level_nested_outer_ref gexpr))) false)
+										(raw_expr_contains_skip_level_nested_outer_ref (coalesceNil raw_having true))
+										(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
+											(or acc (match order_item
+												'(col _dir) (raw_expr_contains_skip_level_nested_outer_ref col)
+												false)))
+											false)))
+								false)))
+							(raw_query_contains_skip_level_nested_outer_ref subquery (raw_query_local_aliases subquery))))
 						/* detect top-level aggregate for direct scan path */
 						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
@@ -1728,6 +1800,7 @@ or generate runtime scan code (build_queryplan).
 						(define use_direct_agg_scan (and
 							(not (nil? _agg_args))
 							(equal? (count _agg_args) 3)
+							(not raw_contains_skip_level_nested_outer_ref)
 							(nil? stage2_having)
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(not (nil? tables2))
@@ -1735,6 +1808,7 @@ or generate runtime scan code (build_queryplan).
 						))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
+							(not raw_contains_skip_level_nested_outer_ref)
 							(equal? (extract_aggregates value_expr) '())
 							(not (contains_inner_select_marker condition2))
 							(not (contains_inner_select_marker value_expr))
@@ -1818,6 +1892,12 @@ or generate runtime scan code (build_queryplan).
 										(if (and use_ordered_scalar (not (equal? stage2_order '())) (not (equal? (count ordercols) (count stage2_order))))
 											(error "scalar subselect ORDER BY must use direct columns"))
 										(define wrap_generated_outer_refs_scalar (lambda (expr local_params) (match expr
+											'((symbol outer) outer_arg) (if (list? outer_arg)
+												(wrap_generated_outer_refs_scalar outer_arg local_params)
+												expr)
+											'((quote outer) outer_arg) (if (list? outer_arg)
+												(wrap_generated_outer_refs_scalar outer_arg local_params)
+												expr)
 											(cons sym args) (cons sym (map args (lambda (arg) (wrap_generated_outer_refs_scalar arg local_params))))
 											sym (begin
 												/* Correlated direct scalar scans run inside the enclosing scan lambda.
@@ -2114,7 +2194,8 @@ or generate runtime scan code (build_queryplan).
 														(if (nil? je) nil (_us_prefix_ria je)))
 													td))))
 												/* inner condition (non-correlated), prefixed */
-												(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
+												(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil
+													(_us_prefix_ria (_us_ror us_inner_cond_raw))))
 												/* domain columns + original GROUP BY → scoped GROUP stage */
 												(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
 												(define us_orig_having (if us_has_stages (stage_having_expr (car _us_own_stages)) nil))
@@ -2440,7 +2521,6 @@ or generate runtime scan code (build_queryplan).
 				nil))
 			(if (and (_subquery_has_outer_refs subquery outer_schemas)
 				(_subquery_outer_refs_are_direct_columns subquery outer_schemas)
-				(not (_contains_inner_select_marker subquery))
 				(not (nil? _value_expr))
 				(equal? (extract_aggregates _value_expr) '())
 				(nil? h)
@@ -2568,10 +2648,11 @@ or generate runtime scan code (build_queryplan).
 										(cons subquery '())
 										(if prefer_exists_fallback
 											(list (quote not) (build_exists_subselect subquery outer_schemas))
-											(if (expr_uses_session_state subquery)
-											(list (quote not) (build_exists_subselect subquery outer_schemas))
-											(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?))
-												(list (quote not) (build_exists_subselect subquery outer_schemas)))))
+											(begin
+												/* Session-sensitive predicates must still decorrelate; only the
+												reusable COUNT/GROUP cache is restricted via uncached-count. */
+												(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?))
+													(list (quote not) (build_exists_subselect subquery outer_schemas)))))
 										_ nil)
 									nil)))
 						_ nil)
@@ -2592,10 +2673,12 @@ or generate runtime scan code (build_queryplan).
 						(cons subquery '())
 						(if prefer_exists_fallback
 							(build_exists_subselect subquery outer_schemas)
-							(if (expr_uses_session_state subquery)
-							(build_exists_subselect subquery outer_schemas)
-							(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >))
-								(build_exists_subselect subquery outer_schemas))))
+							(begin
+								/* Session-sensitive EXISTS may still use the COUNT-based unnesting
+								path. count_subquery_cache_policy decides whether that grouped helper
+								stage is reusable or must remain uncached for the current session. */
+								(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >))
+									(build_exists_subselect subquery outer_schemas))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects_ex arg outer_schemas prefer_exists_fallback)))))
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects_ex arg outer_schemas prefer_exists_fallback)))))
 				not_expr))
@@ -3955,8 +4038,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				source row plus session/context values must be materialized before the
 				group stage. Otherwise the later keytable aggregation loses the row
 				identity (e.g. a.user_id) they need and the predicate collapses away. */
+				(define runtime_local_name_cache (newsession))
 				(define runtime_local_col_name (lambda (expr)
-					(concat ".runtime_pred|" (expr_name expr) (runtime_cache_suffix_from_exprs (list expr)))))
+					(begin
+						(define base_name (concat ".runtime_pred|" (expr_name expr)))
+						(if (expr_uses_session_state expr)
+							(begin
+								(define cached_name (runtime_local_name_cache base_name))
+								(if (nil? cached_name)
+									(begin
+										(define nonce (coalesceNil (session_runtime_plan_counter "n") 0))
+										(session_runtime_plan_counter "n" (+ nonce 1))
+										(define fresh_name (concat base_name "|sessplan:" nonce))
+										(runtime_local_name_cache base_name fresh_name)
+										fresh_name)
+									cached_name))
+							(concat base_name (runtime_cache_suffix_from_exprs (list expr)))))))
 				(define _runtime_local_part (lambda (part)
 					(and (equal? (has_only_tblvar_refs part tblvar) true)
 						(expr_uses_session_state part))))
