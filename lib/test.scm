@@ -157,12 +157,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (contains? '("a" "b") "c") false "contains? absent")
 
 	/* queryplan.scm pattern compatibility (with SourceInfo wrapping) */
+	(import "queryplan.scm")
 	(print "testing queryplan pattern matching ...")
 	(define tblx "t")
 	(define expr_gc (list 'get_column "t" false "id" false))
 	(assert (match expr_gc '((symbol get_column) (eval tblx) _ col _) col "no") "id" "match get_column for alias t -> id")
 	(define expr_gc_src (source "unit" 1 1 expr_gc))
 	(assert (match expr_gc_src '((symbol get_column) (eval tblx) _ col _) col "no") "id" "match get_column with SourceInfo wrapper")
+	(define alias_map_flat (list 't "memcp-tests.ticket" "ticket" "memcp-tests.ticket"))
+	(define alias_map_pairs (list (list 't "memcp-tests.ticket") (list "ticket" "memcp-tests.ticket")))
+	(define alias_map_fd (reduce (produceN 40) (lambda (acc i)
+		(set_assoc acc (concat "pad" i) i))
+		(set_assoc (set_assoc '() "t" "memcp-tests.ticket") "ticket" "memcp-tests.ticket")))
+	(assert (equal? (resolve_source_alias alias_map_flat 't) "memcp-tests.ticket") true "resolve_source_alias flat assoc")
+	(assert (equal? (resolve_source_alias alias_map_pairs 't) "memcp-tests.ticket") true "resolve_source_alias nested pair list")
+	(assert (equal? (resolve_source_alias alias_map_fd 't) "memcp-tests.ticket") true "resolve_source_alias FastDict")
+	(assert (equal? (rewrite_source_aliases alias_map_flat 't) (symbol "memcp-tests.ticket")) true "rewrite_source_aliases bare symbol alias")
+	(define canon_expr_t (list 'get_column 't false "id" false))
+	(assert (equal? (canonical_expr_name canon_expr_t '(list) '(list) alias_map_flat)
+		(canonical_expr_name canon_expr_t '(list) '(list) alias_map_pairs)) true "canonical_expr_name flat assoc vs nested pairs")
+	(assert (equal? (canonical_expr_name canon_expr_t '(list) '(list) alias_map_flat)
+		(canonical_expr_name canon_expr_t '(list) '(list) alias_map_fd)) true "canonical_expr_name flat assoc vs FastDict")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025  MemCP Contributors
+Copyright (C) 2025-2026  MemCP Contributors
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -170,78 +170,6 @@ func encodeScmerToString(v scm.Scmer, columns []string, columnSymbols []scm.Scme
 	var b bytes.Buffer
 	encodeScmer(v, &b, columns, columnSymbols)
 	return b.String()
-}
-
-func buildCanonicalSymbolIndex(columns []string, columnSymbols []scm.Scmer) map[string]int {
-	symIndex := make(map[string]int, len(columnSymbols))
-	for i, s := range columnSymbols {
-		if s.IsSymbol() {
-			str, _ := s.AppendString(nil) // zero-alloc for tagSymbol
-			symIndex[strings.ToLower(str)] = i
-			continue
-		}
-		if sym, ok := s.Any().(scm.Symbol); ok {
-			symIndex[strings.ToLower(string(sym))] = i
-		}
-	}
-	return symIndex
-}
-
-func canonicalizeScmerNode(v scm.Scmer, columns []string, symIndex map[string]int, aliasMap map[string]string) scm.Scmer {
-	if v.IsNthLocalVar() {
-		i := int(v.NthLocalVar())
-		if i >= 0 && i < len(columns) {
-			return scm.NewSymbol(columns[i])
-		}
-		return v
-	}
-	if v.IsSymbol() {
-		s, _ := v.AppendString(nil) // zero-alloc for tagSymbol
-		sLower := strings.ToLower(s)
-		if idx, ok := symIndex[sLower]; ok && idx >= 0 && idx < len(columns) {
-			return scm.NewSymbol(columns[idx])
-		}
-		if mapped, ok := aliasMap[sLower]; ok {
-			return scm.NewSymbol(mapped)
-		}
-		return v
-	}
-	if !v.IsSlice() {
-		return v
-	}
-
-	items := v.Slice()
-	if len(items) >= 5 && items[0].IsSymbol() {
-		head, _ := items[0].AppendString(nil)
-		if head == "get_column" {
-			out := make([]scm.Scmer, len(items))
-			copy(out, items)
-			if items[1].IsString() {
-				alias, _ := items[1].AppendString(nil)
-				if mapped, ok := aliasMap[strings.ToLower(alias)]; ok {
-					out[1] = scm.NewString(mapped)
-				} else {
-					out[1] = items[1]
-				}
-			} else {
-				out[1] = canonicalizeScmerNode(items[1], columns, symIndex, aliasMap)
-			}
-			out[3] = canonicalizeScmerNode(items[3], columns, symIndex, aliasMap)
-			return scm.NewSlice(out)
-		}
-	}
-
-	out := make([]scm.Scmer, len(items))
-	for i, item := range items {
-		out[i] = canonicalizeScmerNode(item, columns, symIndex, aliasMap)
-	}
-	return scm.NewSlice(out)
-}
-
-func canonicalizeScmerToString(v scm.Scmer, columns []string, columnSymbols []scm.Scmer, aliasMap map[string]string) string {
-	symIndex := buildCanonicalSymbolIndex(columns, columnSymbols)
-	normalized := canonicalizeScmerNode(v, columns, symIndex, aliasMap)
-	return scm.SerializeToString(normalized, &scm.Globalenv)
 }
 
 // Minimum table size required to collect scan statistics.

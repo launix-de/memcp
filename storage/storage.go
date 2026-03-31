@@ -167,50 +167,6 @@ func mustScmerSlice(v scm.Scmer, ctx string) []scm.Scmer {
 	panic(ctx + ": expected list")
 }
 
-func scmerAssocSlice(v scm.Scmer) ([]scm.Scmer, bool) {
-	if v.IsSlice() {
-		return v.Slice(), true
-	}
-	if v.IsFastDict() {
-		fd := v.FastDict()
-		if fd == nil {
-			return []scm.Scmer{}, true
-		}
-		return fd.Pairs, true
-	}
-	return nil, false
-}
-
-func buildCanonicalAliasMap(v scm.Scmer) map[string]string {
-	raw, ok := scmerAssocSlice(v)
-	if !ok {
-		panic("alias_map: expected list")
-	}
-
-	aliasMap := map[string]string{}
-	nestedPairs := len(raw) > 0
-	for _, item := range raw {
-		pair, ok := scmerAssocSlice(item)
-		if !ok || len(pair) != 2 {
-			nestedPairs = false
-			break
-		}
-	}
-
-	if nestedPairs {
-		for _, item := range raw {
-			pair, _ := scmerAssocSlice(item)
-			aliasMap[strings.ToLower(scm.String(pair[0]))] = scm.String(pair[1])
-		}
-		return aliasMap
-	}
-
-	for i := 0; i+1 < len(raw); i += 2 {
-		aliasMap[strings.ToLower(scm.String(raw[i]))] = scm.String(raw[i+1])
-	}
-	return aliasMap
-}
-
 func scmerSliceToStrings(list []scm.Scmer) []string {
 	out := make([]string, len(list))
 	for i, item := range list {
@@ -1297,41 +1253,6 @@ func Init(en scm.Env) {
 				{Kind: "list", ParamName: "sortkeys", ParamDesc: "composite sort key values from which to invalidate"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
-	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "canonical_expr_name",
-		Desc: "builds a canonical string for an expression; maps var(n)/lambda params to column names and can normalize aliases",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			expr := a[0]
-
-			columns := []string{}
-			if len(a) >= 2 && !a[1].IsNil() {
-				for _, item := range mustScmerSlice(a[1], "columns") {
-					columns = append(columns, scm.String(item))
-				}
-			}
-
-			params := []scm.Scmer{}
-			if len(a) >= 3 && !a[2].IsNil() {
-				params = mustScmerSlice(a[2], "params")
-			}
-
-			aliasMap := map[string]string{}
-			if len(a) >= 4 && !a[3].IsNil() {
-				aliasMap = buildCanonicalAliasMap(a[3])
-			}
-
-			return scm.NewString(canonicalizeScmerToString(expr, columns, params, aliasMap))
-		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "expr", ParamDesc: "expression to normalize"},
-				{Kind: "list", ParamName: "columns", ParamDesc: "optional list of column names for var(n) mapping", Optional: true},
-				{Kind: "list", ParamName: "params", ParamDesc: "optional list of lambda parameter symbols", Optional: true},
-				{Kind: "list", ParamName: "alias_map", ParamDesc: "optional list of (alias canonical) pairs", Optional: true},
-			},
-			Return: &scm.TypeDescriptor{Kind: "string"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
