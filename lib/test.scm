@@ -176,9 +176,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(canonical_expr_name canon_expr_t '(list) '(list) alias_map_fd)) true "canonical_expr_name flat assoc vs FastDict")
 	(define schema_case (set_assoc '() "Ticket" (list (list "Field" "ID") (list "Field" "Title"))))
 	(define case_expr (list 'get_column "ticket" true "id" true))
-	(define case_expr_canon (canonicalize_expr_for_name case_expr schema_case))
+	(define case_expr_canon (canonicalize_columns case_expr schema_case))
 	(define case_alias_map (set_assoc '() "Ticket" "memcp-tests.Ticket"))
-	(assert (equal? (serialize case_expr_canon) "(get_column \"Ticket\" false \"ID\" false)") true "canonicalize_expr_for_name resolves schema casing")
+	(assert (equal? (serialize case_expr_canon) "(get_column \"Ticket\" false \"ID\" false)") true "canonicalize_columns resolves schema casing")
 	(assert (equal? (canonical_expr_name case_expr_canon '(list) '(list) case_alias_map)
 		"(get_column \"memcp-tests.Ticket\" false \"ID\" false)") true "canonical_expr_name uses exact alias lookup after schema canonicalization")
 

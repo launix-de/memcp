@@ -745,9 +745,6 @@ to avoid matching outer tables which would break scope resolution. */
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
 				sl soff spa (stage_init_code stage)))))
 )))
-(define canonicalize_expr_for_name (lambda (expr all_schemas)
-	(canonicalize_columns (normalize_canonical_aliases expr) all_schemas)
-))
 
 (import "sql-metadata.scm")
 
@@ -4583,7 +4580,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(cons (symbol aggregate) agg_args)
 					(if nested_agg
 						(begin
-							(define agg_name (canonical_expr_name (canonicalize_expr_for_name agg_args schemas) '(list) '(list) prejoin_alias_map))
+							(define agg_name (canonical_expr_name agg_args '(list) '(list) prejoin_alias_map))
 							(define match_col (reduce prejoin_source_tables (lambda (acc td)
 								(if (not (nil? acc))
 									acc
@@ -4614,7 +4611,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(cons '(quote aggregate) agg_args)
 					(if nested_agg
 						(begin
-							(define agg_name (canonical_expr_name (canonicalize_expr_for_name agg_args schemas) '(list) '(list) prejoin_alias_map))
+							(define agg_name (canonical_expr_name agg_args '(list) '(list) prejoin_alias_map))
 							(define match_col (reduce prejoin_source_tables (lambda (acc td)
 								(if (not (nil? acc))
 									acc
@@ -4755,7 +4752,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
 				(define prejoin_columns (reduce all_referenced_columns (lambda (acc mc)
 					(begin
-						(define canon_name (canonical_expr_name (canonicalize_expr_for_name (lower_prejoin_lineage_expr (cadr mc)) schemas) '(list) '(list) prejoin_alias_map))
+						(define canon_name (canonical_expr_name (lower_prejoin_lineage_expr (cadr mc)) '(list) '(list) prejoin_alias_map))
 						(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false)
 							acc
 							(merge acc (list (list canon_name (cadr mc))))))) '()))
@@ -4763,7 +4760,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
 					(list "Field" (car mc) "Type" "any" "Expr" (cadr mc)))))
-				(define prejoin_condition_name (canonical_expr_name (canonicalize_expr_for_name (lower_prejoin_lineage_expr raw_condition) schemas) '(list) '(list) prejoin_alias_map))
+				(define prejoin_condition_name (canonical_expr_name (lower_prejoin_lineage_expr raw_condition) '(list) '(list) prejoin_alias_map))
 				(define prejointbl (concat ".prejoin:"
 					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
@@ -4810,7 +4807,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define prejoin_variant_names (lambda (expr)
 					(reduce (map (prejoin_variant_exprs expr) (lambda (variant_expr)
 						(sanitize_temp_name
-							(canonical_expr_name (canonicalize_expr_for_name (lower_prejoin_lineage_expr variant_expr) schemas) '(list) '(list) prejoin_alias_map))))
+							(canonical_expr_name (lower_prejoin_lineage_expr variant_expr) '(list) '(list) prejoin_alias_map))))
 						(lambda (acc variant_name) (append_unique acc variant_name))
 						'())))
 				(prejoin_canonical_sources prejointbl
@@ -4941,7 +4938,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(if _scope_match
 								(list (quote get_column) prejoin_alias false
 									(sanitize_temp_name
-										(canonical_expr_name (canonicalize_expr_for_name _logical_source_expr schemas) '(list) '(list) prejoin_alias_map))
+										(canonical_expr_name _logical_source_expr '(list) '(list) prejoin_alias_map))
 									false)
 								expr)))
 					'((quote get_column) src_alias ti col ci) (begin
@@ -4973,7 +4970,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(if _scope_match
 								(list (quote get_column) prejoin_alias false
 									(sanitize_temp_name
-										(canonical_expr_name (canonicalize_expr_for_name _logical_source_expr schemas) '(list) '(list) prejoin_alias_map))
+										(canonical_expr_name _logical_source_expr '(list) '(list) prejoin_alias_map))
 									false)
 								expr)))
 					(cons sym args) (cons sym (map args rewrite_as_prejoin_column))
