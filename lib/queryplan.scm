@@ -1526,6 +1526,75 @@ or generate runtime scan code (build_queryplan).
 						)))
 						(set fields2 (map_assoc fields2 (lambda (k v) (wrap_unresolved_outer v))))
 						(set condition2 (wrap_unresolved_outer condition2))
+						(define raw_contains_skip_level_nested_outer_ref (begin
+							(define raw_query_local_aliases (lambda (query) (match query
+								'(_ raw_tables _ _ _ _ _ _ _) (reduce raw_tables (lambda (acc td)
+									(match td
+										'(alias _ _ _ _) (append_unique acc alias)
+										acc))
+									'())
+								'())))
+							(define alias_in_list (lambda (aliases alias_name)
+								(reduce aliases (lambda (acc alias_) (or acc (equal?? alias_ alias_name))) false)))
+							(define raw_query_uses_alias_outside_current (lambda (query current_aliases) (match query
+								'(_ raw_tables raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+									(define nested_local_aliases (raw_query_local_aliases query))
+									(define raw_expr_uses_alias_outside_current (lambda (expr) (match expr
+										'((symbol get_column) alias_ _ _ _) (and (not (nil? alias_))
+											(not (alias_in_list nested_local_aliases alias_))
+											(not (alias_in_list current_aliases alias_)))
+										'((quote get_column) alias_ _ _ _) (and (not (nil? alias_))
+											(not (alias_in_list nested_local_aliases alias_))
+											(not (alias_in_list current_aliases alias_)))
+										(cons sym args) (reduce args (lambda (acc arg) (or acc (raw_expr_uses_alias_outside_current arg))) false)
+										false)))
+									(or
+										(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_uses_alias_outside_current v))) false)
+										(raw_expr_uses_alias_outside_current (coalesceNil raw_condition true))
+										(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_uses_alias_outside_current gexpr))) false)
+										(raw_expr_uses_alias_outside_current (coalesceNil raw_having true))
+										(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
+											(or acc (match order_item
+												'(col _dir) (raw_expr_uses_alias_outside_current col)
+												false)))
+											false)))
+								false)))
+							(define raw_query_contains_skip_level_nested_outer_ref (lambda (query current_aliases) (match query
+								'(_ _ raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+									(define raw_expr_contains_skip_level_nested_outer_ref (lambda (expr) (match expr
+										(cons sym args) (begin
+											(define kind (inner_select_kind sym))
+											(define nested_subquery (if (nil? kind) nil
+												(match kind
+													(quote inner_select) (match args
+														(cons inner_subquery '()) inner_subquery
+														nil)
+													(quote inner_select_in) (match args
+														(cons _target_expr (cons inner_subquery '())) inner_subquery
+														nil)
+													(quote inner_select_exists) (match args
+														(cons inner_subquery '()) inner_subquery
+														nil)
+													nil)))
+											(or
+												(and (not (nil? nested_subquery))
+													(or
+														(raw_query_uses_alias_outside_current nested_subquery current_aliases)
+														(raw_query_contains_skip_level_nested_outer_ref nested_subquery current_aliases)))
+												(reduce args (lambda (acc arg) (or acc (raw_expr_contains_skip_level_nested_outer_ref arg))) false)))
+										false)))
+									(or
+										(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_contains_skip_level_nested_outer_ref v))) false)
+										(raw_expr_contains_skip_level_nested_outer_ref (coalesceNil raw_condition true))
+										(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_contains_skip_level_nested_outer_ref gexpr))) false)
+										(raw_expr_contains_skip_level_nested_outer_ref (coalesceNil raw_having true))
+										(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
+											(or acc (match order_item
+												'(col _dir) (raw_expr_contains_skip_level_nested_outer_ref col)
+												false)))
+											false)))
+								false)))
+							(raw_query_contains_skip_level_nested_outer_ref subquery (raw_query_local_aliases subquery))))
 						/* detect top-level aggregate for direct scan path */
 						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
@@ -1565,6 +1634,7 @@ or generate runtime scan code (build_queryplan).
 						(define use_direct_agg_scan (and
 							(not (nil? _agg_args))
 							(equal? (count _agg_args) 3)
+							(not raw_contains_skip_level_nested_outer_ref)
 							(nil? stage2_having)
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(not (nil? tables2))
@@ -1572,6 +1642,7 @@ or generate runtime scan code (build_queryplan).
 						))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
+							(not raw_contains_skip_level_nested_outer_ref)
 							(equal? (extract_aggregates value_expr) '())
 							(not (contains_inner_select_marker condition2))
 							(not (contains_inner_select_marker value_expr))
@@ -2272,15 +2343,14 @@ or generate runtime scan code (build_queryplan).
 			true)))
 	(define _try_unnest_scalar_subselect (lambda (subquery outer_schemas) (match subquery
 		'(_ _ flds _ g h o l off) (begin
-			(define _value_expr (match flds
-				(cons _ (cons v _)) v
-				nil))
-			(if (and (_subquery_has_outer_refs subquery outer_schemas)
-				(_subquery_outer_refs_are_direct_columns subquery outer_schemas)
-				(not (_contains_inner_select_marker subquery))
-				(not (nil? _value_expr))
-				(equal? (extract_aggregates _value_expr) '())
-				(nil? h)
+				(define _value_expr (match flds
+					(cons _ (cons v _)) v
+					nil))
+				(if (and (_subquery_has_outer_refs subquery outer_schemas)
+					(_subquery_outer_refs_are_direct_columns subquery outer_schemas)
+					(not (nil? _value_expr))
+					(equal? (extract_aggregates _value_expr) '())
+					(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
 				(nil? l)
@@ -2514,20 +2584,33 @@ or generate runtime scan code (build_queryplan).
 						'((symbol get_column) alias_ ti col ci) (if (not (nil? (schemas2 alias_)))
 							'('get_column (concat id "\0" alias_) ti col ci)
 							expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
-						'((symbol outer) outer_arg) (begin
-							/* prefix outer variable reference if it refers to a table in schemas2 */
-							(define s (string outer_arg))
-							(define parts (split s "."))
-							(match parts
-								(list tbl col) (if (not (nil? (schemas2 tbl)))
-									(list (quote outer) (symbol (concat id "\0" tbl "." col)))
-									(list (quote outer) outer_arg))
-								_ (list (quote outer) (replace_column_alias outer_arg))
+							'((symbol outer) outer_arg) (begin
+								/* prefix outer variable reference if it refers to a table in schemas2 */
+								(define s (string outer_arg))
+								(define parts (split s "."))
+								(match parts
+									(list tbl col) (if (not (nil? (schemas2 tbl)))
+										(list (quote outer) (symbol (concat id "\0" tbl "." col)))
+										(list (quote outer) outer_arg))
+									/* Non-trivial outer expressions must stay expressions with recursively
+									rewritten leaves. Wrapping the whole expression again as (outer ...)
+									produces invalid runtime calls like (outer <custom N>). */
+									_ (replace_column_alias outer_arg)
+								)
 							)
-						)
-						(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
-						expr
-					)))
+							'((quote outer) outer_arg) (begin
+								(define s (string outer_arg))
+								(define parts (split s "."))
+								(match parts
+									(list tbl col) (if (not (nil? (schemas2 tbl)))
+										(list (quote outer) (symbol (concat id "\0" tbl "." col)))
+										(list (quote outer) outer_arg))
+									_ (replace_column_alias outer_arg)
+								)
+							)
+							(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym))) expr /* inner subselects resolved later by replace_inner_selects */ (cons (replace_column_alias sym) (map args replace_column_alias)))
+							expr
+						)))
 					/* prefix all table aliases and transform their joinexprs */
 					(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
 						(list (concat id "\0" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
