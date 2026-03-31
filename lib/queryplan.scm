@@ -1442,6 +1442,40 @@ or generate runtime scan code (build_queryplan).
 		replace_find_column_subselect
 	)))
 
+	/* Scalar subselects should eventually either be fully unnested or run through
+	the normal planner pipeline. This helper is the centralized promise-backed
+	fallback for all remaining scalar/EXISTS shapes and replaces the older direct
+	scan/scan_order special cases. */
+	(define build_queryplan_scalar_subselect (lambda (schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2) (begin
+		(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2 "|" groups2)))
+		(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
+		(define _sq_rr_name (concat "__scalar_resultrow_" _sq_hash))
+		(define replace_resultrow (lambda (expr) (match expr
+			(cons sym args) (if (equal? sym (quote resultrow))
+				(cons (symbol _sq_rr_name) (map args replace_resultrow))
+				(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+					(list (quote symbol) _sq_rr_name)
+					(cons (replace_resultrow sym) (map args replace_resultrow))
+				)
+			)
+			expr
+		)))
+		(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
+		(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+		(cons (quote !begin) (merge _init_stmts (list
+			(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+			(list (quote set) (symbol _sq_rr_name)
+				(list (quote lambda) (list (symbol "row"))
+					(list (symbol _sq_promise_name) "once"
+						(list (quote nth) (symbol "row") 1)
+						"scalar subselect returned more than one row")
+				)
+			)
+			subplan
+			(list (symbol _sq_promise_name) "value")
+		)))
+	)))
+
 	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
 		(if (not (nil? union_parts))
@@ -1546,37 +1580,8 @@ or generate runtime scan code (build_queryplan).
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(and (list? tables2) (equal? (count tables2) 1))
 						))
-						(define build_scalar_subselect_fallback (lambda () (begin
-							(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
-							(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
-							(define _sq_rr_name (concat "__scalar_resultrow_" _sq_hash))
-							(begin
-								(define replace_resultrow (lambda (expr) (match expr
-									(cons sym args) (if (equal? sym (quote resultrow))
-										(cons (symbol _sq_rr_name) (map args replace_resultrow))
-										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-											(list (quote symbol) _sq_rr_name)
-											(cons (replace_resultrow sym) (map args replace_resultrow))
-										)
-									)
-									expr
-								)))
-								(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
-								(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
-								(cons (quote !begin) (merge _init_stmts (list
-									(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
-									(list (quote set) (symbol _sq_rr_name)
-										(list (quote lambda) (list (symbol "row"))
-											(list (symbol _sq_promise_name) "once"
-												(list (quote nth) (symbol "row") 1)
-												"scalar subselect returned more than one row")
-										)
-									)
-									subplan
-									(list (symbol _sq_promise_name) "value")
-								)))
-							)
-						)))
+						(define build_scalar_subselect_fallback (lambda ()
+							(build_queryplan_scalar_subselect schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2)))
 						(if use_direct_agg_scan
 							(begin
 								(define agg_item (nth _agg_args 0))
