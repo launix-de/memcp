@@ -651,7 +651,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 	(define _outer_batch_row_lambda
 		(list (quote lambda) scan_mapfn_params
 			(list (quote begin)
-				(list (quote define) (symbol "__record") (list (quote !!list) batch_stride))
+				(list (quote define) (symbol "__record") (list (quote list)))
 				(cons (quote append_mut) (cons (symbol "__record") batch_map_params)))))
 	(if (nil? batched_inner_scan)
 		(scan_wrapper 'scan schema tbl
