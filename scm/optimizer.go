@@ -449,7 +449,19 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
 	}
 
-	if headOk && headSym == Symbol("begin") {
+	if headOk && (headSym == Symbol("begin") || headSym == Symbol("begin_mut")) {
+		bodyStart := 1
+		reserve := 0
+		if headSym == Symbol("begin_mut") {
+			bodyStart = 2
+			if len(v) > 1 {
+				v[1], transferOwnership, _ = optimizeExCompat(v[1], env, ome, true)
+				reserve = int(ToInt(v[1]))
+				if reserve < 0 {
+					reserve = 0
+				}
+			}
+		}
 		usedVariables := make(map[Symbol]int)
 		variableContent := make(map[Symbol]Scmer)
 		// Track top-level define positions and earliest top-level eval/import index
@@ -489,8 +501,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						}
 						visitNode(sub[2], depth+1, blacklist2)
 					}
-				} else if subHeadOk && subHead == Symbol("begin") {
-					for i := 1; i < len(sub); i++ {
+				} else if subHeadOk && (subHead == Symbol("begin") || subHead == Symbol("begin_mut")) {
+					start := 1
+					if subHead == Symbol("begin_mut") {
+						start = 2
+					}
+					for i := start; i < len(sub); i++ {
 						visitNode(sub[i], depth+1, blacklist)
 					}
 				} else if subHeadOk && subHead == Symbol("!begin") {
@@ -528,7 +544,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
-		for i := 1; i < len(v); i++ {
+		for i := bodyStart; i < len(v); i++ {
 			visitNode(v[i], 0, nil)
 			// Scan top-level statement order for define/set and eval/import safeguards
 			expr := v[i]
@@ -560,6 +576,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		ome2 := ome.CopySharedScope()
+		slotLimit := -1
+		if headSym == Symbol("begin_mut") {
+			slotIndex := 0
+			if ome.nextSlot != nil {
+				slotIndex = *ome.nextSlot
+			}
+			slotLimit = slotIndex + reserve
+			ome2.nextSlot = &slotIndex
+		}
 		for sym, content := range variableContent {
 			normalized := content
 			if stripped, ok := scmerStripSourceInfo(content); ok {
@@ -602,7 +627,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
-		for i := 1; i < len(v); i++ {
+		for i := bodyStart; i < len(v); i++ {
 			var constant bool
 			v[i], transferOwnership, constant = optimizeExCompat(v[i], env, &ome2, i == len(v)-1 && useResult)
 			if constant {
@@ -613,6 +638,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					i--
 				}
 			}
+		}
+		if slotLimit >= 0 && ome2.nextSlot != nil && *ome2.nextSlot > slotLimit {
+			panic("begin_mut reserved too few numbered vars")
 		}
 		// Flatten nested !begin blocks
 		if scmerIsSymbol(v[0], "!begin") {
@@ -636,7 +664,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if scmerIsSymbol(v[0], "begin") && len(v) == 2 {
 			return OptimizeEx(v[1], env, &ome2, useResult)
 		}
-		if scmerIsSymbol(v[0], "begin") {
+		if scmerIsSymbol(v[0], "begin") || scmerIsSymbol(v[0], "begin_mut") {
 			isConstant = false
 		}
 		return NewSlice(v), MakeTypeInfo(transferOwnership, isConstant)
@@ -713,7 +741,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
 			slotIndex++
 		}
-		ome2.nextSlot = &slotIndex // allow !list to allocate extra slots
+		ome2.nextSlot = &slotIndex // allow !list/!!list to allocate extra slots
 		// Propagate callback parameter ownership from pendingCallbackOwned
 		if ome.pendingCallbackOwned != nil {
 			if ome2.ownedVars == nil {
@@ -909,6 +937,19 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			v[0] = NewSymbol(mutName)
 			transferOwnership = true
 		}
+	}
+
+	// !!list rewrite: turn surface (!!list cap) into the internal
+	// stack-backed form (!!list NthLocalVar(start) cap) when we are inside
+	// an optimizer-numbered lambda frame.
+	if scmerIsSymbol(v[0], "!!list") && len(v) == 2 && ome.nextSlot != nil {
+		capacity := int(ToInt(v[1]))
+		if capacity < 0 {
+			capacity = 0
+		}
+		start := *ome.nextSlot
+		*ome.nextSlot += capacity
+		return NewSlice([]Scmer{NewSymbol("!!list"), NewNthLocalVar(NthLocalVar(start)), NewInt(int64(capacity))}), &TypeDescriptor{Transfer: true}
 	}
 
 	// !list rewrite: when an argument is (list expr...) passed to a function
@@ -1227,7 +1268,10 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 
 // deoptimizeExpr rewrites optimizer-produced special forms back to plain equivalents
 // so that buildComputedFn lambdas do not depend on VarsNumbered slots beyond params.
-// Currently handles: (!list NthLocalVar(start) count expr...) -> (list expr...)
+// Currently handles:
+//
+//	(!list NthLocalVar(start) count expr...) -> (list expr...)
+//	(!!list NthLocalVar(start) cap) -> (list)
 func DeoptimizeExpr(expr Scmer) Scmer {
 	if !expr.IsSlice() {
 		return expr
@@ -1243,6 +1287,9 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 			}
 			return NewSlice(newItems)
 		}
+	}
+	if len(items) == 3 && items[0].IsSymbol() && items[0].String() == "!!list" && items[1].IsNthLocalVar() {
+		return NewSlice([]Scmer{NewSymbol("list")})
 	}
 	// recurse into sub-expressions
 	newItems := make([]Scmer, len(items))

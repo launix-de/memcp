@@ -504,6 +504,240 @@ raw _unn_* occurrence aliases into physical temp column names. */
 	(if (equal? result neutral) nil result)
 )))
 
+(define extend_codegen_lambda (lambda (fn extra_params)
+	(match fn
+		'((symbol lambda) params body) (list (quote lambda) (merge (list params extra_params)) body)
+		'((symbol lambda) params body numvars) (list (quote lambda) (merge (list params extra_params)) body numvars)
+		'((quote lambda) params body) (list (quote lambda) (merge (list params extra_params)) body)
+		'((quote lambda) params body numvars) (list (quote lambda) (merge (list params extra_params)) body numvars)
+		_ fn
+	)
+))
+
+(define append_codegen_list (lambda (lst extra_items)
+	(if (list? lst)
+		(merge (list lst extra_items))
+		lst)
+))
+
+/* nested scan batching is a peephole optimizer pass over the generated
+queryplan AST: once build_scan has emitted a child scan tree, rewrite only the
+first reachable scan/scan_batch node so it can consume parent batchdata via #N
+pseudocolumns without changing the higher-level join planning rules. */
+(define batchify_first_scan (lambda (plan batch_params batch_pseudocols stride_expr batchdata_sym)
+	(match plan
+		'((symbol scan) schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter)
+		(if isOuter nil
+			(list (quote scan_batch) schema tbl
+				(append_codegen_list filtercols batch_pseudocols)
+				(extend_codegen_lambda filterfn batch_params)
+				(append_codegen_list mapcols batch_pseudocols)
+				(extend_codegen_lambda mapfn batch_params)
+				stride_expr
+				batchdata_sym
+				reduce neutral reduce2 isOuter))
+		'((quote scan) schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter)
+		(if isOuter nil
+			(list (quote scan_batch) schema tbl
+				(append_codegen_list filtercols batch_pseudocols)
+				(extend_codegen_lambda filterfn batch_params)
+				(append_codegen_list mapcols batch_pseudocols)
+				(extend_codegen_lambda mapfn batch_params)
+				stride_expr
+				batchdata_sym
+				reduce neutral reduce2 isOuter))
+		'((symbol scan_batch) schema tbl filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter)
+		(if isOuter nil
+			(list (quote scan_batch) schema tbl
+				(append_codegen_list filtercols batch_pseudocols)
+				(extend_codegen_lambda filterfn batch_params)
+				(append_codegen_list mapcols batch_pseudocols)
+				(extend_codegen_lambda mapfn batch_params)
+				inner_stride
+				inner_batchdata
+				reduce neutral reduce2 isOuter))
+		'((quote scan_batch) schema tbl filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter)
+		(if isOuter nil
+			(list (quote scan_batch) schema tbl
+				(append_codegen_list filtercols batch_pseudocols)
+				(extend_codegen_lambda filterfn batch_params)
+				(append_codegen_list mapcols batch_pseudocols)
+				(extend_codegen_lambda mapfn batch_params)
+				inner_stride
+				inner_batchdata
+				reduce neutral reduce2 isOuter))
+		'((symbol nth) inner_scan idx)
+		(begin
+			(define rewritten_inner (batchify_first_scan inner_scan batch_params batch_pseudocols stride_expr batchdata_sym))
+			(if (nil? rewritten_inner) nil
+				(list (quote nth) rewritten_inner idx)))
+		'((quote nth) inner_scan idx)
+		(begin
+			(define rewritten_inner (batchify_first_scan inner_scan batch_params batch_pseudocols stride_expr batchdata_sym))
+			(if (nil? rewritten_inner) nil
+				(list (quote nth) rewritten_inner idx)))
+		'((symbol define) sym value)
+		(begin
+			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
+			(if (nil? rewritten_value) nil
+				(list (quote define) sym rewritten_value)))
+		'((quote define) sym value)
+		(begin
+			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
+			(if (nil? rewritten_value) nil
+				(list (quote define) sym rewritten_value)))
+		'((symbol set) sym value)
+		(begin
+			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
+			(if (nil? rewritten_value) nil
+				(list (quote set) sym rewritten_value)))
+		'((quote set) sym value)
+		(begin
+			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
+			(if (nil? rewritten_value) nil
+				(list (quote set) sym rewritten_value)))
+		(cons head rest) (if (or
+			(equal? head (quote begin))
+			(equal? head '(quote begin))
+			(equal? head (quote !begin))
+			(equal? head '(quote !begin))
+			(equal? head (quote begin_mut))
+			(equal? head '(quote begin_mut)))
+			(begin
+				(define rewrite_forms_by_predicate (lambda (forms should_try)
+					(match forms
+						'() nil
+						(cons form tail) (begin
+							(if (should_try form)
+								(begin
+									(define rewritten_form (batchify_first_scan form batch_params batch_pseudocols stride_expr batchdata_sym))
+									(if (nil? rewritten_form)
+										(match (rewrite_forms_by_predicate tail should_try)
+											nil nil
+											rewritten_tail (cons form rewritten_tail))
+										(cons rewritten_form tail)))
+								(match (rewrite_forms_by_predicate tail should_try)
+									nil nil
+									rewritten_tail (cons form rewritten_tail)))))))
+				(define is_preferred_form (lambda (form) (match form
+					'((symbol scan) . _) true
+					'((quote scan) . _) true
+					'((symbol scan_batch) . _) true
+					'((quote scan_batch) . _) true
+					'((symbol nth) . _) true
+					'((quote nth) . _) true
+					'((symbol begin) . _) true
+					'((quote begin) . _) true
+					'((symbol !begin) . _) true
+					'((quote !begin) . _) true
+					'((symbol begin_mut) . _) true
+					'((quote begin_mut) . _) true
+					false
+				)))
+				(match (rewrite_forms_by_predicate rest is_preferred_form)
+					nil (match (rewrite_forms_by_predicate rest (lambda (form) true))
+						nil nil
+						rewritten_rest (cons head rewritten_rest))
+					rewritten_rest (cons head rewritten_rest)))
+			nil)
+		nil
+	)
+))
+
+/* builds the outer scan shell for the peephole-rewritten child plan. the join
+order and scan tree come from build_scan already; this helper only swaps the
+row-at-a-time inner scan calls for buffered scan_batch flushes. */
+(define build_batched_regular_scan (lambda (schema tbl filtercols outer_filter_lambda scan_mapcols scan_mapfn_params batch_map_params direct_inner_scan batched_inner_scan batch_stride batch_capacity is_update_target isOuter) (begin
+	(define _outer_batch_row_lambda
+		(list (quote lambda) scan_mapfn_params
+			(list (quote begin)
+				(list (quote define) (symbol "__record") (list (quote !!list) batch_stride))
+				(cons (quote append_mut) (cons (symbol "__record") batch_map_params)))))
+	(if (nil? batched_inner_scan)
+		(scan_wrapper 'scan schema tbl
+			(cons list filtercols)
+			outer_filter_lambda
+			scan_mapcols
+			(list (symbol "lambda") scan_mapfn_params direct_inner_scan)
+			(if is_update_target (symbol "+") nil)
+			(if is_update_target 0 nil)
+			nil
+			isOuter)
+		(begin
+			(define _inner_flush_define
+				(list (quote define) (symbol "__inner_flush")
+					(list (quote lambda) (list (symbol "__batchbuf")) batched_inner_scan)))
+			(if is_update_target
+				(list (quote begin)
+					_inner_flush_define
+					(list (quote nth)
+						(list (quote scan) schema tbl
+							(cons list filtercols)
+							outer_filter_lambda
+							scan_mapcols
+							_outer_batch_row_lambda
+							(list (quote lambda) (list (symbol "acc") (symbol "rowvals"))
+								(list (quote begin)
+									(list (quote define) (symbol "__state")
+										(list (quote if) (list (quote nil?) (list (quote nth) (symbol "acc") 1))
+											(list (quote list) (list (quote nth) (symbol "acc") 0) (list (quote list)))
+											(symbol "acc")))
+									(list (quote define) (symbol "__batchdata0") (list (quote nth) (symbol "__state") 1))
+									(list (quote define) (symbol "__batchdata") (list (quote apply) (quote append_mut) (list (quote cons) (symbol "__batchdata0") (symbol "rowvals"))))
+									(list (quote nth_mut) (symbol "__state") 1 (symbol "__batchdata"))
+									(list (quote if) (list (quote >=) (list (quote count) (symbol "__batchdata")) batch_capacity)
+										(list (quote begin)
+											(list (quote nth_mut) (symbol "__state") 0
+												(list (quote +) (list (quote nth) (symbol "__state") 0) (list (symbol "__inner_flush") (symbol "__batchdata"))))
+											(list (quote reset_mut) (symbol "__batchdata")))
+										true)
+									(symbol "__state")))
+							(list (quote list) 0 nil)
+							(list (quote lambda) (list (symbol "acc") (symbol "shardstate"))
+								(list (quote begin)
+									(list (quote define) (symbol "__shardbuf") (list (quote nth) (symbol "shardstate") 1))
+									(list (quote define) (symbol "__shardresult")
+										(list (quote if)
+											(list (quote or)
+												(list (quote nil?) (symbol "__shardbuf"))
+												(list (quote equal?) (list (quote count) (symbol "__shardbuf")) 0))
+											(list (quote nth) (symbol "shardstate") 0)
+											(list (quote +) (list (quote nth) (symbol "shardstate") 0) (list (symbol "__inner_flush") (symbol "__shardbuf")))))
+									(list (quote list) (list (quote +) (list (quote nth) (symbol "acc") 0) (symbol "__shardresult")) nil)))
+							isOuter)
+						0))
+				(list (quote begin)
+					_inner_flush_define
+					(list (quote scan) schema tbl
+						(cons list filtercols)
+						outer_filter_lambda
+						scan_mapcols
+						_outer_batch_row_lambda
+						(list (quote lambda) (list (symbol "batchdata") (symbol "rowvals"))
+							(list (quote begin)
+								(list (quote define) (symbol "__batchbuf0")
+									(list (quote if) (list (quote nil?) (symbol "batchdata"))
+										(list (quote list))
+										(symbol "batchdata")))
+								(list (quote define) (symbol "__batchbuf") (list (quote apply) (quote append_mut) (list (quote cons) (symbol "__batchbuf0") (symbol "rowvals"))))
+								(list (quote if) (list (quote >=) (list (quote count) (symbol "__batchbuf")) batch_capacity)
+									(list (quote begin)
+										(list (symbol "__inner_flush") (symbol "__batchbuf"))
+										(list (quote reset_mut) (symbol "__batchbuf")))
+									true)
+								(symbol "__batchbuf")))
+						nil
+						(list (quote lambda) (list (symbol "acc") (symbol "shardbuf"))
+							(list (quote begin)
+								(list (quote if)
+									(list (quote or)
+										(list (quote nil?) (symbol "shardbuf"))
+										(list (quote equal?) (list (quote count) (symbol "shardbuf")) 0))
+									true
+									(list (symbol "__inner_flush") (symbol "shardbuf")))
+								nil))
+						isOuter))))))))
+
 /* returns a list of all aggregates in this expr */
 (define extract_aggregates (lambda (expr)
 	(match expr
@@ -5998,6 +6232,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define scan_mapfn_params (if is_update_target
 										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
+									(define batch_map_params (map cols (lambda(col) (symbol (concat tblvar "." col)))))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_scan_condition isOuter (replace_find_column (coalesceNil joinexpr true)) scan_condition tables) '(now_condition later_condition) (begin
 										(define effective_later_condition (if (and isOuter (equal? now_condition later_condition)) true later_condition))
@@ -6039,29 +6274,32 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															_ '()))))))
 														/* emit init code from partition stage if present */
 														(define _ps_init2 (stage_init_code _ps))
-														(define _ps_scan (scan_wrapper 'scan_order schema tbl
-															(cons list (merge_unique _ps_filtercols cols))
-															'((quote lambda) (map (merge_unique _ps_filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-															(cons list _ps_ordercols)
-															(cons list _ps_dirs)
+															(define _ps_scan (scan_wrapper 'scan_order schema tbl
+																(cons list (merge_unique _ps_filtercols cols))
+																'((quote lambda) (map (merge_unique _ps_filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+																(cons list _ps_ordercols)
+																(cons list _ps_dirs)
 															_ps_partcols _ps_offset _ps_limit
 															scan_mapcols
 															(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later_condition (list schema tbl tblvar)))
-															nil nil isOuter))
-														(if (nil? _ps_init2) _ps_scan (list (quote begin) _ps_init2 _ps_scan)))
-													/* === regular scan === */
-													(scan_wrapper 'scan schema tbl
-														(cons list filtercols)
-														'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-														scan_mapcols
-														(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later_condition (list schema tbl tblvar)))
-														(if is_update_target (symbol "+") nil)
-														(if is_update_target 0 nil)
-														nil
-														isOuter
-										))))
-									))
-								)
+																nil nil isOuter))
+															(if (nil? _ps_init2) _ps_scan (list (quote begin) _ps_init2 _ps_scan)))
+														/* === regular scan === */
+														(begin
+															(define _direct_inner_scan (build_scan tables effective_later_condition (list schema tbl tblvar)))
+															(define _batch_stride (count batch_map_params))
+															(define _batch_capacity_rows 1024)
+															(define _batch_capacity (* _batch_stride _batch_capacity_rows))
+															(define _batch_pseudocols (map (produceN _batch_stride) (lambda (i) (concat "#" i))))
+															(define _batched_inner_scan (if (or (not (nil? update_target)) (equal? tables '()) (equal? _batch_stride 0))
+																nil
+																(batchify_first_scan _direct_inner_scan batch_map_params _batch_pseudocols _batch_stride (symbol "__batchbuf"))))
+															(define _outer_filter_lambda
+																'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition))))
+															(build_batched_regular_scan schema tbl filtercols _outer_filter_lambda scan_mapcols scan_mapfn_params batch_map_params _direct_inner_scan _batched_inner_scan _batch_stride _batch_capacity is_update_target isOuter)
+											))))
+										))
+									)
 								'() /* final inner (=scalar) */ (if (nil? update_target)
 									(begin
 										(define emit_fields (if (nil? last_scan_ctx) fields

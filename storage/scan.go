@@ -41,30 +41,33 @@ func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 // It explicitly controls callback ownership for the reduce and reduce2 lambdas,
 // ensuring the accumulator parameter is marked as owned (enabling _mut swaps
 // like set_assoc → set_assoc_mut inside the reduce body).
-func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	// Optimize args 1-6 normally (schema, table, filterCols, filter, mapCols, map)
-	for i := 1; i <= 6 && i < len(v); i++ {
+func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceIdx, neutralIdx, reduce2Idx, outerIdx int) (scm.Scmer, *scm.TypeDescriptor) {
+	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
-	// Arg 7 (reduce callback): set callback ownership before optimizing
-	if len(v) > 7 && !v[7].IsNil() {
+	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
-		v[7], _ = oc.OptimizeSub(v[7], true)
+		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
 	}
-	// Arg 8 (neutral)
-	if len(v) > 8 {
-		v[8], _ = oc.OptimizeSub(v[8], true)
+	if len(v) > neutralIdx {
+		v[neutralIdx], _ = oc.OptimizeSub(v[neutralIdx], true)
 	}
-	// Arg 9 (reduce2): also set callback ownership
-	if len(v) > 9 && !v[9].IsNil() {
+	if len(v) > reduce2Idx && !v[reduce2Idx].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false})
-		v[9], _ = oc.OptimizeSub(v[9], true)
+		v[reduce2Idx], _ = oc.OptimizeSub(v[reduce2Idx], true)
 	}
-	// Arg 10 (isOuter)
-	if len(v) > 10 {
-		v[10], _ = oc.OptimizeSub(v[10], true)
+	if len(v) > outerIdx {
+		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
 	return scm.NewSlice(v), nil
+}
+
+func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
+}
+
+func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
 }
 
 // scanResult bundles per-shard outputs to minimize allocations and type assertions.
@@ -76,7 +79,7 @@ type scanResult struct {
 }
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
@@ -134,7 +137,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 					values <- scanResult{err: scanError{r, string(debug.Stack())}}
 				}
 			}()
-			res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral)
+			res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata)
 			values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 		})
 		close(values) // last scan is finished
@@ -239,7 +242,10 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	return akkumulator
 }
 
-func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) (scm.Scmer, int64) {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer) (scm.Scmer, int64) {
+	if stride > 0 {
+		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata)
+	}
 	akkumulator := neutral
 	var outCount int64
 
@@ -297,7 +303,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	// MapReducer for map+reduce phase (builds column readers internally)
-	mapper := t.openMapReducerEx(callbackCols, callback, aggregate, skipShardReadLock)
+	mapper := t.openMapReducerEx(callbackCols, callback, aggregate, skipShardReadLock, 0, nil)
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false
@@ -401,7 +407,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 					locked = false
 				}
 				outCount += int64(outN)
-				akkumulator = mapper.Stream(akkumulator, batch[:outN])
+				akkumulator = mapper.Stream(akkumulator, batch[:outN], nil)
 				hadValue = true
 				if !skipShardReadLock {
 					t.mu.RLock()
@@ -443,11 +449,232 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			if j > len(pendingRecids) {
 				j = len(pendingRecids)
 			}
-			akkumulator = mapper.Stream(akkumulator, pendingRecids[i:j])
+			akkumulator = mapper.Stream(akkumulator, pendingRecids[i:j], nil)
 		}
 	}
 	// Release locks before flushing trigger batch to avoid deadlocks
 	// (trigger handlers may scan other tables that need locks)
+	if locked {
+		t.mu.RUnlock()
+		locked = false
+	}
+	if writeLocked {
+		t.exitWriteOwner()
+		t.mu.Unlock()
+		writeLocked = false
+	}
+	mapper.FlushSideEffects()
+	return akkumulator, outCount
+}
+
+func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer) (scm.Scmer, int64) {
+	akkumulator := neutral
+	var outCount int64
+	ss := scm.GetCurrentSessionState()
+
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	hasMutationCallback := false
+	for _, c := range callbackCols {
+		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
+			hasMutationCallback = true
+			break
+		}
+	}
+
+	t.ensureLoaded()
+	currentTx := CurrentTx()
+	ownsWrite := t.hasWriteOwner()
+	lockMutationExclusively := hasMutationCallback && !ownsWrite
+	writeLocked := false
+	if lockMutationExclusively {
+		t.mu.Lock()
+		writeLocked = true
+		defer func() {
+			if writeLocked {
+				t.mu.Unlock()
+			}
+		}()
+		t.enterWriteOwner()
+		defer func() {
+			if writeLocked {
+				t.exitWriteOwner()
+			}
+		}()
+		if currentTx != nil {
+			currentTx.EnterShardWrite(t)
+			defer currentTx.ExitShardWrite(t)
+		}
+		if t.t.tableLockOwner.Load() != nil {
+			t.t.waitTableLock(scm.GetCurrentSessionState(), true)
+		}
+	}
+	skipShardReadLock := ownsWrite || lockMutationExclusively
+	t.ensureMainCount(skipShardReadLock)
+
+	ccols := make([]ColumnStorage, len(conditionCols))
+	conditionBatchSubidx := make([]int, len(conditionCols))
+	for i, k := range conditionCols {
+		if subidx, ok := parseBatchPseudoColName(k); ok {
+			conditionBatchSubidx[i] = subidx + 1
+			continue
+		}
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+	}
+	cdataset := make([]scm.Scmer, len(conditionCols))
+
+	mapper := t.openMapReducerEx(callbackCols, callback, aggregate, skipShardReadLock, stride, batchdata)
+	defer mapper.Close()
+
+	locked := false
+	if !skipShardReadLock {
+		t.mu.RLock()
+		locked = true
+		if t.t.tableLockOwner.Load() != nil {
+			t.mu.RUnlock()
+			locked = false
+			t.t.waitTableLock(scm.GetCurrentSessionState(), hasMutationCallback)
+			t.mu.RLock()
+			locked = true
+		}
+	}
+	defer func() {
+		if locked {
+			t.mu.RUnlock()
+		}
+	}()
+	maxInsertIndex := len(t.inserts)
+	visibleUpper := t.main_count + uint32(maxInsertIndex)
+	var pendingRecids []uint32
+	var pendingBatchids []uint32
+	var mutationSeen map[uint64]struct{}
+	if hasMutationCallback {
+		mutationSeen = make(map[uint64]struct{}, 128)
+	}
+
+	var buf [1024]uint32
+	var batchBuf [1024]uint32
+	hadValue := false
+	batchCount := len(batchdata) / stride
+	batchBoundaries := hasBatchBoundaries(boundaries)
+
+	for batchid := 0; batchid < batchCount; batchid++ {
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
+		activeBoundaries := boundaries
+		activeLower := lower
+		activeUpperLast := upperLast
+		if batchBoundaries {
+			activeBoundaries = materializeBatchBoundaries(boundaries, stride, batchdata, uint32(batchid))
+			activeLower, activeUpperLast = indexFromBoundaries(activeBoundaries)
+		}
+
+		t.iterateIndex(activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
+			outN := 0
+			for _, idx := range batch {
+				effectiveIdx := idx
+				if effectiveIdx >= visibleUpper {
+					continue
+				}
+				if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+					if t.deletions.Get(uint(effectiveIdx)) {
+						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
+							effectiveIdx = followIdx
+						} else {
+							continue
+						}
+					}
+					key := (uint64(uint32(batchid)) << 32) | uint64(effectiveIdx)
+					if _, ok := mutationSeen[key]; ok {
+						continue
+					}
+					mutationSeen[key] = struct{}{}
+				}
+				if currentTx != nil && currentTx.Mode == TxACID {
+					if !currentTx.IsVisible(t, effectiveIdx) {
+						continue
+					}
+				} else if t.deletions.Get(uint(effectiveIdx)) {
+					continue
+				}
+
+				if effectiveIdx < t.main_count {
+					for i, k := range ccols {
+						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
+							cdataset[i] = batchdata[batchid*stride+subidx]
+						} else {
+							cdataset[i] = k.GetValue(effectiveIdx)
+						}
+					}
+				} else {
+					for i, k := range conditionCols {
+						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
+							cdataset[i] = batchdata[batchid*stride+subidx]
+						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+							cdataset[i] = ccols[i].GetValue(effectiveIdx)
+						} else {
+							cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
+						}
+					}
+				}
+				if !scm.ToBool(conditionFn(cdataset...)) {
+					continue
+				}
+
+				batch[outN] = effectiveIdx
+				batchBuf[outN] = uint32(batchid)
+				outN++
+			}
+			if outN > 0 {
+				if hasMutationCallback {
+					pendingRecids = append(pendingRecids, batch[:outN]...)
+					pendingBatchids = append(pendingBatchids, batchBuf[:outN]...)
+					outCount += int64(outN)
+					hadValue = true
+				} else {
+					if locked {
+						t.mu.RUnlock()
+						locked = false
+					}
+					outCount += int64(outN)
+					akkumulator = mapper.Stream(akkumulator, batch[:outN], batchBuf[:outN])
+					hadValue = true
+					if !skipShardReadLock {
+						t.mu.RLock()
+						locked = true
+					}
+				}
+			}
+			return true
+		})
+	}
+
+	if locked {
+		t.mu.RUnlock()
+		locked = false
+	}
+	if !hadValue {
+		mapper.FlushSideEffects()
+		return scm.NewNil(), outCount
+	}
+	if hasMutationCallback && len(pendingRecids) > 0 {
+		if writeLocked {
+			t.exitWriteOwner()
+			t.mu.Unlock()
+			writeLocked = false
+			mapper.SetShardWriteLocked(false)
+		}
+		for i := 0; i < len(pendingRecids); i += len(buf) {
+			j := i + len(buf)
+			if j > len(pendingRecids) {
+				j = len(pendingRecids)
+			}
+			akkumulator = mapper.Stream(akkumulator, pendingRecids[i:j], pendingBatchids[i:j])
+		}
+	}
 	if locked {
 		t.mu.RUnlock()
 		locked = false

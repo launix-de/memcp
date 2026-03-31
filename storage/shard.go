@@ -1218,6 +1218,8 @@ func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
 // scan_order.go catches this type to implement early-exit (LIMIT semantics inside ORC).
 type breakSentinel struct{}
 
+type mapArgGetter func(uint32, uint32) scm.Scmer
+
 // ShardMapReducer pre-allocates args and applies map+reduce over batches of record IDs.
 // Local implementation of the streaming MapReducer pattern (see todos/cluster.md §15.7).
 // Stream() partitions recid batches into main/delta runs and dispatches to
@@ -1225,6 +1227,9 @@ type breakSentinel struct{}
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
 	shard           *storageShard
+	sessionState    *scm.SessionState
+	mainGetters     []mapArgGetter
+	deltaGetters    []mapArgGetter
 	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate/$increment cols)
 	colNames        []string               // column names for delta getDelta access
 	isUpdate        []bool                 // true for $update columns
@@ -1267,15 +1272,18 @@ type ShardMapReducer struct {
 // mapFn and reduceFn are stored as Scmer for future network serialization;
 // OptimizeProcToSerialFunction is called here (TODO: replace with JIT compilation).
 func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer) *ShardMapReducer {
-	return t.openMapReducerEx(cols, mapFn, reduceFn, false)
+	return t.openMapReducerEx(cols, mapFn, reduceFn, false, 0, nil)
 }
 
 // openMapReducerEx is the implementation of OpenMapReducer.
 // alreadyLocked=true skips the hasWriteOwner() check per column (caller already holds
 // the write lock or has confirmed ownsWrite=false via skipShardReadLock).
-func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool) *ShardMapReducer {
+func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer) *ShardMapReducer {
 	mr := &ShardMapReducer{
 		shard:            t,
+		sessionState:     scm.GetCurrentSessionState(),
+		mainGetters:      make([]mapArgGetter, len(cols)),
+		deltaGetters:     make([]mapArgGetter, len(cols)),
 		mainCols:         make([]ColumnStorage, len(cols)),
 		colNames:         cols,
 		isUpdate:         make([]bool, len(cols)),
@@ -1305,6 +1313,15 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		}
 	}
 	for i, col := range cols {
+		if subidx, ok := parseBatchPseudoColName(col); ok {
+			mainSubidx := subidx
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return batchdata[int(batchid)*stride+mainSubidx]
+			}
+			mr.mainGetters[i] = getter
+			mr.deltaGetters[i] = getter
+			continue
+		}
 		if col == "$update" {
 			mr.isUpdate[i] = true
 			mr.hasUpdateCol = true
@@ -1406,6 +1423,85 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 				mr.invClosureFn[i] = &fn
 			}
 		}
+		if mr.mainGetters[i] != nil {
+			continue
+		}
+		if mr.isInvalidate[i] {
+			if fnptr := mr.invClosureFn[i]; fnptr != nil {
+				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+			} else {
+				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(mr.noopClosureFn, id)
+				}
+			}
+			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(mr.noopClosureFn, id)
+			}
+			continue
+		}
+		if mr.isIncrement[i] {
+			if fnptr := mr.incrClosureFn[i]; fnptr != nil {
+				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+			} else {
+				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(mr.noopClosureFn, id)
+				}
+			}
+			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(mr.noopClosureFn, id)
+			}
+			continue
+		}
+		if mr.isSet[i] {
+			if fnptr := mr.setClosureFn[i]; fnptr != nil {
+				getter := func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+				mr.mainGetters[i] = getter
+				mr.deltaGetters[i] = getter
+			} else {
+				getter := func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(mr.noopClosureFn, id)
+				}
+				mr.mainGetters[i] = getter
+				mr.deltaGetters[i] = getter
+			}
+			continue
+		}
+		if mr.isBreak[i] {
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(mr.breakClosureFn, id)
+			}
+			mr.mainGetters[i] = getter
+			mr.deltaGetters[i] = getter
+			continue
+		}
+		if mr.isUpdate[i] {
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch))
+			}
+			mr.mainGetters[i] = getter
+			mr.deltaGetters[i] = getter
+			continue
+		}
+		mainCol := mr.mainCols[i]
+		colName := mr.colNames[i]
+		mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+			return mainCol.GetValue(id)
+		}
+		if _, isProxy := mainCol.(*StorageComputeProxy); isProxy {
+			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+				return mainCol.GetValue(id)
+			}
+		} else {
+			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+				return mr.shard.getDelta(int(id-mr.mainCount), colName)
+			}
+		}
 	}
 	// Register shard for deferred fsync once, not per row.
 	if mr.hasUpdateCol {
@@ -1416,10 +1512,17 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 	return mr
 }
 
+func (m *ShardMapReducer) checkKilled() {
+	if m.sessionState != nil && m.sessionState.IsKilled() {
+		panic("query killed")
+	}
+}
+
 // Stream applies map+reduce over a batch of record IDs. The recid list is
 // partitioned order-preserving into runs of main-storage IDs and delta IDs.
-// Callers can pass subslices (e.g. items[0:1]) for zero-allocation single-item batches.
-func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32) scm.Scmer {
+// batchids is optional and, when present, must align 1:1 with recids.
+func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
+	m.checkKilled()
 	i := 0
 	n := len(recids)
 	for i < n {
@@ -1428,12 +1531,20 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32) scm.Scmer {
 			for j < n && recids[j] < m.mainCount {
 				j++
 			}
-			acc = m.processMainBlock(acc, recids[i:j])
+			if batchids == nil {
+				acc = m.processMainBlock(acc, recids[i:j])
+			} else {
+				acc = m.processMainBlockBatch(acc, recids[i:j], batchids[i:j])
+			}
 		} else {
 			for j < n && recids[j] >= m.mainCount {
 				j++
 			}
-			acc = m.processDeltaBlock(acc, recids[i:j])
+			if batchids == nil {
+				acc = m.processDeltaBlock(acc, recids[i:j])
+			} else {
+				acc = m.processDeltaBlockBatch(acc, recids[i:j], batchids[i:j])
+			}
 		}
 		i = j
 	}
@@ -1447,7 +1558,10 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	// not for the whole batch. This allows nested read scans (e.g. EXISTS
 	// inside UPDATE on the same table) to acquire RLock between rows.
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
-	for _, id := range recids {
+	for rowidx, id := range recids {
+		if rowidx&63 == 0 {
+			m.checkKilled()
+		}
 		func() {
 			effectiveID := id
 			// Acquire write lock per-row for mutation scans
@@ -1470,39 +1584,52 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 					}
 				}
 			}
-			for i, col := range m.mainCols {
-				if m.isInvalidate[i] {
-					if fnptr := m.invClosureFn[i]; fnptr != nil {
-						m.args[i] = scm.NewClosure(fnptr, effectiveID)
-					} else {
-						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
-					}
-				} else if m.isIncrement[i] {
-					if fnptr := m.incrClosureFn[i]; fnptr != nil {
-						m.args[i] = scm.NewClosure(fnptr, effectiveID)
-					} else {
-						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
-					}
-				} else if m.isSet[i] {
-					if fnptr := m.setClosureFn[i]; fnptr != nil {
-						m.args[i] = scm.NewClosure(fnptr, effectiveID)
-					} else {
-						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
-					}
-				} else if m.isBreak[i] {
-					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
-				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, !needsPerRowLock && m.hasUpdateCol, m.deleteBatch))
-				} else {
-					if effectiveID < m.mainCount {
-						m.args[i] = col.GetValue(effectiveID)
-					} else {
-						m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), m.colNames[i])
-					}
-				}
+			for i, getter := range m.mainGetters {
+				m.args[i] = getter(effectiveID, 0)
 			}
 			// Release write lock before mapFn: allows nested scans on same shard.
 			// $update closures will re-acquire the lock when called.
+			if needsPerRowLock {
+				m.shard.exitWriteOwner()
+				m.shard.mu.Unlock()
+			}
+			acc = m.reduceFn(acc, m.mapFn(m.args...))
+		}()
+	}
+	return acc
+}
+
+func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
+	for rowidx, id := range recids {
+		if rowidx&63 == 0 {
+			m.checkKilled()
+		}
+		func() {
+			effectiveID := id
+			batchid := batchids[rowidx]
+			if needsPerRowLock {
+				m.shard.mu.Lock()
+				m.shard.enterWriteOwner()
+			}
+			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
+				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+					if m.shard.deletions.Get(uint(effectiveID)) {
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
+						if !ok {
+							if needsPerRowLock {
+								m.shard.exitWriteOwner()
+								m.shard.mu.Unlock()
+							}
+							return
+						}
+						effectiveID = followedID
+					}
+				}
+			}
+			for i, getter := range m.mainGetters {
+				m.args[i] = getter(effectiveID, batchid)
+			}
 			if needsPerRowLock {
 				m.shard.exitWriteOwner()
 				m.shard.mu.Unlock()
@@ -1517,7 +1644,10 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	// Same hoisting as processMainBlock (see comment there).
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
-	for _, id := range recids {
+	for rowidx, id := range recids {
+		if rowidx&63 == 0 {
+			m.checkKilled()
+		}
 		func() {
 			effectiveID := id
 			if needsPerRowLock {
@@ -1539,30 +1669,49 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 					}
 				}
 			}
-			for i, col := range m.colNames {
-				if m.isSet[i] {
-					if fnptr := m.setClosureFn[i]; fnptr != nil {
-						m.args[i] = scm.NewClosure(fnptr, effectiveID)
-					} else {
-						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
-					}
-				} else if m.isInvalidate[i] || m.isIncrement[i] {
-					m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
-				} else if m.isBreak[i] {
-					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
-				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunctionBatch(effectiveID, true, !needsPerRowLock && m.hasUpdateCol, m.deleteBatch))
-				} else if len(col) >= 4 && col[:4] == "NEW." {
-					m.args[i] = scm.NewNil()
-				} else {
-					if effectiveID < m.mainCount {
-						m.args[i] = m.mainCols[i].GetValue(effectiveID)
-					} else if _, isProxy := m.mainCols[i].(*StorageComputeProxy); isProxy {
-						m.args[i] = m.mainCols[i].GetValue(effectiveID)
-					} else {
-						m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), col)
+			for i, getter := range m.deltaGetters {
+				m.args[i] = getter(effectiveID, 0)
+			}
+			if needsPerRowLock {
+				m.shard.exitWriteOwner()
+				m.shard.mu.Unlock()
+			}
+			acc = m.reduceFn(acc, m.mapFn(m.args...))
+		}()
+	}
+	return acc
+}
+
+func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
+	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
+	for rowidx, id := range recids {
+		if rowidx&63 == 0 {
+			m.checkKilled()
+		}
+		func() {
+			effectiveID := id
+			batchid := batchids[rowidx]
+			if needsPerRowLock {
+				m.shard.mu.Lock()
+				m.shard.enterWriteOwner()
+			}
+			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
+				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+					if m.shard.deletions.Get(uint(effectiveID)) {
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
+						if !ok {
+							if needsPerRowLock {
+								m.shard.exitWriteOwner()
+								m.shard.mu.Unlock()
+							}
+							return
+						}
+						effectiveID = followedID
 					}
 				}
+			}
+			for i, getter := range m.deltaGetters {
+				m.args[i] = getter(effectiveID, batchid)
 			}
 			if needsPerRowLock {
 				m.shard.exitWriteOwner()
