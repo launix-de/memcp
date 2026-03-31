@@ -842,7 +842,14 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			runtime.Gosched()
 		}
 	}
-	// Step 4: Drain any in-flight partition-path dual-writes that write to old
+	// Step 4: Drain any in-flight mutating scan pipelines (UPDATE / DELETE) that
+	// still operate on the old shard set. They hold mutationMu for the whole
+	// scan+callback lifetime; without waiting here, Phase E could snapshot old
+	// deletions after only a prefix of a concurrent DELETE has been applied and
+	// lose the remaining suffix when the old shards are dropped.
+	t.mutationMu.Lock()
+	t.mutationMu.Unlock()
+	// Step 5: Drain any in-flight partition-path dual-writes that write to old
 	// Shards (Partition→Shards direction). These hold t.mu briefly.
 	t.mu.Lock()
 	t.mu.Unlock()
