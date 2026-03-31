@@ -167,6 +167,50 @@ func mustScmerSlice(v scm.Scmer, ctx string) []scm.Scmer {
 	panic(ctx + ": expected list")
 }
 
+func scmerAssocSlice(v scm.Scmer) ([]scm.Scmer, bool) {
+	if v.IsSlice() {
+		return v.Slice(), true
+	}
+	if v.IsFastDict() {
+		fd := v.FastDict()
+		if fd == nil {
+			return []scm.Scmer{}, true
+		}
+		return fd.Pairs, true
+	}
+	return nil, false
+}
+
+func buildCanonicalAliasMap(v scm.Scmer) map[string]string {
+	raw, ok := scmerAssocSlice(v)
+	if !ok {
+		panic("alias_map: expected list")
+	}
+
+	aliasMap := map[string]string{}
+	nestedPairs := len(raw) > 0
+	for _, item := range raw {
+		pair, ok := scmerAssocSlice(item)
+		if !ok || len(pair) != 2 {
+			nestedPairs = false
+			break
+		}
+	}
+
+	if nestedPairs {
+		for _, item := range raw {
+			pair, _ := scmerAssocSlice(item)
+			aliasMap[strings.ToLower(scm.String(pair[0]))] = scm.String(pair[1])
+		}
+		return aliasMap
+	}
+
+	for i := 0; i+1 < len(raw); i += 2 {
+		aliasMap[strings.ToLower(scm.String(raw[i]))] = scm.String(raw[i+1])
+	}
+	return aliasMap
+}
+
 func scmerSliceToStrings(list []scm.Scmer) []string {
 	out := make([]string, len(list))
 	for i, item := range list {
@@ -1275,13 +1319,7 @@ func Init(en scm.Env) {
 
 			aliasMap := map[string]string{}
 			if len(a) >= 4 && !a[3].IsNil() {
-				for _, pair := range mustScmerSlice(a[3], "alias_map") {
-					pp := mustScmerSlice(pair, "alias_map pair")
-					if len(pp) != 2 {
-						continue
-					}
-					aliasMap[strings.ToLower(scm.String(pp[0]))] = scm.String(pp[1])
-				}
+				aliasMap = buildCanonicalAliasMap(a[3])
 			}
 
 			return scm.NewString(canonicalizeScmerToString(expr, columns, params, aliasMap))
