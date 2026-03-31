@@ -17,7 +17,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "sync"
 import "time"
 import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
@@ -127,37 +126,36 @@ func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callb
 	execStart := time.Now()
 	var outCount int64
 	var inputCount int64
-	results := make([]scanResult, 0, 8)
-	var resultsMu sync.Mutex
-	t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+	values := make(chan scanResult, 4)
+	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
 		// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
 		// This keeps the worker pool draining quickly on tables with many shards.
 		if ss != nil && ss.IsKilled() {
 			panic("query killed")
 		}
-		msg := scanResult{}
 		defer func() {
 			if r := recover(); r != nil {
-				msg = scanResult{err: scanError{r, string(debug.Stack())}}
+				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
-			if solo {
-				results = append(results, msg)
-				return
-			}
-			resultsMu.Lock()
-			results = append(results, msg)
-			resultsMu.Unlock()
 		}()
 		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata)
-		msg = scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
+		values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 	})
+	if done == nil {
+		close(values)
+	} else {
+		go func() {
+			<-done
+			close(values)
+		}()
+	}
 
 	akkumulator := neutral
 	hadValue := false
 	var scanErr scanError
 	if !aggregate2.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
-		for _, msg := range results {
+		for msg := range values {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
@@ -180,7 +178,7 @@ func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callb
 		}
 	} else if !aggregate.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
-		for _, msg := range results {
+		for msg := range values {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
@@ -202,7 +200,7 @@ func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callb
 			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
 	} else {
-		for _, msg := range results {
+		for msg := range values {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err

@@ -57,10 +57,13 @@ func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	tbl.iterateShardsParallel(nil, func(s *storageShard, solo bool) {
+	done := tbl.iterateShardsParallel(nil, func(s *storageShard, solo bool) {
 		calls++
 		sawSolo = solo
 	})
+	if done != nil {
+		t.Fatal("iterateShardsParallel free single shard unexpectedly returned async done channel")
+	}
 
 	if calls != 1 {
 		t.Fatalf("iterateShardsParallel free single shard calls = %d, want 1", calls)
@@ -82,7 +85,7 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	tbl.iterateShardsParallel([]columnboundaries{{
+	done := tbl.iterateShardsParallel([]columnboundaries{{
 		col:            "id",
 		matcher:        EqualMatcher,
 		lower:          scm.NewInt(15),
@@ -93,6 +96,9 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 		calls++
 		sawSolo = solo
 	})
+	if done != nil {
+		t.Fatal("iterateShardsParallel partition single shard unexpectedly returned async done channel")
+	}
 
 	if calls != 1 {
 		t.Fatalf("iterateShardsParallel partition single shard calls = %d, want 1", calls)
@@ -114,10 +120,14 @@ func TestIterateShardsParallelMarksPartitionMultiShardNonSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	tbl.iterateShardsParallel(nil, func(s *storageShard, solo bool) {
+	done := tbl.iterateShardsParallel(nil, func(s *storageShard, solo bool) {
 		calls++
 		sawSolo = sawSolo || solo
 	})
+	if done == nil {
+		t.Fatal("iterateShardsParallel partition multi shard did not return async done channel")
+	}
+	<-done
 
 	if calls != 2 {
 		t.Fatalf("iterateShardsParallel partition multi shard calls = %d, want 2", calls)

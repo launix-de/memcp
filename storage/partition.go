@@ -52,7 +52,7 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
 }
 
-func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_old func(*storageShard, bool)) {
+func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_old func(*storageShard, bool)) <-chan struct{} {
 	callback := callback_old
 	if scm.Trace != nil {
 		// hook on tracing
@@ -63,7 +63,7 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 		}
 	}
 
-	runWorkers := func(shards []*storageShard, onDone func(*storageShard)) {
+	runWorkers := func(shards []*storageShard, onDone func(*storageShard)) <-chan struct{} {
 		workers := runtime.NumCPU()
 		if workers < 1 {
 			workers = 1
@@ -72,7 +72,8 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 			workers = len(shards)
 		}
 
-		jobs := make(chan *storageShard, workers)
+		jobs := make(chan *storageShard, len(shards))
+		doneCh := make(chan struct{})
 		var done sync.WaitGroup
 		done.Add(len(shards))
 		for i := 0; i < workers; i++ {
@@ -92,7 +93,11 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 			jobs <- s
 		}
 		close(jobs)
-		done.Wait()
+		go func() {
+			done.Wait()
+			close(doneCh)
+		}()
+		return doneCh
 	}
 
 	// Hold shardModeMu.RLock while reading ShardMode and capturing shard list.
@@ -115,7 +120,7 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 		t.shardModeMu.RUnlock()
 
 		if len(relevant) == 0 {
-			return
+			return nil
 		}
 		if len(relevant) == 1 {
 			s := relevant[0]
@@ -123,25 +128,25 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 			callback(s, true)
 			release()
 			s.activeScanners.Add(-1)
-			return
+			return nil
 		}
-		runWorkers(relevant, func(s *storageShard) {
+		return runWorkers(relevant, func(s *storageShard) {
 			s.activeScanners.Add(-1)
 		})
 	} else {
 		t.shardModeMu.RUnlock()
 		relevant := collectRelevantShards(t.PDimensions, boundaries, t.PShards)
 		if len(relevant) == 0 {
-			return
+			return nil
 		}
 		if len(relevant) == 1 {
 			s := relevant[0]
 			release := s.GetRead()
 			callback(s, true)
 			release()
-			return
+			return nil
 		}
-		runWorkers(relevant, nil)
+		return runWorkers(relevant, nil)
 	}
 }
 
