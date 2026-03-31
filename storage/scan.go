@@ -470,6 +470,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer) (scm.Scmer, int64) {
 	akkumulator := neutral
 	var outCount int64
+	ss := scm.GetCurrentSessionState()
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	hasMutationCallback := false
@@ -557,6 +558,9 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	batchBoundaries := hasBatchBoundaries(boundaries)
 
 	for batchid := 0; batchid < batchCount; batchid++ {
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
 		activeBoundaries := boundaries
 		activeLower := lower
 		activeUpperLast := upperLast
@@ -566,6 +570,9 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		}
 
 		t.iterateIndex(activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
 			outN := 0
 			for _, idx := range batch {
 				effectiveIdx := idx
