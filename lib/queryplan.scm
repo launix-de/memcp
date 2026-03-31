@@ -85,6 +85,9 @@ string -> physical field name. Later GROUP stages can then rewrite both original
 _unn_* get_column terms and their canonicalized forms onto the prejoin's actual
 physical columns without guessing from aliases or suffixes. */
 (define materialized_source_expr_lookup (newsession))
+/* session-sensitive runtime predicate columns must not be reused across plan
+builds, because their truth value depends on current session state. */
+(define session_runtime_plan_counter (newsession))
 (define alias_lookup_variants (lambda (alias_)
 	(reduce (filter (list
 		alias_
@@ -667,7 +670,7 @@ Those terms must affect cache identity (temp column names) even if the
 relational key/domain stays unchanged. */
 (define extract_runtime_cache_terms (lambda (expr) (match expr
 	(cons sym args) (if (_is_opaque_scope_sym sym)
-		'()
+		(merge_unique (map args extract_runtime_cache_terms))
 		(if (and (expr_uses_session_state expr) (equal? (extract_tblvars expr) '()))
 			(list expr)
 			(merge_unique (map args extract_runtime_cache_terms))))
@@ -2022,7 +2025,8 @@ or generate runtime scan code (build_queryplan).
 														(if (nil? je) nil (_us_prefix_ria je)))
 													td))))
 												/* inner condition (non-correlated), prefixed */
-												(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
+												(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil
+													(_us_prefix_ria (_us_ror us_inner_cond_raw))))
 												/* domain columns + original GROUP BY → scoped GROUP stage */
 												(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
 												(define us_orig_having (if us_has_stages (stage_having_expr (car _us_own_stages)) nil))
@@ -2470,15 +2474,16 @@ or generate runtime scan code (build_queryplan).
 									(cons target_expr (cons subquery '()))
 									(coalesce (_unnest_count_subselect subquery outer_schemas target_expr (quote equal?)) expr)
 									_ nil)
-								(if (equal?? inner_kind (quote inner_select_exists))
-									(match inner_args
-										(cons subquery '())
-										(if (expr_uses_session_state subquery)
-											(list (quote not) (build_exists_subselect subquery outer_schemas))
-											(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?))
-												(list (quote not) (build_exists_subselect subquery outer_schemas))))
-										_ nil)
-									nil)))
+									(if (equal?? inner_kind (quote inner_select_exists))
+										(match inner_args
+											(cons subquery '())
+											(begin
+												/* Session-sensitive predicates must still decorrelate; only the
+												reusable COUNT/GROUP cache is restricted via uncached-count. */
+												(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?))
+													(list (quote not) (build_exists_subselect subquery outer_schemas))))
+											_ nil)
+										nil)))
 						_ nil)
 					_ nil)
 				nil))
@@ -2493,13 +2498,15 @@ or generate runtime scan code (build_queryplan).
 						(cons target_expr (cons subquery '()))
 						(coalesce (_unnest_count_subselect subquery outer_schemas target_expr (quote >)) expr)
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
-					(quote inner_select_exists) (match args
-						(cons subquery '())
-						(if (expr_uses_session_state subquery)
-							(build_exists_subselect subquery outer_schemas)
-							(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >))
-								(build_exists_subselect subquery outer_schemas)))
-						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
+						(quote inner_select_exists) (match args
+							(cons subquery '())
+							(begin
+								/* Session-sensitive EXISTS may still use the COUNT-based unnesting
+								path. count_subquery_cache_policy decides whether that grouped helper
+								stage is reusable or must remain uncached for the current session. */
+								(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >))
+									(build_exists_subselect subquery outer_schemas)))
+							_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 				not_expr))
 		expr
@@ -3911,8 +3918,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				source row plus session/context values must be materialized before the
 				group stage. Otherwise the later keytable aggregation loses the row
 				identity (e.g. a.user_id) they need and the predicate collapses away. */
+				(define runtime_local_name_cache (newsession))
 				(define runtime_local_col_name (lambda (expr)
-					(concat ".runtime_pred|" (expr_name expr) (runtime_cache_suffix_from_exprs (list expr)))))
+					(begin
+						(define base_name (concat ".runtime_pred|" (expr_name expr)))
+						(if (expr_uses_session_state expr)
+							(begin
+								(define cached_name (runtime_local_name_cache base_name))
+								(if (nil? cached_name)
+									(begin
+										(define nonce (coalesceNil (session_runtime_plan_counter "n") 0))
+										(session_runtime_plan_counter "n" (+ nonce 1))
+										(define fresh_name (concat base_name "|sessplan:" nonce))
+										(runtime_local_name_cache base_name fresh_name)
+										fresh_name)
+									cached_name))
+							(concat base_name (runtime_cache_suffix_from_exprs (list expr)))))))
 				(define _runtime_local_part (lambda (part)
 					(and (equal? (has_only_tblvar_refs part tblvar) true)
 						(expr_uses_session_state part))))
