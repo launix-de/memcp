@@ -1116,40 +1116,71 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
     return True
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--connect-only] [--jobs N]")
-        sys.exit(1)
+def print_usage() -> None:
+    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--port N] [--connect-only] [--jobs N]")
 
-    spec_files = []
-    port = None
+
+def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, bool, Optional[int]]:
+    spec_files: List[str] = []
+    port: Optional[int] = None
     connect_only = False
     log_times = False
-    jobs = None
+    jobs: Optional[int] = None
 
-    i = 1
-    while i < len(sys.argv):
-        arg = sys.argv[i]
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg == "--connect-only":
             connect_only = True
         elif arg == "--log-times":
             log_times = True
-        elif arg == "--jobs":
+        elif arg in ("--jobs", "--port"):
             i += 1
-            if i >= len(sys.argv):
-                print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--connect-only] [--jobs N]")
+            if i >= len(argv):
+                print_usage()
                 sys.exit(1)
-            jobs = int(sys.argv[i])
+            try:
+                value = int(argv[i])
+            except ValueError:
+                print_usage()
+                sys.exit(1)
+            if arg == "--jobs":
+                jobs = value
+            else:
+                port = value
         elif arg.startswith("--jobs="):
-            jobs = int(arg.split("=", 1)[1])
+            try:
+                jobs = int(arg.split("=", 1)[1])
+            except ValueError:
+                print_usage()
+                sys.exit(1)
+        elif arg.startswith("--port="):
+            try:
+                port = int(arg.split("=", 1)[1])
+            except ValueError:
+                print_usage()
+                sys.exit(1)
+        elif arg.startswith("--"):
+            print_usage()
+            sys.exit(1)
         elif arg.isdigit() and port is None:
             port = int(arg)
         else:
             spec_files.append(arg)
         i += 1
 
+    return spec_files, port, connect_only, log_times, jobs
+
+
+def main():
+    if len(sys.argv) < 2:
+        print_usage()
+        sys.exit(1)
+
+    spec_files, port, connect_only, log_times, jobs = parse_cli_args(sys.argv[1:])
+
     if not spec_files:
-        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--connect-only] [--jobs N]")
+        print_usage()
         sys.exit(1)
 
     if port is None:
