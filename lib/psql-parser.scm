@@ -728,6 +728,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query psql_select) (build_queryplan_term query))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir query))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder query))
 		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
 		psql_insert_into
 		psql_insert_select

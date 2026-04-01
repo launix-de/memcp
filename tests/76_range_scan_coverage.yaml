@@ -199,6 +199,70 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "EXPLAIN IR exposes planner stages"
+    sql: "EXPLAIN IR SELECT id FROM rs_data WHERE val BETWEEN 50 AND 150 ORDER BY id LIMIT 5"
+    expect:
+      rows: 8
+      data:
+        - stage: "untangle"
+          kind: "tables"
+          value: "((\"rs_data\" \"memcp-tests\" \"rs_data\" false nil))"
+        - stage: "untangle"
+          kind: "fields"
+          value: "(\"id\" (get_column \"rs_data\" false \"id\" false))"
+        - stage: "untangle"
+          kind: "condition"
+          value: "(and (and (>= (get_column \"rs_data\" false \"val\" false) 50) (<= (get_column \"rs_data\" false \"val\" false) 150)) true)"
+        - stage: "untangle"
+          kind: "groups"
+          value: "(((group-cols) (having nil) (order (((get_column \"rs_data\" false \"id\" false) <))) (limit-partition-cols 0) (limit 5) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil)))"
+        - stage: "untangle"
+          kind: "init"
+          value: "()"
+        - stage: "reorder"
+          kind: "tables"
+          value: "((\"rs_data\" \"memcp-tests\" \"rs_data\" false nil))"
+        - stage: "reorder"
+          kind: "changed"
+          value: false
+        - stage: "plan"
+          kind: "root"
+          value: "scan_order"
+
+  - name: "EXPLAIN REORDER exposes table order"
+    sql: "EXPLAIN REORDER SELECT a.id, b.id FROM rs_data a, rs_data b WHERE a.id = b.id"
+    expect:
+      rows: 4
+      data:
+        - stage: "untangle"
+          position: 0
+          alias: "a"
+          schema: "memcp-tests"
+          table: "rs_data"
+          outer: false
+          joinexpr: "true"
+        - stage: "untangle"
+          position: 1
+          alias: "b"
+          schema: "memcp-tests"
+          table: "rs_data"
+          outer: false
+          joinexpr: "true"
+        - stage: "reorder"
+          position: 0
+          alias: "a"
+          schema: "memcp-tests"
+          table: "rs_data"
+          outer: false
+          joinexpr: "true"
+        - stage: "reorder"
+          position: 1
+          alias: "b"
+          schema: "memcp-tests"
+          table: "rs_data"
+          outer: false
+          joinexpr: "true"
+
   # ========================================================================
   # 7. Compress and re-test (exercises range scans on compressed storage)
   # ========================================================================
