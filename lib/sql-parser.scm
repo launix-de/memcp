@@ -821,7 +821,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(match l '(id schema tbl _ nil)
 				(merge r '('(id schema tbl true e)))))
 		(parser (define t tabledef) '(t))
-)))
+	)))
 	(define tabledef (parser (or
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
@@ -1408,6 +1408,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query sql_select) (build_queryplan_term query))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir query))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder query))
 		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
 		sql_insert_set
 		sql_insert_values_select

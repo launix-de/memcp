@@ -329,6 +329,70 @@ keep it in a local define instead of rebuilding it from scratch. */
 (define serialize_canonical_expr (lambda (expr)
 	(serialize (require_canonical_logical_expr "serialize_canonical_expr" expr))
 ))
+/* Explain helpers: keep planner debugging on a stable, compact serialization
+surface so tests can assert planner structure without depending on pretty-print
+layout. */
+(define explain_emit_rows (lambda (rows)
+	(cons (quote begin) (map rows (lambda (row)
+		(list (quote resultrow) (cons (quote list) row))))))
+)
+(define explain_plan_root (lambda (plan)
+	(match plan
+		(cons sym _) (string sym)
+		_ (string plan)
+	)
+))
+/* explain_queryplan_ir: expose planner IR around untangle_query/join_reorder.
+Returns compact stage/kind/value rows for stable SQL-level inspection. */
+(define explain_queryplan_ir (lambda (query) (begin
+	(define _uq_result (apply untangle_query (merge query (list nil))))
+	(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
+	(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
+	(define _jr_result (apply join_reorder _uq_7tuple))
+	(define _plan (apply build_queryplan (merge _jr_result (list nil))))
+	(explain_emit_rows (list
+		(list "stage" "untangle" "kind" "tables" "value" (serialize (nth _uq_result 1)))
+		(list "stage" "untangle" "kind" "fields" "value" (serialize (nth _uq_result 2)))
+		(list "stage" "untangle" "kind" "condition" "value" (serialize (nth _uq_result 3)))
+		(list "stage" "untangle" "kind" "groups" "value" (serialize (nth _uq_result 4)))
+		(list "stage" "untangle" "kind" "init" "value" (serialize _uq_init))
+		(list "stage" "reorder" "kind" "tables" "value" (serialize (nth _jr_result 1)))
+		(list "stage" "reorder" "kind" "changed" "value" (not (equal? (nth _uq_result 1) (nth _jr_result 1))))
+		(list "stage" "plan" "kind" "root" "value" (explain_plan_root _plan))
+	))
+)))
+/* explain_queryplan_reorder: focused view for join-reorder work. */
+(define explain_queryplan_reorder (lambda (query) (begin
+	(define _uq_result (apply untangle_query (merge query (list nil))))
+	(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
+	(define _jr_result (apply join_reorder _uq_7tuple))
+	(define table_rows_for_stage (lambda (stage_name tables)
+		(map (produceN (count tables)) (lambda (idx) (match (nth tables idx)
+			'(alias schema tbl isOuter joinexpr)
+			(list
+				"stage" stage_name
+				"position" idx
+				"alias" (string alias)
+				"schema" (string schema)
+				"table" (string tbl)
+				"outer" isOuter
+				"joinexpr" (serialize (coalesceNil joinexpr true)))
+			_ (list
+				"stage" stage_name
+				"position" idx
+				"alias" ""
+				"schema" ""
+				"table" (serialize (nth tables idx))
+				"outer" nil
+				"joinexpr" "true"
+			)
+		)))
+	))
+	(explain_emit_rows (merge
+		(table_rows_for_stage "untangle" (nth _uq_result 1))
+		(table_rows_for_stage "reorder" (nth _jr_result 1))
+	))
+)))
 /* Compatibility wrapper for older call sites. New planner code should keep the
 canonical expression in a local define and only serialize it at the edge. */
 (define canonical_expr_name (lambda (expr columns params alias_map)
