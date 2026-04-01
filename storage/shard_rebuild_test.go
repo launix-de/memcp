@@ -136,7 +136,7 @@ func TestManualRepartitionForwardsConcurrentInserts(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		tbl.mu.Lock()
-		active := tbl.repartitionActive
+		active := tbl.maintenanceKind == 2
 		hasPShards := tbl.PShards != nil
 		tbl.mu.Unlock()
 		if active && hasPShards {

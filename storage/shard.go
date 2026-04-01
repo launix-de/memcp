@@ -1032,8 +1032,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						}
 					}
 				}
-				// Capture for dual-write forwarding (cols/d2 are closure-local)
-				if t.t.repartitionActive {
+				// Capture for dual-write forwarding (cols/d2 are closure-local).
+				// Use repartitionDualWriteActive (set after Phase B snapshot)
+				// so rows already in the snapshot are not dual-written again.
+				if t.t.repartitionDualWriteActive.Load() {
 					dualWriteCols = payloadCols
 					dualWriteRow = [][]scm.Scmer{payloadRow}
 				}
@@ -1191,16 +1193,155 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}
 		}
 		if result {
+			// Dual-write: forward DELETE to PShards during repartition
+			if t.t.repartitionDualWriteActive.Load() {
+				t.t.dualWriteDelete(t, idx)
+			}
 			next := t.loadNext()
 			if next != nil {
-				// also change in next storage
-				// idx translation (subtract the amount of deletions from that idx)
-				idx2 := targetIdx - uint32(t.deletions.CountUntil(uint(targetIdx)))
-				next.UpdateFunction(idx2, false, false)(a...) // propagate to succeeding shard
+				// Propagate to rebuild successor shard.
+				// Use PK-based search instead of idx translation to avoid
+				// the batch-delete bug where CountUntil includes current-scan
+				// deletions that weren't excluded from the rebuilt shard.
+				if len(a) > 0 {
+					// UPDATE: find the old row by PK in next shard, then apply update
+					t.propagateUpdateToNext(next, idx, a...)
+				} else {
+					// DELETE: find and delete by PK
+					t.propagateDeleteToNext(next, idx)
+				}
 			}
 		}
 		return scm.NewBool(result) // maybe instead return UpdateFunction for newly inserted item??
 	}
+}
+
+// propagateUpdateToNext finds the old row by PK in the rebuild successor shard
+// and applies the update there.
+func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid uint32, a ...scm.Scmer) {
+	// Find PK columns
+	var primaryCols []string
+	for _, uk := range t.t.Unique {
+		if uk.Id == "PRIMARY" {
+			primaryCols = uk.Cols
+			break
+		}
+	}
+	if len(primaryCols) == 0 {
+		// No PK — fall back to old idx translation (best effort)
+		idx2 := oldRecid - uint32(t.deletions.CountUntil(uint(oldRecid)))
+		next.UpdateFunction(idx2, false, false)(a...)
+		return
+	}
+
+	// Read PK values from old shard
+	pkVals := make([]scm.Scmer, len(primaryCols))
+	t.mu.RLock()
+	for i, col := range primaryCols {
+		if oldRecid < t.main_count {
+			cs, ok := t.columns[col]
+			if ok {
+				pkVals[i] = cs.GetValue(oldRecid)
+			}
+		} else {
+			idx := int(oldRecid - t.main_count)
+			if colIdx, ok := t.deltaColumns[col]; ok && idx < len(t.inserts) {
+				pkVals[i] = t.inserts[idx][colIdx]
+			}
+		}
+	}
+	t.mu.RUnlock()
+
+	// Find in next shard by PK match
+	next.mu.RLock()
+	limit := next.main_count + uint32(len(next.inserts))
+	targetRecid := uint32(0)
+	found := false
+	for recid := uint32(0); recid < limit; recid++ {
+		if next.deletions.Get(uint(recid)) {
+			continue
+		}
+		match := true
+		for i, col := range primaryCols {
+			if !scm.Equal(next.rowValueByRecidLocked(recid, col), pkVals[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			targetRecid = recid
+			found = true
+			break
+		}
+	}
+	next.mu.RUnlock()
+
+	if found {
+		next.UpdateFunction(targetRecid, false, false)(a...)
+	}
+}
+
+// propagateDeleteToNext finds the deleted row (by PK) in the rebuild successor
+// shard and marks it as deleted there. This avoids the idx translation bug where
+// CountUntil includes current-scan deletions that weren't excluded from the
+// rebuilt shard, causing incorrect recid mapping during batch deletes.
+func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32) {
+	// Find PK columns
+	var primaryCols []string
+	for _, uk := range t.t.Unique {
+		if uk.Id == "PRIMARY" {
+			primaryCols = uk.Cols
+			break
+		}
+	}
+	if len(primaryCols) == 0 {
+		// No PK — fall back to old idx translation (best effort)
+		idx2 := oldRecid - uint32(t.deletions.CountUntil(uint(oldRecid)))
+		next.UpdateFunction(idx2, false, false)()
+		return
+	}
+
+	// Read PK values from old shard (caller already holds or just released shard lock)
+	pkVals := make([]scm.Scmer, len(primaryCols))
+	t.mu.RLock()
+	for i, col := range primaryCols {
+		if oldRecid < t.main_count {
+			cs, ok := t.columns[col]
+			if ok {
+				pkVals[i] = cs.GetValue(oldRecid)
+			}
+		} else {
+			idx := int(oldRecid - t.main_count)
+			if colIdx, ok := t.deltaColumns[col]; ok && idx < len(t.inserts) {
+				pkVals[i] = t.inserts[idx][colIdx]
+			}
+		}
+	}
+	t.mu.RUnlock()
+
+	// Find and delete in next shard by PK match
+	next.mu.Lock()
+	limit := next.main_count + uint32(len(next.inserts))
+	for recid := uint32(0); recid < limit; recid++ {
+		if next.deletions.Get(uint(recid)) {
+			continue
+		}
+		match := true
+		for i, col := range primaryCols {
+			if !scm.Equal(next.rowValueByRecidLocked(recid, col), pkVals[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			next.deletions.Set(uint(recid), true)
+			if (next.t.PersistencyMode == Safe || next.t.PersistencyMode == Logged) && next.logfile != nil {
+				next.logfile.Write(LogEntryDelete{recid})
+			}
+			break
+		}
+	}
+	next.mu.Unlock()
 }
 
 func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
