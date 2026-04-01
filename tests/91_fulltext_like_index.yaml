@@ -6,6 +6,7 @@
 metadata:
   version: "1.0"
   description: "Fulltext LIKE boundary matching with index building"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS `ft_customers`"
