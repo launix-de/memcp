@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 """
 MemCP SQL Test Runner (Optimized)
 
@@ -1062,8 +1078,10 @@ def normalize_jobs(jobs: Optional[int]) -> int:
     return jobs
 
 
-def run_spec_subprocess(spec_file: str, port: int, log_times: bool) -> Tuple[bool, str]:
-    cmd = [sys.executable, os.path.abspath(__file__), spec_file, str(port), "--connect-only"]
+def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, connect_only: bool) -> Tuple[bool, str]:
+    cmd = [sys.executable, os.path.abspath(__file__), spec_file]
+    if connect_only and port is not None:
+        cmd.extend([str(port), "--connect-only"])
     if log_times:
         cmd.append("--log-times")
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -1103,7 +1121,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
 
     with ThreadPoolExecutor(max_workers=max_jobs) as executor:
         futures = {
-            executor.submit(run_spec_subprocess, spec_file, port, log_times): spec_file
+            executor.submit(run_spec_subprocess, spec_file, port, log_times, True): spec_file
             for spec_file in parallel_specs
         }
         for future in as_completed(futures):
@@ -1124,7 +1142,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             ok = runner.run_test_spec(spec_file)
             suite_status[spec_file] = ok
         else:
-            ok, output = run_spec_subprocess(spec_file, port, log_times)
+            ok, output = run_spec_subprocess(spec_file, None, log_times, False)
             record_result(spec_file, ok, output)
 
     failed_files = [spec_file for spec_file in spec_files if not suite_status.get(spec_file, False)]
