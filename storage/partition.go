@@ -781,28 +781,6 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 					s.deletions.Set(uint(uint32(mainN)+uint32(i)), true)
 				}
 			}
-			// Rebuild hashmaps with shifted keys
-			for k, v := range s.hashmaps1 {
-				newmap := make(map[[1]scm.Scmer]uint32, len(v))
-				for key, recid := range v {
-					newmap[key] = recid + uint32(mainN)
-				}
-				s.hashmaps1[k] = newmap
-			}
-			for k, v := range s.hashmaps2 {
-				newmap := make(map[[2]scm.Scmer]uint32, len(v))
-				for key, recid := range v {
-					newmap[key] = recid + uint32(mainN)
-				}
-				s.hashmaps2[k] = newmap
-			}
-			for k, v := range s.hashmaps3 {
-				newmap := make(map[[3]scm.Scmer]uint32, len(v))
-				for key, recid := range v {
-					newmap[key] = recid + uint32(mainN)
-				}
-				s.hashmaps3[k] = newmap
-			}
 			// Shift delta btree indexes
 			for _, index := range s.Indexes {
 				if index.deltaBtree != nil {
