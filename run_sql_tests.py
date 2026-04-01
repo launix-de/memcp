@@ -659,7 +659,8 @@ class SQLTestRunner:
             else:
                 # Treat SHUTDOWN as successful regardless of response body, even if the connection closed.
                 if self._restart_handler is not None:
-                    self._restart_handler()
+                    if not self._restart_handler():
+                        return self._record_fail(name, "Restart failed after SHUTDOWN", query, None, None, is_noncritical)
                 else:
                     # No restart handler (--connect-only): wait until SQL endpoint is actually ready again.
                     restart_timeout = int(test_case.get("restart_timeout", 120))
@@ -979,7 +980,15 @@ _memcp_log_file: str = ""
 def start_memcp_process(port: int) -> subprocess.Popen | None:
     global _memcp_log_file
     try:
-        datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
+        # Test-runner contract:
+        # - Always use the repository-local ./data directory.
+        # - Never create port-specific or temp datadirs here.
+        # - Never delete ./data in the runner.
+        #
+        # The SQL suites intentionally share one database state across tables and
+        # restart/shutdown scenarios. "isolated" means serialized execution, not
+        # storage isolation.
+        datadir = "./data"
         _memcp_log_file = f"/tmp/memcp-test-{port}.log"
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
@@ -1012,13 +1021,40 @@ def print_memcp_log(tail: int = 100) -> None:
     except Exception:
         pass
 
-def stop_memcp_process(proc: subprocess.Popen) -> None:
+def get_memcp_api_port(proc: subprocess.Popen) -> Optional[int]:
     try:
-        proc.stdin.close()
+        args = proc.args if isinstance(proc.args, list) else [proc.args]
+        for arg in args:
+            if isinstance(arg, str) and arg.startswith("--api-port="):
+                return int(arg.split("=", 1)[1])
+    except Exception:
+        pass
+    return None
+
+def stop_memcp_process(proc: subprocess.Popen) -> None:
+    port = get_memcp_api_port(proc)
+    try:
+        if proc.stdin is not None and not proc.stdin.closed:
+            proc.stdin.close()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
+    if port is not None:
+        kill_memcp_by_port(port)
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
         proc.wait(timeout=10)
     except Exception:
         try:
-            proc.kill()
+            if port is not None:
+                kill_memcp_by_port(port)
         except Exception:
             pass
 
@@ -1107,6 +1143,13 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
     sequential_specs: List[Tuple[str, str]] = []
     for spec_file in spec_files:
         metadata = load_suite_metadata(spec_file)
+        # Scheduling contract:
+        # - restart/SHUTDOWN suites run sequentially with managed restarts
+        #   against the same shared ./data.
+        # - metadata.isolated also means sequential execution on that same
+        #   shared database, never a fresh datadir.
+        # - only non-isolated, non-restart suites may use the parallel
+        #   connect-only worker pool.
         if suite_requires_managed_restart(spec_file):
             sequential_specs.append(("direct", spec_file))
         elif metadata.get("isolated"):
