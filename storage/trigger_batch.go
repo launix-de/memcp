@@ -21,11 +21,11 @@ import "sync"
 // triggerBatch collects rows for deferred batch trigger execution.
 // Used by DML operations to avoid firing triggers per-row.
 type triggerBatch struct {
-	mu       sync.Mutex
-	timing   TriggerTiming
-	rows     []dataset
-	table    *table
-	isOld    bool // true for DELETE (rows are OLD), false for INSERT (rows are NEW)
+	mu     sync.Mutex
+	timing TriggerTiming
+	rows   []dataset
+	table  *table
+	isOld  bool // true for DELETE (rows are OLD), false for INSERT (rows are NEW)
 }
 
 // BeginTriggerBatch starts collecting trigger rows for the given timing.

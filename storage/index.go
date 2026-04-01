@@ -58,16 +58,16 @@ type StorageIndex struct {
 	Cols []string // sort equal-cols alphabetically, so similar conditions are canonical
 	// ColMapCols[i] and ColMapFn[i] are set for computed index columns (col starts with ".").
 	// Both are nil for raw columns.
-	ColMapCols  [][]string  // per-column source col names; nil entry means raw column
-	ColMapFn    []scm.Scmer // per-column compute fn; IsNil() entry means raw column
+	ColMapCols  [][]string        // per-column source col names; nil entry means raw column
+	ColMapFn    []scm.Scmer       // per-column compute fn; IsNil() entry means raw column
 	ColMatchers []BoundaryMatcher // per-column matcher (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
 	// skipLists[colIdx][pattern] stores precomputed SkipLists for non-sorted columns.
 	// Built during buildIndex via BoundaryMatcher.BuildSkipList.
 	// TODO: replace map with NonLockingReadMap for lock-free reads.
 	skipLists   []map[string]*SkipList
-	Savings     float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
-	Native      bool        // true when data is physically sorted by this index (zero-cost)
-	mainIndexes StorageInt  // we can do binary searches here (unused when Native)
+	Savings     float64    // store the amount of time savings here -> add selectivity (outputted / size) on each
+	Native      bool       // true when data is physically sorted by this index (zero-cost)
+	mainIndexes StorageInt // we can do binary searches here (unused when Native)
 	// deltaBtree holds delta inserts in index-column order. Contract:
 	// when active==true, deltaBtree is non-nil. It is built during index
 	// construction and kept in sync by shard.insertDataset on every insert.
@@ -237,7 +237,6 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		upperIncl = cols[len(cols)-1].upperInclusive
 	}
 
-
 	// check if we found conditions
 	if len(lower) > 0 {
 		// find an index that has at least the columns in that order we're searching for
@@ -333,8 +332,8 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		index.ColMatchers = make([]BoundaryMatcher, len(lower))
 		for i := range lower {
 			index.Cols[i] = cols[i].col
-			index.ColMapCols[i] = cols[i].mapCols // nil for raw columns
-			index.ColMapFn[i] = cols[i].mapFn     // IsNil() for raw columns
+			index.ColMapCols[i] = cols[i].mapCols  // nil for raw columns
+			index.ColMapFn[i] = cols[i].mapFn      // IsNil() for raw columns
 			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
 		}
 		index.Savings = 0.0  // count how many cost we wasted so we decide when to build the index

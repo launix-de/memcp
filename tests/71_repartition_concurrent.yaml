@@ -148,5 +148,111 @@ test_cases:
       data:
         - cnt: 200
 
+  # ---- Minimal DELETE-only repeat to isolate the deletion race ----
+  - repeat: 10
+    delay_ms: 20
+    tests:
+      - name: "RC-del: reset"
+        sql: "DROP TABLE IF EXISTS `rc_data`"
+      - name: "RC-del: create"
+        sql: |
+          CREATE TABLE `rc_data` (
+            id INT PRIMARY KEY,
+            val INT,
+            tag TEXT
+          )
+      - name: "RC-del: insert 61000 rows"
+        scm: |
+          (begin
+            (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
+            (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+            61000)
+      - name: "RC-del: rebuild"
+        parallel: repart_del
+        scm: "(rebuild)"
+      - name: "RC-del: concurrent DELETE 50"
+        parallel: repart_del
+        sql: "DELETE FROM rc_data WHERE id >= 60950 AND id < 61000"
+        expect:
+          affected_rows: 50
+      - name: "RC-del: count after ops"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+        expect:
+          rows: 1
+          data:
+            - cnt: 60950
+      - name: "RC-del: deleted rows gone"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+        expect:
+          rows: 1
+          data:
+            - cnt: 0
+
+  # ---- Repeat the race N times to stress dual-write correctness ----
+  # Each iteration resets the table and runs rebuild + concurrent DML.
+  # delay_ms between iterations varies the timing window to catch races.
+  - repeat: 5
+    delay_ms: 50
+    tests:
+      - name: "RC-repeat: reset table"
+        sql: "DROP TABLE IF EXISTS `rc_data`"
+      - name: "RC-repeat: create table"
+        sql: |
+          CREATE TABLE `rc_data` (
+            id INT PRIMARY KEY,
+            val INT,
+            tag TEXT
+          )
+      - name: "RC-repeat: insert 61000 rows"
+        scm: |
+          (begin
+            (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
+            (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+            61000)
+      - name: "RC-repeat: rebuild"
+        parallel: repart_repeat
+        scm: "(rebuild)"
+      - name: "RC-repeat: concurrent UPDATE 50"
+        parallel: repart_repeat
+        sql: "UPDATE rc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
+        expect:
+          affected_rows: 50
+      - name: "RC-repeat: concurrent DELETE 50"
+        parallel: repart_repeat
+        sql: "DELETE FROM rc_data WHERE id >= 60950 AND id < 61000"
+        expect:
+          affected_rows: 50
+      - name: "RC-repeat: concurrent INSERT 200"
+        parallel: repart_repeat
+        scm: |
+          (begin
+            (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
+            (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+            200)
+      - name: "RC-repeat: count after ops"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+        expect:
+          rows: 1
+          data:
+            - cnt: 61150
+      - name: "RC-repeat: deleted rows gone"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+        expect:
+          rows: 1
+          data:
+            - cnt: 0
+      - name: "RC-repeat: updated rows"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE val = -999 AND tag = 'updated'"
+        expect:
+          rows: 1
+          data:
+            - cnt: 50
+      - name: "RC-repeat: inserted rows"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 100000"
+        expect:
+          rows: 1
+          data:
+            - cnt: 200
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS `rc_data`"

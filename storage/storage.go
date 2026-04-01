@@ -333,7 +333,30 @@ func Init(en scm.Env) {
 
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
+				// Virtual schemas like information_schema are handled in the
+				// Scheme layer (scan_wrapper in sql-metadata.scm) which
+				// replaces the table name with an in-memory list before the
+				// scan reaches Go.  However, when the query planner emits a
+				// batched nested-loop join the outer scan bypasses
+				// scan_wrapper and arrives here with the raw table name
+				// string.  Since there is no physical database backing these
+				// virtual schemas, we return an empty result (or a single
+				// NULL row for outer joins) instead of panicking.  The inner
+				// scan will still go through scan_wrapper correctly.
+				neutral := scm.NewNil()
+				if len(a) > 7 {
+					neutral = a[7]
+				}
+				if isOuter {
+					mapfn := scm.OptimizeProcToSerialFunction(a[5])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if len(a) > 6 {
+						reducefn = scm.OptimizeProcToSerialFunction(a[6])
+					}
+					return reducefn(neutral, mapfn(mapparams...))
+				}
+				return neutral
 			}
 			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
@@ -444,7 +467,27 @@ func Init(en scm.Env) {
 
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
+				// Same virtual-schema guard as in scan() above.
+				// scan_batch is emitted by batchify_first_scan which
+				// rewrites scan→scan_batch after scan_wrapper has already
+				// run.  When the outer table of a batched join is virtual,
+				// scan_wrapper was bypassed by build_batched_regular_scan
+				// (queryplan.scm) so the raw table name arrives here.
+				// Return empty results to match the list-path semantics.
+				neutral := scm.NewNil()
+				if len(a) > 9 {
+					neutral = a[9]
+				}
+				if isOuter {
+					mapfn := scm.OptimizeProcToSerialFunction(a[5])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if len(a) > 8 {
+						reducefn = scm.OptimizeProcToSerialFunction(a[8])
+					}
+					return reducefn(neutral, mapfn(mapparams...))
+				}
+				return neutral
 			}
 			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
@@ -601,7 +644,17 @@ func Init(en scm.Env) {
 
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
+				// Same virtual-schema guard as in scan() — see comment there.
+				if isOuter {
+					mapfn := scm.OptimizeProcToSerialFunction(a[10])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if !aggregate.IsNil() {
+						reducefn = scm.OptimizeProcToSerialFunction(aggregate)
+					}
+					return reducefn(neutral, mapfn(mapparams...))
+				}
+				return neutral
 			}
 			t := db.GetTable(scm.String(a[1]))
 			if t == nil {

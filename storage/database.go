@@ -486,8 +486,9 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 					func() {
 						defer func() { _ = recover() }()
 						t.mu.Lock()
-						t.rebuilding = false
+						t.maintenanceKind = 0
 						t.mu.Unlock()
+						t.maintenanceMu.Unlock()
 					}()
 				}
 				done.Done()
@@ -495,14 +496,12 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 			if t.isEphemeralQueryTable() && !includeEphemeral {
 				return
 			}
+			if !t.maintenanceMu.TryLock() {
+				return // another rebuild/repartition is in progress
+			}
 			t.mu.Lock() // table lock
 			tableLocked = true
-			if t.rebuilding {
-				t.mu.Unlock()
-				tableLocked = false
-				return
-			}
-			t.rebuilding = true
+			t.maintenanceKind = 1
 			rebuildClaimed = true
 			// TODO: check LRU statistics and remove unused computed columns
 
@@ -601,8 +600,9 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 				rebuildErrors = append(rebuildErrors, shardErrors...)
 				errMu.Unlock()
 				t.mu.Lock()
-				t.rebuilding = false
+				t.maintenanceKind = 0
 				t.mu.Unlock()
+				t.maintenanceMu.Unlock()
 				rebuildClaimed = false
 				return
 			}
@@ -648,12 +648,11 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 			//     "partitioned with one shard", because that touches unrelated
 			//     tables during shared rebuild tests without any layout benefit
 			//
-			// Also claim repartitionActive under t.mu so a concurrent
-			// rebuild (e.g. the 15-min scheduler) sees the flag and
-			// skips its own repartition instead of racing.
+			// Since we already hold maintenanceMu from the rebuild, just
+			// transition to maintenanceKind=2 for repartition (no re-lock needed).
 			var shardCandidates []shardDimension
 			doRepart := false
-			if repartition && !hasColdShard && !t.repartitionActive {
+			if repartition && !hasColdShard {
 				var shouldChange bool
 				shardCandidates, shouldChange = t.proposerepartition(maincount)
 				if shouldChange {
@@ -675,16 +674,22 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 				}
 			}
 			if doRepart {
-				t.repartitionActive = true // claim under t.mu — atomic with the doRepart decision
+				t.maintenanceKind = 2 // transition rebuild→repartition, still holding maintenanceMu
+			} else {
+				t.maintenanceKind = 0
 			}
-			t.rebuilding = false
-			rebuildClaimed = false
 
 			t.mu.Unlock()
 			tableLocked = false
 
 			if doRepart {
+				// maintenanceMu stays locked; repartition Phase G will unlock it
+				rebuildClaimed = false
 				t.repartitionDDLReadLocked(shardCandidates)
+			} else {
+				// No repartition — release maintenanceMu now
+				t.maintenanceMu.Unlock()
+				rebuildClaimed = false
 			}
 		}(t)
 	}

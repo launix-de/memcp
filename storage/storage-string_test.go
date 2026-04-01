@@ -18,8 +18,8 @@ package storage
 
 import (
 	"bytes"
-	"fmt"
 	"encoding/binary"
+	"fmt"
 	"sync"
 	"testing"
 
