@@ -58,6 +58,11 @@ type storageShard struct {
 	mu         sync.RWMutex
 	uniquelock sync.Mutex                   // unique insert lock (only used in the sharded case)
 	next       atomic.Pointer[storageShard] // rebuild successor published lock-free to concurrent writers
+	// nextTranslation maps old recids on this shard to recids on the current
+	// rebuild successor. Snapshot rows are installed during rebuild setup; delta
+	// inserts extend the same map as they are mirrored into next.
+	nextTranslationMu sync.RWMutex
+	nextTranslation   map[uint32]uint32
 	// indexes
 	Indexes    []*StorageIndex // sorted keys
 	indexMutex sync.Mutex
@@ -86,6 +91,42 @@ func (s *storageShard) storeNext(next *storageShard) {
 
 func (s *storageShard) clearNext(next *storageShard) {
 	s.next.CompareAndSwap(next, nil)
+}
+
+func (s *storageShard) setNextTranslation(m map[uint32]uint32) {
+	s.nextTranslationMu.Lock()
+	s.nextTranslation = m
+	s.nextTranslationMu.Unlock()
+}
+
+func (s *storageShard) clearNextTranslation() {
+	s.nextTranslationMu.Lock()
+	s.nextTranslation = nil
+	s.nextTranslationMu.Unlock()
+}
+
+func (s *storageShard) translateNextRecid(oldRecid uint32) (uint32, bool) {
+	s.nextTranslationMu.RLock()
+	defer s.nextTranslationMu.RUnlock()
+	if s.nextTranslation == nil {
+		return 0, false
+	}
+	newRecid, ok := s.nextTranslation[oldRecid]
+	return newRecid, ok
+}
+
+func (s *storageShard) recordNextInsertRange(oldStartRecid, newStartRecid uint32, count int) {
+	if count == 0 {
+		return
+	}
+	s.nextTranslationMu.Lock()
+	if s.nextTranslation == nil {
+		s.nextTranslation = make(map[uint32]uint32, count)
+	}
+	for i := 0; i < count; i++ {
+		s.nextTranslation[oldStartRecid+uint32(i)] = newStartRecid + uint32(i)
+	}
+	s.nextTranslationMu.Unlock()
 }
 
 // computeSizeLocked computes the shard's memory footprint without acquiring s.mu.
@@ -1071,7 +1112,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}()
 			// Dual-write: forward the new row to the secondary shard set
 			if result && dualWriteRow != nil {
-				t.t.dualWriteInsert(dualWriteCols, dualWriteRow)
+				t.t.dualWriteInsertFromOld(t, newRecid, dualWriteCols, dualWriteRow)
 			}
 			// transaction bookkeeping + deferred sync
 			// (shard is already registered via OpenMapReducer — no per-row RegisterTouchedShard)
@@ -1199,15 +1240,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}
 			next := t.loadNext()
 			if next != nil {
-				// Propagate to rebuild successor shard.
-				// Use PK-based search instead of idx translation to avoid
-				// the batch-delete bug where CountUntil includes current-scan
-				// deletions that weren't excluded from the rebuilt shard.
+				// Propagate to the rebuild successor shard via the stable
+				// old→new recid translation published by rebuild().
 				if len(a) > 0 {
-					// UPDATE: find the old row by PK in next shard, then apply update
 					t.propagateUpdateToNext(next, idx, a...)
 				} else {
-					// DELETE: find and delete by PK
 					t.propagateDeleteToNext(next, idx)
 				}
 			}
@@ -1216,130 +1253,39 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 	}
 }
 
-// propagateUpdateToNext finds the old row by PK in the rebuild successor shard
-// and applies the update there.
+// propagateUpdateToNext uses the old→new recid translation built by rebuild()
+// and extended by mirrored delta inserts.
 func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid uint32, a ...scm.Scmer) {
-	// Find PK columns
-	var primaryCols []string
-	for _, uk := range t.t.Unique {
-		if uk.Id == "PRIMARY" {
-			primaryCols = uk.Cols
-			break
-		}
+	targetRecid, ok := t.translateNextRecid(oldRecid)
+	if !ok {
+		// The successor stays write-locked until rebuild() has published the
+		// initial translation. Wait for that point once, then retry the map.
+		next.mu.Lock()
+		next.mu.Unlock()
+		targetRecid, ok = t.translateNextRecid(oldRecid)
 	}
-	if len(primaryCols) == 0 {
-		// No PK — fall back to old idx translation (best effort)
-		idx2 := oldRecid - uint32(t.deletions.CountUntil(uint(oldRecid)))
-		next.UpdateFunction(idx2, false, false)(a...)
-		return
-	}
-
-	// Read PK values from old shard
-	pkVals := make([]scm.Scmer, len(primaryCols))
-	t.mu.RLock()
-	for i, col := range primaryCols {
-		if oldRecid < t.main_count {
-			cs, ok := t.columns[col]
-			if ok {
-				pkVals[i] = cs.GetValue(oldRecid)
-			}
-		} else {
-			idx := int(oldRecid - t.main_count)
-			if colIdx, ok := t.deltaColumns[col]; ok && idx < len(t.inserts) {
-				pkVals[i] = t.inserts[idx][colIdx]
-			}
-		}
-	}
-	t.mu.RUnlock()
-
-	// Find in next shard by PK match
-	next.mu.RLock()
-	limit := next.main_count + uint32(len(next.inserts))
-	targetRecid := uint32(0)
-	found := false
-	for recid := uint32(0); recid < limit; recid++ {
-		if next.deletions.Get(uint(recid)) {
-			continue
-		}
-		match := true
-		for i, col := range primaryCols {
-			if !scm.Equal(next.rowValueByRecidLocked(recid, col), pkVals[i]) {
-				match = false
-				break
-			}
-		}
-		if match {
-			targetRecid = recid
-			found = true
-			break
-		}
-	}
-	next.mu.RUnlock()
-
-	if found {
+	if ok {
 		next.UpdateFunction(targetRecid, false, false)(a...)
 	}
 }
 
-// propagateDeleteToNext finds the deleted row (by PK) in the rebuild successor
-// shard and marks it as deleted there. This avoids the idx translation bug where
-// CountUntil includes current-scan deletions that weren't excluded from the
-// rebuilt shard, causing incorrect recid mapping during batch deletes.
+// propagateDeleteToNext uses the old→new recid translation built by rebuild()
+// and extended by mirrored delta inserts. This avoids the CountUntil bug during
+// batch deletes without falling back to an O(n) PK scan.
 func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32) {
-	// Find PK columns
-	var primaryCols []string
-	for _, uk := range t.t.Unique {
-		if uk.Id == "PRIMARY" {
-			primaryCols = uk.Cols
-			break
-		}
+	targetRecid, ok := t.translateNextRecid(oldRecid)
+	if !ok {
+		next.mu.Lock()
+		next.mu.Unlock()
+		targetRecid, ok = t.translateNextRecid(oldRecid)
 	}
-	if len(primaryCols) == 0 {
-		// No PK — fall back to old idx translation (best effort)
-		idx2 := oldRecid - uint32(t.deletions.CountUntil(uint(oldRecid)))
-		next.UpdateFunction(idx2, false, false)()
+	if !ok {
 		return
 	}
-
-	// Read PK values from old shard (caller already holds or just released shard lock)
-	pkVals := make([]scm.Scmer, len(primaryCols))
-	t.mu.RLock()
-	for i, col := range primaryCols {
-		if oldRecid < t.main_count {
-			cs, ok := t.columns[col]
-			if ok {
-				pkVals[i] = cs.GetValue(oldRecid)
-			}
-		} else {
-			idx := int(oldRecid - t.main_count)
-			if colIdx, ok := t.deltaColumns[col]; ok && idx < len(t.inserts) {
-				pkVals[i] = t.inserts[idx][colIdx]
-			}
-		}
-	}
-	t.mu.RUnlock()
-
-	// Find and delete in next shard by PK match
 	next.mu.Lock()
-	limit := next.main_count + uint32(len(next.inserts))
-	for recid := uint32(0); recid < limit; recid++ {
-		if next.deletions.Get(uint(recid)) {
-			continue
-		}
-		match := true
-		for i, col := range primaryCols {
-			if !scm.Equal(next.rowValueByRecidLocked(recid, col), pkVals[i]) {
-				match = false
-				break
-			}
-		}
-		if match {
-			next.deletions.Set(uint(recid), true)
-			if (next.t.PersistencyMode == Safe || next.t.PersistencyMode == Logged) && next.logfile != nil {
-				next.logfile.Write(LogEntryDelete{recid})
-			}
-			break
-		}
+	next.deletions.Set(uint(targetRecid), true)
+	if (next.t.PersistencyMode == Safe || next.t.PersistencyMode == Logged) && next.logfile != nil {
+		next.logfile.Write(LogEntryDelete{targetRecid})
 	}
 	next.mu.Unlock()
 }
@@ -1895,7 +1841,7 @@ func (m *ShardMapReducer) FlushSideEffects() {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) uint32 {
 	// Check table-level user lock (LOCK TABLES): writes block under any lock.
 	// Always call waitTableLock — it handles other-session blocking and
 	// owner-write-under-READ-lock error in one place.
@@ -1919,14 +1865,18 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 			preparedRows = append(preparedRows, sanitized[0])
 		}
 		if len(preparedRows) == 0 {
-			return
+			return 0
 		}
 		if !alreadyLocked {
 			t.mu.Lock()
 		}
+		firstNewRecid := uint32(0)
 		firstInsertId := onFirstInsertId
 		for i, row := range preparedRows {
-			t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId)
+			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true)
+			if i == 0 {
+				firstNewRecid = recid
+			}
 			if firstInsertId != nil {
 				firstInsertId = nil
 			}
@@ -1934,31 +1884,63 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		if !alreadyLocked {
 			t.mu.Unlock()
 		}
-		return
+		return firstNewRecid
 	}
 
 	// Re-apply sanitizers after trigger-free INSERT input preparation.
 	values = t.t.sanitizeInsertRows(columns, values, isIgnore)
 	if len(values) == 0 {
-		return // all rows skipped by sanitizer in INSERT IGNORE mode
+		return 0 // all rows skipped by sanitizer in INSERT IGNORE mode
 	}
 
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
-	t.insertPreparedLocked(columns, values, onFirstInsertId)
+	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true)
 	if !alreadyLocked {
 		t.mu.Unlock()
 	}
+	return firstNewRecid
 }
 
-func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64)) {
+func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alreadyLocked bool) uint32 {
+	if len(values) == 0 {
+		return 0
+	}
+	if !alreadyLocked {
+		t.mu.Lock()
+	}
+	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false)
+	if !alreadyLocked {
+		t.mu.Unlock()
+	}
+	return firstNewRecid
+}
+
+func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]string, [][]scm.Scmer) {
+	idx2col := make([]string, len(t.deltaColumns))
+	for name, idx := range t.deltaColumns {
+		if idx < len(idx2col) {
+			idx2col[idx] = name
+		}
+	}
+	newRows := t.inserts[firstNewInsertIdx:]
+	logVals := make([][]scm.Scmer, len(newRows))
+	for i, row := range newRows {
+		rowCopy := make([]scm.Scmer, len(idx2col))
+		copy(rowCopy, row)
+		logVals[i] = rowCopy
+	}
+	return idx2col, logVals
+}
+
+func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool) uint32 {
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
 	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId)
-	if len(t.t.Triggers) > 0 {
+	if fireTriggers && len(t.t.Triggers) > 0 {
 		newRows := t.inserts[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
 		for i, deltaRow := range newRows {
@@ -1973,27 +1955,27 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			triggerInsertRows[i] = row
 		}
 	}
+	needMaterializedRows := (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil
+	needMaterializedRows = needMaterializedRows || (propagateMaintenance && (t.loadNext() != nil || (t.t.repartitionDualWriteActive.Load() && t.t.ShardMode == ShardModeFree)))
+	var payloadCols []string
+	var payloadVals [][]scm.Scmer
+	if needMaterializedRows {
+		payloadCols, payloadVals = t.materializedInsertedRowsLocked(firstNewInsertIdx)
+	}
 	if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 		// Log the actual inserted rows (not the original columns/values) so that
 		// auto-incremented IDs and column defaults are preserved across restarts.
-		idx2col := make([]string, len(t.deltaColumns))
-		for name, idx := range t.deltaColumns {
-			if idx < len(idx2col) {
-				idx2col[idx] = name
-			}
-		}
-		newRows := t.inserts[firstNewInsertIdx:]
-		logVals := make([][]scm.Scmer, len(newRows))
-		for i, row := range newRows {
-			rowCopy := make([]scm.Scmer, len(idx2col))
-			copy(rowCopy, row)
-			logVals[i] = rowCopy
-		}
-		t.logfile.Write(LogEntryInsert{idx2col, logVals})
+		t.logfile.Write(LogEntryInsert{payloadCols, payloadVals})
 	}
-	if next := t.loadNext(); next != nil {
-		// also insert into next storage
-		next.Insert(columns, values, false, nil, false)
+	if propagateMaintenance {
+		if next := t.loadNext(); next != nil {
+			// also insert into next storage
+			firstNextRecid := next.insertReplica(payloadCols, payloadVals, false)
+			t.recordNextInsertRange(firstNewRecid, firstNextRecid, len(payloadVals))
+		}
+		if t.t.repartitionDualWriteActive.Load() && t.t.ShardMode == ShardModeFree {
+			t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals)
+		}
 	}
 	// transaction bookkeeping
 	if tx := CurrentTx(); tx != nil {
@@ -2019,7 +2001,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	// execute AFTER INSERT triggers outside the shard write lock, matching the
 	// AFTER UPDATE/DELETE paths and avoiding lock inversion with computed-column
 	// invalidation on shared keytables.
-	if len(t.t.Triggers) > 0 {
+	if fireTriggers && len(t.t.Triggers) > 0 {
 		func() {
 			t.mu.Unlock()
 			defer t.mu.Lock()
@@ -2028,6 +2010,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			}
 		}()
 	}
+	return firstNewRecid
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
@@ -2461,6 +2444,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			// Otherwise, later rebuild/save cycles may publish a schema referencing a UUID whose
 			// column files were never written.
 			t.clearNext(result)
+			t.clearNextTranslation()
 			if result.logfile != nil {
 				func() { defer func() { _ = recover() }(); result.logfile.Close() }()
 			}
@@ -2626,6 +2610,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 			}
 		}
+		nextTranslation := make(map[uint32]uint32, len(rebuiltRowIDs))
+		for newRecid, oldRecid := range rebuiltRowIDs {
+			nextTranslation[oldRecid] = uint32(newRecid)
+		}
+		t.setNextTranslation(nextTranslation)
 
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
@@ -2838,6 +2827,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 		}
 		t.logfile = nil
+		nextTranslation := make(map[uint32]uint32, int(result.main_count))
+		for recid := uint32(0); recid < result.main_count; recid++ {
+			nextTranslation[recid] = recid
+		}
+		t.setNextTranslation(nextTranslation)
 		// Update index parent pointers to reference the new shard
 		for _, idx := range result.Indexes {
 			idx.t = result
