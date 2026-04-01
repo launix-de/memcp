@@ -295,19 +295,21 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		defer UnregisterSession(ss.ID)
 		defer ss.ReleaseAllLocks() // non-persistent: release locks when request ends
 	}
-	// Reset killed flag in case this session was killed in a previous request
-	ss.ResetKilled()
-	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
+	querySeq := ss.BeginQuery("Query", req.Method+" "+req.URL.Path)
+	ctx, cancel := context.WithCancel(req.Context())
+	ss.SetCancel(querySeq, cancel)
+	defer cancel()
+	defer ss.EndQuery(querySeq, "Sleep", "")
 	// Watch for HTTP client disconnect and propagate to session kill
 	reqDone := make(chan struct{})
 	defer close(reqDone)
-	go func() {
+	go func(seq uint64) {
 		select {
 		case <-req.Context().Done():
-			ss.Kill()
+			ss.KillQuery(seq)
 		case <-reqDone:
 		}
-	}()
+	}(querySeq)
 	SetValues(map[string]any{"sessionStatePtr": ss}, func() {
 		contextFn := func() {
 			// catch panics and print out 500 Internal Server Error
@@ -331,9 +333,9 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		// Persistent HTTP sessions reuse the same Scheme session so that
 		// @variables set in one request are visible in subsequent requests.
 		if req.Header.Get("X-Session-Id") != "" {
-			NewContextWithSession(req.Context(), ss.GetOrCreateScmSession(), contextFn)
+			NewContextWithSession(ctx, ss.GetOrCreateScmSession(), contextFn)
 		} else {
-			NewContext(req.Context(), contextFn)
+			NewContext(ctx, contextFn)
 		}
 	})
 }

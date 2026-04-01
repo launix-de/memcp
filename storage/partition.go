@@ -52,17 +52,54 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
 }
 
-func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*storageShard)) {
+func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_old func(*storageShard, bool)) <-chan struct{} {
 	callback := callback_old
 	if scm.Trace != nil {
 		// hook on tracing
-		callback = func(s *storageShard) {
+		callback = func(s *storageShard, solo bool) {
 			scm.Trace.Duration(fmt.Sprintf("%p", s), "shard", func() {
-				callback_old(s)
+				callback_old(s, solo)
 			})
 		}
 	}
-	var done sync.WaitGroup
+
+	runWorkers := func(shards []*storageShard, onDone func(*storageShard)) <-chan struct{} {
+		workers := runtime.NumCPU()
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > len(shards) {
+			workers = len(shards)
+		}
+
+		jobs := make(chan *storageShard, len(shards))
+		doneCh := make(chan struct{})
+		var done sync.WaitGroup
+		done.Add(len(shards))
+		for i := 0; i < workers; i++ {
+			gls.Go(func() {
+				for s := range jobs {
+					release := s.GetRead()
+					callback(s, false)
+					release()
+					if onDone != nil {
+						onDone(s)
+					}
+					done.Done()
+				}
+			})
+		}
+		for _, s := range shards {
+			jobs <- s
+		}
+		close(jobs)
+		go func() {
+			done.Wait()
+			close(doneCh)
+		}()
+		return doneCh
+	}
+
 	// Hold shardModeMu.RLock while reading ShardMode and capturing shard list.
 	// Phase F's drain uses shardModeMu.Lock() to synchronize, ensuring all
 	// iterateShards calls that read FreeShard have incremented activeScanners
@@ -73,137 +110,57 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 		shards := t.Shards
 		// Increment activeScanners while holding shardModeMu.RLock so Phase F
 		// sees all in-flight scans after its shardModeMu.Lock()/Unlock().
+		relevant := make([]*storageShard, 0, len(shards))
 		for _, s := range shards {
 			if s != nil {
 				s.activeScanners.Add(1)
+				relevant = append(relevant, s)
 			}
 		}
 		t.shardModeMu.RUnlock()
 
-		// fast path: single shard → execute synchronously, no goroutine overhead
-		if len(shards) == 1 && shards[0] != nil {
-			s := shards[0]
+		if len(relevant) == 0 {
+			return nil
+		}
+		if len(relevant) == 1 {
+			s := relevant[0]
 			release := s.GetRead()
-			callback(s)
+			callback(s, true)
 			release()
 			s.activeScanners.Add(-1)
-			return
+			return nil
 		}
-
-		// throttle by CPU cores to avoid massive goroutine fan-out
-		workers := runtime.NumCPU()
-		if workers < 1 {
-			workers = 1
-		}
-		if len(shards) <= workers {
-			done.Add(len(shards))
-			for _, s := range shards {
-				gls.Go(func(s *storageShard) func() {
-					return func() {
-						if s == nil {
-							fmt.Println("Warning: a shard is missing")
-							return
-						}
-						defer s.activeScanners.Add(-1)
-						release := s.GetRead()
-						callback(s)
-						release()
-						done.Done()
-					}
-				}(s))
-			}
-		} else {
-			jobs := make(chan *storageShard, workers)
-			done.Add(len(shards))
-			for i := 0; i < workers; i++ {
-				gls.Go(func() func() {
-					return func() {
-						for s := range jobs {
-							if s == nil {
-								fmt.Println("Warning: a shard is missing")
-								done.Done()
-								continue
-							}
-							release := s.GetRead()
-							callback(s)
-							release()
-							s.activeScanners.Add(-1)
-							done.Done()
-						}
-					}
-				}())
-			}
-			for _, s := range shards {
-				jobs <- s
-			}
-			close(jobs)
-		}
+		return runWorkers(relevant, func(s *storageShard) {
+			s.activeScanners.Add(-1)
+		})
 	} else {
 		t.shardModeMu.RUnlock()
-		iterateShardIndex(t.PDimensions, boundaries, t.PShards, func(s *storageShard) {
+		relevant := collectRelevantShards(t.PDimensions, boundaries, t.PShards)
+		if len(relevant) == 0 {
+			return nil
+		}
+		if len(relevant) == 1 {
+			s := relevant[0]
 			release := s.GetRead()
-			callback(s)
+			callback(s, true)
 			release()
-		}, &done, false)
+			return nil
+		}
+		return runWorkers(relevant, nil)
 	}
-	done.Wait()
 }
 
-// iterate over all shards parallely
-func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, callback func(*storageShard), done *sync.WaitGroup, parallel bool) {
+func collectRelevantShards(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard) []*storageShard {
+	result := make([]*storageShard, 0, len(shards))
+	collectRelevantShardsIndex(schema, boundaries, shards, &result)
+	return result
+}
+
+func collectRelevantShardsIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, result *[]*storageShard) {
 	if len(schema) == 0 {
-		if len(shards) == 1 && !parallel {
-			// execute without go
-			release := shards[0].GetRead()
-			callback(shards[0])
-			release()
-		} else {
-			// throttle high fan-out to avoid spawning excessive goroutines
-			workers := runtime.NumCPU()
-			if workers < 1 {
-				workers = 1
-			}
-			if len(shards) <= workers {
-				done.Add(len(shards))
-				for _, s := range shards {
-					gls.Go(func(s *storageShard) func() {
-						return func() {
-							if s == nil {
-								fmt.Println("Warning: a shard is missing")
-								return
-							}
-							release := s.GetRead()
-							callback(s)
-							release()
-							done.Done()
-						}
-					}(s))
-				}
-			} else {
-				// worker pool
-				jobs := make(chan *storageShard, workers)
-				done.Add(len(shards))
-				for i := 0; i < workers; i++ {
-					gls.Go(func() func() {
-						return func() {
-							for s := range jobs {
-								if s == nil {
-									fmt.Println("Warning: a shard is missing")
-									done.Done()
-									continue
-								}
-								release := s.GetRead()
-								callback(s)
-								release()
-								done.Done()
-							}
-						}
-					}())
-				}
-				for _, s := range shards {
-					jobs <- s
-				}
-				close(jobs)
+		for _, s := range shards {
+			if s != nil {
+				*result = append(*result, s)
 			}
 		}
 		return
@@ -261,8 +218,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 			}
 
 			for i := min; i <= max; i++ {
-				// recurse over range
-				iterateShardIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], callback, done, parallel || (min != max))
+				collectRelevantShardsIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], result)
 			}
 			return // finish (don't run into next boundary, don't run into the all-loop)
 		}
@@ -270,7 +226,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 
 	// else: no boundaries: iterate all
 	for i := 0; i < len(shards); i += blockdim {
-		iterateShardIndex(schema[1:], boundaries, shards[i:i+blockdim], callback, done, parallel || len(shards) >= blockdim)
+		collectRelevantShardsIndex(schema[1:], boundaries, shards[i:i+blockdim], result)
 	}
 }
 

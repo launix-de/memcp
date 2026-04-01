@@ -352,7 +352,7 @@ func Init(en scm.Env) {
 			if len(a) > 8 {
 				reduce2 = a[8]
 			}
-			return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter, 0, nil)
+			return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
@@ -463,7 +463,7 @@ func Init(en scm.Env) {
 			if len(a) > 10 {
 				reduce2 = a[10]
 			}
-			return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter, stride, batchdata)
+			return t.scanWithBatch(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter, stride, batchdata)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
@@ -2474,7 +2474,7 @@ func fkExistenceCheck(tbl *table, filterCols []string, vals []scm.Scmer) bool {
 		}
 		return scm.NewBool(false)
 	})
-	return scm.ToBool(tbl.scan(filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false, 0, nil))
+	return scm.ToBool(tbl.scan(filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false))
 }
 
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
@@ -2494,7 +2494,7 @@ func fkCascadeDelete(childTbl *table, cols []string, vals []scm.Scmer) {
 		scm.Apply(a[len(cols)]) // $update() with no args = delete
 		return scm.NewNil()
 	})
-	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false, 0, nil)
+	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeSetNull sets FK cols to NULL in childTbl where cols match vals.
@@ -2519,7 +2519,7 @@ func fkCascadeSetNull(childTbl *table, cols []string, vals []scm.Scmer) {
 		scm.Apply(a[len(cols)], scm.NewSlice(payload))
 		return scm.NewNil()
 	})
-	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false, 0, nil)
+	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeUpdate updates FK cols in childTbl from oldVals to newVals.
@@ -2544,7 +2544,7 @@ func fkCascadeUpdate(childTbl *table, cols []string, oldVals, newVals []scm.Scme
 		scm.Apply(a[len(cols)], scm.NewSlice(payload))
 		return scm.NewNil()
 	})
-	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false, 0, nil)
+	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.

@@ -23,7 +23,6 @@ import "time"
 import "strings"
 import "runtime/debug"
 import "container/heap"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 // optimizeScanOrder is the Optimize hook for the scan_order declaration.
@@ -402,25 +401,28 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	var q globalqueue
 	q_ := make(chan scanOrderResult, 1)
 	var inputCount int64
-	gls.Go(func() {
-		t.iterateShards(boundaries, func(s *storageShard) {
-			// Kill check at shard-scheduling point using closure-captured ss (no GLS lookup).
-			if ss != nil && ss.IsKilled() {
-				panic("query killed")
+	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+		// Kill check at shard-scheduling point using closure-captured ss (no GLS lookup).
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 			}
-			// parallel scan over shards
-			defer func() {
-				if r := recover(); r != nil {
-					// fmt.Println("panic during scan:", r, string(debug.Stack()))
-					q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
-				}
-			}()
-			res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols)
-			q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
-		})
-		close(q_)
+		}()
+		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols)
+		q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 	})
-	// collect all subchans — drain fully before acting on errors (see scan.go for rationale)
+	if done == nil {
+		close(q_)
+	} else {
+		go func() {
+			<-done
+			close(q_)
+		}()
+	}
+
 	var scanErr scanError
 	for msg := range q_ {
 		if msg.err.r != nil {

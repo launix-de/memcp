@@ -651,7 +651,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 	(define _outer_batch_row_lambda
 		(list (quote lambda) scan_mapfn_params
 			(list (quote begin)
-				(list (quote define) (symbol "__record") (list (quote !!list) batch_stride))
+				(list (quote define) (symbol "__record") (list (quote list)))
 				(cons (quote append_mut) (cons (symbol "__record") batch_map_params)))))
 	(if (nil? batched_inner_scan)
 		(scan_wrapper 'scan schema tbl
@@ -1122,22 +1122,23 @@ get_column markers and may no longer run schema-based repair heuristics. */
 (define finalize_logical_stage_scoped (lambda (stage local_schemas visible_schemas rewrite_expr enforce_contract) (begin
 	(define fin (lambda (expr) (finalize_logical_expr_scoped expr local_schemas visible_schemas rewrite_expr enforce_contract)))
 	(define sg (coalesceNil (stage_group_cols stage) '()))
-	(define sh (stage_having_expr stage))
+	(define sh (stage_post_group_condition_expr stage))
 	(define so (coalesceNil (stage_order_list stage) '()))
 	(define sl (stage_limit_val stage))
 	(define soff (stage_offset_val stage))
+	(define sga (stage_group_alias stage))
 	(define spa (stage_partition_aliases stage))
 	(if (stage_is_dedup stage)
-		(stage_preserve_cache_meta stage (make_dedup_stage (map sg fin) spa))
+		(stage_preserve_cache_meta stage (make_dedup_stage (map sg fin) sga spa))
 		(if (and (not (nil? spa)) (or (nil? sg) (equal? sg '())))
 			(stage_preserve_cache_meta stage (make_partition_stage spa
 				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
-				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
+				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage) sga))
 			(stage_preserve_cache_meta stage (make_group_stage
 				(map sg fin)
 				(fin sh)
 				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
-				sl soff spa (stage_init_code stage)))))
+				sl soff sga spa (stage_init_code stage)))))
 )))
 (define finalize_logical_stage (lambda (stage all_schemas rewrite_expr enforce_contract)
 	(finalize_logical_stage_scoped stage all_schemas all_schemas rewrite_expr enforce_contract)
@@ -1148,7 +1149,7 @@ get_column markers and may no longer run schema-based repair heuristics. */
 /* group stage constructors and accessors - shared between untangle_query and build_queryplan
 All stages have partition-aliases (scope): nil = global (all tables), list = scoped to those tables.
 All stages have init: nil = no init code, or code to run before the scan. */
-(define make_group_stage (lambda (group having order limit offset aliases init)
+(define make_group_stage (lambda (group having order limit offset group_alias aliases init)
 	(list
 		(cons (quote group-cols) (coalesce group '()))
 		(list (quote having) having)
@@ -1156,12 +1157,13 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(list (quote limit-partition-cols) 0)
 		(list (quote limit) limit)
 		(list (quote offset) offset)
+		(list (quote group-alias) group_alias)
 		(list (quote dedup) false)
 		(list (quote partition-aliases) aliases)
 		(list (quote init) init)
 	)
 ))
-(define make_partition_stage (lambda (aliases order partition_cols limit offset init)
+(define make_partition_stage (lambda (aliases order partition_cols limit offset init group_alias)
 	(list
 		(cons (quote group-cols) '())
 		(list (quote having) nil)
@@ -1169,12 +1171,13 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(list (quote limit-partition-cols) partition_cols)
 		(list (quote limit) limit)
 		(list (quote offset) offset)
+		(list (quote group-alias) group_alias)
 		(list (quote dedup) false)
 		(list (quote partition-aliases) aliases)
 		(list (quote init) init)
 	)
 ))
-(define make_dedup_stage (lambda (group aliases)
+(define make_dedup_stage (lambda (group group_alias aliases)
 	(list
 		(cons (quote group-cols) (coalesce group '()))
 		(list (quote having) nil)
@@ -1182,6 +1185,7 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(list (quote limit-partition-cols) 0)
 		(list (quote limit) nil)
 		(list (quote offset) nil)
+		(list (quote group-alias) group_alias)
 		(list (quote dedup) true)
 		(list (quote partition-aliases) aliases)
 		(list (quote init) nil)
@@ -1199,6 +1203,12 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		_ nil
 	) acc)
 ) nil)))
+/* Transitional alias: the stage `having` slot carries the stage-local
+post-group condition until the stage IR is flattened further. Planner code
+should reason about this as post-group filtering on the stage's group domain,
+not as a separate SQL-level HAVING special case. */
+(define stage_post_group_condition_expr (lambda (stage)
+	(stage_having_expr stage)))
 (define stage_order_list (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
 		(cons (quote order) rest) (if (nil? rest) '() (car rest))
@@ -1214,6 +1224,12 @@ All stages have init: nil = no init code, or code to run before the scan. */
 (define stage_offset_val (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
 		(cons (quote offset) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_group_alias (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote group-alias) rest) (if (nil? rest) nil (car rest))
 		_ nil
 	) acc)
 ) nil)))
@@ -1897,7 +1913,7 @@ or generate runtime scan code (build_queryplan).
 								(define groups2_us (coalesceNil groups2_us '()))
 								(define groups2_us (if (or (nil? groups2_us) (equal? groups2_us '()))
 									(if (or raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
-										(list (make_group_stage raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us nil _nt_virtual_init))
+										(list (make_group_stage raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us nil nil _nt_virtual_init))
 										groups2_us)
 									groups2_us))
 								/* resolve columns against inner and outer schemas */
@@ -1954,7 +1970,7 @@ or generate runtime scan code (build_queryplan).
 										(begin
 											(define g (stage_group_cols stage))
 											(or (and (not (nil? g)) (not (equal? g '())) (not (equal? g '(1))))
-												(not (nil? (stage_having_expr stage))))))) false)
+												(not (nil? (stage_post_group_condition_expr stage))))))) false)
 									false))
 								/* check for LIMIT/ORDER/OFFSET stages — deferred until 1-row constraint handling */
 								(define us_has_limit (if us_has_stages
@@ -2067,7 +2083,7 @@ or generate runtime scan code (build_queryplan).
 													(_us_prefix_ria (_us_ror us_inner_cond_raw))))
 												/* domain columns + original GROUP BY → scoped GROUP stage */
 												(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
-												(define us_orig_having (if us_has_stages (stage_having_expr (car _us_own_stages)) nil))
+												(define us_orig_having (if us_has_stages (stage_post_group_condition_expr (car _us_own_stages)) nil))
 												(define _us_dom_group_cols (map us_domain_cols (lambda (dc) (_us_prefix_ria (nth dc 0)))))
 												(define us_new_group (merge _us_dom_group_cols
 													(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1)))
@@ -2087,17 +2103,17 @@ or generate runtime scan code (build_queryplan).
 												(define us_group_stage
 													(stage_with_cache_query
 														(stage_with_cache_policy
-															(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_inner_aliases nil)
+															(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a nil us_inner_aliases nil)
 															(count_subquery_cache_policy subquery))
 														(if (nil? (count_subquery_cache_policy subquery)) nil subquery)))
 												/* propagate inner scoped stages with prefix */
 												(define _us_prefixed_inner_stages (map _us_inner_stages (lambda (s) (begin
 													(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_prefix_ria))
-													(define _psh (if (nil? (stage_having_expr s)) nil (_us_prefix_ria (stage_having_expr s))))
+													(define _psh (if (nil? (stage_post_group_condition_expr s)) nil (_us_prefix_ria (stage_post_group_condition_expr s))))
 													(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_prefix_ria c) d) o))))
 													(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
 													(stage_preserve_cache_meta s
-														(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s)))))))
+														(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) (stage_group_alias s) _psa (stage_init_code s)))))))
 												/* register prefixed tables */
 												(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
 												/* register scoped GROUP stage + propagated inner stages */
@@ -2211,18 +2227,18 @@ or generate runtime scan code (build_queryplan).
 															(b) explicit LIMIT from SQL, (c) uncorrelated needs global limit=1.
 															Indirect-only correlations skip: join chain guarantees 1 row. */
 															(if (or (not (equal? us_part_order '())) us_has_limit (not us_has_outer)) (begin
-																(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
+																(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil nil))
 																(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '()))))))
 														/* propagate inner scoped stages with renaming */
 														(if (not (equal? _us_inner_stages '()))
 															(sq_cache "groups" (merge
 																(map _us_inner_stages (lambda (s) (begin
 																	(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_ria))
-																	(define _psh (if (nil? (stage_having_expr s)) nil (_us_ria (stage_having_expr s))))
+																	(define _psh (if (nil? (stage_post_group_condition_expr s)) nil (_us_ria (stage_post_group_condition_expr s))))
 																	(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_ria c) d) o))))
 																	(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
 																	(stage_preserve_cache_meta s
-																		(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s))))))
+																		(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) (stage_group_alias s) _psa (stage_init_code s))))))
 																(coalesceNil (sq_cache "groups") '()))))
 														/* direct table entry with join condition (like non-agg non-LIMIT path) */
 														(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
@@ -2682,7 +2698,7 @@ or generate runtime scan code (build_queryplan).
 									(define g (stage_group_cols stage))
 									(and (not (nil? g)) (not (equal? g '())))
 								)
-								(not (nil? (stage_having_expr stage)))
+								(not (nil? (stage_post_group_condition_expr stage)))
 								(not (nil? (stage_limit_val stage)))
 								(not (nil? (stage_offset_val stage)))
 							)
@@ -3002,14 +3018,15 @@ or generate runtime scan code (build_queryplan).
 					(merge
 						(map (coalesce _cd_user_group '()) finalize_visible_expr)
 						(map _cd_distinct_exprs (lambda (e) (replace_find_column (finalize_visible_expr e)))))
+					nil
 					nil)
 				(make_group_stage
 					(if (nil? _cd_user_group) '(1) (map _cd_user_group (lambda (e) (replace_find_column (finalize_visible_expr e)))))
 					(_cd_replace (finalize_visible_expr _cd_having))
 					(map (coalesce _cd_order '()) (lambda (o) (match o '(col dir) (list (_cd_replace (finalize_visible_expr col)) dir))))
-					_cd_limit _cd_offset nil nil))
+					_cd_limit _cd_offset nil nil nil))
 			/* normal: single group stage */
-			(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '()))))
+			(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil nil)) '()))))
 	/* Contract boundary: untangle_query returns canonical logical IR.
 	All case-insensitive parser markers are resolved here, before build_queryplan
 	starts creating keytables/prejoins or serializing canonical expression names. */
@@ -3029,7 +3046,7 @@ or generate runtime scan code (build_queryplan).
 		(merge (map _canon_groups (lambda (stage)
 			(merge_unique
 				(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
-				(extract_tblvars (coalesceNil (stage_having_expr stage) true))
+				(extract_tblvars (coalesceNil (stage_post_group_condition_expr stage) true))
 				(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))
 				(coalesceNil (stage_partition_aliases stage) '())))))))
 	/* prune unused LEFT JOINs and unreferenced .(1) DUAL tables.
@@ -3275,7 +3292,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	(define require_canonical_stage (lambda (stage) (begin
 		(map (coalesceNil (stage_group_cols stage) '()) (lambda (expr)
 			(require_canonical_logical_expr "build_queryplan stage group" expr)))
-		(require_canonical_logical_expr "build_queryplan stage having" (coalesceNil (stage_having_expr stage) true))
+		(require_canonical_logical_expr "build_queryplan stage post-group condition" (coalesceNil (stage_post_group_condition_expr stage) true))
 		(map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(expr dir)
 			(require_canonical_logical_expr "build_queryplan stage order" expr)
 			true)))
@@ -3300,7 +3317,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	(define rest_groups (if groups_present (cdr groups) nil))
 	(set rest_groups (coalesceNil rest_groups '()))
 	(define stage_group (if stage (stage_group_cols stage) nil))
-	(define stage_having (if stage (stage_having_expr stage) nil))
+	(define stage_post_group_condition (if stage (stage_post_group_condition_expr stage) nil))
+	(define stage_group_alias_name (if stage (stage_group_alias stage) nil))
 	(define stage_order (if stage (stage_order_list stage) nil))
 	(define stage_partcols (if stage (coalesceNil (stage_limit_partition_cols stage) 0) 0))
 	(define stage_limit (if stage (stage_limit_val stage) nil))
@@ -3413,11 +3431,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		next stage's logical keys/fields and explode into nested "(get_column ...)"
 		temp names. */
 		(define raw_stage_group stage_group)
-		(define raw_stage_having stage_having)
+		(define raw_stage_post_group_condition stage_post_group_condition)
 		(define raw_stage_order stage_order)
 		(define raw_fields fields)
 		(set stage_group (map stage_group replace_find_column))
-		(set stage_having (replace_find_column stage_having))
+		(set stage_post_group_condition (replace_find_column stage_post_group_condition))
 		(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
 		(define is_dedup (stage_is_dedup stage))
 		(define _scoped_stage (not (nil? (stage_partition_aliases stage))))
@@ -3441,7 +3459,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(not _has_existing_later_group_stage)
 			(or
 				(reduce_assoc fields (lambda (acc _k expr) (or acc (_needs_outer_group_expr expr))) false)
-				(_needs_outer_group_expr (coalesce stage_having true))
+				(_needs_outer_group_expr (coalesce stage_post_group_condition true))
 				(reduce (coalesce stage_order '()) (lambda (acc o)
 					(or acc (match o '(col _dir) (_needs_outer_group_expr col) false))) false))))
 		(define _has_later_group_stage (or _has_existing_later_group_stage _needs_synthetic_outer_group))
@@ -3467,7 +3485,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define ags_raw (if is_dedup '() (extract_assoc fields (lambda (key expr) (extract_stage_field_aggregates expr false)))))
 		(define ags (if is_dedup '() (merge_unique ags_raw))) /* aggregates in fields */
 		(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
-		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_having true))))) /* aggregates in having */
+		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_post_group_condition true))))) /* aggregates in stage-local post-group condition */
 		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce condition true))))) /* aggregates in condition (from Neumann EXISTS/IN rewrite) */
 
 		/* TODO: replace (get_column nil ti col ci) in group, having and order with (coalesce (fields col) '('get_column nil false col false)) */
@@ -3512,7 +3530,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(or
 				(reduce stage_group (lambda (acc expr) (or acc (_resolved_expr_refs_grp_ps_table expr))) false)
 				(reduce ags (lambda (acc ag) (or acc (_resolved_expr_refs_grp_ps_table ag))) false)
-				(_resolved_expr_refs_grp_ps_table (coalesce stage_having true))
+				(_resolved_expr_refs_grp_ps_table (coalesce stage_post_group_condition true))
 				(reduce (coalesce stage_order '()) (lambda (acc o) (or acc (match o '(col _dir) (_resolved_expr_refs_grp_ps_table col) false))) false))))
 		(define _grp_tables (if _must_prejoin_outer_group_tables
 			(merge _grp_tables_raw _grp_ps_tables_raw)
@@ -4039,6 +4057,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define keytable_init (car (cdr kt_result)))
 				(define fk_pk_col (car (cdr (cdr kt_result))))
 				(define is_fk_reuse (not (nil? fk_pk_col)))
+				(define effective_group_alias (coalesce stage_group_alias_name grouptbl))
 
 				/* make_collect: builds collect plan with optional WHERE filter
 				with_filter=true: apply WHERE condition (for DEDUP)
@@ -4099,10 +4118,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(define transformed_rest_groups (map rest_groups (lambda (s)
 						(stage_preserve_cache_meta s (make_group_stage
 							(map (stage_group_cols s) _dedup_resolve)
-							(_dedup_resolve (stage_having_expr s))
+							(_dedup_resolve (stage_post_group_condition_expr s))
 							(map (coalesce (stage_order_list s) '()) (lambda (o) (match o '(col dir) (list (_dedup_resolve col) dir))))
 							(stage_limit_val s)
 							(stage_offset_val s)
+							(stage_group_alias s)
 							(stage_partition_aliases s)
 							(stage_init_code s)))
 					)))
@@ -4128,10 +4148,43 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define agg_col_name (lambda (ag)
 							(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
+						(define resolved_stage_group_key_names (map resolved_stage_group (lambda (expr)
+							(if is_fk_reuse fk_pk_col (expr_name expr)))))
+						(define replace_stage_group_alias_ref (lambda (expr) (match expr
+							'((symbol get_column) alias_ false col false)
+							(if (and (equal?? alias_ effective_group_alias) (has? resolved_stage_group_key_names col))
+								(list (quote get_column) grouptbl false col false)
+								nil)
+							'((quote get_column) alias_ false col false)
+							(if (and (equal?? alias_ effective_group_alias) (has? resolved_stage_group_key_names col))
+								(list (quote get_column) grouptbl false col false)
+								nil)
+							'((symbol outer) outer_sym)
+							(begin
+								(define parts (split (string outer_sym) "."))
+								(match parts
+									(list alias_ col)
+									(if (and (equal?? alias_ effective_group_alias) (has? resolved_stage_group_key_names col))
+										(list (quote get_column) grouptbl false col false)
+										nil)
+									nil))
+							'((quote outer) outer_sym)
+							(begin
+								(define parts (split (string outer_sym) "."))
+								(match parts
+									(list alias_ col)
+									(if (and (equal?? alias_ effective_group_alias) (has? resolved_stage_group_key_names col))
+										(list (quote get_column) grouptbl false col false)
+										nil)
+									nil))
+							nil)))
 						(define replace_group_key_or_fetch (lambda (expr) (if
-							(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
-							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
-							(replace_agg_with_fetch expr)
+							(not (nil? (replace_stage_group_alias_ref expr)))
+							(replace_stage_group_alias_ref expr)
+							(if
+								(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
+								'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
+								(replace_agg_with_fetch expr))
 						)))
 						/* scoped GROUP stages from unnesting must not eagerly rewrite later
 						outer aggregates like COUNT(*) in the SELECT list. Those belong to
@@ -4232,8 +4285,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_group_key_or_fetch col) dir))))))
 						(define next_groups (merge
-							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset nil nil)) '())
-							(if _needs_synthetic_outer_group (list (make_group_stage '(1) nil nil nil nil nil nil)) '())
+							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset nil nil nil)) '())
+							(if _needs_synthetic_outer_group (list (make_group_stage '(1) nil nil nil nil nil nil nil)) '())
 							rest_groups
 						))
 						/* FK reuse: extract child FK column name */
@@ -4245,13 +4298,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						if the deferred post-group condition contains aggregate terms. Only the
 						COUNT>0 empty-group filter itself stays restricted to true global groups. */
 						(define _marker_in_fields (reduce_assoc fields (lambda (acc _k v) (or acc (_has_agg_expr v))) false))
-						(define _marker_in_having (if (nil? stage_having) false (_has_agg_expr stage_having)))
+						(define _marker_in_post_group_condition (if (nil? stage_post_group_condition) false (_has_agg_expr stage_post_group_condition)))
 						(define _marker_in_order (reduce (coalesce stage_order '()) (lambda (acc o) (or acc (match o '(col _dir) (_has_agg_expr col) false))) false))
 						(define needs_count (or
 							(not (equal? resolved_stage_group '(1)))
 							(not (equal? _cond_agg_parts '()))
 							_marker_in_fields
-							_marker_in_having
+							_marker_in_post_group_condition
 							_marker_in_order))
 						/* SQL GROUP BY semantics: unscoped non-global groups only exist for row
 						keys that survive the pre-group row domain. Keep the logical aggregate
@@ -4267,7 +4320,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(not (equal? resolved_stage_group '(1)))
 								(and
 									(not _marker_in_fields)
-									(not _marker_in_having)
+									(not _marker_in_post_group_condition)
 									(not _marker_in_order)))))
 						(define ags (if needs_count (merge_unique ags (list count_ag)) ags))
 						(define count_col_name (if needs_count (agg_col_name count_ag) nil))
@@ -4307,15 +4360,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(cons sym args) (cons sym (map args rewrite_group_outer_refs))
 							expr)))
 						/* AND count>0 into HAVING so empty/non-matching groups are excluded */
-						(define effective_having_raw (if (and needs_count filter_empty_groups)
+						(define current_stage_post_group_condition_raw (if (and needs_count filter_empty_groups)
 							(begin
 								(define count_check '('> '('get_column grouptbl false count_col_name false) 0))
-								(define replaced_having (replace_group_key_or_fetch stage_having))
-								(if (or (nil? replaced_having) (equal? replaced_having true))
-									count_check
-									(list 'and replaced_having count_check)))
-							(replace_group_key_or_fetch stage_having)))
-						(define effective_having (rewrite_group_outer_refs effective_having_raw))
+								(combine_and_terms (list
+									(replace_group_key_or_fetch stage_post_group_condition)
+									count_check)))
+							(replace_group_key_or_fetch stage_post_group_condition)))
+						(define current_stage_post_group_condition (rewrite_group_outer_refs current_stage_post_group_condition_raw))
 
 						/* Phase 2: replace aggregates in the separated agg-condition parts,
 						then combine everything: HAVING + replaced agg-parts + ps-table conditions */
@@ -4324,7 +4376,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						The keytable LEFT JOIN must only use correlations against group/domain
 						keys, otherwise unrelated outer filters get attached to the wrong side. */
 						(define _gp_parts (filter (merge (map (merge
-							(if (or (nil? effective_having) (equal? effective_having true)) '() (list effective_having))
+							(flatten_and_terms current_stage_post_group_condition)
 							_replaced_agg_parts
 							(if (equal? _grp_ps_condition true) '() (list (replace_group_key_or_fetch _grp_ps_condition))))
 							_flatten_gp_part))
@@ -4806,7 +4858,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define all_referenced_columns (merge
 					(merge (map stage_group extract_all_get_columns))
 					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
-					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
+					(if (nil? stage_post_group_condition) '() (extract_all_get_columns stage_post_group_condition))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
 					(extract_all_get_columns (coalesceNil raw_condition true))
 					(extract_all_get_columns (coalesceNil raw_post_group_condition true))
@@ -5089,7 +5141,26 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define grouped_fields (map_assoc raw_fields (lambda (k v)
 					(lower_prejoin_lineage_expr v))))
 				(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_lineage_expr))
-				(define grouped_having (lower_prejoin_lineage_expr raw_stage_having))
+				(define grouped_stage_alias_result (if (nil? grouped_keys)
+					nil
+					(make_keytable_schema schema prejointbl grouped_keys prejoin_alias)))
+				(define grouped_stage_alias (if (nil? grouped_stage_alias_result) nil
+					(car grouped_stage_alias_result)))
+				(define grouped_stage_key_names (if (nil? grouped_stage_alias_result) '()
+					(car (cdr grouped_stage_alias_result))))
+				(define rewrite_group_key_to_group_alias (lambda (expr)
+					(coalesce
+						(reduce (produceN (count grouped_keys)) (lambda (found i)
+							(if (not (nil? found))
+								found
+								(if (equal? expr (nth grouped_keys i))
+									(list (quote get_column) grouped_stage_alias false (nth grouped_stage_key_names i) false)
+									nil)))
+							nil)
+						(match expr
+							(cons sym args) (cons sym (map args rewrite_group_key_to_group_alias))
+							expr))))
+				(define grouped_having (rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr raw_stage_post_group_condition)))
 				(define grouped_order (if (nil? raw_stage_order) nil
 					(map raw_stage_order (lambda (o) (match o '(col dir)
 						(list (lower_prejoin_lineage_expr col) dir))))))
@@ -5172,9 +5243,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				Post-group predicates continue as grouped_plan condition so recursive
 				planning uses a single filter path instead of a nested HAVING special case. */
 				(define grouped_stage (if is_dedup
-					(make_dedup_stage grouped_keys
+					(make_dedup_stage grouped_keys grouped_stage_alias
 						(if (nil? _stage_scope) nil (list prejoin_alias)))
 					(make_group_stage grouped_keys nil grouped_order stage_limit stage_offset
+						grouped_stage_alias
 						(if (nil? _stage_scope) nil (list prejoin_alias))
 						nil)))
 				(define grouped_fields_for_recursive (if is_dedup
@@ -5190,6 +5262,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(stage_preserve_cache_meta s
 								(make_dedup_stage
 									(map _sg recursive_replace_find_column)
+									(stage_group_alias s)
 									_spa))
 							(if (and (not (nil? _spa)) (or (nil? _sg) (equal? _sg '())))
 								(stage_preserve_cache_meta s
@@ -5199,14 +5272,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(coalesceNil (stage_limit_partition_cols s) 0)
 										(stage_limit_val s)
 										(stage_offset_val s)
-										(stage_init_code s)))
+										(stage_init_code s)
+										(stage_group_alias s)))
 								(stage_preserve_cache_meta s
 									(make_group_stage
 										(map _sg recursive_replace_find_column)
-										(recursive_replace_find_column_condition (stage_having_expr s))
+										(recursive_replace_find_column_condition (stage_post_group_condition_expr s))
 										(map _so (lambda (o) (match o '(col dir) (list (recursive_replace_find_column col) dir))))
 										(stage_limit_val s)
 										(stage_offset_val s)
+										(stage_group_alias s)
 										_spa
 										(stage_init_code s))))))))
 				(define grouped_all_stages (cons grouped_stage

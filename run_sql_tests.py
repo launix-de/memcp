@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 """
 MemCP SQL Test Runner (Optimized)
 
@@ -643,7 +659,8 @@ class SQLTestRunner:
             else:
                 # Treat SHUTDOWN as successful regardless of response body, even if the connection closed.
                 if self._restart_handler is not None:
-                    self._restart_handler()
+                    if not self._restart_handler():
+                        return self._record_fail(name, "Restart failed after SHUTDOWN", query, None, None, is_noncritical)
                 else:
                     # No restart handler (--connect-only): wait until SQL endpoint is actually ready again.
                     restart_timeout = int(test_case.get("restart_timeout", 120))
@@ -963,7 +980,15 @@ _memcp_log_file: str = ""
 def start_memcp_process(port: int) -> subprocess.Popen | None:
     global _memcp_log_file
     try:
-        datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
+        # Test-runner contract:
+        # - Always use the repository-local ./data directory.
+        # - Never create port-specific or temp datadirs here.
+        # - Never delete ./data in the runner.
+        #
+        # The SQL suites intentionally share one database state across tables and
+        # restart/shutdown scenarios. "isolated" means serialized execution, not
+        # storage isolation.
+        datadir = "./data"
         _memcp_log_file = f"/tmp/memcp-test-{port}.log"
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
@@ -996,13 +1021,40 @@ def print_memcp_log(tail: int = 100) -> None:
     except Exception:
         pass
 
-def stop_memcp_process(proc: subprocess.Popen) -> None:
+def get_memcp_api_port(proc: subprocess.Popen) -> Optional[int]:
     try:
-        proc.stdin.close()
+        args = proc.args if isinstance(proc.args, list) else [proc.args]
+        for arg in args:
+            if isinstance(arg, str) and arg.startswith("--api-port="):
+                return int(arg.split("=", 1)[1])
+    except Exception:
+        pass
+    return None
+
+def stop_memcp_process(proc: subprocess.Popen) -> None:
+    port = get_memcp_api_port(proc)
+    try:
+        if proc.stdin is not None and not proc.stdin.closed:
+            proc.stdin.close()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
+    if port is not None:
+        kill_memcp_by_port(port)
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
         proc.wait(timeout=10)
     except Exception:
         try:
-            proc.kill()
+            if port is not None:
+                kill_memcp_by_port(port)
         except Exception:
             pass
 
@@ -1062,8 +1114,10 @@ def normalize_jobs(jobs: Optional[int]) -> int:
     return jobs
 
 
-def run_spec_subprocess(spec_file: str, port: int, log_times: bool) -> Tuple[bool, str]:
-    cmd = [sys.executable, os.path.abspath(__file__), spec_file, str(port), "--connect-only"]
+def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, connect_only: bool) -> Tuple[bool, str]:
+    cmd = [sys.executable, os.path.abspath(__file__), spec_file]
+    if connect_only and port is not None:
+        cmd.extend([str(port), "--connect-only"])
     if log_times:
         cmd.append("--log-times")
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -1089,6 +1143,13 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
     sequential_specs: List[Tuple[str, str]] = []
     for spec_file in spec_files:
         metadata = load_suite_metadata(spec_file)
+        # Scheduling contract:
+        # - restart/SHUTDOWN suites run sequentially with managed restarts
+        #   against the same shared ./data.
+        # - metadata.isolated also means sequential execution on that same
+        #   shared database, never a fresh datadir.
+        # - only non-isolated, non-restart suites may use the parallel
+        #   connect-only worker pool.
         if suite_requires_managed_restart(spec_file):
             sequential_specs.append(("direct", spec_file))
         elif metadata.get("isolated"):
@@ -1103,7 +1164,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
 
     with ThreadPoolExecutor(max_workers=max_jobs) as executor:
         futures = {
-            executor.submit(run_spec_subprocess, spec_file, port, log_times): spec_file
+            executor.submit(run_spec_subprocess, spec_file, port, log_times, True): spec_file
             for spec_file in parallel_specs
         }
         for future in as_completed(futures):
@@ -1124,7 +1185,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             ok = runner.run_test_spec(spec_file)
             suite_status[spec_file] = ok
         else:
-            ok, output = run_spec_subprocess(spec_file, port, log_times)
+            ok, output = run_spec_subprocess(spec_file, port, log_times, True)
             record_result(spec_file, ok, output)
 
     failed_files = [spec_file for spec_file in spec_files if not suite_status.get(spec_file, False)]

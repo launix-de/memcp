@@ -19,7 +19,6 @@ package storage
 import "fmt"
 import "time"
 import "runtime/debug"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
@@ -79,7 +78,11 @@ type scanResult struct {
 }
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
+func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+	return t.scanWithBatch(conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
+}
+
+func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
@@ -118,36 +121,35 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		t.AddPartitioningScore([]string{b.col})
 	}
 
-	values := make(chan scanResult, 4)
 	analyzeNs := time.Since(analyzeStart).Nanoseconds()
 	// Measure execution time (parallel shard scans + collection)
 	execStart := time.Now()
 	var outCount int64
 	var inputCount int64
-	gls.Go(func() {
-		t.iterateShards(boundaries, func(s *storageShard) {
-			// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
-			// This keeps the worker pool draining quickly on tables with many shards.
-			if ss != nil && ss.IsKilled() {
-				panic("query killed")
+	values := make(chan scanResult, 4)
+	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+		// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
+		// This keeps the worker pool draining quickly on tables with many shards.
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
-			// parallel scan over shards
-			defer func() {
-				if r := recover(); r != nil {
-					values <- scanResult{err: scanError{r, string(debug.Stack())}}
-				}
-			}()
-			res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata)
-			values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
-		})
-		close(values) // last scan is finished
+		}()
+		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata)
+		values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 	})
-	// collect values from parallel scan
-	// Drain the entire channel before acting on any error: this guarantees that
-	// all shard goroutines have finished (and therefore all LogInsert/LogDelete
-	// calls are complete) before a panic propagates to WithAutocommit's rollback.
-	// Exiting the loop early would leave goroutines blocked on a full channel
-	// (goroutine leak) and create a race between rollback and ongoing mutations.
+	if done == nil {
+		close(values)
+	} else {
+		go func() {
+			<-done
+			close(values)
+		}()
+	}
+
 	akkumulator := neutral
 	hadValue := false
 	var scanErr scanError

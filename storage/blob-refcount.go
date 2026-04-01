@@ -90,7 +90,7 @@ func (db *database) IncrBlobRefcount(hash string) {
 	result := t.scan(
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
-		aggr, scm.NewInt(0), aggr, false, 0, nil,
+		aggr, scm.NewInt(0), aggr, false,
 	)
 
 	if scm.ToInt(result) == 0 {
@@ -147,7 +147,7 @@ func (db *database) DecrBlobRefcount(hash string) {
 	result := t.scan(
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
-		aggr, scm.NewInt(0), aggr, false, 0, nil,
+		aggr, scm.NewInt(0), aggr, false,
 	)
 
 	// If row was deleted (RC was <=1), remove the blob file
