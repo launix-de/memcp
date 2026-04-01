@@ -1185,7 +1185,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             ok = runner.run_test_spec(spec_file)
             suite_status[spec_file] = ok
         else:
-            ok, output = run_spec_subprocess(spec_file, None, log_times, False)
+            ok, output = run_spec_subprocess(spec_file, port, log_times, True)
             record_result(spec_file, ok, output)
 
     failed_files = [spec_file for spec_file in spec_files if not suite_status.get(spec_file, False)]

@@ -235,21 +235,16 @@ run_one() {
   local tf="$1"
   local out="$2"
   local statusf="$3"
-  local mode="${4:-shared}"
-  if [ "$mode" = "isolated" ]; then
-    python3 -u run_sql_tests.py "$tf" > "$out" 2>&1
-  else
-    if ! wait_for_sql_ready 60 1; then
-      echo "FAIL" > "$statusf"
-      {
-        flock -x 9
-        echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
-        echo ""
-      } 9>>"$lockfile"
-      return
-    fi
-    python3 -u run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
+  if ! wait_for_sql_ready 60 1; then
+    echo "FAIL" > "$statusf"
+    {
+      flock -x 9
+      echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
+      echo ""
+    } 9>>"$lockfile"
+    return
   fi
+  python3 -u run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
   rc=$?
   if [ $rc -eq 0 ]; then
     echo OK > "$statusf"
@@ -282,12 +277,7 @@ active_pids=()
 for tf in "${sequential_tests[@]}"; do
   out="$tmpdir/$(basename "$tf").out"
   statusf="$tmpdir/$(basename "$tf").status"
-  stop_supervisor
-  run_one "$tf" "$out" "$statusf" isolated
-  if ! start_supervisor; then
-    echo "FAIL" > "$statusf"
-    break
-  fi
+  run_one "$tf" "$out" "$statusf"
 done
 
 stop_supervisor
