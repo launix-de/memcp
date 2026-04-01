@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 package scm
 
+import "context"
 import "os"
 import "fmt"
 import "net"
@@ -283,14 +284,18 @@ func isSelectQuery(query string) bool {
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
 	atomic.AddInt64(&TotalHTTPRequests, 1)
 	var ss *SessionState
+	var querySeq uint64
+	queryCtx, queryCancel := context.WithCancel(context.Background())
+	defer queryCancel()
 	if v, ok := mysqlStates.Load(session.ID()); ok {
 		ss = v.(*SessionState)
-		ss.SetCommand("Query", query)
+		querySeq = ss.BeginQuery("Query", query)
+		ss.SetCancel(querySeq, queryCancel)
 		ss.SetDB(session.Schema())
 	}
 	defer func() {
 		if ss != nil {
-			ss.SetCommand("Sleep", "")
+			ss.EndQuery(querySeq, "Sleep", "")
 			ss.SetDB(session.Schema())
 		}
 	}()
@@ -379,6 +384,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		SetValues(map[string]any{
 			"session":         scmSessionScmer,
 			"sessionStatePtr": ss,
+			"context":         queryCtx,
 		}, func() {
 			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
 		})

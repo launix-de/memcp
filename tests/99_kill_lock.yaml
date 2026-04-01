@@ -301,11 +301,13 @@ test_cases:
       - sql: "CREATE TABLE kill_ctrl (id BIGINT)"
       - sql: "CREATE TABLE kill_big (id INT)"
       - sql: "INSERT INTO kill_big VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16),(17),(18),(19),(20),(21),(22),(23),(24),(25),(26),(27),(28),(29),(30),(31),(32),(33),(34),(35),(36),(37),(38),(39),(40),(41),(42),(43),(44),(45),(46),(47),(48),(49),(50),(51),(52),(53),(54),(55),(56),(57),(58),(59),(60),(61),(62),(63),(64),(65),(66),(67),(68),(69),(70),(71),(72),(73),(74),(75),(76),(77),(78),(79),(80),(81),(82),(83),(84),(85),(86),(87),(88),(89),(90),(91),(92),(93),(94),(95),(96),(97),(98),(99),(100),(101),(102),(103),(104),(105),(106),(107),(108),(109),(110),(111),(112),(113),(114),(115),(116),(117),(118),(119),(120),(121),(122),(123),(124),(125),(126),(127),(128),(129),(130),(131),(132),(133),(134),(135),(136),(137),(138),(139),(140),(141),(142),(143),(144),(145),(146),(147),(148),(149),(150),(151),(152),(153),(154),(155),(156),(157),(158),(159),(160),(161),(162),(163),(164),(165),(166),(167),(168),(169),(170),(171),(172),(173),(174),(175),(176),(177),(178),(179),(180),(181),(182),(183),(184),(185),(186),(187),(188),(189),(190),(191),(192),(193),(194),(195),(196),(197),(198),(199),(200)"
+      - sql: "INSERT INTO kill_big SELECT id + 200 FROM kill_big"
+      - sql: "INSERT INTO kill_big SELECT id + 1000 FROM kill_big"
     steps:
       # store victim session's connection ID in kill_ctrl
       - session_id: "kill-victim"
         sql: "INSERT INTO kill_ctrl VALUES (CONNECTION_ID())"
-      # start slow CROSS JOIN in background — 200×200 = 40 000 row combinations
+      # start slow CROSS JOIN in background — 400×400 = 160 000 row combinations
       - session_id: "kill-victim"
         sql: "SELECT COUNT(*) AS n FROM kill_big a, kill_big b"
         background: true
@@ -319,6 +321,16 @@ test_cases:
       # kill the victim's running query
       - session_id: "kill-attacker"
         sql: "SELECT KILL_QUERY(id) FROM kill_ctrl LIMIT 1"
+      # let the killed background request drain fully; then the same session
+      # must be reusable immediately without inheriting a stale killed flag
+      - session_id: "kill-attacker"
+        sql: "SELECT 1"
+      - session_id: "kill-attacker"
+        sql: "SELECT 1"
+      - session_id: "kill-victim"
+        sql: "SELECT CONNECTION_ID() AS id"
+        expect:
+          rows: 1
 
   # ── KILL mid-INSERT rollback: no partial state ────────────────────────────
   #
@@ -332,11 +344,11 @@ test_cases:
   #             → error response returned
   #
   # Invariant: after kill, kill_dst contains either 0 rows (kill fired
-  # before INSERT completed + rollback) or 40000 rows (INSERT completed
+  # before INSERT completed + rollback) or 160000 rows (INSERT completed
   # before kill arrived, no rollback needed).  Never a value in between.
   #
   # The check enforces 0 rows because the kill is sent well before the
-  # 200×200=40000-row INSERT SELECT finishes (~89 ms on typical hardware).
+  # 400×400-row INSERT SELECT finishes on typical hardware.
 
   - name: "KILL mid-INSERT leaves target table empty (rollback correctness)"
     setup:
@@ -348,7 +360,7 @@ test_cases:
       # record victim session ID so the attacker can retrieve it
       - session_id: "rb-kill-victim"
         sql: "INSERT INTO kill_ctrl2 VALUES (CONNECTION_ID())"
-      # slow INSERT SELECT: 200×200 = 40 000 row combinations (~89 ms)
+      # slow INSERT SELECT: 400×400 = 160 000 row combinations
       - session_id: "rb-kill-victim"
         sql: "INSERT INTO kill_dst SELECT a.id, b.id FROM kill_big a, kill_big b"
         background: true

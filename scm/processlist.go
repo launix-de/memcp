@@ -40,8 +40,12 @@ type SessionState struct {
 
 	killed atomic.Bool // set by Kill(); checked at scan entry points
 
-	cancel   context.CancelFunc // called by KILL QUERY; nil if not cancellable
-	cancelMu sync.Mutex         // protects cancel assignment
+	nextQuerySeq atomic.Uint64 // monotonically increasing request/query generation
+	activeQuery  atomic.Uint64 // currently running generation; 0 when idle
+
+	cancel    context.CancelFunc // called by KILL QUERY; nil if not cancellable
+	cancelSeq uint64             // generation owning cancel
+	cancelMu  sync.Mutex         // protects cancel assignment
 
 	heldLocks   []func()   // unlock callbacks for LOCK TABLES
 	heldLocksMu sync.Mutex // protects heldLocks slice
@@ -75,6 +79,29 @@ func (s *SessionState) SetCommand(cmd, info string) {
 	s.startedAt.Store(time.Now().UnixNano())
 }
 
+// BeginQuery marks a new request/query generation as active on this session.
+// This prevents late disconnects from earlier HTTP requests from killing a
+// subsequent request reusing the same SessionState.
+func (s *SessionState) BeginQuery(cmd, info string) uint64 {
+	seq := s.nextQuerySeq.Add(1)
+	s.activeQuery.Store(seq)
+	s.killed.Store(false)
+	s.SetState("")
+	s.SetCommand(cmd, info)
+	return seq
+}
+
+// EndQuery clears the active generation if it still matches seq and restores
+// the idle processlist state. Older requests finishing late must not overwrite
+// a newer active request on the same persistent HTTP session.
+func (s *SessionState) EndQuery(seq uint64, idleCmd, idleInfo string) {
+	s.ClearCancel(seq)
+	if s.activeQuery.CompareAndSwap(seq, 0) {
+		s.SetState("")
+		s.SetCommand(idleCmd, idleInfo)
+	}
+}
+
 // SetState updates the State field (e.g. "Waiting for table lock").
 func (s *SessionState) SetState(state string) {
 	s.State.Store(&state)
@@ -85,17 +112,23 @@ func (s *SessionState) SetDB(db string) {
 	s.DB.Store(&db)
 }
 
-// SetCancel stores the cancel function for KILL QUERY support.
-func (s *SessionState) SetCancel(fn context.CancelFunc) {
+// SetCancel stores the cancel function for one specific active query generation.
+func (s *SessionState) SetCancel(seq uint64, fn context.CancelFunc) {
 	s.cancelMu.Lock()
-	s.cancel = fn
+	if s.activeQuery.Load() == seq {
+		s.cancel = fn
+		s.cancelSeq = seq
+	}
 	s.cancelMu.Unlock()
 }
 
-// ClearCancel removes the cancel function after query completion.
-func (s *SessionState) ClearCancel() {
+// ClearCancel removes the cancel function if it still belongs to seq.
+func (s *SessionState) ClearCancel(seq uint64) {
 	s.cancelMu.Lock()
-	s.cancel = nil
+	if s.cancelSeq == seq {
+		s.cancel = nil
+		s.cancelSeq = 0
+	}
 	s.cancelMu.Unlock()
 }
 
@@ -112,15 +145,31 @@ func (s *SessionState) ResetKilled() {
 // Kill marks the session as killed and fires the cancel function if set.
 // Returns true if a running query was cancelled.
 func (s *SessionState) Kill() bool {
+	seq := s.activeQuery.Load()
+	if seq == 0 {
+		return false
+	}
+	return s.KillQuery(seq)
+}
+
+// KillQuery marks the given active query generation as killed.
+// Returns false if the session has already advanced to a different request.
+func (s *SessionState) KillQuery(seq uint64) bool {
+	if seq == 0 || s.activeQuery.Load() != seq {
+		return false
+	}
 	s.killed.Store(true)
 	s.cancelMu.Lock()
-	fn := s.cancel
+	var fn context.CancelFunc
+	if s.cancelSeq == seq {
+		fn = s.cancel
+	}
 	s.cancelMu.Unlock()
 	if fn != nil {
 		fn()
 		return true
 	}
-	return false
+	return true
 }
 
 // AddLock registers an unlock callback for a LOCK TABLES lock.
@@ -199,55 +248,55 @@ func GetCurrentSessionState() *SessionState {
 
 func init_processlist() {
 	nextSessionID.Store(1)
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "show_processlist",
 		Desc: "returns a list of active sessions for SHOW [FULL] PROCESSLIST; pass true for full info",
 		Fn: func(a ...Scmer) Scmer {
-				full := len(a) > 0 && a[0].Bool()
-				sessions := Snapshot()
-				result := make([]Scmer, len(sessions))
-				for i, s := range sessions {
-					info := strPtr(&s.Info)
-					if !full && len(info) > 100 {
-						info = info[:100]
-					}
-					result[i] = NewSlice([]Scmer{
-						NewString("Id"), NewInt(int64(s.ID)),
-						NewString("User"), NewString(s.User),
-						NewString("Host"), NewString(s.Host),
-						NewString("db"), NewString(strPtr(&s.DB)),
-						NewString("Command"), NewString(strPtr(&s.Command)),
-						NewString("Time"), NewInt(s.ElapsedSeconds()),
-						NewString("State"), NewString(strPtr(&s.State)),
-						NewString("Info"), NewString(info),
-					})
+			full := len(a) > 0 && a[0].Bool()
+			sessions := Snapshot()
+			result := make([]Scmer, len(sessions))
+			for i, s := range sessions {
+				info := strPtr(&s.Info)
+				if !full && len(info) > 100 {
+					info = info[:100]
 				}
-				return NewSlice(result)
-			},
+				result[i] = NewSlice([]Scmer{
+					NewString("Id"), NewInt(int64(s.ID)),
+					NewString("User"), NewString(s.User),
+					NewString("Host"), NewString(s.Host),
+					NewString("db"), NewString(strPtr(&s.DB)),
+					NewString("Command"), NewString(strPtr(&s.Command)),
+					NewString("Time"), NewInt(s.ElapsedSeconds()),
+					NewString("State"), NewString(strPtr(&s.State)),
+					NewString("Info"), NewString(info),
+				})
+			}
+			return NewSlice(result)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", ParamName: "full", ParamDesc: "if true, include full Info text", Optional: true}},
 			Return: &TypeDescriptor{Kind: "list"},
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "connection_id",
 		Desc: "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
 		Fn: func(a ...Scmer) Scmer {
-				if ss := GetCurrentSessionState(); ss != nil {
-					return NewInt(int64(ss.ID))
-				}
-				return NewInt(0)
-			},
+			if ss := GetCurrentSessionState(); ss != nil {
+				return NewInt(int64(ss.ID))
+			}
+			return NewInt(0)
+		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "int"},
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "kill_query",
 		Desc: "cancel the running query in session id; returns true if a query was killed",
 		Fn: func(a ...Scmer) Scmer {
-				return NewBool(KillSession(uint64(a[0].Int())))
-			},
+			return NewBool(KillSession(uint64(a[0].Int())))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "int", ParamName: "id", ParamDesc: "session ID from SHOW PROCESSLIST"}},
 			Return: &TypeDescriptor{Kind: "bool"},
