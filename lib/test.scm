@@ -1371,6 +1371,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (produceN_mut 4 (lambda (i) (+ i 1)) nil) nil) true "produceN_mut nil-target avoids allocation")
 	(assert (equal? (parallelN_mut 4 (lambda (i) (+ i 1)) nil) nil) true "parallelN_mut nil-target avoids allocation")
 
+	/* list.go: parallel_map / parallel_map_mut */
+	(assert (equal? (parallel_map '() (lambda (x) x)) '()) true "parallel_map empty list")
+	(assert (equal? (parallel_map '(1) (lambda (x) (* x 10))) '(10)) true "parallel_map single element")
+	(assert (equal? (parallel_map '(1 2 3 4 5) (lambda (x) (* x 2))) '(2 4 6 8 10)) true "parallel_map preserves order")
+	(assert (equal? (parallel_map (produceN 100) (lambda (i) (* i i))) (map (produceN 100) (lambda (i) (* i i)))) true "parallel_map matches sequential map for 100 elements")
+	(assert (equal? (parallel_map_mut '(10 20 30) (lambda (x) (+ x 1))) '(11 21 31)) true "parallel_map_mut basic")
+	(assert (equal? (parallel_map_mut (produceN 50) (lambda (i) (+ i 100))) (map (produceN 50) (lambda (i) (+ i 100)))) true "parallel_map_mut matches sequential map for 50 elements")
+
 	/* scm.go: for_mut (optimizer-internal but callable) */
 	(assert (equal? (for_mut (list 0) (lambda (x) (< x 5)) (lambda (x) (list (+ x 1)))) '(5)) true "for_mut counts to 5")
 
