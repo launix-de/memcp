@@ -3513,9 +3513,67 @@ WHAT IT MUST NOT DO:
 - Build physical scan plans (that is build_queryplan's job)
 - Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
 */
-/* currently a stub — preserves original table order */
+/* conservative first pass: only reorder two-table INNER segments when the
+second table carries strictly more local WHERE predicates than the first. */
+(define jqr_td_alias (lambda (td) (nth td 0)))
+(define jqr_td_schema (lambda (td) (nth td 1)))
+(define jqr_td_table (lambda (td) (nth td 2)))
+(define jqr_td_outer (lambda (td) (nth td 3)))
+(define jqr_td_joinexpr (lambda (td) (nth td 4)))
+(define jqr_td_with_joinexpr (lambda (td joinexpr)
+	(list (jqr_td_alias td) (jqr_td_schema td) (jqr_td_table td) (jqr_td_outer td) joinexpr)))
+(define jqr_flatten_join_terms (lambda (tables_)
+	(merge (map tables_ (lambda (td)
+		(flatten_and_terms (coalesceNil (jqr_td_joinexpr td) true)))))))
+(define jqr_local_term_count (lambda (alias terms)
+	(reduce terms
+		(lambda (acc term) (begin
+			(define refs (extract_tblvars term))
+			(if (and (not (equal? refs '()))
+				(reduce refs (lambda (ok tv) (and ok (equal?? tv alias))) true))
+				(+ acc 1)
+				acc)))
+		0)))
+(define jqr_has_order_sensitive_stage (lambda (groups)
+	(reduce groups
+		(lambda (acc stage)
+			(or acc
+				(not (equal? (coalesceNil (stage_order_list stage) '()) '()))
+				(not (nil? (stage_limit_val stage)))
+				(not (nil? (stage_offset_val stage)))))
+		false)))
+(define jqr_reorder_inner_segment (lambda (segment condition) (begin
+	(if (not (equal? (count segment) 2))
+		segment
+		(begin
+			(define td1 (nth segment 0))
+			(define td2 (nth segment 1))
+			(if (or (jqr_td_outer td1) (jqr_td_outer td2))
+				segment
+				(begin
+					(define condition_terms (flatten_and_terms (coalesceNil condition true)))
+					(define local1 (jqr_local_term_count (jqr_td_alias td1) condition_terms))
+					(define local2 (jqr_local_term_count (jqr_td_alias td2) condition_terms))
+					(if (> local2 local1)
+						(list
+							(jqr_td_with_joinexpr td2 true)
+							(jqr_td_with_joinexpr td1 (combine_and_terms (jqr_flatten_join_terms segment))))
+						segment))))))))
+(define jqr_reorder_segments (lambda (tables_ condition) (begin
+	(match (reduce tables_
+		(lambda (state td) (match state
+			'(out seg)
+			(if (jqr_td_outer td)
+				(list (merge out (jqr_reorder_inner_segment seg condition) (list td)) '())
+				(list out (merge seg (list td))))
+			state))
+		(list '() '()))
+		'(out seg) (merge out (jqr_reorder_inner_segment seg condition))
+		tables_))))
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
-	(list schema tables fields condition groups schemas replace_find_column)))
+	(list schema
+		(if (jqr_has_order_sensitive_stage groups) tables (jqr_reorder_segments tables condition))
+		fields condition groups schemas replace_find_column)))
 
 (define build_queryplan_term (lambda (query) (begin
 	(define union_parts (query_union_all_parts query))
