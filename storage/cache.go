@@ -19,9 +19,9 @@ package storage
 import (
 	"container/heap"
 	"fmt"
+	"github.com/carli2/hybridsort"
 	"log"
 	"os"
-	"github.com/carli2/hybridsort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -60,7 +60,7 @@ const (
 // during query execution. Keytables use touch_keytable to refresh lastAccessed
 // before each use, ensuring they survive cache pressure during query runtime.
 //
-//                                         TempCol Shard Index TempKT CacheEntry StringDict
+//	TempCol Shard Index TempKT CacheEntry StringDict
 var evictableWeights = [numEvictableTypes]int64{20, 1, 20, 2, 20, 20}
 
 var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry", "StringDict"}
@@ -562,8 +562,10 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 
 // telemetryWeight calibrates telemetry (rebuild-decayed usage score) against
 // age*weight (seconds * type priority). With K=50 and weight=20 (index):
-//   Savings=4  → protected ~10s after last access
-//   Savings=50 → protected ~125s after last access
+//
+//	Savings=4  → protected ~10s after last access
+//	Savings=50 → protected ~125s after last access
+//
 // Telemetry is decayed by 0.9x at each rebuild, so it reflects recent usage rate.
 const telemetryWeight = 50.0
 
