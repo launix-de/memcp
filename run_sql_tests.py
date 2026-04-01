@@ -886,11 +886,39 @@ class SQLTestRunner:
             print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
             return False
 
+        # Expand repeat blocks into flat test_cases list, then run.
+        # A repeat block looks like: { repeat: N, delay_ms: 50, tests: [...] }
+        # The inner tests are duplicated N times with iteration-suffixed names
+        # and parallel group keys to avoid collisions between iterations.
+        # Optional delay_ms inserts a sleep between iterations to hit different
+        # timing windows in race-condition tests.
+        raw_cases = spec.get('test_cases', [])
+        test_cases = []
+        for tc in raw_cases:
+            if 'repeat' in tc:
+                n = int(tc['repeat'])
+                delay_ms = int(tc.get('delay_ms', 0))
+                inner = tc.get('tests', [])
+                for iteration in range(n):
+                    if iteration > 0 and delay_ms > 0:
+                        test_cases.append({'_delay_ms': delay_ms})
+                    for inner_tc in inner:
+                        expanded = dict(inner_tc)
+                        expanded['name'] = f"{inner_tc.get('name', '?')} (iter {iteration+1}/{n})"
+                        if 'parallel' in expanded:
+                            expanded['parallel'] = f"{expanded['parallel']}_{iteration}"
+                        test_cases.append(expanded)
+            else:
+                test_cases.append(tc)
+
         # Group consecutive test cases by 'parallel' key and run groups concurrently
-        test_cases = spec.get('test_cases', [])
         i = 0
         while i < len(test_cases):
             tc = test_cases[i]
+            if '_delay_ms' in tc:
+                time.sleep(tc['_delay_ms'] / 1000.0)
+                i += 1
+                continue
             group = tc.get('parallel')
             if group:
                 # Collect all consecutive tests with the same parallel group
