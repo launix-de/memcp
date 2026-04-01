@@ -21,7 +21,6 @@ import "sort"
 import "github.com/carli2/hybridsort"
 import "time"
 import "strings"
-import "sync"
 import "runtime/debug"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
@@ -400,33 +399,32 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	// Measure execution time of the ordered scan
 	execStart := time.Now()
 	var q globalqueue
-	results := make([]scanOrderResult, 0, 8)
-	var resultsMu sync.Mutex
+	q_ := make(chan scanOrderResult, 1)
 	var inputCount int64
-	t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
 		// Kill check at shard-scheduling point using closure-captured ss (no GLS lookup).
 		if ss != nil && ss.IsKilled() {
 			panic("query killed")
 		}
-		msg := scanOrderResult{}
 		defer func() {
 			if r := recover(); r != nil {
-				msg = scanOrderResult{err: scanError{r, string(debug.Stack())}}
+				q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 			}
-			if solo {
-				results = append(results, msg)
-				return
-			}
-			resultsMu.Lock()
-			results = append(results, msg)
-			resultsMu.Unlock()
 		}()
 		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols)
-		msg = scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
+		q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 	})
+	if done == nil {
+		close(q_)
+	} else {
+		go func() {
+			<-done
+			close(q_)
+		}()
+	}
 
 	var scanErr scanError
-	for _, msg := range results {
+	for msg := range q_ {
 		if msg.err.r != nil {
 			if scanErr.r == nil {
 				scanErr = msg.err

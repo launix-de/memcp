@@ -8,6 +8,7 @@
 metadata:
   version: "1.0"
   description: "Unique constraint: main vs delta storage corner cases"
+  isolated: true
 
 test_cases:
   # ==============================================================
