@@ -144,6 +144,8 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 			if (proxy.compressed && len(proxy.delta) == 0) || proxy.AllRowsValid() {
 				return true
 			}
+		} else if proxy.FilteredRowsValid(filterCols, filter) {
+			return true
 		}
 		if !filter.IsNil() {
 			proxy.CompressFiltered(filterCols, filter)
@@ -155,12 +157,14 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 
 	// Create new proxy
 	proxy := &StorageComputeProxy{
-		delta:     make(map[uint32]scm.Scmer),
-		computor:  computor,
-		inputCols: inputCols,
-		shard:     s,
-		colName:   name,
-		count:     s.main_count,
+		delta:      make(map[uint32]scm.Scmer),
+		computor:   computor,
+		inputCols:  inputCols,
+		filterCols: append([]string(nil), filterCols...),
+		filter:     filter,
+		shard:      s,
+		colName:    name,
+		count:      s.main_count,
 	}
 
 	s.mu.Lock()

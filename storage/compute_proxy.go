@@ -36,6 +36,9 @@ type StorageComputeProxy struct {
 	compressed bool                                // true after Compress() → skip validMask, read from main
 	computor   scm.Scmer                           // computation lambda
 	inputCols  []string                            // column names the computor reads
+	filterCols []string                            // columns consulted by the eager filter
+	filter     scm.Scmer                           // eager filter lambda for filtered createcolumn
+	eagerMask  NonLockingReadMap.NonBlockingBitMap // rows intentionally materialized by filtered createcolumn
 	shard      *storageShard                       // back-reference for reading input columns
 	colName    string                              // own column name (for cycle protection)
 	mu         sync.RWMutex                        // protects delta map + compressed flag
@@ -59,17 +62,59 @@ func (p *StorageComputeProxy) AllRowsValid() bool {
 	return p.count == 0 || uint32(p.validMask.Count()) >= p.count
 }
 
+func scmerJSONEqual(a, b scm.Scmer) bool {
+	aj, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bj, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return string(aj) == string(bj)
+}
+
+func (p *StorageComputeProxy) sameFilteredMaterialization(filterCols []string, filter scm.Scmer) bool {
+	return stringSlicesEqual(p.filterCols, filterCols) && scmerJSONEqual(p.filter, filter)
+}
+
+// FilteredRowsValid reports whether a repeated filtered createcolumn call refers
+// to the same eager-materialized subset and all rows in that subset are still
+// valid. Unmatched rows may remain lazy without violating the cache contract.
+func (p *StorageComputeProxy) FilteredRowsValid(filterCols []string, filter scm.Scmer) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if filter.IsNil() || !p.sameFilteredMaterialization(filterCols, filter) {
+		return false
+	}
+	allValid := true
+	p.eagerMask.Iterate(func(idx uint) {
+		if !p.validMask.Get(idx) {
+			allValid = false
+		}
+	})
+	return allValid
+}
+
+func (p *StorageComputeProxy) clearFilteredMaterializationLocked() {
+	p.filterCols = nil
+	p.filter = scm.NewNil()
+	p.eagerMask.Reset()
+}
+
 // cloneComputeProxyRows ports a compute/ORC proxy onto a rebuilt shard without
 // evaluating the computor. Cached rows stay cached, invalid rows stay lazy.
 func cloneComputeProxyRows(oldProxy *StorageComputeProxy, newShard *storageShard, oldRowIDs []uint32) *StorageComputeProxy {
 	newProxy := &StorageComputeProxy{
-		delta:     make(map[uint32]scm.Scmer),
-		computor:  oldProxy.computor,
-		inputCols: oldProxy.inputCols,
-		shard:     newShard,
-		colName:   oldProxy.colName,
-		count:     uint32(len(oldRowIDs)),
-		isOrdered: oldProxy.isOrdered,
+		delta:      make(map[uint32]scm.Scmer),
+		computor:   oldProxy.computor,
+		inputCols:  oldProxy.inputCols,
+		filterCols: append([]string(nil), oldProxy.filterCols...),
+		filter:     oldProxy.filter,
+		shard:      newShard,
+		colName:    oldProxy.colName,
+		count:      uint32(len(oldRowIDs)),
+		isOrdered:  oldProxy.isOrdered,
 	}
 	appendComputeProxyRows(newProxy, oldProxy, oldRowIDs, 0)
 	return newProxy
@@ -111,6 +156,9 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 		}
 		newProxy.delta[newIdx] = val
 		newProxy.validMask.Set(uint(newIdx), true)
+		if oldProxy.eagerMask.Get(uint(oldIdx)) {
+			newProxy.eagerMask.Set(uint(newIdx), true)
+		}
 		newIdx++
 	}
 	return newIdx
@@ -284,6 +332,7 @@ func (p *StorageComputeProxy) Compress() {
 	p.delta = make(map[uint32]scm.Scmer)
 	p.validMask.Reset()
 	p.compressed = true
+	p.clearFilteredMaterializationLocked()
 }
 
 // CompressFiltered eagerly computes only rows matching the filter predicate.
@@ -294,6 +343,9 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 
 	// Empty shard: nothing to compute
 	if p.count == 0 {
+		p.filterCols = append([]string(nil), filterCols...)
+		p.filter = filter
+		p.eagerMask.Reset()
 		return
 	}
 
@@ -311,6 +363,9 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 
 	filterValues := make([]scm.Scmer, len(filterCols))
 	colvalues := make([]scm.Scmer, len(p.inputCols))
+	p.filterCols = append([]string(nil), filterCols...)
+	p.filter = filter
+	p.eagerMask.Reset()
 	for i := uint32(0); i < p.count; i++ {
 		for j := range filterReaders {
 			filterValues[j] = filterReaders[j].GetValue(i)
@@ -321,6 +376,7 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 			}
 			p.delta[i] = fn(colvalues...)
 			p.validMask.Set(uint(i), true)
+			p.eagerMask.Set(uint(i), true)
 		}
 	}
 	// Don't set compressed=true → unmatched rows stay lazy for on-demand GetValue
@@ -468,7 +524,7 @@ func (p *StorageComputeProxy) finish() {
 // storageComputeProxyVersion is the current binary format version for StorageComputeProxy.
 // Increment this constant and add a new deserializeComputeProxyV* helper whenever the
 // layout after the magic byte changes. Never delete old helpers.
-const storageComputeProxyVersion = 2
+const storageComputeProxyVersion = 3
 
 // StorageComputeProxy binary layout (magic byte 50 consumed by shard loader):
 //
@@ -491,6 +547,8 @@ const storageComputeProxyVersion = 2
 //	1: adds [isOrdered uint8] after validMask, but validMask indices were written
 //	   via binary.Write(uint), so persisted data may miss the bitmap payload.
 //	2: writes validMask indices as uint32 and keeps the trailing isOrdered byte.
+//	3: adds filtered eager-materialization metadata after isOrdered:
+//	   filterCols, filter lambda, and eagerMask bitmap.
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(50))                         // magic byte
 	binary.Write(f, binary.LittleEndian, uint8(storageComputeProxyVersion)) // version byte
@@ -551,6 +609,31 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 		isOrderedByte = 1
 	}
 	binary.Write(f, binary.LittleEndian, isOrderedByte)
+
+	var hasFilter byte
+	if !p.filter.IsNil() {
+		hasFilter = 1
+	}
+	binary.Write(f, binary.LittleEndian, hasFilter)
+	if hasFilter != 0 {
+		binary.Write(f, binary.LittleEndian, uint16(len(p.filterCols)))
+		for _, col := range p.filterCols {
+			b := []byte(col)
+			binary.Write(f, binary.LittleEndian, uint16(len(b)))
+			f.Write(b)
+		}
+		filterJSON, err := json.Marshal(p.filter)
+		if err != nil {
+			panic(err)
+		}
+		binary.Write(f, binary.LittleEndian, uint32(len(filterJSON)))
+		f.Write(filterJSON)
+		eagerCount := p.eagerMask.Count()
+		binary.Write(f, binary.LittleEndian, uint32(eagerCount))
+		p.eagerMask.Iterate(func(idx uint) {
+			binary.Write(f, binary.LittleEndian, uint32(idx))
+		})
+	}
 }
 
 // Deserialize reads the proxy from the given reader.
@@ -565,6 +648,8 @@ func (p *StorageComputeProxy) Deserialize(f io.Reader) uint {
 		return p.deserializeComputeProxyV1(f)
 	case 2:
 		return p.deserializeComputeProxyV2(f)
+	case 3:
+		return p.deserializeComputeProxyV3(f)
 	default:
 		panic(fmt.Sprintf("StorageComputeProxy: unknown version %d", version))
 	}
@@ -619,9 +704,9 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &computorLen)
 	computorBuf := make([]byte, computorLen)
 	io.ReadFull(f, computorBuf)
-	var computorRaw any
-	json.Unmarshal(computorBuf, &computorRaw)
-	p.computor = scm.TransformFromJSON(computorRaw)
+	if err := json.Unmarshal(computorBuf, &p.computor); err != nil {
+		panic(err)
+	}
 
 	// compressed flag
 	var compressedFlag uint8
@@ -683,5 +768,40 @@ func (p *StorageComputeProxy) deserializeComputeProxyV2(f io.Reader) uint {
 	var isOrderedByte uint8
 	binary.Read(f, binary.LittleEndian, &isOrderedByte)
 	p.isOrdered = isOrderedByte != 0
+	return n
+}
+
+func (p *StorageComputeProxy) deserializeComputeProxyV3(f io.Reader) uint {
+	n := p.deserializeComputeProxyV2(f)
+	var hasFilter byte
+	binary.Read(f, binary.LittleEndian, &hasFilter)
+	if hasFilter == 0 {
+		return n
+	}
+	var numCols uint16
+	binary.Read(f, binary.LittleEndian, &numCols)
+	p.filterCols = make([]string, numCols)
+	for i := uint16(0); i < numCols; i++ {
+		var slen uint16
+		binary.Read(f, binary.LittleEndian, &slen)
+		buf := make([]byte, slen)
+		io.ReadFull(f, buf)
+		p.filterCols[i] = string(buf)
+	}
+	var filterLen uint32
+	binary.Read(f, binary.LittleEndian, &filterLen)
+	filterBuf := make([]byte, filterLen)
+	io.ReadFull(f, filterBuf)
+	if err := json.Unmarshal(filterBuf, &p.filter); err != nil {
+		panic(err)
+	}
+	var eagerCount uint32
+	binary.Read(f, binary.LittleEndian, &eagerCount)
+	p.eagerMask.Reset()
+	for i := uint32(0); i < eagerCount; i++ {
+		var idx uint32
+		binary.Read(f, binary.LittleEndian, &idx)
+		p.eagerMask.Set(uint(idx), true)
+	}
 	return n
 }
