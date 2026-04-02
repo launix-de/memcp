@@ -2042,11 +2042,15 @@ or generate runtime scan code (build_queryplan).
 											false)))
 								false)))
 							(raw_query_contains_skip_level_nested_outer_ref subquery (raw_query_local_aliases subquery))))
-							/* Software contract: uncorrelated scalar aggregates must stay on
-							the canonical keytable/createcolumn path so COUNT/SUM/... reuse
-							materialized cache tables. Only correlated aggregates may still
-							use the direct reduction path until their outer-domain extension
-							is represented canonically in the helper table. */
+							/* Software contract: scalar aggregates are split by canonical
+							correlation, not by raw parser shape.
+							- uncorrelated aggregates go through the helper-table/keytable path
+							  and may be globally memoized
+							- correlated aggregates stay on the per-row direct scan path until
+							  the helper-table path can safely carry row-local promises
+							The correlation test therefore has to run on resolved planner
+							expressions so derived-table aliases and wrapped outer refs are
+							classified correctly. */
 							(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
 							(or (equal? sym (quote aggregate))
@@ -2071,17 +2075,36 @@ or generate runtime scan code (build_queryplan).
 							(contains_noncolumn_outer_ref value_expr)
 							(contains_noncolumn_outer_ref condition2)
 						))
-						(define contains_inner_select_marker (lambda (expr) (match expr
-							(cons sym args) (or
-								(not (nil? (inner_select_kind sym)))
-								(contains_inner_select_marker sym)
-								(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
-							false)))
-						(define use_ordered_scalar (or
-							(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
-							(and has_stage2 (not (nil? (stage_limit_val stage2))))
-							(and has_stage2 (not (nil? (stage_offset_val stage2))))
-						))
+							(define contains_inner_select_marker (lambda (expr) (match expr
+								(cons sym args) (or
+									(not (nil? (inner_select_kind sym)))
+									(contains_inner_select_marker sym)
+									(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
+								false)))
+							(define contains_outer_ref (lambda (expr) (match expr
+								'((quote outer) _) true
+								'((symbol outer) _) true
+								(cons sym args) (or
+									(contains_outer_ref sym)
+									(reduce args (lambda (found arg) (or found (contains_outer_ref arg))) false))
+								false)))
+							(define stage_contains_outer_ref (lambda (stage)
+								(or
+									(reduce (coalesceNil (stage_group_cols stage) '()) (lambda (found expr) (or found (contains_outer_ref expr))) false)
+									(contains_outer_ref (coalesceNil (stage_post_group_condition_expr stage) true))
+									(reduce (coalesceNil (stage_order_list stage) '()) (lambda (found order_item)
+										(or found (match order_item
+											'(col _dir) (contains_outer_ref col)
+											(contains_outer_ref order_item)))) false))))
+							(define scalar_has_outer_ref (or
+								(reduce_assoc fields2 (lambda (found _k v) (or found (contains_outer_ref v))) false)
+								(contains_outer_ref condition2)
+								(reduce (coalesceNil groups2 '()) (lambda (found stage) (or found (stage_contains_outer_ref stage))) false)))
+							(define use_ordered_scalar (or
+								(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
+								(and has_stage2 (not (nil? (stage_limit_val stage2))))
+								(and has_stage2 (not (nil? (stage_offset_val stage2))))
+							))
 							(define use_direct_agg_scan (and
 								(not (nil? _agg_args))
 								(equal? (count _agg_args) 3)
@@ -2090,7 +2113,7 @@ or generate runtime scan code (build_queryplan).
 								(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 								(not (nil? tables2))
 								(not (equal? tables2 '()))
-								(_subquery_has_outer_refs subquery outer_schemas)
+								scalar_has_outer_ref
 							))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
