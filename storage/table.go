@@ -1679,6 +1679,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			uniquelockHeld = true
 		}
 
+		currentTx := CurrentTx()
 		last_j := 0
 		for j, row := range values {
 			shardlist2 := shardlist
@@ -1707,16 +1708,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			for _, s := range shardlist2 {
 				// ensure shard is loaded for read during unique check
 				r := s.GetRead()
-				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
-				isVisible := false
+				uid, present := s.GetRecordidForUnique(uniq.Cols, key, currentTx)
 				if present {
-					if currentTx := CurrentTx(); currentTx != nil && currentTx.Mode == TxACID {
-						isVisible = currentTx.IsVisible(s, uid)
-					} else {
-						isVisible = !s.deletions.Get(uint(uid))
-					}
-				}
-				if isVisible {
 					// found a unique collision
 					if j != last_j {
 						// If the inner check panics (unique violation in a later constraint),

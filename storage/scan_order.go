@@ -248,6 +248,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
+	currentTx := CurrentTx()
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time
@@ -411,7 +412,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 				q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols)
+		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols, currentTx)
 		q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 	})
 	if done == nil {
@@ -614,7 +615,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
@@ -739,7 +740,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		adjustedSortdirs[i] = cmpFn
 	}
 
-	currentTx := CurrentTx()
 	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column

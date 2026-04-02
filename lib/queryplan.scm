@@ -329,6 +329,70 @@ keep it in a local define instead of rebuilding it from scratch. */
 (define serialize_canonical_expr (lambda (expr)
 	(serialize (require_canonical_logical_expr "serialize_canonical_expr" expr))
 ))
+/* Explain helpers: keep planner debugging on a stable, compact serialization
+surface so tests can assert planner structure without depending on pretty-print
+layout. */
+(define explain_emit_rows (lambda (rows)
+	(cons (quote begin) (map rows (lambda (row)
+		(list (quote resultrow) (cons (quote list) row))))))
+)
+(define explain_plan_root (lambda (plan)
+	(match plan
+		(cons sym _) (string sym)
+		_ (string plan)
+	)
+))
+/* explain_queryplan_ir: expose planner IR around untangle_query/join_reorder.
+Returns compact stage/kind/value rows for stable SQL-level inspection. */
+(define explain_queryplan_ir (lambda (query) (begin
+	(define _uq_result (apply untangle_query (merge query (list nil))))
+	(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
+	(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
+	(define _jr_result (apply join_reorder _uq_7tuple))
+	(define _plan (apply build_queryplan (merge _jr_result (list nil))))
+	(explain_emit_rows (list
+		(list "stage" "untangle" "kind" "tables" "value" (serialize (nth _uq_result 1)))
+		(list "stage" "untangle" "kind" "fields" "value" (serialize (nth _uq_result 2)))
+		(list "stage" "untangle" "kind" "condition" "value" (serialize (nth _uq_result 3)))
+		(list "stage" "untangle" "kind" "groups" "value" (serialize (nth _uq_result 4)))
+		(list "stage" "untangle" "kind" "init" "value" (serialize _uq_init))
+		(list "stage" "reorder" "kind" "tables" "value" (serialize (nth _jr_result 1)))
+		(list "stage" "reorder" "kind" "changed" "value" (not (equal? (nth _uq_result 1) (nth _jr_result 1))))
+		(list "stage" "plan" "kind" "root" "value" (explain_plan_root _plan))
+	))
+)))
+/* explain_queryplan_reorder: focused view for join-reorder work. */
+(define explain_queryplan_reorder (lambda (query) (begin
+	(define _uq_result (apply untangle_query (merge query (list nil))))
+	(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
+	(define _jr_result (apply join_reorder _uq_7tuple))
+	(define table_rows_for_stage (lambda (stage_name tables)
+		(map (produceN (count tables)) (lambda (idx) (match (nth tables idx)
+			'(alias schema tbl isOuter joinexpr)
+			(list
+				"stage" stage_name
+				"position" idx
+				"alias" (string alias)
+				"schema" (string schema)
+				"table" (string tbl)
+				"outer" isOuter
+				"joinexpr" (serialize (coalesceNil joinexpr true)))
+			_ (list
+				"stage" stage_name
+				"position" idx
+				"alias" ""
+				"schema" ""
+				"table" (serialize (nth tables idx))
+				"outer" nil
+				"joinexpr" "true"
+			)
+		)))
+	))
+	(explain_emit_rows (merge
+		(table_rows_for_stage "untangle" (nth _uq_result 1))
+		(table_rows_for_stage "reorder" (nth _jr_result 1))
+	))
+)))
 /* Compatibility wrapper for older call sites. New planner code should keep the
 canonical expression in a local define and only serialize it at the edge. */
 (define canonical_expr_name (lambda (expr columns params alias_map)
@@ -524,125 +588,92 @@ raw _unn_* occurrence aliases into physical temp column names. */
 queryplan AST: once build_scan has emitted a child scan tree, rewrite only the
 first reachable scan/scan_batch node so it can consume parent batchdata via #N
 pseudocolumns without changing the higher-level join planning rules. */
+/* batchify_first_scan: peephole rewrite that converts the first reachable
+scan/scan_batch in a plan tree into a scan_batch that consumes parent
+batchdata via #N pseudocolumns.  Uses two-level match: outer match
+destructures the AST node, inner match dispatches on the head symbol name
+(via (string head)) so (symbol X) and (quote X) are handled uniformly.
+Virtual tables (where tbl is a list, not a string) are excluded via
+(string? tbl) and fall through without rewriting. */
 (define batchify_first_scan (lambda (plan batch_params batch_pseudocols stride_expr batchdata_sym)
 	(match plan
-		'((symbol scan) schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter)
-		(if isOuter nil
-			(list (quote scan_batch) schema tbl
-				(append_codegen_list filtercols batch_pseudocols)
-				(extend_codegen_lambda filterfn batch_params)
-				(append_codegen_list mapcols batch_pseudocols)
-				(extend_codegen_lambda mapfn batch_params)
-				stride_expr
-				batchdata_sym
-				reduce neutral reduce2 isOuter))
-		'((quote scan) schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter)
-		(if isOuter nil
-			(list (quote scan_batch) schema tbl
-				(append_codegen_list filtercols batch_pseudocols)
-				(extend_codegen_lambda filterfn batch_params)
-				(append_codegen_list mapcols batch_pseudocols)
-				(extend_codegen_lambda mapfn batch_params)
-				stride_expr
-				batchdata_sym
-				reduce neutral reduce2 isOuter))
-		'((symbol scan_batch) schema tbl filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter)
-		(if isOuter nil
-			(list (quote scan_batch) schema tbl
-				(append_codegen_list filtercols batch_pseudocols)
-				(extend_codegen_lambda filterfn batch_params)
-				(append_codegen_list mapcols batch_pseudocols)
-				(extend_codegen_lambda mapfn batch_params)
-				inner_stride
-				inner_batchdata
-				reduce neutral reduce2 isOuter))
-		'((quote scan_batch) schema tbl filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter)
-		(if isOuter nil
-			(list (quote scan_batch) schema tbl
-				(append_codegen_list filtercols batch_pseudocols)
-				(extend_codegen_lambda filterfn batch_params)
-				(append_codegen_list mapcols batch_pseudocols)
-				(extend_codegen_lambda mapfn batch_params)
-				inner_stride
-				inner_batchdata
-				reduce neutral reduce2 isOuter))
-		'((symbol nth) inner_scan idx)
-		(begin
-			(define rewritten_inner (batchify_first_scan inner_scan batch_params batch_pseudocols stride_expr batchdata_sym))
-			(if (nil? rewritten_inner) nil
-				(list (quote nth) rewritten_inner idx)))
-		'((quote nth) inner_scan idx)
-		(begin
-			(define rewritten_inner (batchify_first_scan inner_scan batch_params batch_pseudocols stride_expr batchdata_sym))
-			(if (nil? rewritten_inner) nil
-				(list (quote nth) rewritten_inner idx)))
-		'((symbol define) sym value)
-		(begin
-			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
-			(if (nil? rewritten_value) nil
-				(list (quote define) sym rewritten_value)))
-		'((quote define) sym value)
-		(begin
-			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
-			(if (nil? rewritten_value) nil
-				(list (quote define) sym rewritten_value)))
-		'((symbol set) sym value)
-		(begin
-			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
-			(if (nil? rewritten_value) nil
-				(list (quote set) sym rewritten_value)))
-		'((quote set) sym value)
-		(begin
-			(define rewritten_value (batchify_first_scan value batch_params batch_pseudocols stride_expr batchdata_sym))
-			(if (nil? rewritten_value) nil
-				(list (quote set) sym rewritten_value)))
-		(cons head rest) (if (or
-			(equal? head (quote begin))
-			(equal? head '(quote begin))
-			(equal? head (quote !begin))
-			(equal? head '(quote !begin))
-			(equal? head (quote begin_mut))
-			(equal? head '(quote begin_mut)))
-			(begin
-				(define rewrite_forms_by_predicate (lambda (forms should_try)
-					(match forms
-						'() nil
-						(cons form tail) (begin
-							(if (should_try form)
-								(begin
-									(define rewritten_form (batchify_first_scan form batch_params batch_pseudocols stride_expr batchdata_sym))
-									(if (nil? rewritten_form)
-										(match (rewrite_forms_by_predicate tail should_try)
-											nil nil
-											rewritten_tail (cons form rewritten_tail))
-										(cons rewritten_form tail)))
-								(match (rewrite_forms_by_predicate tail should_try)
-									nil nil
-									rewritten_tail (cons form rewritten_tail)))))))
-				(define is_preferred_form (lambda (form) (match form
-					'((symbol scan) . _) true
-					'((quote scan) . _) true
-					'((symbol scan_batch) . _) true
-					'((quote scan_batch) . _) true
-					'((symbol nth) . _) true
-					'((quote nth) . _) true
-					'((symbol begin) . _) true
-					'((quote begin) . _) true
-					'((symbol !begin) . _) true
-					'((quote !begin) . _) true
-					'((symbol begin_mut) . _) true
-					'((quote begin_mut) . _) true
-					false
-				)))
-				(match (rewrite_forms_by_predicate rest is_preferred_form)
-					nil (match (rewrite_forms_by_predicate rest (lambda (form) true))
-						nil nil
-						rewritten_rest (cons head rewritten_rest))
-					rewritten_rest (cons head rewritten_rest)))
+		/* scan / scan_batch with a real (string) table name */
+		(cons scanhead (cons schema (cons (string? tbl) rest)))
+		(match (string scanhead)
+			"scan" (match rest
+				(merge '(filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter) _)
+				(if isOuter nil
+					(list (quote scan_batch) schema tbl
+						(append_codegen_list filtercols batch_pseudocols)
+						(extend_codegen_lambda filterfn batch_params)
+						(append_codegen_list mapcols batch_pseudocols)
+						(extend_codegen_lambda mapfn batch_params)
+						stride_expr batchdata_sym
+						reduce neutral reduce2 isOuter))
+				nil)
+			"scan_batch" (match rest
+				(merge '(filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter) _)
+				(if isOuter nil
+					(list (quote scan_batch) schema tbl
+						(append_codegen_list filtercols batch_pseudocols)
+						(extend_codegen_lambda filterfn batch_params)
+						(append_codegen_list mapcols batch_pseudocols)
+						(extend_codegen_lambda mapfn batch_params)
+						inner_stride inner_batchdata
+						reduce neutral reduce2 isOuter))
+				nil)
 			nil)
-		nil
-	)
-))
+		/* wrapper nodes: recurse into the contained value/scan */
+		(cons wraphead (cons arg1 arg2))
+		(match (string wraphead)
+			"nth" (begin /* (nth inner_scan idx) */
+				(define rewritten (batchify_first_scan arg1 batch_params batch_pseudocols stride_expr batchdata_sym))
+				(if (nil? rewritten) nil
+					(list (quote nth) rewritten (car arg2))))
+			"define" (begin /* (define sym value) */
+				(define rewritten (batchify_first_scan (car arg2) batch_params batch_pseudocols stride_expr batchdata_sym))
+				(if (nil? rewritten) nil
+					(list (quote define) arg1 rewritten)))
+			"set" (begin /* (set sym value) */
+				(define rewritten (batchify_first_scan (car arg2) batch_params batch_pseudocols stride_expr batchdata_sym))
+				(if (nil? rewritten) nil
+					(list (quote set) arg1 rewritten)))
+			"begin" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
+			"!begin" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
+			"begin_mut" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
+			nil)
+		nil)))
+
+/* batchify_begin_forms: helper for batchifying inside begin/!begin/begin_mut blocks.
+Tries preferred forms (scan, scan_batch, nth, begin variants) first, then
+falls back to any form. */
+(define batchify_begin_forms (lambda (plan head rest batch_params batch_pseudocols stride_expr batchdata_sym) (begin
+	(define rewrite_forms_by_predicate (lambda (forms should_try)
+		(match forms
+			'() nil
+			(cons form tail) (begin
+				(if (should_try form)
+					(begin
+						(define rewritten_form (batchify_first_scan form batch_params batch_pseudocols stride_expr batchdata_sym))
+						(if (nil? rewritten_form)
+							(match (rewrite_forms_by_predicate tail should_try)
+								nil nil
+								rewritten_tail (cons form rewritten_tail))
+							(cons rewritten_form tail)))
+					(match (rewrite_forms_by_predicate tail should_try)
+						nil nil
+						rewritten_tail (cons form rewritten_tail)))))))
+	(define is_preferred_form (lambda (form) (match form
+		(cons fh _) (match (string fh)
+			"scan" true "scan_batch" true "nth" true
+			"begin" true "!begin" true "begin_mut" true
+			false)
+		false)))
+	(match (rewrite_forms_by_predicate rest is_preferred_form)
+		nil (match (rewrite_forms_by_predicate rest (lambda (form) true))
+			nil nil
+			rewritten_rest (cons head rewritten_rest))
+		rewritten_rest (cons head rewritten_rest)))))
 
 /* builds the outer scan shell for the peephole-rewritten child plan. the join
 order and scan tree come from build_scan already; this helper only swaps the
@@ -3482,9 +3513,67 @@ WHAT IT MUST NOT DO:
 - Build physical scan plans (that is build_queryplan's job)
 - Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
 */
-/* currently a stub — preserves original table order */
+/* conservative first pass: only reorder two-table INNER segments when the
+second table carries strictly more local WHERE predicates than the first. */
+(define jqr_td_alias (lambda (td) (nth td 0)))
+(define jqr_td_schema (lambda (td) (nth td 1)))
+(define jqr_td_table (lambda (td) (nth td 2)))
+(define jqr_td_outer (lambda (td) (nth td 3)))
+(define jqr_td_joinexpr (lambda (td) (nth td 4)))
+(define jqr_td_with_joinexpr (lambda (td joinexpr)
+	(list (jqr_td_alias td) (jqr_td_schema td) (jqr_td_table td) (jqr_td_outer td) joinexpr)))
+(define jqr_flatten_join_terms (lambda (tables_)
+	(merge (map tables_ (lambda (td)
+		(flatten_and_terms (coalesceNil (jqr_td_joinexpr td) true)))))))
+(define jqr_local_term_count (lambda (alias terms)
+	(reduce terms
+		(lambda (acc term) (begin
+			(define refs (extract_tblvars term))
+			(if (and (not (equal? refs '()))
+				(reduce refs (lambda (ok tv) (and ok (equal?? tv alias))) true))
+				(+ acc 1)
+				acc)))
+		0)))
+(define jqr_has_order_sensitive_stage (lambda (groups)
+	(reduce groups
+		(lambda (acc stage)
+			(or acc
+				(not (equal? (coalesceNil (stage_order_list stage) '()) '()))
+				(not (nil? (stage_limit_val stage)))
+				(not (nil? (stage_offset_val stage)))))
+		false)))
+(define jqr_reorder_inner_segment (lambda (segment condition) (begin
+	(if (not (equal? (count segment) 2))
+		segment
+		(begin
+			(define td1 (nth segment 0))
+			(define td2 (nth segment 1))
+			(if (or (jqr_td_outer td1) (jqr_td_outer td2))
+				segment
+				(begin
+					(define condition_terms (flatten_and_terms (coalesceNil condition true)))
+					(define local1 (jqr_local_term_count (jqr_td_alias td1) condition_terms))
+					(define local2 (jqr_local_term_count (jqr_td_alias td2) condition_terms))
+					(if (> local2 local1)
+						(list
+							(jqr_td_with_joinexpr td2 true)
+							(jqr_td_with_joinexpr td1 (combine_and_terms (jqr_flatten_join_terms segment))))
+						segment))))))))
+(define jqr_reorder_segments (lambda (tables_ condition) (begin
+	(match (reduce tables_
+		(lambda (state td) (match state
+			'(out seg)
+			(if (jqr_td_outer td)
+				(list (merge out (jqr_reorder_inner_segment seg condition) (list td)) '())
+				(list out (merge seg (list td))))
+			state))
+		(list '() '()))
+		'(out seg) (merge out (jqr_reorder_inner_segment seg condition))
+		tables_))))
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
-	(list schema tables fields condition groups schemas replace_find_column)))
+	(list schema
+		(if (jqr_has_order_sensitive_stage groups) tables (jqr_reorder_segments tables condition))
+		fields condition groups schemas replace_find_column)))
 
 (define build_queryplan_term (lambda (query) (begin
 	(define union_parts (query_union_all_parts query))

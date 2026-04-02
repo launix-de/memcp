@@ -87,6 +87,7 @@ func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callb
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
+	currentTx := CurrentTx()
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -138,7 +139,7 @@ func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callb
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata)
+		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx)
 		values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 	})
 	if done == nil {
@@ -244,9 +245,9 @@ func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callb
 	return akkumulator
 }
 
-func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer) (scm.Scmer, int64) {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext) (scm.Scmer, int64) {
 	if stride > 0 {
-		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata)
+		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx)
 	}
 	akkumulator := neutral
 	var outCount int64
@@ -265,7 +266,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// shards have their column map populated by load(t) first.
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
-	currentTx := CurrentTx()
 	ownsWrite := t.hasWriteOwner()
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
@@ -469,7 +469,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	return akkumulator, outCount
 }
 
-func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer) (scm.Scmer, int64) {
+func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext) (scm.Scmer, int64) {
 	akkumulator := neutral
 	var outCount int64
 	ss := scm.GetCurrentSessionState()
@@ -484,7 +484,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	}
 
 	t.ensureLoaded()
-	currentTx := CurrentTx()
 	ownsWrite := t.hasWriteOwner()
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false

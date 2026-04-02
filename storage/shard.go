@@ -37,8 +37,8 @@ type storageShard struct {
 	uuid uuid.UUID // uuid.String()
 	// main storage
 	main_count uint32 // size of main storage
-	// columns, deltaColumns, inserts, deletions, Indexes and the unique
-	// hashmaps are shard-local internals guarded by mu. Code outside this file
+	// columns, deltaColumns, inserts, deletions and Indexes are shard-local
+	// internals guarded by mu. Code outside this file
 	// must treat s.mu as the only authority for shard-local state and must not
 	// read Go maps here lock-free.
 	columns map[string]ColumnStorage
@@ -51,7 +51,7 @@ type storageShard struct {
 	logfile      PersistenceLogfile                  // only in safe mode
 	// mu protects shard-local topology/runtime state:
 	//   - columns / deltaColumns / inserts / deletions
-	//   - Indexes and unique hashmaps
+	//   - Indexes
 	//   - lazy-load attach state and next-shard dual-write publication helpers
 	// Reads take RLock snapshots; mutations, log replay, rebuild publish and
 	// repartition dual-write state updates take Lock.
@@ -66,9 +66,6 @@ type storageShard struct {
 	// indexes
 	Indexes    []*StorageIndex // sorted keys
 	indexMutex sync.Mutex
-	hashmaps1  map[[1]string]map[[1]scm.Scmer]uint32 // hashmaps for single columned unique keys
-	hashmaps2  map[[2]string]map[[2]scm.Scmer]uint32 // hashmaps for single columned unique keys
-	hashmaps3  map[[3]string]map[[3]scm.Scmer]uint32 // hashmaps for single columned unique keys
 
 	// lazy-loading/shared-resource state
 	srState      SharedState
@@ -166,7 +163,6 @@ func (s *storageShard) ComputeSize() uint {
 		for _, idx := range s.Indexes {
 			result += idx.ComputeSize()
 		}
-		// TODO: hashmaps for unique
 		return result
 	}
 	result += s.deletions.ComputeSize()
@@ -174,7 +170,6 @@ func (s *storageShard) ComputeSize() uint {
 	for _, idx := range s.Indexes {
 		result += idx.ComputeSize()
 	}
-	// TODO: hashmaps for unique
 	return result
 }
 
@@ -186,9 +181,6 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 	// do not load heavy fields here; delay until first access
 	u.columns = make(map[string]ColumnStorage)
 	u.deltaColumns = make(map[string]int)
-	u.hashmaps1 = make(map[[1]string]map[[1]scm.Scmer]uint32)
-	u.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint32)
-	u.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint32)
 	u.deletions.Reset()
 	u.srState = COLD
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
@@ -661,9 +653,6 @@ func NewShard(t *table) *storageShard {
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
 	result.deltaColumns = make(map[string]int)
-	result.hashmaps1 = make(map[[1]string]map[[1]scm.Scmer]uint32)
-	result.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint32)
-	result.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint32)
 	result.deletions.Reset()
 	for _, column := range t.Columns {
 		result.columns[column.Name] = new(StorageSparse)
@@ -2080,26 +2069,6 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		}
 		t.inserts = append(t.inserts, newrow)
 
-		// notify all hashmaps (what if col is not present in newrow??)
-		for k, v := range t.hashmaps1 {
-			v[[1]scm.Scmer{
-				newrow[t.deltaColumns[k[0]]],
-			}] = recid
-		}
-		for k, v := range t.hashmaps2 {
-			v[[2]scm.Scmer{
-				newrow[t.deltaColumns[k[0]]],
-				newrow[t.deltaColumns[k[1]]],
-			}] = recid
-		}
-		for k, v := range t.hashmaps3 {
-			v[[3]scm.Scmer{
-				newrow[t.deltaColumns[k[0]]],
-				newrow[t.deltaColumns[k[1]]],
-				newrow[t.deltaColumns[k[2]]],
-			}] = recid
-		}
-
 		// also notify indices
 		for _, index := range t.Indexes {
 			// add to delta indexes
@@ -2164,17 +2133,6 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 		}
 		t.inserts = append(t.inserts, newrow)
 
-		// notify temporary unique hashmaps
-		for k, v := range t.hashmaps1 {
-			v[[1]scm.Scmer{newrow[t.deltaColumns[k[0]]]}] = recid
-		}
-		for k, v := range t.hashmaps2 {
-			v[[2]scm.Scmer{newrow[t.deltaColumns[k[0]]], newrow[t.deltaColumns[k[1]]]}] = recid
-		}
-		for k, v := range t.hashmaps3 {
-			v[[3]scm.Scmer{newrow[t.deltaColumns[k[0]]], newrow[t.deltaColumns[k[1]]], newrow[t.deltaColumns[k[2]]]}] = recid
-		}
-
 		// update delta indexes
 		for _, index := range t.Indexes {
 			index.mu.Lock()
@@ -2186,7 +2144,7 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 	}
 }
 
-func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer) (result uint32, present bool) {
+func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer, currentTx *TxContext) (result uint32, present bool) {
 	// Preload main storages and establish main_count without holding any shard lock
 	t.ensureMainCount(false)
 	mcols := make([]ColumnStorage, len(columns))
@@ -2204,7 +2162,6 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// From here on, read under shard read lock for a consistent snapshot of deletions/inserts/deltaColumns
 	t.mu.RLock()
 
-	currentTx := CurrentTx()
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 
 	mainCount := t.main_count
@@ -2486,9 +2443,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// prepare delta storage
 		result.columns = make(map[string]ColumnStorage)
 		result.deltaColumns = make(map[string]int)
-		result.hashmaps1 = make(map[[1]string]map[[1]scm.Scmer]uint32)
-		result.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint32)
-		result.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint32)
 		result.deletions.Reset()
 		if result.t.PersistencyMode == Safe || result.t.PersistencyMode == Logged {
 			// safe mode: also write all deltas to disk
@@ -2816,9 +2770,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.inserts = t.inserts
 		result.deletions = deletions
 		result.Indexes = t.Indexes
-		result.hashmaps1 = t.hashmaps1
-		result.hashmaps2 = t.hashmaps2
-		result.hashmaps3 = t.hashmaps3
 		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 			if t.logfile != nil {
 				t.logfile.Close()
