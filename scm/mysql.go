@@ -157,6 +157,12 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	if !session.TestPassword([]byte(password.String())) {
 		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
 	}
+	// Update the processlist User field now that auth is complete.
+	// NewSession runs before the auth handshake is parsed, so session.User()
+	// was empty at registration time.
+	if v, ok := mysqlStates.Load(session.ID()); ok {
+		v.(*SessionState).User = session.User()
+	}
 	return nil
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
