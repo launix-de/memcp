@@ -35,6 +35,10 @@ type mysqlCloser interface {
 	Close()
 }
 
+type mysqlSessionDone interface {
+	Done() <-chan struct{}
+}
+
 var mysqlListenersMu sync.Mutex
 var mysqlListeners []mysqlCloser
 
@@ -287,11 +291,26 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	var querySeq uint64
 	queryCtx, queryCancel := context.WithCancel(context.Background())
 	defer queryCancel()
+	queryDone := make(chan struct{})
+	defer close(queryDone)
 	if v, ok := mysqlStates.Load(session.ID()); ok {
 		ss = v.(*SessionState)
+		ss.Touch()
 		querySeq = ss.BeginQuery("Query", query)
 		ss.SetCancel(querySeq, queryCancel)
 		ss.SetDB(session.Schema())
+	}
+	if doneSession, ok := any(session).(mysqlSessionDone); ok {
+		go func() {
+			select {
+			case <-doneSession.Done():
+				queryCancel()
+				if ss != nil {
+					ss.KillQuery(querySeq)
+				}
+			case <-queryDone:
+			}
+		}()
 	}
 	defer func() {
 		if ss != nil {
@@ -384,6 +403,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		SetValues(map[string]any{
 			"session":         scmSessionScmer,
 			"sessionStatePtr": ss,
+			"querySeq":        querySeq,
 			"context":         queryCtx,
 		}, func() {
 			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)

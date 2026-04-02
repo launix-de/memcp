@@ -295,6 +295,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		defer UnregisterSession(ss.ID)
 		defer ss.ReleaseAllLocks() // non-persistent: release locks when request ends
 	}
+	ss.Touch()
 	querySeq := ss.BeginQuery("Query", req.Method+" "+req.URL.Path)
 	ctx, cancel := context.WithCancel(req.Context())
 	ss.SetCancel(querySeq, cancel)
@@ -310,7 +311,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		case <-reqDone:
 		}
 	}(querySeq)
-	SetValues(map[string]any{"sessionStatePtr": ss}, func() {
+	SetValues(map[string]any{"sessionStatePtr": ss, "querySeq": querySeq}, func() {
 		contextFn := func() {
 			// catch panics and print out 500 Internal Server Error
 			defer func() {

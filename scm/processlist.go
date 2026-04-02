@@ -37,21 +37,23 @@ type SessionState struct {
 	State   atomic.Pointer[string] // "Waiting for table lock", "" etc.
 
 	startedAt atomic.Int64 // unix nanos of last command start
-
-	killed atomic.Bool // set by Kill(); checked at scan entry points
+	lastUsed  atomic.Int64 // unix nanos of last observed access; used for cache eviction
 
 	nextQuerySeq atomic.Uint64 // monotonically increasing request/query generation
-	activeQuery  atomic.Uint64 // currently running generation; 0 when idle
+	activeQuery  atomic.Uint64 // latest running generation for processlist display
+	activeCount  atomic.Int64  // number of concurrently running requests/queries
 
-	cancel    context.CancelFunc // called by KILL QUERY; nil if not cancellable
-	cancelSeq uint64             // generation owning cancel
-	cancelMu  sync.Mutex         // protects cancel assignment
+	cancelFns map[uint64]context.CancelFunc
+	active    map[uint64]bool
+	killed    map[uint64]bool
+	cancelMu  sync.Mutex // protects active query bookkeeping
 
 	heldLocks   []func()   // unlock callbacks for LOCK TABLES
 	heldLocksMu sync.Mutex // protects heldLocks slice
 
 	scmSession     Scmer     // persistent Scheme session for HTTP connections
 	scmSessionOnce sync.Once // ensures scmSession is initialized exactly once
+
 }
 
 // GetOrCreateScmSession returns the persistent Scheme session for this SessionState,
@@ -72,11 +74,18 @@ func (s *SessionState) ElapsedSeconds() int64 {
 	return int64(time.Since(time.Unix(0, ns)).Seconds())
 }
 
+// Touch marks this session as recently used for cache eviction purposes.
+func (s *SessionState) Touch() {
+	s.lastUsed.Store(time.Now().UnixNano())
+}
+
 // SetCommand updates Command, Info, and resets the elapsed timer.
 func (s *SessionState) SetCommand(cmd, info string) {
 	s.Command.Store(&cmd)
 	s.Info.Store(&info)
-	s.startedAt.Store(time.Now().UnixNano())
+	now := time.Now().UnixNano()
+	s.startedAt.Store(now)
+	s.lastUsed.Store(now)
 }
 
 // BeginQuery marks a new request/query generation as active on this session.
@@ -85,7 +94,16 @@ func (s *SessionState) SetCommand(cmd, info string) {
 func (s *SessionState) BeginQuery(cmd, info string) uint64 {
 	seq := s.nextQuerySeq.Add(1)
 	s.activeQuery.Store(seq)
-	s.killed.Store(false)
+	s.activeCount.Add(1)
+	s.cancelMu.Lock()
+	if s.active == nil {
+		s.active = make(map[uint64]bool)
+	}
+	s.active[seq] = true
+	if s.killed != nil {
+		delete(s.killed, seq)
+	}
+	s.cancelMu.Unlock()
 	s.SetState("")
 	s.SetCommand(cmd, info)
 	return seq
@@ -96,7 +114,8 @@ func (s *SessionState) BeginQuery(cmd, info string) uint64 {
 // a newer active request on the same persistent HTTP session.
 func (s *SessionState) EndQuery(seq uint64, idleCmd, idleInfo string) {
 	s.ClearCancel(seq)
-	if s.activeQuery.CompareAndSwap(seq, 0) {
+	if s.activeCount.Add(-1) == 0 {
+		s.activeQuery.Store(0)
 		s.SetState("")
 		s.SetCommand(idleCmd, idleInfo)
 	}
@@ -115,59 +134,90 @@ func (s *SessionState) SetDB(db string) {
 // SetCancel stores the cancel function for one specific active query generation.
 func (s *SessionState) SetCancel(seq uint64, fn context.CancelFunc) {
 	s.cancelMu.Lock()
-	if s.activeQuery.Load() == seq {
-		s.cancel = fn
-		s.cancelSeq = seq
+	if s.cancelFns == nil {
+		s.cancelFns = make(map[uint64]context.CancelFunc)
 	}
+	s.cancelFns[seq] = fn
 	s.cancelMu.Unlock()
 }
 
 // ClearCancel removes the cancel function if it still belongs to seq.
 func (s *SessionState) ClearCancel(seq uint64) {
 	s.cancelMu.Lock()
-	if s.cancelSeq == seq {
-		s.cancel = nil
-		s.cancelSeq = 0
+	if s.cancelFns != nil {
+		delete(s.cancelFns, seq)
+	}
+	if s.active != nil {
+		delete(s.active, seq)
+	}
+	if s.killed != nil {
+		delete(s.killed, seq)
 	}
 	s.cancelMu.Unlock()
 }
 
 // IsKilled returns true if this session has been killed.
 func (s *SessionState) IsKilled() bool {
-	return s.killed.Load()
-}
-
-// ResetKilled clears the killed flag, e.g. at the start of a new request on a reused session.
-func (s *SessionState) ResetKilled() {
-	s.killed.Store(false)
+	if mgr == nil {
+		return false
+	}
+	v, ok := mgr.GetValue("querySeq")
+	if !ok {
+		return false
+	}
+	seq, ok := v.(uint64)
+	if !ok || seq == 0 {
+		return false
+	}
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	return s.killed != nil && s.killed[seq]
 }
 
 // Kill marks the session as killed and fires the cancel function if set.
-// Returns true if a running query was cancelled.
+// Returns true if at least one running query was cancelled.
 func (s *SessionState) Kill() bool {
-	seq := s.activeQuery.Load()
-	if seq == 0 {
+	s.cancelMu.Lock()
+	if len(s.active) == 0 {
+		s.cancelMu.Unlock()
 		return false
 	}
-	return s.KillQuery(seq)
+	if s.killed == nil {
+		s.killed = make(map[uint64]bool, len(s.active))
+	}
+	fns := make([]context.CancelFunc, 0, len(s.cancelFns))
+	for seq := range s.active {
+		s.killed[seq] = true
+		if fn := s.cancelFns[seq]; fn != nil {
+			fns = append(fns, fn)
+		}
+	}
+	s.cancelMu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+	return true
 }
 
 // KillQuery marks the given active query generation as killed.
 // Returns false if the session has already advanced to a different request.
 func (s *SessionState) KillQuery(seq uint64) bool {
-	if seq == 0 || s.activeQuery.Load() != seq {
+	if seq == 0 {
 		return false
 	}
-	s.killed.Store(true)
 	s.cancelMu.Lock()
-	var fn context.CancelFunc
-	if s.cancelSeq == seq {
-		fn = s.cancel
+	if s.active == nil || !s.active[seq] {
+		s.cancelMu.Unlock()
+		return false
 	}
+	fn := s.cancelFns[seq]
+	if s.killed == nil {
+		s.killed = make(map[uint64]bool)
+	}
+	s.killed[seq] = true
 	s.cancelMu.Unlock()
 	if fn != nil {
 		fn()
-		return true
 	}
 	return true
 }
@@ -223,12 +273,18 @@ func EvictHTTPSession(key string) bool {
 	if !ok {
 		return false
 	}
-	UnregisterSession(v.(*SessionState).ID)
+	ss := v.(*SessionState)
+	ss.Kill()
+	ss.ReleaseAllLocks()
+	UnregisterSession(ss.ID)
 	return true
 }
 
 // LastUsedNano returns the unix nanosecond timestamp of the last command start.
 func (s *SessionState) LastUsedNano() int64 {
+	if ts := s.lastUsed.Load(); ts != 0 {
+		return ts
+	}
 	return s.startedAt.Load()
 }
 
@@ -317,7 +373,9 @@ func RegisterSession(user, host, db string) *SessionState {
 	empty := ""
 	s.Info.Store(&empty)
 	s.State.Store(&empty)
-	s.startedAt.Store(time.Now().UnixNano())
+	now := time.Now().UnixNano()
+	s.startedAt.Store(now)
+	s.lastUsed.Store(now)
 	processList.Store(s.ID, s)
 	return s
 }
