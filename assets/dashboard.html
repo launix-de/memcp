@@ -2288,7 +2288,7 @@ var p=rows[i];
 var info=p.Info||"";
 if(info.length>120) info=info.substring(0,120)+"\u2026";
 h+='<tr><td>'+esc(""+p.Id)+'</td><td>'+esc(p.User||"")+'</td><td>'+esc(p.Host||"")+'</td><td>'+esc(p.db||"")+'</td><td>'+esc(p.Command||"")+'</td><td>'+esc(""+p.Time)+'</td><td>'+esc(p.State||"")+'</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem" title="'+esc(p.Info||"")+'">'+esc(info)+'</td>';
-h+='<td><button class="btn-warn" style="padding:2px 10px;font-size:.75rem" onclick="killQuery('+p.Id+')">Kill</button></td></tr>';
+h+='<td style="white-space:nowrap"><button class="btn-warn" style="padding:2px 10px;font-size:.75rem;margin-right:4px" onclick="killQuery('+p.Id+')">Kill</button><button class="btn-warn" style="padding:2px 10px;font-size:.75rem;background:#16213e" onclick="copyQuery(this)">Copy</button></td></tr>';
 }
 tb.innerHTML=h;
 });
@@ -2307,7 +2307,9 @@ function togglePlAutoRefresh(){
 var cb=document.getElementById("pl-auto-refresh");
 if(cb&&cb.checked){startPlAutoRefresh();}else{stopPlAutoRefresh();}
 }
+function copyQuery(btn){var td=btn.parentNode.previousElementSibling;var txt=td.getAttribute("title")||td.textContent;navigator.clipboard.writeText(txt).then(function(){btn.textContent="\u2713";setTimeout(function(){btn.textContent="Copy";},1000);});}
 window.killQuery=killQuery;
+window.copyQuery=copyQuery;
 window.loadProcesslist=loadProcesslist;
 window.togglePlAutoRefresh=togglePlAutoRefresh;
 
