@@ -1945,7 +1945,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 		}
 	}
 	needMaterializedRows := (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil
-	needMaterializedRows = needMaterializedRows || (propagateMaintenance && (t.loadNext() != nil || (t.t.repartitionDualWriteActive.Load() && t.t.ShardMode == ShardModeFree)))
+	needMaterializedRows = needMaterializedRows || (propagateMaintenance && (t.loadNext() != nil || t.t.repartitionDualWriteActive.Load()))
 	var payloadCols []string
 	var payloadVals [][]scm.Scmer
 	if needMaterializedRows {
