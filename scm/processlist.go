@@ -18,6 +18,7 @@ package scm
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -174,6 +175,21 @@ func (s *SessionState) IsKilled() bool {
 	return s.killed != nil && s.killed[seq]
 }
 
+func formatKillLog(s *SessionState, action string) string {
+	info := strPtr(&s.Info)
+	if len(info) > 160 {
+		info = info[:160] + "..."
+	}
+	if info == "" {
+		return fmt.Sprintf("kill %s id=%d user=%s host=%s db=%s", action, s.ID, s.User, s.Host, strPtr(&s.DB))
+	}
+	return fmt.Sprintf("kill %s id=%d user=%s host=%s db=%s sql=%s", action, s.ID, s.User, s.Host, strPtr(&s.DB), info)
+}
+
+func logKill(s *SessionState, action string) {
+	TracePrintFunc(formatKillLog(s, action))
+}
+
 // Kill marks the session as killed and fires the cancel function if set.
 // Returns true if at least one running query was cancelled.
 func (s *SessionState) Kill() bool {
@@ -196,6 +212,7 @@ func (s *SessionState) Kill() bool {
 	for _, fn := range fns {
 		fn()
 	}
+	logKill(s, "session")
 	return true
 }
 
@@ -219,6 +236,7 @@ func (s *SessionState) KillQuery(seq uint64) bool {
 	if fn != nil {
 		fn()
 	}
+	logKill(s, fmt.Sprintf("query seq=%d", seq))
 	return true
 }
 

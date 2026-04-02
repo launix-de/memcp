@@ -712,7 +712,7 @@ document.addEventListener("DOMContentLoaded",function(){
 var sel=document.getElementById("errors-db-filter");
 if(sel)sel.addEventListener("change",function(){_errorsDbFilter=this.value;_errorsPage=0;renderErrorsTable();});
 var arcb=document.getElementById("errors-autorefresh");
-if(arcb)arcb.addEventListener("change",function(){if(this.checked)startErrorsAutoRefresh();else stopErrorsAutoRefresh();});
+if(arcb)arcb.addEventListener("change",function(){syncDashboardPolling();});
 var btn=document.getElementById("btn-clear-errors");
 if(btn)btn.addEventListener("click",function(){
 if(!confirm("Clear all error log entries?"))return;
@@ -776,7 +776,7 @@ if(_logsAutoRefreshTimer){clearInterval(_logsAutoRefreshTimer);_logsAutoRefreshT
 
 document.addEventListener("DOMContentLoaded",function(){
 var cb=document.getElementById("logs-autorefresh");
-if(cb)cb.addEventListener("change",function(){if(this.checked)startLogsAutoRefresh();else stopLogsAutoRefresh();});
+if(cb)cb.addEventListener("change",function(){syncDashboardPolling();});
 var btn=document.getElementById("btn-clear-logs");
 if(btn)btn.addEventListener("click",function(){
 if(!confirm("Clear all log entries?"))return;
@@ -820,14 +820,15 @@ fetch(base+"/dashboard/api/whoami",{credentials:"same-origin"}).then(function(r)
 isAdmin=!!d.admin;
 defaultPassword=!!d.default_password;
 applyAdminState();
-if(isAdmin)connect();
 route();
 }).catch(function(){route();});
 
 /* WebSocket for gauges (admin only) */
 var statusEl=document.getElementById("status");
-var ws,retry=0;
+var ws,retry=0,wsWanted=false;
 function connect(){
+if(!wsWanted)return;
+if(ws&&(ws.readyState===WebSocket.OPEN||ws.readyState===WebSocket.CONNECTING))return;
 var proto=location.protocol==="https:"?"wss:":"ws:";
 ws=new WebSocket(proto+"//"+location.host+base+"/ws/dashboard");
 ws.onopen=function(){
@@ -861,6 +862,12 @@ var epsMax=Math.max(1,Math.pow(10,Math.ceil(Math.log10(Math.max(eps,1)))));
 setGauge("g-eps",eps/epsMax,eps+" err/s",eps===0?"no errors":"scale: 0-"+epsMax);
 };
 ws.onclose=function(){
+ws=null;
+if(!wsWanted){
+statusEl.textContent="Disconnected";
+statusEl.className="status-bar disconnected";
+return;
+}
 statusEl.textContent="Disconnected - reconnecting...";
 statusEl.className="status-bar disconnected";
 retry++;
@@ -869,9 +876,59 @@ setTimeout(connect,Math.min(1000*Math.pow(2,retry),30000));
 ws.onerror=function(){ws.close()};
 }
 
+function disconnectDashboardSocket(){
+wsWanted=false;
+retry=0;
+if(ws){
+var cur=ws;
+ws=null;
+cur.onclose=null;
+try{cur.close()}catch(_){}
+}
+statusEl.textContent="Disconnected";
+statusEl.className="status-bar disconnected";
+}
+
 /* SPA hash routing */
-var views=document.querySelectorAll("#view-gauges,#view-users,#view-settings,#view-databases,#view-tables,#view-detail,#view-shard");
+var views=document.querySelectorAll(".view");
 var _sidebarViewIds=["view-databases","view-tables","view-detail","view-shard"];
+
+function isViewActive(id){
+var el=document.getElementById(id);
+return !!(el&&el.classList.contains("active"));
+}
+
+function syncDashboardSocket(){
+var shouldRun=isAdmin&&!document.hidden&&isViewActive("view-gauges");
+if(shouldRun){
+wsWanted=true;
+connect();
+} else {
+disconnectDashboardSocket();
+}
+}
+
+function syncDashboardPolling(){
+var pageVisible=!document.hidden;
+var errorsActive=pageVisible&&isViewActive("view-databases")&&_dbsTab==="errors";
+var logsActive=pageVisible&&isViewActive("view-databases")&&_dbsTab==="logs";
+var processlistActive=pageVisible&&isViewActive("view-processlist");
+var errorsCb=document.getElementById("errors-autorefresh");
+var logsCb=document.getElementById("logs-autorefresh");
+var plCb=document.getElementById("pl-auto-refresh");
+if(errorsActive&&errorsCb&&errorsCb.checked)startErrorsAutoRefresh();else stopErrorsAutoRefresh();
+if(logsActive&&logsCb&&logsCb.checked)startLogsAutoRefresh();else stopLogsAutoRefresh();
+if(processlistActive&&plCb&&plCb.checked)startPlAutoRefresh();else stopPlAutoRefresh();
+syncDashboardSocket();
+}
+
+function refreshActiveDashboardView(){
+if(document.hidden)return;
+if(isViewActive("view-processlist"))loadProcesslist();
+if(isViewActive("view-databases")&&_dbsTab==="errors")loadErrors();
+if(isViewActive("view-databases")&&_dbsTab==="logs")loadLogs();
+syncDashboardPolling();
+}
 
 function showView(id){
 for(var i=0;i<views.length;i++)views[i].classList.remove("active");
@@ -879,6 +936,7 @@ var sw=document.getElementById("sidebar-wrap");
 sw.style.display=_sidebarViewIds.indexOf(id)>=0?"flex":"none";
 var el=document.getElementById(id);
 if(el)el.classList.add("active");
+syncDashboardPolling();
 }
 
 function setBreadcrumb(parts){
@@ -1013,6 +1071,7 @@ consoleTa.value=defaultQueries[defSyn]||"";
 loadConsoleDatabases(function(){consoleTa.focus();});
 renderHistory();
 }
+syncDashboardPolling();
 }
 function _switchDbsTabQuiet(tab){
 _dbsTab=tab;
@@ -1023,6 +1082,7 @@ var b=document.getElementById("tabbtn-dbs-"+tabs[i]);
 if(p)p.classList.toggle("active",tabs[i]===tab);
 if(b)b.classList.toggle("active",tabs[i]===tab);
 }
+syncDashboardPolling();
 }
 
 var _dbTab="tables";
@@ -1313,7 +1373,6 @@ _sidebarActiveDb=null;_sidebarActiveTbl=null;
 setBreadcrumb([]);
 _switchDbsTabQuiet("errors");
 loadErrors();
-startErrorsAutoRefresh();
 fetchSettings(function(data){
 var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
@@ -1330,7 +1389,6 @@ _sidebarActiveDb=null;_sidebarActiveTbl=null;
 setBreadcrumb([]);
 _switchDbsTabQuiet("logs");
 loadLogs();
-startLogsAutoRefresh();
 fetchSettings(function(data){
 var cb=document.getElementById("pl-setting-enable");
 var inp=document.getElementById("pl-setting-max");
@@ -1344,7 +1402,6 @@ if(hash==="processlist"){
 if(!isAdmin){location.hash="databases";return}
 showView("view-processlist");
 loadProcesslist();
-startPlAutoRefresh();
 return;
 }
 if(hash==="settings"){
@@ -2277,6 +2334,9 @@ window.stopErrorsAutoRefresh=stopErrorsAutoRefresh;
 
 /* ── Processlist ── */
 var _plTimer=null;
+function isProcesslistVisible(){
+return isViewActive("view-processlist");
+}
 function loadProcesslist(){
 sqlFetch("SHOW FULL PROCESSLIST",function(rows){
 var tb=document.querySelector("#tbl-processlist tbody");
@@ -2288,7 +2348,7 @@ var p=rows[i];
 var info=p.Info||"";
 if(info.length>120) info=info.substring(0,120)+"\u2026";
 h+='<tr><td>'+esc(""+p.Id)+'</td><td>'+esc(p.User||"")+'</td><td>'+esc(p.Host||"")+'</td><td>'+esc(p.db||"")+'</td><td>'+esc(p.Command||"")+'</td><td>'+esc(""+p.Time)+'</td><td>'+esc(p.State||"")+'</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem" title="'+esc(p.Info||"")+'">'+esc(info)+'</td>';
-h+='<td style="white-space:nowrap"><button class="btn-warn" style="padding:2px 10px;font-size:.75rem;margin-right:4px" onclick="killQuery('+p.Id+')">Kill</button><button class="btn-warn" style="padding:2px 10px;font-size:.75rem;background:#16213e" onclick="copyQuery(this)">Copy</button></td></tr>';
+h+='<td style="white-space:nowrap"><button class="btn-warn" style="padding:2px 10px;font-size:.75rem;background:#16213e;margin-right:4px" onclick="copyQuery(this)">Copy</button><button class="btn-warn" style="padding:2px 10px;font-size:.75rem" onclick="killQuery('+p.Id+')">Kill</button></td></tr>';
 }
 tb.innerHTML=h;
 });
@@ -2303,11 +2363,21 @@ var cb=document.getElementById("pl-auto-refresh");
 if(cb&&cb.checked){_plTimer=setInterval(loadProcesslist,2000);}
 }
 function stopPlAutoRefresh(){if(_plTimer){clearInterval(_plTimer);_plTimer=null;}}
-function togglePlAutoRefresh(){
+function maybeRefreshProcesslist(){
 var cb=document.getElementById("pl-auto-refresh");
-if(cb&&cb.checked){startPlAutoRefresh();}else{stopPlAutoRefresh();}
+if(!cb||!cb.checked||!isProcesslistVisible())return;
+loadProcesslist();
+syncDashboardPolling();
+}
+function togglePlAutoRefresh(){
+syncDashboardPolling();
 }
 function copyQuery(btn){var td=btn.parentNode.previousElementSibling;var txt=td.getAttribute("title")||td.textContent;navigator.clipboard.writeText(txt).then(function(){btn.textContent="\u2713";setTimeout(function(){btn.textContent="Copy";},1000);});}
+window.addEventListener("focus",refreshActiveDashboardView);
+document.addEventListener("visibilitychange",function(){
+if(document.hidden)syncDashboardPolling();
+else refreshActiveDashboardView();
+});
 window.killQuery=killQuery;
 window.copyQuery=copyQuery;
 window.loadProcesslist=loadProcesslist;

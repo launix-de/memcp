@@ -119,6 +119,16 @@ var mysqlsessions sync.Map
 // mysqlStates maps driver session ID -> *SessionState for SHOW PROCESSLIST
 var mysqlStates sync.Map
 
+func refreshMySQLSessionProcesslistMeta(session *driver.Session) {
+	if v, ok := mysqlStates.Load(session.ID()); ok {
+		ss := v.(*SessionState)
+		if user := session.User(); user != "" {
+			ss.User = user
+		}
+		ss.SetDB(session.Schema())
+	}
+}
+
 func (m *MySQLWrapper) ServerVersion() string {
 	return "MemCP"
 }
@@ -129,6 +139,7 @@ func (m *MySQLWrapper) NewSession(session *driver.Session) {
 	mysqlsessions.Store(session.ID(), NewSession().Func())
 	ss := RegisterSession(session.User(), session.Addr(), session.Schema())
 	mysqlStates.Store(session.ID(), ss)
+	refreshMySQLSessionProcesslistMeta(session)
 }
 func (m *MySQLWrapper) SessionInc(session *driver.Session) {
 	// I think we can skip session counting
@@ -161,12 +172,7 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	if !session.TestPassword([]byte(password.String())) {
 		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
 	}
-	// Update the processlist User field now that auth is complete.
-	// NewSession runs before the auth handshake is parsed, so session.User()
-	// was empty at registration time.
-	if v, ok := mysqlStates.Load(session.ID()); ok {
-		v.(*SessionState).User = session.User()
-	}
+	refreshMySQLSessionProcesslistMeta(session)
 	return nil
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
@@ -176,6 +182,7 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 		return sqldb.NewSQLErrorf(sqldb.ER_ACCESS_DENIED_ERROR, "access denied for database %s", database)
 	}
 	session.SetSchema(database)
+	refreshMySQLSessionProcesslistMeta(session)
 	return nil
 }
 func MySQLToScmer(v sqltypes.Value) Scmer {
@@ -301,10 +308,10 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	defer close(queryDone)
 	if v, ok := mysqlStates.Load(session.ID()); ok {
 		ss = v.(*SessionState)
+		refreshMySQLSessionProcesslistMeta(session)
 		ss.Touch()
 		querySeq = ss.BeginQuery("Query", query)
 		ss.SetCancel(querySeq, queryCancel)
-		ss.SetDB(session.Schema())
 	}
 	if doneSession, ok := any(session).(mysqlSessionDone); ok {
 		go func() {

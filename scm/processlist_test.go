@@ -19,6 +19,7 @@ package scm
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,4 +83,32 @@ func TestKillQueryMarksOnlyCurrentGeneration(t *testing.T) {
 	})
 	ss.EndQuery(seq1, "Sleep", "")
 	ss.EndQuery(seq2, "Sleep", "")
+}
+
+func TestKillSessionLogsKilledQuery(t *testing.T) {
+	ss := RegisterSession("u", "h", "db")
+	defer UnregisterSession(ss.ID)
+
+	seq := ss.BeginQuery("Query", "SELECT 42")
+	defer ss.EndQuery(seq, "Sleep", "")
+
+	var msgs []string
+	oldTracePrint := TracePrintFunc
+	TracePrintFunc = func(msg string) {
+		msgs = append(msgs, msg)
+	}
+	defer func() {
+		TracePrintFunc = oldTracePrint
+	}()
+
+	ss.SetCancel(seq, func() {})
+	if !KillSession(ss.ID) {
+		t.Fatalf("expected session kill to succeed")
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected one kill log message, got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[0], "kill session") || !strings.Contains(msgs[0], "SELECT 42") {
+		t.Fatalf("unexpected kill log: %q", msgs[0])
+	}
 }
