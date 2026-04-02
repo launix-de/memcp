@@ -50,6 +50,12 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 			t.Columns[i].ComputorInputCols = inputCols
 			// register cache invalidation triggers on source tables
+			//
+			// Software contract:
+			// The compute cache behind a canonical temp column is persistent and
+			// reusable. Repeated createcolumn calls for the same logical column must
+			// preserve that cache and only repair/install missing metadata or dirty
+			// values. A valid cache is a lookup path, not a suggestion to recompute.
 			t.registerComputeTriggers(name, computor)
 			t.schema.schemalock.Unlock()
 			metadataLocked = false
@@ -117,7 +123,15 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// Ensure main_count and input storages are initialized before compute
 	s.ensureMainCount(false)
 
-	// Check if proxy already exists (idempotent re-computation)
+	// Check if proxy already exists (idempotent re-computation).
+	//
+	// Software contract:
+	// - For unfiltered computed columns, createcolumn on an already-valid proxy
+	//   must be a no-op.
+	// - For filtered createcolumn calls, the planner/runtime still addresses the
+	//   same canonical temp column. Reissuing createcolumn may repair the eager
+	//   subset for that filter, but it must not silently swap to a different
+	//   throwaway computation path.
 	s.mu.RLock()
 	existing := s.columns[name]
 	s.mu.RUnlock()
@@ -208,6 +222,11 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	t.finishSchemaMutationLocked()
 
 	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
+	//
+	// Software contract:
+	// Reissuing createcolumn for the same canonical ORC column must not trigger a
+	// fresh scan_order pass if the cached proxy is still valid. ORC recomputation
+	// is driven by validMask invalidation, not by repeated planner setup.
 	// If ORC params changed (different OVER clause), invalidate all proxies.
 	for _, s := range t.maintenanceShards() {
 		t.initORCShard(s, name)

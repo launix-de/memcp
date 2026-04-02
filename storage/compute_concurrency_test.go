@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,5 +186,62 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 	case err := <-errCh:
 		t.Fatal(err)
 	default:
+	}
+}
+
+func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.T) {
+	defer setupComputeConcurrencyTest(t)()
+
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "filtered", Memory, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(1)},
+		{scm.NewInt(2), scm.NewInt(2)},
+		{scm.NewInt(3), scm.NewInt(3)},
+		{scm.NewInt(4), scm.NewInt(4)},
+	}, nil, scm.NewNil(), false, nil)
+
+	var computeCalls atomic.Int64
+	computor := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		computeCalls.Add(1)
+		return a[0]
+	})
+	filterGT2 := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("val")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol(">"),
+			scm.NewNthLocalVar(0),
+			scm.NewInt(2),
+		}),
+		En:      &scm.Globalenv,
+		NumVars: 1,
+	})
+	filterGT1 := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("val")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol(">"),
+			scm.NewNthLocalVar(0),
+			scm.NewInt(1),
+		}),
+		En:      &scm.Globalenv,
+		NumVars: 1,
+	})
+
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
+	if got := computeCalls.Load(); got != 2 {
+		t.Fatalf("first filtered compute invoked computor %d times, want 2", got)
+	}
+
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
+	if got := computeCalls.Load(); got != 4 {
+		t.Fatalf("repeated filtered compute invoked computor %d times, want 4 total", got)
+	}
+
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1)
+	if got := computeCalls.Load(); got != 7 {
+		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
 	}
 }

@@ -2042,8 +2042,16 @@ or generate runtime scan code (build_queryplan).
 											false)))
 								false)))
 							(raw_query_contains_skip_level_nested_outer_ref subquery (raw_query_local_aliases subquery))))
-						/* detect top-level aggregate for direct scan path */
-						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
+							/* Software contract: scalar aggregates are split by canonical
+							correlation, not by raw parser shape.
+							- uncorrelated aggregates go through the helper-table/keytable path
+							  and may be globally memoized
+							- correlated aggregates stay on the per-row direct scan path until
+							  the helper-table path can safely carry row-local promises
+							The correlation test therefore has to run on resolved planner
+							expressions so derived-table aliases and wrapped outer refs are
+							classified correctly. */
+							(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
 							(or (equal? sym (quote aggregate))
 								(equal? sym '(quote aggregate))
@@ -2067,26 +2075,46 @@ or generate runtime scan code (build_queryplan).
 							(contains_noncolumn_outer_ref value_expr)
 							(contains_noncolumn_outer_ref condition2)
 						))
-						(define contains_inner_select_marker (lambda (expr) (match expr
-							(cons sym args) (or
-								(not (nil? (inner_select_kind sym)))
-								(contains_inner_select_marker sym)
-								(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
-							false)))
-						(define use_ordered_scalar (or
-							(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
-							(and has_stage2 (not (nil? (stage_limit_val stage2))))
-							(and has_stage2 (not (nil? (stage_offset_val stage2))))
-						))
-						(define use_direct_agg_scan (and
-							(not (nil? _agg_args))
-							(equal? (count _agg_args) 3)
-							(not raw_contains_skip_level_nested_outer_ref)
-							(nil? stage2_post_group_condition)
-							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
-							(not (nil? tables2))
-							(not (equal? tables2 '()))
-						))
+							(define contains_inner_select_marker (lambda (expr) (match expr
+								(cons sym args) (or
+									(not (nil? (inner_select_kind sym)))
+									(contains_inner_select_marker sym)
+									(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
+								false)))
+							(define contains_outer_ref (lambda (expr) (match expr
+								'((quote outer) _) true
+								'((symbol outer) _) true
+								(cons sym args) (or
+									(contains_outer_ref sym)
+									(reduce args (lambda (found arg) (or found (contains_outer_ref arg))) false))
+								false)))
+							(define stage_contains_outer_ref (lambda (stage)
+								(or
+									(reduce (coalesceNil (stage_group_cols stage) '()) (lambda (found expr) (or found (contains_outer_ref expr))) false)
+									(contains_outer_ref (coalesceNil (stage_post_group_condition_expr stage) true))
+									(reduce (coalesceNil (stage_order_list stage) '()) (lambda (found order_item)
+										(or found (match order_item
+											'(col _dir) (contains_outer_ref col)
+											(contains_outer_ref order_item)))) false))))
+							(define scalar_has_outer_ref (or
+								(reduce_assoc fields2 (lambda (found _k v) (or found (contains_outer_ref v))) false)
+								(contains_outer_ref condition2)
+								(reduce (coalesceNil groups2 '()) (lambda (found stage) (or found (stage_contains_outer_ref stage))) false)))
+							(define use_ordered_scalar (or
+								(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
+								(and has_stage2 (not (nil? (stage_limit_val stage2))))
+								(and has_stage2 (not (nil? (stage_offset_val stage2))))
+							))
+							(define use_direct_agg_scan (and
+								(not (nil? _agg_args))
+								(equal? (count _agg_args) 3)
+								(not raw_contains_skip_level_nested_outer_ref)
+								(nil? stage2_post_group_condition)
+								(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
+								(not (nil? tables2))
+								(not (equal? tables2 '()))
+								scalar_has_outer_ref
+							))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
 							(not raw_contains_skip_level_nested_outer_ref)
@@ -2871,23 +2899,47 @@ or generate runtime scan code (build_queryplan).
 				(define _first_field (if (nil? target_expr) nil
 					(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons _ (cons v _)) v nil) nil)))
 				(define target_expr resolved_target_expr)
-				(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
-					(begin
-						(define _exists_sq (match subquery
-							'(s t f c g h o l off) (list s t
-								(list "__exists" true) c g nil o (coalesceNil l 1) off)
-							nil))
-						(if (nil? _exists_sq) nil
-							(begin
-								(define _exists_expr (build_exists_subselect _exists_sq outer_schemas))
-								(if (equal?? comparison (quote >))
-									_exists_expr
-									(list (quote not) _exists_expr)))))
-					(if (and (not (nil? target_expr)) (nil? _first_field)) nil
+					(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
 						(begin
-							(define _count_sq (match subquery
-								'(s t f c g h o l off) (list s t
-									(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+							/* Software contract: simple uncorrelated EXISTS/NOT EXISTS must
+							also materialize through the canonical COUNT helper table so the
+							result stays cacheable and incrementally maintainable like other
+							aggregate subqueries. */
+							(match subquery
+								'(s t f c g h o l off)
+								(if (and
+									(or (nil? g) (equal? g '()))
+									(nil? h)
+									(or (nil? o) (equal? o '()))
+									(nil? l)
+									(nil? off))
+									(list comparison
+										(list (quote coalesceNil)
+											(build_scalar_subselect
+												(list s t
+													(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+													c (list 1) nil nil nil nil)
+												outer_schemas)
+											0)
+										0)
+									(begin
+										(define _exists_sq (list s t
+											(list "__exists" true) c g nil o (coalesceNil l 1) off))
+										(define _exists_expr (build_exists_subselect _exists_sq outer_schemas))
+										(if (equal?? comparison (quote >))
+											_exists_expr
+											(list (quote not) _exists_expr))))
+								nil))
+						(if (and (not (nil? target_expr)) (nil? _first_field)) nil
+							(begin
+								/* Software contract: IN/NOT IN stay on the same canonical COUNT
+								helper-table path as EXISTS. The subquery must decorrelate into a
+								cacheable LEFT JOIN + count column instead of an ad-hoc membership
+								scan, so repeated lookups keep using the incrementally maintained
+								temp table. */
+								(define _count_sq (match subquery
+									'(s t f c g h o l off) (list s t
+										(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
 									(if (nil? target_expr) c
 										(if (or (nil? c) (equal? c true))
 											(list (quote equal??) _first_field target_expr)
@@ -4887,10 +4939,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							schemas
 							replace_find_column
 							update_target))
-						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
-						(define createcol_options (cons 'list (merge '("temp" true)
-							(if (and needs_count filter_empty_groups)
-								(list "filtercols" (list 'list count_col_name)
+							/* Software contract for filtered grouped aggregates:
+							- keep a single canonical aggregate temp column per helper table
+							- drive eager materialization via filtercols/filter on the canonical
+							  COUNT helper column, not via ad-hoc one-shot aggregate scans
+							- this keeps the aggregate cache persistent and incrementally
+							  maintainable while still skipping empty groups */
+							/* createcolumn options: filter by COUNT column so only groups with rows are computed */
+							(define createcol_options (cons 'list (merge '("temp" true)
+								(if (and needs_count filter_empty_groups)
+									(list "filtercols" (list 'list count_col_name)
 									"filter" '((quote lambda) (list (symbol count_col_name)) '('> (symbol count_col_name) 0)))
 								'()))))
 
