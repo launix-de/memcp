@@ -51,7 +51,6 @@ type database struct {
 	savePending     []byte     `json:"-"`
 	savePendingSync bool       `json:"-"`
 	savePanic       any        `json:"-"`
-	blobMu          sync.Mutex `json:"-"` // serializes IncrBlobRefcount/DecrBlobRefcount
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`

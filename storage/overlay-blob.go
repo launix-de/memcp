@@ -114,10 +114,10 @@ func (s *OverlayBlob) SetSchema(db *database) {
 	s.refs = make(map[string]bool)
 	for hash, data := range s.values {
 		hexHash := fmt.Sprintf("%x", hash[:])
+		db.IncrBlobRefcount(hexHash)
 		w := db.persistence.WriteBlob(hexHash)
 		io.WriteString(w, data)
 		w.Close()
-		db.IncrBlobRefcount(hexHash)
 		s.refs[hexHash] = true
 	}
 	s.values = nil
@@ -223,16 +223,16 @@ func (s *OverlayBlob) build(i uint32, value scm.Scmer) {
 				s.size += uint(len(gzipped))
 				s.values[hashKey] = gzipped
 
-				// write-through to persistence
+				// write-through to persistence (refcount first, then file)
 				if s.schema != nil && s.schema.persistence != nil {
 					hexHash := fmt.Sprintf("%x", hashKey[:])
-					w := s.schema.persistence.WriteBlob(hexHash)
-					io.WriteString(w, gzipped)
-					w.Close()
 					if !s.refs[hexHash] {
 						s.schema.IncrBlobRefcount(hexHash)
 						s.refs[hexHash] = true
 					}
+					w := s.schema.persistence.WriteBlob(hexHash)
+					io.WriteString(w, gzipped)
+					w.Close()
 				}
 			}
 		} else {
