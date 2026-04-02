@@ -657,6 +657,16 @@ test_cases:
         - grp: "C"
           s: 50
 
+  - name: "EXPLAIN filtered SUM uses count-driven materialized filter cache"
+    sql: "EXPLAIN SELECT grp, SUM(val) AS s FROM ia_data WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 1
+      contains:
+        - "touch_keytable"
+        - "compute-count"
+        - "filtercols"
+        - "\"filter\""
+
   # INSERT passing filter: SUM should increase
   - name: "Filtered SUM after INSERT passing filter"
     sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (16, 'A', 25, 25)"

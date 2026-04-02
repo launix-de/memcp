@@ -4911,10 +4911,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							schemas
 							replace_find_column
 							update_target))
-						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
-						(define createcol_options (cons 'list (merge '("temp" true)
-							(if (and needs_count filter_empty_groups)
-								(list "filtercols" (list 'list count_col_name)
+							/* Software contract for filtered grouped aggregates:
+							- keep a single canonical aggregate temp column per helper table
+							- drive eager materialization via filtercols/filter on the canonical
+							  COUNT helper column, not via ad-hoc one-shot aggregate scans
+							- this keeps the aggregate cache persistent and incrementally
+							  maintainable while still skipping empty groups */
+							/* createcolumn options: filter by COUNT column so only groups with rows are computed */
+							(define createcol_options (cons 'list (merge '("temp" true)
+								(if (and needs_count filter_empty_groups)
+									(list "filtercols" (list 'list count_col_name)
 									"filter" '((quote lambda) (list (symbol count_col_name)) '('> (symbol count_col_name) 0)))
 								'()))))
 
