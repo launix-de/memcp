@@ -2907,11 +2907,16 @@ or generate runtime scan code (build_queryplan).
 											_exists_expr
 											(list (quote not) _exists_expr))))
 								nil))
-					(if (and (not (nil? target_expr)) (nil? _first_field)) nil
-						(begin
-							(define _count_sq (match subquery
-								'(s t f c g h o l off) (list s t
-									(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+						(if (and (not (nil? target_expr)) (nil? _first_field)) nil
+							(begin
+								/* Software contract: IN/NOT IN stay on the same canonical COUNT
+								helper-table path as EXISTS. The subquery must decorrelate into a
+								cacheable LEFT JOIN + count column instead of an ad-hoc membership
+								scan, so repeated lookups keep using the incrementally maintained
+								temp table. */
+								(define _count_sq (match subquery
+									'(s t f c g h o l off) (list s t
+										(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
 									(if (nil? target_expr) c
 										(if (or (nil? c) (equal? c true))
 											(list (quote equal??) _first_field target_expr)
