@@ -70,7 +70,7 @@ test_cases:
 
   # --- Inspect keytable after GROUP BY (noncritical) ---
   - name: "Keytable exists after GROUP BY and contains group keys"
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"memcp-tests.sc_base\" false \"dept\" false))`"
+    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
     expect:
       rows: 1
       data:
@@ -123,7 +123,7 @@ test_cases:
           s: 200
 
   - name: "Keytable updated after INSERT (new dept visible)"
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"memcp-tests.sc_base\" false \"dept\" false))`"
+    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
     expect:
       rows: 1
       data:
@@ -190,7 +190,7 @@ test_cases:
           s: 80
 
   - name: "Keytable has Sales key removed after DELETE (cleanup trigger)"
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"memcp-tests.sc_base\" false \"dept\" false))`"
+    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
     expect:
       rows: 1
       data:

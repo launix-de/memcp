@@ -352,7 +352,6 @@ test_cases:
           table: "perf_main"
           outer: false
           joinexpr: "(equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))"
-
   # ========================================================================
   # 7. Compress and re-test (exercises range scans on compressed storage)
   # ========================================================================
