@@ -35,16 +35,22 @@ type column struct {
 	Typdimensions     []int     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Computor          scm.Scmer `json:"-"`          // TODO: marshaljson -> serialize
 	ComputorInputCols []string  `json:",omitempty"` // input cols for computor (persisted in schema)
-	PartitioningScore int       // count this up to increase the chance of partitioning for this column
-	AutoIncrement     bool
-	Default           scm.Scmer
-	OnUpdate          scm.Scmer
-	AllowNull         bool
-	IsTemp            bool // columns with IsTemp may be removed without consequences
-	Collation         string
-	Comment           string
-	sanitizer         func(scm.Scmer) scm.Scmer
-	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+	// Repeated planner-issued createcolumn calls must be able to detect that the
+	// canonical temp column signature is unchanged and skip schema/trigger work.
+	// filter cols are persisted because they are part of the canonical helper
+	// definition; the filter expression itself is runtime-only like Computor.
+	ComputorFilterCols []string  `json:",omitempty"`
+	ComputorFilter     scm.Scmer `json:"-"`
+	PartitioningScore  int       // count this up to increase the chance of partitioning for this column
+	AutoIncrement      bool
+	Default            scm.Scmer
+	OnUpdate           scm.Scmer
+	AllowNull          bool
+	IsTemp             bool // columns with IsTemp may be removed without consequences
+	Collation          string
+	Comment            string
+	sanitizer          func(scm.Scmer) scm.Scmer
+	lastAccessed       int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
 
 	// ORC fields — non-empty OrcSortCols signals this is an ordered-reduce computed column.
 	// The column value is produced by a scan_order pass rather than per-row computation.

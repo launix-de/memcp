@@ -275,6 +275,30 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
 	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "table_empty?",
+		Desc: "returns true if a table currently has no rows",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			table := scm.String(a[1])
+			db := GetDatabase(schema)
+			if db == nil {
+				panic("database " + schema + " does not exist")
+			}
+			t := db.GetTable(table)
+			if t == nil {
+				panic("table " + schema + "." + table + " does not exist")
+			}
+			return scm.NewBool(t.CountEstimate() == 0)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"},
+				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",
@@ -718,7 +742,32 @@ func Init(en scm.Env) {
 		Name: "createtable",
 		Desc: "creates a new database",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			// parse options
+			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			db.ensureLoaded()
+			tblName := scm.String(a[1])
+
+			// Software contract:
+			// createtable(..., ifnotexists=true) is the hot-path guard used by
+			// planner-generated keytable/prejoin initializers. When the table is
+			// already present, the fast path must stay extremely cheap:
+			// - no schema save
+			// - no table-definition rebuild
+			// - no options/columns parsing
+			//
+			// We still confirm under schemalock after the optimistic probe so the
+			// result stays race-free under concurrent creators.
+			if ifnotexists {
+				if existing := db.tables.Get(tblName); existing != nil {
+					atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
+					return scm.NewBool(false)
+				}
+			}
+
+			// parse options only after the fast existing-table probe
 			options := mustScmerSlice(a[3], "options")
 			var autoIncrement uint64
 			engine := Settings.DefaultEngine
@@ -745,13 +794,6 @@ func Init(en scm.Env) {
 			}
 			pm := parsePersistencyMode(engine)
 
-			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			db.ensureLoaded()
-			tblName := scm.String(a[1])
 			newTable := new(table)
 			newTable.schema = db
 			newTable.Name = tblName
@@ -820,14 +862,13 @@ func Init(en scm.Env) {
 					db.schemalock.Unlock()
 					panic("Table " + tblName + " already exists")
 				}
-				existing.Collation = collation
-				existing.Charset = charset
-				existing.Comment = comment
-				if autoIncrement > existing.Auto_increment {
-					existing.Auto_increment = autoIncrement
-				}
-				db.saveLockedWithDurabilityAndUnlock(existing.PersistencyMode == Safe)
-				return scm.NewBool(true)
+				// Keep the hot ifnotexists path free of schema saves. Planner-created
+				// helper tables deliberately re-issue createtable on every query; if
+				// the table already exists, "created=false" is the only signal the
+				// caller needs to skip collect/materialization work.
+				atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
+				db.schemalock.Unlock()
+				return scm.NewBool(false)
 			}
 
 			if prev := db.tables.Set(newTable); prev != nil {

@@ -1493,9 +1493,12 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
 					'()))))))
 			(define init_code (list 'begin
-				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
-				(list 'partitiontable schema keytable_name kt_partition_code)
-				(list 'touch_keytable schema keytable_name)))
+				(list 'define '__kt_created (list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true))
+				(list 'if '__kt_created
+					(list 'partitiontable schema keytable_name kt_partition_code)
+					nil)
+				(list 'touch_keytable schema keytable_name)
+				'__kt_created))
 			/* return (name init_code nil) — third element nil means no FK reuse */
 			(list keytable_name init_code nil)))
 )))
@@ -3106,10 +3109,11 @@ or generate runtime scan code (build_queryplan).
 	(set tables (if (or (nil? tables) (equal? tables '()))
 		(begin
 			(createdatabase schema true)
-			(createtable schema ".(1)"
+			(if (createtable schema ".(1)"
 				(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
 				(list "engine" "sloppy") true)
-			(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+				(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+				nil)
 			(list (list ".(1)" schema ".(1)" false nil)))
 		tables))
 	(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -5203,7 +5207,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(if (not (nil? _stage_scope))
 									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
 									(list (make_collect false))
-									(list (list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
+									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
 										(make_collect false)
 										nil))))
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
@@ -5970,11 +5974,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
-						(list 'createtable pj_schema prejointbl
+						(list 'if (list 'createtable pj_schema prejointbl
 							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							'(list "engine" "sloppy") true)
-						(list 'if (list 'equal? 0 (list 'scan_estimate pj_schema prejointbl))
-							(list 'time prejoin_materialize_plan "materialize")))
+							(list 'time prejoin_materialize_plan "materialize")
+							(list 'if (list 'table_empty? pj_schema prejointbl)
+								(list 'time prejoin_materialize_plan "materialize")
+								nil)))
 					pj_trigger_registrations
 					(list grouped_result)))
 			)

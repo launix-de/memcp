@@ -46,17 +46,25 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 	}()
 	for i, c := range t.Columns {
 		if c.Name == name {
-			// found the column
-			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
-			t.Columns[i].ComputorInputCols = inputCols
-			// register cache invalidation triggers on source tables
-			//
 			// Software contract:
 			// The compute cache behind a canonical temp column is persistent and
 			// reusable. Repeated createcolumn calls for the same logical column must
 			// preserve that cache and only repair/install missing metadata or dirty
 			// values. A valid cache is a lookup path, not a suggestion to recompute.
-			t.registerComputeTriggers(name, computor)
+			//
+			// Important split of responsibilities:
+			// - table-level metadata/trigger work only when the canonical column
+			//   signature changes
+			// - shard-level ComputeColumn still runs afterwards so dirty proxies can
+			//   repair themselves even on the DDL no-op path
+			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor, filterCols, filter)
+			if metadataChanged {
+				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
+				t.Columns[i].ComputorInputCols = inputCols
+				t.Columns[i].ComputorFilterCols = filterCols
+				t.Columns[i].ComputorFilter = filter
+				t.registerComputeTriggers(name, computor)
+			}
 			t.schema.schemalock.Unlock()
 			metadataLocked = false
 			done := make(chan error, 6)
@@ -95,10 +103,12 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 				}
 				GlobalCache.UpdateSize(c, totalRows*16) // ~16 bytes per value estimate
 			}
-			t.schema.schemalock.Lock()
-			metadataLocked = true
-			t.finishSchemaMutationLocked()
-			metadataLocked = false
+			if metadataChanged {
+				t.schema.schemalock.Lock()
+				metadataLocked = true
+				t.finishSchemaMutationLocked()
+				metadataLocked = false
+			}
 			return
 		}
 	}
@@ -1468,6 +1478,13 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func computeColumnSignatureEqual(c *column, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) bool {
+	return slicesEqual(c.ComputorInputCols, inputCols) &&
+		slicesEqual(c.ComputorFilterCols, filterCols) &&
+		scm.Equal(c.Computor, computor) &&
+		scm.Equal(c.ComputorFilter, filter)
 }
 
 func boolSlicesEqual(a, b []bool) bool {

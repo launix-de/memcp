@@ -35,6 +35,55 @@ func callBuiltin(t *testing.T, name string, args ...scm.Scmer) scm.Scmer {
 	return scm.Apply(fn, args...)
 }
 
+func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-createtable-fast-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tcreatetablefast")
+
+	CreateDatabase("tcreatetablefast", false)
+	cols := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{
+			scm.NewString("column"),
+			scm.NewString("id"),
+			scm.NewString("int"),
+			scm.NewSlice(nil),
+			scm.NewSlice(nil),
+		}),
+	})
+	options := scm.NewSlice([]scm.Scmer{scm.NewString("engine"), scm.NewString("sloppy")})
+
+	first := callBuiltin(t, "createtable",
+		scm.NewString("tcreatetablefast"),
+		scm.NewString(".hot"),
+		cols,
+		options,
+		scm.NewBool(true),
+	)
+	if !scm.ToBool(first) {
+		t.Fatal("first createtable should report created=true")
+	}
+
+	second := callBuiltin(t, "createtable",
+		scm.NewString("tcreatetablefast"),
+		scm.NewString(".hot"),
+		cols,
+		options,
+		scm.NewBool(true),
+	)
+	if scm.ToBool(second) {
+		t.Fatal("second createtable should report created=false")
+	}
+}
+
 func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-shard-rebuild-*")
 	if err != nil {
