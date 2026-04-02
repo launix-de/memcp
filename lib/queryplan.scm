@@ -5223,12 +5223,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1))) nil
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
+						(define keytable_reinit_plan
+							(list 'if (list 'query_helper_needs_init? schema grouptbl)
+								(list 'reset_query_helper schema grouptbl)
+								nil))
 
 						(cons 'begin (merge
 							(if (nil? keytable_init) '() (list keytable_init))
 							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
 							(if (nil? group_value_local_compute_plan) '() (list group_value_local_compute_plan))
 							(if (nil? cleanup_plan) '() (list cleanup_plan))
+							(list keytable_reinit_plan)
 							(if is_fk_reuse '()
 								(if (not (nil? _stage_scope))
 									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
@@ -5998,8 +6003,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
+				(define prejoin_reinit_plan
+					(list 'if (list 'query_helper_needs_init? pj_schema prejointbl)
+						(list 'reset_query_helper pj_schema prejointbl)
+						nil))
 				(cons 'begin (merge
 					(list
+						prejoin_reinit_plan
 						(list 'if (list 'createtable pj_schema prejointbl
 							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							'(list "engine" "sloppy") true)

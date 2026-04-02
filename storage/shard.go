@@ -685,6 +685,22 @@ func NewShard(t *table) *storageShard {
 	return result
 }
 
+func (s *storageShard) resetHelperContentsLocked() {
+	s.inserts = nil
+	s.deletions.Reset()
+	s.main_count = 0
+	s.deltaColumns = make(map[string]int)
+	for _, idx := range s.Indexes {
+		idx.active = false
+		idx.mainIndexes = StorageInt{}
+		idx.deltaBtree = nil
+	}
+	s.Indexes = nil
+	for _, column := range s.t.Columns {
+		s.columns[column.Name] = new(StorageSparse)
+	}
+}
+
 func (t *storageShard) Count() uint32 {
 	return t.main_count + uint32(len(t.inserts)) - uint32(t.deletions.Count())
 }

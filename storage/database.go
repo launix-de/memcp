@@ -363,6 +363,9 @@ func (db *database) ensureLoaded() {
 		for _, col := range t.Columns {
 			col.UpdateSanitizer()
 		}
+		if t.isEphemeralQueryTable() {
+			t.queryScratchNeedsInit.Store(true)
+		}
 		// attach table pointer to existing shard stubs without loading them
 		if t.Shards != nil {
 			for _, s := range t.Shards {
