@@ -927,10 +927,17 @@ func Init(en scm.Env) {
 			// createcolumn is the table-local DDL entrypoint for both "create a new
 			// physical column" and "upgrade/configure an existing temp/base column".
 			//
-			// Query planning relies on this for window/temp columns: the planner may
-			// predeclare a bare temp column so later expressions can reference it, and
-			// the runtime createcolumn call must then install the actual ORC/computed
-			// semantics on the already-existing column instead of silently no-oping.
+			// Planner/cache contract:
+			// 1. Query plans may predeclare canonical temp columns and later call
+			//    createcolumn again with the real computor/ORC metadata.
+			// 2. Reissuing createcolumn for the SAME canonical temp column must be
+			//    idempotent: if the cache/proxy is already valid, the call must not
+			//    eagerly recompute or destroy the cached values.
+			// 3. "Always materialize, but correctly" means the runtime path may reuse
+			//    an already-populated temp column; it must not silently fall back to a
+			//    throwaway one-shot computation because the column already exists.
+			// 4. filtercols/filter further narrow which keys need eager materialization;
+			//    they do not change the identity of the canonical temp column itself.
 			if len(orcSortCols) > 0 {
 				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, 0, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
 				return scm.NewBool(true)

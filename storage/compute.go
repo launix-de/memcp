@@ -50,6 +50,12 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 			t.Columns[i].ComputorInputCols = inputCols
 			// register cache invalidation triggers on source tables
+			//
+			// Software contract:
+			// The compute cache behind a canonical temp column is persistent and
+			// reusable. Repeated createcolumn calls for the same logical column must
+			// preserve that cache and only repair/install missing metadata or dirty
+			// values. A valid cache is a lookup path, not a suggestion to recompute.
 			t.registerComputeTriggers(name, computor)
 			t.schema.schemalock.Unlock()
 			metadataLocked = false
@@ -117,20 +123,27 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// Ensure main_count and input storages are initialized before compute
 	s.ensureMainCount(false)
 
-	// Check if proxy already exists (idempotent re-computation)
+	// Check if proxy already exists (idempotent re-computation).
+	//
+	// Software contract:
+	// - For unfiltered computed columns, createcolumn on an already-valid proxy
+	//   must be a no-op.
+	// - For filtered createcolumn calls, the long-term contract is the same, but
+	//   we still need canonical persisted filter metadata before we can prove that
+	//   "same temp column" also means "same eager key subset". Until then, the
+	//   filtered path may conservatively call CompressFiltered again.
 	s.mu.RLock()
 	existing := s.columns[name]
 	s.mu.RUnlock()
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.computor = computor // update lambda
-		// skip recompute if proxy is still valid (no invalidation since last compute)
-		if proxy.compressed && len(proxy.delta) == 0 {
-			if filter.IsNil() {
-				return true // fully compressed, nothing to do
+		// Fast path: repeated createcolumn on an unchanged canonical temp column.
+		// If all rows are already valid, materialization has already happened and
+		// the value path must stay a lookup instead of triggering another rebuild.
+		if filter.IsNil() {
+			if (proxy.compressed && len(proxy.delta) == 0) || proxy.AllRowsValid() {
+				return true
 			}
-			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
-			proxy.CompressFiltered(filterCols, filter)
-			return true
 		}
 		if !filter.IsNil() {
 			proxy.CompressFiltered(filterCols, filter)
@@ -208,6 +221,11 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	t.finishSchemaMutationLocked()
 
 	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
+	//
+	// Software contract:
+	// Reissuing createcolumn for the same canonical ORC column must not trigger a
+	// fresh scan_order pass if the cached proxy is still valid. ORC recomputation
+	// is driven by validMask invalidation, not by repeated planner setup.
 	// If ORC params changed (different OVER clause), invalidate all proxies.
 	for _, s := range t.maintenanceShards() {
 		t.initORCShard(s, name)

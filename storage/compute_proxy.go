@@ -51,6 +51,14 @@ type StorageComputeProxy struct {
 	lastRecomputeNs       atomic.Int64 // nanoseconds of the last full/suffix recompute
 }
 
+// AllRowsValid reports whether every row in the proxy is currently materialized
+// and valid. This is the key fast-path for repeated createcolumn calls on the
+// same canonical temp column: if all rows are already valid, the planner/runtime
+// must reuse the proxy instead of recomputing it.
+func (p *StorageComputeProxy) AllRowsValid() bool {
+	return p.count == 0 || uint32(p.validMask.Count()) >= p.count
+}
+
 // cloneComputeProxyRows ports a compute/ORC proxy onto a rebuilt shard without
 // evaluating the computor. Cached rows stay cached, invalid rows stay lazy.
 func cloneComputeProxyRows(oldProxy *StorageComputeProxy, newShard *storageShard, oldRowIDs []uint32) *StorageComputeProxy {

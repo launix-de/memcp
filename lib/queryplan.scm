@@ -66,6 +66,11 @@ delete_fn/insert_fn/update_fn are code-generator-produced lambda expressions (no
 Lifecycle triggers use code-generator pattern for the drop body as well.
 update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure capture). */
 (define register_prejoin_incremental (lambda (src_schema src_table pj_schema pj_table delete_fn insert_fn update_fn) (begin
+	/* Software contract:
+	Prejoins are persistent materialized caches. Once created they are maintained
+	incrementally via triggers; repeated query execution must not drop and fully
+	rebuild them on every use. Query-time materialization is only the cold-start
+	path for an empty or freshly recreated prejoin table. */
 	(define prefix (concat ".pj_incr:" pj_table "|" src_table "|"))
 	(createtrigger src_schema src_table (concat prefix "after_delete") "after_delete" "" delete_fn false)
 	(createtrigger src_schema src_table (concat prefix "after_insert") "after_insert" "" insert_fn false)
@@ -2723,6 +2728,14 @@ or generate runtime scan code (build_queryplan).
 	the COUNT-based approach produces a keytable computed column that benefits from
 	MemCP's incremental aggregate cache — DML triggers invalidate only affected
 	groups, so subsequent queries skip recomputation for unchanged partitions.
+	Software contract:
+	- IN/EXISTS/NOT IN/NOT EXISTS should prefer the materialized COUNT/keytable
+	path whenever the subquery can be decorrelated into the cached GROUP/LEFT
+	JOIN machinery.
+	- Direct scalar EXISTS evaluation is only a fallback for shapes that cannot be
+	expressed on the canonical materialized path yet.
+	- Negative matches (NOT EXISTS / NOT IN) rely on the later LEFT JOIN +
+	coalesceNil(…,0) semantics; do not "simplify" that away into an inner join.
 	Caching policy roadmap for session-sensitive predicates:
 	1. First iteration: if the COUNT/EXISTS condition depends on volatile session
 	state (for example @current_user, @fop_time, Betrachtungszeit, username),
@@ -2873,6 +2886,10 @@ or generate runtime scan code (build_queryplan).
 				(define target_expr resolved_target_expr)
 				(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
 					(begin
+						/* Uncorrelated EXISTS still uses the scalar helper path today.
+						The materialized COUNT/keytable contract above only applies once
+						unnest_subselect can emit the canonical helper-table shape for this
+						case without changing EXISTS semantics. */
 						(define _exists_sq (match subquery
 							'(s t f c g h o l off) (list s t
 								(list "__exists" true) c g nil o (coalesceNil l 1) off)
@@ -5825,7 +5842,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										/* emit the register call as an S-expression to be executed at query time */
 										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
-				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
+				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result
+				Software contract:
+				The prejoin table is a persistent cache. `scan_estimate == 0` is the only
+				normal query-time reason to materialize it; subsequent executions must
+				hit the maintained table and let the trigger-based upkeep preserve it. */
 				(cons 'begin (merge
 					(list
 						(list 'createtable pj_schema prejointbl
