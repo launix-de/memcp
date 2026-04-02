@@ -1414,7 +1414,7 @@ insertDone:
 	// triggers, and auto-increment (already assigned in primary insert).
 	// Use repartitionDualWriteActive (set after Phase B snapshot) to avoid
 	// duplicating rows that are already captured in the snapshot.
-	if t.repartitionDualWriteActive.Load() && t.ShardMode == ShardModePartition {
+	if t.repartitionDualWriteActive.Load() {
 		t.dualWriteInsert(columns, values)
 	}
 

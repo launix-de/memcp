@@ -102,25 +102,11 @@ builds, because their truth value depends on current session state. */
 		(lambda (x) (not (nil? x))))
 		(lambda (acc alias_v) (append_unique acc alias_v))
 		'())))
-(define assoc_lookup_one (lambda (assoc key_v)
-	(coalesce
-		(if (nil? assoc) nil (get_assoc assoc key_v))
-		(match assoc
-			(cons _ _) (reduce assoc (lambda (found entry)
-				(if (not (nil? found))
-					found
-					(match entry
-						'(k v) (if (equal? k key_v) v nil)
-						nil)))
-				nil)
-			nil)
-		nil)
-))
 (define assoc_lookup_variants (lambda (assoc variants)
 	(reduce variants (lambda (found key_v)
 		(if (not (nil? found))
 			found
-			(assoc_lookup_one assoc key_v)))
+			(if (nil? assoc) nil (get_assoc assoc key_v))))
 		nil)
 ))
 (define alias_variants_match (lambda (left right insensitive)
@@ -851,6 +837,66 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 		'()
 	)
 ))
+
+/* expr_has_scan: returns true if an AST expression contains any scan node. */
+(define expr_has_scan (lambda (expr)
+	(match expr
+		(cons head rest) (match (string head)
+			"scan" true "scan_order" true "scan_batch" true
+			"scalar_scan" true "scalar_scan_order" true
+			_ (reduce rest (lambda (acc child) (or acc (expr_has_scan child))) false))
+		false)))
+
+/* expr_refs_outer_var: returns true if an expression references (var N) at the
+   top level (outside any nested lambda). */
+(define expr_refs_outer_var (lambda (expr)
+	(match expr
+		(cons head rest) (match (string head)
+			"var" true
+			"lambda" false
+			_ (reduce rest (lambda (acc child) (or acc (expr_refs_outer_var child))) false))
+		false)))
+
+/* expr_is_parallelizable: safe to wrap in a parallel thunk if it contains
+   a scan AND does not reference outer-scope vars. */
+(define expr_is_parallelizable (lambda (expr)
+	(and (expr_has_scan expr) (not (expr_refs_outer_var expr)))))
+
+/* parallelize_resultrows: post-processing pass over the finished query plan AST.
+   Rewrites (resultrow (list k1 v1 k2 v2 ...)) nodes: if >=2 value expressions
+   are parallelizable, wrap them in parallel_map for concurrent evaluation.
+   Only recurses into transparent wrappers (begin/if/define/time). */
+(define parallelize_resultrows (lambda (ast)
+	(match ast
+		(cons head rest)
+		(if (equal? (string head) "resultrow")
+			(match rest
+				(cons (cons list_head kv_pairs) rr_rest)
+				(begin
+					(define vals (extract_assoc kv_pairs (lambda (k v) v)))
+					(define complex_count (reduce vals (lambda (acc v) (+ acc (if (expr_is_parallelizable v) 1 0))) 0))
+					(if (< complex_count 2)
+						ast
+						(begin
+							(define keys (extract_assoc kv_pairs (lambda (k v) k)))
+							(define thunks (map vals (lambda (v) (list (quote lambda) '() v))))
+							(define pmap_call (list (symbol "parallel_map")
+								(cons (symbol "list") thunks)
+								(list (quote lambda) (list (symbol "__pf")) (list (symbol "__pf")))))
+							(define reassembled (cons list_head
+								(merge (mapIndex keys (lambda (i k) (list k (list (symbol "nth") (symbol "__pr") i)))))))
+							(list (quote begin)
+								(list (quote define) (symbol "__pr") pmap_call)
+								(cons head (cons reassembled rr_rest))))))
+				ast)
+			(match (string head)
+				"begin" (cons head (map rest parallelize_resultrows))
+				"!begin" (cons head (map rest parallelize_resultrows))
+				"if" (cons head (map rest parallelize_resultrows))
+				"define" (cons head (map rest parallelize_resultrows))
+				"time" (cons head (map rest parallelize_resultrows))
+				ast))
+		ast)))
 
 /* split_condition: selection pushdown for nested-loop join planning.
 Splits an AND-condition into (now, later): predicates evaluatable with currently
@@ -3748,8 +3794,8 @@ second table carries strictly more local WHERE predicates than the first. */
 				(define _uq_result (apply untangle_query (merge query (list nil))))
 				(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
 				(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
-					(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
-					(if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan)))))
+				(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
+				(parallelize_resultrows (if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan))))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
@@ -5089,8 +5135,33 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										)
 								))
 							)))))
-						(define compute_plan
-							'('time (cons 'parallel agg_plans) "compute"))
+							/* COUNT is a dependency for filtered aggregates: non-count keytable
+							columns may filter on COUNT>0 and therefore must not race the COUNT
+							createcolumn itself. Keep COUNT synchronous, then parallelize the
+							remaining independent aggregate columns. */
+							(define agg_plan_indices (produceN (count ags)))
+							(define count_plan (if needs_count
+								(reduce agg_plan_indices (lambda (found i)
+									(if (not (nil? found))
+										found
+										(if (equal? (agg_col_name (nth ags i)) count_col_name)
+											(nth agg_plans i)
+											nil)))
+									nil)
+								nil))
+							(define non_count_agg_plans (reduce agg_plan_indices (lambda (acc i)
+								(if (and needs_count (equal? (agg_col_name (nth ags i)) count_col_name))
+									acc
+									(merge acc (list (nth agg_plans i)))))
+								'()))
+							(define compute_plan
+								(if (nil? count_plan)
+									'('time (cons 'parallel agg_plans) "compute")
+									(if (equal? non_count_agg_plans '())
+										(list 'time count_plan "compute")
+										(list 'begin
+											(list 'time count_plan "compute-count")
+											(list 'time (cons 'parallel non_count_agg_plans) "compute")))))
 
 						/* invalidation is handled by registerComputeTriggers in ComputeColumn:
 						DML triggers on the base table invalidate computed columns automatically.
@@ -5254,7 +5325,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(cons (symbol aggregate) agg_args)
 					(if nested_agg
 						(begin
-							(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) prejoin_alias_map))
+							(define canonical_agg_args (canonicalize_expr agg_args prejoin_alias_map))
+							(define agg_name (serialize_canonical_expr canonical_agg_args))
 							(define match_col (reduce prejoin_source_tables (lambda (acc td)
 								(if (not (nil? acc))
 									acc
@@ -5285,7 +5357,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(cons '(quote aggregate) agg_args)
 					(if nested_agg
 						(begin
-							(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) prejoin_alias_map))
+							(define canonical_agg_args (canonicalize_expr agg_args prejoin_alias_map))
+							(define agg_name (serialize_canonical_expr canonical_agg_args))
 							(define match_col (reduce prejoin_source_tables (lambda (acc td)
 								(if (not (nil? acc))
 									acc
@@ -5393,7 +5466,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define all_referenced_columns (merge
 					(merge (map stage_group extract_all_get_columns))
 					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
-					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
+					(if (nil? stage_post_group_condition) '() (extract_all_get_columns stage_post_group_condition))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
 					(extract_all_get_columns (coalesceNil raw_condition true))
 					(extract_all_get_columns (coalesceNil raw_post_group_condition true))
@@ -5423,10 +5496,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(if (equal? expr4 expr3)
 						expr4
 						expr4))))
+				(define canonicalize_prejoin_source_expr (lambda (expr)
+					(rewrite_source_aliases prejoin_alias_map
+						(normalize_visible_aliases
+							(lower_prejoin_lineage_expr expr)))))
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
 				(define prejoin_columns (reduce all_referenced_columns (lambda (acc mc)
 					(begin
-						(define canon_name (canonical_expr_name (normalize_canonical_aliases (lower_prejoin_lineage_expr (cadr mc))) '(list) '(list) prejoin_alias_map))
+						(define canonical_lineage_expr (canonicalize_expr
+							(normalize_canonical_aliases (canonicalize_prejoin_source_expr (cadr mc)))
+							prejoin_alias_map))
+						(define canon_name (serialize_canonical_expr canonical_lineage_expr))
 						(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false)
 							acc
 							(merge acc (list (list canon_name (cadr mc))))))) '()))
@@ -5434,7 +5514,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
 					(list "Field" (car mc) "Type" "any" "Expr" (cadr mc)))))
-				(define prejoin_condition_name (canonical_expr_name (normalize_canonical_aliases (lower_prejoin_lineage_expr raw_condition)) '(list) '(list) prejoin_alias_map))
+				(define prejoin_condition_name (serialize_canonical_expr
+					(canonicalize_expr
+						(normalize_canonical_aliases (canonicalize_prejoin_source_expr raw_condition))
+						prejoin_alias_map)))
 				(define prejointbl (concat ".prejoin:"
 					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
@@ -5449,7 +5532,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						tv
 						(match tv '(visible _) visible nil)
 						(visible_occurrence_alias tv)
-						(coalesce (prejoin_alias_map tv) nil)
+						(coalesce (resolve_source_alias prejoin_alias_map tv) nil)
 						(if (equal? (visible_occurrence_alias tv) ttbl) (concat tschema "." ttbl) nil))
 						(lambda (x) (not (nil? x)))))
 					(reduce (merge _raw_aliases
@@ -5462,7 +5545,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						'()))))
 				(define prejoin_variant_exprs (lambda (expr) (match expr
 					'((symbol get_column) alias_ ti col ci) (merge
-						(list expr (rewrite_source_aliases prejoin_alias_map expr))
+						(list expr
+							(canonicalize_prejoin_source_expr expr)
+							(rewrite_source_aliases prejoin_alias_map expr))
 						(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
 							(if (has? (_td_alias_variants tv tschema ttbl) alias_)
 								(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
@@ -5470,23 +5555,30 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								'())
 							'())))))
 					'((quote get_column) alias_ ti col ci) (merge
-						(list expr (rewrite_source_aliases prejoin_alias_map expr))
+						(list expr
+							(canonicalize_prejoin_source_expr expr)
+							(rewrite_source_aliases prejoin_alias_map expr))
 						(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
 							(if (has? (_td_alias_variants tv tschema ttbl) alias_)
 								(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
 									(list (quote get_column) alias_v ti col ci)))
 								'())
 							'())))))
-					_ (list expr (rewrite_source_aliases prejoin_alias_map expr)))))
+					_ (list expr
+						(canonicalize_prejoin_source_expr expr)
+						(rewrite_source_aliases prejoin_alias_map expr)))))
 				(define prejoin_variant_names (lambda (expr)
 					(reduce (map (prejoin_variant_exprs expr) (lambda (variant_expr)
 						(sanitize_temp_name
-							(canonical_expr_name (normalize_canonical_aliases (lower_prejoin_lineage_expr variant_expr)) '(list) '(list) prejoin_alias_map))))
+							(serialize_canonical_expr
+								(canonicalize_expr
+									(normalize_canonical_aliases (canonicalize_prejoin_source_expr variant_expr))
+									prejoin_alias_map)))))
 						(lambda (acc variant_name) (append_unique acc variant_name))
 						'())))
 				(prejoin_canonical_sources prejointbl
 					(merge (map prejoin_columns (lambda (mc) (begin
-						(define source_expr (rewrite_source_aliases prejoin_alias_map (lower_prejoin_lineage_expr (cadr mc))))
+						(define source_expr (canonicalize_prejoin_source_expr (cadr mc)))
 						(map (reduce (cons (car mc) (prejoin_variant_names (cadr mc)))
 							(lambda (acc variant_name) (append_unique acc variant_name))
 							'())
@@ -5502,7 +5594,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
 				(createtable schema prejointbl
 					(map prejoin_column_names (lambda (col) '("column" col "any" '() '())))
-					'("engine" "sloppy") true)
+					query_temp_table_options true)
 				/* legacy nested-loop materializer retained temporarily for trigger backfill paths.
 				Query-time prejoin filling uses the canonical build_queryplan row stream below. */
 				(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
@@ -5612,7 +5704,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(if _scope_match
 								(list (quote get_column) prejoin_alias false
 									(sanitize_temp_name
-										(canonical_expr_name (normalize_canonical_aliases _logical_source_expr) '(list) '(list) prejoin_alias_map))
+										(serialize_canonical_expr (canonicalize_expr _logical_source_expr prejoin_alias_map)))
 									false)
 								expr)))
 					'((quote get_column) src_alias ti col ci) (begin
@@ -5644,7 +5736,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(if _scope_match
 								(list (quote get_column) prejoin_alias false
 									(sanitize_temp_name
-										(canonical_expr_name (normalize_canonical_aliases _logical_source_expr) '(list) '(list) prejoin_alias_map))
+										(serialize_canonical_expr (canonicalize_expr _logical_source_expr prejoin_alias_map)))
 									false)
 								expr)))
 					(cons sym args) (cons sym (map args rewrite_as_prejoin_column))
@@ -5657,21 +5749,33 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define grouped_fields (map_assoc raw_fields (lambda (k v)
 					(lower_prejoin_lineage_expr v))))
 				(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_lineage_expr))
-				(define grouped_having (lower_prejoin_lineage_expr raw_stage_having))
+				(define grouped_stage_alias_result (if (nil? grouped_keys)
+					nil
+					(make_keytable_schema schema prejointbl grouped_keys prejoin_alias)))
+				(define grouped_stage_alias (if (nil? grouped_stage_alias_result) nil
+					(car grouped_stage_alias_result)))
+				(define grouped_stage_key_names (if (nil? grouped_stage_alias_result) '()
+					(car (cdr grouped_stage_alias_result))))
+				(define rewrite_group_key_to_group_alias (lambda (expr)
+					(coalesce
+						(reduce (produceN (count grouped_keys)) (lambda (found i)
+							(if (not (nil? found))
+								found
+								(if (equal? expr (nth grouped_keys i))
+									(list (quote get_column) grouped_stage_alias false (nth grouped_stage_key_names i) false)
+									nil)))
+							nil)
+						(match expr
+							(cons sym args) (cons sym (map args rewrite_group_key_to_group_alias))
+							expr))))
+				(define grouped_having (rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr raw_stage_post_group_condition)))
 				(define grouped_order (if (nil? raw_stage_order) nil
 					(map raw_stage_order (lambda (o) (match o '(col dir)
 						(list (lower_prejoin_lineage_expr col) dir))))))
-				/* rebuild group stage for recursive call */
-					(define grouped_stage (if is_dedup
-						(make_dedup_stage grouped_keys
-							(if (nil? _stage_scope) nil (list prejoin_alias)))
-						(make_group_stage grouped_keys grouped_having grouped_order stage_limit stage_offset
-							(if (nil? _stage_scope) nil (list prejoin_alias))
-							nil)))
-					(define grouped_outer_tables (map _grp_ps_tables (lambda (td) (match td
-						'(tv tschema ttbl toisOuter je)
-						(list (if (nil? tv) ttbl tv) tschema ttbl toisOuter je)
-						td))))
+				(define grouped_outer_tables (map _grp_ps_tables (lambda (td) (match td
+					'(tv tschema ttbl toisOuter je)
+					(list (if (nil? tv) ttbl tv) tschema ttbl toisOuter je)
+					td))))
 				(define grouped_outer_aliases (map grouped_outer_tables (lambda (td) (match td '(tv _ _ _ _) tv ""))))
 				(define grouped_outer_schema_bindings (merge (map grouped_outer_tables (lambda (td) (match td
 					'(tv tschema ttbl _ _)
@@ -5680,10 +5784,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* recursive call with single prejoin table.
 				Scoped groups keep their outer tables outside the prejoin so later field
 				expressions can still read them after the keytable LEFT JOIN. */
-				(define grouped_plan_condition (if (equal? raw_post_group_condition true) nil
+				(define grouped_plan_condition_base (if (equal? raw_post_group_condition true) nil
 					(lower_prejoin_lineage_expr raw_post_group_condition)))
-					(define recursive_replace_find_column (lambda (expr)
-						(match expr
+				(define recursive_replace_find_column (lambda (expr)
+					(match expr
 						'((symbol get_column) alias_ _ _ _) (begin
 							(define resolved (replace_find_column expr))
 							(match resolved
@@ -5708,9 +5812,51 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									resolved
 									(rewrite_as_prejoin_column resolved))
 								_ resolved))
-							(cons sym args) (cons sym (map args recursive_replace_find_column))
-							expr)))
-					(define grouped_fields_for_recursive (if is_dedup
+						(cons sym args) (cons sym (map args recursive_replace_find_column))
+						expr)))
+				(define recursive_replace_find_column_condition (lambda (expr)
+					(match expr
+						'((symbol get_column) alias_ ti col ci) (begin
+							(define resolved (replace_find_column expr))
+							(match resolved
+								'((symbol get_column) resolved_alias _ resolved_col _)
+								(if (has? grouped_outer_aliases resolved_alias)
+									(list (quote outer) (symbol (concat resolved_alias "." resolved_col)))
+									(recursive_replace_find_column resolved))
+								'((quote get_column) resolved_alias _ resolved_col _)
+								(if (has? grouped_outer_aliases resolved_alias)
+									(list (quote outer) (symbol (concat resolved_alias "." resolved_col)))
+									(recursive_replace_find_column resolved))
+								_ (recursive_replace_find_column resolved)))
+						'((quote get_column) alias_ ti col ci) (begin
+							(define resolved (replace_find_column expr))
+							(match resolved
+								'((symbol get_column) resolved_alias _ resolved_col _)
+								(if (has? grouped_outer_aliases resolved_alias)
+									(list (quote outer) (symbol (concat resolved_alias "." resolved_col)))
+									(recursive_replace_find_column resolved))
+								'((quote get_column) resolved_alias _ resolved_col _)
+								(if (has? grouped_outer_aliases resolved_alias)
+									(list (quote outer) (symbol (concat resolved_alias "." resolved_col)))
+									(recursive_replace_find_column resolved))
+								_ (recursive_replace_find_column resolved)))
+						(cons sym args) (cons sym (map args recursive_replace_find_column_condition))
+						expr)))
+				(define grouped_having_for_recursive (if (nil? grouped_having) nil
+					(recursive_replace_find_column_condition grouped_having)))
+				(define grouped_plan_condition (combine_and_terms
+					(filter (list grouped_plan_condition_base grouped_having_for_recursive)
+						(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+				/* rebuild group stage for recursive call.
+				Post-group predicates continue as grouped_plan condition so recursive
+				planning uses a single filter path instead of a nested HAVING special case. */
+				(define grouped_stage (if is_dedup
+					(make_dedup_stage grouped_keys
+						(if (nil? _stage_scope) nil (list prejoin_alias)))
+					(make_group_stage grouped_keys nil grouped_order stage_limit stage_offset
+						(if (nil? _stage_scope) nil (list prejoin_alias))
+						nil)))
+				(define grouped_fields_for_recursive (if is_dedup
 						(map_assoc raw_fields (lambda (k v)
 							(recursive_replace_find_column v)))
 						grouped_fields))

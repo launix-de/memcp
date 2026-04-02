@@ -562,7 +562,6 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			datasetids[idx][si] = items
 		}
 	}
-
 	// Build the snapshot portion of the translation map once the partition scan
 	// is done. Concurrent Phase-C dual-writes extend the same map with delta rows.
 	translationMap := make(map[*storageShard]map[uint32]translatedRecid)

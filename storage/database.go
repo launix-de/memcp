@@ -66,6 +66,17 @@ type schemaWriteOptions interface {
 	WriteSchemaWithMode(schema []byte, durable bool)
 }
 
+func normalizeTempLookupName(dbName string, name string) string {
+	if !strings.HasPrefix(name, ".") {
+		return name
+	}
+	replacer := strings.NewReplacer(
+		`"`+dbName+`.`, `"`,
+		`\"`+dbName+`.`, `\"`,
+	)
+	return replacer.Replace(name)
+}
+
 // Custom JSON to persist private tables field
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
@@ -432,7 +443,27 @@ func (db *database) GetExclusive() func()  { db.ensureLoaded(); db.srState = WRI
 // helper to fetch a table with lazy db load
 func (db *database) GetTable(name string) *table {
 	db.ensureLoaded()
-	return db.tables.Get(name)
+	if t := db.tables.Get(name); t != nil {
+		return t
+	}
+	/* Query-temp/keytable names historically used unqualified source aliases in
+	the embedded get_column serialization. Newer planner/debug paths may look
+	them up with schema-qualified aliases; accept both spellings so planner IR
+	can evolve without breaking the physical temp-table namespace. */
+	if strings.HasPrefix(name, ".") {
+		normalizedName := normalizeTempLookupName(db.Name, name)
+		if normalizedName != name {
+			if t := db.tables.Get(normalizedName); t != nil {
+				return t
+			}
+		}
+		for _, t := range db.tables.GetAll() {
+			if normalizeTempLookupName(db.Name, t.Name) == normalizedName {
+				return t
+			}
+		}
+	}
+	return nil
 }
 
 func (db *database) ShowTables() scm.Scmer {
