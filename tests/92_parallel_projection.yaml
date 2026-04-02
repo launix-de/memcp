@@ -1,0 +1,70 @@
+# Parallel projection performance test
+# Verifies that parallel_map achieves real speedup when evaluating
+# multiple independent scans concurrently.
+
+metadata:
+  version: "1.0"
+  description: "Parallel projection speedup for independent scalar subselects"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS `pp_data`"
+  - sql: "DROP TABLE IF EXISTS `pp_timing`"
+
+test_cases:
+  - name: "PP: create and populate 30k rows"
+    setup:
+      - sql: "CREATE TABLE `pp_data` (id INT PRIMARY KEY, score INT)"
+      - sql: "CREATE TABLE `pp_timing` (label TEXT, ns INT)"
+      - scm: |
+          (begin
+            (insert "memcp-tests" "pp_data" '("id" "score")
+              (map (produceN 30000) (lambda (i) (list i (* i 7)))))
+            (rebuild)
+            true)
+    sql: "SELECT COUNT(*) AS cnt FROM pp_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 30000
+
+  - name: "PP: measure sequential (4 scans in series)"
+    scm: |
+      (begin
+        (define t0 (nanotime))
+        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (define t1 (nanotime))
+        (insert "memcp-tests" "pp_timing" '("label" "ns") (list (list "seq" (- t1 t0))))
+        true)
+
+  - name: "PP: measure parallel (4 scans via parallel_map)"
+    scm: |
+      (begin
+        (define t0 (nanotime))
+        (parallel_map
+          (list 1 2 3 4)
+          (lambda (_)
+            (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)))
+        (define t1 (nanotime))
+        (insert "memcp-tests" "pp_timing" '("label" "ns") (list (list "par" (- t1 t0))))
+        true)
+
+  - name: "PP: speedup >= 1.8x"
+    sql: |
+      SELECT seq_ns, par_ns,
+        CASE WHEN seq_ns * 10 >= par_ns * 18 THEN 'ok' ELSE 'FAIL' END AS result
+      FROM (
+        SELECT
+          (SELECT ns FROM pp_timing WHERE label = 'seq') AS seq_ns,
+          (SELECT ns FROM pp_timing WHERE label = 'par') AS par_ns
+      ) t
+    expect:
+      rows: 1
+      data:
+        - result: "ok"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS `pp_data`"
+  - sql: "DROP TABLE IF EXISTS `pp_timing`"
