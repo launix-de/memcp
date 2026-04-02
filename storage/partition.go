@@ -538,15 +538,22 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// beginManualRepartition) under maintenanceMu.
 	// From this point, all concurrent inserts/updates go to BOTH shard sets.
 
-	// ── Phase B: Snapshot + activate dual-write atomically ──
-	// Hold t.mu while taking all snapshots and activating dual-write.
-	// This closes the INSERT loss window: any INSERT that commits after the
-	// last snapshot will see the flag and dual-write.
+	// ── Phase B: Snapshot under t.mu, partition off-lock ──
+	// Hold t.mu only while taking cheap per-shard snapshots and enabling
+	// dual-write. The expensive partition scan runs on the immutable snapshots
+	// afterwards, so INSERTs are blocked only for the narrow publication window.
+	snapshots := make([]shardPartitionSnapshot, len(oldshards))
 	datasetids := make([][][]uint32, totalShards) // newshard -> oldshard -> []rowIdx
 	total_count := uint64(0)
 	t.mu.Lock()
 	for si, s := range oldshards {
-		snap := s.snapshotPartitionState(shardCandidates)
+		snapshots[si] = s.snapshotPartitionState(shardCandidates)
+	}
+	t.setRepartitionTranslationMap(make(map[*storageShard]map[uint32]translatedRecid))
+	t.repartitionDualWriteActive.Store(true)
+	t.mu.Unlock()
+
+	for si, snap := range snapshots {
 		total_count += snap.count()
 		for idx, items := range snap.partition(shardCandidates) {
 			if datasetids[idx] == nil {
@@ -555,9 +562,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			datasetids[idx][si] = items
 		}
 	}
-	// Build translation map immediately so DELETE dual-write works during Phase C.
-	// The mapping (oldShard, oldRecid) → (pshardIdx, newRecid) is fully determined
-	// by datasetids from the snapshot; it does not depend on Phase C's column build.
+	// Build the snapshot portion of the translation map once the partition scan
+	// is done. Concurrent Phase-C dual-writes extend the same map with delta rows.
 	translationMap := make(map[*storageShard]map[uint32]translatedRecid)
 	for nsi, items := range datasetids {
 		if items == nil {
@@ -580,13 +586,13 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 				translationMap[shard][oldRecid] = translatedRecid{
 					pshardIdx: nsi,
 					newRecid:  offset + uint32(localIdx),
+					inDelta:   false,
 				}
 			}
 		}
 	}
-	t.repartitionTranslation = translationMap
-	t.repartitionDualWriteActive.Store(true)
-	t.mu.Unlock()
+	t.mergeRepartitionTranslations(translationMap)
+	t.resolvePendingRepartitionSourceDeletes()
 
 	// ── Phase C: Build main storage (no locks held — long phase) ──
 	// Build column storage into temporary per-shard maps. We must NOT touch
@@ -774,28 +780,6 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 					s.deletions.Set(uint(uint32(mainN)+uint32(i)), true)
 				}
 			}
-			// Rebuild hashmaps with shifted keys
-			for k, v := range s.hashmaps1 {
-				newmap := make(map[[1]scm.Scmer]uint32, len(v))
-				for key, recid := range v {
-					newmap[key] = recid + uint32(mainN)
-				}
-				s.hashmaps1[k] = newmap
-			}
-			for k, v := range s.hashmaps2 {
-				newmap := make(map[[2]scm.Scmer]uint32, len(v))
-				for key, recid := range v {
-					newmap[key] = recid + uint32(mainN)
-				}
-				s.hashmaps2[k] = newmap
-			}
-			for k, v := range s.hashmaps3 {
-				newmap := make(map[[3]scm.Scmer]uint32, len(v))
-				for key, recid := range v {
-					newmap[key] = recid + uint32(mainN)
-				}
-				s.hashmaps3[k] = newmap
-			}
 			// Shift delta btree indexes
 			for _, index := range s.Indexes {
 				if index.deltaBtree != nil {
@@ -814,6 +798,12 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		}
 		s.mu.Unlock()
 	}
+	mainCounts := make([]uint32, len(newshards))
+	for i, built := range builtData {
+		mainCounts[i] = built.mainCount
+	}
+	t.shiftDeltaRepartitionTranslations(mainCounts)
+	t.resolvePendingRepartitionSourceDeletes()
 
 	// Apply pending main-storage deletions that were buffered during Phase C.
 	totalPending := 0
@@ -828,8 +818,12 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		totalPending += len(pending)
 		for _, tr := range pending {
 			ps := newshards[tr.pshardIdx]
+			recid := tr.newRecid
+			if tr.inDelta {
+				recid += mainCounts[tr.pshardIdx]
+			}
 			ps.mu.Lock()
-			ps.deletions.Set(uint(tr.newRecid), true)
+			ps.deletions.Set(uint(recid), true)
 			ps.mu.Unlock()
 		}
 	}
@@ -869,14 +863,20 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// Final drain of pending deletions. After Phase F drain, all in-flight
 	// DELETE scans have completed and their dual-write callbacks have finished.
 	// Any remaining pending entries are now final.
+	t.resolvePendingRepartitionSourceDeletes()
 	t.repartitionPendingMu.Lock()
 	finalPending := t.repartitionPendingDels
 	t.repartitionPendingDels = nil
+	t.repartitionPendingSourceDels = nil
 	t.repartitionPendingMu.Unlock()
 	for _, tr := range finalPending {
 		ps := newshards[tr.pshardIdx]
+		recid := tr.newRecid
+		if tr.inDelta {
+			recid += mainCounts[tr.pshardIdx]
+		}
 		ps.mu.Lock()
-		ps.deletions.Set(uint(tr.newRecid), true)
+		ps.deletions.Set(uint(recid), true)
 		ps.mu.Unlock()
 	}
 	if len(finalPending) > 0 {
@@ -907,8 +907,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	t.Shards = nil
 	t.maintenanceKind = 0
 	t.repartitionDualWriteActive.Store(false)
-	t.repartitionTranslation = nil
 	t.mu.Unlock()
+	t.clearRepartitionTranslation()
 	t.maintenanceMu.Unlock()
 
 	for _, s := range oldshards {

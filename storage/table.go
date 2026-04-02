@@ -157,6 +157,12 @@ const (
 type translatedRecid struct {
 	pshardIdx int
 	newRecid  uint32
+	inDelta   bool
+}
+
+type pendingSourceDelete struct {
+	oldShard *storageShard
+	oldRecid uint32
 }
 
 func (m *ShardMode) MarshalJSON() ([]byte, error) {
@@ -305,15 +311,18 @@ type table struct {
 	repartitionDualWriteActive atomic.Bool // true after Phase B snapshot; dual-write only when true
 
 	// repartitionTranslation maps old-shard rows to their new PShard locations.
-	// Built during Phase B, read by DELETE dual-write. Immutable after creation.
+	// Snapshot rows are published after Phase B. Post-snapshot dual-written rows
+	// extend the same map during Phase C so DELETE forwarding stays O(1).
 	// Key: pointer to old shard. Value: map from old recid to new location.
-	repartitionTranslation map[*storageShard]map[uint32]translatedRecid
+	repartitionTranslationMu sync.RWMutex
+	repartitionTranslation   map[*storageShard]map[uint32]translatedRecid
 
 	// repartitionPendingDels collects main-storage deletion recids that arrive
 	// via DELETE dual-write before Phase D installs main_count. Phase D applies
 	// them after shifting delta. Protected by repartitionPendingMu.
-	repartitionPendingMu   sync.Mutex
-	repartitionPendingDels []translatedRecid
+	repartitionPendingMu         sync.Mutex
+	repartitionPendingDels       []translatedRecid
+	repartitionPendingSourceDels []pendingSourceDelete
 }
 
 func (t *table) enterMutationOwner() {
@@ -421,6 +430,126 @@ func (t *table) maintenanceShards() []*storageShard {
 		}
 	}
 	return result
+}
+
+func (t *table) setRepartitionTranslationMap(m map[*storageShard]map[uint32]translatedRecid) {
+	t.repartitionTranslationMu.Lock()
+	t.repartitionTranslation = m
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) mergeRepartitionTranslations(m map[*storageShard]map[uint32]translatedRecid) {
+	if len(m) == 0 {
+		return
+	}
+	t.repartitionTranslationMu.Lock()
+	if t.repartitionTranslation == nil {
+		t.repartitionTranslation = make(map[*storageShard]map[uint32]translatedRecid, len(m))
+	}
+	for shard, entries := range m {
+		if len(entries) == 0 {
+			continue
+		}
+		dst := t.repartitionTranslation[shard]
+		if dst == nil {
+			dst = make(map[uint32]translatedRecid, len(entries))
+			t.repartitionTranslation[shard] = dst
+		}
+		for oldRecid, tr := range entries {
+			dst[oldRecid] = tr
+		}
+	}
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) recordRepartitionTranslation(oldShard *storageShard, oldRecid uint32, tr translatedRecid) {
+	t.repartitionTranslationMu.Lock()
+	if t.repartitionTranslation == nil {
+		t.repartitionTranslation = make(map[*storageShard]map[uint32]translatedRecid)
+	}
+	if t.repartitionTranslation[oldShard] == nil {
+		t.repartitionTranslation[oldShard] = make(map[uint32]translatedRecid)
+	}
+	t.repartitionTranslation[oldShard][oldRecid] = tr
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) lookupRepartitionTranslation(oldShard *storageShard, oldRecid uint32) (translatedRecid, bool) {
+	t.repartitionTranslationMu.RLock()
+	defer t.repartitionTranslationMu.RUnlock()
+	if t.repartitionTranslation == nil {
+		return translatedRecid{}, false
+	}
+	shardMap := t.repartitionTranslation[oldShard]
+	if shardMap == nil {
+		return translatedRecid{}, false
+	}
+	tr, ok := shardMap[oldRecid]
+	return tr, ok
+}
+
+func (t *table) shiftDeltaRepartitionTranslations(mainCounts []uint32) {
+	t.repartitionTranslationMu.Lock()
+	for _, shardMap := range t.repartitionTranslation {
+		for oldRecid, tr := range shardMap {
+			if !tr.inDelta {
+				continue
+			}
+			if tr.pshardIdx >= 0 && tr.pshardIdx < len(mainCounts) {
+				tr.newRecid += mainCounts[tr.pshardIdx]
+			}
+			tr.inDelta = false
+			shardMap[oldRecid] = tr
+		}
+	}
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) clearRepartitionTranslation() {
+	t.repartitionTranslationMu.Lock()
+	t.repartitionTranslation = nil
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) appendPendingRepartitionDelete(tr translatedRecid) {
+	t.repartitionPendingMu.Lock()
+	t.repartitionPendingDels = append(t.repartitionPendingDels, tr)
+	t.repartitionPendingMu.Unlock()
+}
+
+func (t *table) appendPendingRepartitionSourceDelete(oldShard *storageShard, oldRecid uint32) {
+	t.repartitionPendingMu.Lock()
+	t.repartitionPendingSourceDels = append(t.repartitionPendingSourceDels, pendingSourceDelete{oldShard: oldShard, oldRecid: oldRecid})
+	t.repartitionPendingMu.Unlock()
+}
+
+func (t *table) resolvePendingRepartitionSourceDeletes() {
+	t.repartitionPendingMu.Lock()
+	pending := t.repartitionPendingSourceDels
+	t.repartitionPendingSourceDels = nil
+	t.repartitionPendingMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+
+	unresolved := pending[:0]
+	translated := make([]translatedRecid, 0, len(pending))
+	for _, src := range pending {
+		if tr, ok := t.lookupRepartitionTranslation(src.oldShard, src.oldRecid); ok {
+			translated = append(translated, tr)
+		} else {
+			unresolved = append(unresolved, src)
+		}
+	}
+
+	t.repartitionPendingMu.Lock()
+	if len(translated) > 0 {
+		t.repartitionPendingDels = append(t.repartitionPendingDels, translated...)
+	}
+	if len(unresolved) > 0 {
+		t.repartitionPendingSourceDels = append(t.repartitionPendingSourceDels, unresolved...)
+	}
+	t.repartitionPendingMu.Unlock()
 }
 
 // beginManualRepartition serializes direct partitiontable-triggered repartitions.
@@ -1285,7 +1414,7 @@ insertDone:
 	// triggers, and auto-increment (already assigned in primary insert).
 	// Use repartitionDualWriteActive (set after Phase B snapshot) to avoid
 	// duplicating rows that are already captured in the snapshot.
-	if t.repartitionDualWriteActive.Load() {
+	if t.repartitionDualWriteActive.Load() && t.ShardMode == ShardModePartition {
 		t.dualWriteInsert(columns, values)
 	}
 
@@ -1392,101 +1521,72 @@ func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
 	}
 }
 
-// dualWriteDelete forwards a DELETE to PShards during repartition.
-// For rows in the Phase B snapshot (present in repartitionTranslation),
-// it uses the translation map to find the exact PShard recid.
-// For post-snapshot dual-written delta rows, it searches by PK.
-func (t *table) dualWriteDelete(oldShard *storageShard, oldRecid uint32) {
-	// Check translation map for snapshot-era rows
-	if t.repartitionTranslation != nil {
-		if shardMap, ok := t.repartitionTranslation[oldShard]; ok {
-			if tr, ok := shardMap[oldRecid]; ok {
-				// Buffer the translated deletion. Phase D will apply all buffered
-				// deletions after installing main storage, avoiding conflicts
-				// with the delta shift.
-				t.repartitionPendingMu.Lock()
-				t.repartitionPendingDels = append(t.repartitionPendingDels, tr)
-				t.repartitionPendingMu.Unlock()
-				return
-			}
-		}
-	}
-	// Post-snapshot delta row: was dual-written as INSERT into PShard.
-	// Find by partition key values and delete by PK match.
-	if t.PDimensions == nil || t.PShards == nil {
+func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uint32, columns []string, values [][]scm.Scmer) {
+	if t.PShards == nil || len(values) == 0 {
 		return
 	}
 	dims := t.PDimensions
 	shardcols := make([]scm.Scmer, len(dims))
-	oldShard.mu.RLock()
-	for i, sd := range dims {
-		if oldRecid < oldShard.main_count {
-			cs, ok := oldShard.columns[sd.Column]
-			if ok {
-				shardcols[i] = cs.GetValue(oldRecid)
-			}
-		} else {
-			idx := int(oldRecid - oldShard.main_count)
-			if colIdx, ok := oldShard.deltaColumns[sd.Column]; ok && idx < len(oldShard.inserts) {
-				shardcols[i] = oldShard.inserts[idx][colIdx]
-			}
-		}
-	}
-	oldShard.mu.RUnlock()
-
-	psi := computeShardIndex(dims, shardcols)
-	ps := t.PShards[psi]
-
-	// Find the row by PK in the target PShard
-	var primaryCols []string
-	for _, uk := range t.Unique {
-		if uk.Id == "PRIMARY" {
-			primaryCols = uk.Cols
-			break
-		}
-	}
-	if len(primaryCols) == 0 {
-		return // no PK, cannot find
-	}
-
-	// Read PK values from old shard
-	pkVals := make([]scm.Scmer, len(primaryCols))
-	oldShard.mu.RLock()
-	for i, col := range primaryCols {
-		if oldRecid < oldShard.main_count {
-			cs, ok := oldShard.columns[col]
-			if ok {
-				pkVals[i] = cs.GetValue(oldRecid)
-			}
-		} else {
-			idx := int(oldRecid - oldShard.main_count)
-			if colIdx, ok := oldShard.deltaColumns[col]; ok && idx < len(oldShard.inserts) {
-				pkVals[i] = oldShard.inserts[idx][colIdx]
-			}
-		}
-	}
-	oldShard.mu.RUnlock()
-
-	// Find and delete in PShard (search both main and delta storage)
-	ps.mu.Lock()
-	limit := ps.main_count + uint32(len(ps.inserts))
-	for recid := uint32(0); recid < limit; recid++ {
-		if ps.deletions.Get(uint(recid)) {
-			continue
-		}
-		match := true
-		for i, col := range primaryCols {
-			if !scm.Equal(ps.rowValueByRecidLocked(recid, col), pkVals[i]) {
-				match = false
+	translatable := make([]int, len(dims))
+	for i, cd := range dims {
+		translatable[i] = -1
+		for j, col := range columns {
+			if cd.Column == col {
+				translatable[i] = j
 				break
 			}
 		}
-		if match {
-			ps.deletions.Set(uint(recid), true)
-			break
+	}
+
+	lastI := 0
+	lastPSI := -1
+	var lastShard *storageShard
+	flush := func(end int) {
+		if lastShard == nil || end <= lastI {
+			return
+		}
+		rel := lastShard.GetExclusive()
+		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false)
+		rel()
+		for i := lastI; i < end; i++ {
+			t.recordRepartitionTranslation(oldShard, firstOldRecid+uint32(i), translatedRecid{
+				pshardIdx: lastPSI,
+				newRecid:  firstNewRecid + uint32(i-lastI),
+				inDelta:   true,
+			})
 		}
 	}
-	ps.mu.Unlock()
+
+	for i := 0; i < len(values); i++ {
+		for j, colidx := range translatable {
+			if colidx >= 0 && colidx < len(values[i]) {
+				shardcols[j] = values[i][colidx]
+			} else {
+				shardcols[j] = scm.NewNil()
+			}
+		}
+		psi := computeShardIndex(dims, shardcols)
+		shard := t.PShards[psi]
+		if i > 0 && shard != lastShard {
+			flush(i)
+			lastI = i
+		}
+		lastPSI = psi
+		lastShard = shard
+	}
+	flush(len(values))
+}
+
+// dualWriteDelete forwards a DELETE to PShards during repartition.
+// For rows in the Phase B snapshot (present in repartitionTranslation),
+// it uses the translation map to find the exact PShard recid. Post-snapshot
+// dual-written rows extend the same translation map as they are inserted.
+func (t *table) dualWriteDelete(oldShard *storageShard, oldRecid uint32) {
+	if tr, ok := t.lookupRepartitionTranslation(oldShard, oldRecid); ok {
+		t.appendPendingRepartitionDelete(tr)
+		return
+	}
+	t.appendPendingRepartitionSourceDelete(oldShard, oldRecid)
 }
 
 /*
@@ -1579,6 +1679,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			uniquelockHeld = true
 		}
 
+		currentTx := CurrentTx()
 		last_j := 0
 		for j, row := range values {
 			shardlist2 := shardlist
@@ -1607,16 +1708,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			for _, s := range shardlist2 {
 				// ensure shard is loaded for read during unique check
 				r := s.GetRead()
-				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
-				isVisible := false
+				uid, present := s.GetRecordidForUnique(uniq.Cols, key, currentTx)
 				if present {
-					if currentTx := CurrentTx(); currentTx != nil && currentTx.Mode == TxACID {
-						isVisible = currentTx.IsVisible(s, uid)
-					} else {
-						isVisible = !s.deletions.Get(uint(uid))
-					}
-				}
-				if isVisible {
 					// found a unique collision
 					if j != last_j {
 						// If the inner check panics (unique violation in a later constraint),

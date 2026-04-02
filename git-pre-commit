@@ -1,5 +1,20 @@
 #!/bin/bash
 #
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 # MemCP Pre-commit Hook
 # Runs SQL tests before allowing commits using a single MemCP instance
 #
@@ -70,10 +85,16 @@ printf '%s\n' "${test_files_arr[@]}"
 echo ""
 
 test_port=4480
-memcp_test_datadir="/tmp/memcp-pre-commit-tests"
-rm -rf "$memcp_test_datadir" || true
-export MEMCP_TEST_DATADIR="$memcp_test_datadir"
 tmpdir=""
+supervisor_pid=""
+
+# Runner contract:
+# - All suites use the repository-local ./data directory.
+# - ./data must never be deleted by this hook.
+# - "isolated" means serialized execution on the same shared database, not
+#   storage isolation.
+# - restart/SHUTDOWN suites may temporarily stop the shared supervisor, but
+#   they must come back on the same ./data afterwards.
 
 run_memcp_forever() {
   trap 'kill $memcp_pid 2>/dev/null; exit 0' TERM INT
@@ -82,7 +103,7 @@ run_memcp_forever() {
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
     memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
-    ./memcp --no-repl -data "$memcp_test_datadir" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
+    ./memcp --no-repl -data ./data --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
     wait $memcp_pid
     rc=$?
@@ -91,6 +112,28 @@ run_memcp_forever() {
     fi
     sleep 0.5
   done
+}
+
+start_supervisor() {
+  echo -n > /tmp/memcp-test.log
+  run_memcp_forever &
+  supervisor_pid=$!
+
+  echo "⏳ Waiting for MemCP to be ready..."
+  if wait_for_sql_ready 60 1; then
+    echo "✅ MemCP is ready!"
+    return 0
+  fi
+  echo "❌ MemCP did not become SQL-ready"
+  return 1
+}
+
+stop_supervisor() {
+  if [ -n "${supervisor_pid:-}" ]; then
+    kill "$supervisor_pid" 2>/dev/null || true
+    supervisor_pid=""
+  fi
+  pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
 }
 
 wait_for_sql_ready() {
@@ -109,15 +152,7 @@ wait_for_sql_ready() {
   return 1
 }
 
-echo -n > /tmp/memcp-test.log
-run_memcp_forever &
-supervisor_pid=$!
-
-echo "⏳ Waiting for MemCP to be ready..."
-if wait_for_sql_ready 60 1; then
-  echo "✅ MemCP is ready!"
-else
-  echo "❌ MemCP did not become SQL-ready"
+if ! start_supervisor; then
   exit 1
 fi
 
@@ -132,12 +167,10 @@ cleanup() {
   for pid in $(jobs -p 2>/dev/null); do
     kill "$pid" 2>/dev/null || true
   done
-  kill $supervisor_pid 2>/dev/null || true
-  pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
+  stop_supervisor
   if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
     rm -rf "$tmpdir" 2>/dev/null || true
   fi
-  rm -rf "$memcp_test_datadir" 2>/dev/null || true
   echo "✅ MemCP stopped"
 }
 trap cleanup EXIT
@@ -153,8 +186,36 @@ failed_files=""
 
 parallel_tests=()
 sequential_tests=()
+suite_mode() {
+  python3 - "$1" <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    spec = yaml.safe_load(f) or {}
+metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
+if metadata.get("isolated"):
+    print("isolated")
+    raise SystemExit(0)
+for test_case in spec.get("test_cases", []) if isinstance(spec, dict) else []:
+    if not isinstance(test_case, dict):
+        continue
+    if test_case.get("action") == "restart":
+        print("isolated")
+        raise SystemExit(0)
+    sql = test_case.get("sql")
+    if isinstance(sql, str) and sql.strip().upper() == "SHUTDOWN":
+        print("isolated")
+        raise SystemExit(0)
+print("shared")
+PY
+}
+
+# Scheduling contract:
+# - shared suites may run in parallel against the long-lived shared MemCP
+#   process
+# - isolated suites must run one after another, but still on the same ./data
+#   database state
 for tf in "${test_files_arr[@]}"; do
-  if grep -Eqi "^[[:space:]]*isolated:[[:space:]]*true([[:space:]]|$)" "$tf"; then
+  if [ "$(suite_mode "$tf")" = "isolated" ]; then
     sequential_tests+=("$tf")
   else
     parallel_tests+=("$tf")
@@ -219,8 +280,7 @@ for tf in "${sequential_tests[@]}"; do
   run_one "$tf" "$out" "$statusf"
 done
 
-kill $supervisor_pid 2>/dev/null || true
-pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
+stop_supervisor
 
 for tf in "${test_files_arr[@]}"; do
   statusf="$tmpdir/$(basename "$tf").status"
