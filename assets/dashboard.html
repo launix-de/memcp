@@ -153,6 +153,7 @@ body{display:flex;flex-direction:column}
 <a href="#databases">Databases</a>
 <a href="#console">Console</a>
 <a href="#users" data-admin-only>Users</a>
+<a href="#processlist" data-admin-only>Processes</a>
 <a href="#errors" data-admin-only>Errors</a>
 <a href="#logs" data-admin-only>Log</a>
 <a href="#settings" data-admin-only>Settings</a>
@@ -562,6 +563,20 @@ body{display:flex;flex-direction:column}
 <button id="change-pw-cancel" class="btn-warn" style="background:#333">Cancel</button>
 <button id="change-pw-ok" class="btn-warn">Change</button>
 </div>
+</div>
+</div>
+
+<div class="view" id="view-processlist">
+<div class="browse-wrap">
+<h2>Processes</h2>
+<div style="margin-bottom:12px;display:flex;align-items:center;gap:12px">
+<button class="btn-warn" onclick="loadProcesslist()" style="background:#16213e">Refresh</button>
+<label style="color:#888;font-size:.8rem"><input type="checkbox" id="pl-auto-refresh" checked onchange="togglePlAutoRefresh()"> Auto-refresh</label>
+</div>
+<table class="browse-table" id="tbl-processlist">
+<thead><tr><th>ID</th><th>User</th><th>Host</th><th>DB</th><th>Command</th><th>Time</th><th>State</th><th>Info</th><th>Action</th></tr></thead>
+<tbody></tbody>
+</table>
 </div>
 </div>
 
@@ -1152,6 +1167,15 @@ fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:expr})
 
 function fetchUsers(cb){scmFetch(SCM_USERS,cb);}
 
+function sqlFetch(query,cb){
+fetch(base+"/sql/system",{method:"POST",credentials:"same-origin",body:query})
+.then(function(r){if(!r.ok)throw new Error(r.status);return r.text();})
+.then(function(t){
+var rows=t.trim().split("\n").filter(function(l){return l.length>0;}).map(function(l){return JSON.parse(l);});
+cb(rows);
+}).catch(function(e){console.error("SQL error:",e);});
+}
+
 function apiPost(url,body,cb){
 fetch(url,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){
 if(!r.ok)return r.text().then(function(t){throw new Error(t)});
@@ -1314,6 +1338,13 @@ if(cb)cb.checked=data.PrintLog||false;
 if(inp)inp.value=data.MaxPrintLog||0;
 });
 loadSidebar();
+return;
+}
+if(hash==="processlist"){
+if(!isAdmin){location.hash="databases";return}
+showView("view-processlist");
+loadProcesslist();
+startPlAutoRefresh();
 return;
 }
 if(hash==="settings"){
@@ -2243,6 +2274,42 @@ window.startLogsAutoRefresh=startLogsAutoRefresh;
 window.stopLogsAutoRefresh=stopLogsAutoRefresh;
 window.startErrorsAutoRefresh=startErrorsAutoRefresh;
 window.stopErrorsAutoRefresh=stopErrorsAutoRefresh;
+
+/* ── Processlist ── */
+var _plTimer=null;
+function loadProcesslist(){
+sqlFetch("SHOW FULL PROCESSLIST",function(rows){
+var tb=document.querySelector("#tbl-processlist tbody");
+if(!tb)return;
+if(!rows||!rows.length){tb.innerHTML='<tr><td colspan="9" style="color:#888;text-align:center">No active connections</td></tr>';return;}
+var h="";
+for(var i=0;i<rows.length;i++){
+var p=rows[i];
+var info=p.Info||"";
+if(info.length>120) info=info.substring(0,120)+"\u2026";
+h+='<tr><td>'+esc(""+p.Id)+'</td><td>'+esc(p.User||"")+'</td><td>'+esc(p.Host||"")+'</td><td>'+esc(p.db||"")+'</td><td>'+esc(p.Command||"")+'</td><td>'+esc(""+p.Time)+'</td><td>'+esc(p.State||"")+'</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem" title="'+esc(p.Info||"")+'">'+esc(info)+'</td>';
+h+='<td><button class="btn-warn" style="padding:2px 10px;font-size:.75rem" onclick="killQuery('+p.Id+')">Kill</button></td></tr>';
+}
+tb.innerHTML=h;
+});
+}
+function killQuery(id){
+if(!confirm("Kill query #"+id+"?"))return;
+sqlFetch("KILL QUERY "+id,function(){loadProcesslist();});
+}
+function startPlAutoRefresh(){
+stopPlAutoRefresh();
+var cb=document.getElementById("pl-auto-refresh");
+if(cb&&cb.checked){_plTimer=setInterval(loadProcesslist,2000);}
+}
+function stopPlAutoRefresh(){if(_plTimer){clearInterval(_plTimer);_plTimer=null;}}
+function togglePlAutoRefresh(){
+var cb=document.getElementById("pl-auto-refresh");
+if(cb&&cb.checked){startPlAutoRefresh();}else{stopPlAutoRefresh();}
+}
+window.killQuery=killQuery;
+window.loadProcesslist=loadProcesslist;
+window.togglePlAutoRefresh=togglePlAutoRefresh;
 
 })();
 </script>
