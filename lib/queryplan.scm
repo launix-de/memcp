@@ -825,6 +825,18 @@ planner starts splitting aggregate conditions apart. */
 	)
 ))
 
+/* extract_all_table_aliases: return a flat list of all table aliases referenced
+   via get_column nodes in an expression.  Used by LEFT JOIN pruning to detect
+   which tables are actually read. */
+(define extract_all_table_aliases (lambda (expr)
+	(match expr
+		'((symbol get_column) alias_ _ _ _) (if (nil? alias_) '() (list (string alias_)))
+		'((quote get_column) alias_ _ _ _) (if (nil? alias_) '() (list (string alias_)))
+		(cons sym args) (merge (map args extract_all_table_aliases))
+		'()
+	)
+))
+
 /* extract_scanned_tables: walk an expression AST and return all (schema table) pairs from scan/scan_order calls.
 Used to detect which tables a computor lambda reads from, so we can register invalidation triggers. */
 (define extract_scanned_tables (lambda (expr)
@@ -3645,6 +3657,20 @@ or generate runtime scan code (build_queryplan).
 	(set order (map order (lambda (o) (match o '(col dir) (list (finalize_visible_expr col) dir)))))
 
 	(set having (finalize_visible_expr having))
+
+	/* LEFT JOIN pruning: remove LEFT JOINed tables that are not referenced
+	   anywhere in the query (fields, condition, having, order, or sibling
+	   joinexprs). A LEFT JOIN that is never read contributes only NULL columns
+	   and cannot filter rows, so it is safe to drop entirely. */
+	(define _all_referenced_aliases (merge_unique (list
+		(extract_all_table_aliases fields)
+		(extract_all_table_aliases conditionAll)
+		(extract_all_table_aliases (coalesceNil having true))
+		(merge (map (coalesceNil order '()) (lambda (o) (extract_all_table_aliases o))))
+		(merge (map tables (lambda (td) (match td '(_ _ _ _ je) (if (nil? je) '() (extract_all_table_aliases je)) '())))))))
+	(set tables (filter tables (lambda (td) (match td
+		'(alias _ _ isOuter _) (or (not isOuter) (has? _all_referenced_aliases (string alias)))
+		true))))
 
 	(define groups (merge
 		(coalesceNil _sq_pstages '())
