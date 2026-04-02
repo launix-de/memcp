@@ -5233,8 +5233,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(if (not (nil? _stage_scope))
 									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
 									(list (make_collect false))
-									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
-										(make_collect false)
+									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl) (list 'table_stale? schema grouptbl))
+										(list 'begin
+											(make_collect false)
+											(list 'mark_table_fresh schema grouptbl))
 										nil))))
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
 							(list compute_plan)
@@ -6003,9 +6005,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(list 'if (list 'createtable pj_schema prejointbl
 							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							'(list "engine" "sloppy") true)
-							(list 'time prejoin_materialize_plan "materialize")
-							(list 'if (list 'table_empty? pj_schema prejointbl)
+							(list 'begin
 								(list 'time prejoin_materialize_plan "materialize")
+								(list 'mark_table_fresh pj_schema prejointbl))
+							(list 'if (list 'or (list 'table_empty? pj_schema prejointbl) (list 'table_stale? pj_schema prejointbl))
+								(list 'begin
+									(list 'time prejoin_materialize_plan "materialize")
+									(list 'mark_table_fresh pj_schema prejointbl))
 								nil)))
 					pj_trigger_registrations
 					(list grouped_result)))
