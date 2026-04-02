@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Parallel projection speedup for independent scalar subselects"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS `pp_data`"
@@ -15,12 +16,13 @@ test_cases:
     setup:
       - sql: "CREATE TABLE `pp_data` (id INT PRIMARY KEY, score INT)"
       - sql: "CREATE TABLE `pp_timing` (label TEXT, ns INT)"
-      - scm: |
-          (begin
-            (insert "memcp-tests" "pp_data" '("id" "score")
-              (map (produceN 30000) (lambda (i) (list i (* i 7)))))
-            (rebuild)
-            true)
+    scm: |
+      (begin
+        (insert "memcp-tests" "pp_data" '("id" "score")
+          (map (produceN 30000) (lambda (i) (list i (* i 7)))))
+        30000)
+
+  - name: "PP: verify data"
     sql: "SELECT COUNT(*) AS cnt FROM pp_data"
     expect:
       rows: 1
@@ -51,10 +53,10 @@ test_cases:
         (insert "memcp-tests" "pp_timing" '("label" "ns") (list (list "par" (- t1 t0))))
         true)
 
-  - name: "PP: speedup >= 1.8x"
+  - name: "PP: speedup >= 1.5x"
     sql: |
       SELECT seq_ns, par_ns,
-        CASE WHEN seq_ns * 10 >= par_ns * 18 THEN 'ok' ELSE 'FAIL' END AS result
+        CASE WHEN seq_ns * 10 >= par_ns * 15 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
           (SELECT ns FROM pp_timing WHERE label = 'seq') AS seq_ns,

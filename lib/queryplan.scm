@@ -831,35 +831,56 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 			_ (reduce rest (lambda (acc child) (or acc (expr_has_scan child))) false))
 		false)))
 
-/* maybe_parallelize_resultrow: takes a flat assoc list of resolved
-   field AST nodes (k1 v1 k2 v2 ...) and wraps it in a resultrow call.
-   If >=2 value expressions contain scans, the values are evaluated via
-   parallel_map for concurrent execution.  Otherwise emits a plain
-   sequential resultrow.  Runs at queryplan build time on AST data. */
-(define maybe_parallelize_resultrow (lambda (kv_flat)
-	(begin
-		/* extract keys and values from the flat assoc */
-		(define keys (extract_assoc kv_flat (lambda (k v) k)))
-		(define vals (extract_assoc kv_flat (lambda (k v) v)))
-		(define complex_count (reduce vals (lambda (acc v) (+ acc (if (expr_has_scan v) 1 0))) 0))
-		(if (< complex_count 2)
-			/* sequential: plain resultrow */
-			(list (symbol "resultrow") (cons (symbol "list") kv_flat))
-			/* parallel: wrap value evaluation in parallel_map */
-			(begin
-				/* thunks: ((lambda () v1) (lambda () v2) ...) */
-				(define thunks (map vals (lambda (v) (list (quote lambda) '() v))))
-				/* (parallel_map (list thunk1 thunk2 ...) (lambda (__pf) (__pf))) */
-				(define pmap_call (list (symbol "parallel_map")
-					(cons (symbol "list") thunks)
-					(list (quote lambda) (list (symbol "__pf")) (list (symbol "__pf")))))
-				/* (list "k1" (nth __pr 0) "k2" (nth __pr 1) ...) */
-				(define reassembled (cons (symbol "list")
-					(merge (mapIndex keys (lambda (i k) (list k (list (symbol "nth") (symbol "__pr") i)))))))
-				/* (begin (define __pr (parallel_map ...)) (resultrow (list ...))) */
-				(list (quote begin)
-					(list (quote define) (symbol "__pr") pmap_call)
-					(list (symbol "resultrow") reassembled)))))))
+/* expr_refs_outer_var: returns true if an expression references (var N) at the
+   top level (outside any nested lambda). */
+(define expr_refs_outer_var (lambda (expr)
+	(match expr
+		(cons head rest) (match (string head)
+			"var" true
+			"lambda" false
+			_ (reduce rest (lambda (acc child) (or acc (expr_refs_outer_var child))) false))
+		false)))
+
+/* expr_is_parallelizable: safe to wrap in a parallel thunk if it contains
+   a scan AND does not reference outer-scope vars. */
+(define expr_is_parallelizable (lambda (expr)
+	(and (expr_has_scan expr) (not (expr_refs_outer_var expr)))))
+
+/* parallelize_resultrows: post-processing pass over the finished query plan AST.
+   Rewrites (resultrow (list k1 v1 k2 v2 ...)) nodes: if >=2 value expressions
+   are parallelizable, wrap them in parallel_map for concurrent evaluation.
+   Only recurses into transparent wrappers (begin/if/define/time). */
+(define parallelize_resultrows (lambda (ast)
+	(match ast
+		(cons head rest)
+		(if (equal? (string head) "resultrow")
+			(match rest
+				(cons (cons list_head kv_pairs) rr_rest)
+				(begin
+					(define vals (extract_assoc kv_pairs (lambda (k v) v)))
+					(define complex_count (reduce vals (lambda (acc v) (+ acc (if (expr_is_parallelizable v) 1 0))) 0))
+					(if (< complex_count 2)
+						ast
+						(begin
+							(define keys (extract_assoc kv_pairs (lambda (k v) k)))
+							(define thunks (map vals (lambda (v) (list (quote lambda) '() v))))
+							(define pmap_call (list (symbol "parallel_map")
+								(cons (symbol "list") thunks)
+								(list (quote lambda) (list (symbol "__pf")) (list (symbol "__pf")))))
+							(define reassembled (cons list_head
+								(merge (mapIndex keys (lambda (i k) (list k (list (symbol "nth") (symbol "__pr") i)))))))
+							(list (quote begin)
+								(list (quote define) (symbol "__pr") pmap_call)
+								(cons head (cons reassembled rr_rest))))))
+				ast)
+			(match (string head)
+				"begin" (cons head (map rest parallelize_resultrows))
+				"!begin" (cons head (map rest parallelize_resultrows))
+				"if" (cons head (map rest parallelize_resultrows))
+				"define" (cons head (map rest parallelize_resultrows))
+				"time" (cons head (map rest parallelize_resultrows))
+				ast))
+		ast)))
 
 /* split_condition: selection pushdown for nested-loop join planning.
 Splits an AND-condition into (now, later): predicates evaluatable with currently
@@ -3623,7 +3644,7 @@ second table carries strictly more local WHERE predicates than the first. */
 				(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
 				(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
 				(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
-				(if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan)))))
+				(parallelize_resultrows (if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan))))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
@@ -6136,7 +6157,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(cons sym args_) (cons sym (map args_ (lambda (a) (rewrite_for_emit a row_pos))))
 										expr)))
 									/* build emit_fn: (lambda (__w0 __w1 ...) (resultrow (list field_rewrites...))) */
-									(define emit_body (maybe_parallelize_resultrow (map_assoc fields (lambda (k v) (rewrite_for_emit v current_row_pos))))))
+									(define emit_body '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (rewrite_for_emit v current_row_pos))))))
 									(define emit_fn_ast (list (quote lambda) emit_params emit_body))
 									/* build neutral */
 									(define neutral_list (merge (list skip 0 stride) (produceN (* window_size stride) (lambda (_) nil))))
@@ -6380,7 +6401,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(match last_scan_ctx
 											'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar fields)
 											fields)))
-									'('if (optimize (replace_columns_from_expr condition)) (maybe_parallelize_resultrow (map_assoc emit_fields (lambda (k v) (replace_columns_from_expr v))))))
+									'('if (optimize (replace_columns_from_expr condition)) '((symbol "resultrow") (cons (symbol "list") (map_assoc emit_fields (lambda (k v) (replace_columns_from_expr v)))))))
 								/* DML mode: emit $update call */
 								(begin (define _ut_cols (nth update_target 1))
 									(define _ut_cols (if (nil? last_scan_ctx) _ut_cols
@@ -6509,7 +6530,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											(match last_scan_ctx
 												'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar fields)
 												fields)))
-										'('if (optimize (replace_columns_from_expr condition)) (maybe_parallelize_resultrow (map_assoc emit_fields (lambda (k v) (replace_columns_from_expr v))))))
+										'('if (optimize (replace_columns_from_expr condition)) '((symbol "resultrow") (cons (symbol "list") (map_assoc emit_fields (lambda (k v) (replace_columns_from_expr v)))))))
 									/* DML mode */
 									(begin (define _ut_cols (nth update_target 1))
 										(define _ut_cols (if (nil? last_scan_ctx) _ut_cols
