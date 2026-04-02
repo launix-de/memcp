@@ -103,6 +103,19 @@ test_cases:
         - ID: 3
           name: "image3.png"
 
+  - name: "EXPLAIN IN subquery uses materialized count helper cache"
+    sql: |
+      EXPLAIN SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob)
+      ORDER BY ID
+    expect:
+      rows: 1
+      contains:
+        - "touch_keytable"
+        - "createcolumn"
+        - "\"__cnt\""
+        - ".in_renderjob:((get_column"
+
   # === UNION ALL inside IN subselect ===
   # Can be compiled to (or (scan...) (scan...))
 

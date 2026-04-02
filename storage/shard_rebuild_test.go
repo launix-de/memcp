@@ -95,6 +95,90 @@ func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 	}
 }
 
+func TestShardRebuildDeletePropagationUsesStableTranslation(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-shard-rebuild-delete-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("trebuilddelete")
+
+	CreateDatabase("trebuilddelete", false)
+	tbl, _ := CreateTable("trebuilddelete", "items", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("one")},
+		{scm.NewInt(2), scm.NewString("two")},
+	}, nil, scm.NewNil(), false, nil)
+
+	shard := tbl.Shards[0]
+	rebuilt := shard.rebuild(true)
+	if rebuilt == nil {
+		t.Fatal("rebuild returned nil shard")
+	}
+
+	shard.UpdateFunction(0, false, false)()
+	shard.UpdateFunction(1, false, false)()
+
+	rebuilt.mu.RLock()
+	firstDeleted := rebuilt.deletions.Get(0)
+	secondDeleted := rebuilt.deletions.Get(1)
+	rebuilt.mu.RUnlock()
+	if !firstDeleted || !secondDeleted {
+		t.Fatalf("rebuilt shard deletions = (%v, %v), want both true", firstDeleted, secondDeleted)
+	}
+}
+
+func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-shard-rebuild-update-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("trebuildupdate")
+
+	CreateDatabase("trebuildupdate", false)
+	tbl, _ := CreateTable("trebuildupdate", "items", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("one")},
+		{scm.NewInt(2), scm.NewString("two")},
+	}, nil, scm.NewNil(), false, nil)
+
+	shard := tbl.Shards[0]
+	rebuilt := shard.rebuild(true)
+	if rebuilt == nil {
+		t.Fatal("rebuild returned nil shard")
+	}
+
+	shard.UpdateFunction(0, false, false)()
+	shard.UpdateFunction(1, false, false)(scm.NewSlice([]scm.Scmer{
+		scm.NewString("payload"), scm.NewString("two-updated"),
+	}))
+
+	rebuilt.mu.RLock()
+	rowOneDeleted := rebuilt.deletions.Get(1)
+	rebuilt.mu.RUnlock()
+	got := rebuilt.ColumnReader("payload")(2)
+	if !rowOneDeleted || got.String() != "two-updated" {
+		t.Fatalf("rebuilt update state = (deleted=%v, payload=%v), want (true, two-updated)", rowOneDeleted, got)
+	}
+}
+
 func TestManualRepartitionForwardsConcurrentInserts(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-manual-repartition-*")
 	if err != nil {
@@ -136,7 +220,7 @@ func TestManualRepartitionForwardsConcurrentInserts(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		tbl.mu.Lock()
-		active := tbl.repartitionActive
+		active := tbl.maintenanceKind == 2
 		hasPShards := tbl.PShards != nil
 		tbl.mu.Unlock()
 		if active && hasPShards {
@@ -164,6 +248,74 @@ func TestManualRepartitionForwardsConcurrentInserts(t *testing.T) {
 	}
 	if got, want := total, uint32(len(initialRows)+len(extraRows)); got != want {
 		t.Fatalf("manual repartition count = %d, want %d", got, want)
+	}
+}
+
+func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-manual-repartition-delete-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tmanualrepartitiondelete")
+
+	CreateDatabase("tmanualrepartitiondelete", false)
+	tbl, _ := CreateTable("tmanualrepartitiondelete", "items", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("payload", "TEXT", nil, nil)
+
+	initialRows := make([][]scm.Scmer, 0, 20000)
+	for i := 0; i < 20000; i++ {
+		initialRows = append(initialRows, []scm.Scmer{
+			scm.NewInt(int64(i + 1)),
+			scm.NewString(fmt.Sprintf("%032x", i+1)),
+		})
+	}
+	tbl.Insert([]string{"id", "payload"}, initialRows, nil, scm.NewNil(), false, nil)
+
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		tbl.repartition([]shardDimension{tbl.NewShardDimension("id", 2)})
+		close(done)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !tbl.repartitionDualWriteActive.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("manual repartition never enabled dual-write")
+		}
+		runtime.Gosched()
+	}
+
+	oldShard := tbl.Shards[len(tbl.Shards)-1]
+	oldShard.mu.RLock()
+	oldRecid := oldShard.main_count + uint32(len(oldShard.inserts))
+	oldShard.mu.RUnlock()
+
+	oldShard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{
+		scm.NewInt(30001),
+		scm.NewString("transient"),
+	}}, false, nil, false)
+	oldShard.UpdateFunction(oldRecid, false, false)()
+
+	<-done
+
+	total := uint32(0)
+	for _, s := range tbl.ActiveShards() {
+		total += s.Count()
+	}
+	if got, want := total, uint32(len(initialRows)); got != want {
+		t.Fatalf("manual repartition count after insert+delete = %d, want %d", got, want)
 	}
 }
 

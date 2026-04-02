@@ -154,6 +154,17 @@ const (
 	ShardModePartition ShardMode = 1 // use PShards (partitioned)
 )
 
+type translatedRecid struct {
+	pshardIdx int
+	newRecid  uint32
+	inDelta   bool
+}
+
+type pendingSourceDelete struct {
+	oldShard *storageShard
+	oldRecid uint32
+}
+
 func (m *ShardMode) MarshalJSON() ([]byte, error) {
 	if *m == ShardModePartition {
 		return []byte("\"partition\""), nil
@@ -232,8 +243,8 @@ type table struct {
 	// snapshot under the narrowest lock and then release it before scanning.
 	//
 	// t.mu protects table-local storage topology and long-lived maintenance
-	// state: ShardMode, Shards/PShards, rebuilding, repartitionActive and the
-	// condition variables that coordinate table-level rebuild/repartition.
+	// state: ShardMode, Shards/PShards, maintenanceKind and the dual-write
+	// flags that coordinate table-level rebuild/repartition.
 	mu         sync.Mutex
 	uniquelock sync.Mutex // unique insert lock
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
@@ -286,19 +297,32 @@ type table struct {
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode   ShardMode
-	rebuilding  bool
 	shardModeMu sync.RWMutex    // protects ShardMode reads in iterateShards vs Phase F flip
 	Shards      []*storageShard // unordered shards (used when ShardMode == ShardModeFree)
 	PShards     []*storageShard // partitioned shards according to PDimensions (used when ShardMode == ShardModePartition)
 	PDimensions []shardDimension
 
-	// repartitionActive is the table-local contract for live repartition:
-	// while true, concurrent DML must dual-write into both shard sets.
-	// It is protected by t.mu and is claimed before a repartition starts,
-	// not only by background rebuilds but also by direct/manual partitiontable calls.
-	repartitionActive bool
-	repartitionOnce   sync.Once
-	repartitionCond   *sync.Cond
+	// maintenanceMu prevents concurrent rebuild and repartition on this table.
+	// Holders: db.rebuild() claims it for rebuild (maintenanceKind=1) and may
+	// transition to repartition (maintenanceKind=2) while still holding it.
+	// beginManualRepartition() also claims it for direct repartition requests.
+	maintenanceMu              sync.Mutex
+	maintenanceKind            int         // 0=idle, 1=rebuilding, 2=repartitioning
+	repartitionDualWriteActive atomic.Bool // true after Phase B snapshot; dual-write only when true
+
+	// repartitionTranslation maps old-shard rows to their new PShard locations.
+	// Snapshot rows are published after Phase B. Post-snapshot dual-written rows
+	// extend the same map during Phase C so DELETE forwarding stays O(1).
+	// Key: pointer to old shard. Value: map from old recid to new location.
+	repartitionTranslationMu sync.RWMutex
+	repartitionTranslation   map[*storageShard]map[uint32]translatedRecid
+
+	// repartitionPendingDels collects main-storage deletion recids that arrive
+	// via DELETE dual-write before Phase D installs main_count. Phase D applies
+	// them after shifting delta. Protected by repartitionPendingMu.
+	repartitionPendingMu         sync.Mutex
+	repartitionPendingDels       []translatedRecid
+	repartitionPendingSourceDels []pendingSourceDelete
 }
 
 func (t *table) enterMutationOwner() {
@@ -394,7 +418,7 @@ func (t *table) maintenanceShards() []*storageShard {
 		appendShard(s)
 		appendShard(s.loadNext())
 	}
-	if t.repartitionActive {
+	if t.maintenanceKind == 2 {
 		if t.ShardMode == ShardModePartition {
 			for _, s := range t.Shards {
 				appendShard(s)
@@ -408,30 +432,142 @@ func (t *table) maintenanceShards() []*storageShard {
 	return result
 }
 
-func (t *table) getRepartitionCond() *sync.Cond {
-	t.repartitionOnce.Do(func() {
-		t.repartitionCond = sync.NewCond(&t.mu)
-	})
-	return t.repartitionCond
+func (t *table) setRepartitionTranslationMap(m map[*storageShard]map[uint32]translatedRecid) {
+	t.repartitionTranslationMu.Lock()
+	t.repartitionTranslation = m
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) mergeRepartitionTranslations(m map[*storageShard]map[uint32]translatedRecid) {
+	if len(m) == 0 {
+		return
+	}
+	t.repartitionTranslationMu.Lock()
+	if t.repartitionTranslation == nil {
+		t.repartitionTranslation = make(map[*storageShard]map[uint32]translatedRecid, len(m))
+	}
+	for shard, entries := range m {
+		if len(entries) == 0 {
+			continue
+		}
+		dst := t.repartitionTranslation[shard]
+		if dst == nil {
+			dst = make(map[uint32]translatedRecid, len(entries))
+			t.repartitionTranslation[shard] = dst
+		}
+		for oldRecid, tr := range entries {
+			dst[oldRecid] = tr
+		}
+	}
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) recordRepartitionTranslation(oldShard *storageShard, oldRecid uint32, tr translatedRecid) {
+	t.repartitionTranslationMu.Lock()
+	if t.repartitionTranslation == nil {
+		t.repartitionTranslation = make(map[*storageShard]map[uint32]translatedRecid)
+	}
+	if t.repartitionTranslation[oldShard] == nil {
+		t.repartitionTranslation[oldShard] = make(map[uint32]translatedRecid)
+	}
+	t.repartitionTranslation[oldShard][oldRecid] = tr
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) lookupRepartitionTranslation(oldShard *storageShard, oldRecid uint32) (translatedRecid, bool) {
+	t.repartitionTranslationMu.RLock()
+	defer t.repartitionTranslationMu.RUnlock()
+	if t.repartitionTranslation == nil {
+		return translatedRecid{}, false
+	}
+	shardMap := t.repartitionTranslation[oldShard]
+	if shardMap == nil {
+		return translatedRecid{}, false
+	}
+	tr, ok := shardMap[oldRecid]
+	return tr, ok
+}
+
+func (t *table) shiftDeltaRepartitionTranslations(mainCounts []uint32) {
+	t.repartitionTranslationMu.Lock()
+	for _, shardMap := range t.repartitionTranslation {
+		for oldRecid, tr := range shardMap {
+			if !tr.inDelta {
+				continue
+			}
+			if tr.pshardIdx >= 0 && tr.pshardIdx < len(mainCounts) {
+				tr.newRecid += mainCounts[tr.pshardIdx]
+			}
+			tr.inDelta = false
+			shardMap[oldRecid] = tr
+		}
+	}
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) clearRepartitionTranslation() {
+	t.repartitionTranslationMu.Lock()
+	t.repartitionTranslation = nil
+	t.repartitionTranslationMu.Unlock()
+}
+
+func (t *table) appendPendingRepartitionDelete(tr translatedRecid) {
+	t.repartitionPendingMu.Lock()
+	t.repartitionPendingDels = append(t.repartitionPendingDels, tr)
+	t.repartitionPendingMu.Unlock()
+}
+
+func (t *table) appendPendingRepartitionSourceDelete(oldShard *storageShard, oldRecid uint32) {
+	t.repartitionPendingMu.Lock()
+	t.repartitionPendingSourceDels = append(t.repartitionPendingSourceDels, pendingSourceDelete{oldShard: oldShard, oldRecid: oldRecid})
+	t.repartitionPendingMu.Unlock()
+}
+
+func (t *table) resolvePendingRepartitionSourceDeletes() {
+	t.repartitionPendingMu.Lock()
+	pending := t.repartitionPendingSourceDels
+	t.repartitionPendingSourceDels = nil
+	t.repartitionPendingMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+
+	unresolved := pending[:0]
+	translated := make([]translatedRecid, 0, len(pending))
+	for _, src := range pending {
+		if tr, ok := t.lookupRepartitionTranslation(src.oldShard, src.oldRecid); ok {
+			translated = append(translated, tr)
+		} else {
+			unresolved = append(unresolved, src)
+		}
+	}
+
+	t.repartitionPendingMu.Lock()
+	if len(translated) > 0 {
+		t.repartitionPendingDels = append(t.repartitionPendingDels, translated...)
+	}
+	if len(unresolved) > 0 {
+		t.repartitionPendingSourceDels = append(t.repartitionPendingSourceDels, unresolved...)
+	}
+	t.repartitionPendingMu.Unlock()
 }
 
 // beginManualRepartition serializes direct partitiontable-triggered repartitions.
 // Contract:
-//   - callers wait until any already-running repartition on this table finishes
+//   - blocks until any already-running rebuild/repartition on this table finishes
 //   - if the table became partitioned while waiting, no new immediate repartition starts
-//   - otherwise repartitionActive is claimed under t.mu before returning
+//   - otherwise maintenanceKind is set to 2 under maintenanceMu before returning
 func (t *table) beginManualRepartition() bool {
-	cond := t.getRepartitionCond()
+	t.maintenanceMu.Lock()
 	t.mu.Lock()
-	for t.repartitionActive {
-		cond.Wait()
-	}
 	if t.ShardMode != ShardModeFree {
 		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
 		return false
 	}
-	t.repartitionActive = true
+	t.maintenanceKind = 2
 	t.mu.Unlock()
+	// maintenanceMu stays locked — released by repartition Phase G
 	return true
 }
 
@@ -1276,7 +1412,9 @@ insertDone:
 	// Dual-write: forward inserts to the secondary shard set during repartition.
 	// The secondary insert bypasses unique checks (already handled above),
 	// triggers, and auto-increment (already assigned in primary insert).
-	if t.repartitionActive {
+	// Use repartitionDualWriteActive (set after Phase B snapshot) to avoid
+	// duplicating rows that are already captured in the snapshot.
+	if t.repartitionDualWriteActive.Load() && t.ShardMode == ShardModePartition {
 		t.dualWriteInsert(columns, values)
 	}
 
@@ -1326,8 +1464,8 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 }
 
 // dualWriteInsert routes rows into the secondary shard set (the one not selected
-// by ShardMode) during an active repartition. Called only when repartitionActive
-// is true. Rows are inserted with alreadyLocked=false and no unique/trigger processing.
+// by ShardMode) during an active repartition. Called only when
+// repartitionDualWriteActive is true. Rows are inserted without unique/trigger processing.
 func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
 	if t.ShardMode == ShardModeFree {
 		// Primary is Shards, secondary is PShards
@@ -1383,6 +1521,74 @@ func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
 	}
 }
 
+func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uint32, columns []string, values [][]scm.Scmer) {
+	if t.PShards == nil || len(values) == 0 {
+		return
+	}
+	dims := t.PDimensions
+	shardcols := make([]scm.Scmer, len(dims))
+	translatable := make([]int, len(dims))
+	for i, cd := range dims {
+		translatable[i] = -1
+		for j, col := range columns {
+			if cd.Column == col {
+				translatable[i] = j
+				break
+			}
+		}
+	}
+
+	lastI := 0
+	lastPSI := -1
+	var lastShard *storageShard
+	flush := func(end int) {
+		if lastShard == nil || end <= lastI {
+			return
+		}
+		rel := lastShard.GetExclusive()
+		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false)
+		rel()
+		for i := lastI; i < end; i++ {
+			t.recordRepartitionTranslation(oldShard, firstOldRecid+uint32(i), translatedRecid{
+				pshardIdx: lastPSI,
+				newRecid:  firstNewRecid + uint32(i-lastI),
+				inDelta:   true,
+			})
+		}
+	}
+
+	for i := 0; i < len(values); i++ {
+		for j, colidx := range translatable {
+			if colidx >= 0 && colidx < len(values[i]) {
+				shardcols[j] = values[i][colidx]
+			} else {
+				shardcols[j] = scm.NewNil()
+			}
+		}
+		psi := computeShardIndex(dims, shardcols)
+		shard := t.PShards[psi]
+		if i > 0 && shard != lastShard {
+			flush(i)
+			lastI = i
+		}
+		lastPSI = psi
+		lastShard = shard
+	}
+	flush(len(values))
+}
+
+// dualWriteDelete forwards a DELETE to PShards during repartition.
+// For rows in the Phase B snapshot (present in repartitionTranslation),
+// it uses the translation map to find the exact PShard recid. Post-snapshot
+// dual-written rows extend the same translation map as they are inserted.
+func (t *table) dualWriteDelete(oldShard *storageShard, oldRecid uint32) {
+	if tr, ok := t.lookupRepartitionTranslation(oldShard, oldRecid); ok {
+		t.appendPendingRepartitionDelete(tr)
+		return
+	}
+	t.appendPendingRepartitionSourceDelete(oldShard, oldRecid)
+}
+
 /*
 checks a number of datasets for unique collisions.
 For each block of datasets that pass, success is called.
@@ -1427,16 +1633,16 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 
 		shardlist := t.ActiveShards()
 		// During repartition drain (ShardMode already flipped to Partition but
-		// repartitionActive still true), in-flight scans on old shards call
+		// maintenanceKind == 2 still true), in-flight scans on old shards call
 		// ProcessUniqueCollision. We must check old Shards because the deletion
 		// from the UPDATE is only in the old shard, not yet in PShards.
-		if t.repartitionActive && t.ShardMode == ShardModePartition && t.Shards != nil {
+		if t.maintenanceKind == 2 && t.ShardMode == ShardModePartition && t.Shards != nil {
 			shardlist = t.Shards
 		}
 		allowPruning := false // if we can prune the shardlist
 		pruningMap := make([]int, len(uniq.Cols))
 		pruningVals := make([]scm.Scmer, len(uniq.Cols))
-		if t.ShardMode == ShardModePartition && !t.repartitionActive {
+		if t.ShardMode == ShardModePartition && t.maintenanceKind != 2 {
 			// partitioning
 			allowPruning = true
 			for j, dim := range t.PDimensions {
@@ -1473,6 +1679,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			uniquelockHeld = true
 		}
 
+		currentTx := CurrentTx()
 		last_j := 0
 		for j, row := range values {
 			shardlist2 := shardlist
@@ -1501,16 +1708,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			for _, s := range shardlist2 {
 				// ensure shard is loaded for read during unique check
 				r := s.GetRead()
-				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
-				isVisible := false
+				uid, present := s.GetRecordidForUnique(uniq.Cols, key, currentTx)
 				if present {
-					if currentTx := CurrentTx(); currentTx != nil && currentTx.Mode == TxACID {
-						isVisible = currentTx.IsVisible(s, uid)
-					} else {
-						isVisible = !s.deletions.Get(uint(uid))
-					}
-				}
-				if isVisible {
 					// found a unique collision
 					if j != last_j {
 						// If the inner check panics (unique violation in a later constraint),

@@ -599,6 +599,206 @@ raw _unn_* occurrence aliases into physical temp column names. */
 	(if (equal? result neutral) nil result)
 )))
 
+(define extend_codegen_lambda (lambda (fn extra_params)
+	(match fn
+		'((symbol lambda) params body) (list (quote lambda) (merge (list params extra_params)) body)
+		'((symbol lambda) params body numvars) (list (quote lambda) (merge (list params extra_params)) body numvars)
+		'((quote lambda) params body) (list (quote lambda) (merge (list params extra_params)) body)
+		'((quote lambda) params body numvars) (list (quote lambda) (merge (list params extra_params)) body numvars)
+		_ fn
+	)
+))
+
+(define append_codegen_list (lambda (lst extra_items)
+	(if (list? lst)
+		(merge (list lst extra_items))
+		lst)
+))
+
+/* nested scan batching is a peephole optimizer pass over the generated
+queryplan AST: once build_scan has emitted a child scan tree, rewrite only the
+first reachable scan/scan_batch node so it can consume parent batchdata via #N
+pseudocolumns without changing the higher-level join planning rules. */
+/* batchify_first_scan: peephole rewrite that converts the first reachable
+scan/scan_batch in a plan tree into a scan_batch that consumes parent
+batchdata via #N pseudocolumns.  Uses two-level match: outer match
+destructures the AST node, inner match dispatches on the head symbol name
+(via (string head)) so (symbol X) and (quote X) are handled uniformly.
+Virtual tables (where tbl is a list, not a string) are excluded via
+(string? tbl) and fall through without rewriting. */
+(define batchify_first_scan (lambda (plan batch_params batch_pseudocols stride_expr batchdata_sym)
+	(match plan
+		/* scan / scan_batch with a real (string) table name */
+		(cons scanhead (cons schema (cons (string? tbl) rest)))
+		(match (string scanhead)
+			"scan" (match rest
+				(merge '(filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter) _)
+				(if isOuter nil
+					(list (quote scan_batch) schema tbl
+						(append_codegen_list filtercols batch_pseudocols)
+						(extend_codegen_lambda filterfn batch_params)
+						(append_codegen_list mapcols batch_pseudocols)
+						(extend_codegen_lambda mapfn batch_params)
+						stride_expr batchdata_sym
+						reduce neutral reduce2 isOuter))
+				nil)
+			"scan_batch" (match rest
+				(merge '(filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter) _)
+				(if isOuter nil
+					(list (quote scan_batch) schema tbl
+						(append_codegen_list filtercols batch_pseudocols)
+						(extend_codegen_lambda filterfn batch_params)
+						(append_codegen_list mapcols batch_pseudocols)
+						(extend_codegen_lambda mapfn batch_params)
+						inner_stride inner_batchdata
+						reduce neutral reduce2 isOuter))
+				nil)
+			nil)
+		/* wrapper nodes: recurse into the contained value/scan */
+		(cons wraphead (cons arg1 arg2))
+		(match (string wraphead)
+			"nth" (begin /* (nth inner_scan idx) */
+				(define rewritten (batchify_first_scan arg1 batch_params batch_pseudocols stride_expr batchdata_sym))
+				(if (nil? rewritten) nil
+					(list (quote nth) rewritten (car arg2))))
+			"define" (begin /* (define sym value) */
+				(define rewritten (batchify_first_scan (car arg2) batch_params batch_pseudocols stride_expr batchdata_sym))
+				(if (nil? rewritten) nil
+					(list (quote define) arg1 rewritten)))
+			"set" (begin /* (set sym value) */
+				(define rewritten (batchify_first_scan (car arg2) batch_params batch_pseudocols stride_expr batchdata_sym))
+				(if (nil? rewritten) nil
+					(list (quote set) arg1 rewritten)))
+			"begin" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
+			"!begin" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
+			"begin_mut" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
+			nil)
+		nil)))
+
+/* batchify_begin_forms: helper for batchifying inside begin/!begin/begin_mut blocks.
+Tries preferred forms (scan, scan_batch, nth, begin variants) first, then
+falls back to any form. */
+(define batchify_begin_forms (lambda (plan head rest batch_params batch_pseudocols stride_expr batchdata_sym) (begin
+	(define rewrite_forms_by_predicate (lambda (forms should_try)
+		(match forms
+			'() nil
+			(cons form tail) (begin
+				(if (should_try form)
+					(begin
+						(define rewritten_form (batchify_first_scan form batch_params batch_pseudocols stride_expr batchdata_sym))
+						(if (nil? rewritten_form)
+							(match (rewrite_forms_by_predicate tail should_try)
+								nil nil
+								rewritten_tail (cons form rewritten_tail))
+							(cons rewritten_form tail)))
+					(match (rewrite_forms_by_predicate tail should_try)
+						nil nil
+						rewritten_tail (cons form rewritten_tail)))))))
+	(define is_preferred_form (lambda (form) (match form
+		(cons fh _) (match (string fh)
+			"scan" true "scan_batch" true "nth" true
+			"begin" true "!begin" true "begin_mut" true
+			false)
+		false)))
+	(match (rewrite_forms_by_predicate rest is_preferred_form)
+		nil (match (rewrite_forms_by_predicate rest (lambda (form) true))
+			nil nil
+			rewritten_rest (cons head rewritten_rest))
+		rewritten_rest (cons head rewritten_rest)))))
+
+/* builds the outer scan shell for the peephole-rewritten child plan. the join
+order and scan tree come from build_scan already; this helper only swaps the
+row-at-a-time inner scan calls for buffered scan_batch flushes. */
+(define build_batched_regular_scan (lambda (schema tbl filtercols outer_filter_lambda scan_mapcols scan_mapfn_params batch_map_params direct_inner_scan batched_inner_scan batch_stride batch_capacity is_update_target isOuter) (begin
+	(define _outer_batch_row_lambda
+		(list (quote lambda) scan_mapfn_params
+			(list (quote begin)
+				(list (quote define) (symbol "__record") (list (quote list)))
+				(cons (quote append_mut) (cons (symbol "__record") batch_map_params)))))
+	(if (nil? batched_inner_scan)
+		(scan_wrapper 'scan schema tbl
+			(cons list filtercols)
+			outer_filter_lambda
+			scan_mapcols
+			(list (symbol "lambda") scan_mapfn_params direct_inner_scan)
+			(if is_update_target (symbol "+") nil)
+			(if is_update_target 0 nil)
+			nil
+			isOuter)
+		(begin
+			(define _inner_flush_define
+				(list (quote define) (symbol "__inner_flush")
+					(list (quote lambda) (list (symbol "__batchbuf")) batched_inner_scan)))
+			(if is_update_target
+				(list (quote begin)
+					_inner_flush_define
+					(list (quote nth)
+						(list (quote scan) schema tbl
+							(cons list filtercols)
+							outer_filter_lambda
+							scan_mapcols
+							_outer_batch_row_lambda
+							(list (quote lambda) (list (symbol "acc") (symbol "rowvals"))
+								(list (quote begin)
+									(list (quote define) (symbol "__state")
+										(list (quote if) (list (quote nil?) (list (quote nth) (symbol "acc") 1))
+											(list (quote list) (list (quote nth) (symbol "acc") 0) (list (quote list)))
+											(symbol "acc")))
+									(list (quote define) (symbol "__batchdata0") (list (quote nth) (symbol "__state") 1))
+									(list (quote define) (symbol "__batchdata") (list (quote apply) (quote append_mut) (list (quote cons) (symbol "__batchdata0") (symbol "rowvals"))))
+									(list (quote nth_mut) (symbol "__state") 1 (symbol "__batchdata"))
+									(list (quote if) (list (quote >=) (list (quote count) (symbol "__batchdata")) batch_capacity)
+										(list (quote begin)
+											(list (quote nth_mut) (symbol "__state") 0
+												(list (quote +) (list (quote nth) (symbol "__state") 0) (list (symbol "__inner_flush") (symbol "__batchdata"))))
+											(list (quote reset_mut) (symbol "__batchdata")))
+										true)
+									(symbol "__state")))
+							(list (quote list) 0 nil)
+							(list (quote lambda) (list (symbol "acc") (symbol "shardstate"))
+								(list (quote begin)
+									(list (quote define) (symbol "__shardbuf") (list (quote nth) (symbol "shardstate") 1))
+									(list (quote define) (symbol "__shardresult")
+										(list (quote if)
+											(list (quote or)
+												(list (quote nil?) (symbol "__shardbuf"))
+												(list (quote equal?) (list (quote count) (symbol "__shardbuf")) 0))
+											(list (quote nth) (symbol "shardstate") 0)
+											(list (quote +) (list (quote nth) (symbol "shardstate") 0) (list (symbol "__inner_flush") (symbol "__shardbuf")))))
+									(list (quote list) (list (quote +) (list (quote nth) (symbol "acc") 0) (symbol "__shardresult")) nil)))
+							isOuter)
+						0))
+				(list (quote begin)
+					_inner_flush_define
+					(list (quote scan) schema tbl
+						(cons list filtercols)
+						outer_filter_lambda
+						scan_mapcols
+						_outer_batch_row_lambda
+						(list (quote lambda) (list (symbol "batchdata") (symbol "rowvals"))
+							(list (quote begin)
+								(list (quote define) (symbol "__batchbuf0")
+									(list (quote if) (list (quote nil?) (symbol "batchdata"))
+										(list (quote list))
+										(symbol "batchdata")))
+								(list (quote define) (symbol "__batchbuf") (list (quote apply) (quote append_mut) (list (quote cons) (symbol "__batchbuf0") (symbol "rowvals"))))
+								(list (quote if) (list (quote >=) (list (quote count) (symbol "__batchbuf")) batch_capacity)
+									(list (quote begin)
+										(list (symbol "__inner_flush") (symbol "__batchbuf"))
+										(list (quote reset_mut) (symbol "__batchbuf")))
+									true)
+								(symbol "__batchbuf")))
+						nil
+						(list (quote lambda) (list (symbol "acc") (symbol "shardbuf"))
+							(list (quote begin)
+								(list (quote if)
+									(list (quote or)
+										(list (quote nil?) (symbol "shardbuf"))
+										(list (quote equal?) (list (quote count) (symbol "shardbuf")) 0))
+									true
+									(list (symbol "__inner_flush") (symbol "shardbuf")))
+								nil))
+						isOuter))))))))
 /* returns a list of all aggregates in this expr */
 (define extract_aggregates (lambda (expr)
 	(match expr
@@ -1777,8 +1977,85 @@ or generate runtime scan code (build_queryplan).
 						)))
 						(set fields2 (map_assoc fields2 (lambda (k v) (wrap_unresolved_outer v))))
 						(set condition2 (wrap_unresolved_outer condition2))
-						/* detect top-level aggregate for direct scan path */
-						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
+						(define raw_contains_skip_level_nested_outer_ref (begin
+							(define raw_query_local_aliases (lambda (query) (match query
+								'(_ raw_tables _ _ _ _ _ _ _) (reduce raw_tables (lambda (acc td)
+									(match td
+										'(alias _ _ _ _) (append_unique acc alias)
+										acc))
+									'())
+								'())))
+							(define alias_in_list (lambda (aliases alias_name)
+								(reduce aliases (lambda (acc alias_) (or acc (equal?? alias_ alias_name))) false)))
+							(define raw_query_uses_alias_outside_current (lambda (query current_aliases) (match query
+								'(_ raw_tables raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+									(define nested_local_aliases (raw_query_local_aliases query))
+									(define raw_expr_uses_alias_outside_current (lambda (expr) (match expr
+										'((symbol get_column) alias_ _ _ _) (and (not (nil? alias_))
+											(not (alias_in_list nested_local_aliases alias_))
+											(not (alias_in_list current_aliases alias_)))
+										'((quote get_column) alias_ _ _ _) (and (not (nil? alias_))
+											(not (alias_in_list nested_local_aliases alias_))
+											(not (alias_in_list current_aliases alias_)))
+										(cons sym args) (reduce args (lambda (acc arg) (or acc (raw_expr_uses_alias_outside_current arg))) false)
+										false)))
+									(or
+										(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_uses_alias_outside_current v))) false)
+										(raw_expr_uses_alias_outside_current (coalesceNil raw_condition true))
+										(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_uses_alias_outside_current gexpr))) false)
+										(raw_expr_uses_alias_outside_current (coalesceNil raw_having true))
+										(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
+											(or acc (match order_item
+												'(col _dir) (raw_expr_uses_alias_outside_current col)
+												false)))
+											false)))
+								false)))
+							(define raw_query_contains_skip_level_nested_outer_ref (lambda (query current_aliases) (match query
+								'(_ _ raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+									(define raw_expr_contains_skip_level_nested_outer_ref (lambda (expr) (match expr
+										(cons sym args) (begin
+											(define kind (inner_select_kind sym))
+											(define nested_subquery (if (nil? kind) nil
+												(match kind
+													(quote inner_select) (match args
+														(cons inner_subquery '()) inner_subquery
+														nil)
+													(quote inner_select_in) (match args
+														(cons _target_expr (cons inner_subquery '())) inner_subquery
+														nil)
+													(quote inner_select_exists) (match args
+														(cons inner_subquery '()) inner_subquery
+														nil)
+													nil)))
+											(or
+												(and (not (nil? nested_subquery))
+													(or
+														(raw_query_uses_alias_outside_current nested_subquery current_aliases)
+														(raw_query_contains_skip_level_nested_outer_ref nested_subquery current_aliases)))
+												(reduce args (lambda (acc arg) (or acc (raw_expr_contains_skip_level_nested_outer_ref arg))) false)))
+										false)))
+									(or
+										(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_contains_skip_level_nested_outer_ref v))) false)
+										(raw_expr_contains_skip_level_nested_outer_ref (coalesceNil raw_condition true))
+										(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_contains_skip_level_nested_outer_ref gexpr))) false)
+										(raw_expr_contains_skip_level_nested_outer_ref (coalesceNil raw_having true))
+										(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
+											(or acc (match order_item
+												'(col _dir) (raw_expr_contains_skip_level_nested_outer_ref col)
+												false)))
+											false)))
+								false)))
+							(raw_query_contains_skip_level_nested_outer_ref subquery (raw_query_local_aliases subquery))))
+							/* Software contract: scalar aggregates are split by canonical
+							correlation, not by raw parser shape.
+							- uncorrelated aggregates go through the helper-table/keytable path
+							  and may be globally memoized
+							- correlated aggregates stay on the per-row direct scan path until
+							  the helper-table path can safely carry row-local promises
+							The correlation test therefore has to run on resolved planner
+							expressions so derived-table aliases and wrapped outer refs are
+							classified correctly. */
+							(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
 							(or (equal? sym (quote aggregate))
 								(equal? sym '(quote aggregate))
@@ -1802,32 +2079,54 @@ or generate runtime scan code (build_queryplan).
 							(contains_noncolumn_outer_ref value_expr)
 							(contains_noncolumn_outer_ref condition2)
 						))
-						(define contains_inner_select_marker (lambda (expr) (match expr
-							(cons sym args) (or
-								(not (nil? (inner_select_kind sym)))
-								(contains_inner_select_marker sym)
-								(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
-							false)))
-						(define use_ordered_scalar (or
-							(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
-							(and has_stage2 (not (nil? (stage_limit_val stage2))))
-							(and has_stage2 (not (nil? (stage_offset_val stage2))))
-						))
-						(define use_direct_agg_scan (and
-							(not (nil? _agg_args))
-							(equal? (count _agg_args) 3)
-							(nil? stage2_having)
-							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
-							(not (nil? tables2))
-							(not (equal? tables2 '()))
-						))
+							(define contains_inner_select_marker (lambda (expr) (match expr
+								(cons sym args) (or
+									(not (nil? (inner_select_kind sym)))
+									(contains_inner_select_marker sym)
+									(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
+								false)))
+							(define contains_outer_ref (lambda (expr) (match expr
+								'((quote outer) _) true
+								'((symbol outer) _) true
+								(cons sym args) (or
+									(contains_outer_ref sym)
+									(reduce args (lambda (found arg) (or found (contains_outer_ref arg))) false))
+								false)))
+							(define stage_contains_outer_ref (lambda (stage)
+								(or
+									(reduce (coalesceNil (stage_group_cols stage) '()) (lambda (found expr) (or found (contains_outer_ref expr))) false)
+									(contains_outer_ref (coalesceNil (stage_post_group_condition_expr stage) true))
+									(reduce (coalesceNil (stage_order_list stage) '()) (lambda (found order_item)
+										(or found (match order_item
+											'(col _dir) (contains_outer_ref col)
+											(contains_outer_ref order_item)))) false))))
+							(define scalar_has_outer_ref (or
+								(reduce_assoc fields2 (lambda (found _k v) (or found (contains_outer_ref v))) false)
+								(contains_outer_ref condition2)
+								(reduce (coalesceNil groups2 '()) (lambda (found stage) (or found (stage_contains_outer_ref stage))) false)))
+							(define use_ordered_scalar (or
+								(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
+								(and has_stage2 (not (nil? (stage_limit_val stage2))))
+								(and has_stage2 (not (nil? (stage_offset_val stage2))))
+							))
+							(define use_direct_agg_scan (and
+								(not (nil? _agg_args))
+								(equal? (count _agg_args) 3)
+								(not raw_contains_skip_level_nested_outer_ref)
+								(nil? stage2_post_group_condition)
+								(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
+								(not (nil? tables2))
+								(not (equal? tables2 '()))
+								scalar_has_outer_ref
+							))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
+							(not raw_contains_skip_level_nested_outer_ref)
 							(equal? (extract_aggregates value_expr) '())
 							(not (contains_inner_select_marker condition2))
 							(not (contains_inner_select_marker value_expr))
 							(not has_noncolumn_outer_ref)
-							(nil? stage2_having)
+							(nil? stage2_post_group_condition)
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(and (list? tables2) (equal? (count tables2) 1))
 						))
@@ -3379,9 +3678,67 @@ WHAT IT MUST NOT DO:
 - Build physical scan plans (that is build_queryplan's job)
 - Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
 */
-/* currently a stub — preserves original table order */
+/* conservative first pass: only reorder two-table INNER segments when the
+second table carries strictly more local WHERE predicates than the first. */
+(define jqr_td_alias (lambda (td) (nth td 0)))
+(define jqr_td_schema (lambda (td) (nth td 1)))
+(define jqr_td_table (lambda (td) (nth td 2)))
+(define jqr_td_outer (lambda (td) (nth td 3)))
+(define jqr_td_joinexpr (lambda (td) (nth td 4)))
+(define jqr_td_with_joinexpr (lambda (td joinexpr)
+	(list (jqr_td_alias td) (jqr_td_schema td) (jqr_td_table td) (jqr_td_outer td) joinexpr)))
+(define jqr_flatten_join_terms (lambda (tables_)
+	(merge (map tables_ (lambda (td)
+		(flatten_and_terms (coalesceNil (jqr_td_joinexpr td) true)))))))
+(define jqr_local_term_count (lambda (alias terms)
+	(reduce terms
+		(lambda (acc term) (begin
+			(define refs (extract_tblvars term))
+			(if (and (not (equal? refs '()))
+				(reduce refs (lambda (ok tv) (and ok (equal?? tv alias))) true))
+				(+ acc 1)
+				acc)))
+		0)))
+(define jqr_has_order_sensitive_stage (lambda (groups)
+	(reduce groups
+		(lambda (acc stage)
+			(or acc
+				(not (equal? (coalesceNil (stage_order_list stage) '()) '()))
+				(not (nil? (stage_limit_val stage)))
+				(not (nil? (stage_offset_val stage)))))
+		false)))
+(define jqr_reorder_inner_segment (lambda (segment condition) (begin
+	(if (not (equal? (count segment) 2))
+		segment
+		(begin
+			(define td1 (nth segment 0))
+			(define td2 (nth segment 1))
+			(if (or (jqr_td_outer td1) (jqr_td_outer td2))
+				segment
+				(begin
+					(define condition_terms (flatten_and_terms (coalesceNil condition true)))
+					(define local1 (jqr_local_term_count (jqr_td_alias td1) condition_terms))
+					(define local2 (jqr_local_term_count (jqr_td_alias td2) condition_terms))
+					(if (> local2 local1)
+						(list
+							(jqr_td_with_joinexpr td2 true)
+							(jqr_td_with_joinexpr td1 (combine_and_terms (jqr_flatten_join_terms segment))))
+						segment))))))))
+(define jqr_reorder_segments (lambda (tables_ condition) (begin
+	(match (reduce tables_
+		(lambda (state td) (match state
+			'(out seg)
+			(if (jqr_td_outer td)
+				(list (merge out (jqr_reorder_inner_segment seg condition) (list td)) '())
+				(list out (merge seg (list td))))
+			state))
+		(list '() '()))
+		'(out seg) (merge out (jqr_reorder_inner_segment seg condition))
+		tables_))))
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
-	(list schema tables fields condition groups schemas replace_find_column)))
+	(list schema
+		(if (jqr_has_order_sensitive_stage groups) tables (jqr_reorder_segments tables condition))
+		fields condition groups schemas replace_find_column)))
 
 (define build_queryplan_term (lambda (query) (begin
 	(define union_parts (query_union_all_parts query))
@@ -4613,10 +4970,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							schemas
 							replace_find_column
 							update_target))
-						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
-						(define createcol_options (cons 'list (merge '("temp" true)
-							(if (and needs_count filter_empty_groups)
-								(list "filtercols" (list 'list count_col_name)
+							/* Software contract for filtered grouped aggregates:
+							- keep a single canonical aggregate temp column per helper table
+							- drive eager materialization via filtercols/filter on the canonical
+							  COUNT helper column, not via ad-hoc one-shot aggregate scans
+							- this keeps the aggregate cache persistent and incrementally
+							  maintainable while still skipping empty groups */
+							/* createcolumn options: filter by COUNT column so only groups with rows are computed */
+							(define createcol_options (cons 'list (merge '("temp" true)
+								(if (and needs_count filter_empty_groups)
+									(list "filtercols" (list 'list count_col_name)
 									"filter" '((quote lambda) (list (symbol count_col_name)) '('> (symbol count_col_name) 0)))
 								'()))))
 

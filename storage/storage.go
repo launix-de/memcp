@@ -333,7 +333,30 @@ func Init(en scm.Env) {
 
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
+				// Virtual schemas like information_schema are handled in the
+				// Scheme layer (scan_wrapper in sql-metadata.scm) which
+				// replaces the table name with an in-memory list before the
+				// scan reaches Go.  However, when the query planner emits a
+				// batched nested-loop join the outer scan bypasses
+				// scan_wrapper and arrives here with the raw table name
+				// string.  Since there is no physical database backing these
+				// virtual schemas, we return an empty result (or a single
+				// NULL row for outer joins) instead of panicking.  The inner
+				// scan will still go through scan_wrapper correctly.
+				neutral := scm.NewNil()
+				if len(a) > 7 {
+					neutral = a[7]
+				}
+				if isOuter {
+					mapfn := scm.OptimizeProcToSerialFunction(a[5])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if len(a) > 6 {
+						reducefn = scm.OptimizeProcToSerialFunction(a[6])
+					}
+					return reducefn(neutral, mapfn(mapparams...))
+				}
+				return neutral
 			}
 			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
@@ -444,7 +467,27 @@ func Init(en scm.Env) {
 
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
+				// Same virtual-schema guard as in scan() above.
+				// scan_batch is emitted by batchify_first_scan which
+				// rewrites scan→scan_batch after scan_wrapper has already
+				// run.  When the outer table of a batched join is virtual,
+				// scan_wrapper was bypassed by build_batched_regular_scan
+				// (queryplan.scm) so the raw table name arrives here.
+				// Return empty results to match the list-path semantics.
+				neutral := scm.NewNil()
+				if len(a) > 9 {
+					neutral = a[9]
+				}
+				if isOuter {
+					mapfn := scm.OptimizeProcToSerialFunction(a[5])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if len(a) > 8 {
+						reducefn = scm.OptimizeProcToSerialFunction(a[8])
+					}
+					return reducefn(neutral, mapfn(mapparams...))
+				}
+				return neutral
 			}
 			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
@@ -601,7 +644,17 @@ func Init(en scm.Env) {
 
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
+				// Same virtual-schema guard as in scan() — see comment there.
+				if isOuter {
+					mapfn := scm.OptimizeProcToSerialFunction(a[10])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if !aggregate.IsNil() {
+						reducefn = scm.OptimizeProcToSerialFunction(aggregate)
+					}
+					return reducefn(neutral, mapfn(mapparams...))
+				}
+				return neutral
 			}
 			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
@@ -874,10 +927,17 @@ func Init(en scm.Env) {
 			// createcolumn is the table-local DDL entrypoint for both "create a new
 			// physical column" and "upgrade/configure an existing temp/base column".
 			//
-			// Query planning relies on this for window/temp columns: the planner may
-			// predeclare a bare temp column so later expressions can reference it, and
-			// the runtime createcolumn call must then install the actual ORC/computed
-			// semantics on the already-existing column instead of silently no-oping.
+			// Planner/cache contract:
+			// 1. Query plans may predeclare canonical temp columns and later call
+			//    createcolumn again with the real computor/ORC metadata.
+			// 2. Reissuing createcolumn for the SAME canonical temp column must be
+			//    idempotent: if the cache/proxy is already valid, the call must not
+			//    eagerly recompute or destroy the cached values.
+			// 3. "Always materialize, but correctly" means the runtime path may reuse
+			//    an already-populated temp column; it must not silently fall back to a
+			//    throwaway one-shot computation because the column already exists.
+			// 4. filtercols/filter further narrow which keys need eager materialization;
+			//    they do not change the identity of the canonical temp column itself.
 			if len(orcSortCols) > 0 {
 				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, 0, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
 				return scm.NewBool(true)

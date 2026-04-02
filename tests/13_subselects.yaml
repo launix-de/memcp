@@ -106,6 +106,15 @@ test_cases:
         - name: "Bob"
           order_count: 1
 
+  - name: "EXPLAIN scalar COUNT subselect uses materialized keytable cache"
+    sql: "EXPLAIN SELECT (SELECT COUNT(*) FROM sub_orders WHERE customer_id = 1) AS cnt"
+    expect:
+      rows: 1
+      contains:
+        - "createcolumn"
+        - "touch_keytable"
+        - ".sub_orders:(1)"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sub_orders"
   - sql: "DROP TABLE IF EXISTS sub_customers"

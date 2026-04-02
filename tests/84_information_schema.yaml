@@ -114,6 +114,34 @@ test_cases:
     expect:
       min_rows: 0
 
+  # --- JOINs between INFORMATION_SCHEMA tables ---
+
+  - name: "JOIN key_column_usage with referential_constraints"
+    sql: >
+      SELECT key_column_usage.table_name AS tbl,
+             key_column_usage.column_name AS col,
+             key_column_usage.referenced_table_name AS tbl2,
+             referential_constraints.delete_rule
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+      JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+        ON key_column_usage.constraint_schema = referential_constraints.constraint_schema
+       AND key_column_usage.constraint_name = referential_constraints.constraint_name
+      WHERE key_column_usage.referenced_table_name IS NOT NULL
+        AND key_column_usage.table_schema = 'memcp-tests'
+    expect:
+      min_rows: 0
+
+  - name: "JOIN tables with columns"
+    sql: >
+      SELECT t.table_name, c.column_name
+      FROM INFORMATION_SCHEMA.TABLES t
+      JOIN INFORMATION_SCHEMA.COLUMNS c
+        ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+      WHERE t.table_name = 'is_test_tbl'
+      ORDER BY c.column_name
+    expect:
+      min_rows: 3
+
   # --- Case insensitivity ---
 
   - name: "Case insensitive schema name"
