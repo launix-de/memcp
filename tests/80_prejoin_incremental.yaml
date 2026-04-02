@@ -4,19 +4,19 @@ metadata:
   isolated: true
 
 setup:
-  - sql: "DROP TABLE IF EXISTS orders"
-  - sql: "DROP TABLE IF EXISTS customers"
-  - sql: "CREATE TABLE customers (id INT, name TEXT)"
-  - sql: "CREATE TABLE orders (id INT, customer_id INT, amount INT)"
-  - sql: "INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')"
-  - sql: "INSERT INTO orders VALUES (10, 1, 100), (20, 1, 200), (30, 2, 50)"
+  - sql: "DROP TABLE IF EXISTS prejoin_orders"
+  - sql: "DROP TABLE IF EXISTS prejoin_customers"
+  - sql: "CREATE TABLE prejoin_customers (id INT, name TEXT)"
+  - sql: "CREATE TABLE prejoin_orders (id INT, customer_id INT, amount INT)"
+  - sql: "INSERT INTO prejoin_customers VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')"
+  - sql: "INSERT INTO prejoin_orders VALUES (10, 1, 100), (20, 1, 200), (30, 2, 50)"
 
 test_cases:
 
   # --- Initial materialization ---
 
   - name: "Initial GROUP BY across tables materializes prejoin"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 2
       data:
@@ -25,15 +25,15 @@ test_cases:
         - name: "Bob"
           total: 50
 
-  # --- INSERT into orders (child table) ---
+  # --- INSERT into prejoin_orders (child table) ---
 
   - name: "Insert a new order for Alice"
-    sql: "INSERT INTO orders VALUES (40, 1, 75)"
+    sql: "INSERT INTO prejoin_orders VALUES (40, 1, 75)"
     expect:
       affected_rows: 1
 
-  - name: "After INSERT into orders: Alice total updated"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+  - name: "After INSERT into prejoin_orders: Alice total updated"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 2
       data:
@@ -42,15 +42,15 @@ test_cases:
         - name: "Bob"
           total: 50
 
-  # --- INSERT into customers (parent table) ---
+  # --- INSERT into prejoin_customers (parent table) ---
 
-  - name: "Insert a new customer Carol with existing orders (none yet)"
-    sql: "INSERT INTO orders VALUES (50, 3, 999)"
+  - name: "Insert a new customer Carol with existing prejoin_orders (none yet)"
+    sql: "INSERT INTO prejoin_orders VALUES (50, 3, 999)"
     expect:
       affected_rows: 1
 
   - name: "After INSERT order for Carol: Carol appears in results"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 3
       data:
@@ -61,20 +61,20 @@ test_cases:
         - name: "Carol"
           total: 999
 
-  # --- INSERT into customers: customer with matching orders ---
+  # --- INSERT into prejoin_customers: customer with matching prejoin_orders ---
 
-  - name: "Insert a new customer Dave with pre-existing orders"
-    sql: "INSERT INTO orders VALUES (60, 4, 111), (70, 4, 222)"
+  - name: "Insert a new customer Dave with pre-existing prejoin_orders"
+    sql: "INSERT INTO prejoin_orders VALUES (60, 4, 111), (70, 4, 222)"
     expect:
       affected_rows: 2
 
   - name: "Insert customer Dave"
-    sql: "INSERT INTO customers VALUES (4, 'Dave')"
+    sql: "INSERT INTO prejoin_customers VALUES (4, 'Dave')"
     expect:
       affected_rows: 1
 
-  - name: "After INSERT customer Dave: Dave appears with his orders"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+  - name: "After INSERT customer Dave: Dave appears with his prejoin_orders"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 4
       data:
@@ -87,15 +87,15 @@ test_cases:
         - name: "Dave"
           total: 333
 
-  # --- DELETE from orders ---
+  # --- DELETE from prejoin_orders ---
 
-  - name: "Delete one of Alice's orders"
-    sql: "DELETE FROM orders WHERE id = 10"
+  - name: "Delete one of Alice's prejoin_orders"
+    sql: "DELETE FROM prejoin_orders WHERE id = 10"
     expect:
       affected_rows: 1
 
-  - name: "After DELETE from orders: Alice total reduced"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+  - name: "After DELETE from prejoin_orders: Alice total reduced"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 4
       data:
@@ -108,15 +108,15 @@ test_cases:
         - name: "Dave"
           total: 333
 
-  # --- DELETE from customers ---
+  # --- DELETE from prejoin_customers ---
 
   - name: "Delete customer Bob"
-    sql: "DELETE FROM customers WHERE id = 2"
+    sql: "DELETE FROM prejoin_customers WHERE id = 2"
     expect:
       affected_rows: 1
 
-  - name: "After DELETE from customers: Bob disappears"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+  - name: "After DELETE from prejoin_customers: Bob disappears"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 3
       data:
@@ -127,15 +127,15 @@ test_cases:
         - name: "Dave"
           total: 333
 
-  # --- UPDATE orders (amount changes) ---
+  # --- UPDATE prejoin_orders (amount changes) ---
 
   - name: "Update Alice's order amount"
-    sql: "UPDATE orders SET amount = 500 WHERE id = 20"
+    sql: "UPDATE prejoin_orders SET amount = 500 WHERE id = 20"
     expect:
       affected_rows: 1
 
   - name: "After UPDATE order amount: Alice total updated"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 3
       data:
@@ -146,15 +146,15 @@ test_cases:
         - name: "Dave"
           total: 333
 
-  # --- UPDATE orders (foreign key change: reassign order to different customer) ---
+  # --- UPDATE prejoin_orders (foreign key change: reassign order to different customer) ---
 
   - name: "Reassign order 40 from Alice (1) to Carol (3)"
-    sql: "UPDATE orders SET customer_id = 3 WHERE id = 40"
+    sql: "UPDATE prejoin_orders SET customer_id = 3 WHERE id = 40"
     expect:
       affected_rows: 1
 
   - name: "After UPDATE order FK: Alice loses order, Carol gains it"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 3
       data:
@@ -165,15 +165,15 @@ test_cases:
         - name: "Dave"
           total: 333
 
-  # --- UPDATE customers (name change) ---
+  # --- UPDATE prejoin_customers (name change) ---
 
   - name: "Rename Dave to Evan"
-    sql: "UPDATE customers SET name = 'Evan' WHERE id = 4"
+    sql: "UPDATE prejoin_customers SET name = 'Evan' WHERE id = 4"
     expect:
       affected_rows: 1
 
   - name: "After UPDATE customer name: Dave becomes Evan"
-    sql: "SELECT customers.name, SUM(orders.amount) AS total FROM orders JOIN customers ON orders.customer_id = customers.id GROUP BY customers.name ORDER BY customers.name"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
     expect:
       rows: 3
       data:
