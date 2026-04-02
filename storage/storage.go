@@ -299,55 +299,6 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "table_stale?",
-		Desc: "returns true if a planner-owned scratch table must be refreshed before reuse",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			table := scm.String(a[1])
-			db := GetDatabase(schema)
-			if db == nil {
-				panic("database " + schema + " does not exist")
-			}
-			t := db.GetTable(table)
-			if t == nil {
-				panic("table " + schema + "." + table + " does not exist")
-			}
-			return scm.NewBool(t.scratchNeedsRefresh.Load())
-		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
-	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "mark_table_fresh",
-		Desc: "clears the restart-stale bit on a planner-owned scratch table after it has been recollected",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			table := scm.String(a[1])
-			db := GetDatabase(schema)
-			if db == nil {
-				panic("database " + schema + " does not exist")
-			}
-			t := db.GetTable(table)
-			if t == nil {
-				panic("table " + schema + "." + table + " does not exist")
-			}
-			t.scratchNeedsRefresh.Store(false)
-			return scm.NewBool(true)
-		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
-	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",

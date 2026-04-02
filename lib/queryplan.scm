@@ -826,8 +826,8 @@ planner starts splitting aggregate conditions apart. */
 ))
 
 /* extract_all_table_aliases: return a flat list of all table aliases referenced
-   via get_column nodes in an expression.  Used by LEFT JOIN pruning to detect
-   which tables are actually read. */
+via get_column nodes in an expression.  Used by LEFT JOIN pruning to detect
+which tables are actually read. */
 (define extract_all_table_aliases (lambda (expr)
 	(match expr
 		'((symbol get_column) alias_ _ _ _) (if (nil? alias_) '() (list (string alias_)))
@@ -3663,9 +3663,9 @@ or generate runtime scan code (build_queryplan).
 	(set having (finalize_visible_expr having))
 
 	/* LEFT JOIN pruning: remove LEFT JOINed tables that are not referenced
-	   anywhere in the query (fields, condition, having, order, or sibling
-	   joinexprs). A LEFT JOIN that is never read contributes only NULL columns
-	   and cannot filter rows, so it is safe to drop entirely. */
+	anywhere in the query (fields, condition, having, order, or sibling
+	joinexprs). A LEFT JOIN that is never read contributes only NULL columns
+	and cannot filter rows, so it is safe to drop entirely. */
 	(define _all_referenced_aliases (merge_unique (list
 		(extract_all_table_aliases fields)
 		(extract_all_table_aliases conditionAll)
@@ -5233,10 +5233,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(if (not (nil? _stage_scope))
 									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
 									(list (make_collect false))
-									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl) (list 'table_stale? schema grouptbl))
-										(list 'begin
-											(make_collect false)
-											(list 'mark_table_fresh schema grouptbl))
+									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
+										(make_collect false)
 										nil))))
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
 							(list compute_plan)
@@ -6005,13 +6003,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(list 'if (list 'createtable pj_schema prejointbl
 							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							'(list "engine" "sloppy") true)
-							(list 'begin
+							(list 'time prejoin_materialize_plan "materialize")
+							(list 'if (list 'table_empty? pj_schema prejointbl)
 								(list 'time prejoin_materialize_plan "materialize")
-								(list 'mark_table_fresh pj_schema prejointbl))
-							(list 'if (list 'or (list 'table_empty? pj_schema prejointbl) (list 'table_stale? pj_schema prejointbl))
-								(list 'begin
-									(list 'time prejoin_materialize_plan "materialize")
-									(list 'mark_table_fresh pj_schema prejointbl))
 								nil)))
 					pj_trigger_registrations
 					(list grouped_result)))

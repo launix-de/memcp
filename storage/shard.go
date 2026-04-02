@@ -188,6 +188,26 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 }
 func (u *storageShard) load(t *table) {
 	u.t = t
+	if t.isEphemeralQueryTable() {
+		// Planner-owned helper tables persist only their schema contract. Their
+		// materialized rows are cache state and must not survive restart/reload:
+		// base-table WAL replay can make persisted helper contents stale, missing
+		// new groups, or duplicated when incremental rebuild logic runs again.
+		//
+		// Keep the helper table definition (schema.json, hidden columns, trigger
+		// metadata), but always start with empty storages after process start.
+		// The normal createtable/collect/createcolumn path will repopulate the
+		// helper deterministically on first reuse.
+		u.columns = make(map[string]ColumnStorage, len(u.t.Columns))
+		u.deltaColumns = make(map[string]int)
+		u.inserts = nil
+		u.deletions.Reset()
+		u.main_count = 0
+		for _, col := range u.t.Columns {
+			u.columns[col.Name] = new(StorageSparse)
+		}
+		return
+	}
 	// mark columns for lazy loading (caller must hold u.mu.Lock)
 	for _, col := range u.t.Columns {
 		u.columns[col.Name] = nil

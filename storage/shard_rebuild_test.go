@@ -834,6 +834,60 @@ func TestEnsureColumnLoadedRehydratesOrderedProxyFromSchemaPlaceholder(t *testin
 	}
 }
 
+func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-ephemeral-helper-load-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tephemeralhelper")
+
+	CreateDatabase("tephemeralhelper", false)
+	tbl, _ := CreateTable("tephemeralhelper", ".helper", Sloppy, false)
+	tbl.Comment = queryScratchComment
+	tbl.CreateColumn("grp", "TEXT", nil, nil)
+	tbl.CreateColumn("sumv", "INT", nil, nil)
+
+	orig := tbl.Shards[0]
+	grp := &StorageSCMER{values: []scm.Scmer{scm.NewString("A"), scm.NewString("B")}}
+	f := tbl.schema.persistence.WriteColumn(orig.uuid.String(), "grp")
+	grp.Serialize(f)
+	f.Close()
+
+	proxy := &StorageComputeProxy{
+		delta:    map[uint32]scm.Scmer{0: scm.NewInt(100), 1: scm.NewInt(200)},
+		count:    2,
+		computor: scm.NewSymbol("+"),
+	}
+	proxy.validMask.Set(0, true)
+	proxy.validMask.Set(1, true)
+	f = tbl.schema.persistence.WriteColumn(orig.uuid.String(), "sumv")
+	proxy.Serialize(f)
+	f.Close()
+
+	reloaded := &storageShard{uuid: orig.uuid}
+	reloaded.load(tbl)
+
+	if reloaded.main_count != 0 {
+		t.Fatalf("ephemeral helper load restored main_count=%d, want 0", reloaded.main_count)
+	}
+	if _, ok := reloaded.columns["grp"].(*StorageSparse); !ok {
+		t.Fatalf("ephemeral helper grp column loaded as %T, want *StorageSparse", reloaded.columns["grp"])
+	}
+	if _, ok := reloaded.columns["sumv"].(*StorageSparse); !ok {
+		t.Fatalf("ephemeral helper compute column loaded as %T, want *StorageSparse", reloaded.columns["sumv"])
+	}
+	if got := reloaded.Count(); got != 0 {
+		t.Fatalf("ephemeral helper row count = %d, want 0", got)
+	}
+}
+
 func TestCreateColumnBuiltinUpgradesExistingColumnToORC(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-createcolumn-orc-upgrade-*")
 	if err != nil {

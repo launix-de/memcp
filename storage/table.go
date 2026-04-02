@@ -293,21 +293,6 @@ type table struct {
 	orcRecomputing int32 // atomic: >0 means an ORC recompute is in progress (skip re-entry in GetValue)
 
 	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
-	// scratchNeedsRefresh is a runtime-only safety bit for planner-owned helper
-	// tables (keytables, prejoins, scalar helper tables, ...). After a process
-	// restart we conservatively treat persisted scratch tables as stale until the
-	// first collect/materialize pass has rebuilt them once.
-	//
-	// Why this must exist:
-	// - helper tables use ENGINE=sloppy on purpose for speed
-	// - base-table WAL replay after an unclean shutdown does not replay helper
-	//   trigger effects
-	// - therefore "table exists and is non-empty" is NOT enough to trust a
-	//   persisted helper right after startup
-	//
-	// Do not remove this flag just because it looks redundant with CountEstimate.
-	// It encodes a restart/recovery contract, not a row-count property.
-	scratchNeedsRefresh atomic.Bool
 
 	// ddlMu is the table-local schema contract:
 	//   - Lock(): column/trigger/ORC metadata on this table may change
