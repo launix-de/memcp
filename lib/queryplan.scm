@@ -4095,6 +4095,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		temp names. */
 		(define raw_stage_group stage_group)
 		(define raw_stage_having stage_having)
+		/* Compatibility name: current planner stores the logical post-group
+		predicate in HAVING. Keep an explicit raw alias here so recursive
+		prejoin/group planning cannot silently drop it by referring to an
+		undefined symbol. */
+		(define raw_stage_post_group_condition raw_stage_having)
 		(define raw_stage_order stage_order)
 		(define raw_fields fields)
 		(set stage_group (map stage_group replace_find_column))
