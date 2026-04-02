@@ -299,65 +299,6 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "query_helper_needs_init?",
-		Desc: "returns true if a planner-owned helper table still needs its first full rebuild after reload",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			table := scm.String(a[1])
-			db := GetDatabase(schema)
-			if db == nil {
-				panic("database " + schema + " does not exist")
-			}
-			t := db.GetTable(table)
-			if t == nil {
-				panic("table " + schema + "." + table + " does not exist")
-			}
-			return scm.NewBool(t.queryScratchNeedsInit.Load())
-		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
-	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "reset_query_helper",
-		Desc: "clears a planner-owned helper table so the next collect/materialize rebuild replaces any partial post-reload trigger state",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			table := scm.String(a[1])
-			db := GetDatabase(schema)
-			if db == nil {
-				panic("database " + schema + " does not exist")
-			}
-			t := db.GetTable(table)
-			if t == nil {
-				panic("table " + schema + "." + table + " does not exist")
-			}
-			if !t.isEphemeralQueryTable() {
-				panic("reset_query_helper only allowed on planner-owned helper tables")
-			}
-			t.mu.Lock()
-			for _, s := range t.maintenanceShards() {
-				s.mu.Lock()
-				s.resetHelperContentsLocked()
-				s.mu.Unlock()
-			}
-			t.queryScratchNeedsInit.Store(false)
-			t.mu.Unlock()
-			return scm.NewBool(true)
-		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
-	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",

@@ -849,8 +849,7 @@ func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
 	defer databases.Remove("tephemeralhelper")
 
 	CreateDatabase("tephemeralhelper", false)
-	tbl, _ := CreateTable("tephemeralhelper", ".helper", Sloppy, false)
-	tbl.Comment = queryScratchComment
+	tbl, _ := CreateTable("tephemeralhelper", ".helper", Cache, false)
 	tbl.CreateColumn("grp", "TEXT", nil, nil)
 	tbl.CreateColumn("sumv", "INT", nil, nil)
 
@@ -871,17 +870,27 @@ func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
 	proxy.Serialize(f)
 	f.Close()
 
-	reloaded := &storageShard{uuid: orig.uuid}
+	reloaded := &storageShard{
+		uuid:         orig.uuid,
+		columns:      make(map[string]ColumnStorage),
+		deltaColumns: make(map[string]int),
+	}
 	reloaded.load(tbl)
 
 	if reloaded.main_count != 0 {
 		t.Fatalf("ephemeral helper load restored main_count=%d, want 0", reloaded.main_count)
 	}
-	if _, ok := reloaded.columns["grp"].(*StorageSparse); !ok {
-		t.Fatalf("ephemeral helper grp column loaded as %T, want *StorageSparse", reloaded.columns["grp"])
+	if reloaded.columns["grp"] != nil {
+		t.Fatalf("ephemeral helper grp column should stay unloaded on reload, got %T", reloaded.columns["grp"])
 	}
-	if _, ok := reloaded.columns["sumv"].(*StorageSparse); !ok {
-		t.Fatalf("ephemeral helper compute column loaded as %T, want *StorageSparse", reloaded.columns["sumv"])
+	if reloaded.columns["sumv"] != nil {
+		t.Fatalf("ephemeral helper compute column should stay unloaded on reload, got %T", reloaded.columns["sumv"])
+	}
+	if _, ok := reloaded.ensureColumnLoaded("grp", false).(*StorageSparse); !ok {
+		t.Fatalf("ephemeral helper grp lazy load returned %T, want *StorageSparse", reloaded.columns["grp"])
+	}
+	if _, ok := reloaded.ensureColumnLoaded("sumv", false).(*StorageSparse); !ok {
+		t.Fatalf("ephemeral helper compute lazy load returned %T, want *StorageSparse", reloaded.columns["sumv"])
 	}
 	if got := reloaded.Count(); got != 0 {
 		t.Fatalf("ephemeral helper row count = %d, want 0", got)

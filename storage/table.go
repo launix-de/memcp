@@ -293,20 +293,6 @@ type table struct {
 	orcRecomputing int32 // atomic: >0 means an ORC recompute is in progress (skip re-entry in GetValue)
 
 	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
-	// queryScratchNeedsInit is a runtime-only reload contract for planner-owned
-	// helper tables. We intentionally do NOT trust persisted helper contents
-	// across restart: the helper reloads empty and the first foreground query
-	// must rebuild it from base tables with replace semantics.
-	//
-	// Why this bit still matters even though helper rows are dropped on reload:
-	// persisted internal triggers can already append partial rows into the empty
-	// helper before the first query runs. The first query must therefore ignore
-	// those partial rows, clear the helper, and rebuild the canonical state once.
-	//
-	// Do not remove this because "table_empty?" looks sufficient. Empty is a row
-	// count property; this bit encodes whether a helper has completed its first
-	// post-reload full rebuild.
-	queryScratchNeedsInit atomic.Bool
 
 	// ddlMu is the table-local schema contract:
 	//   - Lock(): column/trigger/ORC metadata on this table may change
@@ -591,20 +577,12 @@ func (t *table) beginManualRepartition() bool {
 	return true
 }
 
-const queryScratchComment = "__memcp_query_temp"
-
 // isEphemeralQueryTable identifies planner-owned query scratch tables
 // (keytables, prejoins, scalar helper tables, etc.). These relations are
-// explicitly marked at creation time so persistence/rebuild can skip them
-// without conflating them with user-created hidden tables.
-//
-// Contract:
-//   - durable internal tables such as ".blobs" are NOT ephemeral and must
-//     continue to participate in rebuild/persistence.
-//   - user-created hidden tables (dot prefix) are still normal tables unless
-//     they carry the internal query scratch marker.
+// dot-prefixed cache-engine tables: durable internal tables such as ".blobs"
+// use persisted engines and must not be treated as ephemeral helpers.
 func (t *table) isEphemeralQueryTable() bool {
-	return strings.HasPrefix(t.Name, ".") && t.Comment == queryScratchComment
+	return strings.HasPrefix(t.Name, ".") && t.PersistencyMode == Cache
 }
 
 // schemaWriteDurable reports whether schema.json must be flushed with Sync for
