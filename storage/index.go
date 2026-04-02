@@ -17,7 +17,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 package storage
 
-import "sort"
 import "sync"
 import "sync/atomic"
 import "time"
@@ -77,8 +76,13 @@ type StorageIndex struct {
 	deltaBtree *btree.BTreeG[indexPair]
 	t          *storageShard
 	active     bool
-	lastHit    atomic.Uint32 // last binary search position for sorted access pattern optimization
+	lastHit    atomic.Uint32 // last search position for sorted access pattern optimization
 	mu         sync.Mutex
+	// minVals/maxVals: per sorted index column, the minimum and maximum value
+	// in main storage.  Used by interpolation search to estimate positions.
+	// Set during buildIndex; nil entries mean the column is non-sorted or empty.
+	minVals []scm.Scmer
+	maxVals []scm.Scmer
 }
 
 // buildGetters returns per-column value getters for this index, reading from the
@@ -532,8 +536,31 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 			s.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
 		}
 		s.mainIndexes.finish()
+		// Capture min/max from sorted permutation for interpolation search
+		if len(tmp) > 0 {
+			s.minVals = make([]scm.Scmer, len(cols))
+			s.maxVals = make([]scm.Scmer, len(cols))
+			for i, g := range cols {
+				if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+					continue
+				}
+				s.minVals[i] = g.get(tmp[0])
+				s.maxVals[i] = g.get(tmp[len(tmp)-1])
+			}
+		}
+	} else if s.t.main_count > 0 {
+		// Native index: identity order, recid 0 = min, recid N-1 = max
+		s.minVals = make([]scm.Scmer, len(cols))
+		s.maxVals = make([]scm.Scmer, len(cols))
+		for i, g := range cols {
+			if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+				continue
+			}
+			s.minVals[i] = g.get(0)
+			s.maxVals[i] = g.get(s.t.main_count - 1)
+		}
 	}
-	// else: Native index — data is physically sorted, no mainIndexes needed
+	// (previously: else: Native index comment)
 
 	// delta storage — comparator uses getDeltaColValue so computed columns work;
 	// skip non-sorted matcher columns (they don't participate in sort order)
@@ -707,23 +734,17 @@ start_scan:
 			}
 		}
 	}
-	mainIdx := searchLo + sort.Search(searchN, func(idx int) bool {
-		idx2 := getRecid(searchLo + idx)
-		for i := 0; i < cmpCols; i++ {
-			if len(bounds) > i && !bounds[i].matcher.IsSorted() {
-				continue // non-sorted matcher cols: no binary search, filter later
-			}
-			a := lower[i]
-			b := cols[i].get(idx2)
-			if scm.Less(a, b) {
-				return true // less
-			} else if scm.Less(b, a) {
-				return false // greater
-			}
-			// otherwise: next iteration
-		}
-		return true // fully equal
-	})
+	// Interpolation search: estimate position from first sorted column's
+	// min/max, then binary search for exact multi-column position.
+	var interpMin, interpMax scm.Scmer
+	if cmpCols > 0 && firstSearchable && len(s.minVals) > 0 && !lower[0].IsNil() {
+		interpMin = s.minVals[0]
+		interpMax = s.maxVals[0]
+	}
+	mainIdx := interpolationSearch(searchLo, searchN, lower[0], interpMin, interpMax,
+		func(idx int) scm.Scmer {
+			return cols[0].get(getRecid(idx))
+		})
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
 	// LIKE columns don't have lower/upper semantics, so skip this optimization.
