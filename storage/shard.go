@@ -1962,7 +1962,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			firstNextRecid := next.insertReplica(payloadCols, payloadVals, false)
 			t.recordNextInsertRange(firstNewRecid, firstNextRecid, len(payloadVals))
 		}
-		if t.t.repartitionDualWriteActive.Load() && t.t.ShardMode == ShardModeFree {
+		if t.t.repartitionDualWriteActive.Load() {
 			t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals)
 		}
 	}

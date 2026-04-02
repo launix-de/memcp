@@ -28,6 +28,8 @@ package scm
 import "fmt"
 import "runtime"
 import "sync"
+import "sync/atomic"
+import "github.com/jtolds/gls"
 
 // optimizeMap is the optimizer hook for `map`. It applies default optimization
 // (including FirstParameterMutable swap to map_mut), then fuses
@@ -573,6 +575,126 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeMap,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "parallel_map",
+		Desc: "like map, but applies fn to each element in parallel using a worker pool limited to runtime.NumCPU()",
+		Fn: func(a ...Scmer) Scmer {
+			list := asSlice(a[0], "parallel_map")
+			if len(list) <= 1 {
+				// fast path: no parallelism needed
+				result := make([]Scmer, len(list))
+				if len(list) == 1 {
+					fn := OptimizeProcToSerialFunction(a[1])
+					result[0] = fn(list[0])
+				}
+				return NewSlice(result)
+			}
+			results := make([]Scmer, len(list))
+			workers := runtime.NumCPU()
+			if workers > len(list) {
+				workers = len(list)
+			}
+			jobs := make(chan int, workers)
+			var wg sync.WaitGroup
+			var firstErr atomic.Value
+			wg.Add(workers)
+			for w := 0; w < workers; w++ {
+				gls.Go(func() {
+					defer wg.Done()
+					fn := OptimizeProcToSerialFunction(a[1])
+					for i := range jobs {
+						if firstErr.Load() != nil {
+							continue // drain remaining jobs
+						}
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									firstErr.CompareAndSwap(nil, r)
+								}
+							}()
+							results[i] = fn(list[i])
+						}()
+					}
+				})
+			}
+			for i := range list {
+				jobs <- i
+			}
+			close(jobs)
+			wg.Wait()
+			if err := firstErr.Load(); err != nil {
+				panic(err)
+			}
+			return NewSlice(results)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "list to map over in parallel", NoEscape: true},
+				{Kind: "func", ParamName: "fn", ParamDesc: "function applied to each element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:   FreshAlloc,
+			Optimize: FirstParameterMutable("parallel_map_mut"),
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "parallel_map_mut",
+		Desc: "like parallel_map, but signals the optimizer that fn may have side effects",
+		Fn: func(a ...Scmer) Scmer {
+			list := asSlice(a[0], "parallel_map_mut")
+			if len(list) <= 1 {
+				result := make([]Scmer, len(list))
+				if len(list) == 1 {
+					fn := OptimizeProcToSerialFunction(a[1])
+					result[0] = fn(list[0])
+				}
+				return NewSlice(result)
+			}
+			results := make([]Scmer, len(list))
+			workers := runtime.NumCPU()
+			if workers > len(list) {
+				workers = len(list)
+			}
+			jobs := make(chan int, workers)
+			var wg sync.WaitGroup
+			var firstErr atomic.Value
+			wg.Add(workers)
+			for w := 0; w < workers; w++ {
+				gls.Go(func() {
+					defer wg.Done()
+					fn := OptimizeProcToSerialFunction(a[1])
+					for i := range jobs {
+						if firstErr.Load() != nil {
+							continue
+						}
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									firstErr.CompareAndSwap(nil, r)
+								}
+							}()
+							results[i] = fn(list[i])
+						}()
+					}
+				})
+			}
+			for i := range list {
+				jobs <- i
+			}
+			close(jobs)
+			wg.Wait()
+			if err := firstErr.Load(); err != nil {
+				panic(err)
+			}
+			return NewSlice(results)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "list to map over in parallel", NoEscape: true},
+				{Kind: "func", ParamName: "fn", ParamDesc: "function with side effects applied to each element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return: FreshAlloc,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

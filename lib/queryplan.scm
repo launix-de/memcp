@@ -822,6 +822,66 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	)
 ))
 
+/* expr_has_scan: returns true if an AST expression contains any scan node. */
+(define expr_has_scan (lambda (expr)
+	(match expr
+		(cons head rest) (match (string head)
+			"scan" true "scan_order" true "scan_batch" true
+			"scalar_scan" true "scalar_scan_order" true
+			_ (reduce rest (lambda (acc child) (or acc (expr_has_scan child))) false))
+		false)))
+
+/* expr_refs_outer_var: returns true if an expression references (var N) at the
+   top level (outside any nested lambda). */
+(define expr_refs_outer_var (lambda (expr)
+	(match expr
+		(cons head rest) (match (string head)
+			"var" true
+			"lambda" false
+			_ (reduce rest (lambda (acc child) (or acc (expr_refs_outer_var child))) false))
+		false)))
+
+/* expr_is_parallelizable: safe to wrap in a parallel thunk if it contains
+   a scan AND does not reference outer-scope vars. */
+(define expr_is_parallelizable (lambda (expr)
+	(and (expr_has_scan expr) (not (expr_refs_outer_var expr)))))
+
+/* parallelize_resultrows: post-processing pass over the finished query plan AST.
+   Rewrites (resultrow (list k1 v1 k2 v2 ...)) nodes: if >=2 value expressions
+   are parallelizable, wrap them in parallel_map for concurrent evaluation.
+   Only recurses into transparent wrappers (begin/if/define/time). */
+(define parallelize_resultrows (lambda (ast)
+	(match ast
+		(cons head rest)
+		(if (equal? (string head) "resultrow")
+			(match rest
+				(cons (cons list_head kv_pairs) rr_rest)
+				(begin
+					(define vals (extract_assoc kv_pairs (lambda (k v) v)))
+					(define complex_count (reduce vals (lambda (acc v) (+ acc (if (expr_is_parallelizable v) 1 0))) 0))
+					(if (< complex_count 2)
+						ast
+						(begin
+							(define keys (extract_assoc kv_pairs (lambda (k v) k)))
+							(define thunks (map vals (lambda (v) (list (quote lambda) '() v))))
+							(define pmap_call (list (symbol "parallel_map")
+								(cons (symbol "list") thunks)
+								(list (quote lambda) (list (symbol "__pf")) (list (symbol "__pf")))))
+							(define reassembled (cons list_head
+								(merge (mapIndex keys (lambda (i k) (list k (list (symbol "nth") (symbol "__pr") i)))))))
+							(list (quote begin)
+								(list (quote define) (symbol "__pr") pmap_call)
+								(cons head (cons reassembled rr_rest))))))
+				ast)
+			(match (string head)
+				"begin" (cons head (map rest parallelize_resultrows))
+				"!begin" (cons head (map rest parallelize_resultrows))
+				"if" (cons head (map rest parallelize_resultrows))
+				"define" (cons head (map rest parallelize_resultrows))
+				"time" (cons head (map rest parallelize_resultrows))
+				ast))
+		ast)))
+
 /* split_condition: selection pushdown for nested-loop join planning.
 Splits an AND-condition into (now, later): predicates evaluatable with currently
 bound tables vs predicates that must wait for inner tables to be scanned.
@@ -3636,7 +3696,7 @@ second table carries strictly more local WHERE predicates than the first. */
 				(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
 				(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
 				(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
-				(if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan)))))
+				(parallelize_resultrows (if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan))))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
