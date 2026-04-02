@@ -1493,7 +1493,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
 					'())))))
 			/* create at compile time (needed for recursive build_queryplan) */
-			(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
+			(createtable schema keytable_name kt_cols query_temp_table_options true)
 			(partitiontable schema keytable_name kt_partition)
 			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
 			(define kt_cols_code (cons 'list
@@ -1505,7 +1505,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
 					'()))))))
 			(define init_code (list 'begin
-				(list 'define '__kt_created (list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true))
+				(list 'define '__kt_created (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true))
 				(list 'if '__kt_created
 					(list 'partitiontable schema keytable_name kt_partition_code)
 					nil)
