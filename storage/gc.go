@@ -33,36 +33,29 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
 }
 
 // cleanBlobs deletes blob files that are not referenced in the .blobs table.
-// Runs under db.blobMu to serialize with IncrBlobRefcount/FlushBlobRefcounts,
-// eliminating the race between WriteBlob and IncrBlobRefcount.
+// No global lock needed: IncrBlobRefcount is always called BEFORE WriteBlob,
+// so any file on disk has (or will have) a refcount entry.  Only truly
+// orphaned files (from incomplete writes) are deleted.
+// Queries the .blobs table per blob file instead of building an in-memory map.
 func cleanBlobs(db *database) int {
-	db.blobMu.Lock()
-	defer db.blobMu.Unlock()
-
-	// Build set of active hashes from the .blobs table (small — unique blobs only).
-	active := map[string]bool{}
-	if bt := db.GetTable(".blobs"); bt != nil {
-		bt.scan(
-			[]string{},
-			scm.NewProcStruct(scm.Proc{Body: scm.NewBool(true), En: &scm.Globalenv}),
-			[]string{"hash", "refcount"},
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-				if scm.ToInt(a[1]) > 0 {
-					active[scm.String(a[0])] = true
-				}
-				return scm.NewNil()
-			}),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
-			scm.NewNil(),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
-			false,
-		)
+	bt := db.GetTable(".blobs")
+	if bt == nil {
+		return 0
 	}
+	aggr := sumProc()
 
-	// Walk disk blobs one by one; delete those without an active refcount.
+	// Walk disk blobs one by one; check refcount via scan on .blobs table.
 	deleted := 0
 	db.persistence.WalkBlobs(func(hash string) error {
-		if !active[hash] {
+		hashVal := scm.NewString(hash)
+		// scan .blobs WHERE hash = <hash>, sum refcount
+		rc := bt.scan(
+			[]string{"hash"}, blobCondition(hashVal),
+			[]string{"refcount"},
+			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
+			aggr, scm.NewInt(0), aggr, false,
+		)
+		if scm.ToInt(rc) <= 0 {
 			db.persistence.DeleteBlob(hash)
 			deleted++
 		}
