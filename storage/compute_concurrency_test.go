@@ -17,8 +17,6 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"sync"
@@ -27,7 +25,6 @@ import (
 	"time"
 
 	"github.com/jtolds/gls"
-	"github.com/launix-de/NonLockingReadMap"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -192,7 +189,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 	}
 }
 
-func TestFilteredComputeColumnReusesSameFilterWithoutRecompute(t *testing.T) {
+func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 
 	CreateDatabase("compconc", false)
@@ -239,68 +236,12 @@ func TestFilteredComputeColumnReusesSameFilterWithoutRecompute(t *testing.T) {
 	}
 
 	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
-	if got := computeCalls.Load(); got != 2 {
-		t.Fatalf("repeated filtered compute recomputed %d values, want cached no-op", got)
+	if got := computeCalls.Load(); got != 4 {
+		t.Fatalf("repeated filtered compute invoked computor %d times, want 4 total", got)
 	}
 
 	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1)
-	if got := computeCalls.Load(); got != 5 {
-		t.Fatalf("changing filtered materialization invoked computor %d times, want 5 total", got)
-	}
-}
-
-func TestComputeProxySerializeRoundTripPreservesFilteredMaterialization(t *testing.T) {
-	filter := scm.NewProcStruct(scm.Proc{
-		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("val")}),
-		Body: scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol(">"),
-			scm.NewNthLocalVar(0),
-			scm.NewInt(2),
-		}),
-		En:      &scm.Globalenv,
-		NumVars: 1,
-	})
-	computor := scm.NewProcStruct(scm.Proc{
-		Params:  scm.NewSlice([]scm.Scmer{scm.NewSymbol("val")}),
-		Body:    scm.NewNthLocalVar(0),
-		En:      &scm.Globalenv,
-		NumVars: 1,
-	})
-	proxy := &StorageComputeProxy{
-		delta:      map[uint32]scm.Scmer{2: scm.NewInt(3), 3: scm.NewInt(4)},
-		validMask:  NonLockingReadMap.NonBlockingBitMap{},
-		computor:   computor,
-		inputCols:  []string{"val"},
-		filterCols: []string{"val"},
-		filter:     filter,
-		count:      4,
-	}
-	proxy.validMask.Set(2, true)
-	proxy.validMask.Set(3, true)
-	proxy.eagerMask.Set(2, true)
-	proxy.eagerMask.Set(3, true)
-
-	var buf bytes.Buffer
-	proxy.Serialize(&buf)
-
-	var magic uint8
-	if err := binary.Read(&buf, binary.LittleEndian, &magic); err != nil {
-		t.Fatal(err)
-	}
-	if magic != 50 {
-		t.Fatalf("magic = %d, want 50", magic)
-	}
-	var roundTrip StorageComputeProxy
-	if got := roundTrip.Deserialize(&buf); got != 4 {
-		t.Fatalf("Deserialize count = %d, want 4", got)
-	}
-	if !stringSlicesEqual(roundTrip.filterCols, []string{"val"}) {
-		t.Fatalf("filterCols = %v, want [val]", roundTrip.filterCols)
-	}
-	if !scmerJSONEqual(roundTrip.filter, filter) {
-		t.Fatal("round-trip filter does not match original filtered materialization")
-	}
-	if !roundTrip.eagerMask.Get(2) || !roundTrip.eagerMask.Get(3) {
-		t.Fatal("round-trip eagerMask lost filtered eager rows")
+	if got := computeCalls.Load(); got != 7 {
+		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
 	}
 }

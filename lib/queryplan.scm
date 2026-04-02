@@ -66,11 +66,6 @@ delete_fn/insert_fn/update_fn are code-generator-produced lambda expressions (no
 Lifecycle triggers use code-generator pattern for the drop body as well.
 update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure capture). */
 (define register_prejoin_incremental (lambda (src_schema src_table pj_schema pj_table delete_fn insert_fn update_fn) (begin
-	/* Software contract:
-	Prejoins are persistent materialized caches. Once created they are maintained
-	incrementally via triggers; repeated query execution must not drop and fully
-	rebuild them on every use. Query-time materialization is only the cold-start
-	path for an empty or freshly recreated prejoin table. */
 	(define prefix (concat ".pj_incr:" pj_table "|" src_table "|"))
 	(createtrigger src_schema src_table (concat prefix "after_delete") "after_delete" "" delete_fn false)
 	(createtrigger src_schema src_table (concat prefix "after_insert") "after_insert" "" insert_fn false)
@@ -2047,8 +2042,12 @@ or generate runtime scan code (build_queryplan).
 											false)))
 								false)))
 							(raw_query_contains_skip_level_nested_outer_ref subquery (raw_query_local_aliases subquery))))
-						/* detect top-level aggregate for direct scan path */
-						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
+							/* Software contract: uncorrelated scalar aggregates must stay on
+							the canonical keytable/createcolumn path so COUNT/SUM/... reuse
+							materialized cache tables. Only correlated aggregates may still
+							use the direct reduction path until their outer-domain extension
+							is represented canonically in the helper table. */
+							(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
 							(or (equal? sym (quote aggregate))
 								(equal? sym '(quote aggregate))
@@ -2083,15 +2082,16 @@ or generate runtime scan code (build_queryplan).
 							(and has_stage2 (not (nil? (stage_limit_val stage2))))
 							(and has_stage2 (not (nil? (stage_offset_val stage2))))
 						))
-						(define use_direct_agg_scan (and
-							(not (nil? _agg_args))
-							(equal? (count _agg_args) 3)
-							(not raw_contains_skip_level_nested_outer_ref)
-							(nil? stage2_post_group_condition)
-							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
-							(not (nil? tables2))
-							(not (equal? tables2 '()))
-						))
+							(define use_direct_agg_scan (and
+								(not (nil? _agg_args))
+								(equal? (count _agg_args) 3)
+								(not raw_contains_skip_level_nested_outer_ref)
+								(nil? stage2_post_group_condition)
+								(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
+								(not (nil? tables2))
+								(not (equal? tables2 '()))
+								(_subquery_has_outer_refs subquery outer_schemas)
+							))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
 							(not raw_contains_skip_level_nested_outer_ref)
@@ -2728,14 +2728,6 @@ or generate runtime scan code (build_queryplan).
 	the COUNT-based approach produces a keytable computed column that benefits from
 	MemCP's incremental aggregate cache — DML triggers invalidate only affected
 	groups, so subsequent queries skip recomputation for unchanged partitions.
-	Software contract:
-	- IN/EXISTS/NOT IN/NOT EXISTS should prefer the materialized COUNT/keytable
-	path whenever the subquery can be decorrelated into the cached GROUP/LEFT
-	JOIN machinery.
-	- Direct scalar EXISTS evaluation is only a fallback for shapes that cannot be
-	expressed on the canonical materialized path yet.
-	- Negative matches (NOT EXISTS / NOT IN) rely on the later LEFT JOIN +
-	coalesceNil(…,0) semantics; do not "simplify" that away into an inner join.
 	Caching policy roadmap for session-sensitive predicates:
 	1. First iteration: if the COUNT/EXISTS condition depends on volatile session
 	state (for example @current_user, @fop_time, Betrachtungszeit, username),
@@ -2884,22 +2876,37 @@ or generate runtime scan code (build_queryplan).
 				(define _first_field (if (nil? target_expr) nil
 					(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons _ (cons v _)) v nil) nil)))
 				(define target_expr resolved_target_expr)
-				(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
-					(begin
-						/* Uncorrelated EXISTS still uses the scalar helper path today.
-						The materialized COUNT/keytable contract above only applies once
-						unnest_subselect can emit the canonical helper-table shape for this
-						case without changing EXISTS semantics. */
-						(define _exists_sq (match subquery
-							'(s t f c g h o l off) (list s t
-								(list "__exists" true) c g nil o (coalesceNil l 1) off)
-							nil))
-						(if (nil? _exists_sq) nil
-							(begin
-								(define _exists_expr (build_exists_subselect _exists_sq outer_schemas))
-								(if (equal?? comparison (quote >))
-									_exists_expr
-									(list (quote not) _exists_expr)))))
+					(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
+						(begin
+							/* Software contract: simple uncorrelated EXISTS/NOT EXISTS must
+							also materialize through the canonical COUNT helper table so the
+							result stays cacheable and incrementally maintainable like other
+							aggregate subqueries. */
+							(match subquery
+								'(s t f c g h o l off)
+								(if (and
+									(or (nil? g) (equal? g '()))
+									(nil? h)
+									(or (nil? o) (equal? o '()))
+									(nil? l)
+									(nil? off))
+									(list comparison
+										(list (quote coalesceNil)
+											(build_scalar_subselect
+												(list s t
+													(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+													c (list 1) nil nil nil nil)
+												outer_schemas)
+											0)
+										0)
+									(begin
+										(define _exists_sq (list s t
+											(list "__exists" true) c g nil o (coalesceNil l 1) off))
+										(define _exists_expr (build_exists_subselect _exists_sq outer_schemas))
+										(if (equal?? comparison (quote >))
+											_exists_expr
+											(list (quote not) _exists_expr))))
+								nil))
 					(if (and (not (nil? target_expr)) (nil? _first_field)) nil
 						(begin
 							(define _count_sq (match subquery
@@ -5842,11 +5849,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										/* emit the register call as an S-expression to be executed at query time */
 										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
-				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result
-				Software contract:
-				The prejoin table is a persistent cache. `scan_estimate == 0` is the only
-				normal query-time reason to materialize it; subsequent executions must
-				hit the maintained table and let the trigger-based upkeep preserve it. */
+				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
 						(list 'createtable pj_schema prejointbl

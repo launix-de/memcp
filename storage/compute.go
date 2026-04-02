@@ -128,23 +128,22 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// Software contract:
 	// - For unfiltered computed columns, createcolumn on an already-valid proxy
 	//   must be a no-op.
-	// - For filtered createcolumn calls, the long-term contract is the same, but
-	//   we still need canonical persisted filter metadata before we can prove that
-	//   "same temp column" also means "same eager key subset". Until then, the
-	//   filtered path may conservatively call CompressFiltered again.
+	// - For filtered createcolumn calls, the planner/runtime still addresses the
+	//   same canonical temp column. Reissuing createcolumn may repair the eager
+	//   subset for that filter, but it must not silently swap to a different
+	//   throwaway computation path.
 	s.mu.RLock()
 	existing := s.columns[name]
 	s.mu.RUnlock()
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.computor = computor // update lambda
-		// Fast path: repeated createcolumn on an unchanged canonical temp column.
-		// If all rows are already valid, materialization has already happened and
-		// the value path must stay a lookup instead of triggering another rebuild.
-		if filter.IsNil() {
-			if (proxy.compressed && len(proxy.delta) == 0) || proxy.AllRowsValid() {
-				return true
+		// skip recompute if proxy is still valid (no invalidation since last compute)
+		if proxy.compressed && len(proxy.delta) == 0 {
+			if filter.IsNil() {
+				return true // fully compressed, nothing to do
 			}
-		} else if proxy.FilteredRowsValid(filterCols, filter) {
+			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
+			proxy.CompressFiltered(filterCols, filter)
 			return true
 		}
 		if !filter.IsNil() {
@@ -157,14 +156,12 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 
 	// Create new proxy
 	proxy := &StorageComputeProxy{
-		delta:      make(map[uint32]scm.Scmer),
-		computor:   computor,
-		inputCols:  inputCols,
-		filterCols: append([]string(nil), filterCols...),
-		filter:     filter,
-		shard:      s,
-		colName:    name,
-		count:      s.main_count,
+		delta:     make(map[uint32]scm.Scmer),
+		computor:  computor,
+		inputCols: inputCols,
+		shard:     s,
+		colName:   name,
+		count:     s.main_count,
 	}
 
 	s.mu.Lock()
