@@ -663,6 +663,7 @@ test_cases:
       rows: 1
       contains:
         - "touch_keytable"
+        - "(if __kt_created"
         - "compute-count"
         - "filtercols"
         - "\"filter\""

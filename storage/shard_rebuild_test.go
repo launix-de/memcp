@@ -35,6 +35,55 @@ func callBuiltin(t *testing.T, name string, args ...scm.Scmer) scm.Scmer {
 	return scm.Apply(fn, args...)
 }
 
+func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-createtable-fast-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tcreatetablefast")
+
+	CreateDatabase("tcreatetablefast", false)
+	cols := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{
+			scm.NewString("column"),
+			scm.NewString("id"),
+			scm.NewString("int"),
+			scm.NewSlice(nil),
+			scm.NewSlice(nil),
+		}),
+	})
+	options := scm.NewSlice([]scm.Scmer{scm.NewString("engine"), scm.NewString("sloppy")})
+
+	first := callBuiltin(t, "createtable",
+		scm.NewString("tcreatetablefast"),
+		scm.NewString(".hot"),
+		cols,
+		options,
+		scm.NewBool(true),
+	)
+	if !scm.ToBool(first) {
+		t.Fatal("first createtable should report created=true")
+	}
+
+	second := callBuiltin(t, "createtable",
+		scm.NewString("tcreatetablefast"),
+		scm.NewString(".hot"),
+		cols,
+		options,
+		scm.NewBool(true),
+	)
+	if scm.ToBool(second) {
+		t.Fatal("second createtable should report created=false")
+	}
+}
+
 func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-shard-rebuild-*")
 	if err != nil {
@@ -782,6 +831,69 @@ func TestEnsureColumnLoadedRehydratesOrderedProxyFromSchemaPlaceholder(t *testin
 	}
 	if loadedProxy.validMask.Count() != 0 {
 		t.Fatal("placeholder-backed ORC proxy must stay invalid until foreground recompute")
+	}
+}
+
+func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-ephemeral-helper-load-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tephemeralhelper")
+
+	CreateDatabase("tephemeralhelper", false)
+	tbl, _ := CreateTable("tephemeralhelper", ".helper", Cache, false)
+	tbl.CreateColumn("grp", "TEXT", nil, nil)
+	tbl.CreateColumn("sumv", "INT", nil, nil)
+
+	orig := tbl.Shards[0]
+	grp := &StorageSCMER{values: []scm.Scmer{scm.NewString("A"), scm.NewString("B")}}
+	f := tbl.schema.persistence.WriteColumn(orig.uuid.String(), "grp")
+	grp.Serialize(f)
+	f.Close()
+
+	proxy := &StorageComputeProxy{
+		delta:    map[uint32]scm.Scmer{0: scm.NewInt(100), 1: scm.NewInt(200)},
+		count:    2,
+		computor: scm.NewSymbol("+"),
+	}
+	proxy.validMask.Set(0, true)
+	proxy.validMask.Set(1, true)
+	f = tbl.schema.persistence.WriteColumn(orig.uuid.String(), "sumv")
+	proxy.Serialize(f)
+	f.Close()
+
+	reloaded := &storageShard{
+		uuid:         orig.uuid,
+		columns:      make(map[string]ColumnStorage),
+		deltaColumns: make(map[string]int),
+	}
+	reloaded.load(tbl)
+
+	if reloaded.main_count != 0 {
+		t.Fatalf("ephemeral helper load restored main_count=%d, want 0", reloaded.main_count)
+	}
+	if reloaded.columns["grp"] != nil {
+		t.Fatalf("ephemeral helper grp column should stay unloaded on reload, got %T", reloaded.columns["grp"])
+	}
+	if reloaded.columns["sumv"] != nil {
+		t.Fatalf("ephemeral helper compute column should stay unloaded on reload, got %T", reloaded.columns["sumv"])
+	}
+	if _, ok := reloaded.ensureColumnLoaded("grp", false).(*StorageSparse); !ok {
+		t.Fatalf("ephemeral helper grp lazy load returned %T, want *StorageSparse", reloaded.columns["grp"])
+	}
+	if _, ok := reloaded.ensureColumnLoaded("sumv", false).(*StorageSparse); !ok {
+		t.Fatalf("ephemeral helper compute lazy load returned %T, want *StorageSparse", reloaded.columns["sumv"])
+	}
+	if got := reloaded.Count(); got != 0 {
+		t.Fatalf("ephemeral helper row count = %d, want 0", got)
 	}
 }
 

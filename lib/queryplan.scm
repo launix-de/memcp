@@ -260,8 +260,8 @@ physical storage name so partition files remain valid on disk. */
 (define sanitize_temp_name (lambda (name)
 	(if (string? name) (replace name "\0" "") name)
 )))
-(define query_temp_table_options '("engine" "sloppy" "comment" "__memcp_query_temp"))
-(define query_temp_table_options_code '(list "engine" "sloppy" "comment" "__memcp_query_temp"))
+(define query_temp_table_options '("engine" "cache"))
+(define query_temp_table_options_code '(list "engine" "cache"))
 /* Design contract: get_column / aggregate / window sentinels stay logical for as
 long as possible and are only lowered to physical scan symbols at the final
 build_scan boundary. Materialized derived tables therefore must not be keyed by
@@ -826,8 +826,8 @@ planner starts splitting aggregate conditions apart. */
 ))
 
 /* extract_all_table_aliases: return a flat list of all table aliases referenced
-   via get_column nodes in an expression.  Used by LEFT JOIN pruning to detect
-   which tables are actually read. */
+via get_column nodes in an expression.  Used by LEFT JOIN pruning to detect
+which tables are actually read. */
 (define extract_all_table_aliases (lambda (expr)
 	(match expr
 		'((symbol get_column) alias_ _ _ _) (if (nil? alias_) '() (list (string alias_)))
@@ -1493,7 +1493,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
 					'())))))
 			/* create at compile time (needed for recursive build_queryplan) */
-			(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
+			(createtable schema keytable_name kt_cols query_temp_table_options true)
 			(partitiontable schema keytable_name kt_partition)
 			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
 			(define kt_cols_code (cons 'list
@@ -1505,9 +1505,12 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
 					'()))))))
 			(define init_code (list 'begin
-				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
-				(list 'partitiontable schema keytable_name kt_partition_code)
-				(list 'touch_keytable schema keytable_name)))
+				(list 'define '__kt_created (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true))
+				(list 'if '__kt_created
+					(list 'partitiontable schema keytable_name kt_partition_code)
+					nil)
+				(list 'touch_keytable schema keytable_name)
+				'__kt_created))
 			/* return (name init_code nil) — third element nil means no FK reuse */
 			(list keytable_name init_code nil)))
 )))
@@ -3118,10 +3121,11 @@ or generate runtime scan code (build_queryplan).
 	(set tables (if (or (nil? tables) (equal? tables '()))
 		(begin
 			(createdatabase schema true)
-			(createtable schema ".(1)"
+			(if (createtable schema ".(1)"
 				(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
 				(list "engine" "sloppy") true)
-			(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+				(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+				nil)
 			(list (list ".(1)" schema ".(1)" false nil)))
 		tables))
 	(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -3659,9 +3663,9 @@ or generate runtime scan code (build_queryplan).
 	(set having (finalize_visible_expr having))
 
 	/* LEFT JOIN pruning: remove LEFT JOINed tables that are not referenced
-	   anywhere in the query (fields, condition, having, order, or sibling
-	   joinexprs). A LEFT JOIN that is never read contributes only NULL columns
-	   and cannot filter rows, so it is safe to drop entirely. */
+	anywhere in the query (fields, condition, having, order, or sibling
+	joinexprs). A LEFT JOIN that is never read contributes only NULL columns
+	and cannot filter rows, so it is safe to drop entirely. */
 	(define _all_referenced_aliases (merge_unique (list
 		(extract_all_table_aliases fields)
 		(extract_all_table_aliases conditionAll)
@@ -5219,7 +5223,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1))) nil
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
-
 						(cons 'begin (merge
 							(if (nil? keytable_init) '() (list keytable_init))
 							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
@@ -5229,7 +5232,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(if (not (nil? _stage_scope))
 									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
 									(list (make_collect false))
-									(list (list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
+									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
 										(make_collect false)
 										nil))))
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
@@ -5982,25 +5985,46 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													(list 'list "$update")
 													(list 'lambda (list '$update) (list '$update))
 													'+ 0 'nil 'false))))
-										/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows */
-										(define insert_fn
+										/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows.
+										Design contract: planner-owned prejoin helpers are cache-engine tables.
+										After restart or eviction they may exist as an empty cache shell before any
+										full materialization has happened. Incremental triggers must NOT seed such
+										an empty helper with partial rows, otherwise table_empty? stops being a
+										reliable bootstrap signal and later GROUP queries will skip the required
+										full rebuild. Therefore all incremental maintenance is gated on the helper
+										already containing a materialized baseline. */
+										(define raw_insert_fn
 											(eval (list 'lambda (list 'OLD 'NEW)
 												(build_pj_insert_scan tables condition trigger_tv true prejoin_schema prejoin_table_name prejoin_columns prejoin_column_names))))
+										(define insert_fn
+											(eval (list 'lambda (list 'OLD 'NEW)
+												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
+													true
+													(list raw_insert_fn 'OLD 'NEW)))))
 										/* UPDATE trigger: delete old prejoin rows + insert new for any row change.
 										Code-generator pattern: embed delete_fn/insert_fn as proc literals in body
-										so no closure capture — serializes cleanly for persistence. */
-										(define update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list insert_fn 'OLD 'NEW)))))
+										so no closure capture — serializes cleanly for persistence. The same empty-
+										helper contract applies here: if no baseline is materialized yet, skip the
+										incremental step and let the next query rebuild the full cache. */
+										(define raw_update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list raw_insert_fn 'OLD 'NEW)))))
+										(define update_fn
+											(eval (list 'lambda (list 'OLD 'NEW)
+												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
+													true
+													(list raw_update_fn 'OLD 'NEW)))))
 										/* emit the register call as an S-expression to be executed at query time */
 										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
-						(list 'createtable pj_schema prejointbl
+						(list 'if (list 'createtable pj_schema prejointbl
 							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
-							'(list "engine" "sloppy") true)
-						(list 'if (list 'equal? 0 (list 'scan_estimate pj_schema prejointbl))
-							(list 'time prejoin_materialize_plan "materialize")))
+							query_temp_table_options_code true)
+							(list 'time prejoin_materialize_plan "materialize")
+							(list 'if (list 'table_empty? pj_schema prejointbl)
+								(list 'time prejoin_materialize_plan "materialize")
+								nil)))
 					pj_trigger_registrations
 					(list grouped_result)))
 			)
