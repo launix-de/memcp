@@ -51,6 +51,52 @@ test_cases:
         - ID: 2
           typ: null
 
+  - name: "UPDATE with OR EXISTS is idempotent on second run"
+    sql: >
+      UPDATE ux_customer
+      SET typ = 1
+      WHERE typ IS NULL
+        AND (
+          EXISTS (
+            SELECT * FROM ux_order
+            WHERE ux_order.purchase = ux_purchase.ID
+              AND ux_purchase.customer = ux_customer.`ID`
+          )
+          OR EXISTS (SELECT * FROM ux_invoice WHERE ux_invoice.customer = ux_customer.`ID`)
+        )
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE with EXISTS counts every matching row"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ux_invoice2"
+      - sql: "DROP TABLE IF EXISTS ux_customer2"
+      - sql: "CREATE TABLE ux_customer2 (ID INT PRIMARY KEY, typ INT)"
+      - sql: "CREATE TABLE ux_invoice2 (ID INT PRIMARY KEY, customer INT)"
+      - sql: "INSERT INTO ux_customer2 (ID, typ) VALUES (1, NULL), (2, NULL), (3, NULL)"
+      - sql: "INSERT INTO ux_invoice2 (ID, customer) VALUES (1, 1), (2, 2)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ux_invoice2"
+      - sql: "DROP TABLE IF EXISTS ux_customer2"
+    sql: >
+      UPDATE ux_customer2
+      SET typ = 7
+      WHERE EXISTS (SELECT * FROM ux_invoice2 WHERE ux_invoice2.customer = ux_customer2.`ID`)
+    expect:
+      affected_rows: 2
+
+  - name: "UPDATE with EXISTS changes all matching rows"
+    sql: "SELECT ID, typ FROM ux_customer2 ORDER BY ID"
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          typ: 7
+        - ID: 2
+          typ: 7
+        - ID: 3
+          typ: null
+
   - name: "DELETE with EXISTS keeps shared DML callback bound"
     setup:
       - sql: "DROP TABLE IF EXISTS dx_invoice"
@@ -69,6 +115,21 @@ test_cases:
       affected_rows: 1
 
   - name: "DELETE with EXISTS removes only matching customer"
+    sql: "SELECT ID, typ FROM dx_customer ORDER BY ID"
+    expect:
+      rows: 1
+      data:
+        - ID: 2
+          typ: 20
+
+  - name: "DELETE with EXISTS is idempotent on second run"
+    sql: >
+      DELETE FROM dx_customer
+      WHERE EXISTS (SELECT * FROM dx_invoice WHERE dx_invoice.customer = dx_customer.`ID`)
+    expect:
+      affected_rows: 0
+
+  - name: "DELETE with EXISTS leaves remaining customer untouched"
     sql: "SELECT ID, typ FROM dx_customer ORDER BY ID"
     expect:
       rows: 1
