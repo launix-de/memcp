@@ -50,3 +50,28 @@ test_cases:
           typ: 1
         - ID: 2
           typ: null
+
+  - name: "DELETE with EXISTS keeps shared DML callback bound"
+    setup:
+      - sql: "DROP TABLE IF EXISTS dx_invoice"
+      - sql: "DROP TABLE IF EXISTS dx_customer"
+      - sql: "CREATE TABLE dx_customer (ID INT PRIMARY KEY, typ INT)"
+      - sql: "CREATE TABLE dx_invoice (ID INT PRIMARY KEY, customer INT)"
+      - sql: "INSERT INTO dx_customer (ID, typ) VALUES (1, 10), (2, 20)"
+      - sql: "INSERT INTO dx_invoice (ID, customer) VALUES (1, 1)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS dx_invoice"
+      - sql: "DROP TABLE IF EXISTS dx_customer"
+    sql: >
+      DELETE FROM dx_customer
+      WHERE EXISTS (SELECT * FROM dx_invoice WHERE dx_invoice.customer = dx_customer.`ID`)
+    expect:
+      affected_rows: 1
+
+  - name: "DELETE with EXISTS removes only matching customer"
+    sql: "SELECT ID, typ FROM dx_customer ORDER BY ID"
+    expect:
+      rows: 1
+      data:
+        - ID: 2
+          typ: 20
