@@ -25,6 +25,32 @@ import "regexp"
 
 var SettingsHaveGoodBacktraces bool
 
+func procBodyUsesNamedParam(body Scmer, named map[Symbol]struct{}) bool {
+	if len(named) == 0 {
+		return false
+	}
+	if stripped, ok := scmerStripSourceInfo(body); ok {
+		body = stripped
+	}
+	if body.IsSymbol() {
+		_, ok := named[mustSymbol(body)]
+		return ok
+	}
+	if !body.IsSlice() {
+		return false
+	}
+	items := body.Slice()
+	if len(items) > 0 && items[0].IsSymbol() && items[0].String() == "quote" {
+		return false
+	}
+	for _, item := range items {
+		if procBodyUsesNamedParam(item, named) {
+			return true
+		}
+	}
+	return false
+}
+
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
 func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	/* API contract:
@@ -102,9 +128,6 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	}
 
 	var vars Vars
-	if p.NumVars == 0 {
-		vars = make(Vars)
-	}
 	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, p.NumVars), Outer: p.En, Nodefine: false}
 	params := p.Params
 	if stripped, ok := scmerStripSourceInfo(params); ok {
@@ -113,6 +136,23 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	if params.IsSlice() {
 		paramSlice := params.Slice()
 		if p.NumVars > 0 {
+			named := make(map[Symbol]struct{}, len(paramSlice))
+			for i, param := range paramSlice {
+				if i >= p.NumVars {
+					break
+				}
+				if stripped, ok := scmerStripSourceInfo(param); ok {
+					param = stripped
+				}
+				if param.IsSymbol() && !param.SymbolEquals("_") {
+					named[mustSymbol(param)] = struct{}{}
+				}
+			}
+			bindNamed := procBodyUsesNamedParam(p.Body, named)
+			if bindNamed {
+				vars = make(Vars, len(named))
+				en.Vars = vars
+			}
 			return func(args ...Scmer) Scmer {
 				for i := 0; i < p.NumVars; i++ {
 					if i < len(args) {
@@ -121,9 +161,27 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 						en.VarsNumbered[i] = NewNil()
 					}
 				}
+				if bindNamed {
+					for i, param := range paramSlice {
+						if stripped, ok := scmerStripSourceInfo(param); ok {
+							param = stripped
+						}
+						if !param.IsSymbol() || param.SymbolEquals("_") {
+							continue
+						}
+						sym := mustSymbol(param)
+						if i < len(args) {
+							en.Vars[sym] = args[i]
+						} else {
+							en.Vars[sym] = NewNil()
+						}
+					}
+				}
 				return Eval(p.Body, en)
 			}
 		}
+		vars = make(Vars, len(paramSlice))
+		en.Vars = vars
 		return func(args ...Scmer) Scmer {
 			for i, param := range paramSlice {
 				if stripped, ok := scmerStripSourceInfo(param); ok {
@@ -145,11 +203,22 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	if params.IsSymbol() {
 		sym := mustSymbol(params)
 		if p.NumVars > 0 {
+			bindNamed := procBodyUsesNamedParam(p.Body, map[Symbol]struct{}{sym: {}})
+			if bindNamed {
+				vars = make(Vars, 1)
+				en.Vars = vars
+			}
 			return func(args ...Scmer) Scmer {
-				en.VarsNumbered[0] = NewSlice(args)
+				argsList := NewSlice(args)
+				en.VarsNumbered[0] = argsList
+				if bindNamed {
+					en.Vars[sym] = argsList
+				}
 				return Eval(p.Body, en)
 			}
 		}
+		vars = make(Vars, 1)
+		en.Vars = vars
 		return func(args ...Scmer) Scmer {
 			en.Vars[sym] = NewSlice(args)
 			return Eval(p.Body, en)
@@ -710,17 +779,25 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			v[2], transferOwnership, _ = optimizeExCompat(v[2], env, &ome2, true)
 			return NewSlice(v), MakeTypeInfo(transferOwnership, false)
 		}
-		// Skip lambdas that already have explicit NumVars
+		/* Lambdas with explicit NumVars still execute in numbered-call frames at
+		runtime. Some generated plans keep symbolic parameter references in the
+		body while adding NumVars later, so we must continue mapping declared
+		parameters onto their numbered slots here instead of dropping them.
+		Otherwise callbacks like $update remain unbound at runtime. */
 		if len(v) > 3 {
 			ome2 := ome.Copy()
+			numVars := int(ToInt(v[3]))
 			if list, ok := scmerSlice(params); ok {
-				for _, param := range list {
-					if sym, ok := scmerSymbol(param); ok {
-						delete(ome2.variableReplacement, sym)
+				for i, param := range list {
+					if i >= numVars {
+						break
+					}
+					if sym, ok := scmerSymbol(param); ok && sym != Symbol("_") {
+						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(i))
 					}
 				}
 			} else if sym, ok := scmerSymbol(params); ok {
-				delete(ome2.variableReplacement, sym)
+				ome2.variableReplacement[sym] = NewNthLocalVar(0)
 			}
 			v[2], transferOwnership, _ = optimizeExCompat(v[2], env, &ome2, true)
 			return NewSlice(v), MakeTypeInfo(transferOwnership, false)

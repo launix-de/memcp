@@ -1,0 +1,52 @@
+# Prejoin helper DELETE regression
+
+metadata:
+  version: "1.0"
+  description: "Prejoin helper DELETE uses shared DML planner without losing $update binding"
+
+setup: []
+
+test_cases:
+  - name: "UPDATE with OR EXISTS keeps prejoin helper delete callback bound"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ux_invoice"
+      - sql: "DROP TABLE IF EXISTS ux_order"
+      - sql: "DROP TABLE IF EXISTS ux_purchase"
+      - sql: "DROP TABLE IF EXISTS ux_customer"
+      - sql: "CREATE TABLE ux_customer (ID INT PRIMARY KEY, typ INT)"
+      - sql: "CREATE TABLE ux_purchase (ID INT PRIMARY KEY, customer INT)"
+      - sql: "CREATE TABLE ux_order (ID INT PRIMARY KEY, purchase INT)"
+      - sql: "CREATE TABLE ux_invoice (ID INT PRIMARY KEY, customer INT)"
+      - sql: "INSERT INTO ux_customer (ID, typ) VALUES (1, NULL), (2, NULL)"
+      - sql: "INSERT INTO ux_purchase (ID, customer) VALUES (1, 1), (2, 2)"
+      - sql: "INSERT INTO ux_order (ID, purchase) VALUES (1, 1)"
+      - sql: "INSERT INTO ux_invoice (ID, customer) VALUES (1, 1)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ux_invoice"
+      - sql: "DROP TABLE IF EXISTS ux_order"
+      - sql: "DROP TABLE IF EXISTS ux_purchase"
+      - sql: "DROP TABLE IF EXISTS ux_customer"
+    sql: >
+      UPDATE ux_customer
+      SET typ = 1
+      WHERE typ IS NULL
+        AND (
+          EXISTS (
+            SELECT * FROM ux_order
+            WHERE ux_order.purchase = ux_purchase.ID
+              AND ux_purchase.customer = ux_customer.`ID`
+          )
+          OR EXISTS (SELECT * FROM ux_invoice WHERE ux_invoice.customer = ux_customer.`ID`)
+        )
+    expect:
+      affected_rows: 1
+
+  - name: "UPDATE with OR EXISTS updates only matching customer"
+    sql: "SELECT ID, typ FROM ux_customer ORDER BY ID"
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          typ: 1
+        - ID: 2
+          typ: null

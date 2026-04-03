@@ -1814,6 +1814,27 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 	)
 ))
 
+/* build_prejoin_delete_plan: route prejoin helper row removal through the
+normal DELETE planner. The old bespoke scan+$update builder duplicated DML
+codegen and drifted out of sync with the shared mutation path. */
+(define build_prejoin_delete_plan (lambda (pj_schema pjtbl ti_col_pairs) (begin
+	(define delete_alias "_pj")
+	(define delete_condition
+		(if (equal? 1 (count ti_col_pairs))
+			(list 'equal?
+				(list 'get_column delete_alias false (car (car ti_col_pairs)) false)
+				(list 'get_assoc 'OLD (cadr (car ti_col_pairs))))
+			(cons 'and
+				(map ti_col_pairs (lambda (p)
+					(list 'equal?
+						(list 'get_column delete_alias false (car p) false)
+						(list 'get_assoc 'OLD (cadr p))))))))
+	(build_dml_plan pj_schema pjtbl delete_alias
+		(list (list delete_alias pj_schema pjtbl false nil))
+		nil
+		delete_condition
+		nil nil nil))))
+
 /*
 === untangle_query: Neumann query decorrelation ===
 
@@ -5970,21 +5991,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														(merge acc (list (list (car mc) col)))
 														acc)
 													acc)) (list)))
-										/* DELETE trigger: scan prejoin_table_name, filter by OLD values for T_i cols, delete matching rows */
+										/* DELETE trigger: run helper-row removal through the shared
+										DML planner so internal maintenance stays aligned with
+										ordinary DELETE/$update semantics. */
 										(define delete_fn
 											(eval (list 'lambda (list 'OLD 'NEW)
-												(list 'scan prejoin_schema prejoin_table_name
-													(cons 'list (map ti_col_pairs car))
-													(list 'lambda (map ti_col_pairs (lambda (p) (symbol (concat "_pj." (car p)))))
-														(if (equal? 1 (count ti_col_pairs))
-															(list 'equal? (symbol (concat "_pj." (car (car ti_col_pairs))))
-																(list 'get_assoc 'OLD (cadr (car ti_col_pairs))))
-															(cons 'and (map ti_col_pairs (lambda (p)
-																(list 'equal? (symbol (concat "_pj." (car p)))
-																	(list 'get_assoc 'OLD (cadr p))))))))
-													(list 'list "$update")
-													(list 'lambda (list '$update) (list '$update))
-													'+ 0 'nil 'false))))
+												(build_prejoin_delete_plan prejoin_schema prejoin_table_name ti_col_pairs))))
 										/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows.
 										Design contract: planner-owned prejoin helpers are cache-engine tables.
 										After restart or eviction they may exist as an empty cache shell before any

@@ -525,9 +525,6 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 	}
 	proc := *p
 	var vars Vars
-	if proc.NumVars == 0 {
-		vars = make(Vars)
-	}
 	env := &Env{Vars: vars, VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
 	switch proc.Params.GetTag() {
 	case tagSlice:
@@ -536,12 +533,22 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 			panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
 		}
 		if proc.NumVars > 0 {
+			vars = make(Vars, len(params))
+			env.Vars = vars
 			for i := range params {
 				if i < len(operands) && i < proc.NumVars {
-					env.VarsNumbered[i] = Eval(operands[i], caller)
+					val := Eval(operands[i], caller)
+					env.VarsNumbered[i] = val
+					if !params[i].SymbolEquals("_") {
+						env.Vars[mustSymbol(params[i])] = val
+					}
+				} else if !params[i].SymbolEquals("_") {
+					env.Vars[mustSymbol(params[i])] = NewNil()
 				}
 			}
 		} else {
+			vars = make(Vars, len(params))
+			env.Vars = vars
 			for i, param := range params {
 				if !param.SymbolEquals("_") {
 					if i < len(operands) {
@@ -560,7 +567,12 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 		argsList := NewSlice(args)
 		if proc.NumVars > 0 {
 			env.VarsNumbered[0] = argsList
+			vars = make(Vars, 1)
+			env.Vars = vars
+			env.Vars[mustSymbol(proc.Params)] = argsList
 		} else {
+			vars = make(Vars, 1)
+			env.Vars = vars
 			env.Vars[mustSymbol(proc.Params)] = argsList
 		}
 	case tagNil:
@@ -577,20 +589,26 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 	}
 	proc := *p
 	var vars Vars
-	if proc.NumVars == 0 {
-		vars = make(Vars)
-	}
 	env := &Env{Vars: vars, VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
 	switch proc.Params.GetTag() {
 	case tagSlice:
 		params := proc.Params.Slice()
 		if proc.NumVars > 0 {
+			vars = make(Vars, len(params))
+			env.Vars = vars
 			for i := range params {
 				if i < len(args) {
 					env.VarsNumbered[i] = args[i]
+					if !params[i].SymbolEquals("_") {
+						env.Vars[mustSymbol(params[i])] = args[i]
+					}
+				} else if !params[i].SymbolEquals("_") {
+					env.Vars[mustSymbol(params[i])] = NewNil()
 				}
 			}
 		} else {
+			vars = make(Vars, len(params))
+			env.Vars = vars
 			for i, param := range params {
 				if !param.SymbolEquals("_") {
 					if i < len(args) {
@@ -605,7 +623,12 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 		argsList := NewSlice(args)
 		if proc.NumVars > 0 {
 			env.VarsNumbered[0] = argsList
+			vars = make(Vars, 1)
+			env.Vars = vars
+			env.Vars[mustSymbol(proc.Params)] = argsList
 		} else {
+			vars = make(Vars, 1)
+			env.Vars = vars
 			env.Vars[mustSymbol(proc.Params)] = argsList
 		}
 	case tagNil:
