@@ -3142,11 +3142,18 @@ or generate runtime scan code (build_queryplan).
 	(set tables (if (or (nil? tables) (equal? tables '()))
 		(begin
 			(createdatabase schema true)
-			(if (createtable schema ".(1)"
-				(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
-				(list "engine" "sloppy") true)
-				(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
-				nil)
+			/* ".(1)" is the synthetic one-row DUAL table for no-FROM queries.
+			It may already exist while being empty after cache eviction / restart /
+			other recovery paths. Re-check runtime emptiness instead of inserting
+			only on first CREATE, otherwise scalar/EXISTS no-FROM subqueries become
+			silently empty and collapse to NULL/FALSE. */
+			(begin
+				(createtable schema ".(1)"
+					(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
+					(list "engine" "sloppy") true)
+				(if (table_empty? schema ".(1)")
+					(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+					nil))
 			(list (list ".(1)" schema ".(1)" false nil)))
 		tables))
 	(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
