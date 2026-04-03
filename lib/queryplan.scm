@@ -5985,14 +5985,33 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													(list 'list "$update")
 													(list 'lambda (list '$update) (list '$update))
 													'+ 0 'nil 'false))))
-										/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows */
-										(define insert_fn
+										/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows.
+										Design contract: planner-owned prejoin helpers are cache-engine tables.
+										After restart or eviction they may exist as an empty cache shell before any
+										full materialization has happened. Incremental triggers must NOT seed such
+										an empty helper with partial rows, otherwise table_empty? stops being a
+										reliable bootstrap signal and later GROUP queries will skip the required
+										full rebuild. Therefore all incremental maintenance is gated on the helper
+										already containing a materialized baseline. */
+										(define raw_insert_fn
 											(eval (list 'lambda (list 'OLD 'NEW)
 												(build_pj_insert_scan tables condition trigger_tv true prejoin_schema prejoin_table_name prejoin_columns prejoin_column_names))))
+										(define insert_fn
+											(eval (list 'lambda (list 'OLD 'NEW)
+												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
+													true
+													(list raw_insert_fn 'OLD 'NEW)))))
 										/* UPDATE trigger: delete old prejoin rows + insert new for any row change.
 										Code-generator pattern: embed delete_fn/insert_fn as proc literals in body
-										so no closure capture — serializes cleanly for persistence. */
-										(define update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list insert_fn 'OLD 'NEW)))))
+										so no closure capture — serializes cleanly for persistence. The same empty-
+										helper contract applies here: if no baseline is materialized yet, skip the
+										incremental step and let the next query rebuild the full cache. */
+										(define raw_update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list raw_insert_fn 'OLD 'NEW)))))
+										(define update_fn
+											(eval (list 'lambda (list 'OLD 'NEW)
+												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
+													true
+													(list raw_update_fn 'OLD 'NEW)))))
 										/* emit the register call as an S-expression to be executed at query time */
 										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
