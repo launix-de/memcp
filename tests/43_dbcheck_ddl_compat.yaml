@@ -112,6 +112,50 @@ test_cases:
     expect:
       affected_rows: 2
 
+  # --- Direct INSERT ... SELECT resultrow contract ---
+  - name: "CREATE direct INSERT SELECT source table"
+    sql: "CREATE TABLE dbc_src (id INT PRIMARY KEY, note VARCHAR(50), active BOOLEAN)"
+  - name: "INSERT direct INSERT SELECT source rows"
+    sql: "INSERT INTO dbc_src (id, note, active) VALUES (1, 'keep', true), (2, 'skip', false), (3, 'also_keep', true)"
+    expect:
+      affected_rows: 3
+  - name: "INSERT ... SELECT inserts projected rows"
+    sql: "INSERT INTO dbc_child (id, parent_id) SELECT id + 1000, id FROM dbc_src WHERE active"
+    expect:
+      affected_rows: 2
+  - name: "INSERT ... SELECT projected rows exist"
+    sql: "SELECT id, parent_id FROM dbc_child WHERE id >= 1000 ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1001
+          parent_id: 1
+        - id: 1003
+          parent_id: 3
+  - name: "INSERT ... SELECT with empty result is a no-op"
+    sql: "INSERT INTO dbc_child (id, parent_id) SELECT id + 2000, id FROM dbc_src WHERE false"
+    expect:
+      affected_rows: 0
+  - name: "INSERT ... SELECT with expression columns keeps row shape"
+    sql: "INSERT INTO dbc_t (id, name, email, status, active) SELECT id + 300, CONCAT(note, '_copy'), CONCAT(note, '@shape.test'), 'bulk', active FROM dbc_src WHERE active ORDER BY id"
+    expect:
+      affected_rows: 2
+  - name: "INSERT ... SELECT with expressions inserted all columns correctly"
+    sql: "SELECT id, name, email, status, active FROM dbc_t WHERE id IN (301, 303) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 301
+          name: "keep_copy"
+          email: "keep@shape.test"
+          status: "bulk"
+          active: true
+        - id: 303
+          name: "also_keep_copy"
+          email: "also_keep@shape.test"
+          status: "bulk"
+          active: true
+
   # --- Triggers ---
   - name: "DROP TRIGGER IF EXISTS"
     sql: "DROP TRIGGER IF EXISTS `dbc_t.ib`"
@@ -162,5 +206,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS dbc_datetime"
   - sql: "DROP TABLE IF EXISTS dbc_longblob"
   - sql: "DROP TABLE IF EXISTS dbc_longtext"
+  - sql: "DROP TABLE IF EXISTS dbc_src"
   - sql: "DROP TABLE IF EXISTS dbc_child"
   - sql: "DROP TABLE IF EXISTS dbc_t"

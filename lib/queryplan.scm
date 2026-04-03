@@ -3910,7 +3910,11 @@ order: ORDER BY list or nil
 limit_val: LIMIT value or nil
 offset_val: OFFSET value or nil
 The pipeline resolves inner_selects in SET expressions, handles JOINs, subselects,
-column resolution — then injects $update into the target table's scan. */
+column resolution — then projects $update through the target table's scan.
+The actual mutation is executed only via a temporary resultrow wrapper after the
+full WHERE/join pipeline reached its final leaf. Keep this contract: inner scans
+must stay pure row/filter pipelines, and DML side effects happen only at the
+same boundary where SELECT would emit result rows. */
 (define build_dml_plan (lambda (schema target_tbl target_alias all_defs cols condition order limit_val offset_val) (begin
 	(define tgt (coalesce target_alias target_tbl))
 	(define is_update (and (not (nil? cols)) (not (equal? cols '()))))
@@ -3954,6 +3958,7 @@ column resolution — then injects $update into the target table's scan. */
 	(define final_fields (if is_update
 		(nth pipeline_result 2)
 		'("$dml" 1)))
+	(define dml_tag (concat "__dml:" (fnv_hash (concat schema "|" target_tbl "|" tgt "|" cols "|" condition "|" order "|" limit_val "|" offset_val))))
 	(define final_pipeline (list
 		(nth pipeline_result 0) /* schema */
 		(nth pipeline_result 1) /* tables */
@@ -3962,10 +3967,26 @@ column resolution — then injects $update into the target table's scan. */
 		(nth pipeline_result 4) /* groups */
 		(nth pipeline_result 5) /* schemas */
 		(nth pipeline_result 6) /* replace_find_column */
-		(list tgt resolved_target_cols) /* update_target: (alias cols) — empty cols = DELETE */
+		(list tgt resolved_target_cols dml_tag) /* update_target: (alias cols dml_tag) — empty cols = DELETE */
 	))
 	(define dml_plan (apply build_queryplan final_pipeline))
-	(if (equal? _uq_init '()) dml_plan (cons (quote begin) (merge _uq_init (list dml_plan))))
+	(define dml_prev_rr (symbol "__dml_prev_resultrow"))
+	(define dml_rc (symbol "__dml_result_count"))
+	(define wrapped_plan (list (quote begin)
+		(list (quote set) dml_prev_rr (symbol "resultrow"))
+		(list (quote set) (symbol "resultrow")
+			(list (quote lambda) (list (symbol "item"))
+				(list (quote if) (list (quote or)
+						(list (quote nil?) (list (quote get_assoc) (symbol "item") "__update"))
+						(list (quote not) (list (quote equal??) (list (quote get_assoc) (symbol "item") "__dml_tag") dml_tag)))
+					0
+					(list (quote if) (list (quote nil?) (list (quote get_assoc) (symbol "item") "__values"))
+						(list (quote if) (list (quote apply) (list (quote get_assoc) (symbol "item") "__update") nil) 1 0)
+						(list (quote if) (list (quote apply) (list (quote get_assoc) (symbol "item") "__update") (list (quote list) (list (quote get_assoc) (symbol "item") "__values"))) 1 0)))))
+		(list (quote define) dml_rc dml_plan)
+		(list (quote set) (symbol "resultrow") dml_prev_rr)
+		dml_rc))
+	(if (equal? _uq_init '()) wrapped_plan (cons (quote begin) (merge _uq_init (list wrapped_plan))))
 )))
 
 /* Convenience wrapper for multi-table UPDATE (called from sql_update) */
@@ -6546,15 +6567,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar fields)
 											fields)))
 									'('if (optimize (replace_columns_from_expr condition)) '((symbol "resultrow") (cons (symbol "list") (map_assoc emit_fields (lambda (k v) (replace_columns_from_expr v)))))))
-								/* DML mode: emit $update call */
+								/* DML mode: emit mutation payload; actual DELETE/UPDATE runs in build_dml_plan's resultrow wrapper */
 								(begin (define _ut_cols (nth update_target 1))
+									(define _ut_tag (nth update_target 2))
 									(define _ut_cols (if (nil? last_scan_ctx) _ut_cols
 										(match last_scan_ctx
 											'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar _ut_cols)
 											_ut_cols)))
 									(if (equal? _ut_cols '())
-										'('if (optimize (replace_columns_from_expr condition)) '('$update) 0)
-										'('if (optimize (replace_columns_from_expr condition)) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
+										'('if (optimize (replace_columns_from_expr condition))
+											'((symbol "resultrow") (list (symbol "list") "__dml_tag" _ut_tag "__update" '$update "__values" nil))
+											0)
+										'('if (optimize (replace_columns_from_expr condition))
+											'((symbol "resultrow") (list (symbol "list") "__dml_tag" _ut_tag "__update" '$update "__values" (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))))
+											0))))
 						)
 					))
 					(build_scan ordered_tables (replace_find_column condition) true nil)
@@ -6563,7 +6589,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 						/* TODO: sort tables according to join plan */
 						/* TODO: match tbl to inner query vs string */
-						(define build_scan (lambda (tables condition last_scan_ctx)
+						(define build_scan (lambda (tables condition last_scan_ctx bound_update_expr)
 							(match tables
 								(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
 									(define scan_condition (lower_materialized_scan_condition schema tbl tblvar condition))
@@ -6619,8 +6645,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(define deferred_condition (combine_and_terms (merge
 													(flatten_and_terms now_condition)
 													(flatten_and_terms effective_later_condition))))
-												(build_scan tables deferred_condition last_scan_ctx))
+												(build_scan tables deferred_condition last_scan_ctx bound_update_expr))
 											(begin
+												(define next_update_expr (if is_update_target (symbol "__dml_update_bound") bound_update_expr))
+												(define child_scan (build_scan tables effective_later_condition (list schema tbl tblvar) next_update_expr))
+												(define scan_body (if is_update_target
+													(list (list (symbol "lambda") (list (symbol "__dml_update_bound")) child_scan) (symbol "$update"))
+													(if (nil? bound_update_expr) child_scan
+														(list (list (symbol "lambda") (list (symbol "__dml_update_bound")) child_scan) bound_update_expr))))
 												/* check partition_stages: does this table have a per-table partition limit? */
 												(define _ps (reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil))
 												(if (not (nil? _ps))
@@ -6648,7 +6680,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															(cons list _ps_dirs)
 															_ps_partcols _ps_offset _ps_limit
 															scan_mapcols
-															(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later_condition (list schema tbl tblvar)))
+															(list (symbol "lambda") scan_mapfn_params scan_body)
 															nil nil isOuter))
 														(if (nil? _ps_init2) _ps_scan (list (quote begin) _ps_init2 _ps_scan)))
 													/* === regular scan === */
@@ -6656,7 +6688,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														(cons list filtercols)
 														'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 														scan_mapcols
-														(list (symbol "lambda") scan_mapfn_params (build_scan tables effective_later_condition (list schema tbl tblvar)))
+														(list (symbol "lambda") scan_mapfn_params scan_body)
 														(if is_update_target (symbol "+") nil)
 														(if is_update_target 0 nil)
 														nil
@@ -6671,20 +6703,25 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar fields)
 												fields)))
 										'('if (optimize (replace_columns_from_expr condition)) '((symbol "resultrow") (cons (symbol "list") (map_assoc emit_fields (lambda (k v) (replace_columns_from_expr v)))))))
-									/* DML mode */
+									/* DML mode: emit mutation payload; actual DELETE/UPDATE runs in build_dml_plan's resultrow wrapper */
 									(begin (define _ut_cols (nth update_target 1))
+										(define _ut_tag (nth update_target 2))
 										(define _ut_cols (if (nil? last_scan_ctx) _ut_cols
 											(match last_scan_ctx
 												'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar _ut_cols)
 												_ut_cols)))
 										(if (equal? _ut_cols '())
 											/* DELETE */
-											'('if (optimize (replace_columns_from_expr condition)) '('$update) 0)
+											(list (quote if) (list (quote optimize) (replace_columns_from_expr condition))
+												(list (symbol "resultrow") (list (symbol "list") "__dml_tag" _ut_tag "__update" bound_update_expr "__values" nil))
+												0)
 											/* UPDATE */
-											'('if (optimize (replace_columns_from_expr condition)) '('$update (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))) 0))))
+											(list (quote if) (list (quote optimize) (replace_columns_from_expr condition))
+												(list (symbol "resultrow") (list (symbol "list") "__dml_tag" _ut_tag "__update" bound_update_expr "__values" (cons (symbol "list") (map_assoc _ut_cols (lambda (k v) (replace_columns_from_expr v))))))
+												0))))
 							)
 						))
-						(build_scan tables (replace_find_column condition) nil)
+						(build_scan tables (replace_find_column condition) nil nil)
 			)))
 	)))
 )))
