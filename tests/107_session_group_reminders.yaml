@@ -151,7 +151,6 @@ test_cases:
       data:
         - ownerTeam: "team-red"
           cnt: 2
-
   - name: "Session workflow: switch to second user"
     session_id: "sgr-reminder-session"
     sql: "SELECT @fop_user := 2"
@@ -178,7 +177,6 @@ test_cases:
       data:
         - ownerTeam: "team-blue"
           cnt: 1
-
   - name: "Reminder badge query reflects changed equality session key"
     session_id: "sgr-reminder-session"
     noncritical: true
@@ -274,7 +272,6 @@ test_cases:
       data:
         - ownerTeam: "team-blue"
           cnt: 2
-
   - name: "Reminder badge query reflects changed range session key"
     session_id: "sgr-reminder-session"
     noncritical: true

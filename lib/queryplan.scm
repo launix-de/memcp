@@ -108,7 +108,7 @@ builds, because their truth value depends on current session state. */
 			found
 			(if (nil? assoc) nil (get_assoc assoc key_v))))
 		nil)
-))
+	))
 (define alias_variants_match (lambda (left right insensitive)
 	(reduce (alias_lookup_variants left) (lambda (matched left_v)
 		(or matched
@@ -594,7 +594,7 @@ raw _unn_* occurrence aliases into physical temp column names. */
 	(if (equal? result neutral) nil result)
 )))
 
-(define current_query_tx_expr (lambda () (symbol "tx")))
+(define current_query_tx_expr (lambda () nil))
 
 (define extend_codegen_lambda (lambda (fn extra_params)
 	(match fn
@@ -1642,7 +1642,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					(define kt_key_names (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 					/* outer refs need raw column names (tblvar.col), not canonical expr_name */
 					(define raw_col_names (map group_keys (lambda (col) (match col '('get_column _ _ c _) c (expr_name col)))))
-					(list 'scan schema grouptbl
+					(list 'scan (current_query_tx_expr) schema grouptbl
 						(cons 'list kt_key_names)
 						/* filter: (equal? grouptbl.kt_key (outer tblvar.raw_col)) — zip kt_key_names with raw_col_names */
 						(list 'lambda
@@ -1652,7 +1652,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false))
-					(list 'scan schema grouptbl '(list) '('lambda '() true)
+					(list 'scan (current_query_tx_expr) schema grouptbl '(list) '('lambda '() true)
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false)))
@@ -1833,7 +1833,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(list 'scan schema tbl
+					(list 'scan (current_query_tx_expr) schema tbl
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -3932,7 +3932,7 @@ second table carries strictly more local WHERE predicates than the first. */
 				(parallelize_resultrows
 					(cons (quote begin)
 						(merge
-							(list (list (quote define) (symbol "tx") (list (quote session) "__memcp_tx")))
+							(list (list (quote define) (symbol "tx") (list (list (quote context) "session") "__memcp_tx")))
 							(if (equal? _uq_init '()) (list _plan) (merge _uq_init (list _plan)))))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
@@ -4066,7 +4066,7 @@ same boundary where SELECT would emit result rows. */
 		dml_rc))
 	(cons (quote begin)
 		(merge
-			(list (list (quote define) (symbol "tx") (list (quote session) "__memcp_tx")))
+			(list (list (quote define) (symbol "tx") (list (list (quote context) "session") "__memcp_tx")))
 			(if (equal? _uq_init '()) (list wrapped_plan) (merge _uq_init (list wrapped_plan)))))
 )))
 

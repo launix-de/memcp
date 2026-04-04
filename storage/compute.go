@@ -32,6 +32,7 @@ import "github.com/launix-de/memcp/scm"
 // When the storage is OverlayBlob wrapping StorageEnum, unwraps to cache the
 // enum directly (blob overlay is only used for large-value storage, not compute inputs).
 func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext) ColumnReader {
+	tx = effectiveTxContext(tx)
 	// unwrap OverlayBlob: compute inputs are stored in the base, not the blob layer
 	if ob, ok := col.(*OverlayBlob); ok {
 		col = ob.Base
