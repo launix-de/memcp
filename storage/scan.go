@@ -62,11 +62,17 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
+	if scanExprUsesLegacyArgs(v) {
+		return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
+	}
+	return optimizeScanShared(v, oc, 7, 8, 9, 10, 11)
 }
 
 func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
+	if scanExprUsesLegacyArgs(v) {
+		return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
+	}
+	return optimizeScanShared(v, oc, 9, 10, 11, 12, 13)
 }
 
 // scanResult bundles per-shard outputs to minimize allocations and type assertions.
@@ -78,16 +84,15 @@ type scanResult struct {
 }
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
-	return t.scanWithBatch(conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
+func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+	return t.scanWithBatch(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
 }
 
-func (t *table) scanWithBatch(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
+func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
-	currentTx := CurrentTx()
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -299,8 +304,10 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
 	for i, k := range conditionCols {
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -374,13 +381,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 			// condition check
 			if effectiveIdx < t.main_count {
-				for i, k := range ccols {
+				for i, k := range cReaders {
 					cdataset[i] = k.GetValue(effectiveIdx)
 				}
 			} else {
 				for i, k := range conditionCols {
 					if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-						cdataset[i] = ccols[i].GetValue(effectiveIdx)
+						cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 					} else {
 						cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
 					}
@@ -513,6 +520,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	t.ensureMainCount(skipShardReadLock)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
 	conditionBatchSubidx := make([]int, len(conditionCols))
 	for i, k := range conditionCols {
 		if subidx, ok := parseBatchPseudoColName(k); ok {
@@ -520,6 +528,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -615,7 +624,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
 							cdataset[i] = batchdata[batchid*stride+subidx]
 						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-							cdataset[i] = ccols[i].GetValue(effectiveIdx)
+							cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 						} else {
 							cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
 						}

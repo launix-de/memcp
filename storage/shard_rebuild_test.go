@@ -1090,6 +1090,82 @@ func TestComputeProxyGetValueUsesDeltaBeyondMainCount(t *testing.T) {
 	}
 }
 
+func TestComputeProxyGetCachedReaderTxUsesSessionVariants(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-compute-reader-session-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tcomputesession")
+
+	CreateDatabase("tcomputesession", false)
+	tbl, _ := CreateTable("tcomputesession", "items", Safe, false)
+	tbl.CreateColumn("base", "INT", nil, nil)
+	tbl.Insert([]string{"base"}, [][]scm.Scmer{{scm.NewInt(5)}}, nil, scm.NewNil(), false, nil)
+
+	formulaExpr := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("+"),
+		scm.NewSymbol("base"),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("session"),
+			scm.NewString("k"),
+		}),
+	})
+	params := scm.NewSlice([]scm.Scmer{scm.NewSymbol("base")})
+	inputCols, computor := buildComputedFn(formulaExpr, params, &scm.Globalenv, []string{"base"})
+	if computor.IsNil() {
+		t.Fatal("buildComputedFn returned nil computor")
+	}
+
+	shard := tbl.Shards[0]
+	shard.mu.Lock()
+	proxy := &StorageComputeProxy{
+		delta:       make(map[uint32]scm.Scmer),
+		computor:    computor,
+		inputCols:   inputCols,
+		shard:       shard,
+		colName:     ".temp",
+		count:       shard.main_count,
+		sessionKeys: extractSessionKeys(formulaExpr),
+	}
+	shard.columns[".temp"] = proxy
+	shard.mu.Unlock()
+
+	makeTx := func(k int64) *TxContext {
+		sess := scm.NewSession()
+		tx := NewTxContext(TxCursorStability)
+		tx.Session = sess
+		scm.Apply(sess, scm.NewString("__memcp_tx"), scm.NewAny(tx))
+		scm.Apply(sess, scm.NewString("k"), scm.NewInt(k))
+		return tx
+	}
+
+	tx1 := makeTx(1)
+	tx2 := makeTx(10)
+
+	reader1 := proxy.GetCachedReaderTx(tx1)
+	reader2 := proxy.GetCachedReaderTx(tx2)
+
+	if got := reader1.GetValue(0).Int(); got != 6 {
+		t.Fatalf("reader1.GetValue(0) = %d, want 6", got)
+	}
+	if got := reader2.GetValue(0).Int(); got != 15 {
+		t.Fatalf("reader2.GetValue(0) = %d, want 15", got)
+	}
+	if got := reader1.GetValue(0).Int(); got != 6 {
+		t.Fatalf("reader1.GetValue(0) second read = %d, want 6", got)
+	}
+	if len(proxy.variants) != 2 {
+		t.Fatalf("proxy variants = %d, want 2", len(proxy.variants))
+	}
+}
+
 func TestInvalidateORCHitsShadowRebuildShards(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-orc-shadow-invalidate-*")
 	if err != nil {

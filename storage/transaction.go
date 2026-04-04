@@ -106,6 +106,7 @@ type TxContext struct {
 	State         TxState
 	SnapshotEpoch uint64 // ACID: snapshot boundary
 	Depth         uint32 // nesting depth for savepoints / triggers
+	Session       scm.Scmer
 
 	// Per-shard state, nil until first write (zero-alloc for read-only transactions).
 	shards map[*storageShard]*storageShardTransaction
@@ -129,6 +130,35 @@ func NewTxContext(mode TxMode) *TxContext {
 		tx.SnapshotEpoch = atomic.LoadUint64(&GlobalCommitEpoch)
 	}
 	return tx
+}
+
+func (tx *TxContext) SessionValue(key string) scm.Scmer {
+	if tx == nil || tx.Session.IsNil() {
+		return scm.NewNil()
+	}
+	return scm.Apply(tx.Session, scm.NewString(key))
+}
+
+func txSessionScmer(tx *TxContext) scm.Scmer {
+	if tx == nil || tx.Session.IsNil() {
+		return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewNil() })
+	}
+	return tx.Session
+}
+
+func bindSessionEnv(env *scm.Env, session scm.Scmer) *scm.Env {
+	outer := &scm.Globalenv
+	var numbered []scm.Scmer
+	if env != nil {
+		outer = env
+		numbered = env.VarsNumbered
+	}
+	return &scm.Env{
+		Vars:         scm.Vars{scm.Symbol("session"): session},
+		VarsNumbered: numbered,
+		Outer:        outer,
+		Nodefine:     false,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +617,7 @@ func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Sc
 	}
 
 	tx := NewTxContext(TxCursorStability)
+	tx.Session = scm.NewFunc(sessionFn)
 	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 
 	var result scm.Scmer
@@ -635,6 +666,7 @@ func initTransaction(en scm.Env) {
 				}
 			}
 			tx := NewTxContext(TxCursorStability)
+			tx.Session = a[0]
 			sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
@@ -657,6 +689,7 @@ func initTransaction(en scm.Env) {
 				}
 			}
 			tx := NewTxContext(TxACID)
+			tx.Session = a[0]
 			sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)

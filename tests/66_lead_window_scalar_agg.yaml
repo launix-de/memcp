@@ -5,7 +5,8 @@
 #     FROM hist) m WHERE m.ID = main.ID AND ...), 0)
 #
 # The SUM triggers the direct aggregate scan path in build_scalar_subselect,
-# which must propagate _init2 (window materialization code) or __mat:m is nil.
+# which must propagate _init2 (window materialization code) or the
+# materialized_derived_source_rows binding for alias m is nil.
 
 metadata:
   version: "1.0"

@@ -106,11 +106,78 @@ test_cases:
           grouped_due: 2
           reminder_tickets: 2
 
+  - name: "Inner grouped reminder source for user 1"
+    session_id: "sgr-reminder-session"
+    sql: |
+      SELECT t.ownerTeam, SUM(1) AS cnt
+      FROM sgr_task t
+      WHERE t.due_at < @fop_time
+        AND EXISTS (
+          SELECT TRUE
+          FROM sgr_team_item ti
+          WHERE ti.list = t.ownerTeam
+            AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+          LIMIT 1
+        )
+      GROUP BY t.ownerTeam
+      ORDER BY t.ownerTeam
+    expect:
+      rows: 1
+      data:
+        - ownerTeam: "team-red"
+          cnt: 2
+
+  - name: "Materialized grouped reminder source for user 1"
+    session_id: "sgr-reminder-session"
+    noncritical: true
+    sql: |
+      SELECT *
+      FROM (
+        SELECT t.ownerTeam, SUM(1) AS cnt
+        FROM sgr_task t
+        WHERE t.due_at < @fop_time
+          AND EXISTS (
+            SELECT TRUE
+            FROM sgr_team_item ti
+            WHERE ti.list = t.ownerTeam
+              AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+            LIMIT 1
+          )
+        GROUP BY t.ownerTeam
+      ) g
+      ORDER BY ownerTeam
+    expect:
+      rows: 1
+      data:
+        - ownerTeam: "team-red"
+          cnt: 2
+
   - name: "Session workflow: switch to second user"
     session_id: "sgr-reminder-session"
     sql: "SELECT @fop_user := 2"
     expect:
       rows: 1
+
+  - name: "Inner grouped reminder source for user 2"
+    session_id: "sgr-reminder-session"
+    sql: |
+      SELECT t.ownerTeam, SUM(1) AS cnt
+      FROM sgr_task t
+      WHERE t.due_at < @fop_time
+        AND EXISTS (
+          SELECT TRUE
+          FROM sgr_team_item ti
+          WHERE ti.list = t.ownerTeam
+            AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+          LIMIT 1
+        )
+      GROUP BY t.ownerTeam
+      ORDER BY t.ownerTeam
+    expect:
+      rows: 1
+      data:
+        - ownerTeam: "team-blue"
+          cnt: 1
 
   - name: "Reminder badge query reflects changed equality session key"
     session_id: "sgr-reminder-session"
@@ -159,6 +226,54 @@ test_cases:
     sql: "SELECT @fop_time := 85"
     expect:
       rows: 1
+
+  - name: "Inner grouped reminder source reflects tightened time cutoff"
+    session_id: "sgr-reminder-session"
+    sql: |
+      SELECT t.ownerTeam, SUM(1) AS cnt
+      FROM sgr_task t
+      WHERE t.due_at < @fop_time
+        AND EXISTS (
+          SELECT TRUE
+          FROM sgr_team_item ti
+          WHERE ti.list = t.ownerTeam
+            AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+          LIMIT 1
+        )
+      GROUP BY t.ownerTeam
+      ORDER BY t.ownerTeam
+    expect:
+      rows: 1
+      data:
+        - ownerTeam: "team-blue"
+          cnt: 1
+
+  - name: "Session workflow: insert new matching task for user 2"
+    session_id: "sgr-reminder-session"
+    sql: "INSERT INTO sgr_task VALUES (5, 'team-blue', 80, FALSE)"
+    expect:
+      affected_rows: 1
+
+  - name: "Inner grouped reminder source sees incremental insert for current session"
+    session_id: "sgr-reminder-session"
+    sql: |
+      SELECT t.ownerTeam, SUM(1) AS cnt
+      FROM sgr_task t
+      WHERE t.due_at < @fop_time
+        AND EXISTS (
+          SELECT TRUE
+          FROM sgr_team_item ti
+          WHERE ti.list = t.ownerTeam
+            AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+          LIMIT 1
+        )
+      GROUP BY t.ownerTeam
+      ORDER BY t.ownerTeam
+    expect:
+      rows: 1
+      data:
+        - ownerTeam: "team-blue"
+          cnt: 2
 
   - name: "Reminder badge query reflects changed range session key"
     session_id: "sgr-reminder-session"

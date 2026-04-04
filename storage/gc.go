@@ -50,6 +50,7 @@ func cleanBlobs(db *database) int {
 		hashVal := scm.NewString(hash)
 		// scan .blobs WHERE hash = <hash>, sum refcount
 		rc := bt.scan(
+			nil,
 			[]string{"hash"}, blobCondition(hashVal),
 			[]string{"refcount"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),

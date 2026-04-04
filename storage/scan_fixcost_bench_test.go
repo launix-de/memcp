@@ -53,6 +53,7 @@ func BenchmarkScanFixedCosts_NoSession(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tbl.scan(
+			nil,
 			[]string{"id"}, trueFn,
 			[]string{"id"}, trueFn,
 			nilFn, neutral, nilFn, false,
@@ -73,6 +74,7 @@ func BenchmarkScanFixedCosts_WithGLS(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		scm.SetValues(map[string]any{"session": session}, func() {
 			tbl.scan(
+				nil,
 				[]string{"id"}, trueFn,
 				[]string{"id"}, trueFn,
 				nilFn, neutral, nilFn, false,
@@ -96,6 +98,7 @@ func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 		scm.SetValues(map[string]any{"session": session}, func() {
 			WithAutocommit(sessionFn, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 				return tbl.scan(
+					CurrentTx(),
 					[]string{"id"}, trueFn,
 					[]string{"id"}, trueFn,
 					nilFn, neutral, nilFn, false,
@@ -131,6 +134,7 @@ func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 			// simulate ~80 extra frames of Scheme evaluation above the scan call
 			recurse(80, func() {
 				tbl.scan(
+					nil,
 					[]string{"id"}, trueFn,
 					[]string{"id"}, trueFn,
 					nilFn, neutral, nilFn, false,
@@ -200,6 +204,7 @@ func BenchmarkScanUpdate(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		scm.SetValues(map[string]any{"session": session}, func() {
 			tbl.scan(
+				nil,
 				[]string{"id"}, trueFn,
 				[]string{"id", "$increment:cached_val"}, trueFn,
 				nilFn, neutral, nilFn, false,
