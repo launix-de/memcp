@@ -86,6 +86,37 @@ test_cases:
         - ".exists_orders:(1)"
         - "\"__cnt\""
 
+  - name: "EXISTS with session-backed scalar predicate is true"
+    sql: |
+      SELECT EXISTS (SELECT 1 WHERE LAST_INSERT_ID() IS NULL) AS ok
+    expect:
+      rows: 1
+      data:
+        - ok: true
+
+  - name: "Scalar no-FROM subquery with session-backed predicate returns one row"
+    sql: |
+      SELECT (SELECT 1 WHERE LAST_INSERT_ID() IS NULL) AS one_row
+    expect:
+      rows: 1
+      data:
+        - one_row: 1
+
+  - name: "EXISTS with session-backed scalar predicate keeps outer rows"
+    sql: |
+      SELECT ID, name FROM exists_customers
+      WHERE EXISTS (SELECT 1 WHERE LAST_INSERT_ID() IS NULL)
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          name: "Alice"
+        - ID: 2
+          name: "Bob"
+        - ID: 3
+          name: "Charlie"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS exists_orders"
   - sql: "DROP TABLE IF EXISTS exists_customers"

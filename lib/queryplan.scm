@@ -108,7 +108,7 @@ builds, because their truth value depends on current session state. */
 			found
 			(if (nil? assoc) nil (get_assoc assoc key_v))))
 		nil)
-))
+	))
 (define alias_variants_match (lambda (left right insensitive)
 	(reduce (alias_lookup_variants left) (lambda (matched left_v)
 		(or matched
@@ -1089,6 +1089,15 @@ same cache column while different session values get separate temp columns. */
 					(map terms (lambda (term) (list term (eval term))))
 					'(list)))))
 )))
+(define assoc_keys_as_dataset_rows (lambda (dict width)
+	(map (extract_assoc dict (lambda (k v) k))
+		(lambda (k)
+			(if (list? k)
+				k
+				(if (<= width 1)
+					(list k)
+					(map (produceN width) (lambda (_) nil))))
+		))))
 /* Column-resolution contract:
 - parser-level get_column markers may still carry ti/ci flags inside untangle_query
 - they must be resolved against schema metadata exactly once before the logical IR
@@ -3142,11 +3151,18 @@ or generate runtime scan code (build_queryplan).
 	(set tables (if (or (nil? tables) (equal? tables '()))
 		(begin
 			(createdatabase schema true)
-			(if (createtable schema ".(1)"
-				(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
-				(list "engine" "sloppy") true)
-				(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
-				nil)
+			/* ".(1)" is the synthetic one-row DUAL table for no-FROM queries.
+			It may already exist while being empty after cache eviction / restart /
+			other recovery paths. Re-check runtime emptiness instead of inserting
+			only on first CREATE, otherwise scalar/EXISTS no-FROM subqueries become
+			silently empty and collapse to NULL/FALSE. */
+			(begin
+				(createtable schema ".(1)"
+					(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
+					(list "engine" "sloppy") true)
+				(if (table_empty? schema ".(1)")
+					(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+					nil))
 			(list (list ".(1)" schema ".(1)" false nil)))
 		tables))
 	(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -3977,8 +3993,8 @@ same boundary where SELECT would emit result rows. */
 		(list (quote set) (symbol "resultrow")
 			(list (quote lambda) (list (symbol "item"))
 				(list (quote if) (list (quote or)
-						(list (quote nil?) (list (quote get_assoc) (symbol "item") "__update"))
-						(list (quote not) (list (quote equal??) (list (quote get_assoc) (symbol "item") "__dml_tag") dml_tag)))
+					(list (quote nil?) (list (quote get_assoc) (symbol "item") "__update"))
+					(list (quote not) (list (quote equal??) (list (quote get_assoc) (symbol "item") "__dml_tag") dml_tag)))
 					0
 					(list (quote if) (list (quote nil?) (list (quote get_assoc) (symbol "item") "__values"))
 						(list (quote if) (list (quote apply) (list (quote get_assoc) (symbol "item") "__update") nil) 1 0)
@@ -4834,14 +4850,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(cons (quote list) (map resolved_stage_group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
 									'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
 									'(list) /* empty dict */
-									'((quote lambda) '('acc 'sharddict)
-										'('insert
-											schema grouptbl
-											(cons 'list (map resolved_stage_group expr_name))
-											'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
-											'(list) '('lambda '() true) true)
-									)
-									isOuter)
+										'((quote lambda) '('acc 'sharddict)
+											'('insert
+												schema grouptbl
+												(cons 'list (map resolved_stage_group expr_name))
+												'('assoc_keys_as_dataset_rows 'sharddict (count resolved_stage_group)) /* turn keys from assoc into dataset rows */
+												'(list) '('lambda '() true) true)
+										)
+										isOuter)
 							)
 						)
 					) "collect")))

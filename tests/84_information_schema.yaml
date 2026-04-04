@@ -4,6 +4,7 @@
 metadata:
   version: "1.0"
   description: "INFORMATION_SCHEMA virtual table queries"
+  isolated: true
 
 setup:
   - sql: "CREATE TABLE IF NOT EXISTS is_test_tbl (id INT, name VARCHAR(50), score DOUBLE)"

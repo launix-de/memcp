@@ -1,0 +1,203 @@
+# Session-sensitive reminder/badge repros
+# Models ERP-style badge queries that combine scalar subselects, grouped inner
+# aggregates and permission checks via session variables.
+
+metadata:
+  version: "1.0"
+  description: "Session-sensitive grouped reminder queries should survive session changes"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sgr_team_item"
+  - sql: "DROP TABLE IF EXISTS sgr_ticket"
+  - sql: "DROP TABLE IF EXISTS sgr_task"
+  - sql: "DROP TABLE IF EXISTS sgr_user"
+  - sql: "CREATE TABLE sgr_user (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE sgr_task (ID INT PRIMARY KEY, ownerTeam TEXT, due_at INT, done BOOL)"
+  - sql: "CREATE TABLE sgr_ticket (ID INT PRIMARY KEY, assigned INT, assigned2 TEXT, creator INT, final BOOL, due_at INT)"
+  - sql: "CREATE TABLE sgr_team_item (ID INT PRIMARY KEY, list TEXT, item INT)"
+  - sql: "INSERT INTO sgr_user VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO sgr_team_item VALUES (1, 'team-red', 1), (2, 'team-blue', 2)"
+  - sql: |
+      INSERT INTO sgr_task VALUES
+        (1, 'team-red', 80, FALSE),
+        (2, 'team-red', 95, FALSE),
+        (3, 'team-blue', 70, FALSE),
+        (4, 'team-blue', 110, FALSE)
+  - sql: |
+      INSERT INTO sgr_ticket VALUES
+        (1, 1, NULL, 1, FALSE, 60),
+        (2, NULL, 'team-red', 2, FALSE, 75),
+        (3, 2, NULL, 2, FALSE, 65),
+        (4, NULL, 'team-blue', 1, FALSE, 95)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sgr_team_item"
+  - sql: "DROP TABLE IF EXISTS sgr_ticket"
+  - sql: "DROP TABLE IF EXISTS sgr_task"
+  - sql: "DROP TABLE IF EXISTS sgr_user"
+
+test_cases:
+  - name: "Session workflow: set initial reminder session vars"
+    session_id: "sgr-reminder-session"
+    sql: "SELECT @fop_user := 1, @fop_time := 100"
+    expect:
+      rows: 1
+
+  - name: "Session workflow sanity: direct visible task rows for user 1"
+    session_id: "sgr-reminder-session"
+    sql: |
+      SELECT t.ID
+      FROM sgr_task t
+      WHERE t.due_at < @fop_time
+        AND EXISTS (
+          SELECT TRUE
+          FROM sgr_team_item ti
+          WHERE ti.list = t.ownerTeam
+            AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+          LIMIT 1
+        )
+      ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+        - ID: 2
+
+  - name: "Reminder badge query with grouped inner aggregate for user 1"
+    session_id: "sgr-reminder-session"
+    noncritical: true
+    sql: |
+      SELECT 1 AS ok,
+        (SELECT SUM(cnt)
+         FROM (
+           SELECT t.ownerTeam, SUM(1) AS cnt
+           FROM sgr_task t
+           WHERE t.due_at < @fop_time
+             AND EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = t.ownerTeam
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           GROUP BY t.ownerTeam
+         ) g
+         LIMIT 1) AS grouped_due,
+        (SELECT SUM(1)
+         FROM sgr_ticket x
+         WHERE NOT x.final
+           AND x.due_at < @fop_time
+           AND (
+             (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = x.assigned LIMIT 1)
+             OR EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = x.assigned2
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           )
+         LIMIT 1) AS reminder_tickets
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+          grouped_due: 2
+          reminder_tickets: 2
+
+  - name: "Session workflow: switch to second user"
+    session_id: "sgr-reminder-session"
+    sql: "SELECT @fop_user := 2"
+    expect:
+      rows: 1
+
+  - name: "Reminder badge query reflects changed equality session key"
+    session_id: "sgr-reminder-session"
+    noncritical: true
+    sql: |
+      SELECT 1 AS ok,
+        (SELECT SUM(cnt)
+         FROM (
+           SELECT t.ownerTeam, SUM(1) AS cnt
+           FROM sgr_task t
+           WHERE t.due_at < @fop_time
+             AND EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = t.ownerTeam
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           GROUP BY t.ownerTeam
+         ) g
+         LIMIT 1) AS grouped_due,
+        (SELECT SUM(1)
+         FROM sgr_ticket x
+         WHERE NOT x.final
+           AND x.due_at < @fop_time
+           AND (
+             (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = x.assigned LIMIT 1)
+             OR EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = x.assigned2
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           )
+         LIMIT 1) AS reminder_tickets
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+          grouped_due: 1
+          reminder_tickets: 2
+
+  - name: "Session workflow: tighten time cutoff"
+    session_id: "sgr-reminder-session"
+    sql: "SELECT @fop_time := 85"
+    expect:
+      rows: 1
+
+  - name: "Reminder badge query reflects changed range session key"
+    session_id: "sgr-reminder-session"
+    noncritical: true
+    sql: |
+      SELECT 1 AS ok,
+        (SELECT SUM(cnt)
+         FROM (
+           SELECT t.ownerTeam, SUM(1) AS cnt
+           FROM sgr_task t
+           WHERE t.due_at < @fop_time
+             AND EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = t.ownerTeam
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           GROUP BY t.ownerTeam
+         ) g
+         LIMIT 1) AS grouped_due,
+        (SELECT SUM(1)
+         FROM sgr_ticket x
+         WHERE NOT x.final
+           AND x.due_at < @fop_time
+           AND (
+             (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = x.assigned LIMIT 1)
+             OR EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = x.assigned2
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           )
+         LIMIT 1) AS reminder_tickets
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+          grouped_due: 1
+          reminder_tickets: 1
