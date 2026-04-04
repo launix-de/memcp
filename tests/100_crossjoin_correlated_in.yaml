@@ -4,9 +4,15 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS ta_empty"
+  - sql: "DROP TABLE IF EXISTS tb_empty"
+  - sql: "DROP TABLE IF EXISTS tc_empty"
   - sql: "DROP TABLE IF EXISTS ta"
   - sql: "DROP TABLE IF EXISTS tb"
   - sql: "DROP TABLE IF EXISTS tc"
+  - sql: "CREATE TABLE ta_empty (ID INT, kunde INT)"
+  - sql: "CREATE TABLE tb_empty (ID INT, account TEXT)"
+  - sql: "CREATE TABLE tc_empty (ID INT, crdtAccount TEXT)"
   - sql: "CREATE TABLE ta (ID INT, x TEXT, kunde INT)"
   - sql: "CREATE TABLE tb (ID INT, y INT, account TEXT)"
   - sql: "CREATE TABLE tc (ID INT, z INT, crdtAccount TEXT)"
@@ -18,11 +24,19 @@ setup:
   - sql: "INSERT INTO tc VALUES (20, 5, 'acct-B')"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ta_empty"
+  - sql: "DROP TABLE IF EXISTS tb_empty"
+  - sql: "DROP TABLE IF EXISTS tc_empty"
   - sql: "DROP TABLE IF EXISTS ta"
   - sql: "DROP TABLE IF EXISTS tb"
   - sql: "DROP TABLE IF EXISTS tc"
 
 test_cases:
+  - name: "correlated IN subquery over empty tables returns empty result"
+    sql: "SELECT ta_empty.ID AS aid, tb_empty.ID AS bid FROM ta_empty, tb_empty WHERE ta_empty.kunde IN (SELECT ID FROM tc_empty WHERE tb_empty.account = tc_empty.crdtAccount)"
+    expect:
+      rows: 0
+
   - name: "cross-join with correlated IN subquery - should return 1 row"
     sql: "SELECT ta.ID AS aid, tb.ID AS bid FROM ta, tb WHERE ta.x IS NULL AND ta.kunde IN (SELECT ID FROM tc WHERE tb.y = tc.z)"
     expect:

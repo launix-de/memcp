@@ -108,7 +108,7 @@ builds, because their truth value depends on current session state. */
 			found
 			(if (nil? assoc) nil (get_assoc assoc key_v))))
 		nil)
-))
+	))
 (define alias_variants_match (lambda (left right insensitive)
 	(reduce (alias_lookup_variants left) (lambda (matched left_v)
 		(or matched
@@ -1089,6 +1089,15 @@ same cache column while different session values get separate temp columns. */
 					(map terms (lambda (term) (list term (eval term))))
 					'(list)))))
 )))
+(define assoc_keys_as_dataset_rows (lambda (dict width)
+	(map (extract_assoc dict (lambda (k v) k))
+		(lambda (k)
+			(if (list? k)
+				k
+				(if (<= width 1)
+					(list k)
+					(map (produceN width) (lambda (_) nil))))
+		))))
 /* Column-resolution contract:
 - parser-level get_column markers may still carry ti/ci flags inside untangle_query
 - they must be resolved against schema metadata exactly once before the logical IR
@@ -1600,14 +1609,20 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 				(scan_wrapper 'scan schema tbl
 					(cons list filtercols)
 					'('lambda (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
-					(cons list keycols)
-					'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
-					'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
-					'(list)
-					'('lambda '('acc 'sharddict) '('insert schema grouptbl (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
-					isOuter))))
-		/* aggregate descriptors */
-		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
+						(cons list keycols)
+						'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
+						'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
+						'(list)
+						'('lambda '('acc 'sharddict)
+							'('insert schema grouptbl
+								(cons 'list (map group_keys expr_name))
+								'('assoc_keys_as_dataset_rows 'sharddict (count group_keys))
+								'(list)
+								'('lambda '() true)
+								true)))
+						isOuter))))
+			/* aggregate descriptors */
+			(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
 		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 			/* args already resolved via replace_find_column in wf_resolved */
@@ -3984,8 +3999,8 @@ same boundary where SELECT would emit result rows. */
 		(list (quote set) (symbol "resultrow")
 			(list (quote lambda) (list (symbol "item"))
 				(list (quote if) (list (quote or)
-						(list (quote nil?) (list (quote get_assoc) (symbol "item") "__update"))
-						(list (quote not) (list (quote equal??) (list (quote get_assoc) (symbol "item") "__dml_tag") dml_tag)))
+					(list (quote nil?) (list (quote get_assoc) (symbol "item") "__update"))
+					(list (quote not) (list (quote equal??) (list (quote get_assoc) (symbol "item") "__dml_tag") dml_tag)))
 					0
 					(list (quote if) (list (quote nil?) (list (quote get_assoc) (symbol "item") "__values"))
 						(list (quote if) (list (quote apply) (list (quote get_assoc) (symbol "item") "__update") nil) 1 0)
@@ -4841,14 +4856,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(cons (quote list) (map resolved_stage_group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
 									'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
 									'(list) /* empty dict */
-									'((quote lambda) '('acc 'sharddict)
-										'('insert
-											schema grouptbl
-											(cons 'list (map resolved_stage_group expr_name))
-											'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
-											'(list) '('lambda '() true) true)
-									)
-									isOuter)
+										'((quote lambda) '('acc 'sharddict)
+											'('insert
+												schema grouptbl
+												(cons 'list (map resolved_stage_group expr_name))
+												'('assoc_keys_as_dataset_rows 'sharddict (count resolved_stage_group)) /* turn keys from assoc into dataset rows */
+												'(list) '('lambda '() true) true)
+										)
+										isOuter)
 							)
 						)
 					) "collect")))
