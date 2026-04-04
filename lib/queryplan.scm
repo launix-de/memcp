@@ -1609,20 +1609,14 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 				(scan_wrapper 'scan schema tbl
 					(cons list filtercols)
 					'('lambda (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
-						(cons list keycols)
-						'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
-						'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
-						'(list)
-						'('lambda '('acc 'sharddict)
-							'('insert schema grouptbl
-								(cons 'list (map group_keys expr_name))
-								'('assoc_keys_as_dataset_rows 'sharddict (count group_keys))
-								'(list)
-								'('lambda '() true)
-								true)))
-						isOuter))))
-			/* aggregate descriptors */
-			(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
+					(cons list keycols)
+					'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
+					'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
+					'(list)
+					'('lambda '('acc 'sharddict) '('insert schema grouptbl (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
+					isOuter))))
+		/* aggregate descriptors */
+		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
 		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 			/* args already resolved via replace_find_column in wf_resolved */
