@@ -108,7 +108,7 @@ builds, because their truth value depends on current session state. */
 			found
 			(if (nil? assoc) nil (get_assoc assoc key_v))))
 		nil)
-	))
+))
 (define alias_variants_match (lambda (left right insensitive)
 	(reduce (alias_lookup_variants left) (lambda (matched left_v)
 		(or matched
@@ -1064,31 +1064,6 @@ These columns must still be mapped by the current scan so nested join filters ca
 	(symbol newpromise) true '(quote newpromise) true 'newpromise true
 	(symbol newsession) true '(quote newsession) true 'newsession true
 	_ false)))
-/* extract runtime-sensitive subexpressions that do not depend on table rows.
-Those terms must affect cache identity (temp column names) even if the
-relational key/domain stays unchanged. */
-(define extract_runtime_cache_terms (lambda (expr) (match expr
-	(cons sym args) (if (_is_opaque_scope_sym sym)
-		(merge_unique (map args extract_runtime_cache_terms))
-		(if (and (expr_uses_session_state expr) (equal? (extract_tblvars expr) '()))
-			(list expr)
-			(merge_unique (map args extract_runtime_cache_terms))))
-	'()
-)))
-/* runtime_cache_suffix_from_exprs: derive a stable, value-sensitive appendix for
-temp column names from session-/context-dependent terms. The suffix is computed
-at plan-build time, so repeated queries with the same runtime values reuse the
-same cache column while different session values get separate temp columns. */
-(define runtime_cache_suffix_from_exprs (lambda (exprs) (begin
-	(define terms (merge_unique (map exprs extract_runtime_cache_terms)))
-	(if (equal? terms '())
-		""
-		(concat "|rt:"
-			(serialize_canonical_expr
-				(canonicalize_expr
-					(map terms (lambda (term) (list term (eval term))))
-					'(list)))))
-)))
 (define assoc_keys_as_dataset_rows (lambda (dict width)
 	(map (extract_assoc dict (lambda (k v) k))
 		(lambda (k)
@@ -1097,7 +1072,7 @@ same cache column while different session values get separate temp columns. */
 				(if (<= width 1)
 					(list k)
 					(map (produceN width) (lambda (_) nil))))
-		))))
+))))
 /* Column-resolution contract:
 - parser-level get_column markers may still carry ti/ci flags inside untangle_query
 - they must be resolved against schema metadata exactly once before the logical IR
@@ -1536,10 +1511,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 	(define expr_name (lambda (expr)
 		(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar expr)) '(list) '(list) canon_alias_map)))
 	(set condition (replace_find_column (coalesceNil condition true)))
-	(define window_runtime_suffix (runtime_cache_suffix_from_exprs (merge
-		(list condition)
-		partition_exprs
-		(merge (map wf_resolved (lambda (wf) (match wf '(fn args _) args '())))))))
+	(define window_runtime_suffix "")
 	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
 	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
 		(define is_fk_reuse (not (nil? fk_pk_col)))
@@ -1609,20 +1581,20 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 				(scan_wrapper 'scan schema tbl
 					(cons list filtercols)
 					'('lambda (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
-						(cons list keycols)
-						'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
-						'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
-						'(list)
-						'('lambda '('acc 'sharddict)
-							'('insert schema grouptbl
-								(cons 'list (map group_keys expr_name))
-								'('assoc_keys_as_dataset_rows 'sharddict (count group_keys))
-								'(list)
-								'('lambda '() true)
-								true)))
-						isOuter))))
-			/* aggregate descriptors */
-			(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
+					(cons list keycols)
+					'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
+					'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
+					'(list)
+					'('lambda '('acc 'sharddict)
+						'('insert schema grouptbl
+							(cons 'list (map group_keys expr_name))
+							'('assoc_keys_as_dataset_rows 'sharddict (count group_keys))
+							'(list)
+							'('lambda '() true)
+							true)))
+				isOuter))))
+		/* aggregate descriptors */
+		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
 		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 			/* args already resolved via replace_find_column in wf_resolved */
@@ -4111,7 +4083,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define scan_expr_name (lambda (expr)
 					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr scan_tbl scan_tblvar expr)) '(list) '(list) canon_alias_map)))
 				(define agg_col_name (lambda (ag)
-					(concat (scan_expr_name ag) "|" (scan_expr_name agg_name_context) (runtime_cache_suffix_from_exprs (list ag agg_name_context)))))
+					(concat (scan_expr_name ag) "|" (scan_expr_name agg_name_context))))
 				(define materialized_cols (materialized_source_physical_schema scan_schema scan_tbl scan_tblvar schemas))
 				(define lookup_expr_field (lambda (expr) (begin
 					(define expr_lookup (materialized_source_expr_lookup scan_tbl))
@@ -4320,7 +4292,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(sanitize_temp_name
 						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar expr)) '(list) '(list) canon_alias_map))))
 				(define agg_col_name (lambda (ag)
-					(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))
+					(concat (expr_name ag) "|" (expr_name condition))))
 				(define count_ag '(1 + 0))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
@@ -4666,37 +4638,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(merge (map parts _flatten_and_parts))
 						(list expr))
 					(list expr))))
-				/* Runtime-sensitive row predicates that only depend on the current
-				source row plus session/context values must be materialized before the
-				group stage. Otherwise the later keytable aggregation loses the row
-				identity (e.g. a.user_id) they need and the predicate collapses away. */
-				(define runtime_local_col_name (lambda (expr)
-					(concat ".runtime_pred|" (expr_name expr) (runtime_cache_suffix_from_exprs (list expr)))))
-				(define _runtime_local_part (lambda (part)
-					(and (equal? (has_only_tblvar_refs part tblvar) true)
-						(expr_uses_session_state part))))
-				(define _condition_parts0 (_flatten_and_parts condition))
-				(define _runtime_local_parts (filter _condition_parts0 _runtime_local_part))
-				(define _runtime_local_setup_expr (lambda (part) (begin
-					(define col_name (runtime_local_col_name part))
-					(define cols (extract_columns_for_tblvar tblvar part))
-					(list (quote createcolumn) schema tbl col_name "any" '(list) '(list "temp" true)
-						(cons (quote list) cols)
-						(list (quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col))))
-							(replace_columns_from_expr part))))))
-				(define _rewrite_runtime_local_part (lambda (part)
-					(if (_runtime_local_part part)
-						(list (quote get_column) tblvar false (runtime_local_col_name part) false)
-						part)))
-				(set condition (if (equal? _condition_parts0 '()) true
-					(begin
-						(define _rewritten_parts (map _condition_parts0 _rewrite_runtime_local_part))
-						(if (equal? 1 (count _rewritten_parts)) (car _rewritten_parts)
-							(cons (quote and) _rewritten_parts)))))
-				(define runtime_local_compute_plan (if (equal? _runtime_local_parts '()) nil
-					(list (quote time)
-						(cons (quote parallel) (map _runtime_local_parts _runtime_local_setup_expr))
-						"runtime-local")))
+				(define runtime_local_compute_plan nil)
 				/* 2-phase condition split:
 				Phase 1: separate aggregate-containing AND-parts from non-aggregate parts.
 				Aggregates cannot be evaluated as row filters — they need the keytable.
@@ -4856,14 +4798,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(cons (quote list) (map resolved_stage_group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
 									'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
 									'(list) /* empty dict */
-										'((quote lambda) '('acc 'sharddict)
-											'('insert
-												schema grouptbl
-												(cons 'list (map resolved_stage_group expr_name))
-												'('assoc_keys_as_dataset_rows 'sharddict (count resolved_stage_group)) /* turn keys from assoc into dataset rows */
-												'(list) '('lambda '() true) true)
-										)
-										isOuter)
+									'((quote lambda) '('acc 'sharddict)
+										'('insert
+											schema grouptbl
+											(cons 'list (map resolved_stage_group expr_name))
+											'('assoc_keys_as_dataset_rows 'sharddict (count resolved_stage_group)) /* turn keys from assoc into dataset rows */
+											'(list) '('lambda '() true) true)
+									)
+									isOuter)
 							)
 						)
 					) "collect")))
@@ -4912,7 +4854,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						update_target))
 					(cons 'begin (merge
 						(if (nil? keytable_init) '() (list keytable_init))
-						(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
 						(list (make_collect true))
 						(list grouped_plan)))
 				) (begin
@@ -4920,7 +4861,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
 						(define agg_col_name (lambda (ag)
-							(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))
+							(concat (expr_name ag) "|" (expr_name condition))))
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
