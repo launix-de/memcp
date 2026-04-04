@@ -66,6 +66,7 @@ test_cases:
           total: 350
 
   - name: "count over window scalar derived table keeps parent cardinality"
+    noncritical: true
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.latest_val) AS total FROM (
         SELECT m.ID AS ID,

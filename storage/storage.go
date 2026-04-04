@@ -61,7 +61,7 @@ func scanUsesLegacyArgs(a []scm.Scmer) bool {
 }
 
 func scanExprUsesLegacyArgs(a []scm.Scmer) bool {
-	return len(a) > 0 && a[0].IsString()
+	return len(a) > 1 && a[1].IsString()
 }
 
 func effectiveTxContext(tx *TxContext) *TxContext {

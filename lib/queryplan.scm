@@ -294,7 +294,9 @@ defines the physical prejoin column names. */
 		'((quote get_column) alias_ ti col ci)
 		(list (quote get_column) (resolve_source_alias alias_map alias_) ti col ci)
 		(cons sym args)
-		(cons sym (map args (lambda (arg) (rewrite_source_aliases alias_map arg))))
+		(if (_is_opaque_scope_sym sym)
+			expr
+			(cons sym (map args (lambda (arg) (rewrite_source_aliases alias_map arg)))))
 		expr
 		(if (equal? expr (symbol (string expr)))
 			(begin
@@ -821,6 +823,7 @@ planner starts splitting aggregate conditions apart. */
 (define extract_window_funcs (lambda (expr)
 	(match expr
 		(cons (symbol window_func) rest) (list rest)
+		(cons '(quote window_func) rest) (list rest)
 		(cons sym args) /* function call */ (merge (map args extract_window_funcs))
 		/* literal */ '()
 	)
@@ -852,10 +855,10 @@ which tables are actually read. */
 Used to detect which tables a computor lambda reads from, so we can register invalidation triggers. */
 (define extract_scanned_tables (lambda (expr)
 	(match expr
-		(cons (symbol scan) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
-		(cons (symbol scan_order) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
-		(cons (symbol scalar_scan) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
-		(cons (symbol scalar_scan_order) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scan) (cons _tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scan_order) (cons _tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scalar_scan) (cons _tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scalar_scan_order) (cons _tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
 		(cons sym args) (merge (map args extract_scanned_tables))
 		'()
 	)
@@ -1508,221 +1511,6 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				'__kt_created))
 			/* return (name init_code nil) — third element nil means no FK reuse */
 			(list keytable_name init_code nil)))
-)))
-
-/* build_agg_window_plan: generates the full plan for aggregate window functions (SUM/COUNT/MIN/MAX OVER).
-Uses keytable infrastructure (same as GROUP BY): make_keytable + collect + createcolumn + scalar fetch.
-Result query runs on the BASE table; window_func expressions are replaced with scalar keytable scans. */
-(define build_agg_window_plan (lambda (schema tbl tblvar tables over_partition wf_resolved condition output_groups schemas replace_find_column fields isOuter replace_columns_from_expr extract_columns_for_tblvar scan_wrapper) (begin
-	(define has_partition (not (equal? over_partition '())))
-	(define partition_exprs (map over_partition replace_find_column))
-	(define group_keys (if has_partition partition_exprs '(1)))
-	(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
-	(define materialized_source (and (string? tbl) (>= (strlen tbl) 1) (equal? (substr tbl 0 1) ".")))
-	(define expr_name (lambda (expr)
-		(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar expr)) '(list) '(list) canon_alias_map)))
-	(set condition (replace_find_column (coalesceNil condition true)))
-	(define window_runtime_suffix "")
-	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
-	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
-		(define is_fk_reuse (not (nil? fk_pk_col)))
-		(define tblvar_cols (if has_partition (merge_unique (map group_keys (lambda (col) (extract_columns_for_tblvar tblvar col)))) '()))
-		(define materialized_cols (if materialized_source
-			(materialized_source_physical_schema schema tbl tblvar schemas)
-			'()))
-		/* Design contract:
-		Keep aggregate/window sentinels logical while naming and wiring stages.
-		Only the scan expression of the current materialized source may lower a
-		nested aggregate marker to the already materialized column that computes it.
-		This prevents raw (aggregate ...) nodes from leaking into build_scan while
-		still avoiding early physical substitution in the logical stage graph. */
-		(define lower_window_runtime_expr (lambda (expr) (match expr
-			(cons (symbol aggregate) agg_args) (begin
-				(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
-				(define match_col (if materialized_source
-					(reduce materialized_cols (lambda (found coldef)
-						(if (not (nil? found)) found
-							(begin
-								(define field_name (coldef "Field"))
-								(if (and (>= (strlen field_name) (+ (strlen agg_name) 1))
-									(equal? (substr field_name 0 (strlen agg_name)) agg_name)
-									(equal? (substr field_name (strlen agg_name) 1) "|"))
-									field_name
-									nil))))
-						nil)
-					nil))
-				(if (nil? match_col)
-					(match agg_args
-						'(agg_expr agg_reduce agg_neutral)
-						(list (quote aggregate) (lower_window_runtime_expr agg_expr) agg_reduce agg_neutral)
-						_ expr)
-					(list (quote get_column) tblvar false match_col false)))
-			(cons '(quote aggregate) agg_args) (begin
-				(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
-				(define match_col (if materialized_source
-					(reduce materialized_cols (lambda (found coldef)
-						(if (not (nil? found)) found
-							(begin
-								(define field_name (coldef "Field"))
-								(if (and (>= (strlen field_name) (+ (strlen agg_name) 1))
-									(equal? (substr field_name 0 (strlen agg_name)) agg_name)
-									(equal? (substr field_name (strlen agg_name) 1) "|"))
-									field_name
-									nil))))
-						nil)
-					nil))
-				(if (nil? match_col)
-					(match agg_args
-						'(agg_expr agg_reduce agg_neutral)
-						(list (quote aggregate) (lower_window_runtime_expr agg_expr) agg_reduce agg_neutral)
-						_ expr)
-					(list (quote get_column) tblvar false match_col false)))
-			(cons sym args) (cons sym (map args lower_window_runtime_expr))
-			expr)))
-		(set filtercols (if has_partition
-			(merge_unique (list
-				(extract_columns_for_tblvar tblvar condition)
-				(extract_outer_columns_for_tblvar tblvar condition)))
-			'()))
-		/* collect plan */
-		(define collect_plan (if (equal? group_keys '(1))
-			'('insert schema grouptbl '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
-			(begin
-				(define keycols (merge_unique (map group_keys (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
-				(scan_wrapper 'scan schema tbl
-					(cons list filtercols)
-					'('lambda (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
-					(cons list keycols)
-					'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
-					'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
-					'(list)
-					'('lambda '('acc 'sharddict)
-						'('insert schema grouptbl
-							(cons 'list (map group_keys expr_name))
-							'('assoc_keys_as_dataset_rows 'sharddict (count group_keys))
-							'(list)
-							'('lambda '() true)
-							true)))
-				isOuter))))
-		/* aggregate descriptors */
-		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix)))
-		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
-		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
-			/* args already resolved via replace_find_column in wf_resolved */
-			(define map_expr (if (equal? fn "COUNT") 1 (if (nil? args) 1 (car args))))
-			(define sep (if (and (equal? fn "GROUP_CONCAT") (> (count args) 1)) (cadr args) ","))
-			(match fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil)
-				"GROUP_CONCAT" (list '('concat map_expr) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil)
-				(error (concat "unsupported aggregate window function: " fn))))))))
-		/* createcolumn on KEYTABLE */
-		(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
-			(define runtime_expr (lower_window_runtime_expr expr))
-			(define cols (extract_columns_for_tblvar tblvar runtime_expr))
-			'('createcolumn schema grouptbl (agg_col_name ag) "any" '(list) '(list "temp" true)
-				(cons list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
-				'('lambda (map group_keys (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
-					(scan_wrapper 'scan schema tbl
-						(cons list (merge tblvar_cols filtercols))
-						'('lambda (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons 'and (cons (replace_columns_from_expr condition) (map group_keys (lambda (col) '('equal? (replace_columns_from_expr col) '('outer (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
-						(cons list cols)
-						'('lambda (map cols (lambda (col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr runtime_expr))
-						reduce neutral nil isOuter))))))))
-		(define compute_plan (cons 'parallel agg_plans))
-		/* replace window_func with scalar fetch */
-		(define replace_wf_with_fetch (lambda (expr) (match expr
-			(cons (symbol window_func) wf_rest) (begin
-				(define wf_fn (car wf_rest))
-				(define wf_args (cadr wf_rest))
-				(define map_expr (if (equal? wf_fn "COUNT") 1 (if (nil? wf_args) 1 (replace_find_column (car wf_args)))))
-				(define sep (if (and (equal? wf_fn "GROUP_CONCAT") (> (count wf_args) 1)) (cadr wf_args) ","))
-				(define ag_col (agg_col_name (match wf_fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil)
-					"GROUP_CONCAT" (list '('concat map_expr) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil)
-					(list map_expr '+ 0))))
-				(if has_partition (begin
-					(define kt_key_names (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
-					/* outer refs need raw column names (tblvar.col), not canonical expr_name */
-					(define raw_col_names (map group_keys (lambda (col) (match col '('get_column _ _ c _) c (expr_name col)))))
-					(list 'scan (current_query_tx_expr) schema grouptbl
-						(cons 'list kt_key_names)
-						/* filter: (equal? grouptbl.kt_key (outer tblvar.raw_col)) — zip kt_key_names with raw_col_names */
-						(list 'lambda
-							(map kt_key_names (lambda (kn) (symbol (concat grouptbl "." kn))))
-							(cons 'and (map (produceN (count kt_key_names) (lambda (i) i)) (lambda (i)
-								(list 'equal? (symbol (concat grouptbl "." (nth kt_key_names i))) (list 'outer (symbol (concat tblvar "." (nth raw_col_names i)))))))))
-						(list 'list ag_col)
-						'('lambda '('__v) '__v)
-						'('lambda '('__a '__b) '__b) nil nil false))
-					(list 'scan (current_query_tx_expr) schema grouptbl '(list) '('lambda '() true)
-						(list 'list ag_col)
-						'('lambda '('__v) '__v)
-						'('lambda '('__a '__b) '__b) nil nil false)))
-			(cons sym args_) (cons sym (map args_ replace_wf_with_fetch))
-			expr)))
-		(define new_fields (map_assoc fields (lambda (k v) (replace_wf_with_fetch (replace_find_column v)))))
-		(define output_groups_present (and (not (nil? output_groups)) (not (equal? output_groups '()))))
-		(define output_stage (if output_groups_present (car output_groups) nil))
-		(define output_stage_order (if output_stage (coalesceNil (stage_order_list output_stage) '()) '()))
-		(define output_stage_limit (if output_stage (stage_limit_val output_stage) nil))
-		(define output_stage_offset (if output_stage (stage_offset_val output_stage) nil))
-		(define output_stage_init (if output_stage (stage_init_code output_stage) nil))
-		(define output_condition (replace_find_column condition))
-		(define output_filtercols (merge_unique (list
-			(extract_columns_for_tblvar tblvar output_condition)
-			(extract_outer_columns_for_tblvar tblvar output_condition))))
-		(define output_cols (merge_unique (list
-			output_filtercols
-			(extract_assoc new_fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))
-			(extract_assoc new_fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
-			(merge (map output_stage_order (lambda (o) (match o '(col _dir)
-				(extract_columns_for_tblvar tblvar col)
-				'()))))
-			(merge (map output_stage_order (lambda (o) (match o '(col _dir)
-				(extract_outer_columns_for_tblvar tblvar col)
-				'())))))))
-		(define output_mapfn
-			'((quote lambda) (map output_cols (lambda (col) (symbol (concat tblvar "." col))))
-				((symbol "resultrow") (cons (symbol "list")
-					(map_assoc new_fields (lambda (k v) (replace_columns_from_expr v)))))))
-		(define output_scan (if (or (not (equal? output_stage_order '())) (not (nil? output_stage_limit)) (not (nil? output_stage_offset)))
-			(begin
-				(define ordercols (merge (map output_stage_order (lambda (order_item) (match order_item '(col dir) (match col
-					'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-					'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-					_ '()))))))
-				(define dirs (merge (map output_stage_order (lambda (order_item) (match order_item '(col dir) (match col
-					'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-					'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-					_ '()))))))
-				(scan_wrapper 'scan_order schema tbl
-					(cons list output_filtercols)
-					'((quote lambda) (map output_filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize output_condition))
-					(cons list ordercols)
-					(cons list dirs)
-					0
-					(coalesceNil output_stage_offset 0)
-					(coalesceNil output_stage_limit -1)
-					(cons list output_cols)
-					output_mapfn
-					nil
-					nil
-					isOuter))
-			(scan_wrapper 'scan schema tbl
-				(cons list output_filtercols)
-				'((quote lambda) (map output_filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize output_condition))
-				(cons list output_cols)
-				output_mapfn
-				nil
-				nil
-				nil
-				isOuter)))
-		(define scan_plan (if (nil? output_stage_init) output_scan (list 'begin output_stage_init output_scan)))
-		(if (equal? tbl "win_emp")
-			(error (concat "__agg_window_scan_plan__ "
-				" has_partition=" has_partition
-				" output_scan=" (serialize output_scan)
-				" scan_plan=" (serialize scan_plan)))
-			nil)
-		(list 'begin keytable_init '('time collect_plan "collect") '('time compute_plan "compute") scan_plan)))
 )))
 
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table
@@ -3618,6 +3406,83 @@ or generate runtime scan code (build_queryplan).
 		expr
 	)))
 
+	/* Rewrite aggregate window functions into logical scalar subqueries before
+	unnesting. The subquery ranges over the current FROM/WHERE domain and
+	correlates on PARTITION BY via explicit outer equalities. Non-ordered
+	aggregates ignore OVER ORDER BY; ordered aggregates stay on the window path. */
+	(define sql_window_agg_descriptor (lambda (fn wf_args over_order) (begin
+		(define reg (sql_aggregates fn))
+		(if (nil? reg)
+			nil
+			(begin
+				(define ordered (nth reg 2))
+				(define map_expr (if (equal? fn "COUNT") 1 (if (nil? wf_args) 1 (car wf_args))))
+				(define sep (if (and (equal? fn "GROUP_CONCAT") (> (count wf_args) 1)) (cadr wf_args) ","))
+				(if (and ordered (not (equal? over_order '())))
+					nil
+					(match fn
+						"SUM" (list (quote aggregate) map_expr (quote +) 0)
+						"COUNT" (list (quote aggregate) 1 (quote +) 0)
+						"MIN" (list (quote aggregate) map_expr (quote min) nil)
+						"MAX" (list (quote aggregate) map_expr (quote max) nil)
+						"GROUP_CONCAT" (list (quote aggregate)
+							(list (quote concat) map_expr)
+							(list (quote lambda) (list (quote a) (quote b))
+								(list (quote if) (list (quote nil?) (quote a))
+									(quote b)
+									(list (quote concat) (quote a) sep (quote b))))
+							nil)
+						nil)))))))
+	(define outerize_window_partition_expr (lambda (expr) (match expr
+		'((symbol get_column) alias_ _ col _) (if (nil? alias_) expr
+			(list (quote outer) (symbol (concat alias_ "." col))))
+		'((quote get_column) alias_ _ col _) (if (nil? alias_) expr
+			(list (quote outer) (symbol (concat alias_ "." col))))
+		(cons sym args) (cons sym (map args outerize_window_partition_expr))
+		expr
+	)))
+	(define rewrite_window_agg_node (lambda (fn wf_args over fallback_expr) (begin
+		(define over_partition (car over))
+		(define over_order (cadr over))
+		(define agg_expr (sql_window_agg_descriptor fn wf_args over_order))
+		(if (nil? agg_expr)
+			fallback_expr
+			(begin
+				(define partition_eqs (map over_partition (lambda (pe) (begin
+					(define resolved_pe (replace_find_column pe))
+					(list (quote equal??) resolved_pe (outerize_window_partition_expr resolved_pe))))))
+				(define sub_condition (combine_and_terms
+					(merge (flatten_and_terms (coalesceNil condition true)) partition_eqs)))
+				(list (quote inner_select)
+					(list schema tables
+						(list "__value" agg_expr)
+						sub_condition
+						nil nil nil nil nil)))))))
+	(define rewrite_aggregate_windows (lambda (expr) (match expr
+		(cons (symbol window_func) rest) (match rest
+			'(fn wf_args over) (rewrite_window_agg_node fn wf_args over expr)
+			_ expr)
+		(cons '(quote window_func) rest) (match rest
+			'(fn wf_args over) (rewrite_window_agg_node fn wf_args over expr)
+			_ expr)
+		(cons sym args) (cons sym (map args rewrite_aggregate_windows))
+		expr
+	)))
+	(define grouped_query_has_post_group_window_domain
+		(or (not (nil? group)) (not (nil? having))))
+	(if (not grouped_query_has_post_group_window_domain)
+		(set fields (map_assoc fields (lambda (k v) (rewrite_aggregate_windows v))))
+		nil)
+	(define top_window_funcs (merge (extract_assoc fields (lambda (_k v) (extract_window_funcs v)))))
+	(if (and (not (equal? top_window_funcs '()))
+		(or (not (nil? group)) (not (nil? having)))
+		(reduce top_window_funcs (lambda (acc wf) (or acc (match wf '(fn _ _)
+			(nil? (sql_aggregates fn))
+			true)))
+			false))
+		(error "window function with GROUP BY not yet supported")
+		nil)
+
 	/* pass full schema chain (current + ancestors) so nested subselects can resolve grandparent refs */
 	(define _ris_schemas (merge schemas outer_schemas_chain))
 	(set tables (map tables (lambda (td) (match td
@@ -4229,68 +4094,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	(define lower_materialized_emit_assoc (lambda (scan_schema scan_tbl scan_tblvar exprs)
 		(map_assoc exprs (lambda (k v) (lower_materialized_emit_expr scan_schema scan_tbl scan_tblvar v)))))
 	(if window_in_condition (error "window functions not allowed in WHERE clause"))
-	(define _has_non_window_agg_expr (lambda (expr) (match expr
-		(cons (symbol window_func) _) false
-		(cons (quote window_func) _) false
-		(cons (symbol aggregate) _) true
-		(cons (quote aggregate) _) true
-		(cons sym args) (reduce args (lambda (acc arg) (or acc (_has_non_window_agg_expr arg))) false)
-		false)))
-	(define _window_first_over (if has_window (nth (car window_funcs_all) 2) nil))
-	(define _window_same_over (if has_window
-		(reduce window_funcs_all (lambda (ok wf) (and ok (equal? (nth wf 2) _window_first_over))) true)
-		false))
-	(define _window_over_order (if has_window
-		(map (cadr _window_first_over) (lambda (o) (match o '(col dir) (list (replace_find_column col) dir))))
-		'()))
-	(define _window_wf_resolved (if has_window
-		(map window_funcs_all (lambda (wf) (match wf '(fn args over)
-			(list fn (map args replace_find_column) over))))
-		'()))
-	(define _window_has_over_order (not (equal? _window_over_order '())))
-	(define _window_is_agg (lambda (wf) (match wf '(fn _ _) (not (nil? (sql_aggregates fn))))))
-	(define _window_is_ordered_agg (lambda (wf) (match wf '(fn _ _) (begin
-		(define reg (sql_aggregates fn))
-		(if (nil? reg) false (nth reg 2))))))
-	(define _direct_agg_window_plan (and has_window _window_same_over
-		(reduce _window_wf_resolved (lambda (acc wf)
-			(and acc (_window_is_agg wf) (or (not (_window_is_ordered_agg wf)) (not _window_has_over_order))))
-			true)
-		(not (or
-			(reduce_assoc fields (lambda (acc _k v) (or acc (_has_non_window_agg_expr v))) false)
-			(_has_non_window_agg_expr (coalesce stage_having true))
-			(reduce (coalesce stage_order '()) (lambda (acc o) (or acc (match o '(col _dir) (_has_non_window_agg_expr col) false))) false)
-			(_has_non_window_agg_expr (coalesce condition true))))))
-	(define _window_output_stage (if stage
-		(stage_preserve_cache_meta stage
-			(if (and (not (nil? (stage_partition_aliases stage)))
-					(or (nil? (stage_group_cols stage)) (equal? (stage_group_cols stage) '())))
-				(make_partition_stage
-					(stage_partition_aliases stage)
-					(coalesceNil (stage_order_list stage) '())
-					(coalesceNil (stage_limit_partition_cols stage) 0)
-					(stage_limit_val stage)
-					(stage_offset_val stage)
-					(stage_init_code stage))
-				(make_group_stage
-					'()
-					nil
-					(coalesceNil (stage_order_list stage) '())
-					(stage_limit_val stage)
-					(stage_offset_val stage)
-					(stage_partition_aliases stage)
-					(stage_init_code stage))))
-		nil))
-	(define _window_output_groups (if stage
-		(cons _window_output_stage rest_groups)
-		groups))
 
 	/* window functions with GROUP BY: strip window expressions to inner
 	aggregates so the normal GROUP BY path processes them. Save original
 	fields so we can inject promise values after compute_plan. */
 	(define _wg_store (newsession))
 	(_wg_store "fields" nil)
-	(if (and has_window stage_group (not _direct_agg_window_plan)) (begin
+	(if (and has_window stage_group) (begin
 		(_wg_store "fields" fields) /* save original fields with window_func */
 		(define strip_window_inner (lambda (expr)
 			(if (and (list? expr) (> (count expr) 0) (equal?? (car expr) (quote window_func)))
@@ -4300,7 +4110,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(set fields (map_assoc fields (lambda (k v) (strip_window_inner v))))
 		(set has_window false)))
 
-	(if (and stage_group (not _direct_agg_window_plan)) (begin
+	(if stage_group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		/* Design contract:
 		Keep get_column / aggregate / window sentinels logical until the final scan
@@ -5442,11 +5252,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
 												(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
 												(list (quote set) (symbol pn)
-													'('scan schema grouptbl
-														'(list acn)
-														'('lambda (list (symbol acn)) true)
-														'(list acn)
-														'('lambda (list (symbol acn)) (symbol acn))
+													(list (quote scan) schema grouptbl
+														(list (quote list) acn)
+														(list (quote lambda) (list (symbol acn)) true)
+														(list (quote list) acn)
+														(list (quote lambda) (list (symbol acn)) (symbol acn))
 														reduce_op
 														neutral
 														nil false)))))))
@@ -6257,19 +6067,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														agg_neutral))))))))
 				)))
 				(define is_orc_window (lambda (wf) (match wf '(fn args _) (not (nil? (orc_window_descriptor fn args '()))))))
-				/* aggregate window: look up fn in sql_aggregates registry → (reduce neutral ordered) */
-				(define is_agg_window (lambda (wf) (match wf '(fn _ _) (not (nil? (sql_aggregates fn))))))
 				/* is_ordered_agg: true if the aggregate is order-sensitive (e.g. GROUP_CONCAT) */
 				(define is_ordered_agg (lambda (wf) (match wf '(fn _ _) (begin
 					(define reg (sql_aggregates fn))
 					(if (nil? reg) false (nth reg 2))))))
 				/* classify: ORC (has ORDER BY + ORC-eligible or ordered aggregate),
-				aggregate (no ORDER BY, or non-ordered aggregate ignoring ORDER BY),
-				LAG/LEAD (everything else) */
+				LAG/LEAD (everything else). Non-ORC aggregate windows are rewritten
+				away in untangle before build_queryplan sees them. */
 				(define has_over_order (not (equal? over_order '())))
 				(define all_orc_window (and has_over_order (reduce wf_resolved (lambda (acc wf) (and acc (or (is_orc_window wf) (is_ordered_agg wf)))) true)))
-				/* agg window: non-ordered aggs always, OR ordered aggs WITHOUT ORDER BY (keytable, not ORC) */
-				(define all_agg_window (and (not all_orc_window) (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf) (or (not (is_ordered_agg wf)) (not has_over_order)))) true)))
 				(if all_orc_window
 					(match tables
 						/* ========= ORC materialization (ROW_NUMBER, RANK, DENSE_RANK, ...) ========= */
@@ -6336,12 +6142,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							/* compile time: add bare column so the scan plan can reference it */
 							(createcolumn schema tbl orc_col_name "any" '() '("temp" true))
 							/* replace window_func references with ORC column read */
-							(define replace_wf (lambda (expr) (match expr
-								(cons (symbol window_func) _) '((quote get_column) (eval tblvar) false (eval orc_col_name) false)
-								(cons sym args_) (cons sym (map args_ replace_wf))
-								expr)))
-							(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
-							/* runtime plan: createcolumn with ORC params, then the actual scan */
+								(define replace_wf (lambda (expr) (match expr
+									(cons (symbol window_func) _) '((quote get_column) (eval tblvar) false (eval orc_col_name) false)
+									(cons '(quote window_func) _) '((quote get_column) (eval tblvar) false (eval orc_col_name) false)
+									(cons sym args_) (cons sym (map args_ replace_wf))
+									expr)))
+								(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
+								/* runtime plan: createcolumn with ORC params, then the actual scan */
 							/* sortcols: partition cols (ASC) first, then ORDER BY cols */
 							(define full_sort_cols (if has_partition (merge partition_col_names orc_sort_col_names) orc_sort_col_names))
 							(define full_sort_dirs (if has_partition
@@ -6358,22 +6165,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list (quote begin) (list orc_setup) scan_plan)
 						)
 						(error "window functions on joined tables not yet supported"))
-					(if all_agg_window
+					(begin
+						/* ========= LAG/LEAD scan path (unchanged) ========= */
+						/* Case 3: conflicting ORDER BY */
+						(if (and (not (equal? stage_order_resolved '())) (not (equal? effective_sort stage_order_resolved)))
+							(error "window ORDER BY with outer ORDER BY not yet supported"))
+						(if (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _)
+							(or acc (and (not (equal? fn "LAG")) (not (equal? fn "LEAD")))))) false)
+							(error (concat "unsupported window function in LAG/LEAD context: " (car (car wf_resolved)))))
+						/* single table only */
 						(match tables
-							'('(tblvar schema tbl isOuter _))
-							(build_agg_window_plan schema tbl tblvar tables over_partition wf_resolved condition _window_output_groups schemas replace_find_column fields isOuter replace_columns_from_expr extract_columns_for_tblvar scan_wrapper)
-							(error "window functions on joined tables not yet supported"))
-						(begin
-							/* ========= LAG/LEAD scan path (unchanged) ========= */
-							/* Case 3: conflicting ORDER BY */
-							(if (and (not (equal? stage_order_resolved '())) (not (equal? effective_sort stage_order_resolved)))
-								(error "window ORDER BY with outer ORDER BY not yet supported"))
-							(if (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _)
-								(or acc (and (not (equal? fn "LAG")) (not (equal? fn "LEAD")))))) false)
-								(error (concat "unsupported window function in LAG/LEAD context: " (car (car wf_resolved)))))
-							/* single table only */
-							(match tables
-								'('(tblvar schema tbl isOuter _)) (begin
+							'('(tblvar schema tbl isOuter _)) (begin
 									(set condition (replace_find_column (coalesceNil condition true)))
 									(define has_partition (not (equal? over_partition '())))
 									/* compute stride_cols: all columns needed in output and window args */
@@ -6405,6 +6207,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									/* rewrite field expression for emit_fn */
 									(define rewrite_for_emit (lambda (expr row_pos) (match expr
 										(cons (symbol window_func) wf_rest) (begin
+											(define fn (car wf_rest))
+											(define wf_args (cadr wf_rest))
+											(define wf_offset (if (> (count wf_args) 1) (cadr wf_args) 1))
+											(define wf_pos (if (equal? fn "LAG") (- current_row_pos wf_offset) (+ current_row_pos wf_offset)))
+											(rewrite_for_emit (replace_find_column (car wf_args)) wf_pos))
+										(cons '(quote window_func) wf_rest) (begin
+											(define fn (car wf_rest))
+											(define wf_args (cadr wf_rest))
+											(define wf_offset (if (> (count wf_args) 1) (cadr wf_args) 1))
+											(define wf_pos (if (equal? fn "LAG") (- current_row_pos wf_offset) (+ current_row_pos wf_offset)))
+											(rewrite_for_emit (replace_find_column (car wf_args)) wf_pos))
+										(cons '(quote window_func) wf_rest) (begin
 											(define fn (car wf_rest))
 											(define wf_args (cadr wf_rest))
 											(define wf_offset (if (> (count wf_args) 1) (cadr wf_args) 1))
@@ -6532,12 +6346,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														reducer_ast
 														neutral_ast
 														isOuter))))
-											scan_plan
+										scan_plan
 									))
 								)
-								(error "window functions on joined tables not yet supported")
-				))))
-			) (if (coalesce stage_order stage_limit stage_offset) (begin
+									(error "window functions on joined tables not yet supported")
+						)))
+				) (if (coalesce stage_order stage_limit stage_offset) (begin
 					/* ordered or limited scan */
 					/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
 					(set stage_order (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
@@ -6677,7 +6491,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											0))))
 						)
 					))
-					(build_scan ordered_tables (replace_find_column condition) true nil)
+						(build_scan ordered_tables (replace_find_column condition) true nil)
 				) (begin
 						/* unordered unlimited scan */
 
@@ -6816,7 +6630,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							)
 						))
 						(build_scan tables (replace_find_column condition) nil nil)
-			)))
+						))))
 	)))
 )))
+)
 )
