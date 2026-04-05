@@ -438,7 +438,7 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 		// ColumnStorage access only understands main-row indexes.
 		colvalues[i] = p.shard.ColumnReader(col)(idx)
 	}
-	val := scm.Apply(p.computor, colvalues...)
+	val := applyWithTx(CurrentTx(), p.computor, colvalues...)
 
 	p.mu.Lock()
 	p.delta[idx] = val
@@ -473,7 +473,6 @@ func (p *StorageComputeProxy) Compress() {
 		return
 	}
 
-	fn := scm.OptimizeProcToSerialFunction(p.computor)
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
 		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
@@ -491,8 +490,7 @@ func (p *StorageComputeProxy) Compress() {
 		for j := range readers {
 			colvalues[j] = readers[j].GetValue(idx)
 		}
-		result := fn(colvalues...)
-		return result
+		return applyWithTx(tx, p.computor, colvalues...)
 	}
 
 	// Standard proposeCompression loop (same as shard rebuild)
@@ -536,9 +534,6 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 		return
 	}
 
-	fn := scm.OptimizeProcToSerialFunction(p.computor)
-	filterFn := scm.OptimizeProcToSerialFunction(filter)
-
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
 		filterReaders[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
@@ -554,11 +549,11 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 		for j := range filterReaders {
 			filterValues[j] = filterReaders[j].GetValue(i)
 		}
-		if scm.ToBool(filterFn(filterValues...)) {
+		if scm.ToBool(applyWithTx(tx, filter, filterValues...)) {
 			for j := range readers {
 				colvalues[j] = readers[j].GetValue(i)
 			}
-			p.delta[i] = fn(colvalues...)
+			p.delta[i] = applyWithTx(tx, p.computor, colvalues...)
 			p.validMask.Set(uint(i), true)
 		}
 	}

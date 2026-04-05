@@ -30,13 +30,13 @@ The query is hashed with FNV-1a (fnv_hash) so long SQL strings don't bloat the c
 Session-sensitive plans must not be reused under that key because their lowered
 runtime helper names and cache domains may depend on current session variables.
 On parse error the result is not cached (e.g. table does not exist yet). */
-(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username)
+(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session)
 	(begin
 		(define cache_key (concat username ":" schema ":" (fnv_hash query)))
 		(define cached (queryplan_cache cache_key))
 		(if cached cached
 			(begin
-				(define formula (parse_fn schema query policy))
+				(define formula (with_session session (lambda () (parse_fn schema query policy))))
 				(if (expr_uses_session_state formula)
 					true
 					(queryplan_cache cache_key formula))
@@ -198,7 +198,6 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
-					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username")))
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 					(define resultrow (res "jsonl"))
 					/* Use persistent session if X-Session-Id header is present */
@@ -214,6 +213,10 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						)
 						(context "session")
 					))
+					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
+					before parse/build so session-sensitive planner rewrites see the right values. */
+					(extract_assoc (req "query") (lambda (k v) (session k v)))
+					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username") session))
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
 					(set last_row nil)
@@ -222,8 +225,6 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(if (equal? row last_row)
 							true
 							(begin (set last_row row) (original_resultrow row))))))
-					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session */
-					(extract_assoc (req "query") (lambda (k v) (session k v)))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
 					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -278,9 +279,10 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(regex "FROM\\s+pg_constraint" _) true
 						false))
 					(define query_result (if handled nil (begin
-						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username")))
-						/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session */
+						/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
+						before parse/build so session-sensitive planner rewrites see the right values. */
 						(extract_assoc (req "query") (lambda (k v) (session k v)))
+						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username") session))
 						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -387,8 +389,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
 				(define mysql_username (coalesce (session "username") "root"))
 				(define formula (if (equal? (session "syntax") "postgresql")
-					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
-					(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username)))
+					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username session)
+					(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username session)))
 				(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 			) sql))
 	)) (lambda (e) (begin
