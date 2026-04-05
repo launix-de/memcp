@@ -1475,13 +1475,38 @@ fk_pk_col is non-nil when FK→PK reuse is active (parent table used instead of 
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
-	reuse the parent (referenced) table instead of creating a temp keytable */
+	reuse the parent (referenced) table instead of creating a temp keytable.
+	The rest of the grouped pipeline must still see the normal logical key name,
+	so install a temp alias column on the parent table when the physical PK name
+	differs from the canonical GROUP BY key name. */
 	(define fk_result (if (and (nil? condition_suffix) (equal? 1 (count keys)))
 		(match (car keys)
 			'('get_column (eval tblvar) false scol false) (begin
 				(define fk_info (get_fk_target schema tbl scol))
 				(if (not (nil? fk_info))
-					(list (car fk_info) nil (car (cdr fk_info)))
+					(begin
+						(define alias_map (list (list tblvar (concat schema "." tbl))))
+						(define key_name
+							(sanitize_temp_name
+								(canonical_expr_name
+									(normalize_canonical_aliases
+										(lower_materialized_source_expr tbl tblvar (car keys)))
+									'(list) '(list) alias_map)))
+						(define parent_tbl (car fk_info))
+						(define parent_col (car (cdr fk_info)))
+						(if (equal? key_name parent_col)
+							(list parent_tbl nil key_name)
+							(begin
+								(createcolumn schema parent_tbl key_name "any" '() '("temp" true)
+									(list parent_col)
+									(eval (list 'lambda (list (symbol parent_col)) (symbol parent_col))))
+								(list parent_tbl
+									(list 'createcolumn schema parent_tbl key_name "any"
+										(list 'quote '())
+										(list 'quote '("temp" true))
+										(list 'quote (list parent_col))
+										(list 'lambda (list (symbol parent_col)) (symbol parent_col)))
+									key_name))))
 					nil))
 			nil)
 		nil))
