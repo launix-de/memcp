@@ -330,9 +330,6 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 		}
 		cond.Broadcast()
 		t.tableLockMu.Unlock()
-		if ss != nil {
-			ss.SetState("")
-		}
 	}()
 	shards := t.ActiveShards()
 	for _, s := range shards {
@@ -345,7 +342,6 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	}
 	acquired = true
 	if ss != nil {
-		ss.SetState("")
 		ss.AddLock(t.unlockTable)
 	}
 }

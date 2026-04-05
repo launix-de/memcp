@@ -29,14 +29,11 @@ import "github.com/launix-de/memcp/scm"
 // reader variant here; plain storages keep using the legacy reader path.
 //
 // For StorageEnum this gives O(1) sequential decode; for others it's a no-op.
-// When the storage is OverlayBlob wrapping StorageEnum, unwraps to cache the
-// enum directly (blob overlay is only used for large-value storage, not compute inputs).
+// Do not strip runtime overlays here: generic scan/read paths must still see
+// user-visible values (for example OverlayBlob must dereference its hash marker
+// back to the persisted blob payload after restart).
 func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext) ColumnReader {
 	tx = effectiveTxContext(tx)
-	// unwrap OverlayBlob: compute inputs are stored in the base, not the blob layer
-	if ob, ok := col.(*OverlayBlob); ok {
-		col = ob.Base
-	}
 	if provider, ok := col.(TxColumnReaderProvider); ok {
 		return provider.GetCachedReaderTx(tx)
 	}
@@ -1423,7 +1420,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 		// Determine trigger bodies: selective if join pairs are available
 		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 
-		// Check if this scan is an additive aggregate eligible for incremental update
+		// Check if this scan is an additive aggregate eligible for incremental update.
 		var scanNode []scm.Scmer
 		incremental := false
 		if selective {

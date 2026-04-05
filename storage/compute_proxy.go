@@ -605,8 +605,9 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 }
 
 // IncrementalUpdate adds delta to the cached value at idx.
-// If the row is not valid (not yet computed), this is a no-op (the next read will compute fresh).
-// This avoids shard rebuilds by modifying the cached value in-place.
+// If the row is not valid yet, materialize it from the current post-mutation
+// state instead of silently dropping the update. This keeps FK-reuse and other
+// incremental aggregate caches correct across empty<->non-empty transitions.
 func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 	if p.hasSessionVariants() {
 		p.forEachVariant(func(v *storageComputeVariant) {
@@ -642,9 +643,13 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if !p.compressed && !p.validMask.Get(uint(idx)) {
-		return // not valid → will be computed fresh on next read
+		p.mu.Unlock()
+		// Recompute the affected row from the already-mutated source state so the
+		// cache converges immediately even when this row had never been
+		// materialized before.
+		p.GetValue(idx)
+		return
 	}
 	var oldVal scm.Scmer
 	if v, ok := p.delta[idx]; ok {
@@ -673,6 +678,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 			p.validMask.Set(uint(i), true)
 		}
 	}
+	p.mu.Unlock()
 }
 
 // SetValue writes val directly to the cached value at idx, bypassing recomputation.
