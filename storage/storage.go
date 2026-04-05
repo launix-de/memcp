@@ -306,6 +306,8 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	// herd when many sessions repeatedly lock the same hot table (e.g. cron).
 	cond := t.getTableLockCond()
 	if ss != nil {
+		ss.BeginLockWait()
+		defer ss.EndLockWait()
 		ss.SetState("Waiting for table lock")
 	}
 	t.tableLockMu.Lock()

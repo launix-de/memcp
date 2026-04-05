@@ -612,8 +612,9 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 	if p.hasSessionVariants() {
 		p.forEachVariant(func(v *storageComputeVariant) {
 			v.mu.Lock()
-			defer v.mu.Unlock()
 			if !v.compressed && !v.validMask.Get(uint(idx)) {
+				v.mu.Unlock()
+				p.GetValue(idx)
 				return
 			}
 			var oldVal scm.Scmer
@@ -622,6 +623,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 			} else if v.main != nil {
 				oldVal = v.main.GetValue(idx)
 			} else {
+				v.mu.Unlock()
 				return
 			}
 			var newVal scm.Scmer
@@ -639,6 +641,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 					v.validMask.Set(uint(i), true)
 				}
 			}
+			v.mu.Unlock()
 		})
 		return
 	}

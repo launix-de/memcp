@@ -623,6 +623,8 @@ func (t *table) getTableLockCond() *sync.Cond {
 func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	cond := t.getTableLockCond()
 	if ss != nil {
+		ss.BeginLockWait()
+		defer ss.EndLockWait()
 		ss.SetState("Waiting for table lock")
 	}
 	var errMsg string
