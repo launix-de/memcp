@@ -53,7 +53,7 @@ Uses code-generator pattern: values baked into quoted lambda body at register ti
 so no closure capture — the trigger body serializes cleanly as a self-contained expression. */
 (define register_prejoin_invalidation (lambda (src_schema src_table pj_schema pj_table) (begin
 	(define prefix (concat ".prejoin:" pj_table "|" src_table "|"))
-	(define drop_body (eval (list 'lambda (list 'OLD 'NEW) (list 'droptable pj_schema pj_table true))))
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
 	(createtrigger src_schema src_table (concat prefix "after_insert")     "after_insert"     "" drop_body false)
 	(createtrigger src_schema src_table (concat prefix "after_update")     "after_update"     "" drop_body false)
 	(createtrigger src_schema src_table (concat prefix "after_delete")     "after_delete"     "" drop_body false)
@@ -70,7 +70,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(createtrigger src_schema src_table (concat prefix "after_delete") "after_delete" "" delete_fn false)
 	(createtrigger src_schema src_table (concat prefix "after_insert") "after_insert" "" insert_fn false)
 	(createtrigger src_schema src_table (concat prefix "after_update") "after_update" "" update_fn false)
-	(define drop_body (eval (list 'lambda (list 'OLD 'NEW) (list 'droptable pj_schema pj_table true))))
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
 	(createtrigger src_schema src_table (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
 	(createtrigger src_schema src_table (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
 	true)))
@@ -1749,7 +1749,7 @@ with (list 'get_assoc dict_sym col) — for use in building trigger body S-expre
 Skips scanning trigger_tv (its cols come from (get_assoc NEW "col") at runtime),
 scans all other tables, and inserts matching rows into pj_schema/pjtbl.
 pj_schema, pjtbl, mat_cols, mat_col_names are passed explicitly to avoid free-variable capture issues.
-Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd, performs the insert. */
+Returns an S-expression that, when wrapped in (lambda (OLD NEW session) ...) and eval'd, performs the insert. */
 (define build_pj_insert_scan (lambda (scan_tables scan_condition trigger_tv is_outermost pj_schema pjtbl mat_cols mat_col_names)
 	(match scan_tables
 		(cons '(tblvar schema tbl isOuter joinexpr) rest)
@@ -6037,7 +6037,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										DML planner so internal maintenance stays aligned with
 										ordinary DELETE/$update semantics. */
 										(define delete_fn
-											(eval (list 'lambda (list 'OLD 'NEW)
+											(eval (list 'lambda (list 'OLD 'NEW 'session)
 												(build_prejoin_delete_plan prejoin_schema prejoin_table_name ti_col_pairs))))
 										/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows.
 										Design contract: planner-owned prejoin helpers are cache-engine tables.
@@ -6048,24 +6048,24 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										full rebuild. Therefore all incremental maintenance is gated on the helper
 										already containing a materialized baseline. */
 										(define raw_insert_fn
-											(eval (list 'lambda (list 'OLD 'NEW)
+											(eval (list 'lambda (list 'OLD 'NEW 'session)
 												(build_pj_insert_scan tables condition trigger_tv true prejoin_schema prejoin_table_name prejoin_columns prejoin_column_names))))
 										(define insert_fn
-											(eval (list 'lambda (list 'OLD 'NEW)
+											(eval (list 'lambda (list 'OLD 'NEW 'session)
 												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
 													true
-													(list raw_insert_fn 'OLD 'NEW)))))
+													(list raw_insert_fn 'OLD 'NEW 'session)))))
 										/* UPDATE trigger: delete old prejoin rows + insert new for any row change.
 										Code-generator pattern: embed delete_fn/insert_fn as proc literals in body
 										so no closure capture — serializes cleanly for persistence. The same empty-
 										helper contract applies here: if no baseline is materialized yet, skip the
 										incremental step and let the next query rebuild the full cache. */
-										(define raw_update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list raw_insert_fn 'OLD 'NEW)))))
+										(define raw_update_fn (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'begin (list delete_fn 'OLD 'NEW 'session) (list raw_insert_fn 'OLD 'NEW 'session)))))
 										(define update_fn
-											(eval (list 'lambda (list 'OLD 'NEW)
+											(eval (list 'lambda (list 'OLD 'NEW 'session)
 												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
 													true
-													(list raw_update_fn 'OLD 'NEW)))))
+													(list raw_update_fn 'OLD 'NEW 'session)))))
 										/* emit the register call as an S-expression to be executed at query time */
 										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))

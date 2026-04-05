@@ -2906,7 +2906,7 @@ func initFKBuiltins(en scm.Env) {
 // body is the Scheme expression as an S-expression (a Scmer list).
 func buildFKProc(body scm.Scmer) scm.Scmer {
 	return scm.NewProc(&scm.Proc{
-		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("OLD"), scm.NewSymbol("NEW")}),
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("OLD"), scm.NewSymbol("NEW"), scm.NewSymbol("session")}),
 		Body:   body,
 		En:     &scm.Globalenv,
 	})

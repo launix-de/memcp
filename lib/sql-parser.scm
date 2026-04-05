@@ -169,13 +169,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
 	/* (get_column "OLD" _ col _) -> (get_assoc OLD col) */
 	/* (get_column nil _ col _) -> (get_assoc NEW col) for unqualified columns in trigger context */
-	/* ('session var) -> ((context "session") var) — always read @var from GLS session, not lexical scope */
+	/* ('session var) stays a normal session-function call in trigger scope */
 	(define transform_trigger_expr (lambda (expr) (match expr
 		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-		'('session var) (list (list (symbol "context") "session") var)
-		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
+		'('session var) (list (symbol "session") var)
+		'('session var value) (list (symbol "session") var (transform_trigger_expr value))
 
 		(cons head tail) (if (or (equal?? head "inner_select") (equal?? head (quote inner_select)))
 			/* scalar subselect in trigger: compile via build_queryplan_term.
@@ -228,10 +228,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/*        body from sql_trigger_body */
 	/*   - (!begin stmt1 stmt2 ...) for BEGIN...END blocks */
 	/*   - (list (col1 expr1) (col2 expr2) ...) for SET statements */
-	/* Output: (lambda (OLD NEW) ...) that can be applied by ExecuteTriggers */
+	/* Output: (lambda (OLD NEW session) ...) that can be applied by ExecuteTriggers */
 	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
 	(define compile_trigger_body (lambda (schema timing body) (begin
-		(define params (list (symbol "OLD") (symbol "NEW")))
+		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
 
@@ -415,18 +415,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(define valid_stmts (filter compiled_stmts (lambda (s) (not (nil? s)))))
 				/* For BEFORE triggers: init changed_rows from NEW, return it at end */
 				/* For AFTER triggers: just execute statements */
-				/* Inject (define session (context "session")) so @variables resolve in trigger scope */
-				(define session_bind (list (symbol "define") (symbol "session") (list (symbol "context") "session")))
 				(if is_after
 					(if (> (count valid_stmts) 0)
-						(list (symbol "lambda") params (cons (symbol "begin") (cons session_bind valid_stmts)))
+						(list (symbol "lambda") params (cons (symbol "begin") valid_stmts))
 						(list (symbol "lambda") params nil))
 					/* BEFORE trigger: wrap with changed_rows handling */
 					/* Use outer begin for define, inner !begin (no new scope) for statements */
 					/* Wrap in begin: define changed_rows, execute stmts, return changed_rows */
 					(list (symbol "lambda") params
 						(list (symbol "begin")
-							session_bind
 							(list (symbol "define") changed_rows_sym (symbol "NEW"))
 							(cons '!begin valid_stmts)
 							changed_rows_sym)))
