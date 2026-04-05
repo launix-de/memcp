@@ -108,7 +108,7 @@ builds, because their truth value depends on current session state. */
 			found
 			(if (nil? assoc) nil (get_assoc assoc key_v))))
 		nil)
-	))
+))
 (define alias_variants_match (lambda (left right insensitive)
 	(reduce (alias_lookup_variants left) (lambda (matched left_v)
 		(or matched
@@ -1079,6 +1079,13 @@ relational key/domain stays unchanged. */
 temp column names from session-/context-dependent terms. The suffix is computed
 at plan-build time, so repeated queries with the same runtime values reuse the
 same cache column while different session values get separate temp columns. */
+(define planner_eval_runtime_term (lambda (expr)
+	(define _bind_context_session (lambda (node) (match node
+		(symbol session) '(context "session")
+		(cons sym args) (cons (_bind_context_session sym) (map args _bind_context_session))
+		node)))
+	(eval (_bind_context_session expr))
+))
 (define runtime_cache_suffix_from_exprs (lambda (exprs) (begin
 	(define terms (merge_unique (map exprs extract_runtime_cache_terms)))
 	(if (equal? terms '())
@@ -1086,7 +1093,7 @@ same cache column while different session values get separate temp columns. */
 		(concat "|rt:"
 			(serialize_canonical_expr
 				(canonicalize_expr
-					(map terms (lambda (term) (list term (eval term))))
+					(map terms (lambda (term) (list term (planner_eval_runtime_term term))))
 					'(list)))))
 )))
 (define assoc_keys_as_dataset_rows (lambda (dict width)
@@ -1097,7 +1104,7 @@ same cache column while different session values get separate temp columns. */
 				(if (<= width 1)
 					(list k)
 					(map (produceN width) (lambda (_) nil))))
-		))))
+))))
 /* Column-resolution contract:
 - parser-level get_column markers may still carry ti/ci flags inside untangle_query
 - they must be resolved against schema metadata exactly once before the logical IR
@@ -1487,7 +1494,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar k)) '(list) '(list) alias_map)))))
 			(define condition_name (if (nil? condition_suffix) nil
 				(sanitize_temp_name
-					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar condition_suffix)) '(list) '(list) alias_map))))
+					(concat
+						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar condition_suffix)) '(list) '(list) alias_map)
+						(runtime_cache_suffix_from_exprs (list condition_suffix))))))
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
 			(define keytable_name (if (nil? condition_suffix)
@@ -1845,7 +1854,7 @@ codegen and drifted out of sync with the shared mutation path. */
 		nil nil nil))))
 
 /*
-=== untangle_query: Neumann query decorrelation ===
+=== untangle_query: logical rewrite / Neumann decorrelation ===
 
 Implements the algebraic unnesting transformation from Neumann/Kemper (BTW 2015)
 and the holistic top-down extension (Neumann BTW 2025). Transforms a parsed SQL
@@ -1858,6 +1867,8 @@ The output is a single flat table list where every correlated subquery has been
 replaced by a LEFT JOIN table entry. Dependencies between nesting levels are
 expressed as join conditions; aggregation boundaries are expressed as group-stages
 with partition-aliases (scoping). There is no nested runtime code in the output.
+The IR must stay purely logical: no inner_select, subscan, or derived-source
+materialization model may remain after untangle_query.
 
 Key transformations:
 - Derived tables (FROM subqueries): flattened into parent table list with column renaming
@@ -1870,6 +1881,9 @@ or LEFT JOIN + scoped GROUP-stage (Path A for aggregates)
 
 Does NOT: choose join order (join_reorder), create keytables (build_queryplan),
 or generate runtime scan code (build_queryplan).
+FROM (SELECT ...) must be inlined here by renaming/term replacement; aggregate
+window functions without a true physical ORDER requirement also belong here as
+ordinary group/keytable rewrites, not as later physical planner semantics.
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
 	(set rename_prefix (coalesce rename_prefix ""))
@@ -4012,8 +4026,8 @@ same boundary where SELECT would emit result rows. */
 /*
 === CONTRACT: build_queryplan ===
 
-PURPOSE: Generate physical execution plans from the logical structure.
-Takes a flat, already-reordered table list and builds executable plans.
+PURPOSE: Generate physical execution plans from the logical IR.
+Takes a flat, already-reordered table list and translates it into executable SCM.
 
 INPUT:  7-tuple (schema tables fields condition groups schemas replace_find_column)
 After join_reorder, tables are in optimal scan order.
@@ -4030,6 +4044,9 @@ WHAT IT DOES:
 WHAT IT MUST NOT DO:
 - Reorder tables (that is join_reorder's job)
 - Flatten derived tables or unnest subqueries (that is untangle_query's job)
+- Re-introduce logical subquery semantics. If build_queryplan still needs
+inner_select/subscan/materialized-derived-source behavior, untangle_query has
+not finished its job.
 
 GROUP BY AGGREGATE PIPELINE:
 1. collect_plan: extract unique group keys from base table into a keytable
@@ -4040,7 +4057,7 @@ store results as keytable columns named "expr|condition"
 /*
 === build_queryplan: physical plan generation ===
 
-Translates the flat relational IR from untangle_query into executable scan code.
+Translates the flat logical IR from untangle_query into executable SCM scan code.
 Consumes the table list, conditions, and group-stages and produces nested scan/scan_order
 calls, keytable materialization (GROUP BY), and prejoin materialization (multi-table GROUP).
 
@@ -4660,37 +4677,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(merge (map parts _flatten_and_parts))
 						(list expr))
 					(list expr))))
-				/* Runtime-sensitive row predicates that only depend on the current
-				source row plus session/context values must be materialized before the
-				group stage. Otherwise the later keytable aggregation loses the row
-				identity (e.g. a.user_id) they need and the predicate collapses away. */
-				(define runtime_local_col_name (lambda (expr)
-					(concat ".runtime_pred|" (expr_name expr) (runtime_cache_suffix_from_exprs (list expr)))))
-				(define _runtime_local_part (lambda (part)
-					(and (equal? (has_only_tblvar_refs part tblvar) true)
-						(expr_uses_session_state part))))
 				(define _condition_parts0 (_flatten_and_parts condition))
-				(define _runtime_local_parts (filter _condition_parts0 _runtime_local_part))
-				(define _runtime_local_setup_expr (lambda (part) (begin
-					(define col_name (runtime_local_col_name part))
-					(define cols (extract_columns_for_tblvar tblvar part))
-					(list (quote createcolumn) schema tbl col_name "any" '(list) '(list "temp" true)
-						(cons (quote list) cols)
-						(list (quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col))))
-							(replace_columns_from_expr part))))))
-				(define _rewrite_runtime_local_part (lambda (part)
-					(if (_runtime_local_part part)
-						(list (quote get_column) tblvar false (runtime_local_col_name part) false)
-						part)))
-				(set condition (if (equal? _condition_parts0 '()) true
-					(begin
-						(define _rewritten_parts (map _condition_parts0 _rewrite_runtime_local_part))
-						(if (equal? 1 (count _rewritten_parts)) (car _rewritten_parts)
-							(cons (quote and) _rewritten_parts)))))
-				(define runtime_local_compute_plan (if (equal? _runtime_local_parts '()) nil
-					(list (quote time)
-						(cons (quote parallel) (map _runtime_local_parts _runtime_local_setup_expr))
-						"runtime-local")))
+				/* Old runtime-local temp-column materialization pushed session-sensitive
+				row predicates into createcolumn lambdas. That leaks the query-only
+				session scope into storage compute code. Keep the predicate in the
+				normal grouped scan and let the tx-aware compute/cache layer handle
+				session variants instead of precomputing .runtime_pred temp columns. */
+				(define runtime_local_compute_plan nil)
 				/* 2-phase condition split:
 				Phase 1: separate aggregate-containing AND-parts from non-aggregate parts.
 				Aggregates cannot be evaluated as row filters — they need the keytable.
@@ -4822,7 +4815,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(set filtercols (merge_unique (list
 					(extract_columns_for_tblvar tblvar collect_condition)
 					(extract_outer_columns_for_tblvar tblvar collect_condition))))
-				(define kt_result (make_keytable schema tbl resolved_stage_group tblvar (if is_dedup collect_condition nil)))
+				(define session_sensitive_group_domain (expr_uses_session_state collect_condition))
+				(define kt_result (make_keytable schema tbl resolved_stage_group tblvar
+					(if (or is_dedup session_sensitive_group_domain) collect_condition nil)))
 				(set grouptbl (car kt_result))
 				(define keytable_init (car (cdr kt_result)))
 				(define fk_pk_col (car (cdr (cdr kt_result))))
@@ -4850,14 +4845,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(cons (quote list) (map resolved_stage_group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
 									'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
 									'(list) /* empty dict */
-										'((quote lambda) '('acc 'sharddict)
-											'('insert
-												schema grouptbl
-												(cons 'list (map resolved_stage_group expr_name))
-												'('assoc_keys_as_dataset_rows 'sharddict (count resolved_stage_group)) /* turn keys from assoc into dataset rows */
-												'(list) '('lambda '() true) true)
-										)
-										isOuter)
+									'((quote lambda) '('acc 'sharddict)
+										'('insert
+											schema grouptbl
+											(cons 'list (map resolved_stage_group expr_name))
+											'('assoc_keys_as_dataset_rows 'sharddict (count resolved_stage_group)) /* turn keys from assoc into dataset rows */
+											'(list) '('lambda '() true) true)
+									)
+									isOuter)
 							)
 						)
 					) "collect")))
@@ -5281,18 +5276,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1))) nil
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
-						(cons 'begin (merge
-							(if (nil? keytable_init) '() (list keytable_init))
-							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
-							(if (nil? group_value_local_compute_plan) '() (list group_value_local_compute_plan))
-							(if (nil? cleanup_plan) '() (list cleanup_plan))
-							(if is_fk_reuse '()
+						(define collect_plan (if is_fk_reuse '()
+							(if session_sensitive_group_domain
+								/* session-sensitive grouped domains must never reuse a stale
+								keytable domain collected under a different session binding.
+								Until the keytable identity fully carries those bindings end-to-end,
+								rebuild the key domain explicitly for every execution. */
+								(list (list 'begin
+									(list 'droptable schema grouptbl true)
+									keytable_init
+									(make_collect false)))
 								(if (not (nil? _stage_scope))
 									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
 									(list (make_collect false))
 									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
 										(make_collect false)
-										nil))))
+										nil))))))
+						(cons 'begin (merge
+							(if (nil? keytable_init) '() (list keytable_init))
+							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
+							(if (nil? group_value_local_compute_plan) '() (list group_value_local_compute_plan))
+							(if (nil? cleanup_plan) '() (list cleanup_plan))
+							collect_plan
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
 							(list compute_plan)
 							(list

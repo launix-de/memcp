@@ -24,16 +24,52 @@ import "sync/atomic"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
-// newCachedColumnReader returns a per-goroutine ColumnReader for the given storage.
+// newCachedColumnReaderTx returns a per-goroutine ColumnReader for the given
+// storage and tx context. Context-sensitive storages can bind a session-aware
+// reader variant here; plain storages keep using the legacy reader path.
+//
 // For StorageEnum this gives O(1) sequential decode; for others it's a no-op.
 // When the storage is OverlayBlob wrapping StorageEnum, unwraps to cache the
 // enum directly (blob overlay is only used for large-value storage, not compute inputs).
-func newCachedColumnReader(col ColumnStorage) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext) ColumnReader {
+	tx = effectiveTxContext(tx)
 	// unwrap OverlayBlob: compute inputs are stored in the base, not the blob layer
 	if ob, ok := col.(*OverlayBlob); ok {
-		return ob.Base.GetCachedReader()
+		col = ob.Base
+	}
+	if provider, ok := col.(TxColumnReaderProvider); ok {
+		return provider.GetCachedReaderTx(tx)
 	}
 	return col.GetCachedReader()
+}
+
+func newCachedColumnReader(col ColumnStorage) ColumnReader {
+	return newCachedColumnReaderTx(col, CurrentTx())
+}
+
+func collectDependentSessionKeys(shard *storageShard, cols []string) []string {
+	if shard == nil || len(cols) == 0 {
+		return nil
+	}
+	keys := make([]string, 0)
+	for _, col := range cols {
+		cs := shard.getColumnStorageOrPanic(col)
+		if proxy, ok := cs.(*StorageComputeProxy); ok {
+			keys = mergeSessionKeys(keys, proxy.sessionKeys)
+		}
+	}
+	return keys
+}
+
+func runWithTxSession(tx *TxContext, fn func()) {
+	if tx == nil || tx.Session.IsNil() {
+		fn()
+		return
+	}
+	scm.WithSession(tx.Session, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		fn()
+		return scm.NewNil()
+	}))
 }
 
 func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
@@ -69,6 +105,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			metadataLocked = false
 			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
+			currentTx := CurrentTx()
 			for i, s := range shardlist {
 				gls.Go(func(i int, s *storageShard) func() {
 					return func() {
@@ -78,7 +115,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 								done <- scanError{r, string(debug.Stack())}
 							}
 						}()
-						for !s.ComputeColumn(name, inputCols, computor, filterCols, filter, len(shardlist) == 1) {
+						for !s.ComputeColumn(name, inputCols, computor, filterCols, filter, len(shardlist) == 1, currentTx) {
 							// couldn't compute column because delta is still active
 							t.mu.Lock()
 							s = s.rebuild(false)
@@ -121,7 +158,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
 }
 
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool) bool {
+func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool, tx *TxContext) bool {
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}
@@ -145,33 +182,53 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	s.mu.RLock()
 	existing := s.columns[name]
 	s.mu.RUnlock()
+	dependentSessionKeys := mergeSessionKeys(
+		collectDependentSessionKeys(s, inputCols),
+		collectDependentSessionKeys(s, filterCols),
+	)
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.computor = computor // update lambda
+		proxy.sessionKeys = mergeSessionKeys(extractSessionKeys(computor), extractSessionKeys(filter), dependentSessionKeys)
+		if proxy.hasSessionVariants() {
+			runWithTxSession(tx, func() {
+				if !filter.IsNil() {
+					proxy.CompressFiltered(filterCols, filter)
+				} else {
+					proxy.Compress()
+				}
+			})
+			return true
+		}
 		// skip recompute if proxy is still valid (no invalidation since last compute)
 		if proxy.compressed && len(proxy.delta) == 0 {
 			if filter.IsNil() {
 				return true // fully compressed, nothing to do
 			}
 			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
-			proxy.CompressFiltered(filterCols, filter)
+			runWithTxSession(tx, func() {
+				proxy.CompressFiltered(filterCols, filter)
+			})
 			return true
 		}
-		if !filter.IsNil() {
-			proxy.CompressFiltered(filterCols, filter)
-		} else {
-			proxy.Compress()
-		}
+		runWithTxSession(tx, func() {
+			if !filter.IsNil() {
+				proxy.CompressFiltered(filterCols, filter)
+			} else {
+				proxy.Compress()
+			}
+		})
 		return true
 	}
 
 	// Create new proxy
 	proxy := &StorageComputeProxy{
-		delta:     make(map[uint32]scm.Scmer),
-		computor:  computor,
-		inputCols: inputCols,
-		shard:     s,
-		colName:   name,
-		count:     s.main_count,
+		delta:       make(map[uint32]scm.Scmer),
+		computor:    computor,
+		inputCols:   inputCols,
+		shard:       s,
+		colName:     name,
+		count:       s.main_count,
+		sessionKeys: mergeSessionKeys(extractSessionKeys(computor), extractSessionKeys(filter), dependentSessionKeys),
 	}
 
 	s.mu.Lock()
@@ -180,11 +237,13 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 
 	// pre-free memory before allocating the compute result array
 	GlobalCache.CheckPressure(int64(s.main_count) * 16)
-	if !filter.IsNil() {
-		proxy.CompressFiltered(filterCols, filter)
-	} else {
-		proxy.Compress() // eagerly compute + compress all values (same behavior as before)
-	}
+	runWithTxSession(tx, func() {
+		if !filter.IsNil() {
+			proxy.CompressFiltered(filterCols, filter)
+		} else {
+			proxy.Compress() // eagerly compute + compress all values (same behavior as before)
+		}
+	})
 	return true
 }
 
@@ -431,6 +490,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	})
 
 	t.scan_order(
+		CurrentTx(),
 		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
 		0, 0, -1,
@@ -734,17 +794,26 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 	if len(items) >= 5 && items[0].IsSymbol() {
 		sym := items[0].String()
 		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
-			info := scanJoinInfo{
-				schema: scm.String(items[1]),
-				table:  scm.String(items[2]),
+			schemaIdx, tableIdx := 1, 2
+			condColsIdx, filterIdx := 3, 4
+			if len(items) > 1 && !items[1].IsString() {
+				schemaIdx, tableIdx = 2, 3
+				condColsIdx, filterIdx = 4, 5
 			}
-			// items[3] = condCols (list "col1" "col2" ...), items[4] = filter lambda
-			condCols := extractStringListFromAST(items[3])
+			if len(items) <= filterIdx {
+				return nil
+			}
+			info := scanJoinInfo{
+				schema: scm.String(items[schemaIdx]),
+				table:  scm.String(items[tableIdx]),
+			}
+			// condCols = (list "col1" "col2" ...), filter = lambda
+			condCols := extractStringListFromAST(items[condColsIdx])
 			if len(condCols) > 0 {
-				info.srcCols, info.inputCols = extractEqualityJoins(items[4], condCols)
+				info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols)
 			}
 			result := []scanJoinInfo{info}
-			for _, item := range items[5:] {
+			for _, item := range items[filterIdx+1:] {
 				result = append(result, extractScanJoinInfoBody(item)...)
 			}
 			return result
@@ -931,8 +1000,13 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 	items := expr.Slice()
 	if len(items) >= 5 && items[0].IsSymbol() {
 		sym := items[0].String()
+		schemaIdx, tableIdx := 1, 2
+		if len(items) > 1 && !items[1].IsString() {
+			schemaIdx, tableIdx = 2, 3
+		}
 		if (sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order") &&
-			scm.String(items[1]) == schema && scm.String(items[2]) == table {
+			len(items) > tableIdx &&
+			scm.String(items[schemaIdx]) == schema && scm.String(items[tableIdx]) == table {
 			return items
 		}
 	}
@@ -967,9 +1041,15 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 	if len(scanNode) < 9 {
 		return false
 	}
-	// items[7] = reduce, items[8] = neutral
-	reduce := scanNode[7]
-	neutral := scanNode[8]
+	mapFnIdx, reduceIdx, neutralIdx := 6, 7, 8
+	if len(scanNode) > 1 && !scanNode[1].IsString() {
+		mapFnIdx, reduceIdx, neutralIdx = 7, 8, 9
+	}
+	if len(scanNode) <= neutralIdx {
+		return false
+	}
+	reduce := scanNode[reduceIdx]
+	neutral := scanNode[neutralIdx]
 	if !isAdditiveReduce(reduce) {
 		return false
 	}
@@ -978,7 +1058,7 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 		return false
 	}
 	// mapFn must not contain inner scans
-	if containsScan(scanNode[6]) {
+	if containsScan(scanNode[mapFnIdx]) {
 		return false
 	}
 	return true
@@ -1366,7 +1446,11 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			if !exists {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
-					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[5], scanNode[6], timing)
+					mapColsIdx, mapFnIdx := 5, 6
+					if len(scanNode) > 1 && !scanNode[1].IsString() {
+						mapColsIdx, mapFnIdx = 6, 7
+					}
+					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapFnIdx], timing)
 				} else {
 					// Full invalidation: for non-additive aggregates and AfterInvalidate propagation.
 					body = scm.NewSlice([]scm.Scmer{

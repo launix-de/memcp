@@ -20,11 +20,53 @@ import "io"
 import "fmt"
 import "sync"
 import "sync/atomic"
+import "time"
 import "reflect"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
+
+type storageComputeVariant struct {
+	main       ColumnStorage
+	delta      map[uint32]scm.Scmer
+	validMask  NonLockingReadMap.NonBlockingBitMap
+	compressed bool
+	count      uint32
+
+	invalidateNsSinceRead atomic.Int64
+	lastRecomputeNs       atomic.Int64
+	lastUsed              atomic.Int64
+	mu                    sync.RWMutex
+}
+
+func newStorageComputeVariant(count uint32) *storageComputeVariant {
+	return &storageComputeVariant{
+		delta: make(map[uint32]scm.Scmer),
+		count: count,
+	}
+}
+
+type computeVariantReader struct {
+	proxy   *StorageComputeProxy
+	variant *storageComputeVariant
+	readers []ColumnReader
+	tx      *TxContext
+}
+
+func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
+	if fn.IsProc() {
+		proc := *fn.Proc()
+		proc.En = bindSessionEnv(proc.En, txSessionScmer(tx))
+		fn = scm.NewProcStruct(proc)
+	}
+	if tx == nil || tx.Session.IsNil() {
+		return scm.Apply(fn, args...)
+	}
+	return scm.WithSession(tx.Session, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		return scm.Apply(fn, args...)
+	}))
+}
 
 // StorageComputeProxy wraps a main storage with lazy-evaluation support.
 // Values are computed on demand via a computor lambda and cached in a delta map
@@ -49,6 +91,51 @@ type StorageComputeProxy struct {
 	// switches to InvalidateAll() to avoid death-by-a-thousand-cuts.
 	invalidateNsSinceRead atomic.Int64 // cumulative invalidation nanoseconds since last read
 	lastRecomputeNs       atomic.Int64 // nanoseconds of the last full/suffix recompute
+	sessionKeys           []string
+	variants              map[string]*storageComputeVariant
+	variantsMu            sync.RWMutex
+}
+
+func (p *StorageComputeProxy) hasSessionVariants() bool {
+	return len(p.sessionKeys) > 0
+}
+
+func (p *StorageComputeProxy) sessionVariantKey(tx *TxContext) string {
+	if tx == nil || !p.hasSessionVariants() {
+		return ""
+	}
+	keyExpr := make([]scm.Scmer, 0, len(p.sessionKeys)*2+1)
+	keyExpr = append(keyExpr, scm.NewSymbol("list"))
+	for _, key := range p.sessionKeys {
+		keyExpr = append(keyExpr, scm.NewString(key), tx.SessionValue(key))
+	}
+	return encodeScmerToString(scm.NewSlice(keyExpr), nil, nil)
+}
+
+func (p *StorageComputeProxy) currentVariant(tx *TxContext, create bool) *storageComputeVariant {
+	if !p.hasSessionVariants() {
+		return nil
+	}
+	key := p.sessionVariantKey(tx)
+	p.variantsMu.RLock()
+	variant := p.variants[key]
+	p.variantsMu.RUnlock()
+	if variant == nil && create {
+		p.variantsMu.Lock()
+		variant = p.variants[key]
+		if variant == nil {
+			variant = newStorageComputeVariant(p.count)
+			if p.variants == nil {
+				p.variants = make(map[string]*storageComputeVariant)
+			}
+			p.variants[key] = variant
+		}
+		p.variantsMu.Unlock()
+	}
+	if variant != nil {
+		variant.lastUsed.Store(time.Now().UnixNano())
+	}
+	return variant
 }
 
 // cloneComputeProxyRows ports a compute/ORC proxy onto a rebuilt shard without
@@ -110,6 +197,156 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 
 func (p *StorageComputeProxy) String() string {
 	return "compute-proxy"
+}
+
+func (r *computeVariantReader) GetValue(idx uint32) scm.Scmer {
+	p := r.proxy
+	v := r.variant
+
+	v.mu.RLock()
+	if val, ok := v.delta[idx]; ok {
+		v.mu.RUnlock()
+		return val
+	}
+	v.mu.RUnlock()
+
+	if v.compressed && idx < v.count && v.main != nil {
+		return v.main.GetValue(idx)
+	}
+	if v.validMask.Get(uint(idx)) && idx < v.count && v.main != nil {
+		return v.main.GetValue(idx)
+	}
+
+	colvalues := make([]scm.Scmer, len(r.readers))
+	for i := range r.readers {
+		colvalues[i] = r.readers[i].GetValue(idx)
+	}
+	val := applyWithTx(r.tx, p.computor, colvalues...)
+
+	v.mu.Lock()
+	v.delta[idx] = val
+	v.mu.Unlock()
+	v.validMask.Set(uint(idx), true)
+
+	return val
+}
+
+func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
+	if !p.hasSessionVariants() {
+		return p
+	}
+	variant := p.currentVariant(tx, true)
+	readers := make([]ColumnReader, len(p.inputCols))
+	for i, col := range p.inputCols {
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+	}
+	return &computeVariantReader{
+		proxy:   p,
+		variant: variant,
+		readers: readers,
+		tx:      tx,
+	}
+}
+
+func (p *StorageComputeProxy) forEachVariant(fn func(*storageComputeVariant)) {
+	p.variantsMu.RLock()
+	variants := make([]*storageComputeVariant, 0, len(p.variants))
+	for _, variant := range p.variants {
+		variants = append(variants, variant)
+	}
+	p.variantsMu.RUnlock()
+	for _, variant := range variants {
+		fn(variant)
+	}
+}
+
+func (p *StorageComputeProxy) compressVariant(v *storageComputeVariant, tx *TxContext) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.compressed && len(v.delta) == 0 {
+		return
+	}
+	if v.count == 0 {
+		v.compressed = true
+		return
+	}
+
+	readers := make([]ColumnReader, len(p.inputCols))
+	for i, col := range p.inputCols {
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+	}
+
+	colvalues := make([]scm.Scmer, len(p.inputCols))
+	getValue := func(idx uint32) scm.Scmer {
+		if val, ok := v.delta[idx]; ok {
+			return val
+		}
+		if v.main != nil && v.validMask.Get(uint(idx)) {
+			return v.main.GetValue(idx)
+		}
+		for j := range readers {
+			colvalues[j] = readers[j].GetValue(idx)
+		}
+		return applyWithTx(tx, p.computor, colvalues...)
+	}
+
+	var newcol ColumnStorage = new(StorageSCMER)
+	for {
+		newcol.prepare()
+		for i := uint32(0); i < v.count; i++ {
+			newcol.scan(i, getValue(i))
+		}
+		proposed := newcol.proposeCompression(v.count)
+		if proposed == nil {
+			break
+		}
+		newcol = proposed
+	}
+	newcol.init(v.count)
+	for i := uint32(0); i < v.count; i++ {
+		newcol.build(i, getValue(i))
+	}
+	newcol.finish()
+
+	v.main = newcol
+	v.delta = make(map[uint32]scm.Scmer)
+	v.validMask.Reset()
+	v.compressed = true
+}
+
+func (p *StorageComputeProxy) compressFilteredVariant(v *storageComputeVariant, tx *TxContext, filterCols []string, filter scm.Scmer) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.count == 0 {
+		return
+	}
+
+	filterFn := scm.OptimizeProcToSerialFunction(filter)
+	filterReaders := make([]ColumnReader, len(filterCols))
+	for i, col := range filterCols {
+		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+	}
+	readers := make([]ColumnReader, len(p.inputCols))
+	for i, col := range p.inputCols {
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+	}
+
+	filterValues := make([]scm.Scmer, len(filterCols))
+	colvalues := make([]scm.Scmer, len(p.inputCols))
+	for i := uint32(0); i < v.count; i++ {
+		for j := range filterReaders {
+			filterValues[j] = filterReaders[j].GetValue(i)
+		}
+		if scm.ToBool(filterFn(filterValues...)) {
+			for j := range readers {
+				colvalues[j] = readers[j].GetValue(i)
+			}
+			v.delta[i] = applyWithTx(tx, p.computor, colvalues...)
+			v.validMask.Set(uint(i), true)
+		}
+	}
 }
 
 // orcCol returns the column definition for this ORC proxy's column.
@@ -201,7 +438,7 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 		// ColumnStorage access only understands main-row indexes.
 		colvalues[i] = p.shard.ColumnReader(col)(idx)
 	}
-	val := scm.Apply(p.computor, colvalues...)
+	val := applyWithTx(CurrentTx(), p.computor, colvalues...)
 
 	p.mu.Lock()
 	p.delta[idx] = val
@@ -212,11 +449,16 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 }
 
 func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
-	return p
+	return p.GetCachedReaderTx(CurrentTx())
 }
 
 // Compress materializes all values into a compressed main storage.
 func (p *StorageComputeProxy) Compress() {
+	tx := CurrentTx()
+	if variant := p.currentVariant(tx, true); variant != nil {
+		p.compressVariant(variant, tx)
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -231,10 +473,9 @@ func (p *StorageComputeProxy) Compress() {
 		return
 	}
 
-	fn := scm.OptimizeProcToSerialFunction(p.computor)
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReader(p.shard.getColumnStorageOrPanic(col))
+		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
 	}
 
 	colvalues := make([]scm.Scmer, len(p.inputCols))
@@ -249,8 +490,7 @@ func (p *StorageComputeProxy) Compress() {
 		for j := range readers {
 			colvalues[j] = readers[j].GetValue(idx)
 		}
-		result := fn(colvalues...)
-		return result
+		return applyWithTx(tx, p.computor, colvalues...)
 	}
 
 	// Standard proposeCompression loop (same as shard rebuild)
@@ -281,6 +521,11 @@ func (p *StorageComputeProxy) Compress() {
 // CompressFiltered eagerly computes only rows matching the filter predicate.
 // Unmatched rows stay lazy and are computed on demand via GetValue.
 func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
+	tx := CurrentTx()
+	if variant := p.currentVariant(tx, true); variant != nil {
+		p.compressFilteredVariant(variant, tx, filterCols, filter)
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -289,16 +534,13 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 		return
 	}
 
-	fn := scm.OptimizeProcToSerialFunction(p.computor)
-	filterFn := scm.OptimizeProcToSerialFunction(filter)
-
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
-		filterReaders[i] = newCachedColumnReader(p.shard.getColumnStorageOrPanic(col))
+		filterReaders[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
 	}
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReader(p.shard.getColumnStorageOrPanic(col))
+		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
 	}
 
 	filterValues := make([]scm.Scmer, len(filterCols))
@@ -307,11 +549,11 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 		for j := range filterReaders {
 			filterValues[j] = filterReaders[j].GetValue(i)
 		}
-		if scm.ToBool(filterFn(filterValues...)) {
+		if scm.ToBool(applyWithTx(tx, filter, filterValues...)) {
 			for j := range readers {
 				colvalues[j] = readers[j].GetValue(i)
 			}
-			p.delta[i] = fn(colvalues...)
+			p.delta[i] = applyWithTx(tx, p.computor, colvalues...)
 			p.validMask.Set(uint(i), true)
 		}
 	}
@@ -320,6 +562,27 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 
 // Invalidate marks a single row as needing recomputation.
 func (p *StorageComputeProxy) Invalidate(idx uint32) {
+	if p.hasSessionVariants() {
+		p.forEachVariant(func(v *storageComputeVariant) {
+			v.mu.Lock()
+			defer v.mu.Unlock()
+			if v.compressed {
+				if scmer, ok := v.main.(*StorageSCMER); ok {
+					colvalues := make([]scm.Scmer, len(p.inputCols))
+					for i, col := range p.inputCols {
+						colvalues[i] = p.shard.ColumnReaderTx(col, CurrentTx())(idx)
+					}
+					val := applyWithTx(CurrentTx(), p.computor, colvalues...)
+					scmer.SetValue(idx, val)
+					return
+				}
+				v.compressed = false
+			}
+			v.validMask.Set(uint(idx), false)
+			delete(v.delta, idx)
+		})
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Try in-place update if main supports SetValue (StorageSCMER)
@@ -330,7 +593,7 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 			for i, col := range p.inputCols {
 				colvalues[i] = p.shard.getColumnStorageOrPanic(col).GetValue(idx)
 			}
-			val := scm.Apply(p.computor, colvalues...)
+			val := applyWithTx(CurrentTx(), p.computor, colvalues...)
 			scmer.SetValue(idx, val)
 			return // stay compressed, no bitmap change needed
 		}
@@ -345,6 +608,39 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 // If the row is not valid (not yet computed), this is a no-op (the next read will compute fresh).
 // This avoids shard rebuilds by modifying the cached value in-place.
 func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
+	if p.hasSessionVariants() {
+		p.forEachVariant(func(v *storageComputeVariant) {
+			v.mu.Lock()
+			defer v.mu.Unlock()
+			if !v.compressed && !v.validMask.Get(uint(idx)) {
+				return
+			}
+			var oldVal scm.Scmer
+			if val, ok := v.delta[idx]; ok {
+				oldVal = val
+			} else if v.main != nil {
+				oldVal = v.main.GetValue(idx)
+			} else {
+				return
+			}
+			var newVal scm.Scmer
+			if oldVal.IsInt() && delta.IsInt() {
+				newVal = scm.NewInt(oldVal.Int() + delta.Int())
+			} else if oldVal.IsNil() || delta.IsNil() {
+				newVal = scm.NewNil()
+			} else {
+				newVal = scm.NewFloat(oldVal.Float() + delta.Float())
+			}
+			v.delta[idx] = newVal
+			if v.compressed {
+				v.compressed = false
+				for i := uint32(0); i < v.count; i++ {
+					v.validMask.Set(uint(i), true)
+				}
+			}
+		})
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.compressed && !p.validMask.Get(uint(idx)) {
@@ -383,6 +679,25 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 // If the shard is compressed and main is a StorageSCMER, the value is written in-place.
 // Otherwise the value is written to the delta map.
 func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
+	if p.hasSessionVariants() {
+		p.forEachVariant(func(v *storageComputeVariant) {
+			v.mu.Lock()
+			defer v.mu.Unlock()
+			if v.compressed && v.main != nil {
+				if scmer, ok := v.main.(*StorageSCMER); ok {
+					scmer.SetValue(idx, val)
+					return
+				}
+				v.compressed = false
+				for i := uint32(0); i < v.count; i++ {
+					v.validMask.Set(uint(i), true)
+				}
+			}
+			v.delta[idx] = val
+			v.validMask.Set(uint(idx), true)
+		})
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.compressed && p.main != nil {
@@ -403,6 +718,16 @@ func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 
 // InvalidateAll marks all rows as needing recomputation (resets validMask).
 func (p *StorageComputeProxy) InvalidateAll() {
+	if p.hasSessionVariants() {
+		p.forEachVariant(func(v *storageComputeVariant) {
+			v.mu.Lock()
+			defer v.mu.Unlock()
+			v.compressed = false
+			v.validMask.Reset()
+			v.delta = make(map[uint32]scm.Scmer)
+		})
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.compressed = false

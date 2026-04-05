@@ -270,6 +270,7 @@ func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnS
 		// the owning shard/column must be restored when the storage is loaded.
 		proxy.shard = u
 		proxy.colName = colName
+		proxy.sessionKeys = extractSessionKeys(proxy.computor)
 		if col != nil && len(col.OrcSortCols) > 0 {
 			proxy.isOrdered = true
 		}
@@ -1280,10 +1281,15 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 }
 
 func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
+	return t.ColumnReaderTx(col, CurrentTx())
+}
+
+func (t *storageShard) ColumnReaderTx(col string, tx *TxContext) func(uint32) scm.Scmer {
 	cstorage := t.getColumnStorageOrPanic(col)
+	reader := newCachedColumnReaderTx(cstorage, tx)
 	return func(idx uint32) scm.Scmer {
 		if idx < t.main_count {
-			return cstorage.GetValue(idx)
+			return reader.GetValue(idx)
 		} else {
 			return t.getDelta(int(idx-t.main_count), col)
 		}
@@ -1565,13 +1571,14 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 			continue
 		}
 		mainCol := mr.mainCols[i]
+		mainReader := newCachedColumnReaderTx(mainCol, CurrentTx())
 		colName := mr.colNames[i]
 		mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
-			return mainCol.GetValue(id)
+			return mainReader.GetValue(id)
 		}
 		if _, isProxy := mainCol.(*StorageComputeProxy); isProxy {
 			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
-				return mainCol.GetValue(id)
+				return mainReader.GetValue(id)
 			}
 		} else {
 			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {

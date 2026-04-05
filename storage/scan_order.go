@@ -25,26 +25,23 @@ import "runtime/debug"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
-// optimizeScanOrder is the Optimize hook for the scan_order declaration.
-// scan_order args: 1=schema, 2=table, 3=filterCols, 4=filter, 5=sortcols, 6=sortdirs,
-// 7=limitPartitionCols, 8=offset, 9=limit, 10=mapCols, 11=map, 12=reduce, 13=neutral, 14=isOuter
 func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	// Optimize args 1-11 normally
-	for i := 1; i <= 11 && i < len(v); i++ {
+	mapEnd, reduceIdx, neutralIdx, outerIdx := 11, 12, 13, 14
+	if !scanExprUsesLegacyArgs(v) {
+		mapEnd, reduceIdx, neutralIdx, outerIdx = 12, 13, 14, 15
+	}
+	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
-	// Arg 12 (reduce callback): set callback ownership before optimizing
-	if len(v) > 12 && !v[12].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
-		v[12], _ = oc.OptimizeSub(v[12], true)
+	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
+		oc.SetCallbackOwned([]bool{true, false})
+		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
 	}
-	// Arg 13 (neutral)
-	if len(v) > 13 {
-		v[13], _ = oc.OptimizeSub(v[13], true)
+	if len(v) > neutralIdx {
+		v[neutralIdx], _ = oc.OptimizeSub(v[neutralIdx], true)
 	}
-	// Arg 14 (isOuter)
-	if len(v) > 14 {
-		v[14], _ = oc.OptimizeSub(v[14], true)
+	if len(v) > outerIdx {
+		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
 	return scm.NewSlice(v), nil
 }
@@ -243,12 +240,12 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	currentTx = effectiveTxContext(currentTx)
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
-	currentTx := CurrentTx()
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time

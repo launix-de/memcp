@@ -35,6 +35,108 @@ type ColumnReader interface {
 	GetValue(uint32) scm.Scmer
 }
 
+type ColumnReaderFunc func(uint32) scm.Scmer
+
+func (f ColumnReaderFunc) GetValue(idx uint32) scm.Scmer {
+	return f(idx)
+}
+
+// TxColumnReaderProvider optionally exposes a transaction-bound reader.
+// Storages that do not depend on tx/session context can ignore it and rely on
+// the legacy GetCachedReader path.
+type TxColumnReaderProvider interface {
+	GetCachedReaderTx(*TxContext) ColumnReader
+}
+
+func scmerToTxContext(v scm.Scmer) *TxContext {
+	if v.IsNil() {
+		return nil
+	}
+	tx, _ := v.Any().(*TxContext)
+	return tx
+}
+
+func scanUsesLegacyArgs(a []scm.Scmer) bool {
+	return len(a) > 0 && a[0].IsString()
+}
+
+func scanExprUsesLegacyArgs(a []scm.Scmer) bool {
+	return len(a) > 1 && a[1].IsString()
+}
+
+func effectiveTxContext(tx *TxContext) *TxContext {
+	if tx != nil {
+		return tx
+	}
+	return CurrentTx()
+}
+
+type scanArgLayout struct {
+	tx            *TxContext
+	schemaIdx     int
+	tableIdx      int
+	filterColsIdx int
+	filterFnIdx   int
+	mapColsIdx    int
+	mapFnIdx      int
+	reduceIdx     int
+	neutralIdx    int
+	reduce2Idx    int
+	outerIdx      int
+	sortColsIdx   int
+	sortDirsIdx   int
+	partColsIdx   int
+	offsetIdx     int
+	limitIdx      int
+	strideIdx     int
+	batchDataIdx  int
+}
+
+func scanLayout(a []scm.Scmer) scanArgLayout {
+	if scanUsesLegacyArgs(a) {
+		return scanArgLayout{
+			tx:            nil,
+			schemaIdx:     0,
+			tableIdx:      1,
+			filterColsIdx: 2,
+			filterFnIdx:   3,
+			mapColsIdx:    4,
+			mapFnIdx:      5,
+			reduceIdx:     6,
+			neutralIdx:    7,
+			reduce2Idx:    8,
+			outerIdx:      9,
+			sortColsIdx:   4,
+			sortDirsIdx:   5,
+			partColsIdx:   6,
+			offsetIdx:     7,
+			limitIdx:      8,
+			strideIdx:     6,
+			batchDataIdx:  7,
+		}
+	}
+	return scanArgLayout{
+		tx:            scmerToTxContext(a[0]),
+		schemaIdx:     1,
+		tableIdx:      2,
+		filterColsIdx: 3,
+		filterFnIdx:   4,
+		mapColsIdx:    5,
+		mapFnIdx:      6,
+		reduceIdx:     7,
+		neutralIdx:    8,
+		reduce2Idx:    9,
+		outerIdx:      10,
+		sortColsIdx:   5,
+		sortDirsIdx:   6,
+		partColsIdx:   7,
+		offsetIdx:     8,
+		limitIdx:      9,
+		strideIdx:     7,
+		batchDataIdx:  8,
+	}
+}
+
 func normalizePartitionDataset(arg scm.Scmer) dataset {
 	raw := mustScmerSlice(arg, "partition columns")
 	if len(raw) == 0 {
@@ -304,23 +406,24 @@ func Init(en scm.Env) {
 		Name: "scan",
 		Desc: "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
-			isOuter := len(a) > 9 && scm.ToBool(a[9])
+			layout := scanLayout(a)
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.mapColsIdx], "mapColumns"))
+			isOuter := len(a) > layout.outerIdx && scm.ToBool(a[layout.outerIdx])
 
-			if list, ok := scmerSlice(a[1]); ok {
+			if list, ok := scmerSlice(a[layout.tableIdx]); ok {
 				neutral := scm.NewNil()
-				if len(a) > 7 {
-					neutral = a[7]
+				if len(a) > layout.neutralIdx {
+					neutral = a[layout.neutralIdx]
 				}
 				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[5])
+				mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
 				mapparams := make([]scm.Scmer, len(mapcols))
 				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if len(a) > 6 {
-					reducefn = scm.OptimizeProcToSerialFunction(a[6])
+				if len(a) > layout.reduceIdx {
+					reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx])
 				}
 				hadValue := false
 				for _, val := range list {
@@ -344,18 +447,18 @@ func Init(en scm.Env) {
 					}
 					result = reducefn(result, mapfn(mapparams...))
 				}
-				if len(a) > 8 && !a[8].IsNil() {
-					reduce2fn := scm.OptimizeProcToSerialFunction(a[8])
+				if len(a) > layout.reduce2Idx && !a[layout.reduce2Idx].IsNil() {
+					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx])
 					base := neutral
-					if len(a) > 7 {
-						base = a[7]
+					if len(a) > layout.neutralIdx {
+						base = a[layout.neutralIdx]
 					}
 					result = reduce2fn(base, result)
 				}
 				return result
 			}
 
-			db := GetDatabase(scm.String(a[0]))
+			db := GetDatabase(scm.String(a[layout.schemaIdx]))
 			if db == nil {
 				// Virtual schemas like information_schema are handled in the
 				// Scheme layer (scan_wrapper in sql-metadata.scm) which
@@ -368,38 +471,38 @@ func Init(en scm.Env) {
 				// NULL row for outer joins) instead of panicking.  The inner
 				// scan will still go through scan_wrapper correctly.
 				neutral := scm.NewNil()
-				if len(a) > 7 {
-					neutral = a[7]
+				if len(a) > layout.neutralIdx {
+					neutral = a[layout.neutralIdx]
 				}
 				if isOuter {
-					mapfn := scm.OptimizeProcToSerialFunction(a[5])
+					mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
 					mapparams := make([]scm.Scmer, len(mapcols))
 					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-					if len(a) > 6 {
-						reducefn = scm.OptimizeProcToSerialFunction(a[6])
+					if len(a) > layout.reduceIdx {
+						reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx])
 					}
 					return reducefn(neutral, mapfn(mapparams...))
 				}
 				return neutral
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[layout.tableIdx]))
 			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(a[layout.tableIdx]) + " does not exist")
 			}
 
 			aggregate := scm.NewNil()
-			if len(a) > 6 {
-				aggregate = a[6]
+			if len(a) > layout.reduceIdx {
+				aggregate = a[layout.reduceIdx]
 			}
 			neutral := scm.NewNil()
-			if len(a) > 7 {
-				neutral = a[7]
+			if len(a) > layout.neutralIdx {
+				neutral = a[layout.neutralIdx]
 			}
 			reduce2 := scm.NewNil()
-			if len(a) > 8 {
-				reduce2 = a[8]
+			if len(a) > layout.reduce2Idx {
+				reduce2 = a[layout.reduce2Idx]
 			}
-			return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
+			return t.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
@@ -422,25 +525,26 @@ func Init(en scm.Env) {
 		Name: "scan_batch",
 		Desc: "does an unordered parallel filter-map-reduce pass on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
-			stride := int(scm.ToInt(a[6]))
-			batchdata := mustScmerSlice(a[7], "batchdata")
-			isOuter := len(a) > 11 && scm.ToBool(a[11])
+			layout := scanLayout(a)
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.mapColsIdx], "mapColumns"))
+			stride := int(scm.ToInt(a[layout.strideIdx]))
+			batchdata := mustScmerSlice(a[layout.batchDataIdx], "batchdata")
+			isOuter := len(a) > layout.outerIdx+1 && scm.ToBool(a[layout.outerIdx+1])
 
-			if list, ok := scmerSlice(a[1]); ok {
+			if list, ok := scmerSlice(a[layout.tableIdx]); ok {
 				neutral := scm.NewNil()
-				if len(a) > 9 {
-					neutral = a[9]
+				if len(a) > layout.neutralIdx+1 {
+					neutral = a[layout.neutralIdx+1]
 				}
 				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[5])
+				mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
 				mapparams := make([]scm.Scmer, len(mapcols))
 				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if len(a) > 8 {
-					reducefn = scm.OptimizeProcToSerialFunction(a[8])
+				if len(a) > layout.reduceIdx+1 {
+					reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx+1])
 				}
 				hadValue := false
 				batchCount := 0
@@ -478,18 +582,18 @@ func Init(en scm.Env) {
 					}
 					result = reducefn(result, mapfn(mapparams...))
 				}
-				if len(a) > 10 && !a[10].IsNil() {
-					reduce2fn := scm.OptimizeProcToSerialFunction(a[10])
+				if len(a) > layout.reduce2Idx+1 && !a[layout.reduce2Idx+1].IsNil() {
+					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx+1])
 					base := neutral
-					if len(a) > 9 {
-						base = a[9]
+					if len(a) > layout.neutralIdx+1 {
+						base = a[layout.neutralIdx+1]
 					}
 					result = reduce2fn(base, result)
 				}
 				return result
 			}
 
-			db := GetDatabase(scm.String(a[0]))
+			db := GetDatabase(scm.String(a[layout.schemaIdx]))
 			if db == nil {
 				// Same virtual-schema guard as in scan() above.
 				// scan_batch is emitted by batchify_first_scan which
@@ -499,38 +603,38 @@ func Init(en scm.Env) {
 				// (queryplan.scm) so the raw table name arrives here.
 				// Return empty results to match the list-path semantics.
 				neutral := scm.NewNil()
-				if len(a) > 9 {
-					neutral = a[9]
+				if len(a) > layout.neutralIdx+1 {
+					neutral = a[layout.neutralIdx+1]
 				}
 				if isOuter {
-					mapfn := scm.OptimizeProcToSerialFunction(a[5])
+					mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
 					mapparams := make([]scm.Scmer, len(mapcols))
 					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-					if len(a) > 8 {
-						reducefn = scm.OptimizeProcToSerialFunction(a[8])
+					if len(a) > layout.reduceIdx+1 {
+						reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx+1])
 					}
 					return reducefn(neutral, mapfn(mapparams...))
 				}
 				return neutral
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[layout.tableIdx]))
 			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(a[layout.tableIdx]) + " does not exist")
 			}
 
 			aggregate := scm.NewNil()
-			if len(a) > 8 {
-				aggregate = a[8]
+			if len(a) > layout.reduceIdx+1 {
+				aggregate = a[layout.reduceIdx+1]
 			}
 			neutral := scm.NewNil()
-			if len(a) > 9 {
-				neutral = a[9]
+			if len(a) > layout.neutralIdx+1 {
+				neutral = a[layout.neutralIdx+1]
 			}
 			reduce2 := scm.NewNil()
-			if len(a) > 10 {
-				reduce2 = a[10]
+			if len(a) > layout.reduce2Idx+1 {
+				reduce2 = a[layout.reduce2Idx+1]
 			}
-			return t.scanWithBatch(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter, stride, batchdata)
+			return t.scanWithBatch(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
@@ -555,19 +659,20 @@ func Init(en scm.Env) {
 		Name: "scan_order",
 		Desc: "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			sortcolsVals := mustScmerSlice(a[4], "sortcols")
-			sortdirsVals := mustScmerSlice(a[5], "sortdirs")
-			limitPartitionCols := scm.ToInt(a[6])
-			mapcols := scmerSliceToStrings(mustScmerSlice(a[9], "mapColumns"))
+			layout := scanLayout(a)
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
+			sortcolsVals := mustScmerSlice(a[layout.sortColsIdx], "sortcols")
+			sortdirsVals := mustScmerSlice(a[layout.sortDirsIdx], "sortdirs")
+			limitPartitionCols := scm.ToInt(a[layout.partColsIdx])
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.limitIdx+1], "mapColumns"))
 
 			aggregate := scm.NewNil()
-			if len(a) > 11 {
-				aggregate = a[11]
+			if len(a) > layout.limitIdx+3 {
+				aggregate = a[layout.limitIdx+3]
 			}
 			neutral := scm.NewNil()
-			if len(a) > 12 {
-				neutral = a[12]
+			if len(a) > layout.limitIdx+4 {
+				neutral = a[layout.limitIdx+4]
 			}
 
 			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcolsVals))
@@ -575,13 +680,13 @@ func Init(en scm.Env) {
 				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
 			}
 
-			isOuter := len(a) > 13 && scm.ToBool(a[13])
+			isOuter := len(a) > layout.limitIdx+5 && scm.ToBool(a[layout.limitIdx+5])
 
-			if list, ok := scmerSlice(a[1]); ok {
+			if list, ok := scmerSlice(a[layout.tableIdx]); ok {
 				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[10])
+				mapfn := scm.OptimizeProcToSerialFunction(a[layout.limitIdx+2])
 				mapparams := make([]scm.Scmer, len(mapcols))
 				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
 				if !aggregate.IsNil() {
@@ -637,8 +742,8 @@ func Init(en scm.Env) {
 					}
 					return false
 				})
-				offset := int(scm.ToInt(a[7]))
-				limit := int(scm.ToInt(a[8]))
+				offset := int(scm.ToInt(a[layout.offsetIdx]))
+				limit := int(scm.ToInt(a[layout.limitIdx]))
 				hadValue := false
 				count := 0
 				for idx, val := range filtered {
@@ -666,11 +771,11 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			db := GetDatabase(scm.String(a[0]))
+			db := GetDatabase(scm.String(a[layout.schemaIdx]))
 			if db == nil {
 				// Same virtual-schema guard as in scan() — see comment there.
 				if isOuter {
-					mapfn := scm.OptimizeProcToSerialFunction(a[10])
+					mapfn := scm.OptimizeProcToSerialFunction(a[layout.limitIdx+2])
 					mapparams := make([]scm.Scmer, len(mapcols))
 					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
 					if !aggregate.IsNil() {
@@ -680,12 +785,12 @@ func Init(en scm.Env) {
 				}
 				return neutral
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[layout.tableIdx]))
 			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(a[layout.tableIdx]) + " does not exist")
 			}
 
-			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[7]), scm.ToInt(a[8]), mapcols, a[10], aggregate, neutral, isOuter)
+			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
@@ -2575,7 +2680,7 @@ func fkExistenceCheck(tbl *table, filterCols []string, vals []scm.Scmer) bool {
 		}
 		return scm.NewBool(false)
 	})
-	return scm.ToBool(tbl.scan(filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false))
+	return scm.ToBool(tbl.scan(CurrentTx(), filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false))
 }
 
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
@@ -2595,7 +2700,7 @@ func fkCascadeDelete(childTbl *table, cols []string, vals []scm.Scmer) {
 		scm.Apply(a[len(cols)]) // $update() with no args = delete
 		return scm.NewNil()
 	})
-	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(CurrentTx(), cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeSetNull sets FK cols to NULL in childTbl where cols match vals.
@@ -2620,7 +2725,7 @@ func fkCascadeSetNull(childTbl *table, cols []string, vals []scm.Scmer) {
 		scm.Apply(a[len(cols)], scm.NewSlice(payload))
 		return scm.NewNil()
 	})
-	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(CurrentTx(), cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeUpdate updates FK cols in childTbl from oldVals to newVals.
@@ -2645,7 +2750,7 @@ func fkCascadeUpdate(childTbl *table, cols []string, oldVals, newVals []scm.Scme
 		scm.Apply(a[len(cols)], scm.NewSlice(payload))
 		return scm.NewNil()
 	})
-	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(CurrentTx(), cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.

@@ -91,6 +91,7 @@ func (db *database) IncrBlobRefcount(hash string) {
 
 	aggr := sumProc()
 	result := t.scan(
+		CurrentTx(),
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
 		aggr, scm.NewInt(0), aggr, false,
@@ -146,6 +147,7 @@ func (db *database) DecrBlobRefcount(hash string) {
 
 	aggr := sumProc()
 	result := t.scan(
+		CurrentTx(),
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
 		aggr, scm.NewInt(0), aggr, false,
