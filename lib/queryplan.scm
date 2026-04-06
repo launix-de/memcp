@@ -577,11 +577,11 @@ raw _unn_* occurrence aliases into physical temp column names. */
 
 /* scalar subselect helper wrappers */
 (define scalar_scan (lambda (schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2) (begin
-	(define result (scan '((context "session") "__memcp_tx") schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2))
+	(define result (scan (session "__memcp_tx") schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2))
 	(if (equal? result neutral) nil result)
 )))
 (define scalar_scan_order (lambda (schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral) (begin
-	(define result (scan_order '((context "session") "__memcp_tx") schema tbl filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
+	(define result (scan_order (session "__memcp_tx") schema tbl filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
 	(if (equal? result neutral) nil result)
 )))
 
@@ -615,12 +615,12 @@ Virtual tables (where tbl is a list, not a string) are excluded via
 (define batchify_first_scan (lambda (plan batch_params batch_pseudocols stride_expr batchdata_sym)
 	(match plan
 		/* scan / scan_batch with a real (string) table name */
-		(cons scanhead (cons schema (cons (string? tbl) rest)))
+		(cons scanhead (cons tx (cons schema (cons (string? tbl) rest))))
 		(match (string scanhead)
 			"scan" (match rest
 				(merge '(filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter) _)
 				(if isOuter nil
-					(list (quote scan_batch) schema tbl
+					(list (quote scan_batch) tx schema tbl
 						(append_codegen_list filtercols batch_pseudocols)
 						(extend_codegen_lambda filterfn batch_params)
 						(append_codegen_list mapcols batch_pseudocols)
@@ -631,7 +631,7 @@ Virtual tables (where tbl is a list, not a string) are excluded via
 			"scan_batch" (match rest
 				(merge '(filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter) _)
 				(if isOuter nil
-					(list (quote scan_batch) schema tbl
+					(list (quote scan_batch) tx schema tbl
 						(append_codegen_list filtercols batch_pseudocols)
 						(extend_codegen_lambda filterfn batch_params)
 						(append_codegen_list mapcols batch_pseudocols)
@@ -719,7 +719,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 				(list (quote begin)
 					_inner_flush_define
 					(list (quote nth)
-						(list (quote scan) '((context "session") "__memcp_tx") schema tbl
+						(list (quote scan) '(session "__memcp_tx") schema tbl
 							(cons list filtercols)
 							outer_filter_lambda
 							scan_mapcols
@@ -756,7 +756,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 						0))
 				(list (quote begin)
 					_inner_flush_define
-					(list (quote scan) '((context "session") "__memcp_tx") schema tbl
+					(list (quote scan) '(session "__memcp_tx") schema tbl
 						(cons list filtercols)
 						outer_filter_lambda
 						scan_mapcols
@@ -847,10 +847,10 @@ which tables are actually read. */
 Used to detect which tables a computor lambda reads from, so we can register invalidation triggers. */
 (define extract_scanned_tables (lambda (expr)
 	(match expr
-		(cons (symbol scan) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
-		(cons (symbol scan_order) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
-		(cons (symbol scalar_scan) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
-		(cons (symbol scalar_scan_order) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scan) (cons current_tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scan_order) (cons current_tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scalar_scan) (cons current_tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scalar_scan_order) (cons current_tx (cons schema (cons tbl rest)))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
 		(cons sym args) (merge (map args extract_scanned_tables))
 		'()
 	)
@@ -1693,7 +1693,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					(define kt_key_names (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 					/* outer refs need raw column names (tblvar.col), not canonical expr_name */
 					(define raw_col_names (map group_keys (lambda (col) (match col '('get_column _ _ c _) c (expr_name col)))))
-					(list 'scan '((context "session") "__memcp_tx") schema grouptbl
+					(list 'scan '(session "__memcp_tx") schema grouptbl
 						(cons 'list kt_key_names)
 						/* filter: (equal? grouptbl.kt_key (outer tblvar.raw_col)) — zip kt_key_names with raw_col_names */
 						(list 'lambda
@@ -1703,7 +1703,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false))
-					(list 'scan '((context "session") "__memcp_tx") schema grouptbl '(list) '('lambda '() true)
+					(list 'scan '(session "__memcp_tx") schema grouptbl '(list) '('lambda '() true)
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false)))
@@ -1822,7 +1822,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW session) ...) and
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(list 'scan '((context "session") "__memcp_tx") schema tbl
+					(list 'scan '(session "__memcp_tx") schema tbl
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -2397,6 +2397,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 													(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
 													(if use_ordered_scalar
 														(list (quote scan_order)
+															(list (quote session) "__memcp_tx")
 															schema3
 															tbl3
 															(cons list filtercols)
@@ -2413,6 +2414,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 															nil
 															false)
 														(list (quote scan)
+															(list (quote session) "__memcp_tx")
 															schema3
 															tbl3
 															(cons list filtercols)
@@ -3144,7 +3146,44 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 	(define replace_inner_selects (lambda (expr outer_schemas) (match expr
 		(cons sym args) (begin
 			(define kind (inner_select_kind sym))
-			/* handle NOT IN / NOT EXISTS */
+			(define union_exists_expr (lambda (subquery negated) (begin
+				(define union_parts (query_union_all_parts subquery))
+				(if (nil? union_parts)
+					nil
+					(match union_parts '(branches union_order union_limit union_offset)
+						(if (or (not (nil? union_order)) (not (nil? union_limit)) (not (nil? union_offset)))
+							nil
+							(begin
+								(define branch_exprs (map branches (lambda (branch)
+									(replace_inner_selects
+										(if negated
+											(list (quote not) (list (quote inner_select_exists) branch))
+											(list (quote inner_select_exists) branch))
+										outer_schemas))))
+								(if (equal? branch_exprs '())
+									nil
+									(if (equal? (count branch_exprs) 1)
+										(car branch_exprs)
+										(cons (if negated (quote and) (quote or)) branch_exprs))))))))))
+			(define union_in_expr (lambda (target_expr subquery negated) (begin
+				(define union_parts (query_union_all_parts subquery))
+				(if (nil? union_parts)
+					nil
+					(match union_parts '(branches union_order union_limit union_offset)
+						(if (or (not (nil? union_order)) (not (nil? union_limit)) (not (nil? union_offset)))
+							nil
+							(begin
+								(define branch_exprs (map branches (lambda (branch)
+									(replace_inner_selects
+										(if negated
+											(list (quote not) (list (quote inner_select_in) target_expr branch))
+											(list (quote inner_select_in) target_expr branch))
+										outer_schemas))))
+								(if (equal? branch_exprs '())
+									nil
+									(if (equal? (count branch_exprs) 1)
+										(car branch_exprs)
+										(cons (if negated (quote and) (quote or)) branch_exprs))))))))))
 			(define not_expr (if (not_symbol sym)
 				(match args
 					(cons inner_expr '()) (match inner_expr
@@ -3153,15 +3192,21 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							(if (equal?? inner_kind (quote inner_select_in))
 								(match inner_args
 									(cons target_expr (cons subquery '()))
-									(coalesce (_unnest_count_subselect subquery outer_schemas target_expr (quote equal?)) expr)
+									(coalesce
+										(union_in_expr target_expr subquery true)
+										(_unnest_count_subselect subquery outer_schemas target_expr (quote equal?))
+										expr)
 									_ nil)
 								(if (equal?? inner_kind (quote inner_select_exists))
 									(match inner_args
 										(cons subquery '())
-										(if (expr_uses_session_state subquery)
-											(list (quote not) (build_exists_subselect subquery outer_schemas))
-											(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote equal?))
-												(list (quote not) (build_exists_subselect subquery outer_schemas))))
+										(coalesce
+											(union_exists_expr subquery true)
+											(if (expr_uses_session_state subquery)
+												(list (quote not) (build_exists_subselect subquery outer_schemas))
+												(coalesce
+													(_unnest_count_subselect subquery outer_schemas nil (quote equal?))
+													(list (quote not) (build_exists_subselect subquery outer_schemas)))))
 										_ nil)
 									nil)))
 						_ nil)
@@ -3176,14 +3221,20 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_in) (match args
 						(cons target_expr (cons subquery '()))
-						(coalesce (_unnest_count_subselect subquery outer_schemas target_expr (quote >)) expr)
+						(coalesce
+							(union_in_expr target_expr subquery false)
+							(_unnest_count_subselect subquery outer_schemas target_expr (quote >))
+							expr)
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_exists) (match args
 						(cons subquery '())
-						(if (expr_uses_session_state subquery)
-							(build_exists_subselect subquery outer_schemas)
-							(coalesce (_unnest_count_subselect subquery outer_schemas nil (quote >))
-								(build_exists_subselect subquery outer_schemas)))
+						(coalesce
+							(union_exists_expr subquery false)
+							(if (expr_uses_session_state subquery)
+								(build_exists_subselect subquery outer_schemas)
+								(coalesce
+									(_unnest_count_subselect subquery outer_schemas nil (quote >))
+									(build_exists_subselect subquery outer_schemas))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 				not_expr))

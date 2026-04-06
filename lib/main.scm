@@ -20,6 +20,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (print "")
 (import "test.scm")
 
+/* global session helper: runtime code calls (session key) or
+(session key value), while the actual session instance is taken from the
+current execution context */
+(define session (lambda args
+	(apply (context "session") args)))
+
 (set static_files (serveStatic "../assets"))
 
 /* this can be overhooked */

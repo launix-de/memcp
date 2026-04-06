@@ -19,13 +19,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* check admin credentials against system.user table */
 (define dashboard_check_admin (lambda (req) (begin
-	(set pw (scan '((context "session") "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+	(set pw (scan (session "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
 	(and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
 )))
 
 /* check any authenticated user (returns admin flag or false) */
 (define dashboard_check_user (lambda (req) (begin
-	(set pw (scan '((context "session") "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+	(set pw (scan (session "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
 	(if (and pw (equal? (car pw) (password (req "password")))) (equal? (car (cdr pw)) 1) nil)
 )))
 
@@ -42,7 +42,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(if is_admin (show)
 		(begin
 			/* build list of db names the user has access to; nil neutral avoids pre-call quirk */
-			(define allowed (scan '((context "session") "__memcp_tx") "system" "access"
+			(define allowed (scan (session "__memcp_tx") "system" "access"
 				'("username" "database") (lambda (u db) (equal?? u username))
 				'("database") (lambda (db) db)
 				(lambda (acc db) (if (nil? db) acc (cons db (if (nil? acc) (list) acc))))
@@ -90,7 +90,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* check if user has access to a specific database */
 (define dashboard_has_db_access (lambda (username is_admin dbname)
 	(if is_admin true
-		(> (scan '((context "session") "__memcp_tx") "system" "access"
+		(> (scan (session "__memcp_tx") "system" "access"
 			'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db dbname)))
 			'() (lambda () 1)
 			+ 0) 0)
@@ -127,10 +127,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: build JSON for a single user entry (takes username string) */
 (define dashboard_build_user_json (lambda (uname) (begin
-	(set is_adm (scan '((context "session") "__memcp_tx") "system" "user" '("username") (lambda (u) (equal? u uname)) '("admin") (lambda (a) a) (lambda (a b) b) false))
+	(set is_adm (scan (session "__memcp_tx") "system" "user" '("username") (lambda (u) (equal? u uname)) '("admin") (lambda (a) a) (lambda (a b) b) false))
 	/* get database access for non-admins */
 	(set dbs_csv (if is_adm ""
-		(scan '((context "session") "__memcp_tx") "system" "access" '("username") (lambda (u) (equal?? u uname))
+		(scan (session "__memcp_tx") "system" "access" '("username") (lambda (u) (equal?? u uname))
 			'("database") (lambda (db) (json_encode db))
 			(lambda (acc db) (if (equal? acc "") db (concat acc "," db))) "")))
 	(concat "{\"username\":" (json_encode uname)
@@ -297,7 +297,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			/* API: print log — list latest entries (admin only) */
 			"/dashboard/api/logs" (begin
 				(if (dashboard_check_admin req) (begin
-					(define items (scan_order '((context "session") "__memcp_tx") "system_statistic" "logs"
+					(define items (scan_order (session "__memcp_tx") "system_statistic" "logs"
 						'() (lambda () true)
 						'("datetime") '(>) 0 0 100
 						'("datetime" "message")
@@ -310,7 +310,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			/* API: error query log — list entries (admin only) */
 			"/dashboard/api/errors" (begin
 				(if (dashboard_check_admin req) (begin
-					(define items (scan '((context "session") "__memcp_tx") "system_statistic" "errors"
+					(define items (scan (session "__memcp_tx") "system_statistic" "errors"
 						'() (lambda () true)
 						'("datetime" "database" "user" "query" "error")
 						(lambda (dt db usr qry err) (json_encode_assoc (list "datetime" dt "database" db "user" usr "query" qry "error" err)))
@@ -326,7 +326,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_401 res)
 					(begin
 						(define default_pw (if is_admin
-							(scan '((context "session") "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username "root")) '("password") (lambda (pw) (equal? pw (password "admin"))) (lambda (a b) b) false)
+							(scan (session "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username "root")) '("password") (lambda (pw) (equal? pw (password "admin"))) (lambda (a b) b) false)
 							false))
 						(dashboard_send_json res (concat
 							"{\"admin\":" (if is_admin "true" "false")
@@ -404,9 +404,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define max_print (settings "MaxPrintLog"))
 	(if (> max_print 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan '((context "session") "__memcp_tx") "system_statistic" "logs" '() (lambda () true) '() (lambda () 1) + 0))
+			(define cnt (scan (session "__memcp_tx") "system_statistic" "logs" '() (lambda () true) '() (lambda () 1) + 0))
 			(if (> cnt max_print)
-				(scan_order '((context "session") "__memcp_tx") "system_statistic" "logs" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+				(scan_order (session "__memcp_tx") "system_statistic" "logs" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
 			)
 		)) (lambda (e) true))
 	))
@@ -414,9 +414,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define max_err (settings "MaxErrorQueryLog"))
 	(if (> max_err 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan '((context "session") "__memcp_tx") "system_statistic" "errors" '() (lambda () true) '() (lambda () 1) + 0))
+			(define cnt (scan (session "__memcp_tx") "system_statistic" "errors" '() (lambda () true) '() (lambda () 1) + 0))
 			(if (> cnt max_err)
-				(scan_order '((context "session") "__memcp_tx") "system_statistic" "errors" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+				(scan_order (session "__memcp_tx") "system_statistic" "errors" '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
 			)
 		)) (lambda (e) true))
 	))
