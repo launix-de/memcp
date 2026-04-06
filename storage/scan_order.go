@@ -738,6 +738,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	}
 
 	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
+	if t.t.tableLockOwner.Load() != nil {
+		t.t.waitTableLock(scm.GetCurrentSessionState(), false)
+	}
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
 	ccols := make([]ColumnStorage, len(conditionCols))

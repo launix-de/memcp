@@ -1061,6 +1061,23 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 	return true
 }
 
+// COUNT-style helper columns use a literal 1 map function. Their value also
+// controls group visibility via COUNT>0, so selective invalidation is safer
+// than arithmetic delta folding across 0<->1 transitions.
+func isConstantOneAggregate(mapFn scm.Scmer) bool {
+	if mapFn.IsProc() {
+		body := mapFn.Proc().Body
+		return body.IsInt() && body.Int() == 1
+	}
+	if mapFn.IsSlice() {
+		items := mapFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			return items[2].IsInt() && items[2].Int() == 1
+		}
+	}
+	return false
+}
+
 // containsScan returns true if the expression contains a scan/scan_order/etc. call.
 func containsScan(expr scm.Scmer) bool {
 	if expr.IsProc() {
@@ -1447,7 +1464,11 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					if len(scanNode) > 1 && !scanNode[1].IsString() {
 						mapColsIdx, mapFnIdx = 6, 7
 					}
-					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapFnIdx], timing)
+					if isConstantOneAggregate(scanNode[mapFnIdx]) {
+						body = buildSelectiveInvalidationBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, timing)
+					} else {
+						body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapFnIdx], timing)
+					}
 				} else {
 					// Full invalidation: for non-additive aggregates and AfterInvalidate propagation.
 					body = scm.NewSlice([]scm.Scmer{

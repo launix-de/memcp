@@ -107,6 +107,9 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 		t.enterMutationOwner()
 		defer t.exitMutationOwner()
 	}
+	if t.tableLockOwner.Load() != nil {
+		t.waitTableLock(ss, hasMutationCallback)
+	}
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time (boundary extraction, sharding hints)
