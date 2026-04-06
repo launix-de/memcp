@@ -1620,7 +1620,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons '!begin vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))
@@ -1690,17 +1690,17 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			'((quote droptrigger) schema name (if if_exists true false)))
 
 		/* USE database - change current schema */
-		(parser '((atom "USE" true) (define db sql_identifier)) '('session "schema" db))
+		(parser '((atom "USE" true) (define db sql_identifier)) (list (list (quote context) "session") "schema" db))
 
 		/* ANALYZE TABLE (no-op) */
 		(parser '((atom "ANALYZE" true) (atom "TABLE" true) sql_identifier) "ignore")
 
 		/* transaction control */
-		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) '('tx_begin_acid 'session))
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('tx_begin 'session))
-		(parser '((atom "BEGIN" true)) '('tx_begin 'session))
-		(parser '((atom "COMMIT" true)) '('tx_commit 'session))
-		(parser '((atom "ROLLBACK" true)) '('tx_rollback 'session))
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (list (quote context) "session")))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (list (quote context) "session")))
+		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)

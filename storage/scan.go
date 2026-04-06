@@ -319,7 +319,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	// MapReducer for map+reduce phase (builds column readers internally)
-	mapper := t.openMapReducerEx(callbackCols, callback, aggregate, skipShardReadLock, 0, nil)
+	mapper := t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, 0, nil, currentTx)
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false
@@ -541,7 +541,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
-	mapper := t.openMapReducerEx(callbackCols, callback, aggregate, skipShardReadLock, stride, batchdata)
+	mapper := t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, stride, batchdata, currentTx)
 	defer mapper.Close()
 
 	locked := false

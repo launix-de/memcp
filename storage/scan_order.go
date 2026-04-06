@@ -446,7 +446,7 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 	hadValue := false
 	// initialize MapReducers: pre-allocate args per shard
 	for _, sq := range q.q {
-		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callback, aggregate)
+		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callback, aggregate, false, 0, nil, currentTx)
 	}
 
 	var buf [1024]uint32 // stack-allocated batch buffer (4 KB, fits in L1)

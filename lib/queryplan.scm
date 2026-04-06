@@ -799,8 +799,14 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 planner starts splitting aggregate conditions apart. */
 (define expr_uses_session_state (lambda (expr)
 	(match expr
+		(symbol session) true
+		'(quote session) true
 		(cons (symbol session) _) true
 		(cons '(quote session) _) true
+		(cons (symbol context) '("session")) true
+		(cons (cons (symbol context) '("session")) _) true
+		(cons (symbol ?) '("__memcp_tx")) true
+		(cons '(quote ?) '("__memcp_tx")) true
 		(cons sym args) (reduce args (lambda (acc arg) (or acc (expr_uses_session_state arg))) false)
 		false
 	)

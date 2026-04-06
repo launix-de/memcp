@@ -173,8 +173,8 @@ func TestShardRebuildDeletePropagationUsesStableTranslation(t *testing.T) {
 		t.Fatal("rebuild returned nil shard")
 	}
 
-	shard.UpdateFunction(0, false, false)()
-	shard.UpdateFunction(1, false, false)()
+	shard.UpdateFunction(0, false, false, nil)()
+	shard.UpdateFunction(1, false, false, nil)()
 
 	rebuilt.mu.RLock()
 	firstDeleted := rebuilt.deletions.Get(0)
@@ -214,8 +214,8 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 		t.Fatal("rebuild returned nil shard")
 	}
 
-	shard.UpdateFunction(0, false, false)()
-	shard.UpdateFunction(1, false, false)(scm.NewSlice([]scm.Scmer{
+	shard.UpdateFunction(0, false, false, nil)()
+	shard.UpdateFunction(1, false, false, nil)(scm.NewSlice([]scm.Scmer{
 		scm.NewString("payload"), scm.NewString("two-updated"),
 	}))
 
@@ -355,7 +355,7 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 		scm.NewInt(30001),
 		scm.NewString("transient"),
 	}}, false, nil, false)
-	oldShard.UpdateFunction(oldRecid, false, false)()
+	oldShard.UpdateFunction(oldRecid, false, false, nil)()
 
 	<-done
 

@@ -938,7 +938,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */
 			(parser (atom "heap" true) "heap") /* quirks for SET default_table_access_method = heap */
 			psql_expression
-		))) '((quote session) key value)) ","))) (cons '!begin vars))
+		))) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl psql_identifier) (? (atom "AS" true) (define alias psql_identifier)) (define mode (or (parser (atom "WRITE" true) true) (parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true) (parser '((atom "READ" true) (? (atom "LOCAL" true))) nil)))) (list tbl (not (nil? mode)))) ",")))
@@ -952,14 +952,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "ANALYZE" true) (atom "TABLE" true) psql_identifier) "ignore")
 
 		/* USE database - change current schema */
-		(parser '((atom "USE" true) (define db psql_identifier)) '('session "schema" db))
+		(parser '((atom "USE" true) (define db psql_identifier)) (list (list (quote context) "session") "schema" db))
 
 		/* transaction control */
-		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) '('tx_begin_acid 'session))
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('tx_begin 'session))
-		(parser '((atom "BEGIN" true)) '('tx_begin 'session))
-		(parser '((atom "COMMIT" true)) '('tx_commit 'session))
-		(parser '((atom "ROLLBACK" true)) '('tx_rollback 'session))
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (list (quote context) "session")))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (list (quote context) "session")))
+		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
