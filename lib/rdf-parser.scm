@@ -33,7 +33,7 @@ consumer stage. */
 	(parser '((atom "<" false false) (regex "[^>]*" false false) (atom ">" false false)) nil) /* ^^<IRI> */
 	(regex "[a-zA-Z0-9_]*:[a-zA-Z0-9_]*" false false) /* ^^prefix:name */
 	(regex "[a-zA-Z0-9_]+" false false) /* ^^barename */
-	)))
+)))
 /* unescape standard TTL/JSON escape sequences in a string */
 (define rdf_unescape (lambda (s)
 	(replace (replace (replace (replace (replace s "\\n" "\n") "\\t" "\t") "\\\\" "\\") "\\\"" "\"") "\\r" "\r")
@@ -42,9 +42,9 @@ consumer stage. */
 (define rdf_unbound_expr? (lambda (expr) (equal? expr '("__rdf_unbound__"))))
 (define rdf_ctx_lookup (lambda (ctx sym) (match ctx
 	(cons key (cons val tail))
-		(if (rdf_key_equal key sym) (list true val) (rdf_ctx_lookup tail sym))
+	(if (rdf_key_equal key sym) (list true val) (rdf_ctx_lookup tail sym))
 	'()
-		(list false nil)
+	(list false nil)
 )))
 (define rdf_ctx_bound (lambda (ctx sym)
 	(match (rdf_ctx_lookup ctx sym) '(found val)
@@ -236,11 +236,11 @@ consumer stage. */
 	(define conditions (* (parser '((define item rdf_where_basic_item) (? (atom "." true))) item)))
 	(atom "}" true)
 	(atom "}" true)
-	) (match var '('get_var s)
+) (match var '('get_var s)
 		(list (list "__subquery__"
 			(list "select" (merge (list (list s agg))) "where" (merge (coalesce conditions '('()))) "group" '() "order" nil "limit" nil "offset" nil "distinct" nil)
-		)))
 	)))
+)))
 (define rdf_where_union_item (parser '(
 	(define first rdf_where_union_group)
 	(atom "UNION" true)
@@ -388,21 +388,21 @@ consumer stage. */
 	(merge_unique (map conditions (lambda (cond) (match cond
 		'("__filter__" expr) (rdf_extract_vars expr)
 		'("__union__" branches)
-			(reduce branches (lambda (acc branch)
-				(merge_unique (list acc (rdf_condition_vars branch)))
-			) '())
+		(reduce branches (lambda (acc branch)
+			(merge_unique (list acc (rdf_condition_vars branch)))
+		) '())
 		'("__optional__" inner) (rdf_condition_vars inner)
 		'("__bind__" expr var_expr) (merge_unique (list (rdf_extract_vars expr) (list (rdf_var_symbol var_expr))))
 		'("__values__" var_expr _vals) (list (rdf_var_symbol var_expr))
 		'("__subquery__" subquery)
-			(match subquery
-				'("select" subcols "where" subconds "group" subgroup "order" suborder "limit" sublimit "offset" suboffset "distinct" subdistinct)
-					(reduce_assoc subcols (lambda (acc alias expr) (append acc alias)) '())
-				'()
-			)
+		(match subquery
+			'("select" subcols "where" subconds "group" subgroup "order" suborder "limit" sublimit "offset" suboffset "distinct" subdistinct)
+			(reduce_assoc subcols (lambda (acc alias expr) (append acc alias)) '())
+			'()
+		)
 		'(s p o) (merge_unique (list (rdf_extract_vars s) (rdf_extract_vars p) (rdf_extract_vars o)))
 		'()
-	))))))
+))))))
 (define rdf_missing_select_vars (lambda (cols conditions)
 	(begin
 		(define available_vars (rdf_condition_vars conditions))
@@ -418,20 +418,20 @@ consumer stage. */
 ))
 (define rdf_strip_leading_ws_comments (lambda (s) (match s
 	(regex "(?s)^(?:[\\r\\n\\t ]+|/\\*.*?\\*/|--[^\\r\\n]*(?:\\r?\\n|$)|#[^\\r\\n]*(?:\\r?\\n|$))(.*)$" _ rest)
-		(rdf_strip_leading_ws_comments rest)
+	(rdf_strip_leading_ws_comments rest)
 	s
 )))
 (define rdf_resolve_prefixes (lambda (expr definitions) (match expr
 	'('concat ('definitions pfx) post)
-		(if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))
+	(if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))
 	'((quote concat) ((quote definitions) pfx) post)
-		(if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))
+	(if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))
 	(cons head tail) (cons (rdf_resolve_prefixes head definitions) (map tail (lambda (x) (rdf_resolve_prefixes x definitions))))
 	expr
 )))
 (define rdf_row_items (lambda (cols ctx) (match cols
 	(cons key (cons val tail))
-		(cons (concat key) (cons (rdf_replace_ctx val ctx) (rdf_row_items tail ctx)))
+	(cons (concat key) (cons (rdf_replace_ctx val ctx) (rdf_row_items tail ctx)))
 	'()
 )))
 (define rdf_select_resultrow_ast (lambda (row_cols ctx)
@@ -486,20 +486,20 @@ consumer stage. */
 	))
 ))
 (define rdf_capture_row_items (lambda (vars ctx) (match vars
-		(cons var tail) (cons
-			(list (quote list) (list (quote quote) var) (rdf_ctx_value ctx var))
-			(rdf_capture_row_items tail ctx))
-		'()
+	(cons var tail) (cons
+		(list (quote list) (list (quote quote) var) (rdf_ctx_value ctx var))
+		(rdf_capture_row_items tail ctx))
+	'()
 )))
 (define rdf_row_missing (lambda () '("__rdf_row_missing__")))
 (define rdf_row_key_equal (lambda (a b) (rdf_key_equal a b)))
 (define rdf_row_lookup (lambda (row sym) (match row
 	(cons (cons key (cons val '())) tail)
-		(if (rdf_row_key_equal key sym) val (rdf_row_lookup tail sym))
+	(if (rdf_row_key_equal key sym) val (rdf_row_lookup tail sym))
 	(cons key (cons val tail))
-		(if (rdf_row_key_equal key sym) val (rdf_row_lookup tail sym))
+	(if (rdf_row_key_equal key sym) val (rdf_row_lookup tail sym))
 	'()
-		(rdf_row_missing)
+	(rdf_row_missing)
 )))
 (define rdf_replace_row (lambda (expr row) (match expr
 	'('get_var sym) (begin
@@ -535,35 +535,35 @@ consumer stage. */
 )))
 (define rdf_agg_step (lambda (expr state row) (match expr
 	'("__rdf_agg__" "COUNT" inner _)
-		(if (nil? (rdf_row_eval inner row)) state (+ state 1))
+	(if (nil? (rdf_row_eval inner row)) state (+ state 1))
 	'("__rdf_agg__" "SUM" inner _)
-		(if (nil? (rdf_row_eval inner row)) state (+ state (rdf_numeric_value (rdf_row_eval inner row))))
+	(if (nil? (rdf_row_eval inner row)) state (+ state (rdf_numeric_value (rdf_row_eval inner row))))
 	'("__rdf_agg__" "AVG" inner _)
-		(if (nil? (rdf_row_eval inner row))
-			state
-			(list (+ (car state) (rdf_numeric_value (rdf_row_eval inner row))) (+ (cadr state) 1)))
+	(if (nil? (rdf_row_eval inner row))
+		state
+		(list (+ (car state) (rdf_numeric_value (rdf_row_eval inner row))) (+ (cadr state) 1)))
 	'("__rdf_agg__" "MIN" inner _)
-		(begin
-			(define v (rdf_row_eval inner row))
-			(if (nil? v)
-				state
-				(if (nil? state)
-					v
-					(if (< (rdf_numeric_value v) (rdf_numeric_value state)) v state))))
+	(begin
+		(define v (rdf_row_eval inner row))
+		(if (nil? v)
+			state
+			(if (nil? state)
+				v
+				(if (< (rdf_numeric_value v) (rdf_numeric_value state)) v state))))
 	'("__rdf_agg__" "MAX" inner _)
-		(begin
-			(define v (rdf_row_eval inner row))
-			(if (nil? v)
-				state
-				(if (nil? state)
-					v
-					(if (> (rdf_numeric_value v) (rdf_numeric_value state)) v state))))
+	(begin
+		(define v (rdf_row_eval inner row))
+		(if (nil? v)
+			state
+			(if (nil? state)
+				v
+				(if (> (rdf_numeric_value v) (rdf_numeric_value state)) v state))))
 	'("__rdf_agg__" "GROUP_CONCAT" inner sep)
-		(begin
-			(define v (rdf_row_eval inner row))
-			(if (nil? v)
-				state
-				(if (nil? state) (concat v) (concat state sep v))))
+	(begin
+		(define v (rdf_row_eval inner row))
+		(if (nil? v)
+			state
+			(if (nil? state) (concat v) (concat state sep v))))
 	(error "unsupported RDF aggregate " expr)
 )))
 (define rdf_agg_finalize (lambda (expr state) (match expr
@@ -572,17 +572,17 @@ consumer stage. */
 )))
 (define rdf_groups_lookup (lambda (groups gkey) (match groups
 	(cons (cons key (cons gstate '())) tail)
-		(if (equal? key gkey) gstate (rdf_groups_lookup tail gkey))
+	(if (equal? key gkey) gstate (rdf_groups_lookup tail gkey))
 	'()
-		nil
+	nil
 )))
 (define rdf_groups_upsert (lambda (groups gkey gstate) (match groups
 	(cons (cons key (cons oldstate '())) tail)
-		(if (equal? key gkey)
-			(cons (list gkey gstate) tail)
-			(cons (list key oldstate) (rdf_groups_upsert tail gkey gstate)))
+	(if (equal? key gkey)
+		(cons (list gkey gstate) tail)
+		(cons (list key oldstate) (rdf_groups_upsert tail gkey gstate)))
 	'()
-		(list (list gkey gstate))
+	(list (list gkey gstate))
 )))
 (define rdf_init_group_state (lambda (cols row) (begin
 	(define gstate (newsession))
@@ -599,7 +599,7 @@ consumer stage. */
 		(begin
 			(define gstate (rdf_init_group_state cols row))
 			(list (rdf_groups_upsert groups gkey gstate) gstate)
-		))
+	))
 )))
 (define rdf_apply_row_to_groups (lambda (groups cols group row) (begin
 	(define gvals (map group (lambda (gexpr) (rdf_row_eval gexpr row))))
@@ -652,7 +652,7 @@ consumer stage. */
 			(begin
 				(seen node true)
 				(map (rdf_relation_targets schema node pred) visit)
-			))
+		))
 		nil
 	)))
 	(if include_self
@@ -680,175 +680,175 @@ consumer stage. */
 	(match query '("select" cols "where" conditions "group" group "order" order "limit" limit "offset" offset "distinct" distinct) (begin
 		/* ctx: array with predefined variables */
 		/* no join reordering yet */
-			(define rdf_path_subject_value_local (lambda (expr ctx) (match expr
-				'('get_var var)
-					(if (rdf_ctx_bound ctx var)
-						(ctx var)
-						(error "SPARQL error: property path subject must be bound"))
-				(string? sval) sval
-				(list? l) (eval l)
-				(error "SPARQL error: unsupported property path subject " expr)
-			)))
-			(define rdf_path_target_plan_local (lambda (obj target_sym tail order ctx resultfunc2) (match obj
-				'('get_var var)
-					(if (rdf_ctx_bound ctx var)
-						(list (quote if) (list (quote equal?) target_sym (ctx var)) (build_scan tail order ctx resultfunc2) nil)
-						(build_scan tail order (merge ctx (merge (list (list var target_sym)))) resultfunc2))
-				(string? oval)
-					(list (quote if) (list (quote equal?) target_sym oval) (build_scan tail order ctx resultfunc2) nil)
-				(list? l)
-					(list (quote if) (list (quote equal?) target_sym (eval l)) (build_scan tail order ctx resultfunc2) nil)
-				(error "SPARQL error: unsupported property path object " obj)
-			)))
-			(define build_scan (lambda (conditions order ctx resultfunc2)
-				(match conditions
-					(cons '("__union__" branches) tail)
-						(cons (quote begin) (map branches (lambda (branch)
-							(build_scan (merge (list branch tail)) order ctx resultfunc2)
-						)))
-					(cons '("__filter_exists__" negate exists_conditions) tail)
-						(begin
-							(define exists_hash (fnv_hash (concat exists_conditions "|" tail "|" negate)))
-							(define exists_state (symbol (concat "__rdf_exists_" exists_hash)))
+		(define rdf_path_subject_value_local (lambda (expr ctx) (match expr
+			'('get_var var)
+			(if (rdf_ctx_bound ctx var)
+				(ctx var)
+				(error "SPARQL error: property path subject must be bound"))
+			(string? sval) sval
+			(list? l) (eval l)
+			(error "SPARQL error: unsupported property path subject " expr)
+		)))
+		(define rdf_path_target_plan_local (lambda (obj target_sym tail order ctx resultfunc2) (match obj
+			'('get_var var)
+			(if (rdf_ctx_bound ctx var)
+				(list (quote if) (list (quote equal?) target_sym (ctx var)) (build_scan tail order ctx resultfunc2) nil)
+				(build_scan tail order (merge ctx (merge (list (list var target_sym)))) resultfunc2))
+			(string? oval)
+			(list (quote if) (list (quote equal?) target_sym oval) (build_scan tail order ctx resultfunc2) nil)
+			(list? l)
+			(list (quote if) (list (quote equal?) target_sym (eval l)) (build_scan tail order ctx resultfunc2) nil)
+			(error "SPARQL error: unsupported property path object " obj)
+		)))
+		(define build_scan (lambda (conditions order ctx resultfunc2)
+			(match conditions
+				(cons '("__union__" branches) tail)
+				(cons (quote begin) (map branches (lambda (branch)
+					(build_scan (merge (list branch tail)) order ctx resultfunc2)
+				)))
+				(cons '("__filter_exists__" negate exists_conditions) tail)
+				(begin
+					(define exists_hash (fnv_hash (concat exists_conditions "|" tail "|" negate)))
+					(define exists_state (symbol (concat "__rdf_exists_" exists_hash)))
+					(list (quote begin)
+						(list (quote set) exists_state (list (quote newsession)))
+						(list exists_state "matched" false)
+						(build_scan exists_conditions '() ctx (lambda (_ _exists_ctx)
+							(list exists_state "matched" true)))
+						(list (quote if)
+							(if negate
+								(list (quote not) (list exists_state "matched"))
+								(list exists_state "matched"))
+							(build_scan tail order ctx resultfunc2)
+							nil)))
+				(cons '("__optional__" optional_conditions) tail)
+				(begin
+					(define optional_vars_all (rdf_condition_vars optional_conditions))
+					/* A variable can be bound to nil by OPTIONAL. Presence in ctx determines scope;
+					the bound expression itself may still evaluate to nil later in build_scan. */
+					(define optional_new_vars (filter optional_vars_all (lambda (var) (not (has_assoc? ctx var)))))
+					(define optional_ctx_nil (merge ctx (merge (map optional_new_vars (lambda (var) (list var (rdf_unbound_expr)))))))
+					(define optional_hash (fnv_hash (concat optional_conditions "|" tail "|" optional_new_vars)))
+					(define optional_state (symbol (concat "__rdf_optional_" optional_hash)))
+					(list (quote begin)
+						(list (quote set) optional_state (list (quote newsession)))
+						(list optional_state "matched" false)
+						(build_scan optional_conditions '() ctx (lambda (_ optional_ctx)
 							(list (quote begin)
-								(list (quote set) exists_state (list (quote newsession)))
-								(list exists_state "matched" false)
-								(build_scan exists_conditions '() ctx (lambda (_ _exists_ctx)
-									(list exists_state "matched" true)))
-								(list (quote if)
-									(if negate
-										(list (quote not) (list exists_state "matched"))
-										(list exists_state "matched"))
-									(build_scan tail order ctx resultfunc2)
-									nil)))
-					(cons '("__optional__" optional_conditions) tail)
+								(list optional_state "matched" true)
+								(build_scan tail order optional_ctx resultfunc2))))
+						(list (quote if) (list (quote not) (list optional_state "matched"))
+							(build_scan tail order optional_ctx_nil resultfunc2)
+							nil)))
+				(cons '("__bind__" bind_expr bind_var_expr) tail)
+				(build_scan tail order (merge ctx (merge (list (list (rdf_var_symbol bind_var_expr) (rdf_replace_ctx bind_expr ctx))))) resultfunc2)
+				(cons '("__values__" var_expr vals) tail)
+				(cons (quote begin) (map vals (lambda (val)
+					(build_scan tail order (merge ctx (merge (list (list (rdf_var_symbol var_expr) (rdf_replace_ctx val ctx))))) resultfunc2)
+				)))
+				(cons '("__subquery__" subquery) tail)
+				(match subquery
+					'("select" subcols "where" _subconds "group" subgroup "order" _suborder "limit" _sublimit "offset" _suboffset "distinct" _subdistinct)
+					(if (or (rdf_select_has_aggregates subcols) (not (equal? subgroup '())))
 						(begin
-							(define optional_vars_all (rdf_condition_vars optional_conditions))
-							/* A variable can be bound to nil by OPTIONAL. Presence in ctx determines scope;
-							the bound expression itself may still evaluate to nil later in build_scan. */
-							(define optional_new_vars (filter optional_vars_all (lambda (var) (not (has_assoc? ctx var)))))
-							(define optional_ctx_nil (merge ctx (merge (map optional_new_vars (lambda (var) (list var (rdf_unbound_expr)))))))
-							(define optional_hash (fnv_hash (concat optional_conditions "|" tail "|" optional_new_vars)))
-							(define optional_state (symbol (concat "__rdf_optional_" optional_hash)))
-							(list (quote begin)
-								(list (quote set) optional_state (list (quote newsession)))
-								(list optional_state "matched" false)
-								(build_scan optional_conditions '() ctx (lambda (_ optional_ctx)
-									(list (quote begin)
-										(list optional_state "matched" true)
-										(build_scan tail order optional_ctx resultfunc2))))
-								(list (quote if) (list (quote not) (list optional_state "matched"))
-									(build_scan tail order optional_ctx_nil resultfunc2)
-									nil)))
-					(cons '("__bind__" bind_expr bind_var_expr) tail)
-						(build_scan tail order (merge ctx (merge (list (list (rdf_var_symbol bind_var_expr) (rdf_replace_ctx bind_expr ctx))))) resultfunc2)
-					(cons '("__values__" var_expr vals) tail)
-						(cons (quote begin) (map vals (lambda (val)
-							(build_scan tail order (merge ctx (merge (list (list (rdf_var_symbol var_expr) (rdf_replace_ctx val ctx))))) resultfunc2)
-						)))
-					(cons '("__subquery__" subquery) tail)
-						(match subquery
-							'("select" subcols "where" _subconds "group" subgroup "order" _suborder "limit" _sublimit "offset" _suboffset "distinct" _subdistinct)
-								(if (or (rdf_select_has_aggregates subcols) (not (equal? subgroup '())))
-									(begin
-										(define sub_rows (symbol (concat "__rdf_subquery_rows_" (uuid))))
-										(define sub_rowvars (rdf_select_capture_vars subcols subgroup))
-										(define sub_rowctx (map_assoc subcols (lambda (k _v)
-											(list (quote rdf_row_lookup) (quote row) (concat k))
-										)))
-										(list (quote begin)
-											(list (quote set) sub_rows (list (quote newsession)))
-											(rdf_queryplan schema subquery definitions ctx (lambda (_cols inner_ctx)
-												(list sub_rows (list (quote uuid)) (cons list (rdf_capture_row_items sub_rowvars inner_ctx)))
-											))
-											(list (quote rdf_emit_aggregated_rows)
-												sub_rows
-												(list (quote quote) subcols)
-												(list (quote quote) subgroup)
-												(list (quote lambda) (list (quote row))
-													(build_scan tail order (merge ctx sub_rowctx) resultfunc2))))
-									)
-									(rdf_queryplan schema subquery definitions ctx (lambda (subcols subctx)
-										(build_scan tail order (merge ctx (merge (map_assoc subcols (lambda (k v) (list k (rdf_replace_ctx v subctx)))))) resultfunc2)
-									)))
-							(rdf_queryplan schema subquery definitions ctx (lambda (subcols subctx)
-								(build_scan tail order (merge ctx (merge (map_assoc subcols (lambda (k v) (list k (rdf_replace_ctx v subctx)))))) resultfunc2)
+							(define sub_rows (symbol (concat "__rdf_subquery_rows_" (uuid))))
+							(define sub_rowvars (rdf_select_capture_vars subcols subgroup))
+							(define sub_rowctx (map_assoc subcols (lambda (k _v)
+								(list (quote rdf_row_lookup) (quote row) (concat k))
 							)))
-					(cons '(s p) tail)
-						(if (equal? (concat s) "__filter__")
-							(list (quote if) (rdf_replace_ctx p ctx) (build_scan tail order ctx resultfunc2))
-							(error "SPARQL error: expected triple pattern (s p o), got 2 elements"))
-					(cons '(s p o) tail)
-						(match p
-							'("__path_seq__" p1 p2)
-								(begin
-									(define tmp_var (concat "?__rdf_path_" (uuid)))
-									(build_scan (cons (list s p1 (list (quote get_var) tmp_var)) (cons (list (list (quote get_var) tmp_var) p2 o) tail)) order ctx resultfunc2))
-							'("__path_alt__" p1 p2)
-								(list (quote begin)
-									(build_scan (cons (list s p1 o) tail) order ctx resultfunc2)
-									(build_scan (cons (list s p2 o) tail) order ctx resultfunc2))
-							'("__path_star__" pred)
-								(begin
-									(define start_expr (rdf_path_subject_value_local s ctx))
-									(define target_sym (symbol (concat "__rdf_path_target_" (uuid))))
-									(list (quote map)
-										(list (quote rdf_path_targets) schema start_expr pred true)
-										(list (quote lambda) (list target_sym)
-											(rdf_path_target_plan_local o target_sym tail order ctx resultfunc2))))
-							'("__path_plus__" pred)
-								(begin
-									(define start_expr (rdf_path_subject_value_local s ctx))
-									(define target_sym (symbol (concat "__rdf_path_target_" (uuid))))
-									(list (quote map)
-										(list (quote rdf_path_targets) schema start_expr pred false)
-										(list (quote lambda) (list target_sym)
-											(rdf_path_target_plan_local o target_sym tail order ctx resultfunc2))))
-							_
-								(begin
-									(define process (lambda (v sym conditions vars) (match v
-										'('get_var var)
-											(if (rdf_ctx_bound ctx var)
-												'((append conditions sym (ctx var)) vars)
-												'(conditions (append vars sym (symbol var))))
-										(string? s) '((append conditions sym s) vars)
-										(list? l) '((append conditions sym (eval l)) vars)
-										(error "SPARQL error: unsupported expression type in WHERE clause: " v)
-									)))
-									(match (process s "s" '() '()) '(conditions vars)
-										(match (process p "p" conditions vars) '(conditions vars)
-											(match (process o "o" conditions vars) '(conditions vars) (begin
-												/* check if one of the orders matches (currently only raw-variable support) */
-												/* TODO: for general expressions: two cases: s/p/o is bound to a variable and we bind against only variables from s/p/o: use scan_order; otherwise: collect all results in a list and use scm's sort */
-												(set order_head (match order
-													(cons '(expr dir) order_rest)
-														(match expr (eval s) '("s" dir) (eval p) '("p" dir) (eval o) '("o" dir))
-												))
-												(set inner_ctx (merge ctx (merge (extract_assoc vars (lambda (k v) '(v (symbol v)))))))
-												(set filter_cols (cons list (extract_assoc conditions (lambda (k v) k))))
-												(set filter_fn '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v))))))
-												(set map_cols (cons list (extract_assoc vars (lambda (k v) k))))
-												(set map_fn (list (quote lambda) (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (if order_head order_rest order) inner_ctx resultfunc2)))
-												(match order_head
-													'(col dir)
-														(list (quote scan_order) schema "rdf"
-															filter_cols filter_fn
-															(list (quote list) col) (list (quote list) (match dir "DESC" > <)) 0 0 -1
-															map_cols map_fn (quote cons) nil)
-													(list (quote scan) schema "rdf" filter_cols filter_fn map_cols map_fn)
-												)
-											)))
-										))
-								)
-					'()
-						(match order
-							(cons _ _) (error (concat "order not consumed: " order))
-							(resultfunc2 cols ctx))
+							(list (quote begin)
+								(list (quote set) sub_rows (list (quote newsession)))
+								(rdf_queryplan schema subquery definitions ctx (lambda (_cols inner_ctx)
+									(list sub_rows (list (quote uuid)) (cons list (rdf_capture_row_items sub_rowvars inner_ctx)))
+								))
+								(list (quote rdf_emit_aggregated_rows)
+									sub_rows
+									(list (quote quote) subcols)
+									(list (quote quote) subgroup)
+									(list (quote lambda) (list (quote row))
+										(build_scan tail order (merge ctx sub_rowctx) resultfunc2))))
+						)
+						(rdf_queryplan schema subquery definitions ctx (lambda (subcols subctx)
+							(build_scan tail order (merge ctx (merge (map_assoc subcols (lambda (k v) (list k (rdf_replace_ctx v subctx)))))) resultfunc2)
+					)))
+					(rdf_queryplan schema subquery definitions ctx (lambda (subcols subctx)
+						(build_scan tail order (merge ctx (merge (map_assoc subcols (lambda (k v) (list k (rdf_replace_ctx v subctx)))))) resultfunc2)
+				)))
+				(cons '(s p) tail)
+				(if (equal? (concat s) "__filter__")
+					(list (quote if) (rdf_replace_ctx p ctx) (build_scan tail order ctx resultfunc2))
+					(error "SPARQL error: expected triple pattern (s p o), got 2 elements"))
+				(cons '(s p o) tail)
+				(match p
+					'("__path_seq__" p1 p2)
+					(begin
+						(define tmp_var (concat "?__rdf_path_" (uuid)))
+						(build_scan (cons (list s p1 (list (quote get_var) tmp_var)) (cons (list (list (quote get_var) tmp_var) p2 o) tail)) order ctx resultfunc2))
+					'("__path_alt__" p1 p2)
+					(list (quote begin)
+						(build_scan (cons (list s p1 o) tail) order ctx resultfunc2)
+						(build_scan (cons (list s p2 o) tail) order ctx resultfunc2))
+					'("__path_star__" pred)
+					(begin
+						(define start_expr (rdf_path_subject_value_local s ctx))
+						(define target_sym (symbol (concat "__rdf_path_target_" (uuid))))
+						(list (quote map)
+							(list (quote rdf_path_targets) schema start_expr pred true)
+							(list (quote lambda) (list target_sym)
+								(rdf_path_target_plan_local o target_sym tail order ctx resultfunc2))))
+					'("__path_plus__" pred)
+					(begin
+						(define start_expr (rdf_path_subject_value_local s ctx))
+						(define target_sym (symbol (concat "__rdf_path_target_" (uuid))))
+						(list (quote map)
+							(list (quote rdf_path_targets) schema start_expr pred false)
+							(list (quote lambda) (list target_sym)
+								(rdf_path_target_plan_local o target_sym tail order ctx resultfunc2))))
+					_
+					(begin
+						(define process (lambda (v sym conditions vars) (match v
+							'('get_var var)
+							(if (rdf_ctx_bound ctx var)
+								'((append conditions sym (ctx var)) vars)
+								'(conditions (append vars sym (symbol var))))
+							(string? s) '((append conditions sym s) vars)
+							(list? l) '((append conditions sym (eval l)) vars)
+							(error "SPARQL error: unsupported expression type in WHERE clause: " v)
+						)))
+						(match (process s "s" '() '()) '(conditions vars)
+							(match (process p "p" conditions vars) '(conditions vars)
+								(match (process o "o" conditions vars) '(conditions vars) (begin
+									/* check if one of the orders matches (currently only raw-variable support) */
+									/* TODO: for general expressions: two cases: s/p/o is bound to a variable and we bind against only variables from s/p/o: use scan_order; otherwise: collect all results in a list and use scm's sort */
+									(set order_head (match order
+										(cons '(expr dir) order_rest)
+										(match expr (eval s) '("s" dir) (eval p) '("p" dir) (eval o) '("o" dir))
+									))
+									(set inner_ctx (merge ctx (merge (extract_assoc vars (lambda (k v) '(v (symbol v)))))))
+									(set filter_cols (cons list (extract_assoc conditions (lambda (k v) k))))
+									(set filter_fn '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v))))))
+									(set map_cols (cons list (extract_assoc vars (lambda (k v) k))))
+									(set map_fn (list (quote lambda) (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (if order_head order_rest order) inner_ctx resultfunc2)))
+									(match order_head
+										'(col dir)
+										(list (quote scan_order) schema "rdf"
+											filter_cols filter_fn
+											(list (quote list) col) (list (quote list) (match dir "DESC" > <)) 0 0 -1
+											map_cols map_fn (quote cons) nil)
+										(list (quote scan) schema "rdf" filter_cols filter_fn map_cols map_fn)
+									)
+							)))
+					))
 				)
-			))
-			(build_scan conditions order ctx resultfunc)
-		) (error "wrong rdf layout " query))
-	)))
+				'()
+				(match order
+					(cons _ _) (error (concat "order not consumed: " order))
+					(resultfunc2 cols ctx))
+			)
+		))
+		(build_scan conditions order ctx resultfunc)
+	) (error "wrong rdf layout " query))
+)))
 
 (define parse_sparql (lambda (schema s) (match (ttl_header s)
 	'("prefixes" definitions "rest" rest) (begin
@@ -857,13 +857,13 @@ consumer stage. */
 		(set parsed (rdf_resolve_prefixes parsed definitions))
 		(match parsed
 			'("insert_data" triples)
-				(list (quote begin)
-					(list (quote rdf_ensure_table) schema)
-					(list (quote rdf_insert_triples) schema (list (quote quote) triples)))
+			(list (quote begin)
+				(list (quote rdf_ensure_table) schema)
+				(list (quote rdf_insert_triples) schema (list (quote quote) triples)))
 			'("delete_data" triples)
-				(list (quote begin)
-					(list (quote rdf_ensure_table) schema)
-					(list (quote rdf_delete_triples) schema (list (quote quote) triples)))
+			(list (quote begin)
+				(list (quote rdf_ensure_table) schema)
+				(list (quote rdf_delete_triples) schema (list (quote quote) triples)))
 			'("ask" "where" conditions) (begin
 				(set _ask_state (newsession))
 				(_ask_state "matched" false)
@@ -872,16 +872,16 @@ consumer stage. */
 					(rdf_queryplan schema '("select" '() "where" conditions "group" '() "order" nil "limit" nil "offset" nil "distinct" nil) definitions '() (lambda (_cols _ctx)
 						(list _ask_state "matched" true)))
 					(list (quote resultrow) (list (quote list) "?ask" (list _ask_state "matched")))
-				))
+			))
 			'("construct" triples "where" conditions)
-				(list (quote begin)
-					(list (quote rdf_ensure_table) schema)
-					(rdf_queryplan schema '("select" '() "where" conditions "group" '() "order" nil "limit" nil "offset" nil "distinct" nil) definitions '() (lambda (_cols ctx)
-						(cons (quote begin) (map triples (lambda (triple) (match triple '(s p o)
-							(list (quote resultrow) (list (quote list) (rdf_replace_ctx s ctx) (rdf_replace_ctx p ctx) (rdf_replace_ctx o ctx)))
-						))))
-					))
-				)
+			(list (quote begin)
+				(list (quote rdf_ensure_table) schema)
+				(rdf_queryplan schema '("select" '() "where" conditions "group" '() "order" nil "limit" nil "offset" nil "distinct" nil) definitions '() (lambda (_cols ctx)
+					(cons (quote begin) (map triples (lambda (triple) (match triple '(s p o)
+						(list (quote resultrow) (list (quote list) (rdf_replace_ctx s ctx) (rdf_replace_ctx p ctx) (rdf_replace_ctx o ctx)))
+					))))
+				))
+			)
 			'("modify" "delete" delete_triples "insert" insert_triples "where" conditions) (begin
 				(set _delete_rows (newsession))
 				(set _insert_rows (newsession))
@@ -895,7 +895,7 @@ consumer stage. */
 					))
 					(list (quote rdf_delete_triples) schema (list (quote rdf_session_merged_values) _delete_rows))
 					(list (quote rdf_insert_triples) schema (list (quote rdf_session_merged_values) _insert_rows))
-				))
+			))
 			'("select" cols "where" conditions "group" qgroup "order" qorder "limit" qlimit "offset" qoffset "distinct" qdistinct) (begin
 				(set missing_select_vars (rdf_missing_select_vars cols conditions))
 				(if (not (equal? missing_select_vars '()))
@@ -933,12 +933,12 @@ consumer stage. */
 								(if qdistinct (_st "seen" (newsession)))
 								(rdf_queryplan schema parsed definitions '() (lambda (row_cols ctx)
 									(rdf_wrapped_resultrow_ast _st (cons list (rdf_row_items row_cols ctx)) qdistinct effective_offset effective_limit)
-								)))
+							)))
 							(rdf_queryplan schema parsed definitions '() rdf_select_resultrow_ast))
-					))
 				))
-		)
+		))
 	)
+)
 )))
 
 
@@ -957,42 +957,42 @@ consumer stage. */
 /* helper: parse TTL into list of (s p o) triples without loading */
 (define parse_ttl_triples (lambda (schema s) (match (ttl_header s)
 	'("prefixes" definitions "rest" rest)
-		(begin
-			(define ttl_simple_constant (parser (or
-				(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x))
-				(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post)))
-				(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
-				(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x)
-				(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
-				(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) (rdf_unescape x))
-				(regex "[a-zA-Z0-9_]+" true)
-			)))
-			(define ttl_object (parser (or
-				(parser '(
-					"["
-					(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_simple_constant ",")) (? ";")) (map os (lambda (o) '(p o))))))
-					"]"
-				) (begin
+	(begin
+		(define ttl_simple_constant (parser (or
+			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x))
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post)))
+			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
+			(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x)
+			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
+			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) (rdf_unescape x))
+			(regex "[a-zA-Z0-9_]+" true)
+		)))
+		(define ttl_object (parser (or
+			(parser '(
+				"["
+				(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_simple_constant ",")) (? ";")) (map os (lambda (o) '(p o))))))
+				"]"
+			) (begin
 					(define bn (concat "_:anon_" (uuid)))
 					(list "__ttl_inline_node__" bn (merge (map ps (lambda (p) (map p (lambda (p1) (cons bn p1)))))))
-				))
+			))
+			(parser '(
+				"("
+				(define _items (* ttl_simple_constant))
+				")"
+			) (concat "_:list_" (uuid)))
+			ttl_simple_constant
+		)))
+		(define ttl_fact (parser '(
+			(define facts
 				(parser '(
-					"("
-					(define _items (* ttl_simple_constant))
-					")"
-				) (concat "_:list_" (uuid)))
-				ttl_simple_constant
-			)))
-			(define ttl_fact (parser '(
-				(define facts
-					(parser '(
-						(define s ttl_simple_constant)
-						(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_object ",")) (? ";")) (map os (lambda (o) '(p o))))))
-						"."
-					) (merge (map ps (lambda (p) (merge (map p (lambda (p1) (match p1 '(pred obj) (rdf_expand_ttl_object s pred obj)))))))))
-				)
-				(define rest rest)
-			) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+					(define s ttl_simple_constant)
+					(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_object ",")) (? ";")) (map os (lambda (o) '(p o))))))
+					"."
+				) (merge (map ps (lambda (p) (merge (map p (lambda (p1) (match p1 '(pred obj) (rdf_expand_ttl_object s pred obj)))))))))
+			)
+			(define rest rest)
+		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 		(set _pt (newsession))
 		(_pt "triples" '())
 		(define process_fact (lambda (rest) (match (ttl_fact rest)
@@ -1015,9 +1015,9 @@ consumer stage. */
 
 (define load_ttl (lambda (schema s) (match (ttl_header s)
 	'("prefixes" definitions "rest" rest)
-		(begin
-			/* blank node registry: maps _:id to urn:uuid:... per load */
-			(set _bn (newsession))
+	(begin
+		/* blank node registry: maps _:id to urn:uuid:... per load */
+		(set _bn (newsession))
 		(define resolve_blank (lambda (val)
 			(if (nil? val) val
 				(match val (regex "^_:(.+)$" _ bname) (begin
@@ -1026,41 +1026,41 @@ consumer stage. */
 				) val)
 			)
 		))
-			(define ttl_simple_constant (parser (or
-				(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node before prefix match */
-				(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))) /* add prefix with validation */
-				(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
-				(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x)
-				(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
-				(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) (rdf_unescape x))
-				(regex "[a-zA-Z0-9_]+" true)
-			)))
-			(define ttl_object (parser (or
-				(parser '(
-					"["
-					(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_simple_constant ",")) (? ";")) (map os (lambda (o) '(p o))))))
-					"]"
-				) (begin
+		(define ttl_simple_constant (parser (or
+			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node before prefix match */
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))) /* add prefix with validation */
+			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
+			(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) x)
+			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
+			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) rdf_datatype_suffix)) (rdf_unescape x))
+			(regex "[a-zA-Z0-9_]+" true)
+		)))
+		(define ttl_object (parser (or
+			(parser '(
+				"["
+				(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_simple_constant ",")) (? ";")) (map os (lambda (o) '(p o))))))
+				"]"
+			) (begin
 					(define bn (concat "_:anon_" (uuid)))
 					(list "__ttl_inline_node__" bn (merge (map ps (lambda (p) (map p (lambda (p1) (cons bn p1)))))))
-				))
+			))
+			(parser '(
+				"("
+				(define _items (* ttl_simple_constant))
+				")"
+			) (concat "_:list_" (uuid)))
+			ttl_simple_constant
+		)))
+		(define ttl_fact (parser '(
+			(define facts
 				(parser '(
-					"("
-					(define _items (* ttl_simple_constant))
-					")"
-				) (concat "_:list_" (uuid)))
-				ttl_simple_constant
-			)))
-			(define ttl_fact (parser '(
-				(define facts
-					(parser '(
-						(define s ttl_simple_constant)
-						(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_object ",")) (? ";")) (map os (lambda (o) '(p o))))))
-						"."
-					) (merge (map ps (lambda (p) (merge (map p (lambda (p1) (match p1 '(pred obj) (rdf_expand_ttl_object s pred obj)))))))))
-				)
-				(define rest rest)
-			) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
+					(define s ttl_simple_constant)
+					(define ps (+ (parser '((define p ttl_simple_constant) (define os (+ ttl_object ",")) (? ";")) (map os (lambda (o) '(p o))))))
+					"."
+				) (merge (map ps (lambda (p) (merge (map p (lambda (p1) (match p1 '(pred obj) (rdf_expand_ttl_object s pred obj)))))))))
+			)
+			(define rest rest)
+		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 		(set load (lambda (facts) (begin
 			/* resolve blank nodes to UUIDs and insert */
 			(insert schema "rdf" '("s" "p" "o") (map facts (lambda (triple) (list (resolve_blank (car triple)) (resolve_blank (car (cdr triple))) (resolve_blank (car (cdr (cdr triple))))))) '() (lambda () true))
