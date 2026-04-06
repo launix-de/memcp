@@ -4355,9 +4355,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define expr_name (lambda (expr)
 					(sanitize_temp_name
 						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar expr)) '(list) '(list) canon_alias_map))))
-				(define agg_col_name (lambda (ag)
-					(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))
 				(define count_ag '(1 + 0))
+				(define canonical_count_col_name (lambda ()
+					(concat "COUNT(*)|" (expr_name condition) (runtime_cache_suffix_from_exprs (list condition)))))
+				(define agg_col_name (lambda (ag)
+					(if (equal? ag count_ag)
+						(canonical_count_col_name)
+						(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition))))))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
 						(define target_col (agg_col_name agg_args))
@@ -4933,8 +4937,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
+						(define canonical_count_col_name (lambda ()
+							(concat "COUNT(*)|" (expr_name condition) (runtime_cache_suffix_from_exprs (list condition)))))
 						(define agg_col_name (lambda (ag)
-							(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))
+							(if (equal? ag count_ag)
+								(canonical_count_col_name)
+								(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition))))))
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)

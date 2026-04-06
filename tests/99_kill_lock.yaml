@@ -286,6 +286,8 @@ test_cases:
       - session_id: "lock-state-writer"
         sql: "SELECT 1"
       - session_id: "lock-state-writer"
+        sql: "SELECT 1"
+      - session_id: "lock-state-writer"
         sql: "SHOW PROCESSLIST"
         expect:
           contains: "Waiting for table lock"
