@@ -148,7 +148,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx)
+		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
 		values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 	})
 	if done == nil {
@@ -254,12 +254,15 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	return akkumulator
 }
 
-func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext) (scm.Scmer, int64) {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
 	if stride > 0 {
-		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx)
+		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
 	}
 	akkumulator := neutral
 	var outCount int64
+	if ss == nil {
+		ss = scm.GetCurrentSessionState()
+	}
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	hasMutationCallback := false
@@ -480,10 +483,12 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	return akkumulator, outCount
 }
 
-func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext) (scm.Scmer, int64) {
+func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
 	akkumulator := neutral
 	var outCount int64
-	ss := scm.GetCurrentSessionState()
+	if ss == nil {
+		ss = scm.GetCurrentSessionState()
+	}
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	hasMutationCallback := false

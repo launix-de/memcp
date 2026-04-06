@@ -1062,8 +1062,9 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 }
 
 // COUNT-style helper columns use a literal 1 map function. Their value also
-// controls group visibility via COUNT>0, so selective invalidation is safer
-// than arithmetic delta folding across 0<->1 transitions.
+// controls group visibility via COUNT>0, so DML must not rely on key-local
+// arithmetic folding. A full column invalidation is semantically robust and
+// lets the next read recompute the visible domain from source rows.
 func isConstantOneAggregate(mapFn scm.Scmer) bool {
 	if mapFn.IsProc() {
 		body := mapFn.Proc().Body
@@ -1465,7 +1466,12 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 						mapColsIdx, mapFnIdx = 6, 7
 					}
 					if isConstantOneAggregate(scanNode[mapFnIdx]) {
-						body = buildSelectiveInvalidationBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, timing)
+						body = scm.NewSlice([]scm.Scmer{
+							scm.NewSymbol("invalidatecolumn"),
+							scm.NewString(targetSchema),
+							scm.NewString(t.Name),
+							scm.NewString(name),
+						})
 					} else {
 						body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapFnIdx], timing)
 					}

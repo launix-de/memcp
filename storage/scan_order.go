@@ -409,7 +409,7 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 				q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols, currentTx)
+		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols, currentTx, ss)
 		q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 	})
 	if done == nil {
@@ -612,9 +612,12 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
+	if ss == nil {
+		ss = scm.GetCurrentSessionState()
+	}
 	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
 		if len(args) < 2 {
 			return scm.NewBool(false)
@@ -739,7 +742,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
 	if t.t.tableLockOwner.Load() != nil {
-		t.t.waitTableLock(scm.GetCurrentSessionState(), false)
+		t.t.waitTableLock(ss, false)
 	}
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
@@ -762,7 +765,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			if t.t.tableLockOwner.Load() != nil {
 				t.mu.RUnlock()
 				shardLocked = false
-				t.t.waitTableLock(scm.GetCurrentSessionState(), false)
+				t.t.waitTableLock(ss, false)
 				t.mu.RLock()
 				shardLocked = true
 			}
