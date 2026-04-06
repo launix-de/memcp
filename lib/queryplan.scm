@@ -577,11 +577,11 @@ raw _unn_* occurrence aliases into physical temp column names. */
 
 /* scalar subselect helper wrappers */
 (define scalar_scan (lambda (schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2) (begin
-	(define result (scan schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2))
+	(define result (scan '((context "session") "__memcp_tx") schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2))
 	(if (equal? result neutral) nil result)
 )))
 (define scalar_scan_order (lambda (schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral) (begin
-	(define result (scan_order schema tbl filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
+	(define result (scan_order '((context "session") "__memcp_tx") schema tbl filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
 	(if (equal? result neutral) nil result)
 )))
 
@@ -719,7 +719,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 				(list (quote begin)
 					_inner_flush_define
 					(list (quote nth)
-						(list (quote scan) schema tbl
+						(list (quote scan) '((context "session") "__memcp_tx") schema tbl
 							(cons list filtercols)
 							outer_filter_lambda
 							scan_mapcols
@@ -756,7 +756,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 						0))
 				(list (quote begin)
 					_inner_flush_define
-					(list (quote scan) schema tbl
+					(list (quote scan) '((context "session") "__memcp_tx") schema tbl
 						(cons list filtercols)
 						outer_filter_lambda
 						scan_mapcols
@@ -1693,7 +1693,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					(define kt_key_names (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 					/* outer refs need raw column names (tblvar.col), not canonical expr_name */
 					(define raw_col_names (map group_keys (lambda (col) (match col '('get_column _ _ c _) c (expr_name col)))))
-					(list 'scan schema grouptbl
+					(list 'scan '((context "session") "__memcp_tx") schema grouptbl
 						(cons 'list kt_key_names)
 						/* filter: (equal? grouptbl.kt_key (outer tblvar.raw_col)) — zip kt_key_names with raw_col_names */
 						(list 'lambda
@@ -1703,7 +1703,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false))
-					(list 'scan schema grouptbl '(list) '('lambda '() true)
+					(list 'scan '((context "session") "__memcp_tx") schema grouptbl '(list) '('lambda '() true)
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false)))
@@ -1822,7 +1822,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW session) ...) and
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(list 'scan schema tbl
+					(list 'scan '((context "session") "__memcp_tx") schema tbl
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))

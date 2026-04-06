@@ -26,10 +26,7 @@ import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
 func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	mapEnd, reduceIdx, neutralIdx, outerIdx := 11, 12, 13, 14
-	if !scanExprUsesLegacyArgs(v) {
-		mapEnd, reduceIdx, neutralIdx, outerIdx = 12, 13, 14, 15
-	}
+	mapEnd, reduceIdx, neutralIdx, outerIdx := 12, 13, 14, 15
 	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
@@ -241,7 +238,6 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
-	currentTx = effectiveTxContext(currentTx)
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
@@ -638,7 +634,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	for i, scol := range sortcols {
 		if scol.IsString() {
 			colname := scol.String()
-			result.scols[i] = t.ColumnReader(colname)
+			result.scols[i] = t.ColumnReaderTx(currentTx, colname)
 			continue
 		}
 		if proc, ok := scol.Any().(scm.Proc); ok {
@@ -658,7 +654,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				} else {
 					name = scm.String(param)
 				}
-				largs[j] = t.ColumnReader(name)
+				largs[j] = t.ColumnReaderTx(currentTx, name)
 			}
 			procFn := scm.OptimizeProcToSerialFunction(scol)
 			result.scols[i] = func(idx uint32) scm.Scmer {

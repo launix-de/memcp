@@ -238,7 +238,7 @@ func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
 	variant := p.currentVariant(tx, true)
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
 	}
 	return &computeVariantReader{
 		proxy:   p,
@@ -274,7 +274,7 @@ func (p *StorageComputeProxy) compressVariant(v *storageComputeVariant, tx *TxCo
 
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
 	}
 
 	colvalues := make([]scm.Scmer, len(p.inputCols))
@@ -326,11 +326,11 @@ func (p *StorageComputeProxy) compressFilteredVariant(v *storageComputeVariant, 
 	filterFn := scm.OptimizeProcToSerialFunction(filter)
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
-		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
 	}
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(col, tx))
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
 	}
 
 	filterValues := make([]scm.Scmer, len(filterCols))
@@ -436,7 +436,7 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	for i, col := range p.inputCols {
 		// Delta rows must be read via the shard-level ColumnReader; direct
 		// ColumnStorage access only understands main-row indexes.
-		colvalues[i] = p.shard.ColumnReader(col)(idx)
+		colvalues[i] = p.shard.ColumnReaderTx(CurrentTx(), col)(idx)
 	}
 	val := applyWithTx(CurrentTx(), p.computor, colvalues...)
 
@@ -570,7 +570,7 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 				if scmer, ok := v.main.(*StorageSCMER); ok {
 					colvalues := make([]scm.Scmer, len(p.inputCols))
 					for i, col := range p.inputCols {
-						colvalues[i] = p.shard.ColumnReaderTx(col, CurrentTx())(idx)
+						colvalues[i] = p.shard.ColumnReaderTx(CurrentTx(), col)(idx)
 					}
 					val := applyWithTx(CurrentTx(), p.computor, colvalues...)
 					scmer.SetValue(idx, val)

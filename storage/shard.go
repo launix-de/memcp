@@ -1276,11 +1276,7 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 	next.mu.Unlock()
 }
 
-func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
-	return t.ColumnReaderTx(col, CurrentTx())
-}
-
-func (t *storageShard) ColumnReaderTx(col string, tx *TxContext) func(uint32) scm.Scmer {
+func (t *storageShard) ColumnReaderTx(tx *TxContext, col string) func(uint32) scm.Scmer {
 	cstorage := t.getColumnStorageOrPanic(col)
 	reader := newCachedColumnReaderTx(cstorage, tx)
 	return func(idx uint32) scm.Scmer {

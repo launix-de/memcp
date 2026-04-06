@@ -1743,7 +1743,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 								}
 							}
 						} else {
-							params[i] = s.ColumnReader(p)(uid)
+							params[i] = s.ColumnReaderTx(currentTx, p)(uid)
 						}
 					}
 					func() {

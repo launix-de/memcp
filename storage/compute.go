@@ -33,7 +33,6 @@ import "github.com/launix-de/memcp/scm"
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
 func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext) ColumnReader {
-	tx = effectiveTxContext(tx)
 	if provider, ok := col.(TxColumnReaderProvider); ok {
 		return provider.GetCachedReaderTx(tx)
 	}

@@ -222,7 +222,7 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 	rebuilt.mu.RLock()
 	rowOneDeleted := rebuilt.deletions.Get(1)
 	rebuilt.mu.RUnlock()
-	got := rebuilt.ColumnReader("payload")(2)
+	got := rebuilt.ColumnReaderTx(nil, "payload")(2)
 	if !rowOneDeleted || got.String() != "two-updated" {
 		t.Fatalf("rebuilt update state = (deleted=%v, payload=%v), want (true, two-updated)", rowOneDeleted, got)
 	}

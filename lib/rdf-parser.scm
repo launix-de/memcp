@@ -641,7 +641,7 @@ consumer stage. */
 ))
 (define rdf_relation_targets (lambda (schema subj pred) (begin
 	(define out (newsession))
-	(scan schema "rdf" '("s" "p") (lambda (s p) (and (equal? s subj) (equal? p pred))) '("o") (lambda (o) (out o true)))
+	(scan '((context "session") "__memcp_tx") schema "rdf" '("s" "p") (lambda (s p) (and (equal? s subj) (equal? p pred))) '("o") (lambda (o) (out o true)))
 	(out)
 )))
 (define rdf_path_targets (lambda (schema start pred include_self) (begin
@@ -671,7 +671,7 @@ consumer stage. */
 ))
 (define rdf_delete_triples (lambda (schema triples) (begin
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan schema "rdf" '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
+		(scan '((context "session") "__memcp_tx") schema "rdf" '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
 	)))
 	nil
 )))
@@ -1009,7 +1009,7 @@ consumer stage. */
 (define delete_ttl (lambda (schema s) (begin
 	(set triples (parse_ttl_triples schema s))
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan schema "rdf" '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
+		(scan '((context "session") "__memcp_tx") schema "rdf" '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
 	)))
 )))
 

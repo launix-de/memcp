@@ -62,16 +62,10 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	if scanExprUsesLegacyArgs(v) {
-		return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
-	}
 	return optimizeScanShared(v, oc, 7, 8, 9, 10, 11)
 }
 
 func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	if scanExprUsesLegacyArgs(v) {
-		return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
-	}
 	return optimizeScanShared(v, oc, 9, 10, 11, 12, 13)
 }
 
@@ -89,7 +83,6 @@ func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm
 }
 
 func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
-	currentTx = effectiveTxContext(currentTx)
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")

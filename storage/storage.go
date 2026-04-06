@@ -56,21 +56,6 @@ func scmerToTxContext(v scm.Scmer) *TxContext {
 	return tx
 }
 
-func scanUsesLegacyArgs(a []scm.Scmer) bool {
-	return len(a) > 0 && a[0].IsString()
-}
-
-func scanExprUsesLegacyArgs(a []scm.Scmer) bool {
-	return len(a) > 1 && a[1].IsString()
-}
-
-func effectiveTxContext(tx *TxContext) *TxContext {
-	if tx != nil {
-		return tx
-	}
-	return CurrentTx()
-}
-
 type scanArgLayout struct {
 	tx            *TxContext
 	schemaIdx     int
@@ -93,28 +78,6 @@ type scanArgLayout struct {
 }
 
 func scanLayout(a []scm.Scmer) scanArgLayout {
-	if scanUsesLegacyArgs(a) {
-		return scanArgLayout{
-			tx:            nil,
-			schemaIdx:     0,
-			tableIdx:      1,
-			filterColsIdx: 2,
-			filterFnIdx:   3,
-			mapColsIdx:    4,
-			mapFnIdx:      5,
-			reduceIdx:     6,
-			neutralIdx:    7,
-			reduce2Idx:    8,
-			outerIdx:      9,
-			sortColsIdx:   4,
-			sortDirsIdx:   5,
-			partColsIdx:   6,
-			offsetIdx:     7,
-			limitIdx:      8,
-			strideIdx:     6,
-			batchDataIdx:  7,
-		}
-	}
 	return scanArgLayout{
 		tx:            scmerToTxContext(a[0]),
 		schemaIdx:     1,
@@ -504,6 +467,7 @@ func Init(en scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "string|nil", ParamName: "schema", ParamDesc: "database where the table is located"},
 				{Kind: "string|list", ParamName: "table", ParamDesc: "name of the table to scan (or a list if you have temporary data)"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
@@ -636,6 +600,7 @@ func Init(en scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "string|nil", ParamName: "schema", ParamDesc: "database where the table is located"},
 				{Kind: "string|list", ParamName: "table", ParamDesc: "name of the table to scan (or a list if you have temporary data)"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter; #0, #1, ... address batchdata slots"},
@@ -792,6 +757,7 @@ func Init(en scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to scan"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
@@ -2657,7 +2623,7 @@ func (t *table) PrintMemUsage() string {
 }
 
 // fkExistenceCheck checks if values exist in tbl[filterCols]. Returns true if found or all NULL.
-func fkExistenceCheck(tbl *table, filterCols []string, vals []scm.Scmer) bool {
+func fkExistenceCheck(currentTx *TxContext, tbl *table, filterCols []string, vals []scm.Scmer) bool {
 	for _, v := range vals {
 		if v.IsNil() {
 			return true // NULL FK is always valid
@@ -2678,11 +2644,11 @@ func fkExistenceCheck(tbl *table, filterCols []string, vals []scm.Scmer) bool {
 		}
 		return scm.NewBool(false)
 	})
-	return scm.ToBool(tbl.scan(CurrentTx(), filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false))
+	return scm.ToBool(tbl.scan(currentTx, filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false))
 }
 
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
-func fkCascadeDelete(childTbl *table, cols []string, vals []scm.Scmer) {
+func fkCascadeDelete(currentTx *TxContext, childTbl *table, cols []string, vals []scm.Scmer) {
 	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := range cols {
 			if !scm.Equal(a[i], vals[i]) {
@@ -2698,11 +2664,11 @@ func fkCascadeDelete(childTbl *table, cols []string, vals []scm.Scmer) {
 		scm.Apply(a[len(cols)]) // $update() with no args = delete
 		return scm.NewNil()
 	})
-	childTbl.scan(CurrentTx(), cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeSetNull sets FK cols to NULL in childTbl where cols match vals.
-func fkCascadeSetNull(childTbl *table, cols []string, vals []scm.Scmer) {
+func fkCascadeSetNull(currentTx *TxContext, childTbl *table, cols []string, vals []scm.Scmer) {
 	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := range cols {
 			if !scm.Equal(a[i], vals[i]) {
@@ -2723,11 +2689,11 @@ func fkCascadeSetNull(childTbl *table, cols []string, vals []scm.Scmer) {
 		scm.Apply(a[len(cols)], scm.NewSlice(payload))
 		return scm.NewNil()
 	})
-	childTbl.scan(CurrentTx(), cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeUpdate updates FK cols in childTbl from oldVals to newVals.
-func fkCascadeUpdate(childTbl *table, cols []string, oldVals, newVals []scm.Scmer) {
+func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVals, newVals []scm.Scmer) {
 	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := range cols {
 			if !scm.Equal(a[i], oldVals[i]) {
@@ -2748,7 +2714,7 @@ func fkCascadeUpdate(childTbl *table, cols []string, oldVals, newVals []scm.Scme
 		scm.Apply(a[len(cols)], scm.NewSlice(payload))
 		return scm.NewNil()
 	})
-	childTbl.scan(CurrentTx(), cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
 }
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.
@@ -2757,6 +2723,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_check_ref",
 		Desc: "check that FK values exist in the parent table, panic if not",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := CurrentTx()
 			schema := scm.String(a[0])
 			parentTable := scm.String(a[1])
 			parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
@@ -2776,7 +2743,7 @@ func initFKBuiltins(en scm.Env) {
 			if tbl == nil {
 				panic("foreign key " + fkId + ": parent table " + schema + "." + parentTable + " does not exist")
 			}
-			if !fkExistenceCheck(tbl, parentCols, values) {
+			if !fkExistenceCheck(currentTx, tbl, parentCols, values) {
 				panic(sqldb.NewSQLError1(1452, "23000", "foreign key constraint %s failed: value does not exist in %s", fkId, parentTable))
 			}
 			return scm.NewNil()
@@ -2798,6 +2765,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_delete",
 		Desc: "enforce FK constraint when parent row is deleted",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := CurrentTx()
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -2812,16 +2780,16 @@ func initFKBuiltins(en scm.Env) {
 			if tbl == nil {
 				return scm.NewNil()
 			}
-			if !fkExistenceCheck(tbl, childCols, parentVals) {
+			if !fkExistenceCheck(currentTx, tbl, childCols, parentVals) {
 				return scm.NewNil() // no references
 			}
 			switch mode {
 			case "RESTRICT":
 				panic(sqldb.NewSQLError1(1451, "23000", "foreign key constraint %s failed: cannot delete because rows in %s reference it", fkId, childTable))
 			case "CASCADE":
-				fkCascadeDelete(tbl, childCols, parentVals)
+				fkCascadeDelete(currentTx, tbl, childCols, parentVals)
 			case "SETNULL":
-				fkCascadeSetNull(tbl, childCols, parentVals)
+				fkCascadeSetNull(currentTx, tbl, childCols, parentVals)
 			}
 			return scm.NewNil()
 		},
@@ -2843,6 +2811,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_update",
 		Desc: "enforce FK constraint when parent PK is updated",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := CurrentTx()
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -2873,13 +2842,13 @@ func initFKBuiltins(en scm.Env) {
 			}
 			switch mode {
 			case "RESTRICT":
-				if fkExistenceCheck(tbl, childCols, oldVals) {
+				if fkExistenceCheck(currentTx, tbl, childCols, oldVals) {
 					panic(sqldb.NewSQLError1(1451, "23000", "foreign key constraint %s failed: cannot update because rows in %s reference it", fkId, childTable))
 				}
 			case "CASCADE":
-				fkCascadeUpdate(tbl, childCols, oldVals, newVals)
+				fkCascadeUpdate(currentTx, tbl, childCols, oldVals, newVals)
 			case "SETNULL":
-				fkCascadeSetNull(tbl, childCols, oldVals)
+				fkCascadeSetNull(currentTx, tbl, childCols, oldVals)
 			}
 			return scm.NewNil()
 		},
