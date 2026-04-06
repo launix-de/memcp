@@ -1256,6 +1256,7 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
+		scm.NewSymbol("session"),
 		scm.NewString(targetSchema), scm.NewString(targetTable),
 		scm.NewSlice(filterColElems),
 		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
@@ -1375,6 +1376,7 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
+		scm.NewSymbol("session"),
 		scm.NewString(targetSchema), scm.NewString(targetTable),
 		scm.NewSlice(filterColElems),
 		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),

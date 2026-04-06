@@ -1630,6 +1630,7 @@ func Init(en scm.Env) {
 			buildCountScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
+					scm.NewSymbol("session"),
 					scm.NewString(baseSchema), scm.NewString(baseTable.Name),
 					scanFilterCols(baseCols),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
@@ -1644,6 +1645,7 @@ func Init(en scm.Env) {
 			buildDeleteScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
+					scm.NewSymbol("session"),
 					scm.NewString(ktSchema), scm.NewString(ktName),
 					scanFilterCols(ktCols),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},

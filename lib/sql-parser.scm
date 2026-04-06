@@ -1429,14 +1429,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
-					'((quote scan) "system" "access"
+					'((quote scan) '(session "__memcp_tx") "system" "access"
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
 						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 						(quote +)
 						0)
-					'((quote scan) "system" "user"
+					'((quote scan) '(session "__memcp_tx") "system" "user"
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -1453,7 +1453,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
 
 		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
@@ -1463,7 +1463,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
 		/* GRANT <anything> ON db.* TO user -> insert access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
@@ -1480,12 +1480,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
+					'(session "__memcp_tx")
 					"system"
 					"access"
 					'(list "username" "database")
@@ -1499,6 +1500,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
+					'(session "__memcp_tx")
 					"system"
 					"access"
 					'(list "username" "database")
@@ -1607,7 +1609,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
-					'((quote scan) "system" "access"
+					'((quote scan) '(session "__memcp_tx") "system" "access"
 						'('list "database")
 						'((quote lambda) '('database) '((quote equal??) (quote database) id))
 						'(list "$update")

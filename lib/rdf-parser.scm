@@ -831,11 +831,11 @@ consumer stage. */
 									(set map_fn (list (quote lambda) (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (if order_head order_rest order) inner_ctx resultfunc2)))
 									(match order_head
 										'(col dir)
-										(list (quote scan_order) schema "rdf"
+										(list (quote scan_order) (list (quote session) "__memcp_tx") schema "rdf"
 											filter_cols filter_fn
 											(list (quote list) col) (list (quote list) (match dir "DESC" > <)) 0 0 -1
 											map_cols map_fn (quote cons) nil)
-										(list (quote scan) schema "rdf" filter_cols filter_fn map_cols map_fn)
+										(list (quote scan) (list (quote session) "__memcp_tx") schema "rdf" filter_cols filter_fn map_cols map_fn)
 									)
 							)))
 					))
