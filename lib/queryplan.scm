@@ -5771,9 +5771,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
 					(list "Field" (car mc) "Type" "any" "Expr" (cadr mc)))))
+				(define prejoin_row_domain_raw (combine_and_terms
+					(merge
+						(if (or (nil? raw_condition) (equal? raw_condition true)) '()
+							(list raw_condition))
+						(merge (map prejoin_source_tables (lambda (td) (match td
+							'(_ _ _ _ tjoinexpr)
+								(if (or (nil? tjoinexpr) (equal? tjoinexpr true)) '()
+									(list tjoinexpr))
+							'())))))))
 				(define prejoin_condition_name (serialize_canonical_expr
 					(canonicalize_expr
-						(normalize_canonical_aliases (canonicalize_prejoin_source_expr raw_condition))
+						(normalize_canonical_aliases (canonicalize_prejoin_source_expr prejoin_row_domain_raw))
 						prejoin_alias_map)))
 				(define prejointbl (concat ".prejoin:"
 					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
@@ -6024,7 +6033,31 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(match expr
 							(cons sym args) (cons sym (map args rewrite_group_key_to_group_alias))
 							expr))))
-				(define grouped_having (rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr raw_stage_post_group_condition)))
+				(define grouped_outer_condition_aliases (map _grp_ps_tables (lambda (td) (match td
+					'(tv _ _ _ _) (if (nil? tv) "" tv)
+					""))))
+				(define grouped_outer_condition_term? (lambda (expr)
+					(reduce (extract_tblvars expr) (lambda (acc tv)
+						(or acc (has? grouped_outer_condition_aliases tv)))
+						false)))
+				(define rewrite_local_prejoin_count_term (lambda (expr) (match expr
+					(cons (symbol aggregate) _) (list (quote aggregate) 1 + 0)
+					(cons '(quote aggregate) _) (list (quote aggregate) 1 + 0)
+					(cons sym args) (cons sym (map args rewrite_local_prejoin_count_term))
+					expr)))
+				(define keep_grouped_post_group_term (lambda (expr)
+					(if (grouped_outer_condition_term? expr)
+						expr
+						(if (equal? (extract_aggregates expr) '())
+							nil
+							(rewrite_local_prejoin_count_term expr)))))
+				(define grouped_having_raw (combine_and_terms
+					(filter (map (flatten_and_terms (coalesceNil raw_stage_post_group_condition true))
+						keep_grouped_post_group_term)
+						(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+				(define grouped_having (if (or (nil? grouped_having_raw) (equal? grouped_having_raw true))
+					nil
+					(rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr grouped_having_raw))))
 				(define grouped_order (if (nil? raw_stage_order) nil
 					(map raw_stage_order (lambda (o) (match o '(col dir)
 						(list (lower_prejoin_lineage_expr col) dir))))))
@@ -6039,9 +6072,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					'())))))
 				/* recursive call with single prejoin table.
 				Scoped groups keep their outer tables outside the prejoin so later field
-				expressions can still read them after the keytable LEFT JOIN. */
-				(define grouped_plan_condition_base (if (equal? raw_post_group_condition true) nil
-					(lower_prejoin_lineage_expr raw_post_group_condition)))
+				expressions can still read them after the keytable LEFT JOIN.
+				Local predicates were already enforced while filling the prejoin table and
+				must not be carried again as a grouped cache condition suffix. */
+				(define grouped_plan_condition_base_raw (combine_and_terms
+					(filter (map (flatten_and_terms (coalesceNil raw_post_group_condition true))
+						keep_grouped_post_group_term)
+						(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+				(define grouped_plan_condition_base (if (or (nil? grouped_plan_condition_base_raw) (equal? grouped_plan_condition_base_raw true))
+					nil
+					(lower_prejoin_lineage_expr grouped_plan_condition_base_raw)))
 				(define recursive_replace_find_column (lambda (expr)
 					(match expr
 						'((symbol get_column) alias_ _ _ _) (begin
