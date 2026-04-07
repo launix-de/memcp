@@ -1,0 +1,62 @@
+# SELECT 1 with scalar SUM subquery containing NOT(col), nested correlated
+# COALESCE, session variable, EXISTS, and CASE WHEN. The aggregate column
+# name must be stable between create-time and read-time despite optimizer
+# rewriting the aggregate body from literal 1 to (outer (var N)).
+
+metadata:
+  version: "1.0"
+  description: "Scalar SUM with correlated session subquery in SELECT 1 context"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS era_share"
+  - sql: "DROP TABLE IF EXISTS era_box"
+  - sql: "DROP TABLE IF EXISTS era_dir"
+  - sql: "DROP TABLE IF EXISTS era_email"
+  - sql: "CREATE TABLE era_box (ID INT PRIMARY KEY, fopuser TEXT, zuweisungPublic INT)"
+  - sql: "CREATE TABLE era_share (ID INT PRIMARY KEY, mailbox INT, fopuser TEXT)"
+  - sql: "CREATE TABLE era_dir (ID INT PRIMARY KEY, mailbox INT)"
+  - sql: "CREATE TABLE era_email (ID INT PRIMARY KEY, directory INT, seen INT)"
+  - sql: "INSERT INTO era_box VALUES (1, 'alice', 0), (2, 'bob', 1)"
+  - sql: "INSERT INTO era_share VALUES (10, 1, 'carol')"
+  - sql: "INSERT INTO era_dir VALUES (100, 1), (200, 2)"
+  - sql: "INSERT INTO era_email VALUES (1000, 100, 0), (1001, 100, 1), (1002, 200, 0)"
+
+test_cases:
+
+  - name: "set session var"
+    session_id: "era_sess"
+    sql: "SET @fop_user = 'alice'"
+    expect:
+      rows_affected: 0
+
+  - name: "ERPL reminder: SUM with NOT, session var, EXISTS, CASE WHEN in correlated chain"
+    session_id: "era_sess"
+    sql: |
+      SELECT 1,
+        (SELECT SUM(1) FROM era_email e
+          WHERE NOT(e.seen)
+          AND COALESCE(
+            (SELECT
+              COALESCE(
+                (SELECT
+                  (CASE WHEN FALSE THEN TRUE
+                    ELSE NOT ((b.fopuser <> @fop_user)
+                      AND (NOT (EXISTS (SELECT TRUE FROM era_share s
+                        WHERE s.mailbox = b.ID AND s.fopuser = @fop_user LIMIT 1))))
+                  END)
+                FROM era_box b WHERE b.ID = d.mailbox LIMIT 1),
+              FALSE)
+            FROM era_dir d WHERE d.ID = e.directory LIMIT 1),
+          FALSE)
+        LIMIT 1) AS unseen
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          unseen: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS era_email"
+  - sql: "DROP TABLE IF EXISTS era_dir"
+  - sql: "DROP TABLE IF EXISTS era_share"
+  - sql: "DROP TABLE IF EXISTS era_box"
