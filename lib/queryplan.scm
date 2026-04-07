@@ -5694,12 +5694,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(if (equal? raw_post_group_condition true)
 							raw_deferred_condition
 							(cons (quote and) (cons raw_post_group_condition (list raw_deferred_condition)))))))
-				/* merge aggregate parts into ps_condition (both go to grouped_plan) */
-				(define post_group_condition (if (equal? 0 (count aggregate_condition_parts)) post_group_condition
+				/* Only true deferred condition aggregates belong in grouped_plan condition.
+				Local HAVING on the recursive grouped prejoin stage must stay on the stage
+				itself instead of being collapsed into the later count-cache condition path. */
+				(define post_group_condition (if (or (nil? _grp_ps_tables) (equal? 0 (count aggregate_condition_parts))) post_group_condition
 					(if (equal? post_group_condition true)
 						(if (equal? 1 (count aggregate_condition_parts)) (car aggregate_condition_parts) (cons (quote and) aggregate_condition_parts))
 						(cons (quote and) (cons post_group_condition aggregate_condition_parts)))))
-				(define raw_post_group_condition (if (equal? 0 (count raw_aggregate_condition_parts)) raw_post_group_condition
+				(define raw_post_group_condition (if (or (nil? _grp_ps_tables) (equal? 0 (count raw_aggregate_condition_parts))) raw_post_group_condition
 					(if (equal? raw_post_group_condition true)
 						(if (equal? 1 (count raw_aggregate_condition_parts)) (car raw_aggregate_condition_parts) (cons (quote and) raw_aggregate_condition_parts))
 						(cons (quote and) (cons raw_post_group_condition raw_aggregate_condition_parts)))))
@@ -6040,9 +6042,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(reduce (extract_tblvars expr) (lambda (acc tv)
 						(or acc (has? grouped_outer_condition_aliases tv)))
 						false)))
+				(define countlike_prejoin_aggregate_expr? (lambda (expr) (match expr
+					1 true
+					'(if _ 1 0) true
+					'(if _ true false) true
+					'(if _ false true) true
+					'(if _ 0 1) true
+					_ false)))
 				(define rewrite_local_prejoin_count_term (lambda (expr) (match expr
-					(cons (symbol aggregate) _) (list (quote aggregate) 1 + 0)
-					(cons '(quote aggregate) _) (list (quote aggregate) 1 + 0)
+					(cons (symbol aggregate) agg_args)
+						(match agg_args
+							'(agg_expr + 0)
+								(if (countlike_prejoin_aggregate_expr? agg_expr)
+									(list (quote aggregate) 1 + 0)
+									expr)
+							_ expr)
+					(cons '(quote aggregate) agg_args)
+						(match agg_args
+							'(agg_expr + 0)
+								(if (countlike_prejoin_aggregate_expr? agg_expr)
+									(list (quote aggregate) 1 + 0)
+									expr)
+							_ expr)
 					(cons sym args) (cons sym (map args rewrite_local_prejoin_count_term))
 					expr)))
 				(define keep_grouped_post_group_term (lambda (expr)
@@ -6051,13 +6072,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(if (equal? (extract_aggregates expr) '())
 							nil
 							(rewrite_local_prejoin_count_term expr)))))
-				(define grouped_having_raw (combine_and_terms
-					(filter (map (flatten_and_terms (coalesceNil raw_stage_post_group_condition true))
-						keep_grouped_post_group_term)
-						(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
-				(define grouped_having (if (or (nil? grouped_having_raw) (equal? grouped_having_raw true))
-					nil
-					(rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr grouped_having_raw))))
+				(define grouped_having
+					(rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr raw_stage_post_group_condition)))
 				(define grouped_order (if (nil? raw_stage_order) nil
 					(map raw_stage_order (lambda (o) (match o '(col dir)
 						(list (lower_prejoin_lineage_expr col) dir))))))
@@ -6075,13 +6091,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				expressions can still read them after the keytable LEFT JOIN.
 				Local predicates were already enforced while filling the prejoin table and
 				must not be carried again as a grouped cache condition suffix. */
-				(define grouped_plan_condition_base_raw (combine_and_terms
-					(filter (map (flatten_and_terms (coalesceNil raw_post_group_condition true))
-						keep_grouped_post_group_term)
-						(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
-				(define grouped_plan_condition_base (if (or (nil? grouped_plan_condition_base_raw) (equal? grouped_plan_condition_base_raw true))
+				(define grouped_plan_condition_base (if (nil? _grp_ps_tables)
 					nil
-					(lower_prejoin_lineage_expr grouped_plan_condition_base_raw)))
+					(begin
+						(define grouped_plan_condition_base_raw (combine_and_terms
+							(filter (map (flatten_and_terms (coalesceNil raw_post_group_condition true))
+								keep_grouped_post_group_term)
+								(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+						(if (or (nil? grouped_plan_condition_base_raw) (equal? grouped_plan_condition_base_raw true))
+							nil
+							(lower_prejoin_lineage_expr grouped_plan_condition_base_raw)))))
 				(define recursive_replace_find_column (lambda (expr)
 					(match expr
 						'((symbol get_column) alias_ _ _ _) (begin
@@ -6139,17 +6158,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(cons sym args) (cons sym (map args recursive_replace_find_column_condition))
 						expr)))
 				(define grouped_having_for_recursive (if (nil? grouped_having) nil
-					(recursive_replace_find_column_condition grouped_having)))
-				(define grouped_plan_condition (combine_and_terms
-					(filter (list grouped_plan_condition_base grouped_having_for_recursive)
-						(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+					(if (nil? _grp_ps_tables)
+						grouped_having
+						(recursive_replace_find_column_condition grouped_having))))
+				(define grouped_plan_condition grouped_plan_condition_base)
 				/* rebuild group stage for recursive call.
-				Post-group predicates continue as grouped_plan condition so recursive
-				planning uses a single filter path instead of a nested HAVING special case. */
+				HAVING stays attached to the recursive grouped stage. Only deferred
+				post-group outer predicates continue as condition. */
 				(define grouped_stage (if is_dedup
 					(make_dedup_stage grouped_keys
 						(if (nil? _stage_scope) nil (list prejoin_alias)))
-					(make_group_stage grouped_keys nil grouped_order stage_limit stage_offset
+					(make_group_stage grouped_keys grouped_having_for_recursive grouped_order stage_limit stage_offset
 						(if (nil? _stage_scope) nil (list prejoin_alias))
 						nil)))
 				(define grouped_fields_for_recursive (if is_dedup
@@ -6192,14 +6211,33 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define remaining_partition_stages (filter partition_stages (lambda (ps)
 					(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 						(or acc (has? known_table_aliases a))) false)))))
-				(define grouped_result (build_queryplan schema
-					(merge (list (list prejoin_alias schema prejointbl false nil)) grouped_outer_tables)
-					grouped_fields_for_recursive
-					grouped_plan_condition
-					(merge grouped_all_stages remaining_partition_stages)
-					(merge schemas (list prejoin_alias prejoin_schema_def) grouped_outer_schema_bindings)
-					recursive_replace_find_column
-					update_target))
+				(define grouped_result (if (nil? _grp_ps_tables)
+					(begin
+						(define no_outer_group_condition_raw (combine_and_terms
+							(filter (flatten_and_terms (coalesceNil raw_post_group_condition true))
+								contains_aggregate)))
+						(define no_outer_group_condition (if (or (nil? no_outer_group_condition_raw) (equal? no_outer_group_condition_raw true))
+							nil
+							no_outer_group_condition_raw))
+						(define no_outer_group_stage (if is_dedup
+							(make_dedup_stage raw_stage_group nil)
+							(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil)))
+						(build_queryplan schema
+							(list (list prejoin_alias schema prejointbl false nil))
+							raw_fields
+							no_outer_group_condition
+							(merge (list no_outer_group_stage) rest_groups remaining_partition_stages)
+							(merge schemas (list prejoin_alias prejoin_schema_def))
+							recursive_replace_find_column
+							update_target))
+					(build_queryplan schema
+						(merge (list (list prejoin_alias schema prejointbl false nil)) grouped_outer_tables)
+						grouped_fields_for_recursive
+						grouped_plan_condition
+						(merge grouped_all_stages remaining_partition_stages)
+						(merge schemas (list prejoin_alias prejoin_schema_def) grouped_outer_schema_bindings)
+						recursive_replace_find_column
+						update_target)))
 				/* build per-source-table incremental trigger functions.
 				Deduplicate by physical table to avoid duplicate triggers. */
 				(define seen_trigger_tables (newsession))
