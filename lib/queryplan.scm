@@ -4253,8 +4253,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define canon_alias_map (list (list scan_tblvar (concat scan_schema "." scan_tbl))))
 				(define scan_expr_name (lambda (expr)
 					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr scan_tbl scan_tblvar expr)) '(list) '(list) canon_alias_map)))
+				(define agg_condition_suffix (fnv_hash (scan_expr_name agg_name_context)))
 				(define agg_col_name (lambda (ag)
-					(concat (scan_expr_name ag) "|" (scan_expr_name agg_name_context) (runtime_cache_suffix_from_exprs (list ag agg_name_context)))))
+					(concat (scan_expr_name ag) "|" agg_condition_suffix)))
 				(define materialized_cols (materialized_source_physical_schema scan_schema scan_tbl scan_tblvar schemas))
 				(define lookup_expr_field (lambda (expr) (begin
 					(define expr_lookup (materialized_source_expr_lookup scan_tbl))
@@ -4470,12 +4471,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(sanitize_temp_name
 						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar expr)) '(list) '(list) canon_alias_map))))
 				(define count_ag '(1 + 0))
+				(define agg_condition_suffix2 (fnv_hash (expr_name condition)))
 				(define canonical_count_col_name (lambda ()
-					(concat "COUNT(*)|" (expr_name condition) (runtime_cache_suffix_from_exprs (list condition)))))
+					(concat "COUNT(*)|" agg_condition_suffix2)))
 				(define agg_col_name (lambda (ag)
 					(if (equal? ag count_ag)
 						(canonical_count_col_name)
-						(concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition))))))
+						(concat (expr_name ag) "|" agg_condition_suffix2))))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
 						(define target_col (agg_col_name agg_args))
