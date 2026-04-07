@@ -194,5 +194,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	'((ignorecase "information_schema") (ignorecase "partitions"))
 	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* empty: no MySQL partitions */
 	'(schema tbl) /* normal case */
-	(merge '(scanfn '(session "__memcp_tx") schema tbl) rest)
+	(begin
+		(define scan-table-source (lambda (table_source) (match table_source
+			'(materialized-subquery key) (list (list (quote context) "session") key)
+			'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
+			'((quote materialized-subquery) key) (list (list (quote context) "session") key)
+			table_source)))
+		(merge (list scanfn '(session "__memcp_tx") schema (scan-table-source tbl)) rest))
 ))))

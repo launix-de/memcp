@@ -25,6 +25,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 current execution context */
 (define session (lambda args
 	(apply (context "session") args)))
+(define materialized-subquery (lambda (key)
+	((context "session") key)))
 
 (set static_files (serveStatic "../assets"))
 
