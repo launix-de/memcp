@@ -3481,21 +3481,6 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							false))
 					/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 					(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
-					/* Nested derived-table flattening must not descend into precomputed runtime blocks
-					from scalar subselects; materialize instead of flattening when such blocks are present. */
-					(define expr_has_runtime_scope (lambda (expr) (match expr
-						(cons sym args) (if (or (_is_opaque_scope_sym sym) (_is_precomputed sym))
-							true
-							(reduce args (lambda (a b) (or a (expr_has_runtime_scope b))) false))
-						false
-					)))
-					(define subquery_has_runtime_scope (or
-						(reduce_assoc fields2 (lambda (acc k v) (or acc (expr_has_runtime_scope v))) false)
-						(if (nil? condition2) false (expr_has_runtime_scope condition2))
-						(reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
-							'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_runtime_scope inner_joinexpr))
-							_ false))) false)
-					))
 					/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 					/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
 					(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
@@ -3512,7 +3497,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							)
 						) false)
 						false))
-					(define use_materialize (or subquery_has_window unsupported_groups flatten_has_dangling_output_ref subquery_has_runtime_scope))
+					(define use_materialize (or subquery_has_window unsupported_groups flatten_has_dangling_output_ref))
 					/* Window-function LIMIT pushdown */
 					(define mat_limit nil)
 					(if subquery_has_window (begin
