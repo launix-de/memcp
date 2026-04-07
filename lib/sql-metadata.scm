@@ -193,12 +193,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
 	'((ignorecase "information_schema") (ignorecase "partitions"))
 	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* empty: no MySQL partitions */
-	'(schema tbl) /* normal case */
-	(begin
-		(define scan-table-source (lambda (table_source) (match table_source
-			'(materialized-subquery key) (list (list (quote context) "session") key)
-			'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
-			'((quote materialized-subquery) key) (list (list (quote context) "session") key)
-			table_source)))
+		'(schema tbl) /* normal case */
+		(begin
+			/* scan helpers receive a runtime source as their table argument.
+			Materialized subqueries are stored in the session and therefore must be
+			lowered to ((context "session") key) before scan/scan_order/scan_batch
+			see them. Do not stringify this source and do not add table-name
+			fallbacks in Go for it. */
+			(define scan-table-source (lambda (table_source) (match table_source
+				'(materialized-subquery key) (list (list (quote context) "session") key)
+				'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
+				'((quote materialized-subquery) key) (list (list (quote context) "session") key)
+				table_source)))
 		(merge (list scanfn '(session "__memcp_tx") schema (scan-table-source tbl)) rest))
 ))))

@@ -25,6 +25,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 current execution context */
 (define session (lambda args
 	(apply (context "session") args)))
+/* runtime source for rows materialized by FROM (SELECT ...). This is a
+session lookup, not a physical table name and not a stringly-typed escape
+hatch. Planner-generated scan sources must evaluate this form before the scan
+starts. */
 (define materialized-subquery (lambda (key)
 	((context "session") key)))
 

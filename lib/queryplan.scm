@@ -6086,11 +6086,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					'(tv tschema ttbl _ _)
 					(list tv (materialized_source_schema tschema ttbl tv schemas))
 					'())))))
-				/* recursive call with single prejoin table.
-				Scoped groups keep their outer tables outside the prejoin so later field
-				expressions can still read them after the keytable LEFT JOIN.
-				Local predicates were already enforced while filling the prejoin table and
-				must not be carried again as a grouped cache condition suffix. */
+					/* recursive call with single prejoin table.
+					Contract:
+					1. The prejoin materializes the complete row-domain that can be decided
+					   before grouping: local join predicates, row-local filters and
+					   lineage columns needed later.
+					2. The grouped cache built on top of that prejoin must only see
+					   group-domain conditions. Terms containing aggregates are rewritten
+					   against keytable/temp columns and evaluated on the grouped table.
+					3. Purely local prejoin predicates must not be copied into the grouped
+					   cache suffix again, otherwise unrelated grouped plans alias the same
+					   prejoin differently and cache names/filters drift apart.
+					Scoped groups keep their outer tables outside the prejoin so later
+					field expressions can still read them after the keytable LEFT JOIN. */
 				(define grouped_plan_condition_base (if (nil? _grp_ps_tables)
 					nil
 					(begin
@@ -6211,17 +6219,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define remaining_partition_stages (filter partition_stages (lambda (ps)
 					(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 						(or acc (has? known_table_aliases a))) false)))))
-				(define grouped_result (if (nil? _grp_ps_tables)
-					(begin
-						(define no_outer_group_condition_raw (combine_and_terms
-							(filter (flatten_and_terms (coalesceNil raw_post_group_condition true))
-								contains_aggregate)))
-						(define no_outer_group_condition (if (or (nil? no_outer_group_condition_raw) (equal? no_outer_group_condition_raw true))
-							nil
-							no_outer_group_condition_raw))
-						(define no_outer_group_stage (if is_dedup
-							(make_dedup_stage raw_stage_group nil)
-							(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil)))
+					(define grouped_result (if (nil? _grp_ps_tables)
+						(begin
+							(define no_outer_group_condition_raw (combine_and_terms
+								(filter (flatten_and_terms (coalesceNil raw_post_group_condition true))
+									contains_aggregate)))
+							(define no_outer_group_condition (if (or (nil? no_outer_group_condition_raw) (equal? no_outer_group_condition_raw true))
+								nil
+								no_outer_group_condition_raw))
+							/* no outer-scope aliases remain here, so the recursive call is a
+							plain single-table GROUP BY over the materialized prejoin table.
+							Only aggregate-dependent terms survive into the grouped filter. */
+							(define no_outer_group_stage (if is_dedup
+								(make_dedup_stage raw_stage_group nil)
+								(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil)))
 						(build_queryplan schema
 							(list (list prejoin_alias schema prejointbl false nil))
 							raw_fields
