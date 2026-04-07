@@ -1556,10 +1556,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				(sanitize_temp_name
 					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar k)) '(list) '(list) alias_map)))))
 			(define condition_name (if (nil? condition_suffix) nil
-				(sanitize_temp_name
-					(concat
-						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar condition_suffix)) '(list) '(list) alias_map)
-						(runtime_cache_suffix_from_exprs (list condition_suffix))))))
+				(fnv_hash (concat
+					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar condition_suffix)) '(list) '(list) alias_map)
+					(runtime_cache_suffix_from_exprs (list condition_suffix))))))
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
 			(define keytable_name (if (nil? condition_suffix)
