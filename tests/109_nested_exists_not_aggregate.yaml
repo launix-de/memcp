@@ -79,6 +79,54 @@ test_cases:
       data:
         - unseen: 1
 
+  - name: "ERPL reminder pattern: SET session var for SELECT 1 tests"
+    session_id: "nea_sess"
+    sql: "SET @nea_user = 'alice'"
+    expect:
+      rows_affected: 0
+
+  - name: "SELECT 1 with scalar SUM subquery and correlated session owner check"
+    session_id: "nea_sess"
+    sql: |
+      SELECT 1,
+        (SELECT SUM(1) FROM nea_email e
+          WHERE NOT(e.seen)
+          AND COALESCE(
+            (SELECT
+              COALESCE(
+                (SELECT b.owner = @nea_user
+                  FROM nea_box b WHERE b.ID = d.mailbox LIMIT 1),
+              FALSE)
+            FROM nea_dir d WHERE d.ID = e.directory LIMIT 1),
+          FALSE)
+        ) AS unseen
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          unseen: 1
+
+  - name: "SELECT 1 with scalar SUM subquery and correlated session owner mismatch"
+    session_id: "nea_sess"
+    sql: |
+      SELECT 1,
+        (SELECT SUM(1) FROM nea_email e
+          WHERE NOT(e.seen)
+          AND COALESCE(
+            (SELECT
+              COALESCE(
+                (SELECT b.owner <> @nea_user
+                  FROM nea_box b WHERE b.ID = d.mailbox LIMIT 1),
+              FALSE)
+            FROM nea_dir d WHERE d.ID = e.directory LIMIT 1),
+          FALSE)
+        ) AS unseen
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          unseen: 2
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS nea_email"
   - sql: "DROP TABLE IF EXISTS nea_dir"
