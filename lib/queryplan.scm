@@ -1685,8 +1685,8 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					'('lambda '('acc 'sharddict) '('insert schema grouptbl (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
 					isOuter))))
 		/* aggregate descriptors */
-		(define condition_hash (fnv_hash (concat (expr_name condition) window_runtime_suffix)))
-		(define agg_col_name (lambda (ag) (fnv_hash (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix))))
+		(define condition_suffix_str (fnv_hash (concat (expr_name condition) window_runtime_suffix)))
+		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" condition_suffix_str)))
 		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 			/* args already resolved via replace_find_column in wf_resolved */
@@ -5051,13 +5051,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
-						(define condition_hash (fnv_hash (concat (expr_name condition) (runtime_cache_suffix_from_exprs (list condition)))))
+						(define condition_suffix_str (fnv_hash (expr_name condition)))
 						(define canonical_count_col_name (lambda ()
-							(concat "COUNT(*)|" condition_hash)))
+							(concat "COUNT(*)|" condition_suffix_str)))
 						(define agg_col_name (lambda (ag)
 							(if (equal? ag count_ag)
 								(canonical_count_col_name)
-								(fnv_hash (concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))))
+								(concat (expr_name ag) "|" condition_suffix_str))))
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
