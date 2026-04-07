@@ -1686,7 +1686,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					isOuter))))
 		/* aggregate descriptors */
 		(define condition_hash (fnv_hash (concat (expr_name condition) window_runtime_suffix)))
-		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" condition_hash)))
+		(define agg_col_name (lambda (ag) (fnv_hash (concat (expr_name ag) "|" (expr_name condition) window_runtime_suffix))))
 		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 			/* args already resolved via replace_find_column in wf_resolved */
@@ -5057,7 +5057,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define agg_col_name (lambda (ag)
 							(if (equal? ag count_ag)
 								(canonical_count_col_name)
-								(concat (expr_name ag) "|" (fnv_hash (concat (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition))))))))
+								(fnv_hash (concat (expr_name ag) "|" (expr_name condition) (runtime_cache_suffix_from_exprs (list ag condition)))))))
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
