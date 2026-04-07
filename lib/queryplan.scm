@@ -266,11 +266,17 @@ physical storage name so partition files remain valid on disk. */
 long as possible and are only lowered to physical scan symbols at the final
 build_scan boundary. Materialized derived tables therefore must not be keyed by
 their visible SQL alias alone (`t`, `x`, ...), because later keytable names are
-derived from that materialized source symbol. If two unrelated wrappers reuse the
-same alias on a shared server, alias-only temp identities would let stale
-createcolumn results bleed across queries. */
-(define materialized_subquery_symbol (lambda (id subquery)
-	(symbol (concat "__mat:" id ":" (sha1 (string (normalize_canonical_aliases subquery)))))))
+derived from that materialized source identity. If two unrelated wrappers reuse
+the same alias on a shared server, alias-only temp identities would let stale
+createcolumn results bleed across queries. The rows themselves are session-bound
+so stored compute lambdas can still resolve them after the surrounding lexical
+scope is gone. */
+(define materialized-subquery-key (lambda (id subquery)
+	(concat "__mat:" id ":" (sha1 (string (normalize_canonical_aliases subquery))))))
+(define materialized-subquery-source (lambda (id subquery)
+	(list (list (quote context) "session") (materialized-subquery-key id subquery))))
+(define materialized-subquery-init (lambda (id subquery rows_expr)
+	(list (list (quote context) "session") (materialized-subquery-key id subquery) rows_expr)))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
@@ -549,6 +555,7 @@ raw _unn_* occurrence aliases into physical temp column names. */
 (define extract_tblvars (lambda (expr)
 	(match expr
 		'((symbol get_column) tblvar _ _ _) (if (nil? tblvar) '() '(tblvar))
+		'((quote get_column) tblvar _ _ _) (if (nil? tblvar) '() '(tblvar))
 		(cons sym args) (merge_unique (map args extract_tblvars))
 		'()
 	)
@@ -577,12 +584,18 @@ raw _unn_* occurrence aliases into physical temp column names. */
 
 /* scalar subselect helper wrappers */
 (define scalar_scan (lambda (schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2) (begin
-	(define result (scan (session "__memcp_tx") schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2))
+	(define result (scan (session "__memcp_tx") schema (scan-runtime-source tbl) filtercols filterfn mapcols mapfn reduce neutral reduce2))
 	(if (equal? result neutral) nil result)
 )))
 (define scalar_scan_order (lambda (schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral) (begin
-	(define result (scan_order (session "__memcp_tx") schema tbl filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
+	(define result (scan_order (session "__memcp_tx") schema (scan-runtime-source tbl) filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
 	(if (equal? result neutral) nil result)
+)))
+(define scan-runtime-source (lambda (table-source) (match table-source
+	'(materialized-subquery key) (list (list (quote context) "session") key)
+	'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
+	'((quote materialized-subquery) key) (list (list (quote context) "session") key)
+	table-source
 )))
 
 (define extend_codegen_lambda (lambda (fn extra_params)
@@ -719,7 +732,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 				(list (quote begin)
 					_inner_flush_define
 					(list (quote nth)
-						(list (quote scan) '(session "__memcp_tx") schema tbl
+						(list (quote scan) '(session "__memcp_tx") schema (scan-runtime-source tbl)
 							(cons list filtercols)
 							outer_filter_lambda
 							scan_mapcols
@@ -756,7 +769,7 @@ row-at-a-time inner scan calls for buffered scan_batch flushes. */
 						0))
 				(list (quote begin)
 					_inner_flush_define
-					(list (quote scan) '(session "__memcp_tx") schema tbl
+					(list (quote scan) '(session "__memcp_tx") schema (scan-runtime-source tbl)
 						(cons list filtercols)
 						outer_filter_lambda
 						scan_mapcols
@@ -1480,12 +1493,16 @@ the table exists at execution time (survives cache eviction of sloppy tables).
 fk_pk_col is non-nil when FK→PK reuse is active (parent table used instead of temp keytable).
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
+	(define physical_tbl (string? tbl))
+	(define keytable_source_name (if physical_tbl
+		tbl
+		(string tblvar)))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
 	reuse the parent (referenced) table instead of creating a temp keytable.
 	The rest of the grouped pipeline must still see the normal logical key name,
 	so install a temp alias column on the parent table when the physical PK name
 	differs from the canonical GROUP BY key name. */
-	(define fk_result (if (and (nil? condition_suffix) (equal? 1 (count keys)))
+	(define fk_result (if (and physical_tbl (nil? condition_suffix) (equal? 1 (count keys)))
 		(match (car keys)
 			'('get_column (eval tblvar) false scol false) (begin
 				(define fk_info (get_fk_target schema tbl scol))
@@ -1519,7 +1536,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 	(if (not (nil? fk_result))
 		fk_result
 		(begin
-			(define alias_map (list (list tblvar (concat schema "." tbl))))
+			(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
 			(define key_names (map keys (lambda (k)
 				(sanitize_temp_name
 					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar k)) '(list) '(list) alias_map)))))
@@ -1531,16 +1548,18 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
 			(define keytable_name (if (nil? condition_suffix)
-				(concat "." tbl ":" key_names)
-				(concat "." tbl ":" key_names "|" condition_name)))
+				(concat "." keytable_source_name ":" key_names)
+				(concat "." keytable_source_name ":" key_names "|" condition_name)))
 			/* compute column definitions and partition spec at compile time */
 			(define kt_cols (cons
 				'("unique" "group" key_names)
 				(map key_names (lambda (colname) '("column" colname "any" '() '())))))
-			(define kt_partition (merge (map (produceN (count keys)) (lambda (i)
-				(match (key_at i)
-					'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
-					'())))))
+			(define kt_partition (if physical_tbl
+				(merge (map (produceN (count keys)) (lambda (i)
+					(match (key_at i)
+						'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
+						'()))))
+				'()))
 			/* create at compile time (needed for recursive build_queryplan) */
 			(createtable schema keytable_name kt_cols query_temp_table_options true)
 			(partitiontable schema keytable_name kt_partition)
@@ -1549,10 +1568,12 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				(cons
 					(cons 'list (cons "unique" (cons "group" (list (cons 'list key_names)))))
 					(map key_names (lambda (colname) (list 'list "column" colname "any" '(list) '(list)))))))
-			(define kt_partition_code (cons 'list (merge (map (produceN (count keys)) (lambda (i)
-				(match (key_at i)
-					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
-					'()))))))
+			(define kt_partition_code (cons 'list (if physical_tbl
+				(merge (map (produceN (count keys)) (lambda (i)
+					(match (key_at i)
+						'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
+						'()))))
+				'())))
 			(define init_code (list 'begin
 				(list 'define '__kt_created (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true))
 				(list 'if '__kt_created
@@ -2399,7 +2420,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 														(list (quote scan_order)
 															(list (quote session) "__memcp_tx")
 															schema3
-															tbl3
+															(scan-runtime-source tbl3)
 															(cons list filtercols)
 															(list (quote lambda) filterparams filterbody)
 															(cons list ordercols)
@@ -2416,7 +2437,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 														(list (quote scan)
 															(list (quote session) "__memcp_tx")
 															schema3
-															tbl3
+															(scan-runtime-source tbl3)
 															(cons list filtercols)
 															(list (quote lambda) filterparams filterbody)
 															(cons list mapcols)
@@ -3067,6 +3088,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(cons (if (equal?? comparison (quote >)) (quote or) (quote and)) _branch_results))))))
 			/* single subquery (non-UNION) path */
 			(begin
+				(define count-map-expr-for (lambda (cond-expr)
+					(if (or (nil? cond-expr) (equal? cond-expr true))
+						1
+						(list (quote if) cond-expr 1 0))))
 				(define _first_field (if (nil? target_expr) nil
 					(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons _ (cons v _)) v nil) nil)))
 				(define target_expr resolved_target_expr)
@@ -3084,7 +3109,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(define _count_idx (coalesceNil (sq_cache "idx") 0))
 								(sq_cache "idx" (+ _count_idx 1))
 								(define _count_alias (concat "_uncorr_cnt_" _count_idx))
-								(define _mat_var (materialized_subquery_symbol _count_alias _count_sq))
+								(define mat_source (materialized-subquery-source _count_alias _count_sq))
 								(define _count_rows_sym (symbol (concat "__uncorr_count_rows:" _count_idx)))
 								(define _count_rr_sym (symbol (concat "__uncorr_count_rr:" _count_idx)))
 								(define materialized_rows (list (quote begin)
@@ -3103,9 +3128,9 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								one-row relation with visible column __cnt. The outer query still
 								sees a regular table input, not a nested runtime subquery. */
 								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-									(list (list (quote set) _mat_var materialized_rows))))
+									(list (materialized-subquery-init _count_alias _count_sq materialized_rows))))
 								(sq_cache "tables" (merge
-									(list (list _count_alias schema _mat_var false nil))
+									(list (list _count_alias schema mat_source false nil))
 									(coalesceNil (sq_cache "tables") '())))
 								(sq_cache "schemas" (merge
 									(list _count_alias (list (list "Field" "__cnt" "Type" "any")))
@@ -3120,7 +3145,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(begin
 							(define _count_sq (match subquery
 								'(s t f c g h o l off) (list s t
-									(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
+									(list "__cnt" (list (quote aggregate) (count-map-expr-for c) (symbol "+") 0))
 									(if (nil? target_expr) c
 										(if (or (nil? c) (equal? c true))
 											(list (quote equal??) _first_field target_expr)
@@ -3173,17 +3198,22 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(if (or (not (nil? union_order)) (not (nil? union_limit)) (not (nil? union_offset)))
 							nil
 							(begin
-								(define branch_exprs (map branches (lambda (branch)
-									(replace_inner_selects
+								(if (not (reduce branches (lambda (ok branch)
+									(and ok (equal? 1 (count (query_branch_field_names branch)))))
+									true))
+									(error "UNION ALL subquery must project exactly one column for IN")
+									nil)
+								(define rewritten_expr
+									(if (equal? (count branches) 1)
 										(if negated
-											(list (quote not) (list (quote inner_select_in) target_expr branch))
-											(list (quote inner_select_in) target_expr branch))
-										outer_schemas))))
-								(if (equal? branch_exprs '())
-									nil
-									(if (equal? (count branch_exprs) 1)
-										(car branch_exprs)
-										(cons (if negated (quote and) (quote or)) branch_exprs))))))))))
+											(list (quote not) (list (quote inner_select_in) target_expr (car branches)))
+											(list (quote inner_select_in) target_expr (car branches)))
+										(cons (if negated (quote and) (quote or))
+											(map branches (lambda (branch)
+												(if negated
+													(list (quote not) (list (quote inner_select_in) target_expr branch))
+													(list (quote inner_select_in) target_expr branch)))))))
+								(replace_inner_selects rewritten_expr outer_schemas))))))))
 			(define not_expr (if (not_symbol sym)
 				(match args
 					(cons inner_expr '()) (match inner_expr
@@ -3287,11 +3317,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(list (quote set) (symbol "resultrow") resultrow_sym)
 						(list rows_sym "rows")
 					))
-					(define _mat_var (materialized_subquery_symbol id subquery))
 					(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-						(list (list (quote set) _mat_var materialized_rows))))
+						(list (materialized-subquery-init id subquery materialized_rows))))
 					(list
-						(list (list id schemax _mat_var isOuter joinexpr))
+						(list (list id schemax (materialized-subquery-source id subquery) isOuter joinexpr))
 						'()
 						true
 						(list id (map output_cols (lambda (col) (list "Field" col "Type" "any"))))
@@ -3469,11 +3498,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(list (quote set) (symbol "resultrow") resultrow_sym)
 								(list rows_sym "rows")
 							))
-							(define _mat_var (materialized_subquery_symbol id subquery))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-								(list (list (quote set) _mat_var materialized_rows))))
+								(list (materialized-subquery-init id subquery materialized_rows))))
 							(list
-								(list (list id schemax _mat_var isOuter joinexpr))
+								(list (list id schemax (materialized-subquery-source id subquery) isOuter joinexpr))
 								'()
 								true
 								(list id (merge_schema_fields_unique (list
@@ -4406,6 +4434,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			/* TODO: allow for more than just group by single table */
 			/* TODO: outer tables that only join on group */
 			'('(tblvar schema tbl isOuter _)) (begin
+				(define ags (filter ags (lambda (ag) (match ag
+					'(agg_expr _ _)
+					(begin
+						(define refs (extract_tblvars agg_expr))
+						(or (equal? refs '())
+							(has? refs tblvar)))
+					false))))
 				/* prepare preaggregate */
 				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
 				(define materialized_source (and (string? tbl) (>= (strlen tbl) 1) (equal? (substr tbl 0 1) ".")))
@@ -5162,7 +5197,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 						/* Phase 2: replace aggregates in the separated agg-condition parts,
 						then combine everything: HAVING + replaced agg-parts + ps-table conditions */
-						(define _replaced_agg_parts (map _cond_agg_parts replace_group_key_or_fetch))
+						(define _replaced_agg_parts (map _cond_agg_parts replace_group_field_expr))
 						/* partition-staged table predicates stay global filters.
 						The keytable LEFT JOIN must only use correlations against group/domain
 						keys, otherwise unrelated outer filters get attached to the wrong side. */

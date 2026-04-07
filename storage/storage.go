@@ -100,6 +100,35 @@ func scanLayout(a []scm.Scmer) scanArgLayout {
 	}
 }
 
+func normalizeScanTableArg(tx *TxContext, tableArg scm.Scmer) scm.Scmer {
+	return tableArg
+}
+
+func showColumnsForRows(rows []scm.Scmer) scm.Scmer {
+	if len(rows) == 0 {
+		return scm.NewSlice([]scm.Scmer{})
+	}
+	firstRow, ok := scmerSlice(rows[0])
+	if !ok {
+		return scm.NewSlice([]scm.Scmer{})
+	}
+	columns := make([]scm.Scmer, 0, len(firstRow)/2)
+	for i := 0; i+1 < len(firstRow); i += 2 {
+		columns = append(columns, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Field"), scm.NewString(scm.String(firstRow[i])),
+			scm.NewString("Type"), scm.NewString("any"),
+			scm.NewString("Collation"), scm.NewString(""),
+			scm.NewString("RawType"), scm.NewString("any"),
+			scm.NewString("Dimensions"), scm.NewSlice([]scm.Scmer{}),
+			scm.NewString("Null"), scm.NewBool(true),
+			scm.NewString("Key"), scm.NewString(""),
+			scm.NewString("Default"), scm.NewNil(),
+			scm.NewString("Extra"), scm.NewString(""),
+		}))
+	}
+	return scm.NewSlice(columns)
+}
+
 func normalizePartitionDataset(arg scm.Scmer) dataset {
 	raw := mustScmerSlice(arg, "partition columns")
 	if len(raw) == 0 {
@@ -370,9 +399,10 @@ func Init(en scm.Env) {
 			layout := scanLayout(a)
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.mapColsIdx], "mapColumns"))
+			tableArg := normalizeScanTableArg(layout.tx, a[layout.tableIdx])
 			isOuter := len(a) > layout.outerIdx && scm.ToBool(a[layout.outerIdx])
 
-			if list, ok := scmerSlice(a[layout.tableIdx]); ok {
+			if list, ok := scmerSlice(tableArg); ok {
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx {
 					neutral = a[layout.neutralIdx]
@@ -446,9 +476,9 @@ func Init(en scm.Env) {
 				}
 				return neutral
 			}
-			t := db.GetTable(scm.String(a[layout.tableIdx]))
+			t := db.GetTable(scm.String(tableArg))
 			if t == nil {
-				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(a[layout.tableIdx]) + " does not exist")
+				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(tableArg) + " does not exist")
 			}
 
 			aggregate := scm.NewNil()
@@ -492,9 +522,10 @@ func Init(en scm.Env) {
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.mapColsIdx], "mapColumns"))
 			stride := int(scm.ToInt(a[layout.strideIdx]))
 			batchdata := mustScmerSlice(a[layout.batchDataIdx], "batchdata")
+			tableArg := normalizeScanTableArg(layout.tx, a[layout.tableIdx])
 			isOuter := len(a) > layout.outerIdx+1 && scm.ToBool(a[layout.outerIdx+1])
 
-			if list, ok := scmerSlice(a[layout.tableIdx]); ok {
+			if list, ok := scmerSlice(tableArg); ok {
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx+1 {
 					neutral = a[layout.neutralIdx+1]
@@ -579,9 +610,9 @@ func Init(en scm.Env) {
 				}
 				return neutral
 			}
-			t := db.GetTable(scm.String(a[layout.tableIdx]))
+			t := db.GetTable(scm.String(tableArg))
 			if t == nil {
-				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(a[layout.tableIdx]) + " does not exist")
+				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(tableArg) + " does not exist")
 			}
 
 			aggregate := scm.NewNil()
@@ -628,6 +659,7 @@ func Init(en scm.Env) {
 			sortdirsVals := mustScmerSlice(a[layout.sortDirsIdx], "sortdirs")
 			limitPartitionCols := scm.ToInt(a[layout.partColsIdx])
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.limitIdx+1], "mapColumns"))
+			tableArg := normalizeScanTableArg(layout.tx, a[layout.tableIdx])
 
 			aggregate := scm.NewNil()
 			if len(a) > layout.limitIdx+3 {
@@ -645,7 +677,7 @@ func Init(en scm.Env) {
 
 			isOuter := len(a) > layout.limitIdx+5 && scm.ToBool(a[layout.limitIdx+5])
 
-			if list, ok := scmerSlice(a[layout.tableIdx]); ok {
+			if list, ok := scmerSlice(tableArg); ok {
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
@@ -748,9 +780,9 @@ func Init(en scm.Env) {
 				}
 				return neutral
 			}
-			t := db.GetTable(scm.String(a[layout.tableIdx]))
+			t := db.GetTable(scm.String(tableArg))
 			if t == nil {
-				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(a[layout.tableIdx]) + " does not exist")
+				panic("table " + scm.String(a[layout.schemaIdx]) + "." + scm.String(tableArg) + " does not exist")
 			}
 
 			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
@@ -988,7 +1020,7 @@ func Init(en scm.Env) {
 			}
 			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				panic("createcolumn: table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
 
 			// normal column
@@ -2054,9 +2086,13 @@ func Init(en scm.Env) {
 					return scm.NewSlice(rows)
 				}
 				// (show schema tbl) → column defs
-				t := db.GetTable(scm.String(a[1]))
+				tableArg := normalizeScanTableArg(CurrentTx(), a[1])
+				if rows, ok := scmerSlice(tableArg); ok {
+					return showColumnsForRows(rows)
+				}
+				t := db.GetTable(scm.String(tableArg))
 				if t == nil {
-					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+					panic("table " + scm.String(a[0]) + "." + scm.String(tableArg) + " does not exist")
 				}
 				return t.ShowColumns()
 			} else if len(a) == 3 {
@@ -2066,7 +2102,7 @@ func Init(en scm.Env) {
 				}
 				t := db.GetTable(scm.String(a[1]))
 				if t == nil {
-					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+					panic("show3: table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
 				// (show schema tbl "statistics") → index statistics (INFORMATION_SCHEMA)
 				if a[2].IsString() && scm.String(a[2]) == "statistics" {
