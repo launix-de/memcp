@@ -5997,6 +5997,37 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								expr)))
 					(cons sym args) (cons sym (map args rewrite_as_prejoin_column))
 					expr)))
+				/* Preserve logical lineage into the recursive stage.
+				Do not carry physical .prejoin/.cache column names forward; instead lower
+				the raw stage expressions back onto their logical source lineage first.
+				build_scan stays the only place that finally substitutes onto the current
+				stage's physical scan symbols. */
+				(define grouped_fields (map_assoc raw_fields (lambda (k v)
+					(lower_prejoin_lineage_expr v))))
+				(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_lineage_expr))
+				(define grouped_stage_alias_result (if (nil? grouped_keys)
+					nil
+					(make_keytable_schema schema prejointbl grouped_keys prejoin_alias)))
+				(define grouped_stage_alias (if (nil? grouped_stage_alias_result) nil
+					(car grouped_stage_alias_result)))
+				(define grouped_stage_key_names (if (nil? grouped_stage_alias_result) '()
+					(car (cdr grouped_stage_alias_result))))
+				(define rewrite_group_key_to_group_alias (lambda (expr)
+					(coalesce
+						(reduce (produceN (count grouped_keys)) (lambda (found i)
+							(if (not (nil? found))
+								found
+								(if (equal? expr (nth grouped_keys i))
+									(list (quote get_column) grouped_stage_alias false (nth grouped_stage_key_names i) false)
+									nil)))
+							nil)
+						(match expr
+							(cons sym args) (cons sym (map args rewrite_group_key_to_group_alias))
+							expr))))
+				(define grouped_having (rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr raw_stage_post_group_condition)))
+				(define grouped_order (if (nil? raw_stage_order) nil
+					(map raw_stage_order (lambda (o) (match o '(col dir)
+						(list (lower_prejoin_lineage_expr col) dir))))))
 				(define grouped_outer_tables (map _grp_ps_tables (lambda (td) (match td
 					'(tv tschema ttbl toisOuter je)
 					(list (if (nil? tv) ttbl tv) tschema ttbl toisOuter je)
@@ -6006,6 +6037,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					'(tv tschema ttbl _ _)
 					(list tv (materialized_source_schema tschema ttbl tv schemas))
 					'())))))
+				/* recursive call with single prejoin table.
+				Scoped groups keep their outer tables outside the prejoin so later field
+				expressions can still read them after the keytable LEFT JOIN. */
+				(define grouped_plan_condition_base (if (equal? raw_post_group_condition true) nil
+					(lower_prejoin_lineage_expr raw_post_group_condition)))
 				(define recursive_replace_find_column (lambda (expr)
 					(match expr
 						'((symbol get_column) alias_ _ _ _) (begin
@@ -6062,52 +6098,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								_ (recursive_replace_find_column resolved)))
 						(cons sym args) (cons sym (map args recursive_replace_find_column_condition))
 						expr)))
-				/* recursive call with single prejoin table.
-				Scoped groups keep their outer tables outside the prejoin so later field
-				expressions can still read them after the keytable LEFT JOIN.
-				Local predicates have already been enforced by the prejoin materialization
-				and must not be pushed a second time into the grouped cache. */
-				(define grouped_plan_condition_split
-					(split_condition raw_post_group_condition grouped_outer_tables))
-				(define deferred_grouped_plan_condition
-					(if (or (nil? grouped_plan_condition_split) (equal? grouped_plan_condition_split '()))
-						true
-						(cadr grouped_plan_condition_split)))
-				(define grouped_plan_condition_base
-					(if (or (nil? deferred_grouped_plan_condition) (equal? deferred_grouped_plan_condition true))
-						nil
-						(recursive_replace_find_column_condition deferred_grouped_plan_condition))))
-				/* After prejoin materialization the recursive GROUP path should operate on
-				the physical prejoin solo-table plus explicit outer refs. */
-				(define grouped_fields (map_assoc raw_fields (lambda (k v)
-					(recursive_replace_find_column v))))
-				(define grouped_keys (map (coalesce raw_stage_group '()) recursive_replace_find_column))
-				(define grouped_stage_alias_result (if (nil? grouped_keys)
-					nil
-					(make_keytable_schema schema prejointbl grouped_keys prejoin_alias)))
-				(define grouped_stage_alias (if (nil? grouped_stage_alias_result) nil
-					(car grouped_stage_alias_result)))
-				(define grouped_stage_key_names (if (nil? grouped_stage_alias_result) '()
-					(car (cdr grouped_stage_alias_result))))
-				(define rewrite_group_key_to_group_alias (lambda (expr)
-					(coalesce
-						(reduce (produceN (count grouped_keys)) (lambda (found i)
-							(if (not (nil? found))
-								found
-								(if (equal? expr (nth grouped_keys i))
-									(list (quote get_column) grouped_stage_alias false (nth grouped_stage_key_names i) false)
-									nil)))
-							nil)
-						(match expr
-							(cons sym args) (cons sym (map args rewrite_group_key_to_group_alias))
-							expr))))
-				(define grouped_having (if (nil? raw_stage_post_group_condition)
-					nil
-					(rewrite_group_key_to_group_alias
-						(recursive_replace_find_column_condition raw_stage_post_group_condition))))
-				(define grouped_order (if (nil? raw_stage_order) nil
-					(map raw_stage_order (lambda (o) (match o '(col dir)
-						(list (recursive_replace_find_column col) dir))))))
 				(define grouped_having_for_recursive (if (nil? grouped_having) nil
 					(recursive_replace_find_column_condition grouped_having)))
 				(define grouped_plan_condition (combine_and_terms
