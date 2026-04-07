@@ -277,6 +277,15 @@ scope is gone. */
 	(list (list (quote context) "session") (materialized-subquery-key id subquery))))
 (define materialized-subquery-init (lambda (id subquery rows_expr)
 	(list (list (quote context) "session") (materialized-subquery-key id subquery) rows_expr)))
+(define materialized-source? (lambda (table-source)
+	(or
+		(and (string? table-source) (>= (strlen table-source) 1) (equal? (substr table-source 0 1) "."))
+		(match table-source
+			(cons (cons (symbol context) '("session")) _) true
+			(cons (cons '(quote context) '("session")) _) true
+			false
+		))
+))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
@@ -1593,7 +1602,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 	(define partition_exprs (map over_partition replace_find_column))
 	(define group_keys (if has_partition partition_exprs '(1)))
 	(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
-	(define materialized_source (and (string? tbl) (>= (strlen tbl) 1) (equal? (substr tbl 0 1) ".")))
+	(define materialized_source (materialized-source? tbl))
 	(define expr_name (lambda (expr)
 		(canonical_expr_name (normalize_canonical_aliases (rewrite_materialized_source_columns tbl tblvar expr)) '(list) '(list) canon_alias_map)))
 	(set condition (replace_find_column (coalesceNil condition true)))
@@ -3203,16 +3212,29 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 									true))
 									(error "UNION ALL subquery must project exactly one column for IN")
 									nil)
+								(define normalize_union_in_branch (lambda (branch)
+									(match branch
+										'(b_schema b_tables b_fields b_condition b_group b_having b_order b_limit b_offset)
+										(begin
+											(define first_field_expr (match b_fields
+												(cons _ (cons v _)) v
+												nil))
+											(if (or (nil? first_field_expr) (not (or (nil? b_condition) (equal? b_condition true))))
+												branch
+												(list b_schema b_tables b_fields
+													(list (quote equal??) first_field_expr first_field_expr)
+													b_group b_having b_order b_limit b_offset)))
+										branch)))
 								(define rewritten_expr
 									(if (equal? (count branches) 1)
 										(if negated
-											(list (quote not) (list (quote inner_select_in) target_expr (car branches)))
-											(list (quote inner_select_in) target_expr (car branches)))
+											(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
+											(list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
 										(cons (if negated (quote and) (quote or))
 											(map branches (lambda (branch)
 												(if negated
-													(list (quote not) (list (quote inner_select_in) target_expr branch))
-													(list (quote inner_select_in) target_expr branch)))))))
+													(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch branch)))
+													(list (quote inner_select_in) target_expr (normalize_union_in_branch branch))))))))
 								(replace_inner_selects rewritten_expr outer_schemas))))))))
 			(define not_expr (if (not_symbol sym)
 				(match args
@@ -4224,7 +4246,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	columns, but logical aggregate sentinels must survive until the scan stage
 	that actually reads that temp source. Lower them exactly once here. */
 	(define lower_materialized_scan_expr (lambda (scan_schema scan_tbl scan_tblvar scan_expr agg_name_context) (begin
-		(define materialized_source (and (string? scan_tbl) (>= (strlen scan_tbl) 1) (equal? (substr scan_tbl 0 1) ".")))
+		(define materialized_source (materialized-source? scan_tbl))
 		(if (not materialized_source)
 			scan_expr
 			(begin
@@ -4443,7 +4465,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					false))))
 				/* prepare preaggregate */
 				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
-				(define materialized_source (and (string? tbl) (>= (strlen tbl) 1) (equal? (substr tbl 0 1) ".")))
+				(define materialized_source (materialized-source? tbl))
 				(define expr_name (lambda (expr)
 					(sanitize_temp_name
 						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar expr)) '(list) '(list) canon_alias_map))))
@@ -5060,7 +5082,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch (_group_value_ag_expr (group_value_local_expr expr)))
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr)))
 									(cons (symbol aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest count_ag)))
 										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
@@ -5068,7 +5090,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											_ expr)
 										(replace_group_key_or_fetch expr))
 									(cons '(quote aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest count_ag)))
 										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
@@ -5494,14 +5516,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(define reduce_op (match wfn "SUM" (quote +) "COUNT" (quote +) "MIN" (quote min) "MAX" (quote max) (quote +)))
 												(define neutral (match wfn "SUM" 0 "COUNT" 0 "MIN" nil "MAX" nil 0))
 												(list (quote set) (symbol pn)
-													'('scan schema grouptbl
-														'(list acn)
-														'('lambda (list (symbol acn)) true)
-														'(list acn)
-														'('lambda (list (symbol acn)) (symbol acn))
+													(list (quote scan)
+														'(session "__memcp_tx")
+														schema
+														(scan-runtime-source grouptbl)
+														(list (quote list) acn)
+														(list (quote lambda) (list (symbol acn)) true)
+														(list (quote list) acn)
+														(list (quote lambda) (list (symbol acn)) (symbol acn))
 														reduce_op
 														neutral
-														nil false)))))))
+														nil
+														false)))))))
 										/* wrap grouped_plan: preserve field/value pairs so outer
 										materialization and result serialization keep the visible column
 										names attached to the rebuilt expressions. */
@@ -5716,7 +5742,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(define _lower_once (lambda (cur)
 						(reduce prejoin_source_tables (lambda (inner td) (match td
 							'(tv _ ttbl _ _)
-							(if (and (string? ttbl) (>= (strlen ttbl) 1) (equal? (substr ttbl 0 1) "."))
+							(if (materialized-source? ttbl)
 								(lower_materialized_source_expr ttbl tv inner)
 								inner)
 							inner))
@@ -5756,8 +5782,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define prejoin_schema schema)
 				(define pj_schema schema) /* needed in quoted runtime code below */
 				(define prejoin_table_name prejointbl)
-				(define temp_source_table? (lambda (src_tbl)
-					(and (string? src_tbl) (>= (strlen src_tbl) 1) (equal? (substr src_tbl 0 1) "."))))
+				(define temp_source_table? materialized-source?)
 				(define _td_alias_variants (lambda (tv tschema ttbl) (begin
 					(define _raw_aliases (filter (list
 						tv
