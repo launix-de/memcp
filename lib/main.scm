@@ -20,6 +20,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (print "")
 (import "test.scm")
 
+/* global session helper: runtime code calls (session key) or
+(session key value), while the actual session instance is taken from the
+current execution context */
+(define session (lambda args
+	(apply (context "session") args)))
+/* runtime source for rows materialized by FROM (SELECT ...). This is a
+session lookup, not a physical table name and not a stringly-typed escape
+hatch. Planner-generated scan sources must evaluate this form before the scan
+starts. */
+(define materialized-subquery (lambda (key)
+	((context "session") key)))
+
 (set static_files (serveStatic "../assets"))
 
 /* this can be overhooked */

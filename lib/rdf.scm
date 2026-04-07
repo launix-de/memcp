@@ -38,7 +38,7 @@ this is how rdf works:
 	(set old_handler (coalesce http_handler handler_404))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan (session "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (time (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
@@ -59,7 +59,7 @@ this is how rdf works:
 	)))
 	(define handle_ttl_load (lambda (req res schema ttl_data) (begin
 		/* check for password */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan (session "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
@@ -102,4 +102,3 @@ this is how rdf works:
 		)
 	))
 ))
-

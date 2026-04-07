@@ -616,10 +616,15 @@ func (t *table) getTableLockCond() *sync.Cond {
 // isWrite=true means the caller wants to write (blocked by ANY lock from another session).
 // isWrite=false means the caller wants to read (blocked only by WRITE lock from another session).
 // Sets State to "Waiting for table lock" while blocking.
+// The query lifecycle clears the state again when the statement finishes; do
+// not eagerly clear it here or SHOW PROCESSLIST becomes racy and can miss a
+// blocked waiter that is still in the same request.
 // Panics if the owning session tries to write while holding a READ lock (MySQL semantics).
 func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	cond := t.getTableLockCond()
 	if ss != nil {
+		ss.BeginLockWait()
+		defer ss.EndLockWait()
 		ss.SetState("Waiting for table lock")
 	}
 	var errMsg string
@@ -643,9 +648,6 @@ func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 		cond.Wait()
 	}
 	t.tableLockMu.Unlock()
-	if ss != nil {
-		ss.SetState("")
-	}
 	if errMsg != "" {
 		panic(errMsg)
 	}
@@ -1733,7 +1735,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
 						if p == "$update" {
-							params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false))
+							params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false, currentTx))
 						} else if len(p) >= 4 && p[:4] == "NEW." {
 							for j, c := range columns {
 								if p[4:] == c {
@@ -1741,7 +1743,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 								}
 							}
 						} else {
-							params[i] = s.ColumnReader(p)(uid)
+							params[i] = s.ColumnReaderTx(currentTx, p)(uid)
 						}
 					}
 					func() {

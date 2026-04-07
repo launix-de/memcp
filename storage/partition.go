@@ -670,7 +670,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 								oldShard.mu.RUnlock()
 								if !isProxy {
 									// Old shard has plain storage for this column — read values directly
-									reader := oldShard.ColumnReader(col.Name)
+									reader := oldShard.ColumnReaderTx(nil, col.Name)
 									for _, item := range items {
 										val := reader(uint32(item))
 										newProxy.delta[newIdx] = val
@@ -691,7 +691,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 							// Normal column: read values and compress
 							var i uint32
 							for s2id, items := range datasetids[si] {
-								reader := oldshards[s2id].ColumnReader(col.Name)
+								reader := oldshards[s2id].ColumnReaderTx(nil, col.Name)
 								for _, item := range items {
 									values[i] = reader(uint32(item))
 									i++

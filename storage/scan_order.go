@@ -25,26 +25,20 @@ import "runtime/debug"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
-// optimizeScanOrder is the Optimize hook for the scan_order declaration.
-// scan_order args: 1=schema, 2=table, 3=filterCols, 4=filter, 5=sortcols, 6=sortdirs,
-// 7=limitPartitionCols, 8=offset, 9=limit, 10=mapCols, 11=map, 12=reduce, 13=neutral, 14=isOuter
 func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	// Optimize args 1-11 normally
-	for i := 1; i <= 11 && i < len(v); i++ {
+	mapEnd, reduceIdx, neutralIdx, outerIdx := 12, 13, 14, 15
+	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
-	// Arg 12 (reduce callback): set callback ownership before optimizing
-	if len(v) > 12 && !v[12].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
-		v[12], _ = oc.OptimizeSub(v[12], true)
+	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
+		oc.SetCallbackOwned([]bool{true, false})
+		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
 	}
-	// Arg 13 (neutral)
-	if len(v) > 13 {
-		v[13], _ = oc.OptimizeSub(v[13], true)
+	if len(v) > neutralIdx {
+		v[neutralIdx], _ = oc.OptimizeSub(v[neutralIdx], true)
 	}
-	// Arg 14 (isOuter)
-	if len(v) > 14 {
-		v[14], _ = oc.OptimizeSub(v[14], true)
+	if len(v) > outerIdx {
+		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
 	return scm.NewSlice(v), nil
 }
@@ -243,12 +237,11 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 	ss := scm.GetCurrentSessionState()
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
-	currentTx := CurrentTx()
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time
@@ -412,7 +405,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 				q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols, currentTx)
+		res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols, currentTx, ss)
 		q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 	})
 	if done == nil {
@@ -449,7 +442,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	hadValue := false
 	// initialize MapReducers: pre-allocate args per shard
 	for _, sq := range q.q {
-		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callback, aggregate)
+		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callback, aggregate, false, 0, nil, currentTx)
 	}
 
 	var buf [1024]uint32 // stack-allocated batch buffer (4 KB, fits in L1)
@@ -615,9 +608,12 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
+	if ss == nil {
+		ss = scm.GetCurrentSessionState()
+	}
 	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
 		if len(args) < 2 {
 			return scm.NewBool(false)
@@ -638,7 +634,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	for i, scol := range sortcols {
 		if scol.IsString() {
 			colname := scol.String()
-			result.scols[i] = t.ColumnReader(colname)
+			result.scols[i] = t.ColumnReaderTx(currentTx, colname)
 			continue
 		}
 		if proc, ok := scol.Any().(scm.Proc); ok {
@@ -658,7 +654,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				} else {
 					name = scm.String(param)
 				}
-				largs[j] = t.ColumnReader(name)
+				largs[j] = t.ColumnReaderTx(currentTx, name)
 			}
 			procFn := scm.OptimizeProcToSerialFunction(scol)
 			result.scols[i] = func(idx uint32) scm.Scmer {
@@ -741,6 +737,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	}
 
 	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
+	if t.t.tableLockOwner.Load() != nil {
+		t.t.waitTableLock(ss, false)
+	}
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -762,7 +761,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			if t.t.tableLockOwner.Load() != nil {
 				t.mu.RUnlock()
 				shardLocked = false
-				t.t.waitTableLock(scm.GetCurrentSessionState(), false)
+				t.t.waitTableLock(ss, false)
 				t.mu.RLock()
 				shardLocked = true
 			}

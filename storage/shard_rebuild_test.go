@@ -173,8 +173,8 @@ func TestShardRebuildDeletePropagationUsesStableTranslation(t *testing.T) {
 		t.Fatal("rebuild returned nil shard")
 	}
 
-	shard.UpdateFunction(0, false, false)()
-	shard.UpdateFunction(1, false, false)()
+	shard.UpdateFunction(0, false, false, nil)()
+	shard.UpdateFunction(1, false, false, nil)()
 
 	rebuilt.mu.RLock()
 	firstDeleted := rebuilt.deletions.Get(0)
@@ -214,15 +214,15 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 		t.Fatal("rebuild returned nil shard")
 	}
 
-	shard.UpdateFunction(0, false, false)()
-	shard.UpdateFunction(1, false, false)(scm.NewSlice([]scm.Scmer{
+	shard.UpdateFunction(0, false, false, nil)()
+	shard.UpdateFunction(1, false, false, nil)(scm.NewSlice([]scm.Scmer{
 		scm.NewString("payload"), scm.NewString("two-updated"),
 	}))
 
 	rebuilt.mu.RLock()
 	rowOneDeleted := rebuilt.deletions.Get(1)
 	rebuilt.mu.RUnlock()
-	got := rebuilt.ColumnReader("payload")(2)
+	got := rebuilt.ColumnReaderTx(nil, "payload")(2)
 	if !rowOneDeleted || got.String() != "two-updated" {
 		t.Fatalf("rebuilt update state = (deleted=%v, payload=%v), want (true, two-updated)", rowOneDeleted, got)
 	}
@@ -355,7 +355,7 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 		scm.NewInt(30001),
 		scm.NewString("transient"),
 	}}, false, nil, false)
-	oldShard.UpdateFunction(oldRecid, false, false)()
+	oldShard.UpdateFunction(oldRecid, false, false, nil)()
 
 	<-done
 
@@ -1087,6 +1087,82 @@ func TestComputeProxyGetValueUsesDeltaBeyondMainCount(t *testing.T) {
 	}
 	if !scm.Equal(proxy.GetValue(2), scm.NewString("delta")) {
 		t.Fatalf("proxy.GetValue(2) = %v, want %v", proxy.GetValue(2), scm.NewString("delta"))
+	}
+}
+
+func TestComputeProxyGetCachedReaderTxUsesSessionVariants(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-compute-reader-session-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tcomputesession")
+
+	CreateDatabase("tcomputesession", false)
+	tbl, _ := CreateTable("tcomputesession", "items", Safe, false)
+	tbl.CreateColumn("base", "INT", nil, nil)
+	tbl.Insert([]string{"base"}, [][]scm.Scmer{{scm.NewInt(5)}}, nil, scm.NewNil(), false, nil)
+
+	formulaExpr := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("+"),
+		scm.NewSymbol("base"),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("session"),
+			scm.NewString("k"),
+		}),
+	})
+	params := scm.NewSlice([]scm.Scmer{scm.NewSymbol("base")})
+	inputCols, computor := buildComputedFn(formulaExpr, params, &scm.Globalenv, []string{"base"})
+	if computor.IsNil() {
+		t.Fatal("buildComputedFn returned nil computor")
+	}
+
+	shard := tbl.Shards[0]
+	shard.mu.Lock()
+	proxy := &StorageComputeProxy{
+		delta:       make(map[uint32]scm.Scmer),
+		computor:    computor,
+		inputCols:   inputCols,
+		shard:       shard,
+		colName:     ".temp",
+		count:       shard.main_count,
+		sessionKeys: extractSessionKeys(formulaExpr),
+	}
+	shard.columns[".temp"] = proxy
+	shard.mu.Unlock()
+
+	makeTx := func(k int64) *TxContext {
+		sess := scm.NewSession()
+		tx := NewTxContext(TxCursorStability)
+		tx.Session = sess
+		scm.Apply(sess, scm.NewString("__memcp_tx"), scm.NewAny(tx))
+		scm.Apply(sess, scm.NewString("k"), scm.NewInt(k))
+		return tx
+	}
+
+	tx1 := makeTx(1)
+	tx2 := makeTx(10)
+
+	reader1 := proxy.GetCachedReaderTx(tx1)
+	reader2 := proxy.GetCachedReaderTx(tx2)
+
+	if got := reader1.GetValue(0).Int(); got != 6 {
+		t.Fatalf("reader1.GetValue(0) = %d, want 6", got)
+	}
+	if got := reader2.GetValue(0).Int(); got != 15 {
+		t.Fatalf("reader2.GetValue(0) = %d, want 15", got)
+	}
+	if got := reader1.GetValue(0).Int(); got != 6 {
+		t.Fatalf("reader1.GetValue(0) second read = %d, want 6", got)
+	}
+	if len(proxy.variants) != 2 {
+		t.Fatalf("proxy variants = %d, want 2", len(proxy.variants))
 	}
 }
 

@@ -32,10 +32,11 @@ type SessionState struct {
 	User string // immutable after registration
 	Host string // immutable after registration
 
-	DB      atomic.Pointer[string] // current schema (changes on USE)
-	Command atomic.Pointer[string] // "Query", "Sleep", "Connect"
-	Info    atomic.Pointer[string] // current SQL (empty when idle)
-	State   atomic.Pointer[string] // "Waiting for table lock", "" etc.
+	DB        atomic.Pointer[string] // current schema (changes on USE)
+	Command   atomic.Pointer[string] // "Query", "Sleep", "Connect"
+	Info      atomic.Pointer[string] // current SQL (empty when idle)
+	State     atomic.Pointer[string] // "Waiting for table lock", "" etc.
+	lockWaits atomic.Int64           // number of active table-lock waits for processlist display
 
 	startedAt atomic.Int64 // unix nanos of last command start
 	lastUsed  atomic.Int64 // unix nanos of last observed access; used for cache eviction
@@ -125,6 +126,22 @@ func (s *SessionState) EndQuery(seq uint64, idleCmd, idleInfo string) {
 // SetState updates the State field (e.g. "Waiting for table lock").
 func (s *SessionState) SetState(state string) {
 	s.State.Store(&state)
+}
+
+func (s *SessionState) BeginLockWait() {
+	s.lockWaits.Add(1)
+}
+
+func (s *SessionState) EndLockWait() {
+	for {
+		cur := s.lockWaits.Load()
+		if cur <= 0 {
+			return
+		}
+		if s.lockWaits.CompareAndSwap(cur, cur-1) {
+			return
+		}
+	}
 }
 
 // SetDB updates the current database name.
@@ -334,6 +351,10 @@ func init_processlist() {
 				if !full && len(info) > 100 {
 					info = info[:100]
 				}
+				state := strPtr(&s.State)
+				if state == "" && s.lockWaits.Load() > 0 {
+					state = "Waiting for table lock"
+				}
 				result[i] = NewSlice([]Scmer{
 					NewString("Id"), NewInt(int64(s.ID)),
 					NewString("User"), NewString(s.User),
@@ -341,7 +362,7 @@ func init_processlist() {
 					NewString("db"), NewString(strPtr(&s.DB)),
 					NewString("Command"), NewString(strPtr(&s.Command)),
 					NewString("Time"), NewInt(s.ElapsedSeconds()),
-					NewString("State"), NewString(strPtr(&s.State)),
+					NewString("State"), NewString(state),
 					NewString("Info"), NewString(info),
 				})
 			}

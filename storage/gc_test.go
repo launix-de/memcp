@@ -109,7 +109,7 @@ func TestCleanNoOrphans(t *testing.T) {
 
 	// Data still readable
 	count := 0
-	tbl.scan([]string{}, trueCondition(), []string{"id"},
+	tbl.scan(nil, []string{}, trueCondition(), []string{"id"},
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return scm.NewNil() }),
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 		scm.NewNil(), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }), false)
@@ -157,7 +157,7 @@ func TestCleanOrphanedBlob(t *testing.T) {
 
 	// Data still readable.
 	count := 0
-	tbl.scan([]string{}, trueCondition(), []string{"id"},
+	tbl.scan(nil, []string{}, trueCondition(), []string{"id"},
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return scm.NewNil() }),
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 		scm.NewNil(), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }), false)
@@ -320,7 +320,7 @@ func TestCleanAfterRebuildSupersedesShards(t *testing.T) {
 	// Data still readable (both rows).
 	count := 0
 	tbl = db.GetTable("docs")
-	tbl.scan([]string{}, trueCondition(), []string{"id"},
+	tbl.scan(nil, []string{}, trueCondition(), []string{"id"},
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return scm.NewNil() }),
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 		scm.NewNil(), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }), false)

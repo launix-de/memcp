@@ -270,6 +270,7 @@ func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnS
 		// the owning shard/column must be restored when the storage is loaded.
 		proxy.shard = u
 		proxy.colName = colName
+		proxy.sessionKeys = extractSessionKeys(proxy.computor)
 		if col != nil && len(col.OrcSortCols) > 0 {
 			proxy.isOrdered = true
 		}
@@ -767,15 +768,15 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 	return 0, false
 }
 
-func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool) func(...scm.Scmer) scm.Scmer {
-	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil)
+func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool, currentTx *TxContext) func(...scm.Scmer) scm.Scmer {
+	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, currentTx)
 }
 
 func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
 
-func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch) func(...scm.Scmer) scm.Scmer {
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, currentTx *TxContext) func(...scm.Scmer) scm.Scmer {
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
@@ -810,10 +811,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// For non-ACID updates, callbacks may race on stale recids that are
 				// already deleted by a concurrent writer. Follow to the currently
 				// visible row with the same PRIMARY key.
-				if (func() bool {
-					tx := CurrentTx()
-					return tx == nil || tx.Mode != TxACID
-				})() && t.deletions.Get(uint(targetIdx)) {
+				if (currentTx == nil || currentTx.Mode != TxACID) && t.deletions.Get(uint(targetIdx)) {
 					followed := false
 					for attempt := 0; attempt < 256; attempt++ {
 						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(targetIdx); ok {
@@ -988,7 +986,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					triggerNewRow = schemaRowFromDelta(d2)
 				}
 
-				currentTx := CurrentTx()
 				acidMode := currentTx != nil && currentTx.Mode == TxACID
 				uniqueCheckNeeded := t.t.Unique != nil && uniqueColsChanged
 
@@ -1018,7 +1015,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 
 				payloadCols, payloadRow := buildPayload()
 				newRecid = t.main_count + uint32(len(t.inserts))
-				t.insertDataset(payloadCols, [][]scm.Scmer{payloadRow}, nil)
+				t.insertDataset(payloadCols, [][]scm.Scmer{payloadRow}, nil, currentTx)
 				if !acidMode && !uniqueCheckNeeded {
 					// Atomic visibility switch under shard write lock:
 					// make new row hidden first, then delete old, then publish new.
@@ -1106,7 +1103,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			// transaction bookkeeping + deferred sync
 			// (shard is already registered via OpenMapReducer — no per-row RegisterTouchedShard)
 			if result {
-				if tx := CurrentTx(); tx != nil {
+				if tx := currentTx; tx != nil {
 					switch tx.Mode {
 					case TxCursorStability:
 						tx.LogDelete(t, targetIdx)
@@ -1173,7 +1170,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				}
 			}
 
-			if tx := CurrentTx(); tx != nil && tx.Mode == TxACID {
+			if tx := currentTx; tx != nil && tx.Mode == TxACID {
 				// Check if row was staged by this tx
 				st2 := tx.getShardTx(t)
 				wasStaged := st2 != nil && st2.UndeleteMask.Get(uint(idx))
@@ -1232,7 +1229,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Propagate to the rebuild successor shard via the stable
 				// old→new recid translation published by rebuild().
 				if len(a) > 0 {
-					t.propagateUpdateToNext(next, idx, a...)
+					t.propagateUpdateToNext(next, idx, currentTx, a...)
 				} else {
 					t.propagateDeleteToNext(next, idx)
 				}
@@ -1244,7 +1241,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 
 // propagateUpdateToNext uses the old→new recid translation built by rebuild()
 // and extended by mirrored delta inserts.
-func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid uint32, a ...scm.Scmer) {
+func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid uint32, currentTx *TxContext, a ...scm.Scmer) {
 	targetRecid, ok := t.translateNextRecid(oldRecid)
 	if !ok {
 		// The successor stays write-locked until rebuild() has published the
@@ -1254,7 +1251,7 @@ func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid uint32
 		targetRecid, ok = t.translateNextRecid(oldRecid)
 	}
 	if ok {
-		next.UpdateFunction(targetRecid, false, false)(a...)
+		next.UpdateFunction(targetRecid, false, false, currentTx)(a...)
 	}
 }
 
@@ -1279,11 +1276,12 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 	next.mu.Unlock()
 }
 
-func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
+func (t *storageShard) ColumnReaderTx(tx *TxContext, col string) func(uint32) scm.Scmer {
 	cstorage := t.getColumnStorageOrPanic(col)
+	reader := newCachedColumnReaderTx(cstorage, tx)
 	return func(idx uint32) scm.Scmer {
 		if idx < t.main_count {
-			return cstorage.GetValue(idx)
+			return reader.GetValue(idx)
 		} else {
 			return t.getDelta(int(idx-t.main_count), col)
 		}
@@ -1304,6 +1302,8 @@ type mapArgGetter func(uint32, uint32) scm.Scmer
 type ShardMapReducer struct {
 	shard           *storageShard
 	sessionState    *scm.SessionState
+	currentTx       *TxContext
+	acidMode        bool
 	mainGetters     []mapArgGetter
 	deltaGetters    []mapArgGetter
 	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate/$increment cols)
@@ -1347,17 +1347,12 @@ type ShardMapReducer struct {
 // main storage references are built once; the args buffer is pre-allocated.
 // mapFn and reduceFn are stored as Scmer for future network serialization;
 // OptimizeProcToSerialFunction is called here (TODO: replace with JIT compilation).
-func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer) *ShardMapReducer {
-	return t.openMapReducerEx(cols, mapFn, reduceFn, false, 0, nil)
-}
-
-// openMapReducerEx is the implementation of OpenMapReducer.
-// alreadyLocked=true skips the hasWriteOwner() check per column (caller already holds
-// the write lock or has confirmed ownsWrite=false via skipShardReadLock).
-func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer) *ShardMapReducer {
+func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) *ShardMapReducer {
 	mr := &ShardMapReducer{
 		shard:            t,
 		sessionState:     scm.GetCurrentSessionState(),
+		currentTx:        currentTx,
+		acidMode:         currentTx != nil && currentTx.Mode == TxACID,
 		mainGetters:      make([]mapArgGetter, len(cols)),
 		deltaGetters:     make([]mapArgGetter, len(cols)),
 		mainCols:         make([]ColumnStorage, len(cols)),
@@ -1558,20 +1553,21 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		}
 		if mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch))
+				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch, mr.currentTx))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
 			continue
 		}
 		mainCol := mr.mainCols[i]
+		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx)
 		colName := mr.colNames[i]
 		mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
-			return mainCol.GetValue(id)
+			return mainReader.GetValue(id)
 		}
 		if _, isProxy := mainCol.(*StorageComputeProxy); isProxy {
 			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
-				return mainCol.GetValue(id)
+				return mainReader.GetValue(id)
 			}
 		} else {
 			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
@@ -1581,7 +1577,7 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 	}
 	// Register shard for deferred fsync once, not per row.
 	if mr.hasUpdateCol {
-		if tx := CurrentTx(); tx != nil {
+		if tx := mr.currentTx; tx != nil {
 			tx.RegisterTouchedShard(t)
 		}
 	}
@@ -1646,7 +1642,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				m.shard.enterWriteOwner()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
-				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
@@ -1689,7 +1685,7 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 				m.shard.enterWriteOwner()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
-				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
@@ -1731,7 +1727,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				m.shard.enterWriteOwner()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
-				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
@@ -1772,7 +1768,7 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 				m.shard.enterWriteOwner()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
-				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
@@ -1838,6 +1834,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		t.t.waitTableLock(scm.GetCurrentSessionState(), true)
 	}
 	beforeInsertTriggers := t.t.GetTriggers(BeforeInsert)
+	currentTx := CurrentTx()
 	if len(beforeInsertTriggers) > 0 {
 		preparedColumns := make([][]string, 0, len(values))
 		preparedRows := make([][]scm.Scmer, 0, len(values))
@@ -1862,7 +1859,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		firstNewRecid := uint32(0)
 		firstInsertId := onFirstInsertId
 		for i, row := range preparedRows {
-			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true)
+			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, currentTx)
 			if i == 0 {
 				firstNewRecid = recid
 			}
@@ -1885,7 +1882,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
-	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true)
+	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, currentTx)
 	if !alreadyLocked {
 		t.mu.Unlock()
 	}
@@ -1899,7 +1896,7 @@ func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alr
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
-	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false)
+	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, nil)
 	if !alreadyLocked {
 		t.mu.Unlock()
 	}
@@ -1923,12 +1920,12 @@ func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]
 	return idx2col, logVals
 }
 
-func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool) uint32 {
+func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, currentTx *TxContext) uint32 {
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
 	var triggerInsertRows []dataset
-	t.insertDataset(columns, values, onFirstInsertId)
+	t.insertDataset(columns, values, onFirstInsertId, currentTx)
 	if fireTriggers && len(t.t.Triggers) > 0 {
 		newRows := t.inserts[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
@@ -1967,7 +1964,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 		}
 	}
 	// transaction bookkeeping
-	if tx := CurrentTx(); tx != nil {
+	if tx := currentTx; tx != nil {
 		switch tx.Mode {
 		case TxACID:
 			// ACID: hide rows globally, add to undelete mask so this tx can see them
@@ -2003,7 +2000,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
-func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64)) {
+func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), currentTx *TxContext) {
 	colidx := make([]int, len(columns))
 	for i, col := range columns {
 		// copy all dataset entries into packed array

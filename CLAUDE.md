@@ -1,6 +1,8 @@
 all instructions see AGENTS.md
 
-## Branch: unnesting4 — Neumann Query Unnesting
+before doing anything at the untangle function, read the two papers for Neumann Unnesting
+
+## Neumann Query Unnesting
 
 ### Papers (MUST READ at start of every session)
 - `/home/carli/projekte/memcp/papers/Unnesting-Arbitrary-Queries.pdf` (Neumann/Kemper NK15, BTW 2015)

@@ -169,13 +169,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
 	/* (get_column "OLD" _ col _) -> (get_assoc OLD col) */
 	/* (get_column nil _ col _) -> (get_assoc NEW col) for unqualified columns in trigger context */
-	/* ('session var) -> ((context "session") var) — always read @var from GLS session, not lexical scope */
+	/* ('session var) stays a normal session-function call in trigger scope */
 	(define transform_trigger_expr (lambda (expr) (match expr
 		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-		'('session var) (list (list (symbol "context") "session") var)
-		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
+		'('session var) (list (symbol "session") var)
+		'('session var value) (list (symbol "session") var (transform_trigger_expr value))
 
 		(cons head tail) (if (or (equal?? head "inner_select") (equal?? head (quote inner_select)))
 			/* scalar subselect in trigger: compile via build_queryplan_term.
@@ -228,10 +228,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/*        body from sql_trigger_body */
 	/*   - (!begin stmt1 stmt2 ...) for BEGIN...END blocks */
 	/*   - (list (col1 expr1) (col2 expr2) ...) for SET statements */
-	/* Output: (lambda (OLD NEW) ...) that can be applied by ExecuteTriggers */
+	/* Output: (lambda (OLD NEW session) ...) that can be applied by ExecuteTriggers */
 	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
 	(define compile_trigger_body (lambda (schema timing body) (begin
-		(define params (list (symbol "OLD") (symbol "NEW")))
+		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
 
@@ -415,18 +415,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(define valid_stmts (filter compiled_stmts (lambda (s) (not (nil? s)))))
 				/* For BEFORE triggers: init changed_rows from NEW, return it at end */
 				/* For AFTER triggers: just execute statements */
-				/* Inject (define session (context "session")) so @variables resolve in trigger scope */
-				(define session_bind (list (symbol "define") (symbol "session") (list (symbol "context") "session")))
 				(if is_after
 					(if (> (count valid_stmts) 0)
-						(list (symbol "lambda") params (cons (symbol "begin") (cons session_bind valid_stmts)))
+						(list (symbol "lambda") params (cons (symbol "begin") valid_stmts))
 						(list (symbol "lambda") params nil))
 					/* BEFORE trigger: wrap with changed_rows handling */
 					/* Use outer begin for define, inner !begin (no new scope) for statements */
 					/* Wrap in begin: define changed_rows, execute stmts, return changed_rows */
 					(list (symbol "lambda") params
 						(list (symbol "begin")
-							session_bind
 							(list (symbol "define") changed_rows_sym (symbol "NEW"))
 							(cons '!begin valid_stmts)
 							changed_rows_sym)))
@@ -1432,14 +1429,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
-					'((quote scan) "system" "access"
+					'((quote scan) '(session "__memcp_tx") "system" "access"
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
 						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 						(quote +)
 						0)
-					'((quote scan) "system" "user"
+					'((quote scan) '(session "__memcp_tx") "system" "user"
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -1456,7 +1453,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
 
 		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
@@ -1466,7 +1463,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
 		/* GRANT <anything> ON db.* TO user -> insert access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
@@ -1483,12 +1480,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
+					'(session "__memcp_tx")
 					"system"
 					"access"
 					'(list "username" "database")
@@ -1502,6 +1500,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
+					'(session "__memcp_tx")
 					"system"
 					"access"
 					'(list "username" "database")
@@ -1610,7 +1609,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
-					'((quote scan) "system" "access"
+					'((quote scan) '(session "__memcp_tx") "system" "access"
 						'('list "database")
 						'((quote lambda) '('database) '((quote equal??) (quote database) id))
 						'(list "$update")
@@ -1623,7 +1622,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons '!begin vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))
@@ -1693,17 +1692,17 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			'((quote droptrigger) schema name (if if_exists true false)))
 
 		/* USE database - change current schema */
-		(parser '((atom "USE" true) (define db sql_identifier)) '('session "schema" db))
+		(parser '((atom "USE" true) (define db sql_identifier)) (list (list (quote context) "session") "schema" db))
 
 		/* ANALYZE TABLE (no-op) */
 		(parser '((atom "ANALYZE" true) (atom "TABLE" true) sql_identifier) "ignore")
 
 		/* transaction control */
-		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) '('tx_begin_acid 'session))
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('tx_begin 'session))
-		(parser '((atom "BEGIN" true)) '('tx_begin 'session))
-		(parser '((atom "COMMIT" true)) '('tx_commit 'session))
-		(parser '((atom "ROLLBACK" true)) '('tx_rollback 'session))
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (list (quote context) "session")))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (list (quote context) "session")))
+		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -172,27 +172,38 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "schemata"))
-	(merge '(scanfn schema 
+	(merge '(scanfn '(session "__memcp_tx") schema 
 		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
-	(merge '(scanfn schema
+	(merge '(scanfn '(session "__memcp_tx") schema
 		'('merge '('map '('show) '('lambda '('schema) '('map '('show 'schema) '('lambda '('tbl) '('info_schema_table_row 'schema 'tbl))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
-	(merge '(scanfn schema 
+	(merge '(scanfn '(session "__memcp_tx") schema 
 		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "Field") "data_type" '((quote col) "RawType") "column_type" '((quote concat) '((quote col) "Type") '((quote col) "Dimensions")))))))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "statistics"))
-	(merge '(scanfn schema '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
+	(merge '(scanfn '(session "__memcp_tx") schema '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
 	'((ignorecase "information_schema") (ignorecase "files"))
-	(merge '(scanfn schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
+	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
 	'((ignorecase "information_schema") (ignorecase "partitions"))
-	(merge '(scanfn schema '(list)) rest) /* empty: no MySQL partitions */
-	'(schema tbl) /* normal case */
-	(merge '(scanfn schema tbl) rest)
+	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* empty: no MySQL partitions */
+		'(schema tbl) /* normal case */
+		(begin
+			/* scan helpers receive a runtime source as their table argument.
+			Materialized subqueries are stored in the session and therefore must be
+			lowered to ((context "session") key) before scan/scan_order/scan_batch
+			see them. Do not stringify this source and do not add table-name
+			fallbacks in Go for it. */
+			(define scan-table-source (lambda (table_source) (match table_source
+				'(materialized-subquery key) (list (list (quote context) "session") key)
+				'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
+				'((quote materialized-subquery) key) (list (list (quote context) "session") key)
+				table_source)))
+		(merge (list scanfn '(session "__memcp_tx") schema (scan-table-source tbl)) rest))
 ))))

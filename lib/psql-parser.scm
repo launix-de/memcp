@@ -754,34 +754,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(? (atom "WITH" true))
 			(atom "PASSWORD" true) (define password psql_expression))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
 			(atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
 		/* ALTER USER SUPERUSER / NOSUPERUSER — PostgreSQL admin grant */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "SUPERUSER" true))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "NOSUPERUSER" true))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
 		))
 		/* DROP USER/ROLE [IF EXISTS] — cascade-deletes access entries then the user row */
 		(parser '((atom "DROP" true) (or (atom "USER" true) (atom "ROLE" true)) (? (atom "IF" true) (atom "EXISTS" true)) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
-					'((quote scan) "system" "access"
+					'((quote scan) '(session "__memcp_tx") "system" "access"
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
 						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 						(quote +)
 						0)
-					'((quote scan) "system" "user"
+					'((quote scan) '(session "__memcp_tx") "system" "user"
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -795,12 +795,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
 		))
 		/* GRANT <any> ON DATABASE db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
@@ -824,6 +824,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
+					'(session "__memcp_tx")
 					"system"
 					"access"
 					'(list "username" "database")
@@ -837,6 +838,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
+					'(session "__memcp_tx")
 					"system"
 					"access"
 					'(list "username" "database")
@@ -850,6 +852,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
+					'(session "__memcp_tx")
 					"system"
 					"access"
 					'(list "username" "database")
@@ -938,7 +941,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */
 			(parser (atom "heap" true) "heap") /* quirks for SET default_table_access_method = heap */
 			psql_expression
-		))) '((quote session) key value)) ","))) (cons '!begin vars))
+		))) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl psql_identifier) (? (atom "AS" true) (define alias psql_identifier)) (define mode (or (parser (atom "WRITE" true) true) (parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true) (parser '((atom "READ" true) (? (atom "LOCAL" true))) nil)))) (list tbl (not (nil? mode)))) ",")))
@@ -952,14 +955,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "ANALYZE" true) (atom "TABLE" true) psql_identifier) "ignore")
 
 		/* USE database - change current schema */
-		(parser '((atom "USE" true) (define db psql_identifier)) '('session "schema" db))
+		(parser '((atom "USE" true) (define db psql_identifier)) (list (list (quote context) "session") "schema" db))
 
 		/* transaction control */
-		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) '('tx_begin_acid 'session))
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('tx_begin 'session))
-		(parser '((atom "BEGIN" true)) '('tx_begin 'session))
-		(parser '((atom "COMMIT" true)) '('tx_commit 'session))
-		(parser '((atom "ROLLBACK" true)) '('tx_rollback 'session))
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (list (quote context) "session")))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (list (quote context) "session")))
+		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (list (quote context) "session")))
+		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)

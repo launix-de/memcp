@@ -18,6 +18,63 @@ package storage
 
 import "github.com/launix-de/memcp/scm"
 
+func extractSessionKeys(expr scm.Scmer) []string {
+	seen := make(map[string]bool)
+	var out []string
+	var walk func(scm.Scmer)
+	walk = func(node scm.Scmer) {
+		if node.IsProc() {
+			walk(node.Proc().Body)
+			return
+		}
+		if !node.IsSlice() {
+			return
+		}
+		items := node.Slice()
+		if len(items) == 0 {
+			return
+		}
+		if items[0].IsSymbol() && items[0].String() == "session" {
+			if len(items) >= 2 && items[1].IsString() {
+				key := items[1].String()
+				if !seen[key] {
+					seen[key] = true
+					out = append(out, key)
+				}
+			}
+		}
+		for _, it := range items {
+			walk(it)
+		}
+	}
+	walk(expr)
+	return out
+}
+
+func mergeSessionKeys(parts ...[]string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, part := range parts {
+		for _, key := range part {
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, key)
+			}
+		}
+	}
+	return out
+}
+
+func txBoundSessionScmer() scm.Scmer {
+	return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		return scm.Apply(txSessionScmer(CurrentTx()), a...)
+	})
+}
+
+func bindTxSessionEnv(env *scm.Env) *scm.Env {
+	return bindSessionEnv(env, txBoundSessionScmer())
+}
+
 // containsNthLocalVar reports whether expr contains at least one optimizer-local
 // variable reference (var i). This is used to decide whether Proc.NumVars must
 // be set for serial execution.
@@ -243,10 +300,14 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 		origParams,
 		formulaExpr,
 	})
+	evalEnv := env
+	if len(extractSessionKeys(formulaExpr)) > 0 {
+		evalEnv = bindTxSessionEnv(env)
+	}
 	var result scm.Scmer
 	func() {
 		defer func() { recover() }()
-		result = scm.Eval(lambdaForm, env)
+		result = scm.Eval(lambdaForm, evalEnv)
 	}()
 	if result.IsNil() {
 		return nil, scm.NewNil()
