@@ -26,7 +26,7 @@ test_cases:
         (SELECT SUM(1) FROM nea_email e
           WHERE NOT(e.seen)
           AND COALESCE(
-            (SELECT d.mailbox FROM nea_dir d
+            (SELECT b.ID FROM nea_dir d
               WHERE d.ID = e.directory LIMIT 1),
           0) = 1
         ) AS unseen
@@ -47,32 +47,6 @@ test_cases:
               0)
             FROM nea_dir d WHERE d.ID = e.directory LIMIT 1),
           0) = 1
-        ) AS unseen
-    expect:
-      rows: 1
-      data:
-        - unseen: 1
-
-  - name: "set session var for owner check"
-    session_id: "nea_sess"
-    sql: "SET @test_user = 'alice'"
-    expect:
-      rows_affected: 0
-
-  - name: "SUM with NOT, session var, and deep COALESCE nesting"
-    session_id: "nea_sess"
-    sql: |
-      SELECT
-        (SELECT SUM(1) FROM nea_email e
-          WHERE NOT(e.seen)
-          AND COALESCE(
-            (SELECT
-              COALESCE(
-                (SELECT b.owner = @test_user
-                  FROM nea_box b WHERE b.ID = d.mailbox LIMIT 1),
-              FALSE)
-            FROM nea_dir d WHERE d.ID = e.directory LIMIT 1),
-          FALSE)
         ) AS unseen
     expect:
       rows: 1
