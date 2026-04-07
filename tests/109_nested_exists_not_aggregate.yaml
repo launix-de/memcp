@@ -1,0 +1,59 @@
+# Scalar subquery with SUM + NOT(column) + nested correlated COALESCE subquery.
+# Extracted from ERPL reminder query that produces broken internal column names:
+#   .tbl:(1)|(and (not (get_column "alias" false "col" false)) "0")
+# The group cache key incorrectly embeds the filter condition into the table name.
+
+metadata:
+  version: "1.0"
+  description: "SUM subquery with NOT column and nested correlated COALESCE"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nea_box"
+  - sql: "DROP TABLE IF EXISTS nea_dir"
+  - sql: "DROP TABLE IF EXISTS nea_email"
+  - sql: "CREATE TABLE nea_box (ID INT PRIMARY KEY, owner TEXT)"
+  - sql: "CREATE TABLE nea_dir (ID INT PRIMARY KEY, mailbox INT)"
+  - sql: "CREATE TABLE nea_email (ID INT PRIMARY KEY, directory INT, seen INT)"
+  - sql: "INSERT INTO nea_box VALUES (1, 'alice'), (2, 'bob')"
+  - sql: "INSERT INTO nea_dir VALUES (10, 1), (20, 2)"
+  - sql: "INSERT INTO nea_email VALUES (100, 10, 0), (101, 10, 1), (102, 20, 0), (103, 20, 0)"
+
+test_cases:
+
+  - name: "SUM with NOT and nested correlated COALESCE subquery"
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM nea_email e
+          WHERE NOT(e.seen)
+          AND COALESCE(
+            (SELECT b.ID FROM nea_dir d
+              WHERE d.ID = e.directory LIMIT 1),
+          0) = 1
+        ) AS unseen
+    expect:
+      rows: 1
+      data:
+        - unseen: 1
+
+  - name: "SUM with NOT and double-nested correlated COALESCE"
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM nea_email e
+          WHERE NOT(e.seen)
+          AND COALESCE(
+            (SELECT
+              COALESCE(
+                (SELECT b.ID FROM nea_box b WHERE b.ID = d.mailbox LIMIT 1),
+              0)
+            FROM nea_dir d WHERE d.ID = e.directory LIMIT 1),
+          0) = 1
+        ) AS unseen
+    expect:
+      rows: 1
+      data:
+        - unseen: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nea_email"
+  - sql: "DROP TABLE IF EXISTS nea_dir"
+  - sql: "DROP TABLE IF EXISTS nea_box"
