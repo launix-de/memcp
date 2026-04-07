@@ -17,7 +17,7 @@ setup:
   - sql: "CREATE TABLE nea_share (ID INT PRIMARY KEY, mailbox INT, fopuser TEXT)"
   - sql: "CREATE TABLE nea_dir (ID INT PRIMARY KEY, mailbox INT)"
   - sql: "CREATE TABLE nea_email (ID INT PRIMARY KEY, directory INT, seen INT)"
-  - sql: "INSERT INTO nea_box VALUES (1, 'alice', 'bob'), (2, 'bob', 'alice')"
+  - sql: "INSERT INTO nea_box VALUES (1, 'alice', 'alice'), (2, 'bob', 'bob')"
   - sql: "INSERT INTO nea_share VALUES (1, 1, 'alice')"
   - sql: "INSERT INTO nea_dir VALUES (10, 1), (20, 2)"
   - sql: "INSERT INTO nea_email VALUES (100, 10, 0), (101, 10, 1), (102, 20, 0), (103, 20, 0)"

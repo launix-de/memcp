@@ -374,7 +374,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 (service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
-(set mysql_auth (lambda (username_) (scan (session "__memcp_tx") "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
+(set mysql_auth (lambda (username_) (scan nil "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 (set mysql_handler (lambda (schema sql resultrow_sql session) (begin
 	(define resultrow resultrow_sql)

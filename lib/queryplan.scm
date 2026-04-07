@@ -958,7 +958,13 @@ Enables index-based filtering in scan/scan_order by pushing predicates down. */
 	'((symbol aggregate) _ _ _) (if (equal? tables '()) '(expr true) '(true expr))
 	'((quote aggregate) _ _ _) (if (equal? tables '()) '(expr true) '(true expr))
 	(cons (symbol and) conditions) /* splittable and */ (split_condition_and conditions tables)
-	(cons sym args) /* non-splittable function call */ (split_condition_combine sym args tables)
+	/* Scope contract: runtime subplans and other opaque scope nodes carry their
+	own alias domain. split_condition must not recurse into them, otherwise inner
+	get_column refs from correlated scalar subqueries get misclassified as later
+	join refs of the surrounding group stage and leak into keytable lowering. */
+	(cons sym args) /* non-splittable function call */ (if (_is_opaque_scope_sym sym)
+		'(expr true)
+		(split_condition_combine sym args tables))
 	/* literal */ '(expr true)
 )))
 (define split_condition_combine (lambda (sym args tables) (if
@@ -2178,6 +2184,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								false)))
 							(define raw_query_contains_skip_level_nested_outer_ref (lambda (query current_aliases) (match query
 								'(_ _ raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+									(define nested_current_aliases (append_unique current_aliases (raw_query_local_aliases query)))
 									(define raw_expr_contains_skip_level_nested_outer_ref (lambda (expr) (match expr
 										(cons sym args) (begin
 											(define kind (inner_select_kind sym))
@@ -2196,8 +2203,8 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 											(or
 												(and (not (nil? nested_subquery))
 													(or
-														(raw_query_uses_alias_outside_current nested_subquery current_aliases)
-														(raw_query_contains_skip_level_nested_outer_ref nested_subquery current_aliases)))
+														(raw_query_uses_alias_outside_current nested_subquery nested_current_aliases)
+														(raw_query_contains_skip_level_nested_outer_ref nested_subquery nested_current_aliases)))
 												(reduce args (lambda (acc arg) (or acc (raw_expr_contains_skip_level_nested_outer_ref arg))) false)))
 										false)))
 									(or
@@ -2258,6 +2265,27 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(contains_outer_ref sym)
 								(reduce args (lambda (found arg) (or found (contains_outer_ref arg))) false))
 							false)))
+						(define collapse_runtime_outer_refs (lambda (expr) (match expr
+							'((quote outer) inner_expr) (match inner_expr
+								(symbol inner_sym) (if (equal? 1 (count (split (string inner_sym) ".")))
+									inner_expr
+									expr)
+								'((symbol var) _) inner_expr
+								'((quote var) _) inner_expr
+								'((quote outer) _) (collapse_runtime_outer_refs inner_expr)
+								'((symbol outer) _) (collapse_runtime_outer_refs inner_expr)
+								_ expr)
+							'((symbol outer) inner_expr) (match inner_expr
+								(symbol inner_sym) (if (equal? 1 (count (split (string inner_sym) ".")))
+									inner_expr
+									expr)
+								'((symbol var) _) inner_expr
+								'((quote var) _) inner_expr
+								'((quote outer) _) (collapse_runtime_outer_refs inner_expr)
+								'((symbol outer) _) (collapse_runtime_outer_refs inner_expr)
+								_ expr)
+							(cons sym args) (cons sym (map args collapse_runtime_outer_refs))
+							expr)))
 						(define stage_contains_outer_ref (lambda (stage)
 							(or
 								(reduce (coalesceNil (stage_group_cols stage) '()) (lambda (found expr) (or found (contains_outer_ref expr))) false)
@@ -2278,7 +2306,6 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(define use_direct_agg_scan (and
 							(not (nil? _agg_args))
 							(equal? (count _agg_args) 3)
-							(not raw_contains_skip_level_nested_outer_ref)
 							(nil? stage2_post_group_condition)
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(not (nil? tables2))
@@ -2332,40 +2359,41 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(define agg_item (nth _agg_args 0))
 								(define agg_reduce (nth _agg_args 1))
 								(define agg_neutral (nth _agg_args 2))
-								(define build_scalar_agg_scan (lambda (scan_tables scan_condition)
-									(match scan_tables
-										(cons '(tblvar schema3 tbl3 isOuter3 joinexpr3) rest_tables) (begin
-											(define cur_cols (merge_unique (list
-												(extract_columns_for_tblvar tblvar scan_condition)
-												(extract_columns_for_tblvar tblvar agg_item)
-												(extract_outer_columns_for_tblvar tblvar scan_condition)
-												(extract_outer_columns_for_tblvar tblvar agg_item)
+										(define build_scalar_agg_scan (lambda (scan_tables scan_condition)
+											(match scan_tables
+												(cons '(tblvar schema3 tbl3 isOuter3 joinexpr3) rest_tables) (begin
+													(define cur_cols (merge_unique (list
+														(extract_columns_for_tblvar tblvar scan_condition)
+														(extract_columns_for_tblvar tblvar agg_item)
+														(extract_outer_columns_for_tblvar tblvar scan_condition)
+														(extract_outer_columns_for_tblvar tblvar agg_item)
 												(extract_later_joinexpr_columns_for_tblvar tblvar rest_tables)
 											)))
-											(match (split_scan_condition isOuter3 joinexpr3 scan_condition rest_tables) '(now_condition later_condition) (begin
-												(define filtercols (merge_unique (list
-													(extract_columns_for_tblvar tblvar now_condition)
-													(extract_outer_columns_for_tblvar tblvar now_condition)
-												)))
-												(define inner_body (build_scalar_agg_scan rest_tables later_condition))
-												(scan_wrapper 'scan schema3 tbl3
-													(cons list filtercols)
-													(list (quote lambda)
-														(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-														(replace_columns_from_expr now_condition)
-													)
-													(cons list cur_cols)
-													(list (quote lambda)
-														(map cur_cols (lambda (col) (symbol (concat tblvar "." col))))
-														inner_body
+													(match (split_scan_condition isOuter3 joinexpr3 scan_condition rest_tables) '(now_condition later_condition) (begin
+														(define filtercols (merge_unique (list
+															(extract_columns_for_tblvar tblvar now_condition)
+															(extract_outer_columns_for_tblvar tblvar now_condition)
+														)))
+														(define inner_body (build_scalar_agg_scan rest_tables later_condition))
+														(define filterbody (collapse_runtime_outer_refs (replace_columns_from_expr now_condition)))
+														(scan_wrapper 'scan schema3 tbl3
+															(cons list filtercols)
+															(list (quote lambda)
+																(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
+																filterbody
+															)
+															(cons list cur_cols)
+															(list (quote lambda)
+																(map cur_cols (lambda (col) (symbol (concat tblvar "." col))))
+																inner_body
 													)
 													(eval agg_reduce) agg_neutral (eval agg_reduce) isOuter3
 												)
 											))
 										)
-										'() (replace_columns_from_expr agg_item)
-									)
-								))
+												'() (collapse_runtime_outer_refs (replace_columns_from_expr agg_item))
+											)
+										))
 								(define _init_stmts_agg (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
 								(if (equal? _init_stmts_agg '())
 									(build_scalar_agg_scan tables2 condition2)
@@ -2400,6 +2428,8 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 										(if (and use_ordered_scalar (not (equal? stage2_order '())) (not (equal? (count ordercols) (count stage2_order))))
 											(error "scalar subselect ORDER BY must use direct columns"))
 										(define wrap_generated_outer_refs_scalar (lambda (expr local_params) (match expr
+											'((quote outer) inner_expr) (collapse_runtime_outer_refs expr)
+											'((symbol outer) inner_expr) (collapse_runtime_outer_refs expr)
 											(cons sym args) (cons sym (map args (lambda (arg) (wrap_generated_outer_refs_scalar arg local_params))))
 											sym (begin
 												/* Correlated direct scalar scans run inside the enclosing scan lambda.
@@ -2417,7 +2447,11 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 											(contains_noncolumn_outer_ref filterbody)
 											(contains_noncolumn_outer_ref valuebody)
 										))
-										(if direct_has_noncolumn_outer_ref
+										(define direct_has_runtime_outer_ref (or
+											(contains_outer_ref filterbody)
+											(contains_outer_ref valuebody)
+										))
+										(if (or direct_has_noncolumn_outer_ref direct_has_runtime_outer_ref)
 											(build_scalar_subselect_fallback)
 											(begin
 												(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
@@ -3746,7 +3780,19 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 	Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
 	(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
 	(define _sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
-	(set tables (merge tables _sq_tbls _sq_scalar_tbls))
+	/* Contract: scalar helper tables used only for SELECT/expr projection keep
+	their LEFT JOIN joinexpr local so NULL-preserving semantics survive.
+	When the current WHERE references such a helper, it is no longer a pure
+	projection helper: its joinexpr belongs to the row-domain and must be merged
+	into the normal table/condition pipeline before grouping. */
+	(define condition_ref_aliases (extract_tblvars condition))
+	(define sq_scalar_condition_tbls (filter _sq_scalar_tbls (lambda (t) (match t
+		'(tv _ ttbl _ _)
+		(has? condition_ref_aliases (if (nil? tv) ttbl tv))
+		false))))
+	(define sq_scalar_projection_tbls (filter _sq_scalar_tbls (lambda (t)
+		(not (has? sq_scalar_condition_tbls t)))))
+	(set tables (merge tables _sq_tbls sq_scalar_condition_tbls sq_scalar_projection_tbls))
 	(define _sq_schs (coalesceNil (sq_cache "schemas") '()))
 	(if (not (equal? _sq_schs '())) (set schemas (merge schemas _sq_schs)))
 	/* ensure materialized temp sources have a visible schema under their current alias.
@@ -3762,10 +3808,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 	/* Design contract: logical get_column/aggregate/window sentinels should stay
 	as long as possible and join semantics must stay attached to their stage.
 	COUNT/IN/EXISTS helper tables still expose their correlation predicates here
-	as global condition terms. Scalar projection helpers are kept in
-	_sq_scalar_tbls precisely so their LEFT JOIN joinexpr stays local and does
-	not collapse null-preserving semantics back into an inner filter. */
-	(define _sq_jes (filter (map _sq_tbls (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
+	as global condition terms. Scalar projection helpers only stay local while
+	they are projection-only; once WHERE references them, they join the normal
+	row-domain and their joinexpr must participate in global filtering. */
+	(define _sq_jes (filter (map (merge _sq_tbls sq_scalar_condition_tbls) (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 	(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
 	/* integrate partition stages from non-aggregate LIMIT unnesting */
 	(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
@@ -4879,6 +4925,30 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define _grp_cond_split (split_condition condition _grp_ps_tables))
 				(define _grp_ps_condition (match _grp_cond_split '(_ later) later))
 				(set condition (match _grp_cond_split '(now _) now))
+				/* Scope contract: split_condition may conservatively classify a term as
+				"later" because it traversed into nested runtime/scalar-subquery code and
+				saw inner aliases there. If the resulting later-part no longer contains a
+				real reference to one of the current partition-stage aliases at this plan
+				level, it still belongs to the row-domain filter of the current group. */
+				(define grp_ps_aliases (if (nil? _grp_ps_tables) '()
+					(map _grp_ps_tables (lambda (td) (match td
+						'(tv _ ttbl _ _)
+						(if (nil? tv) ttbl tv)
+						"")))))
+				(define grp_ps_condition_refs_stage (lambda (expr) (match expr
+					'((symbol get_column) alias_ _ _ _) (and (not (nil? alias_)) (has? grp_ps_aliases alias_))
+					'((quote get_column) alias_ _ _ _) (and (not (nil? alias_)) (has? grp_ps_aliases alias_))
+					(cons sym args) (if (_is_opaque_scope_sym sym)
+						false
+						(reduce args (lambda (found arg) (or found (grp_ps_condition_refs_stage arg))) false))
+					false)))
+				(if (and (not (nil? _grp_ps_condition))
+					(not (equal? _grp_ps_condition true))
+					(not (grp_ps_condition_refs_stage _grp_ps_condition)))
+					(begin
+						(set condition (combine_and_terms (list condition _grp_ps_condition)))
+						(set _grp_ps_condition true))
+					nil)
 				(define _grp_outer_aliases (if (nil? _grp_ps_tables) '()
 					(map _grp_ps_tables (lambda (td) (match td
 						'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)

@@ -113,6 +113,22 @@ type MySQLWrapper struct {
 	querycallback  Scmer
 }
 
+func mysqlScmSession(session *driver.Session) Scmer {
+	if scmSessionAny, ok := mysqlsessions.Load(session.ID()); ok {
+		return NewFunc(scmSessionAny.(func(...Scmer) Scmer))
+	}
+	newSession := NewSession().Func()
+	mysqlsessions.Store(session.ID(), newSession)
+	return NewFunc(newSession)
+}
+
+func withMySQLScmSession(session *driver.Session, fn func()) {
+	SetValues(map[string]any{
+		"session": mysqlScmSession(session),
+		"context": context.Background(),
+	}, fn)
+}
+
 /* session storage -> map from session id to SCM session object */
 var mysqlsessions sync.Map
 
@@ -164,7 +180,10 @@ func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	m.log.Info("%s", "Auth Check with "+session.User())
 	// callback should load password from database
-	password := Apply(m.authcallback, NewString(session.User()))
+	var password Scmer
+	withMySQLScmSession(session, func() {
+		password = Apply(m.authcallback, NewString(session.User()))
+	})
 	if password.IsNil() {
 		// user does not exist
 		return sqldb.NewSQLError(sqldb.ER_ACCESS_DENIED_ERROR, session.User(), session.Addr(), "YES")
@@ -177,7 +196,10 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
 	m.log.Info("%s", "db "+database)
-	allowed := Apply(m.schemacallback, NewString(session.User()), NewString(database))
+	var allowed Scmer
+	withMySQLScmSession(session, func() {
+		allowed = Apply(m.schemacallback, NewString(session.User()), NewString(database))
+	})
 	if !allowed.Bool() {
 		return sqldb.NewSQLErrorf(sqldb.ER_ACCESS_DENIED_ERROR, "access denied for database %s", database)
 	}
