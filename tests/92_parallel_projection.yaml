@@ -33,10 +33,10 @@ test_cases:
     scm: |
       (begin
         (define t0 (nanotime))
-        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
-        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
-        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
-        (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
+        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
         (define t1 (nanotime))
         (insert "memcp-tests" "pp_timing" '("label" "ns") (list (list "seq" (- t1 t0))))
         true)
@@ -48,7 +48,7 @@ test_cases:
         (parallel_map
           (list 1 2 3 4)
           (lambda (_)
-            (scan "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)))
+            (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)))
         (define t1 (nanotime))
         (insert "memcp-tests" "pp_timing" '("label" "ns") (list (list "par" (- t1 t0))))
         true)
