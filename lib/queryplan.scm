@@ -217,6 +217,29 @@ builds, because their truth value depends on current session state. */
 		Visible wrappers may still consult materialized_source_schema, but scan-time
 		lowering must stay on stable planned columns only. */
 		(merge_schema_fields_unique (list planned_cols)))))
+(define materialized_field_from_get_column_name (lambda (materialized_cols expr)
+	(match expr
+		'((symbol get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
+		'((quote get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
+		nil
+	)
+))
+(define register_materialized_subquery_metadata (lambda (mat_source fields_assoc)
+	(begin
+		(define schema_def (extract_assoc fields_assoc (lambda (k v)
+			(list "Field" k "Type" "any" "Expr" v))))
+		(planned_materialized_fields mat_source schema_def)
+		(prejoin_canonical_sources mat_source
+			(merge (extract_assoc fields_assoc (lambda (k v)
+				(list
+					(list k v)
+					(list (sanitize_temp_name k) v))))))
+		(materialized_source_expr_lookup mat_source
+			(merge (extract_assoc fields_assoc (lambda (k v)
+				(map (materialized_source_expr_keys v) (lambda (key) (list key k)))))))
+		schema_def
+	)
+))
 /* Some rewrite paths carry alias provenance as (visible_alias canonical_source).
 For physical scans the visible alias matters; for canonical naming / temp reuse the
 canonical source side must be used so equivalent queries share the same temp cols. */
@@ -284,8 +307,14 @@ scope is gone. */
 			(cons (cons (symbol context) '("session")) _) true
 			(cons (cons '(quote context) '("session")) _) true
 			false
-		))
+	))
 ))
+(define planner-temp-source-name (lambda (tbl tblvar)
+	(if (string? tbl)
+		tbl
+		(if (materialized-source? tbl)
+			(concat "mat_" (fnv_hash (string tbl)))
+			(string tblvar)))))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
@@ -558,6 +587,30 @@ raw _unn_* occurrence aliases into physical temp column names. */
 						_
 						(rewrite_materialized_source_columns tbl tblvar node)))))))
 		(lower_node expr)
+)))
+
+/* preserve_current_materialized_field_refs: for naming/group identity on the
+current materialized source, keep direct output-field references logical instead
+of inlining their full source expression. This prevents wrapper GROUP stages
+from serializing nested window/subquery materializations into keytable/agg names
+while still recursing into deeper helper lineage when needed. */
+(define preserve_current_materialized_field_refs (lambda (tbl tblvar expr)
+	(begin
+		(define planned_cols (coalesceNil (planned_materialized_fields tbl) '()))
+		(define preserve_node (lambda (node) (match node
+			'((symbol get_column) (eval tblvar) _ col _)
+			(if (nil? (find_materialized_field_by_name planned_cols col))
+				(lower_materialized_source_expr tbl tblvar node)
+				(list (quote get_column) tblvar false col false))
+			'((quote get_column) (eval tblvar) _ col _)
+			(if (nil? (find_materialized_field_by_name planned_cols col))
+				(lower_materialized_source_expr tbl tblvar node)
+				(list (quote get_column) tblvar false col false))
+			(cons sym args) (cons sym (map args preserve_node))
+			_ node)))
+		(if (materialized-source? tbl)
+			(preserve_node expr)
+			expr)
 )))
 
 /* returns a list of all tblvar aliases referenced via get_column in expr */
@@ -1509,11 +1562,12 @@ Returns (keytable_name key_col_names schema_def) where schema_def is a list of
 column descriptors suitable for the schemas assoc in untangle_query.
 Does NOT handle FK→PK reuse (returns nil for that case — caller must check). */
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
-	(define alias_map (list (list tblvar (concat schema "." tbl))))
+	(define keytable_source_name (planner-temp-source-name tbl tblvar))
+	(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
 	(define key_names (map keys (lambda (k)
 		(sanitize_temp_name
-			(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar k)) '(list) '(list) alias_map)))))
-	(define keytable_name (concat "." tbl ":" key_names))
+			(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar k)) '(list) '(list) alias_map)))))
+	(define keytable_name (concat "." keytable_source_name ":" key_names))
 	(define schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 	(list keytable_name key_names schema_def)
 )))
@@ -1525,9 +1579,7 @@ fk_pk_col is non-nil when FK→PK reuse is active (parent table used instead of 
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
 	(define physical_tbl (string? tbl))
-	(define keytable_source_name (if physical_tbl
-		tbl
-		(string tblvar)))
+	(define keytable_source_name (planner-temp-source-name tbl tblvar))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
 	reuse the parent (referenced) table instead of creating a temp keytable.
 	The rest of the grouped pipeline must still see the normal logical key name,
@@ -1544,7 +1596,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 							(sanitize_temp_name
 								(canonical_expr_name
 									(normalize_canonical_aliases
-										(lower_materialized_source_expr tbl tblvar (car keys)))
+										(preserve_current_materialized_field_refs tbl tblvar (car keys)))
 									'(list) '(list) alias_map)))
 						(define parent_tbl (car fk_info))
 						(define parent_col (car (cdr fk_info)))
@@ -1570,10 +1622,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
 			(define key_names (map keys (lambda (k)
 				(sanitize_temp_name
-					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar k)) '(list) '(list) alias_map)))))
+					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar k)) '(list) '(list) alias_map)))))
 			(define condition_name (if (nil? condition_suffix) nil
 				(fnv_hash (concat
-					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar condition_suffix)) '(list) '(list) alias_map)
+					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar condition_suffix)) '(list) '(list) alias_map)
 					(runtime_cache_suffix_from_exprs (list condition_suffix))))))
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
@@ -3350,6 +3402,9 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(error "UNION ALL subquery must project at least one column"))
 					(define rows_sym (symbol (concat "__from_union_rows:" id)))
 					(define resultrow_sym (symbol (concat "__from_union_resultrow:" id)))
+					(define mat_source (materialized-subquery-source id subquery))
+					(planned_materialized_fields mat_source
+						(map output_cols (lambda (col) (list "Field" col "Type" "any"))))
 					(define materialized_rows (list (quote begin)
 						(list (quote set) rows_sym (list (quote newsession)))
 						(list rows_sym "rows" '())
@@ -3468,6 +3523,43 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(reduce_assoc fields2 (lambda (acc _k v)
 							(or acc (_has_dangling_flatten_ref (replace_column_alias v))))
 							false))
+					(define flatten_referenced_cols (merge_unique (list
+						(extract_columns_for_tblvar id fields)
+						(extract_columns_for_tblvar id condition)
+						(extract_columns_for_tblvar id (coalesceNil having true))
+						(merge (map (coalesceNil order '()) (lambda (o) (extract_columns_for_tblvar id o))))
+						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_columns_for_tblvar id gexpr)))))))
+					(define pruned_fields2 (if (equal? flatten_referenced_cols '()) fields2
+						(filter_assoc fields2 (lambda (k v) (has? flatten_referenced_cols k)))))
+					(define expr_contains_materialized_helper (lambda (expr) (match expr
+						_ (if (materialized-source? expr)
+							true
+							(match expr
+								(cons sym args) (or
+									(expr_contains_materialized_helper sym)
+									(reduce args (lambda (acc arg) (or acc (expr_contains_materialized_helper arg))) false))
+								false)))))
+					(define flatten_has_helper_backed_projection
+						(reduce_assoc pruned_fields2 (lambda (acc _k v)
+							(or acc (expr_contains_materialized_helper v)))
+							false))
+					(define aggregate_refs_subquery_alias (lambda (expr)
+						(reduce (extract_aggregates expr) (lambda (acc ag)
+							(or acc (match ag
+								'(agg_expr _ _)
+								(reduce (extract_tblvars agg_expr) (lambda (found tv) (or found (equal?? tv id))) false)
+								false)))
+							false)))
+					(define outer_uses_subquery_group_boundary (or
+						(reduce_assoc fields (lambda (acc _k v) (or acc (aggregate_refs_subquery_alias v))) false)
+						(reduce (coalesceNil group '()) (lambda (acc gexpr)
+							(or acc (reduce (extract_tblvars gexpr) (lambda (found tv) (or found (equal?? tv id))) false)))
+							false)
+						(reduce (coalesceNil order '()) (lambda (acc o) (or acc (match o
+							'(col _dir) (aggregate_refs_subquery_alias col)
+							false)))
+							false)
+						(aggregate_refs_subquery_alias (coalesceNil having true))))
 					/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 					(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
 					/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
@@ -3486,7 +3578,11 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							)
 						) false)
 						false))
-					(define use_materialize (or subquery_has_window unsupported_groups flatten_has_dangling_output_ref))
+					(define use_materialize (or
+						subquery_has_window
+						unsupported_groups
+						flatten_has_dangling_output_ref
+						(and flatten_has_helper_backed_projection outer_uses_subquery_group_boundary)))
 					/* Window-function LIMIT pushdown */
 					(define mat_limit nil)
 					(if subquery_has_window (begin
@@ -3546,12 +3642,13 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
 								(list (materialized-subquery-init id subquery materialized_rows))))
+							(define mat_source (materialized-subquery-source id subquery))
+							(define mat_schema_def (register_materialized_subquery_metadata mat_source fields2))
 							(list
-								(list (list id schemax (materialized-subquery-source id subquery) isOuter joinexpr))
+								(list (list id schemax mat_source isOuter joinexpr))
 								'()
 								true
-								(list id (merge_schema_fields_unique (list
-									(map output_cols_sub (lambda (col) (list "Field" col "Type" "any"))))))
+								(list id (merge_schema_fields_unique (list mat_schema_def)))
 							)
 						)
 						(begin
@@ -3563,15 +3660,6 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)) (not (_check_inner_select joinexpr2)))
 									(list (quote if) joinexpr2 expr nil)
 									expr)))
-							/* Column pruning: only carry forward subquery columns that the
-							outer query actually references. */
-							(define _referenced_cols (merge_unique (list
-								(extract_columns_for_tblvar id fields)
-								(extract_columns_for_tblvar id condition)
-								(extract_columns_for_tblvar id (coalesceNil having true))
-								(merge (map (coalesceNil order '()) (lambda (o) (extract_columns_for_tblvar id o)))))))
-							(define pruned_fields2 (if (equal? _referenced_cols '()) fields2
-								(filter_assoc fields2 (lambda (k v) (has? _referenced_cols k)))))
 							(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
 						)
 					)
@@ -4276,7 +4364,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(begin
 				(define canon_alias_map (list (list scan_tblvar (concat scan_schema "." scan_tbl))))
 				(define scan_expr_name (lambda (expr)
-					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr scan_tbl scan_tblvar expr)) '(list) '(list) canon_alias_map)))
+					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs scan_tbl scan_tblvar expr)) '(list) '(list) canon_alias_map)))
 				(define agg_col_name (make_aggregate_cache_col_name scan_expr_name agg_name_context nil))
 				(define materialized_cols (materialized_source_physical_schema scan_schema scan_tbl scan_tblvar schemas))
 				(define lookup_expr_field (lambda (expr) (begin
@@ -4486,7 +4574,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define materialized_source (materialized-source? tbl))
 				(define expr_name (lambda (expr)
 					(sanitize_temp_name
-						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar expr)) '(list) '(list) canon_alias_map))))
+						(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar expr)) '(list) '(list) canon_alias_map))))
 				(define agg_col_name (make_aggregate_cache_col_name expr_name condition nil))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
@@ -4524,6 +4612,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(if (not (nil? found)) found
 									(coalesce (expr_lookup key) nil)))
 								nil)))
+						(define direct_field (coalesce direct_field
+							(materialized_field_from_get_column_name
+								(materialized_source_physical_schema schema tbl tblvar schemas)
+								expr)))
 						(if (not (nil? direct_field))
 							(list (quote get_column) tblvar false direct_field false)
 							(begin
@@ -4562,6 +4654,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(if (not (nil? found)) found
 									(coalesce (expr_lookup key) nil)))
 								nil)))
+						(define direct_field (coalesce direct_field
+							(materialized_field_from_get_column_name
+								(materialized_source_physical_schema schema tbl tblvar schemas)
+								expr)))
 						(if (not (nil? direct_field))
 							(list (quote get_column) tblvar false direct_field false)
 							(begin
@@ -5030,14 +5126,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(stage_partition_aliases s)
 							(stage_init_code s)))
 					)))
+					(define dedup_output_fields
+						(map_assoc fields (lambda (k v) (_dedup_resolve v))))
+					(define dedup_visible_schema
+						(extract_assoc dedup_output_fields (lambda (k v)
+							(list "Field" k "Type" "any" "Expr" v))))
 					(define grouped_plan (build_queryplan schema
 						(if _dedup_kt_is_outer
 							(merge _grp_ps_tables (list (list grouptbl schema grouptbl true _dedup_kt_je)))
 							(list (list grouptbl schema grouptbl false nil)))
-						(map_assoc fields (lambda (k v) (_dedup_resolve v)))
+						dedup_output_fields
 						nil /* condition already applied in collect */
 						transformed_rest_groups
-						schemas
+						(merge schemas (list grouptbl dedup_visible_schema))
 						replace_find_column
 						update_target))
 					(cons 'begin (merge
@@ -5243,14 +5344,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(if (equal? 1 (count _kt_terms)) (car _kt_terms)
 										(cons (quote and) _kt_terms))))
 							nil))
+						(define grouped_output_fields
+							(map_assoc fields (lambda (k v) (replace_group_field_expr v))))
+						(define grouped_visible_schema
+							(extract_assoc grouped_output_fields (lambda (k v)
+								(list "Field" k "Type" "any" "Expr" v))))
 						(define grouped_plan (build_queryplan schema
 							(if _kt_is_outer
 								(merge _grp_ps_tables (list (list grouptbl schema grouptbl true _kt_je)))
 								(list (list grouptbl schema grouptbl false nil)))
-							(map_assoc fields (lambda (k v) (replace_group_field_expr v)))
+							grouped_output_fields
 							_gp_condition
 							(merge next_groups _remaining_pstages)
-							schemas
+							(merge schemas (list grouptbl grouped_visible_schema))
 							replace_find_column
 							update_target))
 						/* Software contract for filtered grouped aggregates:
@@ -5762,6 +5868,23 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false)
 							acc
 							(merge acc (list (list canon_name (cadr mc))))))) '()))
+				/* Later wrapper groups must be able to reuse derived output fields by their
+				stable alias instead of re-serializing nested scalar/window expressions into
+				prejoin/keytable column names. Materialize non-trivial projected fields once
+				on the prejoin so recursive grouped stages can address them as `latest`,
+				`total_val`, ... even when their source expression contains inner materialized
+				subqueries. */
+				(define prejoin_columns (reduce (extract_assoc resolved_fields (lambda (field_name field_expr)
+					(match field_expr
+						'((symbol get_column) _ _ _ _) nil
+						'((quote get_column) _ _ _ _) nil
+						(list field_name field_expr))))
+					(lambda (acc mc)
+						(if (or (nil? mc)
+							(reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false))
+							acc
+							(merge acc (list mc))))
+					prejoin_columns))
 				(define prejoin_column_names (map prejoin_columns car))
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
@@ -5772,8 +5895,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list raw_condition))
 						(merge (map prejoin_source_tables (lambda (td) (match td
 							'(_ _ _ _ tjoinexpr)
-								(if (or (nil? tjoinexpr) (equal? tjoinexpr true)) '()
-									(list tjoinexpr))
+							(if (or (nil? tjoinexpr) (equal? tjoinexpr true)) '()
+								(list tjoinexpr))
 							'())))))))
 				(define prejoin_condition_name (serialize_canonical_expr
 					(canonicalize_expr
@@ -5959,6 +6082,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											(coalesce (expr_lookup key) nil)))
 										nil)))
 								nil)))
+						(define direct_field (coalesce direct_field
+							(materialized_field_from_get_column_name
+								(materialized_source_physical_schema prejoin_schema prejointbl prejoin_alias schemas)
+								expr)))
 						(if (not (nil? direct_field))
 							(list (quote get_column) prejoin_alias false direct_field false)
 							(if _scope_match
@@ -5991,6 +6118,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											(coalesce (expr_lookup key) nil)))
 										nil)))
 								nil)))
+						(define direct_field (coalesce direct_field
+							(materialized_field_from_get_column_name
+								(materialized_source_physical_schema prejoin_schema prejointbl prejoin_alias schemas)
+								expr)))
 						(if (not (nil? direct_field))
 							(list (quote get_column) prejoin_alias false direct_field false)
 							(if _scope_match
@@ -6044,19 +6175,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					_ false)))
 				(define rewrite_local_prejoin_count_term (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args)
-						(match agg_args
-							'(agg_expr + 0)
-								(if (countlike_prejoin_aggregate_expr? agg_expr)
-									(list (quote aggregate) 1 + 0)
-									expr)
-							_ expr)
+					(match agg_args
+						'(agg_expr + 0)
+						(if (countlike_prejoin_aggregate_expr? agg_expr)
+							(list (quote aggregate) 1 + 0)
+							expr)
+						_ expr)
 					(cons '(quote aggregate) agg_args)
-						(match agg_args
-							'(agg_expr + 0)
-								(if (countlike_prejoin_aggregate_expr? agg_expr)
-									(list (quote aggregate) 1 + 0)
-									expr)
-							_ expr)
+					(match agg_args
+						'(agg_expr + 0)
+						(if (countlike_prejoin_aggregate_expr? agg_expr)
+							(list (quote aggregate) 1 + 0)
+							expr)
+						_ expr)
 					(cons sym args) (cons sym (map args rewrite_local_prejoin_count_term))
 					expr)))
 				(define keep_grouped_post_group_term (lambda (expr)
@@ -6079,19 +6210,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					'(tv tschema ttbl _ _)
 					(list tv (materialized_source_schema tschema ttbl tv schemas))
 					'())))))
-					/* recursive call with single prejoin table.
-					Contract:
-					1. The prejoin materializes the complete row-domain that can be decided
-					   before grouping: local join predicates, row-local filters and
-					   lineage columns needed later.
-					2. The grouped cache built on top of that prejoin must only see
-					   group-domain conditions. Terms containing aggregates are rewritten
-					   against keytable/temp columns and evaluated on the grouped table.
-					3. Purely local prejoin predicates must not be copied into the grouped
-					   cache suffix again, otherwise unrelated grouped plans alias the same
-					   prejoin differently and cache names/filters drift apart.
-					Scoped groups keep their outer tables outside the prejoin so later
-					field expressions can still read them after the keytable LEFT JOIN. */
+				/* recursive call with single prejoin table.
+				Contract:
+				1. The prejoin materializes the complete row-domain that can be decided
+				before grouping: local join predicates, row-local filters and
+				lineage columns needed later.
+				2. The grouped cache built on top of that prejoin must only see
+				group-domain conditions. Terms containing aggregates are rewritten
+				against keytable/temp columns and evaluated on the grouped table.
+				3. Purely local prejoin predicates must not be copied into the grouped
+				cache suffix again, otherwise unrelated grouped plans alias the same
+				prejoin differently and cache names/filters drift apart.
+				Scoped groups keep their outer tables outside the prejoin so later
+				field expressions can still read them after the keytable LEFT JOIN. */
 				(define grouped_plan_condition_base (if (nil? _grp_ps_tables)
 					nil
 					(begin
@@ -6212,20 +6343,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define remaining_partition_stages (filter partition_stages (lambda (ps)
 					(not (reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 						(or acc (has? known_table_aliases a))) false)))))
-					(define grouped_result (if (nil? _grp_ps_tables)
-						(begin
-							(define no_outer_group_condition_raw (combine_and_terms
-								(filter (flatten_and_terms (coalesceNil raw_post_group_condition true))
-									contains_aggregate)))
-							(define no_outer_group_condition (if (or (nil? no_outer_group_condition_raw) (equal? no_outer_group_condition_raw true))
-								nil
-								no_outer_group_condition_raw))
-							/* no outer-scope aliases remain here, so the recursive call is a
-							plain single-table GROUP BY over the materialized prejoin table.
-							Only aggregate-dependent terms survive into the grouped filter. */
-							(define no_outer_group_stage (if is_dedup
-								(make_dedup_stage raw_stage_group nil)
-								(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil)))
+				(define grouped_result (if (nil? _grp_ps_tables)
+					(begin
+						(define no_outer_group_condition_raw (combine_and_terms
+							(filter (flatten_and_terms (coalesceNil raw_post_group_condition true))
+								contains_aggregate)))
+						(define no_outer_group_condition (if (or (nil? no_outer_group_condition_raw) (equal? no_outer_group_condition_raw true))
+							nil
+							no_outer_group_condition_raw))
+						/* no outer-scope aliases remain here, so the recursive call is a
+						plain single-table GROUP BY over the materialized prejoin table.
+						Only aggregate-dependent terms survive into the grouped filter. */
+						(define no_outer_group_stage (if is_dedup
+							(make_dedup_stage raw_stage_group nil)
+							(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil)))
 						(build_queryplan schema
 							(list (list prejoin_alias schema prejointbl false nil))
 							raw_fields

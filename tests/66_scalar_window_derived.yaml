@@ -118,7 +118,6 @@ test_cases:
           latest: 300
 
   - name: "COUNT over wrapped derived table"
-    noncritical: true
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.latest) AS total FROM (
         SELECT m.ID AS ID,
