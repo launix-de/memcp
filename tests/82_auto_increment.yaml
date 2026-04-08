@@ -9,6 +9,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS ai_mixed"
   - sql: "DROP TABLE IF EXISTS ai_restart"
   - sql: "DROP TABLE IF EXISTS ai_same_col"
+  - sql: "DROP TABLE IF EXISTS ai_tx"
   - sql: "CREATE TABLE ai_basic (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_explicit (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_mixed (id INT AUTO_INCREMENT PRIMARY KEY, val INT)"
@@ -21,6 +22,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ai_restart"
   - sql: "DROP TABLE IF EXISTS ai_mixed"
   - sql: "DROP TABLE IF EXISTS ai_same_col"
+  - sql: "DROP TABLE IF EXISTS ai_tx"
 
 test_cases:
 
