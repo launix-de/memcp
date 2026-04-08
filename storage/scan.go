@@ -109,6 +109,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	analyzeStart := time.Now()
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	boundaries = dropSessionVariantBoundaries(t, boundaries)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	if Settings.ScanDebugging {
@@ -305,9 +306,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
 	for i, k := range conditionCols {
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -523,6 +528,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
 	conditionBatchSubidx := make([]int, len(conditionCols))
 	for i, k := range conditionCols {
 		if subidx, ok := parseBatchPseudoColName(k); ok {
@@ -531,6 +537,9 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		}
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -617,6 +626,8 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 					for i, k := range ccols {
 						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
 							cdataset[i] = batchdata[batchid*stride+subidx]
+						} else if cNeedsTxReader[i] {
+							cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 						} else {
 							cdataset[i] = k.GetValue(effectiveIdx)
 						}
@@ -625,8 +636,10 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 					for i, k := range conditionCols {
 						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
 							cdataset[i] = batchdata[batchid*stride+subidx]
-						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						} else if cNeedsTxReader[i] {
 							cdataset[i] = cReaders[i].GetValue(effectiveIdx)
+						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+							cdataset[i] = ccols[i].GetValue(effectiveIdx)
 						} else {
 							cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
 						}

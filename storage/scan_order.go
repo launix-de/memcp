@@ -253,6 +253,7 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 	*/
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	boundaries = dropSessionVariantBoundaries(t, boundaries)
 	reorderByFrequency(boundaries, t)
 	// When all filter conditions are equality, appending sort columns to the
 	// boundaries lets the shard return rows already sorted by ORDER BY — the
@@ -743,8 +744,14 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
 	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
 	for i, k := range conditionCols { // iterate over columns
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
 	}
 	// initialize main_count lazily if needed
 	t.ensureMainCount(skipShardReadLock)
@@ -800,13 +807,19 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					// value from main storage
 					// check condition
 					for i, k := range ccols { // iterate over columns
-						cdataset[i] = k.GetValue(idx)
+						if cNeedsTxReader[i] {
+							cdataset[i] = cReaders[i].GetValue(idx)
+						} else {
+							cdataset[i] = k.GetValue(idx)
+						}
 					}
 				} else {
 					// value from delta storage
 					// prepare&call condition function
 					for i, k := range conditionCols { // iterate over columns
-						if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						if cNeedsTxReader[i] {
+							cdataset[i] = cReaders[i].GetValue(idx)
+						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 							cdataset[i] = ccols[i].GetValue(idx)
 						} else {
 							cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
