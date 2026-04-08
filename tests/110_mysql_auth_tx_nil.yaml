@@ -1,0 +1,42 @@
+# MySQL auth callback must stay readonly and work with tx=nil
+
+metadata:
+  version: "1.0"
+  description: "mysql_auth and direct system.user lookup work without __memcp_tx"
+
+setup:
+  - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"
+  - sql: "INSERT INTO system.user (username, password, admin) VALUES ('auth_scan_nil_repro', PASSWORD('secret123'), FALSE)"
+
+test_cases:
+  - name: "Direct scan nil resolves password from system.user"
+    scm: |
+      (if
+        (equal?
+          (scan nil "system" "user"
+            '("username")
+            (lambda (username) (equal? username "auth_scan_nil_repro"))
+            '("password")
+            (lambda (password) password)
+            (lambda (a b) b)
+            nil)
+          (password "secret123"))
+        "ok"
+        (error "scan nil over system.user returned wrong password"))
+
+  - name: "mysql_auth returns stored password hash"
+    scm: |
+      (if
+        (equal? (mysql_auth "auth_scan_nil_repro") (password "secret123"))
+        "ok"
+        (error "mysql_auth returned wrong password"))
+
+  - name: "mysql_auth returns nil for missing user"
+    scm: |
+      (if
+        (nil? (mysql_auth "auth_scan_nil_other"))
+        "ok"
+        (error "mysql_auth should return nil for missing user"))
+
+cleanup:
+  - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"
