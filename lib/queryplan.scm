@@ -1124,6 +1124,28 @@ same cache column while different session values get separate temp columns. */
 					(map terms (lambda (term) (list term (planner_eval_runtime_term term))))
 					'(list)))))
 )))
+(define aggregate_count_descriptor '(1 + 0))
+(define aggregate_cache_condition_suffix (lambda (expr_name condition_expr runtime_suffix)
+	(fnv_hash (concat (expr_name condition_expr) (coalesceNil runtime_suffix "")))
+))
+(define aggregate_cache_col_name_with_suffix (lambda (expr_name ag suffix)
+	(if (equal? ag aggregate_count_descriptor)
+		(concat "COUNT(*)|" suffix)
+		(concat (expr_name ag) "|" suffix))
+))
+(define make_aggregate_cache_col_name (lambda (expr_name condition_expr runtime_suffix) (begin
+	(define suffix (aggregate_cache_condition_suffix expr_name condition_expr runtime_suffix))
+	(lambda (ag) (aggregate_cache_col_name_with_suffix expr_name ag suffix))
+)))
+(define find_materialized_field_by_name (lambda (materialized_cols target_col)
+	(reduce materialized_cols (lambda (found coldef)
+		(if (not (nil? found))
+			found
+			(if (equal? (coldef "Field") target_col)
+				target_col
+				nil)))
+		nil)
+))
 (define assoc_keys_as_dataset_rows (lambda (dict width)
 	(map (extract_assoc dict (lambda (k v) k))
 		(lambda (k)
@@ -1685,8 +1707,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					'('lambda '('acc 'sharddict) '('insert schema grouptbl (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
 					isOuter))))
 		/* aggregate descriptors */
-		(define condition_suffix_str (fnv_hash (concat (expr_name condition) window_runtime_suffix)))
-		(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" condition_suffix_str)))
+		(define agg_col_name (make_aggregate_cache_col_name expr_name condition window_runtime_suffix))
 		(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 		(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 			/* args already resolved via replace_find_column in wf_resolved */
@@ -4253,9 +4274,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define canon_alias_map (list (list scan_tblvar (concat scan_schema "." scan_tbl))))
 				(define scan_expr_name (lambda (expr)
 					(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr scan_tbl scan_tblvar expr)) '(list) '(list) canon_alias_map)))
-				(define agg_condition_suffix (fnv_hash (scan_expr_name agg_name_context)))
-				(define agg_col_name (lambda (ag)
-					(concat (scan_expr_name ag) "|" agg_condition_suffix)))
+				(define agg_col_name (make_aggregate_cache_col_name scan_expr_name agg_name_context nil))
 				(define materialized_cols (materialized_source_physical_schema scan_schema scan_tbl scan_tblvar schemas))
 				(define lookup_expr_field (lambda (expr) (begin
 					(define expr_lookup (materialized_source_expr_lookup scan_tbl))
@@ -4287,12 +4306,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(coalesce
 						(lookup_expr_field expr)
 						(begin
-							(define target_col (agg_col_name agg_args))
-							(reduce materialized_cols (lambda (found coldef)
-								(if (not (nil? found))
-									found
-									(if (equal? (coldef "Field") target_col) target_col nil)))
-								nil)))))
+							(find_materialized_field_by_name materialized_cols (agg_col_name agg_args))))))
 				(define lower_aggs (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
 						(define match_col (current_scan_agg_field expr agg_args))
@@ -4470,40 +4484,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define expr_name (lambda (expr)
 					(sanitize_temp_name
 						(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar expr)) '(list) '(list) canon_alias_map))))
-				(define count_ag '(1 + 0))
-				(define agg_condition_suffix2 (fnv_hash (expr_name condition)))
-				(define canonical_count_col_name (lambda ()
-					(concat "COUNT(*)|" agg_condition_suffix2)))
-				(define agg_col_name (lambda (ag)
-					(if (equal? ag count_ag)
-						(canonical_count_col_name)
-						(concat (expr_name ag) "|" agg_condition_suffix2))))
+				(define agg_col_name (make_aggregate_cache_col_name expr_name condition nil))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
 					(cons (symbol aggregate) agg_args) (begin
 						(define target_col (agg_col_name agg_args))
 						(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
-						(define match_col (reduce materialized_cols (lambda (found coldef)
-							(if (not (nil? found)) found
-								(begin
-									(define field_name (coldef "Field"))
-									(if (equal? field_name target_col)
-										field_name
-										nil))))
-							nil))
+						(define match_col (find_materialized_field_by_name materialized_cols target_col))
 						(if (nil? match_col)
 							expr
 							(list (quote get_column) tblvar false match_col false)))
 					(cons '(quote aggregate) agg_args) (begin
 						(define target_col (agg_col_name agg_args))
 						(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
-						(define match_col (reduce materialized_cols (lambda (found coldef)
-							(if (not (nil? found)) found
-								(begin
-									(define field_name (coldef "Field"))
-									(if (equal? field_name target_col)
-										field_name
-										nil))))
-							nil))
+						(define match_col (find_materialized_field_by_name materialized_cols target_col))
 						(if (nil? match_col)
 							expr
 							(list (quote get_column) tblvar false match_col false)))
@@ -5053,13 +5046,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
-						(define condition_suffix_str (fnv_hash (expr_name condition)))
-						(define canonical_count_col_name (lambda ()
-							(concat "COUNT(*)|" condition_suffix_str)))
-						(define agg_col_name (lambda (ag)
-							(if (equal? ag count_ag)
-								(canonical_count_col_name)
-								(concat (expr_name ag) "|" condition_suffix_str))))
+						(define agg_col_name (make_aggregate_cache_col_name expr_name condition nil))
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
@@ -5085,7 +5072,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch (_group_value_ag_expr (group_value_local_expr expr)))
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr)))
 									(cons (symbol aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest count_ag)))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
 										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
@@ -5093,7 +5080,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											_ expr)
 										(replace_group_key_or_fetch expr))
 									(cons '(quote aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest count_ag)))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
 										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
@@ -5202,8 +5189,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(not _marker_in_fields)
 									(not _marker_in_having)
 									(not _marker_in_order)))))
-						(define ags (if needs_count (merge_unique ags (list count_ag)) ags))
-						(define count_col_name (if needs_count (agg_col_name count_ag) nil))
+						(define ags (if needs_count (merge_unique ags (list aggregate_count_descriptor)) ags))
+						(define count_col_name (if needs_count (agg_col_name aggregate_count_descriptor) nil))
 						(define keytable_schema_def (merge
 							(map resolved_stage_group (lambda (expr)
 								(list "Field" (if is_fk_reuse fk_pk_col (expr_name expr)) "Type" "any")))
