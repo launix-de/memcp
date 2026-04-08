@@ -2556,41 +2556,41 @@ seeing the correctly prefixed outer alias. */
 								(define agg_item (nth _agg_args 0))
 								(define agg_reduce (nth _agg_args 1))
 								(define agg_neutral (nth _agg_args 2))
-										(define build_scalar_agg_scan (lambda (scan_tables scan_condition)
-											(match scan_tables
-												(cons '(tblvar schema3 tbl3 isOuter3 joinexpr3) rest_tables) (begin
-													(define cur_cols (merge_unique (list
-														(extract_columns_for_tblvar tblvar scan_condition)
-														(extract_columns_for_tblvar tblvar agg_item)
-														(extract_outer_columns_for_tblvar tblvar scan_condition)
-														(extract_outer_columns_for_tblvar tblvar agg_item)
+								(define build_scalar_agg_scan (lambda (scan_tables scan_condition)
+									(match scan_tables
+										(cons '(tblvar schema3 tbl3 isOuter3 joinexpr3) rest_tables) (begin
+											(define cur_cols (merge_unique (list
+												(extract_columns_for_tblvar tblvar scan_condition)
+												(extract_columns_for_tblvar tblvar agg_item)
+												(extract_outer_columns_for_tblvar tblvar scan_condition)
+												(extract_outer_columns_for_tblvar tblvar agg_item)
 												(extract_later_joinexpr_columns_for_tblvar tblvar rest_tables)
 											)))
-													(match (split_scan_condition isOuter3 joinexpr3 scan_condition rest_tables) '(now_condition later_condition) (begin
-														(define filtercols (merge_unique (list
-															(extract_columns_for_tblvar tblvar now_condition)
-															(extract_outer_columns_for_tblvar tblvar now_condition)
-														)))
-														(define inner_body (build_scalar_agg_scan rest_tables later_condition))
-														(define filterbody (collapse_runtime_outer_refs (replace_columns_from_expr now_condition)))
-														(scan_wrapper 'scan schema3 tbl3
-															(cons list filtercols)
-															(list (quote lambda)
-																(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-																filterbody
-															)
-															(cons list cur_cols)
-															(list (quote lambda)
-																(map cur_cols (lambda (col) (symbol (concat tblvar "." col))))
-																inner_body
+											(match (split_scan_condition isOuter3 joinexpr3 scan_condition rest_tables) '(now_condition later_condition) (begin
+												(define filtercols (merge_unique (list
+													(extract_columns_for_tblvar tblvar now_condition)
+													(extract_outer_columns_for_tblvar tblvar now_condition)
+												)))
+												(define inner_body (build_scalar_agg_scan rest_tables later_condition))
+												(define filterbody (collapse_runtime_outer_refs (replace_columns_from_expr now_condition)))
+												(scan_wrapper 'scan schema3 tbl3
+													(cons list filtercols)
+													(list (quote lambda)
+														(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
+														filterbody
+													)
+													(cons list cur_cols)
+													(list (quote lambda)
+														(map cur_cols (lambda (col) (symbol (concat tblvar "." col))))
+														inner_body
 													)
 													(eval agg_reduce) agg_neutral (eval agg_reduce) isOuter3
 												)
 											))
 										)
-												'() (collapse_runtime_outer_refs (replace_columns_from_expr agg_item))
-											)
-										))
+										'() (collapse_runtime_outer_refs (replace_columns_from_expr agg_item))
+									)
+								))
 								(define _init_stmts_agg (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
 								(if (equal? _init_stmts_agg '())
 									(build_scalar_agg_scan tables2 condition2)
@@ -3748,13 +3748,13 @@ seeing the correctly prefixed outer alias. */
 							)
 						) false)
 						false))
-						/* Nested derived-table flattening must not descend into precomputed runtime blocks
-						from scalar subselects when they appear in JOIN conditions; those scopes carry lowered
-						scan structures that break under alias-renaming. */
-						(define subquery_has_runtime_joinexpr (reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
-							'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_opaque_scope (replace_column_alias inner_joinexpr)))
-							_ false))) false))
-						(define use_materialize (or
+					/* Nested derived-table flattening must not descend into precomputed runtime blocks
+					from scalar subselects when they appear in JOIN conditions; those scopes carry lowered
+					scan structures that break under alias-renaming. */
+					(define subquery_has_runtime_joinexpr (reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
+						'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_opaque_scope (replace_column_alias inner_joinexpr)))
+						_ false))) false))
+					(define use_materialize (or
 						subquery_has_window
 						unsupported_groups
 						flatten_has_dangling_output_ref
@@ -5741,8 +5741,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
 						(define collect_plan (if is_fk_reuse '()
-							(if (not (nil? _stage_scope))
-								/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
+							(if (or (not (nil? _stage_scope)) session_sensitive_group_domain)
+								/* scoped GROUPs and session-sensitive domains: always re-collect
+								to ensure all group keys are present (insert is idempotent for
+								existing keys via set_assoc dedup). No droptable needed — the
+								StorageComputeProxy session variants handle per-session values. */
 								(list (make_collect false))
 								/* Normal and session-sensitive groups: collect only when keytable
 								was just created or is empty. For session-sensitive groups the
@@ -6357,9 +6360,24 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				the raw stage expressions back onto their logical source lineage first.
 				build_scan stays the only place that finally substitutes onto the current
 				stage's physical scan symbols. */
+				(define lower_prejoin_group_expr (lambda (expr) (begin
+					(define lowered (lower_prejoin_lineage_expr expr))
+					(define projected_field
+						(reduce prejoin_columns (lambda (found mc)
+							(if (not (nil? found))
+								found
+								(if (equal? lowered (lower_prejoin_lineage_expr (cadr mc)))
+									(car mc)
+									nil)))
+							nil))
+					(if (not (nil? projected_field))
+						(list (quote get_column) prejoin_alias false projected_field false)
+						(match lowered
+							(cons sym args) (cons sym (map args lower_prejoin_group_expr))
+							lowered)))))
 				(define grouped_fields (map_assoc raw_fields (lambda (k v)
-					(lower_prejoin_lineage_expr v))))
-				(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_lineage_expr))
+					(lower_prejoin_group_expr v))))
+				(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_group_expr))
 				(define grouped_stage_alias_result (if (nil? grouped_keys)
 					nil
 					(make_keytable_schema schema prejointbl grouped_keys prejoin_alias)))
@@ -6417,10 +6435,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							nil
 							(rewrite_local_prejoin_count_term expr)))))
 				(define grouped_having
-					(rewrite_group_key_to_group_alias (lower_prejoin_lineage_expr raw_stage_post_group_condition)))
+					(rewrite_group_key_to_group_alias (lower_prejoin_group_expr raw_stage_post_group_condition)))
 				(define grouped_order (if (nil? raw_stage_order) nil
 					(map raw_stage_order (lambda (o) (match o '(col dir)
-						(list (lower_prejoin_lineage_expr col) dir))))))
+						(list (lower_prejoin_group_expr col) dir))))))
 				(define grouped_outer_tables (map _grp_ps_tables (lambda (td) (match td
 					'(tv tschema ttbl toisOuter je)
 					(list (if (nil? tv) ttbl tv) tschema ttbl toisOuter je)
@@ -6452,7 +6470,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
 						(if (or (nil? grouped_plan_condition_base_raw) (equal? grouped_plan_condition_base_raw true))
 							nil
-							(lower_prejoin_lineage_expr grouped_plan_condition_base_raw)))))
+							(lower_prejoin_group_expr grouped_plan_condition_base_raw)))))
 				(define recursive_replace_find_column (lambda (expr)
 					(match expr
 						'((symbol get_column) alias_ _ _ _) (begin

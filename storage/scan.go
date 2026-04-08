@@ -77,35 +77,6 @@ type scanResult struct {
 	err        scanError // err.r != nil indicates an error
 }
 
-// dropSessionVariantBoundaries removes boundary filters on columns that have
-// session variants. The index stores default (non-session) values, so using
-// those boundaries would incorrectly skip rows whose session-variant value
-// differs from the default.
-func dropSessionVariantBoundaries(bounds boundaries, t *table) boundaries {
-	if len(bounds) == 0 {
-		return bounds
-	}
-	filtered := bounds[:0]
-	for _, b := range bounds {
-		hasVariant := false
-		for _, s := range t.ActiveShards() {
-			if s != nil {
-				s.mu.RLock()
-				col := s.columns[b.col]
-				s.mu.RUnlock()
-				if proxy, ok := col.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
-					hasVariant = true
-					break
-				}
-			}
-		}
-		if !hasVariant {
-			filtered = append(filtered, b)
-		}
-	}
-	return filtered
-}
-
 // map reduce implementation based on scheme scripts
 func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
 	return t.scanWithBatch(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
@@ -138,7 +109,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	analyzeStart := time.Now()
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
-	boundaries = dropSessionVariantBoundaries(boundaries, t)
+	boundaries = dropSessionVariantBoundaries(t, boundaries)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	if Settings.ScanDebugging {
@@ -335,9 +306,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
 	for i, k := range conditionCols {
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -553,6 +528,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
 	conditionBatchSubidx := make([]int, len(conditionCols))
 	for i, k := range conditionCols {
 		if subidx, ok := parseBatchPseudoColName(k); ok {
@@ -561,6 +537,9 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		}
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -647,6 +626,8 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 					for i, k := range ccols {
 						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
 							cdataset[i] = batchdata[batchid*stride+subidx]
+						} else if cNeedsTxReader[i] {
+							cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 						} else {
 							cdataset[i] = k.GetValue(effectiveIdx)
 						}
@@ -655,8 +636,10 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 					for i, k := range conditionCols {
 						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
 							cdataset[i] = batchdata[batchid*stride+subidx]
-						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						} else if cNeedsTxReader[i] {
 							cdataset[i] = cReaders[i].GetValue(effectiveIdx)
+						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+							cdataset[i] = ccols[i].GetValue(effectiveIdx)
 						} else {
 							cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
 						}

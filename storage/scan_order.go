@@ -253,10 +253,7 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 	*/
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
-	// Drop boundaries on columns with session variants: the index stores
-	// default (non-session) values, so index filtering would skip rows
-	// that have different values in the current session's variant.
-	boundaries = dropSessionVariantBoundaries(boundaries, t)
+	boundaries = dropSessionVariantBoundaries(t, boundaries)
 	reorderByFrequency(boundaries, t)
 	// When all filter conditions are equality, appending sort columns to the
 	// boundaries lets the shard return rows already sorted by ORDER BY — the
@@ -748,9 +745,13 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
 	for i, k := range conditionCols { // iterate over columns
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
 	}
 	// initialize main_count lazily if needed
 	t.ensureMainCount(skipShardReadLock)
@@ -803,17 +804,25 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				}
 
 				if idx < t.main_count {
-					// value from main storage (use TX-bound readers for session variants)
-					for i := range cReaders {
-						cdataset[i] = cReaders[i].GetValue(idx)
+					// value from main storage
+					// check condition
+					for i, k := range ccols { // iterate over columns
+						if cNeedsTxReader[i] {
+							cdataset[i] = cReaders[i].GetValue(idx)
+						} else {
+							cdataset[i] = k.GetValue(idx)
+						}
 					}
 				} else {
 					// value from delta storage
-					for i, k := range conditionCols {
-						if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+					// prepare&call condition function
+					for i, k := range conditionCols { // iterate over columns
+						if cNeedsTxReader[i] {
 							cdataset[i] = cReaders[i].GetValue(idx)
+						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+							cdataset[i] = ccols[i].GetValue(idx)
 						} else {
-							cdataset[i] = t.getDelta(int(idx-t.main_count), k)
+							cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
 						}
 					}
 				}
