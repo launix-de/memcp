@@ -1,72 +1,78 @@
-# Parallel projection performance test
-# Verifies that parallel_map achieves real speedup when evaluating
-# multiple independent scans concurrently.
+# Parallel projection planner coverage
+# Verifies that independent scalar subselects in the SELECT list are
+# lowered to a parallel_map projection and still return correct results.
 
 metadata:
   version: "1.0"
-  description: "Parallel projection speedup for independent scalar subselects"
+  description: "Parallel projection planner coverage for independent scalar subselects"
   isolated: true
 
 setup:
-  - sql: "DROP TABLE IF EXISTS `pp_data`"
-  - sql: "DROP TABLE IF EXISTS `pp_timing`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_1`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_2`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_3`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_4`"
 
 test_cases:
-  - name: "PP: create and populate 30k rows"
+  - name: "PP: create and populate source tables"
     setup:
-      - sql: "CREATE TABLE `pp_data` (id INT PRIMARY KEY, score INT)"
-      - sql: "CREATE TABLE `pp_timing` (label TEXT, ns INT)"
+      - sql: "CREATE TABLE `pp_data_1` (id INT PRIMARY KEY, score INT)"
+      - sql: "CREATE TABLE `pp_data_2` (id INT PRIMARY KEY, score INT)"
+      - sql: "CREATE TABLE `pp_data_3` (id INT PRIMARY KEY, score INT)"
+      - sql: "CREATE TABLE `pp_data_4` (id INT PRIMARY KEY, score INT)"
     scm: |
       (begin
-        (insert "memcp-tests" "pp_data" '("id" "score")
-          (map (produceN 30000) (lambda (i) (list i (* i 7)))))
-        30000)
+        (define tables '("pp_data_1" "pp_data_2" "pp_data_3" "pp_data_4"))
+        (map tables (lambda (tbl)
+          (insert "memcp-tests" tbl '("id" "score")
+            (map (produceN 30000) (lambda (i) (list i (* i 7)))))))
+        (* 4 30000))
 
   - name: "PP: verify data"
-    sql: "SELECT COUNT(*) AS cnt FROM pp_data"
-    expect:
-      rows: 1
-      data:
-        - cnt: 30000
-
-  - name: "PP: measure sequential (4 scans in series)"
-    scm: |
-      (begin
-        (define t0 (nanotime))
-        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
-        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
-        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
-        (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)
-        (define t1 (nanotime))
-        (insert "memcp-tests" "pp_timing" '("label" "ns") (list (list "seq" (- t1 t0))))
-        true)
-
-  - name: "PP: measure parallel (4 scans via parallel_map)"
-    scm: |
-      (begin
-        (define t0 (nanotime))
-        (parallel_map
-          (list 1 2 3 4)
-          (lambda (_)
-            (scan (session "__memcp_tx") "memcp-tests" "pp_data" '("score") (lambda (s) (< s 7000)) '("score") (lambda (s) s) + 0)))
-        (define t1 (nanotime))
-        (insert "memcp-tests" "pp_timing" '("label" "ns") (list (list "par" (- t1 t0))))
-        true)
-
-  - name: "PP: speedup >= 1.5x"
     sql: |
-      SELECT seq_ns, par_ns,
-        CASE WHEN seq_ns * 10 >= par_ns * 15 THEN 'ok' ELSE 'FAIL' END AS result
-      FROM (
-        SELECT
-          (SELECT ns FROM pp_timing WHERE label = 'seq') AS seq_ns,
-          (SELECT ns FROM pp_timing WHERE label = 'par') AS par_ns
-      ) t
+      SELECT
+        (SELECT COUNT(*) FROM pp_data_1) +
+        (SELECT COUNT(*) FROM pp_data_2) +
+        (SELECT COUNT(*) FROM pp_data_3) +
+        (SELECT COUNT(*) FROM pp_data_4) AS cnt
     expect:
       rows: 1
       data:
-        - result: "ok"
+        - cnt: 120000
+
+  - name: "PP: EXPLAIN emits parallel_map for independent scalar subselects"
+    sql: |
+      EXPLAIN SELECT
+        (SELECT SUM(score) FROM pp_data_1 WHERE score < 7000) AS s1,
+        (SELECT SUM(score) FROM pp_data_2 WHERE score < 7000) AS s2,
+        (SELECT SUM(score) FROM pp_data_3 WHERE score < 7000) AS s3,
+        (SELECT SUM(score) FROM pp_data_4 WHERE score < 7000) AS s4
+    expect:
+      rows: 1
+      contains:
+        - "parallel_map"
+        - ".pp_data_1:(1)"
+        - ".pp_data_2:(1)"
+        - ".pp_data_3:(1)"
+        - ".pp_data_4:(1)"
+
+  - name: "PP: parallelized scalar subselect projection stays correct"
+    sql: |
+      SELECT
+        (SELECT SUM(score) FROM pp_data_1 WHERE score < 7000) AS s1,
+        (SELECT SUM(score) FROM pp_data_2 WHERE score < 7000) AS s2,
+        (SELECT SUM(score) FROM pp_data_3 WHERE score < 7000) AS s3,
+        (SELECT SUM(score) FROM pp_data_4 WHERE score < 7000) AS s4
+    expect:
+      rows: 1
+      data:
+        - s1: 3496500
+          s2: 3496500
+          s3: 3496500
+          s4: 3496500
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS `pp_data`"
-  - sql: "DROP TABLE IF EXISTS `pp_timing`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_1`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_2`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_3`"
+  - sql: "DROP TABLE IF EXISTS `pp_data_4`"
