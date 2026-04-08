@@ -1,0 +1,33 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Regression: SELECT FROM INFORMATION_SCHEMA.TABLES hangs (deadlock
+# between scan lock and show metadata lock).
+
+metadata:
+  version: "1.0"
+  description: "INFORMATION_SCHEMA.TABLES must not deadlock"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS is_test_tbl"
+  - sql: "CREATE TABLE is_test_tbl (id INT PRIMARY KEY, name VARCHAR(50))"
+  - sql: "INSERT INTO is_test_tbl VALUES (1, 'a'), (2, 'b')"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS is_test_tbl"
+
+test_cases:
+  - name: "INFORMATION_SCHEMA.TABLES returns rows"
+    sql: |
+      SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = 'memcp-tests' AND TABLE_NAME = 'is_test_tbl'
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - TABLE_NAME: "is_test_tbl"
+
+  - name: "INFORMATION_SCHEMA.TABLES with COUNT"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = 'memcp-tests'
+    expect:
+      rows: 1
