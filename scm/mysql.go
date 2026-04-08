@@ -366,6 +366,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	// result from scheme
 	sessionFunc := scmSessionAny.(func(...Scmer) Scmer)
 	scmSessionScmer := NewFunc(sessionFunc)
+	sessionFunc(NewString("username"), NewString(session.User()))
+	sessionFunc(NewString("schema"), NewString(session.Schema()))
 	// Populate bind variables (v1, v2, ...) from prepared-statement params into session
 	for name, bv := range bindVariables {
 		if bv == nil {
