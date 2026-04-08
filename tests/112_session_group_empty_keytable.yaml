@@ -1,0 +1,109 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Regression: derived table with session-filtered GROUP BY must not produce
+# an empty keytable name (createcolumn: table .() does not exist).
+
+metadata:
+  version: "1.0"
+  description: "Session-filtered derived table GROUP BY keytable naming"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sge_ticket"
+  - sql: "DROP TABLE IF EXISTS sge_state"
+  - sql: "DROP TABLE IF EXISTS sge_type"
+  - sql: |
+      CREATE TABLE sge_ticket (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        title VARCHAR(100),
+        state INT,
+        typ INT,
+        assigned INT,
+        creator INT
+      )
+  - sql: |
+      CREATE TABLE sge_state (ID INT PRIMARY KEY, name VARCHAR(50), final INT)
+  - sql: |
+      CREATE TABLE sge_type (ID INT PRIMARY KEY, name VARCHAR(50))
+  - sql: |
+      INSERT INTO sge_state VALUES (1, 'open', 0), (2, 'closed', 1)
+  - sql: |
+      INSERT INTO sge_type VALUES (1, 'bug'), (2, 'feature')
+  - sql: |
+      INSERT INTO sge_ticket (title, state, typ, assigned, creator) VALUES
+        ('fix login', 1, 1, 1, 1),
+        ('add search', 1, 2, 1, 2),
+        ('improve perf', 1, 1, 2, 1),
+        ('done task', 2, 1, 1, 1)
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sge_ticket"
+  - sql: "DROP TABLE IF EXISTS sge_state"
+  - sql: "DROP TABLE IF EXISTS sge_type"
+
+test_cases:
+  - name: "set session user"
+    session_id: "sge_sess"
+    sql: "SET @fop_user = 1"
+    expect:
+      rows_affected: 0
+
+  - name: "COUNT over session-filtered derived table with LEFT JOINs"
+    session_id: "sge_sess"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT ticket.ID AS ID,
+          ticket.title AS title,
+          ref_state.state_name AS state_desc
+        FROM sge_ticket ticket
+        LEFT JOIN (
+          SELECT ID AS state_id, name AS state_name FROM sge_state
+        ) ref_state ON ref_state.state_id = ticket.state
+        WHERE NOT (SELECT s.final FROM sge_state s WHERE s.ID = ticket.state LIMIT 1)
+          AND (SELECT (u.ID = @fop_user) FROM sge_ticket u WHERE u.ID = ticket.assigned LIMIT 1)
+      ) t
+      WHERE TRUE
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "SUM over session-filtered derived table"
+    session_id: "sge_sess"
+    sql: |
+      SELECT COUNT(*) AS cnt, t.state_desc
+      FROM (
+        SELECT ticket.ID AS ID,
+          ticket.title AS title,
+          ref_state.state_name AS state_desc
+        FROM sge_ticket ticket
+        LEFT JOIN (
+          SELECT ID AS state_id, name AS state_name FROM sge_state
+        ) ref_state ON ref_state.state_id = ticket.state
+        WHERE NOT (SELECT s.final FROM sge_state s WHERE s.ID = ticket.state LIMIT 1)
+          AND (SELECT (u.ID = @fop_user) FROM sge_ticket u WHERE u.ID = ticket.assigned LIMIT 1)
+      ) t
+      WHERE TRUE
+      GROUP BY t.state_desc
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+          state_desc: "open"
+
+  - name: "SELECT t.* with ORDER BY LIMIT over session-filtered derived"
+    session_id: "sge_sess"
+    sql: |
+      SELECT t.* FROM (
+        SELECT ticket.ID AS ID,
+          ticket.title AS title,
+          ref_type.type_name AS type_desc
+        FROM sge_ticket ticket
+        LEFT JOIN (
+          SELECT ID AS type_id, name AS type_name FROM sge_type
+        ) ref_type ON ref_type.type_id = ticket.typ
+        WHERE NOT (SELECT s.final FROM sge_state s WHERE s.ID = ticket.state LIMIT 1)
+          AND (SELECT (u.ID = @fop_user) FROM sge_ticket u WHERE u.ID = ticket.assigned LIMIT 1)
+      ) t
+      LEFT JOIN sge_type sorter ON t.type_desc = sorter.name
+      WHERE TRUE
+      ORDER BY t.title LIMIT 10
+    expect:
+      rows: 2

@@ -35,14 +35,20 @@ setup:
         (1, 1), (1, 2), (1, 3),
         (2, 1), (2, 4),
         (3, 2), (3, 5)
-  - sql: "SET @fop_user = 1"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS sgc_data"
   - sql: "DROP TABLE IF EXISTS sgc_acl"
 
 test_cases:
+  - name: "set session user"
+    session_id: "sgc_sess"
+    sql: "SET @fop_user = 1"
+    expect:
+      rows_affected: 0
+
   - name: "session-filtered COUNT GROUP BY (cold)"
+    session_id: "sgc_sess"
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM sgc_data
@@ -64,6 +70,7 @@ test_cases:
           cnt: 4
 
   - name: "session-filtered COUNT GROUP BY (warm, must be fast)"
+    session_id: "sgc_sess"
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM sgc_data
@@ -85,6 +92,7 @@ test_cases:
           cnt: 4
 
   - name: "session-filtered SUM GROUP BY (warm)"
+    session_id: "sgc_sess"
     sql: |
       SELECT category, SUM(val) AS total
       FROM sgc_data
@@ -98,9 +106,14 @@ test_cases:
     expect:
       rows: 3
 
+  - name: "set session user 2"
+    session_id: "sgc_sess2"
+    sql: "SET @fop_user = 2"
+    expect:
+      rows_affected: 0
+
   - name: "different session sees different groups"
-    setup:
-      - sql: "SET @fop_user = 2"
+    session_id: "sgc_sess2"
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM sgc_data
@@ -120,8 +133,7 @@ test_cases:
           cnt: 4
 
   - name: "simple COUNT with session WHERE (warm, must be fast)"
-    setup:
-      - sql: "SET @fop_user = 1"
+    session_id: "sgc_sess"
     sql: |
       SELECT COUNT(*) AS cnt
       FROM sgc_data
