@@ -2255,7 +2255,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(define has_stage2 (and (not (nil? groups2)) (not (equal? groups2 '()))))
 						(define stage2 (if has_stage2 (car groups2) nil))
 						(define stage2_group (if stage2 (coalesceNil (stage_group_cols stage2) '()) '()))
-						(define stage2_having (if stage2 (stage_having_expr stage2) nil))
+						(define stage2_post_group_condition (if stage2 (stage_post_group_condition_expr stage2) nil))
 						(define contains_noncolumn_outer_ref (lambda (expr) (match expr
 							'((quote outer) outer_sym) (equal? 1 (count (split (string outer_sym) ".")))
 							'((symbol outer) outer_sym) (equal? 1 (count (split (string outer_sym) ".")))
