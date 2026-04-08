@@ -2034,6 +2034,117 @@ FROM (SELECT ...) must be inlined here by renaming/term replacement; aggregate
 window functions without a true physical ORDER requirement also belong here as
 ordinary group/keytable rewrites, not as later physical planner semantics.
 */
+
+/* Derived-table flattening must not recurse blindly into opaque runtime scopes,
+because those already contain lowered var/resultrow shapes. Rewrite only outer
+refs inside scan filter/map lambdas so wrapped correlated scalar subselects keep
+seeing the correctly prefixed outer alias. */
+(define prefix_flattened_outer_ref (lambda (flatten_id inner_schemas outer_arg) (begin
+	(define s (string outer_arg))
+	(define parts (split s "."))
+	(match parts
+		(list tbl col) (if (not (nil? (inner_schemas tbl)))
+			(list (quote outer) (symbol (concat flatten_id "\0" tbl "." col)))
+			(list (quote outer) outer_arg))
+		_ (list (quote outer) outer_arg))
+)))
+(define opaque_expr_has_outer_ref (lambda (expr) (match expr
+	'((symbol outer) _) true
+	'((quote outer) _) true
+	(cons sym args) (if (is_quote_scope_sym sym)
+		false
+		(reduce args (lambda (found arg) (or found (opaque_expr_has_outer_ref arg))) false))
+	false
+)))
+(define rewrite_opaque_outer_expr_for_flatten (lambda (flatten_id inner_schemas expr) (match expr
+	'((symbol outer) outer_arg) (prefix_flattened_outer_ref flatten_id inner_schemas outer_arg)
+	'((quote outer) outer_arg) (prefix_flattened_outer_ref flatten_id inner_schemas outer_arg)
+	(cons sym args) (if (is_quote_scope_sym sym)
+		expr
+		(if (reduce args (lambda (found arg) (or found (opaque_expr_has_outer_ref arg))) false)
+			(cons sym (map args (lambda (arg)
+				(if (opaque_expr_has_outer_ref arg)
+					(rewrite_opaque_outer_expr_for_flatten flatten_id inner_schemas arg)
+					arg))))
+			expr))
+	expr
+)))
+(define rewrite_opaque_outer_lambda_for_flatten (lambda (flatten_id inner_schemas fn) (match fn
+	'((symbol lambda) params body)
+	(list (quote lambda) params (if (opaque_expr_has_outer_ref body)
+		(rewrite_opaque_outer_expr_for_flatten flatten_id inner_schemas body)
+		body))
+	'((symbol lambda) params body numvars)
+	(list (quote lambda) params (if (opaque_expr_has_outer_ref body)
+		(rewrite_opaque_outer_expr_for_flatten flatten_id inner_schemas body)
+		body) numvars)
+	'((quote lambda) params body)
+	(list (quote lambda) params (if (opaque_expr_has_outer_ref body)
+		(rewrite_opaque_outer_expr_for_flatten flatten_id inner_schemas body)
+		body))
+	'((quote lambda) params body numvars)
+	(list (quote lambda) params (if (opaque_expr_has_outer_ref body)
+		(rewrite_opaque_outer_expr_for_flatten flatten_id inner_schemas body)
+		body) numvars)
+	fn
+)))
+(define rewrite_opaque_outer_alias_for_flatten (lambda (flatten_id inner_schemas expr) (match expr
+	(cons (symbol !begin) forms)
+	(cons (quote !begin) (map forms (lambda (form) (rewrite_opaque_outer_alias_for_flatten flatten_id inner_schemas form))))
+	(cons '(quote !begin) forms)
+	(cons '(quote !begin) (map forms (lambda (form) (rewrite_opaque_outer_alias_for_flatten flatten_id inner_schemas form))))
+	(cons (symbol begin) forms)
+	(cons (quote begin) (map forms (lambda (form) (rewrite_opaque_outer_alias_for_flatten flatten_id inner_schemas form))))
+	(cons '(quote begin) forms)
+	(cons '(quote begin) (map forms (lambda (form) (rewrite_opaque_outer_alias_for_flatten flatten_id inner_schemas form))))
+	(cons (symbol set) (cons lhs (cons rhs tail)))
+	(cons (quote set) (cons lhs (cons (rewrite_opaque_outer_alias_for_flatten flatten_id inner_schemas rhs) tail)))
+	(cons '(quote set) (cons lhs (cons rhs tail)))
+	(cons '(quote set) (cons lhs (cons (rewrite_opaque_outer_alias_for_flatten flatten_id inner_schemas rhs) tail)))
+	(cons scanhead (cons tx (cons schema3 (cons tbl3 rest))))
+	(match (string scanhead)
+		"scan" (match rest
+			(cons filtercols (cons filterfn (cons mapcols (cons mapfn tail))))
+			(cons scanhead
+				(cons tx
+					(cons schema3
+						(cons tbl3
+							(cons filtercols
+								(cons (rewrite_opaque_outer_lambda_for_flatten flatten_id inner_schemas filterfn)
+									(cons mapcols
+										(cons (rewrite_opaque_outer_lambda_for_flatten flatten_id inner_schemas mapfn) tail))))))))
+			expr)
+		"scan_order" (match rest
+			(cons filtercols (cons filterfn (cons sortcols (cons sortdirs (cons sortpartcols (cons offset (cons limit (cons mapcols (cons mapfn tail)))))))))
+			(cons scanhead
+				(cons tx
+					(cons schema3
+						(cons tbl3
+							(cons filtercols
+								(cons (rewrite_opaque_outer_lambda_for_flatten flatten_id inner_schemas filterfn)
+									(cons sortcols
+										(cons sortdirs
+											(cons sortpartcols
+												(cons offset
+													(cons limit
+														(cons mapcols
+															(cons (rewrite_opaque_outer_lambda_for_flatten flatten_id inner_schemas mapfn) tail)))))))))))))
+			expr)
+		"scan_batch" (match rest
+			(cons filtercols (cons filterfn (cons mapcols (cons mapfn tail))))
+			(cons scanhead
+				(cons tx
+					(cons schema3
+						(cons tbl3
+							(cons filtercols
+								(cons (rewrite_opaque_outer_lambda_for_flatten flatten_id inner_schemas filterfn)
+									(cons mapcols
+										(cons (rewrite_opaque_outer_lambda_for_flatten flatten_id inner_schemas mapfn) tail))))))))
+			expr)
+		_ expr)
+	expr
+)))
+
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
@@ -2146,11 +2257,11 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(define outer_cols (_o outer_alias))
 								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") outer_column)) coldef a)) nil))
 								(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
-								(if outer_expr
-									/* derived table computed column: inline expression with leaf get_column
-									nodes replaced by (outer sym) references for optimizer resolution */
+								(if (and (not (nil? outer_expr)) (not (expr_has_opaque_scope outer_expr)))
+									/* derived table computed column without opaque scopes: inline expression
+									with leaf get_column nodes replaced by (outer sym) references */
 									(wrap_outer_leaves outer_expr)
-									/* real table column: symbol lookup in outer scope */
+									/* real table column or opaque expression: symbol lookup in outer scope */
 									(list (quote outer) (symbol (concat outer_alias "." outer_column))))))
 					)
 				)
@@ -3513,9 +3624,9 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								_ (list (quote outer) (replace_column_alias outer_arg))
 							)
 						)
-						(cons sym args) /* function call */ (if (or (not (nil? (inner_select_kind sym))) (_is_opaque_scope_sym sym))
-							expr /* keep inner subselects and precomputed/runtime scopes intact */
-							(cons sym (map args replace_column_alias)))
+						(cons sym args) /* function call */ (if (not (nil? (inner_select_kind sym)))
+							expr /* inner subselects resolved later by replace_inner_selects */
+							(cons (replace_column_alias sym) (map args replace_column_alias)))
 						expr
 					)))
 					/* prefix all table aliases and transform their joinexprs */
@@ -3550,8 +3661,21 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							(cdr tablesPrefixed)))
 					)
 					(define flattened_table_aliases (map tablesPrefixed (lambda (td) (match td '(alias _ _ _ _) alias ""))))
-					(define _has_dangling_flatten_ref (lambda (expr)
-						(reduce (extract_all_get_columns expr) (lambda (acc mc)
+					/* check for dangling get_column refs that point to a
+					flattened alias prefix but not an actual flattened table.
+					Skip opaque scopes — their inner get_column refs belong
+					to the lowered scan, not the relational alias domain. */
+					(define extract_visible_get_columns (lambda (expr)
+						(match expr
+							'((symbol get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
+							'((quote get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
+							(cons sym args) (if (_is_opaque_scope_sym sym) '()
+								(merge (map args extract_visible_get_columns)))
+							'()
+						)
+					))
+					(define has_dangling_flatten_ref (lambda (expr)
+						(reduce (extract_visible_get_columns expr) (lambda (acc mc)
 							(or acc (match mc
 								'(name '((symbol get_column) alias_ _ _ _))
 								(begin
@@ -3567,7 +3691,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							false)))
 					(define flatten_has_dangling_output_ref
 						(reduce_assoc fields2 (lambda (acc _k v)
-							(or acc (_has_dangling_flatten_ref (replace_column_alias v))))
+							(or acc (has_dangling_flatten_ref (replace_column_alias v))))
 							false))
 					(define flatten_referenced_cols (merge_unique (list
 						(extract_columns_for_tblvar id fields)
@@ -3624,10 +3748,17 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							)
 						) false)
 						false))
-					(define use_materialize (or
+						/* Nested derived-table flattening must not descend into precomputed runtime blocks
+						from scalar subselects when they appear in JOIN conditions; those scopes carry lowered
+						scan structures that break under alias-renaming. */
+						(define subquery_has_runtime_joinexpr (reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
+							'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_opaque_scope (replace_column_alias inner_joinexpr)))
+							_ false))) false))
+						(define use_materialize (or
 						subquery_has_window
 						unsupported_groups
 						flatten_has_dangling_output_ref
+						subquery_has_runtime_joinexpr
 						(and flatten_has_helper_backed_projection outer_uses_subquery_group_boundary)))
 					/* Window-function LIMIT pushdown */
 					(define mat_limit nil)
