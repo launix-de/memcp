@@ -5741,12 +5741,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
 						(define collect_plan (if is_fk_reuse '()
-							(if (or (not (nil? _stage_scope)) session_sensitive_group_domain)
-								/* scoped GROUPs and session-sensitive domains: always re-collect
-								to ensure all group keys are present (insert is idempotent for
-								existing keys via set_assoc dedup). No droptable needed — the
-								StorageComputeProxy session variants handle per-session values. */
+							(if (not (nil? _stage_scope))
+								/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
 								(list (make_collect false))
+								/* Normal and session-sensitive groups: collect only when keytable
+								was just created or is empty. For session-sensitive groups the
+								domain is global (no condition suffix) and StorageComputeProxy
+								session variants handle per-session aggregation. */
 								(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
 									(make_collect false)
 									nil)))))
