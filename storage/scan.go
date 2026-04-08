@@ -77,6 +77,35 @@ type scanResult struct {
 	err        scanError // err.r != nil indicates an error
 }
 
+// dropSessionVariantBoundaries removes boundary filters on columns that have
+// session variants. The index stores default (non-session) values, so using
+// those boundaries would incorrectly skip rows whose session-variant value
+// differs from the default.
+func dropSessionVariantBoundaries(bounds boundaries, t *table) boundaries {
+	if len(bounds) == 0 {
+		return bounds
+	}
+	filtered := bounds[:0]
+	for _, b := range bounds {
+		hasVariant := false
+		for _, s := range t.ActiveShards() {
+			if s != nil {
+				s.mu.RLock()
+				col := s.columns[b.col]
+				s.mu.RUnlock()
+				if proxy, ok := col.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+					hasVariant = true
+					break
+				}
+			}
+		}
+		if !hasVariant {
+			filtered = append(filtered, b)
+		}
+	}
+	return filtered
+}
+
 // map reduce implementation based on scheme scripts
 func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
 	return t.scanWithBatch(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
@@ -109,6 +138,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	analyzeStart := time.Now()
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	boundaries = dropSessionVariantBoundaries(boundaries, t)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	if Settings.ScanDebugging {

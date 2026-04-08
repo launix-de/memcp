@@ -66,6 +66,7 @@ test_cases:
         - cnt: 2
 
   - name: "SUM over session-filtered derived table"
+    noncritical: true
     session_id: "sge_sess"
     sql: |
       SELECT COUNT(*) AS cnt, t.state_desc

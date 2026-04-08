@@ -253,6 +253,10 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 	*/
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	// Drop boundaries on columns with session variants: the index stores
+	// default (non-session) values, so index filtering would skip rows
+	// that have different values in the current session's variant.
+	boundaries = dropSessionVariantBoundaries(boundaries, t)
 	reorderByFrequency(boundaries, t)
 	// When all filter conditions are equality, appending sort columns to the
 	// boundaries lets the shard return rows already sorted by ORDER BY — the
