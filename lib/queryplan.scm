@@ -5738,21 +5738,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
 						(define collect_plan (if is_fk_reuse '()
-							(if session_sensitive_group_domain
-								/* session-sensitive grouped domains must never reuse a stale
-								keytable domain collected under a different session binding.
-								Until the keytable identity fully carries those bindings end-to-end,
-								rebuild the key domain explicitly for every execution. */
-								(list (list 'begin
-									(list 'droptable schema grouptbl true)
-									keytable_init
-									(make_collect false)))
-								(if (not (nil? _stage_scope))
-									/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
-									(list (make_collect false))
-									(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
-										(make_collect false)
-										nil))))))
+							(if (not (nil? _stage_scope))
+								/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
+								(list (make_collect false))
+								(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
+									(make_collect false)
+									nil)))))
 						(cons 'begin (merge
 							(if (nil? keytable_init) '() (list keytable_init))
 							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
