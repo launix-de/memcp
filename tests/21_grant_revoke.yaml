@@ -5,6 +5,8 @@ metadata:
   description: "User privileges: GRANT and REVOKE"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS grant_t"
+    expect: {}
   - sql: "DELETE FROM `system`.`access` WHERE username='alice'"
     expect: {}
   - sql: "DELETE FROM `system`.`user` WHERE username='alice'"
@@ -16,6 +18,10 @@ setup:
   - sql: "DELETE FROM `system`.`access` WHERE username='psqlrole'"
     expect: {}
   - sql: "DELETE FROM `system`.`user` WHERE username='psqlrole'"
+    expect: {}
+  - sql: "DELETE FROM `system`.`access` WHERE username='hostalice'"
+    expect: {}
+  - sql: "DELETE FROM `system`.`user` WHERE username='hostalice'"
     expect: {}
 
 test_cases:
@@ -52,6 +58,29 @@ test_cases:
 
   - name: "Verify access entry exists"
     sql: "SELECT database FROM system.access WHERE username='alice' AND database='memcp-tests'"
+    expect:
+      rows: 1
+      data:
+        - { database: "memcp-tests" }
+
+  - name: "CREATE USER with MySQL host syntax"
+    sql: "CREATE USER 'hostalice'@'%' IDENTIFIED BY 'pw'"
+    expect:
+      affected_rows: 1
+
+  - name: "host syntax stores stripped username"
+    sql: "SELECT username FROM system.user WHERE username='hostalice'"
+    expect:
+      rows: 1
+      data:
+        - { username: "hostalice" }
+
+  - name: "GRANT with MySQL host syntax creates access entry"
+    sql: "GRANT ALL PRIVILEGES ON `memcp-tests`.* TO 'hostalice'@'%'"
+    expect: {}
+
+  - name: "Verify host syntax access entry exists"
+    sql: "SELECT database FROM system.access WHERE username='hostalice' AND database='memcp-tests'"
     expect:
       rows: 1
       data:
@@ -315,8 +344,10 @@ test_cases:
         - { cnt: 0 }
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS grant_t"
   - sql: "DROP USER IF EXISTS alice"
   - sql: "DROP USER IF EXISTS bob"
+  - sql: "DROP USER IF EXISTS hostalice"
   - sql: "DROP USER IF EXISTS psqlalice"
   - sql: "DROP USER IF EXISTS psqlrole"
   - sql: "DROP DATABASE IF EXISTS drop_test_db"

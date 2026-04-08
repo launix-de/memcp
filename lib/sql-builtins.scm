@@ -1,3 +1,20 @@
+/*
+Copyright (C) 2023 - 2026  Carl-Philip Hänsch
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 (define sql_builtins (coalesce sql_builtins (newsession)))
 
 /* all upper case */
@@ -116,6 +133,19 @@
 (sql_builtins "VECTOR_DIM" json_encode)
 
 /* session / processlist */
+(sql_builtins "DATABASE" (lambda () (coalesceNil (session "schema") nil)))
+(sql_builtins "CURRENT_USER" (lambda () (match (session "username")
+	nil nil
+	username (concat username "@%")
+)))
+(sql_builtins "USER" (lambda () (match (session "username")
+	nil nil
+	username (concat username "@%")
+)))
+(sql_builtins "SESSION_USER" (lambda () (match (session "username")
+	nil nil
+	username (concat username "@%")
+)))
 (sql_builtins "CONNECTION_ID" connection_id)
 (sql_builtins "KILL_QUERY" kill_query)
 
