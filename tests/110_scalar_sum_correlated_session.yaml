@@ -29,7 +29,7 @@ test_cases:
     expect:
       rows_affected: 0
 
-  - name: "ERPL reminder: SUM with NOT, session var, EXISTS, CASE WHEN in correlated chain"
+  - name: "scalar SUM with NOT, session var, EXISTS, CASE WHEN in correlated chain"
     session_id: "era_sess"
     sql: |
       SELECT 1,
