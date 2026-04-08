@@ -1216,7 +1216,7 @@ return r.json();
 }
 
 var SCM_SERVICES='(if (nil? service_registry) "[]" (dashboard_json_array (map (service_registry) (lambda (name) (begin (set v (service_registry name)) (json_encode_assoc (list "name" name "port" (car v) "route" (car (cdr v)) "protocols" (car (cdr (cdr v))))))))))';
-var SCM_USERS='(begin (set j (scan "system" "user" \'() (lambda () true) \'("username" "admin") (lambda (u adm) (begin (set dbs_str (scan "system" "access" \'("username") (lambda (au) (equal?? au u)) \'("database") (lambda (db) (json_encode db)) (lambda (a b) (if (equal? a "") b (concat a "," b))) "")) (concat "{\\"username\\":" (json_encode u) ",\\"admin\\":" (if (equal? adm 0) "false" "true") ",\\"databases\\":[" dbs_str "]}")) ) (lambda (acc item) (if (or (nil? item) (equal? item "")) acc (if (equal? acc "") item (concat acc "," item)))) "")) (concat "[" j "]"))';
+var SCM_USERS='(begin (set j (scan nil "system" "user" \'() (lambda () true) \'("username" "admin") (lambda (u adm) (begin (set dbs_str (scan nil "system" "access" \'("username") (lambda (au) (equal?? au u)) \'("database") (lambda (db) (json_encode db)) (lambda (a b) (if (equal? a "") b (concat a "," b))) "")) (concat "{\\"username\\":" (json_encode u) ",\\"admin\\":" (if (equal? adm 0) "false" "true") ",\\"databases\\":[" dbs_str "]}")) ) (lambda (acc item) (if (or (nil? item) (equal? item "")) acc (if (equal? acc "") item (concat acc "," item)))) "")) (concat "[" j "]"))';
 
 function scmFetch(expr,cb){
 fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:expr})
