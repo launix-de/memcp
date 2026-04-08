@@ -2291,6 +2291,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							(reduce_assoc fields2 (lambda (found _k v) (or found (contains_outer_ref v))) false)
 							(contains_outer_ref condition2)
 							(reduce (coalesceNil groups2 '()) (lambda (found stage) (or found (stage_contains_outer_ref stage))) false)))
+						(define scalar_uses_session_state (expr_uses_session_state subquery))
 						(define use_ordered_scalar (or
 							(and has_stage2 (not (equal? (coalesceNil (stage_order_list stage2) '()) '())))
 							(and has_stage2 (not (nil? (stage_limit_val stage2))))
@@ -2299,12 +2300,14 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(define use_direct_agg_scan (and
 							(not (nil? _agg_args))
 							(equal? (count _agg_args) 3)
-							(not raw_contains_skip_level_nested_outer_ref)
+							(or
+								(not raw_contains_skip_level_nested_outer_ref)
+								scalar_uses_session_state)
 							(nil? stage2_post_group_condition)
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(not (nil? tables2))
 							(not (equal? tables2 '()))
-							scalar_has_outer_ref
+							(or scalar_has_outer_ref scalar_uses_session_state)
 						))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
