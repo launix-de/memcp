@@ -84,7 +84,7 @@ echo "Found test files:"
 printf '%s\n' "${test_files_arr[@]}"
 echo ""
 
-test_port=4480
+test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
 tmpdir=""
 supervisor_pid=""
 

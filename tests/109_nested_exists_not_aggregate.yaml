@@ -8,13 +8,17 @@ metadata:
   description: "SUM subquery with NOT column and nested correlated COALESCE"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS nea_share"
   - sql: "DROP TABLE IF EXISTS nea_box"
   - sql: "DROP TABLE IF EXISTS nea_dir"
   - sql: "DROP TABLE IF EXISTS nea_email"
   - sql: "CREATE TABLE nea_box (ID INT PRIMARY KEY, owner TEXT)"
+  - sql: "ALTER TABLE nea_box ADD COLUMN fopuser TEXT"
+  - sql: "CREATE TABLE nea_share (ID INT PRIMARY KEY, mailbox INT, fopuser TEXT)"
   - sql: "CREATE TABLE nea_dir (ID INT PRIMARY KEY, mailbox INT)"
   - sql: "CREATE TABLE nea_email (ID INT PRIMARY KEY, directory INT, seen INT)"
-  - sql: "INSERT INTO nea_box VALUES (1, 'alice'), (2, 'bob')"
+  - sql: "INSERT INTO nea_box VALUES (1, 'alice', 'alice'), (2, 'bob', 'bob')"
+  - sql: "INSERT INTO nea_share VALUES (1, 1, 'alice')"
   - sql: "INSERT INTO nea_dir VALUES (10, 1), (20, 2)"
   - sql: "INSERT INTO nea_email VALUES (100, 10, 0), (101, 10, 1), (102, 20, 0), (103, 20, 0)"
 
@@ -127,7 +131,75 @@ test_cases:
         - "1": 1
           unseen: 2
 
+  - name: "SUM with session var and nested CASE in correlated scalar subquery"
+    session_id: "nea_sess"
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM nea_email e
+          WHERE NOT(e.seen)
+          AND ('0')
+          AND COALESCE(
+            (SELECT
+              COALESCE(
+                (SELECT
+                  CASE
+                    WHEN FALSE THEN TRUE
+                    ELSE NOT (b.fopuser <> @test_user)
+                  END
+                FROM nea_box b
+                WHERE b.ID = d.mailbox
+                LIMIT 1),
+              FALSE)
+            FROM nea_dir d
+            WHERE d.ID = e.directory
+            LIMIT 1),
+          FALSE)
+        ) AS unseen
+    expect:
+      rows: 1
+      data:
+        - unseen: 1
+
+  - name: "SUM with session var, nested CASE, and nested EXISTS"
+    session_id: "nea_sess"
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM nea_email e
+          WHERE NOT(e.seen)
+          AND ('0')
+          AND COALESCE(
+            (SELECT
+              COALESCE(
+                (SELECT
+                  CASE
+                    WHEN FALSE THEN TRUE
+                    ELSE NOT (
+                      (b.fopuser <> @test_user)
+                      AND NOT EXISTS (
+                        SELECT TRUE
+                        FROM nea_share s
+                        WHERE s.mailbox = b.ID
+                          AND s.fopuser = @test_user
+                        LIMIT 1
+                      )
+                    )
+                  END
+                FROM nea_box b
+                WHERE b.ID = d.mailbox
+                LIMIT 1),
+              FALSE)
+            FROM nea_dir d
+            WHERE d.ID = e.directory
+            LIMIT 1),
+          FALSE)
+        ) AS unseen
+    expect:
+      rows: 1
+      data:
+        - unseen: 1
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nea_share"
   - sql: "DROP TABLE IF EXISTS nea_email"
   - sql: "DROP TABLE IF EXISTS nea_dir"
   - sql: "DROP TABLE IF EXISTS nea_box"
