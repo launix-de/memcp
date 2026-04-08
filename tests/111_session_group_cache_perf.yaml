@@ -1,0 +1,130 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Performance regression test for session-sensitive GROUP BY cache.
+# The group cache must be reusable across repeated queries with the same
+# session binding, not dropped+rebuilt every time.
+
+metadata:
+  version: "1.0"
+  description: "Session-sensitive GROUP BY cache reuse performance"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sgc_data"
+  - sql: "DROP TABLE IF EXISTS sgc_acl"
+  - sql: |
+      CREATE TABLE sgc_data (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        category INT,
+        owner INT,
+        val INT
+      )
+  - sql: |
+      CREATE TABLE sgc_acl (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        usr INT,
+        category INT
+      )
+  - sql: |
+      INSERT INTO sgc_data (category, owner, val)
+      SELECT (n % 5) + 1, (n % 3) + 1, n * 7
+      FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
+            UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10
+            UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15
+            UNION ALL SELECT 16 UNION ALL SELECT 17 UNION ALL SELECT 18 UNION ALL SELECT 19 UNION ALL SELECT 20) t
+  - sql: |
+      INSERT INTO sgc_acl (usr, category) VALUES
+        (1, 1), (1, 2), (1, 3),
+        (2, 1), (2, 4),
+        (3, 2), (3, 5)
+  - sql: "SET @fop_user = 1"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sgc_data"
+  - sql: "DROP TABLE IF EXISTS sgc_acl"
+
+test_cases:
+  - name: "session-filtered COUNT GROUP BY (cold)"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @fop_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 4
+        - category: 2
+          cnt: 4
+        - category: 3
+          cnt: 4
+
+  - name: "session-filtered COUNT GROUP BY (warm, must be fast)"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @fop_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 4
+        - category: 2
+          cnt: 4
+        - category: 3
+          cnt: 4
+
+  - name: "session-filtered SUM GROUP BY (warm)"
+    sql: |
+      SELECT category, SUM(val) AS total
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @fop_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+
+  - name: "different session sees different groups"
+    setup:
+      - sql: "SET @fop_user = 2"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @fop_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 2
+      data:
+        - category: 1
+          cnt: 4
+        - category: 4
+          cnt: 4
+
+  - name: "simple COUNT with session WHERE (warm, must be fast)"
+    setup:
+      - sql: "SET @fop_user = 1"
+    sql: |
+      SELECT COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE owner = @fop_user
+    expect:
+      rows: 1
