@@ -103,6 +103,22 @@ test_cases:
         - upper_case: "HELLO"
           lower_case: "world"
 
+  - name: "DATABASE function"
+    sql: "SELECT DATABASE() AS db"
+    expect:
+      rows: 1
+      data:
+        - db: "memcp-tests"
+
+  - name: "CURRENT_USER function"
+    sql: "SELECT CURRENT_USER() AS current_user, USER() AS user_name, SESSION_USER() AS session_user"
+    expect:
+      rows: 1
+      data:
+        - current_user: "root@%"
+          user_name: "root@%"
+          session_user: "root@%"
+
   # === BASE64 FUNCTIONS ===
   - name: "TO_BASE64 encodes"
     sql: "SELECT TO_BASE64('foo') AS b64"

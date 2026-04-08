@@ -213,6 +213,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						)
 						(context "session")
 					))
+					(session "username" (req "username"))
+					(session "schema" schema)
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
@@ -255,6 +257,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					((res "header") "Content-Type" "text/plain")
 					(define resultrow (res "jsonl"))
 					(define session (context "session"))
+					(session "username" (req "username"))
+					(session "schema" schema)
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
 					(set last_row nil)
@@ -313,6 +317,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(try (lambda () (begin
 					((res "header") "Content-Type" "application/json")
 					(define session (context "session"))
+					(session "username" (req "username"))
+					(session "schema" "")
 					(set result (eval (scheme code)))
 					((res "print") (json_encode result))
 				)) (lambda(e) (begin
@@ -377,6 +383,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 (set mysql_auth (lambda (username_) (scan nil "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 (set mysql_handler (lambda (schema sql resultrow_sql session) (begin
+	(session "schema" schema)
 	(define resultrow resultrow_sql)
 	(try (lambda () (begin
 		(if (equal? (session "syntax") "scheme") (begin

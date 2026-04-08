@@ -758,6 +758,9 @@ func main() {
 
 	// REPL shell or wait for signal
 	if noRepl {
+		// In daemon mode, the parent shell may send SIGHUP when its job control
+		// session ends. Ignore it so backgrounded servers keep running.
+		signal.Ignore(syscall.SIGHUP)
 		signal.Stop(cancelChan) // stop duplicate handler; this goroutine handles the signal
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
