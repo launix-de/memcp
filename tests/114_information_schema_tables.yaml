@@ -25,9 +25,11 @@ test_cases:
       data:
         - TABLE_NAME: "is_test_tbl"
 
-  - name: "INFORMATION_SCHEMA.TABLES with COUNT"
+  - name: "INFORMATION_SCHEMA.TABLES finds setup table"
     sql: |
-      SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_SCHEMA = 'memcp-tests'
+      SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = 'memcp-tests' AND TABLE_NAME = 'is_test_tbl'
     expect:
       rows: 1
+      data:
+        - TABLE_NAME: "is_test_tbl"

@@ -176,9 +176,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
-	(merge '(scanfn '(session "__memcp_tx") schema
-		'('merge '('map '('show) '('lambda '('schema) '('map '('show 'schema) '('lambda '('tbl) '('info_schema_table_row 'schema 'tbl))))))
-	) rest)
+	(list 'begin
+		/* Materialize the table list at runtime but BEFORE the scan starts, so
+		info_schema_table_row's (show schema tbl true) calls do not execute inside
+		a scan callback where locks are held (which deadlocks). */
+		'('define '__info_tables_data '('merge '('map '('show) '('lambda '('s) '('map '('show 's) '('lambda '('t) '('info_schema_table_row 's 't)))))))
+		(merge '(scanfn '(session "__memcp_tx") schema '__info_tables_data) rest))
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge '(scanfn '(session "__memcp_tx") schema 
 		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "Field") "data_type" '((quote col) "RawType") "column_type" '((quote concat) '((quote col) "Type") '((quote col) "Dimensions")))))))))))
