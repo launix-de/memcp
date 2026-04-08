@@ -743,8 +743,10 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
 	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
 	for i, k := range conditionCols { // iterate over columns
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	// initialize main_count lazily if needed
 	t.ensureMainCount(skipShardReadLock)
@@ -797,19 +799,17 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				}
 
 				if idx < t.main_count {
-					// value from main storage
-					// check condition
-					for i, k := range ccols { // iterate over columns
-						cdataset[i] = k.GetValue(idx)
+					// value from main storage (use TX-bound readers for session variants)
+					for i := range cReaders {
+						cdataset[i] = cReaders[i].GetValue(idx)
 					}
 				} else {
 					// value from delta storage
-					// prepare&call condition function
-					for i, k := range conditionCols { // iterate over columns
+					for i, k := range conditionCols {
 						if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-							cdataset[i] = ccols[i].GetValue(idx)
+							cdataset[i] = cReaders[i].GetValue(idx)
 						} else {
-							cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
+							cdataset[i] = t.getDelta(int(idx-t.main_count), k)
 						}
 					}
 				}
