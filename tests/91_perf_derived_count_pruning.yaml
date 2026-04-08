@@ -1,0 +1,52 @@
+# Performance self-check for COUNT(*) pruning over derived tables with
+# correlated scalar subselects. If untangle stops pruning unused projections,
+# this query degenerates into repeated correlated scans over perf_detail.
+
+metadata:
+  version: "1.0"
+  description: "Performance self-check for derived COUNT(*) pruning"
+  isolated: true
+
+test_cases:
+  - name: "Perf: derived COUNT prunes correlated subselect payload"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `perf_detail`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, payload INT)"
+      - sql: "CREATE TABLE `perf_detail` (id INT PRIMARY KEY, parent INT, val INT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i (* i 3)))))
+            (insert "{database}" "perf_main" '("id" "payload") rows)
+            (set detail_n (* {rows} 2))
+            (set details (map (produceN detail_n) (lambda (i)
+              (list
+                i
+                (floor (/ i 2))
+                (+ 1 (* i 5))))))
+            (insert "{database}" "perf_detail" '("id" "parent" "val") details)
+            (rebuild)
+            "ok")
+    sql: |
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT m.id,
+          COALESCE((SELECT SUM(d.val) FROM perf_detail d WHERE d.parent = m.id), 0) AS total_val,
+          EXISTS (SELECT 1 FROM perf_detail d2 WHERE d2.parent = m.id AND d2.val > 0) AS has_detail
+        FROM perf_main m
+      ) t
+    threshold_ms: 30000
+    on_fail:
+      - sql: |
+          EXPLAIN IR SELECT COUNT(*) AS cnt FROM (
+            SELECT m.id,
+              COALESCE((SELECT SUM(d.val) FROM perf_detail d WHERE d.parent = m.id), 0) AS total_val,
+              EXISTS (SELECT 1 FROM perf_detail d2 WHERE d2.parent = m.id AND d2.val > 0) AS has_detail
+            FROM perf_main m
+          ) t
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS perf_main"
+  - sql: "DROP TABLE IF EXISTS perf_detail"

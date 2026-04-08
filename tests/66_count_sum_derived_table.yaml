@@ -53,6 +53,78 @@ test_cases:
         - cnt: 3
           total: 60
 
+  - name: "EXPLAIN IR prunes unused derived scalar subselects for COUNT(*)"
+    sql: |
+      EXPLAIN IR SELECT COUNT(*) AS cnt FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT SUM(d.val) FROM csd_detail d WHERE d.parent = m.ID), 0) AS total_val,
+          EXISTS (SELECT 1 FROM csd_detail d2 WHERE d2.parent = m.ID) AS has_detail
+        FROM csd_main m
+      ) t
+    expect:
+      rows: 8
+      data:
+        - stage: "untangle"
+          kind: "tables"
+          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"
+        - stage: "untangle"
+          kind: "fields"
+          value: "(\"cnt\" (aggregate 1 + 0))"
+        - stage: "untangle"
+          kind: "condition"
+          value: "(and true (and true true))"
+        - stage: "untangle"
+          kind: "groups"
+          value: "(((group-cols 1) (having nil) (order ()) (limit-partition-cols 0) (limit nil) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil)))"
+        - stage: "untangle"
+          kind: "init"
+          value: "()"
+        - stage: "reorder"
+          kind: "tables"
+          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"
+        - stage: "reorder"
+          kind: "changed"
+          value: false
+        - stage: "plan"
+          kind: "root"
+          value: "begin"
+
+  - name: "EXPLAIN IR keeps only required derived aggregate payload"
+    sql: |
+      EXPLAIN IR SELECT COUNT(*) AS cnt, SUM(t.total_val) AS grand_total FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT SUM(d.val) FROM csd_detail d WHERE d.parent = m.ID), 0) AS total_val,
+          EXISTS (SELECT 1 FROM csd_detail d2 WHERE d2.parent = m.ID) AS has_detail
+        FROM csd_main m
+      ) t
+    expect:
+      rows: 8
+      data:
+        - stage: "untangle"
+          kind: "tables"
+          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"
+        - stage: "untangle"
+          kind: "fields"
+          value: "(\"cnt\" (aggregate 1 + 0) \"grand_total\" (aggregate (coalesceNil (scan ((lambda args (apply (context \"session\") (var 0)) 1) \"__memcp_tx\") \"memcp-tests\" \"csd_detail\" (list \"parent\") (lambda (d.parent) (equal?? d.parent (outer t\u0000m.ID))) (list \"parent\" \"val\") (lambda (d.parent d.val) d.val) + 0 + false) 0) + 0))"
+        - stage: "untangle"
+          kind: "condition"
+          value: "(and true (and true true))"
+        - stage: "untangle"
+          kind: "groups"
+          value: "(((group-cols 1) (having nil) (order ()) (limit-partition-cols 0) (limit nil) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil)))"
+        - stage: "untangle"
+          kind: "init"
+          value: "()"
+        - stage: "reorder"
+          kind: "tables"
+          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"
+        - stage: "reorder"
+          kind: "changed"
+          value: false
+        - stage: "plan"
+          kind: "root"
+          value: "begin"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS csd_main"
   - sql: "DROP TABLE IF EXISTS csd_detail"
