@@ -40,6 +40,17 @@ test_cases:
         - cnt: 3
           grand_total: 600
 
+  - name: "COUNT + SUM over direct scalar subselect"
+    sql: |
+      SELECT COUNT(*) AS cnt,
+        SUM(COALESCE((SELECT SUM(d.val) FROM csd_detail d WHERE d.parent = m.ID), 0)) AS grand_total
+      FROM csd_main m
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+          grand_total: 600
+
   - name: "COUNT + SUM with EXISTS in derived table"
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.hours) AS total FROM (
@@ -72,7 +83,7 @@ test_cases:
           value: "(\"cnt\" (aggregate 1 + 0))"
         - stage: "untangle"
           kind: "condition"
-          value: "(and true (and true true))"
+          value: "(and true true true)"
         - stage: "untangle"
           kind: "groups"
           value: "(((group-cols 1) (having nil) (order ()) (limit-partition-cols 0) (limit nil) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil)))"
@@ -102,22 +113,22 @@ test_cases:
       data:
         - stage: "untangle"
           kind: "tables"
-          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"
+          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil) (\"t\u0000unn:csd_detail:0\" \"memcp-tests\" \"csd_detail\" true (equal?? (get_column \"t\u0000unn:csd_detail:0\" false \"parent\" false) (get_column \"t\u0000m\" false \"ID\" false))))"
         - stage: "untangle"
           kind: "fields"
-          value: "(\"cnt\" (aggregate 1 + 0) \"grand_total\" (aggregate (coalesceNil (scan ((lambda args (apply (context \"session\") (var 0)) 1) \"__memcp_tx\") \"memcp-tests\" \"csd_detail\" (list \"parent\") (lambda (d.parent) (equal?? d.parent (outer t\u0000m.ID))) (list \"parent\" \"val\") (lambda (d.parent d.val) d.val) + 0 + false) 0) + 0))"
+          value: "(\"cnt\" (aggregate 1 + 0) \"grand_total\" (aggregate (coalesceNil (aggregate (get_column \"t\u0000unn:csd_detail:0\" false \"val\" false) + 0) 0) + 0))"
         - stage: "untangle"
           kind: "condition"
           value: "(and true (and true true))"
         - stage: "untangle"
           kind: "groups"
-          value: "(((group-cols 1) (having nil) (order ()) (limit-partition-cols 0) (limit nil) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil)))"
+          value: "(((group-cols (get_column \"t\u0000unn:csd_detail:0\" false \"parent\" false)) (having nil) (order ()) (limit-partition-cols 0) (limit nil) (offset nil) (group-alias nil) (dedup false) (partition-aliases (\"t\u0000unn:csd_detail:0\")) (init nil)) ((group-cols 1) (having nil) (order ()) (limit-partition-cols 0) (limit nil) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil)))"
         - stage: "untangle"
           kind: "init"
           value: "()"
         - stage: "reorder"
           kind: "tables"
-          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"
+          value: "((\"t\u0000m\" \"memcp-tests\" \"csd_main\" false nil) (\"t\u0000unn:csd_detail:0\" \"memcp-tests\" \"csd_detail\" true (equal?? (get_column \"t\u0000unn:csd_detail:0\" false \"parent\" false) (get_column \"t\u0000m\" false \"ID\" false))))"
         - stage: "reorder"
           kind: "changed"
           value: false
