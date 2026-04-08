@@ -5870,15 +5870,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(merge acc (list (list canon_name (cadr mc))))))) '()))
 				/* Later wrapper groups must be able to reuse derived output fields by their
 				stable alias instead of re-serializing nested scalar/window expressions into
-				prejoin/keytable column names. Materialize non-trivial projected fields once
-				on the prejoin so recursive grouped stages can address them as `latest`,
-				`total_val`, ... even when their source expression contains inner materialized
-				subqueries. */
+				prejoin/keytable column names. Materialize only row-local projected fields on
+				the prejoin. Logical aggregate/window sentinels must stay deferred until the
+				later group/window stage; otherwise raw `(aggregate ...)` / `(window_func ...)`
+				nodes leak into the prejoin row materializer and become executable runtime
+				code instead of logical planner markers. */
+				(define prejoin_materializable_projection? (lambda (field_expr)
+					(and
+						(equal? (extract_aggregates field_expr) '())
+						(equal? (extract_window_funcs field_expr) '()))))
 				(define prejoin_columns (reduce (extract_assoc resolved_fields (lambda (field_name field_expr)
 					(match field_expr
 						'((symbol get_column) _ _ _ _) nil
 						'((quote get_column) _ _ _ _) nil
-						(list field_name field_expr))))
+						(if (prejoin_materializable_projection? field_expr)
+							(list field_name field_expr)
+							nil))))
 					(lambda (acc mc)
 						(if (or (nil? mc)
 							(reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false))
