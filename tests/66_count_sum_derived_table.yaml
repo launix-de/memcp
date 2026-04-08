@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 # COUNT(*) + SUM over a derived table with scalar subselects.
 # Triggers NthLocalVar index out of range when the inner derived table
 # contains correlated scalar subselects that are Neumann-decorrelated.
@@ -52,6 +67,23 @@ test_cases:
       data:
         - cnt: 3
           total: 60
+
+  - name: "EXPLAIN IR keeps non-window derived aggregates flattened"
+    sql: |
+      EXPLAIN IR
+      SELECT COUNT(*) AS cnt, SUM(t.total_val) AS grand_total FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT SUM(d.val) FROM csd_detail d WHERE d.parent = m.ID), 0) AS total_val
+        FROM csd_main m
+      ) t
+    expect:
+      rows: 8
+      contains:
+        - "\"t\\u0000m\" \"memcp-tests\" \"csd_main\" false nil"
+        - "(aggregate 1 + 0)"
+        - "(aggregate (coalesceNil (scan"
+      not_contains:
+        - "__mat:"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS csd_main"

@@ -596,6 +596,11 @@ class SQLTestRunner:
                                 for needle in (step_expect["contains"] if isinstance(step_expect["contains"], list) else [step_expect["contains"]]):
                                     if str(needle) not in flat:
                                         return self._record_fail(name, f"Step '{step_sql[:60]}' missing '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
+                            if "not_contains" in step_expect:
+                                flat = " ".join(str(r) for r in rows)
+                                for needle in (step_expect["not_contains"] if isinstance(step_expect["not_contains"], list) else [step_expect["not_contains"]]):
+                                    if str(needle) in flat:
+                                        return self._record_fail(name, f"Step '{step_sql[:60]}' unexpectedly contained '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
 
             # Wait for background threads to finish
             for t in bg_threads:
@@ -626,6 +631,11 @@ class SQLTestRunner:
                             for needle in (step_expect["contains"] if isinstance(step_expect["contains"], list) else [step_expect["contains"]]):
                                 if str(needle) not in flat:
                                     return self._record_fail(name, f"Background step '{step_sql[:60]}' missing '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
+                        if "not_contains" in step_expect:
+                            flat = " ".join(str(r) for r in rows)
+                            for needle in (step_expect["not_contains"] if isinstance(step_expect["not_contains"], list) else [step_expect["not_contains"]]):
+                                if str(needle) in flat:
+                                    return self._record_fail(name, f"Background step '{step_sql[:60]}' unexpectedly contained '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
             self._record_success(name, is_noncritical)
             return True
 
