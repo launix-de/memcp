@@ -5268,7 +5268,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(extract_columns_for_tblvar tblvar collect_condition)
 					(extract_outer_columns_for_tblvar tblvar collect_condition))))
 				(define session_sensitive_group_domain (expr_uses_session_state collect_condition))
-			/* Session-sensitive groups use a GLOBAL keytable domain (no condition suffix)
+				/* Session-sensitive groups use a GLOBAL keytable domain (no condition suffix)
 				so all group keys are present regardless of session. The per-session filtering
 				happens in createcolumn via StorageComputeProxy session variants. */
 				(define kt_result (make_keytable schema tbl resolved_stage_group tblvar
@@ -5747,6 +5747,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								existing keys via set_assoc dedup). No droptable needed — the
 								StorageComputeProxy session variants handle per-session values. */
 								(list (make_collect false))
+								/* Normal and session-sensitive groups: collect only when keytable
+								was just created or is empty. For session-sensitive groups the
+								domain is global (no condition suffix) and StorageComputeProxy
+								session variants handle per-session aggregation. */
 								(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
 									(make_collect false)
 									nil)))))

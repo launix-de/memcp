@@ -1,0 +1,133 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Regression tests from ERPL integration testing.
+# Covers: empty keytable name, derived-table wrapping with session filter,
+# and column-name/table-name ambiguity.
+
+metadata:
+  version: "1.0"
+  description: "ERPL integration regression queries"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS erpl_ticket"
+  - sql: "DROP TABLE IF EXISTS erpl_ticket_state"
+  - sql: "DROP TABLE IF EXISTS erpl_ticket_type"
+  - sql: "DROP TABLE IF EXISTS erpl_ticket_event"
+  - sql: "DROP TABLE IF EXISTS erpl_team_item"
+  - sql: "DROP TABLE IF EXISTS erpl_project"
+  - sql: "DROP TABLE IF EXISTS erpl_user"
+  - sql: |
+      CREATE TABLE erpl_user (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        vorname VARCHAR(50), nachname VARCHAR(50),
+        superadmin INT DEFAULT 0, archive INT DEFAULT 0
+      )
+  - sql: |
+      CREATE TABLE erpl_ticket_state (ID INT PRIMARY KEY, name VARCHAR(50), final INT)
+  - sql: |
+      CREATE TABLE erpl_ticket_type (ID INT PRIMARY KEY, name VARCHAR(50))
+  - sql: |
+      CREATE TABLE erpl_ticket (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        title VARCHAR(100), state INT, typ INT,
+        assigned INT, assigned2 INT, creator INT, projekt INT, kunde INT
+      )
+  - sql: |
+      CREATE TABLE erpl_ticket_event (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        ticket INT, creator INT, start INT, end INT
+      )
+  - sql: |
+      CREATE TABLE erpl_team_item (ID INT PRIMARY KEY AUTO_INCREMENT, list INT, item INT)
+  - sql: |
+      CREATE TABLE erpl_project (ID INT PRIMARY KEY, name VARCHAR(50))
+  - sql: |
+      INSERT INTO erpl_user (vorname, nachname) VALUES ('Alice', 'Admin'), ('Bob', 'User')
+  - sql: |
+      INSERT INTO erpl_ticket_state VALUES (1, 'open', 0), (2, 'closed', 1)
+  - sql: |
+      INSERT INTO erpl_ticket_type VALUES (1, 'bug'), (2, 'feature')
+  - sql: |
+      INSERT INTO erpl_project VALUES (1, 'Main')
+  - sql: |
+      INSERT INTO erpl_ticket (title, state, typ, assigned, creator, projekt) VALUES
+        ('fix login', 1, 1, 1, 1, 1),
+        ('add search', 1, 2, 1, 2, 1),
+        ('improve perf', 1, 1, 2, 1, 1),
+        ('done task', 2, 1, 1, 1, 1)
+  - sql: |
+      INSERT INTO erpl_ticket_event (ticket, creator, start, end) VALUES
+        (1, 1, 1000, 2000), (1, 2, 3000, 4500), (2, 1, 1000, 1500)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS erpl_ticket_event"
+  - sql: "DROP TABLE IF EXISTS erpl_team_item"
+  - sql: "DROP TABLE IF EXISTS erpl_ticket"
+  - sql: "DROP TABLE IF EXISTS erpl_ticket_state"
+  - sql: "DROP TABLE IF EXISTS erpl_ticket_type"
+  - sql: "DROP TABLE IF EXISTS erpl_project"
+  - sql: "DROP TABLE IF EXISTS erpl_user"
+
+test_cases:
+  - name: "set session"
+    session_id: "erpl_sess"
+    sql: "SET @fop_user = 1"
+    expect:
+      rows_affected: 0
+
+  # Regression: "createcolumn: table .() does not exist"
+  # Derived table t.* with session-filtered WHERE + multiple LEFT JOINs
+  # + outer LEFT JOIN on sorter + LIMIT OFFSET
+  - name: "derived t.* with session WHERE and outer LEFT JOIN sorter"
+    session_id: "erpl_sess"
+    sql: |
+      SELECT t.* FROM (
+        SELECT ticket.ID AS ID,
+          ticket.title AS title,
+          ticket.state AS state,
+          ticket.typ AS typ,
+          ref_state.state_name AS state_desc,
+          ref_type.type_name AS type_desc,
+          COALESCE((SELECT SUM(e.end - e.start) FROM erpl_ticket_event e WHERE e.ticket = ticket.ID LIMIT 1), 0) AS time_spent
+        FROM erpl_ticket ticket
+        LEFT JOIN (SELECT ID AS state_id, name AS state_name FROM erpl_ticket_state) ref_state ON ref_state.state_id = ticket.state
+        LEFT JOIN (SELECT ID AS type_id, name AS type_name FROM erpl_ticket_type) ref_type ON ref_type.type_id = ticket.typ
+        WHERE NOT (SELECT s.final FROM erpl_ticket_state s WHERE s.ID = ticket.state LIMIT 1)
+          AND (SELECT (u.ID = @fop_user) FROM erpl_user u WHERE u.ID = ticket.assigned LIMIT 1)
+      ) t
+      LEFT JOIN erpl_ticket_type AS sorter_typ ON t.typ = sorter_typ.ID
+      LEFT JOIN erpl_ticket_state AS sorter_state ON t.state = sorter_state.ID
+      WHERE TRUE
+      ORDER BY t.title
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          title: "add search"
+        - ID: 1
+          title: "fix login"
+
+  # Regression: COUNT+SUM over the same derived table
+  - name: "COUNT+SUM over session-filtered derived table"
+    session_id: "erpl_sess"
+    sql: |
+      SELECT COUNT(*) AS cnt, SUM(t.time_spent) AS total_time FROM (
+        SELECT ticket.ID AS ID,
+          COALESCE((SELECT SUM(e.end - e.start) FROM erpl_ticket_event e WHERE e.ticket = ticket.ID LIMIT 1), 0) AS time_spent
+        FROM erpl_ticket ticket
+        WHERE NOT (SELECT s.final FROM erpl_ticket_state s WHERE s.ID = ticket.state LIMIT 1)
+          AND (SELECT (u.ID = @fop_user) FROM erpl_user u WHERE u.ID = ticket.assigned LIMIT 1)
+      ) t
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  # Regression: column name same as table name
+  - name: "column named same as table resolves correctly"
+    sql: |
+      SELECT u.ID FROM erpl_user u WHERE u.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
