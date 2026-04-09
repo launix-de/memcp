@@ -31,14 +31,24 @@ type indexPair struct {
 	data   []scm.Scmer
 }
 
+type storageIndexState struct {
+	mainIndexes      StorageInt
+	deltaBtree       *btree.BTreeG[indexPair]
+	active           bool
+	minVals          []scm.Scmer
+	maxVals          []scm.Scmer
+	skipLists        []map[string]*SkipList
+	precomputedDelta bool
+}
+
 // (no op) numeric helper removed; collations now use golang.org/x/text/collate for ordering
 
 // colGetter retrieves a single index-column value for a given record ID.
 // For raw columns it reads directly from ColumnStorage; for computed columns
 // it evaluates the mapFn over the source column storages.
 type colGetter struct {
-	raw     ColumnStorage                // non-nil for raw columns
-	mapCols []ColumnStorage              // non-nil for computed columns
+	raw     ColumnReader                 // non-nil for raw columns
+	mapCols []ColumnReader               // non-nil for computed columns
 	mapFn   func(...scm.Scmer) scm.Scmer // non-nil for computed columns
 }
 
@@ -60,49 +70,43 @@ type StorageIndex struct {
 	ColMapCols  [][]string        // per-column source col names; nil entry means raw column
 	ColMapFn    []scm.Scmer       // per-column compute fn; IsNil() entry means raw column
 	ColMatchers []BoundaryMatcher // per-column matcher (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
-	// skipLists[colIdx][pattern] stores precomputed SkipLists for non-sorted columns.
-	// Built during buildIndex via BoundaryMatcher.BuildSkipList.
-	// TODO: replace map with NonLockingReadMap for lock-free reads.
-	skipLists   []map[string]*SkipList
-	Savings     float64    // store the amount of time savings here -> add selectivity (outputted / size) on each
-	Native      bool       // true when data is physically sorted by this index (zero-cost)
-	mainIndexes StorageInt // we can do binary searches here (unused when Native)
-	// deltaBtree holds delta inserts in index-column order. Contract:
-	// when active==true, deltaBtree is non-nil. It is built during index
-	// construction and kept in sync by shard.insertDataset on every insert.
-	// Deleted rows are intentionally kept in the btree — the scan layer
-	// filters them via t.deletions / transaction visibility overlays,
-	// because a DELETE can be rolled back by a concurrent transaction.
-	deltaBtree *btree.BTreeG[indexPair]
-	t          *storageShard
-	active     bool
-	lastHit    atomic.Uint32 // last search position for sorted access pattern optimization
-	mu         sync.Mutex
-	// minVals/maxVals: per sorted index column, the minimum and maximum value
-	// in main storage.  Used by interpolation search to estimate positions.
-	// Set during buildIndex; nil entries mean the column is non-sorted or empty.
-	minVals []scm.Scmer
-	maxVals []scm.Scmer
+	Savings     float64           // store the amount of time savings here -> add selectivity (outputted / size) on each
+	Native      bool              // true when data is physically sorted by this index (zero-cost)
+	t           *storageShard
+	lastHit     atomic.Uint32 // last search position for sorted access pattern optimization
+	mu          sync.Mutex
+	sessionKeys []string
+	baseState   storageIndexState
+	variants    map[string]*storageIndexState
 }
 
 // buildGetters returns per-column value getters for this index, reading from the
 // shard under a currently-held RLock. Must be called with s.t.mu.RLock held.
-func (s *StorageIndex) buildGetters() []colGetter {
+func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 	getters := make([]colGetter, len(s.Cols))
+	sessionKeys := make([]string, 0)
 	for i, col := range s.Cols {
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
-			mapColStorages := make([]ColumnStorage, len(s.ColMapCols[i]))
+			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
 			for j, mc := range s.ColMapCols[i] {
-				mapColStorages[j] = s.t.getColumnStorageRLocked(mc)
+				cs := s.t.getColumnStorageRLocked(mc)
+				mapColReaders[j] = newCachedColumnReaderTx(cs, tx)
+				if proxy, ok := cs.(*StorageComputeProxy); ok {
+					sessionKeys = mergeSessionKeys(sessionKeys, proxy.sessionKeys)
+				}
 			}
 			fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[i])
-			getters[i] = colGetter{mapCols: mapColStorages, mapFn: fn}
+			getters[i] = colGetter{mapCols: mapColReaders, mapFn: fn}
 		} else {
-			getters[i] = colGetter{raw: s.t.getColumnStorageRLocked(col)}
+			cs := s.t.getColumnStorageRLocked(col)
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx)}
+			if proxy, ok := cs.(*StorageComputeProxy); ok {
+				sessionKeys = mergeSessionKeys(sessionKeys, proxy.sessionKeys)
+			}
 		}
 	}
-	return getters
+	return getters, sessionKeys
 }
 
 // matcherKindEqual checks if two matchers have the same kind for index deduplication.
@@ -110,16 +114,81 @@ func matcherKindEqual(a, b BoundaryMatcher) bool {
 	return a.Kind() == b.Kind()
 }
 
+func (idx *StorageIndex) sessionVariantKey(tx *TxContext) string {
+	if len(idx.sessionKeys) == 0 {
+		return ""
+	}
+	keyExpr := make([]scm.Scmer, 0, len(idx.sessionKeys)*2+1)
+	keyExpr = append(keyExpr, scm.NewSymbol("list"))
+	for _, key := range idx.sessionKeys {
+		val := scm.NewNil()
+		if tx != nil {
+			val = tx.SessionValue(key)
+		}
+		keyExpr = append(keyExpr, scm.NewString(key), val)
+	}
+	return encodeScmerToString(scm.NewSlice(keyExpr), nil, nil)
+}
+
+func (idx *StorageIndex) syncSessionKeys(keys []string) {
+	idx.mu.Lock()
+	idx.sessionKeys = mergeSessionKeys(idx.sessionKeys, keys)
+	idx.mu.Unlock()
+}
+
+func (idx *StorageIndex) stateForTx(tx *TxContext, create bool) *storageIndexState {
+	if len(idx.sessionKeys) == 0 {
+		return &idx.baseState
+	}
+	key := idx.sessionVariantKey(tx)
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.variants == nil {
+		if !create {
+			return nil
+		}
+		idx.variants = make(map[string]*storageIndexState)
+	}
+	state := idx.variants[key]
+	if state == nil && create {
+		state = &storageIndexState{}
+		idx.variants[key] = state
+	}
+	return state
+}
+
+func (idx *StorageIndex) markVariantsDirty() {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for _, state := range idx.variants {
+		state.active = false
+		state.mainIndexes = StorageInt{}
+		state.deltaBtree = nil
+		state.skipLists = nil
+		state.minVals = nil
+		state.maxVals = nil
+		state.precomputedDelta = false
+	}
+}
+
 func (idx *StorageIndex) ComputeSize() uint {
 	var sz uint = 24 * 8 // heuristic
-	if !idx.Native {
-		sz += idx.mainIndexes.ComputeSize()
+	states := []*storageIndexState{&idx.baseState}
+	idx.mu.Lock()
+	for _, state := range idx.variants {
+		states = append(states, state)
 	}
-	for _, colCache := range idx.skipLists {
-		sz += 8
-		for k, sl := range colCache {
-			sz += uint(len(k)) + 24
-			sz += sl.ComputeSize()
+	idx.mu.Unlock()
+	for _, state := range states {
+		if !idx.Native {
+			sz += state.mainIndexes.ComputeSize()
+		}
+		for _, colCache := range state.skipLists {
+			sz += 8
+			for k, sl := range colCache {
+				sz += uint(len(k)) + 24
+				sz += sl.ComputeSize()
+			}
 		}
 	}
 	// TODO: deltaBtree
@@ -166,6 +235,27 @@ func (s *StorageIndex) getDeltaColValue(data []scm.Scmer, colIdx int) scm.Scmer 
 	return s.getDeltaValue(data, s.Cols[colIdx])
 }
 
+func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
+	if len(s.ColMapFn) > colIdx && !s.ColMapFn[colIdx].IsNil() {
+		fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[colIdx])
+		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
+		for i, mc := range s.ColMapCols[colIdx] {
+			cs := s.t.getColumnStorageOrPanic(mc)
+			if proxy, ok := cs.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+				vals[i] = s.t.ColumnReaderTx(tx, mc)(recid)
+			} else {
+				vals[i] = s.getDeltaValue(data, mc)
+			}
+		}
+		return fn(vals...)
+	}
+	cs := s.t.getColumnStorageOrPanic(s.Cols[colIdx])
+	if proxy, ok := cs.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+		return s.t.ColumnReaderTx(tx, s.Cols[colIdx])(recid)
+	}
+	return s.getDeltaValue(data, s.Cols[colIdx])
+}
+
 // rowWithinBounds checks sorted (equal/range) columns using lower/upper directly.
 // Non-sorted columns (LIKE etc.) are skipped — handled by block-level skipping
 // in iterate(); the scan layer applies the full condition afterwards.
@@ -203,13 +293,16 @@ func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast
 	return true, false
 }
 
-func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainGetters []colGetter, delta indexPair) int {
+func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid uint32, mainGetters []colGetter, delta indexPair) int {
 	for i := range s.Cols {
 		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
 			continue
 		}
 		mainVal := mainGetters[i].get(mainRecid)
-		deltaVal := s.getDeltaColValue(delta.data, i)
+		deltaVal := delta.data[i]
+		if !state.precomputedDelta {
+			deltaVal = s.getDeltaColValue(delta.data, i)
+		}
 		if scm.Less(mainVal, deltaVal) {
 			return -1
 		}
@@ -231,7 +324,7 @@ func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainGetters []colGe
 // The callback receives batches of record IDs and returns false to stop iteration.
 // Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
 // for existence checks, large buffers (e.g. [1024]uint32) for full scans.
-func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
 	// extract inclusiveness for the range column (last boundary)
@@ -260,7 +353,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 					}
 				}
 				// this index fits!
-				index.iterate(cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 				return
 			}
 		skip_index:
@@ -289,7 +382,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 					return
 				}
 			}
@@ -340,12 +433,12 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 			index.ColMapFn[i] = cols[i].mapFn      // IsNil() for raw columns
 			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
 		}
-		index.Savings = 0.0  // count how many cost we wasted so we decide when to build the index
-		index.active = false // tell the engine that index has to be built first
+		index.Savings = 0.0            // count how many cost we wasted so we decide when to build the index
+		index.baseState.active = false // tell the engine that index has to be built first
 		index.t = t
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 		return
 	}
 
@@ -410,7 +503,7 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 		clone.ColMatchers = idx.ColMatchers // shallow copy OK (singletons)
 		clone.Savings = idx.Savings * 0.9
 		clone.t = t2
-		clone.active = false
+		clone.baseState.active = false
 		candidates = append(candidates, clone)
 	}
 
@@ -498,10 +591,10 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 	}
 }
 
-// buildIndex constructs the index data structures (mainIndexes and deltaBtree).
+// buildIndex constructs the index data structures for one global/session variant.
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
-func (s *StorageIndex) buildIndex(cols []colGetter) {
+func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx *TxContext) {
 	if !s.Native {
 		// main storage: build sort-order index
 		tmp := make([]uint32, s.t.main_count)
@@ -527,50 +620,54 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 			return false // fully equal
 		})
 		// store sorted values into compressed format
-		s.mainIndexes.prepare()
+		state.mainIndexes.prepare()
 		for i, v := range tmp {
-			s.mainIndexes.scan(uint32(i), scm.NewInt(int64(v)))
+			state.mainIndexes.scan(uint32(i), scm.NewInt(int64(v)))
 		}
-		s.mainIndexes.init(uint32(len(tmp)))
+		state.mainIndexes.init(uint32(len(tmp)))
 		for i, v := range tmp {
-			s.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
+			state.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
 		}
-		s.mainIndexes.finish()
+		state.mainIndexes.finish()
 		// Capture min/max from sorted permutation for interpolation search
 		if len(tmp) > 0 {
-			s.minVals = make([]scm.Scmer, len(cols))
-			s.maxVals = make([]scm.Scmer, len(cols))
+			state.minVals = make([]scm.Scmer, len(cols))
+			state.maxVals = make([]scm.Scmer, len(cols))
 			for i, g := range cols {
 				if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
 					continue
 				}
-				s.minVals[i] = g.get(tmp[0])
-				s.maxVals[i] = g.get(tmp[len(tmp)-1])
+				state.minVals[i] = g.get(tmp[0])
+				state.maxVals[i] = g.get(tmp[len(tmp)-1])
 			}
 		}
 	} else if s.t.main_count > 0 {
 		// Native index: identity order, recid 0 = min, recid N-1 = max
-		s.minVals = make([]scm.Scmer, len(cols))
-		s.maxVals = make([]scm.Scmer, len(cols))
+		state.minVals = make([]scm.Scmer, len(cols))
+		state.maxVals = make([]scm.Scmer, len(cols))
 		for i, g := range cols {
 			if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
 				continue
 			}
-			s.minVals[i] = g.get(0)
-			s.maxVals[i] = g.get(s.t.main_count - 1)
+			state.minVals[i] = g.get(0)
+			state.maxVals[i] = g.get(s.t.main_count - 1)
 		}
 	}
 	// (previously: else: Native index comment)
 
 	// delta storage — comparator uses getDeltaColValue so computed columns work;
 	// skip non-sorted matcher columns (they don't participate in sort order)
-	s.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
+	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		for colIdx := range s.Cols {
 			if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
 				continue
 			}
-			av := s.getDeltaColValue(a.data, colIdx)
-			bv := s.getDeltaColValue(b.data, colIdx)
+			av := a.data[colIdx]
+			bv := b.data[colIdx]
+			if !state.precomputedDelta {
+				av = s.getDeltaColValue(a.data, colIdx)
+				bv = s.getDeltaColValue(b.data, colIdx)
+			}
 			if scm.Less(av, bv) {
 				return true // less
 			} else if !scm.Equal(av, bv) {
@@ -584,22 +681,35 @@ func (s *StorageIndex) buildIndex(cols []colGetter) {
 	})
 	// fill deltaBtree with global record IDs
 	for i, data := range s.t.inserts {
-		s.deltaBtree.ReplaceOrInsert(indexPair{int(s.t.main_count) + i, data})
+		recid := s.t.main_count + uint32(i)
+		if len(s.sessionKeys) > 0 {
+			values := make([]scm.Scmer, len(s.Cols))
+			for colIdx := range s.Cols {
+				values[colIdx] = s.getDeltaColValueTx(tx, recid, data, colIdx)
+			}
+			state.precomputedDelta = true
+			state.deltaBtree.ReplaceOrInsert(indexPair{int(recid), values})
+		} else {
+			state.deltaBtree.ReplaceOrInsert(indexPair{int(recid), data})
+		}
 	}
 
-	s.active = true // mark as ready
+	state.active = true // mark as ready
 }
 
 // getOrBuildSkipList returns the cached skip list for a non-sorted column,
 // building it on first access. The caller must hold s.t.mu.RLock for column access.
-func (s *StorageIndex) getOrBuildSkipList(colIdx int, pattern string) *SkipList {
+func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, colIdx int, pattern string) *SkipList {
 	// Fast path: check cache
-	if len(s.skipLists) > colIdx && s.skipLists[colIdx] != nil {
-		if sl, ok := s.skipLists[colIdx][pattern]; ok {
+	if len(state.skipLists) > colIdx && state.skipLists[colIdx] != nil {
+		if sl, ok := state.skipLists[colIdx][pattern]; ok {
 			return sl
 		}
 	}
 	// Slow path: build and cache
+	if len(s.sessionKeys) > 0 {
+		return nil
+	}
 	if colIdx >= len(s.ColMatchers) || s.ColMatchers[colIdx] == nil {
 		return nil
 	}
@@ -611,18 +721,18 @@ func (s *StorageIndex) getOrBuildSkipList(colIdx int, pattern string) *SkipList 
 		if s.Native {
 			return pos
 		}
-		return uint32(int64(s.mainIndexes.GetValueUInt(pos)) + s.mainIndexes.offset)
+		return uint32(int64(state.mainIndexes.GetValueUInt(pos)) + state.mainIndexes.offset)
 	}
 	sl := s.ColMatchers[colIdx].BuildSkipList(pattern, s.t.main_count, getRecid, colStorage)
 	// Cache the result (TODO: replace with NonLockingReadMap)
 	s.mu.Lock()
-	if s.skipLists == nil {
-		s.skipLists = make([]map[string]*SkipList, len(s.Cols))
+	if state.skipLists == nil {
+		state.skipLists = make([]map[string]*SkipList, len(s.Cols))
 	}
-	if s.skipLists[colIdx] == nil {
-		s.skipLists[colIdx] = make(map[string]*SkipList)
+	if state.skipLists[colIdx] == nil {
+		state.skipLists[colIdx] = make(map[string]*SkipList)
 	}
-	s.skipLists[colIdx][pattern] = sl
+	state.skipLists[colIdx][pattern] = sl
 	s.mu.Unlock()
 	// Register skip list with CacheManager at 1/100 of the index priority,
 	// so rarely used patterns are evicted before the whole index.
@@ -634,18 +744,20 @@ func (s *StorageIndex) getOrBuildSkipList(colIdx int, pattern string) *SkipList 
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
 	// Re-acquiring RLock via getColumnStorageOrPanic would deadlock when a
 	// concurrent writer is waiting for s.t.mu.Lock() (write-preferring RWMutex).
-	cols := s.buildGetters()
+	cols, sessionKeys := s.buildGetters(tx)
+	s.syncSessionKeys(sessionKeys)
+	state := s.stateForTx(tx, true)
 	// no collation-specific helpers in the current implementation
 
 	savings_threshold := 2.0    // building an index costs 1x the time as traversing the list
 	s.Savings = s.Savings + 1.0 // mark that we could save time
-	if !s.active {
+	if !state.active {
 		// index is not built yet
 		if s.Savings < savings_threshold {
 			// iterate over all items because we don't want to store the index
@@ -660,12 +772,12 @@ func (s *StorageIndex) iterate(bounds boundaries, lower []scm.Scmer, upperLast s
 				s.fullScan(maxInsertIndex, buf, callback)
 				return
 			}
-			if s.active {
+			if state.active {
 				// someone has built it in the meantime
 				s.mu.Unlock()
 				goto start_scan
 			}
-			s.buildIndex(cols)
+			s.buildIndex(state, cols, tx)
 			s.mu.Unlock()
 			// register with CacheManager
 			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
@@ -680,17 +792,17 @@ start_scan:
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
-	if !s.active {
+	if !state.active {
 		// Index was evicted between our initial check and here.
 		s.mu.Unlock()
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
-	snapMainIndexes := s.mainIndexes
+	snapMainIndexes := state.mainIndexes
 	// No clone needed: the shard's RLock (held by caller) prevents concurrent
 	// inserts from modifying deltaBtree. The index mutex protects against
 	// eviction only; the btree data is stable under RLock.
-	snapDeltaBtree := s.deltaBtree
+	snapDeltaBtree := state.deltaBtree
 	isNative := s.Native
 	s.mu.Unlock()
 
@@ -712,7 +824,7 @@ start_scan:
 	skipCount := 0
 	for i := 0; i < cmpCols && i < len(bounds) && skipCount < 8; i++ {
 		if !bounds[i].matcher.IsSorted() {
-			skipListPtrs[skipCount] = s.getOrBuildSkipList(i, bounds[i].lower.String())
+			skipListPtrs[skipCount] = s.getOrBuildSkipList(state, i, bounds[i].lower.String())
 			skipCount++
 		}
 	}
@@ -737,9 +849,9 @@ start_scan:
 	// Interpolation search: estimate position from first sorted column's
 	// min/max, then binary search for exact multi-column position.
 	var interpMin, interpMax scm.Scmer
-	if cmpCols > 0 && firstSearchable && len(s.minVals) > 0 && !lower[0].IsNil() {
-		interpMin = s.minVals[0]
-		interpMax = s.maxVals[0]
+	if cmpCols > 0 && firstSearchable && len(state.minVals) > 0 && !lower[0].IsNil() {
+		interpMin = state.minVals[0]
+		interpMax = state.maxVals[0]
 	}
 	mainIdx := interpolationSearch(searchLo, searchN, lower[0], interpMin, interpMax,
 		func(idx int) scm.Scmer {
@@ -859,6 +971,9 @@ start_scan:
 				return true
 			}
 			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
+				if state.precomputedDelta {
+					return p.data[i]
+				}
 				return s.getDeltaColValue(p.data, i)
 			})
 			if !inRange {
@@ -866,7 +981,7 @@ start_scan:
 			}
 			// drain main items that sort before this delta item
 			for mainOk && !stopped {
-				cmp := s.compareMainAndDelta(mainRecid, cols, p)
+				cmp := s.compareMainAndDelta(state, mainRecid, cols, p)
 				if cmp > 0 {
 					break // delta item comes first
 				}
@@ -883,7 +998,7 @@ start_scan:
 		// For computed or non-sorted matcher columns, AscendGreaterOrEqual cannot be
 		// used (computed col names have no entry in deltaColumns, matcher patterns
 		// don't map to sort order), so scan all.
-		hasUnsearchableInBounds := false
+		hasUnsearchableInBounds := state.precomputedDelta
 		for i := 0; i < cmpCols; i++ {
 			if (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (len(bounds) > i && !bounds[i].matcher.IsSorted()) {
 				hasUnsearchableInBounds = true
@@ -927,10 +1042,8 @@ func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !idx.mu.TryLock() {
 		return false // index is in use, skip eviction
 	}
-	idx.active = false
-	idx.mainIndexes = StorageInt{}
-	idx.deltaBtree = nil
-	idx.skipLists = nil
+	idx.baseState = storageIndexState{}
+	idx.variants = nil
 	idx.mu.Unlock()
 	return true
 }
@@ -956,8 +1069,8 @@ func skipListCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !e.index.mu.TryLock() {
 		return false
 	}
-	if len(e.index.skipLists) > e.colIdx && e.index.skipLists[e.colIdx] != nil {
-		delete(e.index.skipLists[e.colIdx], e.pattern)
+	if len(e.index.baseState.skipLists) > e.colIdx && e.index.baseState.skipLists[e.colIdx] != nil {
+		delete(e.index.baseState.skipLists[e.colIdx], e.pattern)
 	}
 	e.index.mu.Unlock()
 	return true

@@ -598,9 +598,8 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
 		GlobalCache.removeInternal(idx, freedByType)
-		idx.active = false
-		idx.mainIndexes = StorageInt{}
-		idx.deltaBtree = nil
+		idx.baseState = storageIndexState{}
+		idx.variants = nil
 	}
 	// release column storage (deregister compressed string dicts first)
 	for col := range s.columns {
@@ -628,9 +627,8 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
 		GlobalCache.removeInternal(idx, freedByType)
-		idx.active = false
-		idx.mainIndexes = StorageInt{}
-		idx.deltaBtree = nil
+		idx.baseState = storageIndexState{}
+		idx.variants = nil
 	}
 	// clear in-memory data (no disk backing to flush to)
 	s.inserts = nil
@@ -2069,9 +2067,13 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		// also notify indices
 		for _, index := range t.Indexes {
 			// add to delta indexes
+			if len(index.sessionKeys) > 0 {
+				index.markVariantsDirty()
+				continue
+			}
 			index.mu.Lock()
-			if index.deltaBtree != nil {
-				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+			if index.baseState.deltaBtree != nil {
+				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
 			}
 			index.mu.Unlock()
 		}
@@ -2132,9 +2134,13 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 
 		// update delta indexes
 		for _, index := range t.Indexes {
+			if len(index.sessionKeys) > 0 {
+				index.markVariantsDirty()
+				continue
+			}
 			index.mu.Lock()
-			if index.deltaBtree != nil {
-				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+			if index.baseState.deltaBtree != nil {
+				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
 			}
 			index.mu.Unlock()
 		}
@@ -2166,7 +2172,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
 	var buf [8]uint32
-	t.iterateIndex(bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
@@ -2708,7 +2714,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// Eagerly rebuild indexes with sufficient Savings so the first
 		// query after rebuild does not pay a cold-start full-scan penalty.
 		for _, idx := range result.Indexes {
-			if idx.Savings >= 2.0 && !idx.active {
+			if idx.Savings >= 2.0 && !idx.baseState.active {
 				// Verify all required columns exist before building the index.
 				// A column may be absent from this shard if it was added after
 				// the shard was created (e.g. ALTER TABLE ADD COLUMN).
@@ -2733,7 +2739,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					}
 				}
 				if allFound {
-					idx.buildIndex(idx.buildGetters())
+					getters, sessionKeys := idx.buildGetters(nil)
+					idx.syncSessionKeys(sessionKeys)
+					idx.buildIndex(idx.stateForTx(nil, true), getters, nil)
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}
 			}
@@ -2743,16 +2751,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// publish the new shard pointer and then save atomically at the
 		// table/database level to avoid transient, inconsistent schemas.
 
-		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-			// remove old log file
-			// TODO: this should be in sync with setting the new pointer
-			logfile := t.logfile
-			t.logfile = nil
-			if logfile != nil {
-				logfile.Close()
-			}
-			t.t.schema.persistence.RemoveLog(t.uuid.String())
-		}
+		// Keep the old WAL until the caller has durably published the new shard
+		// list and saved schema.json. Otherwise a crash between rebuild and
+		// publish can leave schema.json pointing at the old shard UUID after its
+		// WAL was already removed, losing rows that only existed in the old log.
 
 		// Only after a successful rebuild, schedule old shard files for deletion.
 		runtime.SetFinalizer(t, func(t *storageShard) {
