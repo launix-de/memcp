@@ -3250,6 +3250,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
 								(cons sym args) (cons (prefix_expr sym) (map args prefix_expr))
 								expr)))
+							/* inject subquery WHERE condition into outer query */
+							(if (and (not (nil? condition2)) (not (equal? condition2 true)))
+								(sq_cache "condition" (cons (prefix_expr condition2)
+									(coalesceNil (sq_cache "condition") '()))))
 							(prefix_expr value_expr2))
 						nil))))
 		nil)))
@@ -3998,6 +4002,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 	row-domain and their joinexpr must participate in global filtering. */
 	(define _sq_jes (filter (map (merge _sq_tbls sq_scalar_condition_tbls) (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 	(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
+	/* integrate WHERE conditions from aggregate/uncorrelated scalar subselects (Path B) */
+	(define _sq_conds (coalesceNil (sq_cache "condition") '()))
+	(if (not (equal? _sq_conds '()))
+		(set condition (cons (quote and) (cons condition _sq_conds))))
 	/* integrate partition stages from non-aggregate LIMIT unnesting */
 	(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
 	(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
@@ -4632,7 +4640,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
 		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_having true))))) /* aggregates in having */
 		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce condition true))))) /* aggregates in condition (from Neumann EXISTS/IN rewrite) */
-
 		/* TODO: replace (get_column nil ti col ci) in group, having and order with (coalesce (fields col) '('get_column nil false col false)) */
 
 		/* determine which tables the GROUP BY applies to:
@@ -5046,7 +5053,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 				/* preparation */
 				(define tblvar_cols (merge_unique (map resolved_stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
-				(set condition (replace_find_column (coalesceNil condition true)))
+				/* skip replace_find_column for scoped stages — columns already resolved */
+				(if (not _scoped_stage) (set condition (replace_find_column (coalesceNil condition true))))
 				(set condition (lower_visible_materialized_aggs_single condition))
 				(if materialized_source
 					(set condition (rewrite_materialized_source_aggs_single condition)))
