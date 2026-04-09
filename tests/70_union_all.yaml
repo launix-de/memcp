@@ -73,8 +73,7 @@ test_cases:
       rows: 4
 
   # === UNION ALL with ORDER BY / LIMIT ===
-  # TODO: global ORDER BY/LIMIT on UNION ALL needs set-operator materialization
-  # or a dedicated shuffle/merge operator in storage; not preplanned in this step.
+  # Uses scan_order_multi for materialization-free sorted merge across tables.
 
   - name: "UNION ALL with ORDER BY"
     sql: |
@@ -83,16 +82,25 @@ test_cases:
       SELECT ID, name FROM fop_files WHERE ID >= 4
       ORDER BY ID
     expect:
-      error: true
+      rows: 4
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 2
+          name: "image2.png"
+        - ID: 4
+          name: "image4.png"
+        - ID: 5
+          name: "image5.png"
 
   - name: "UNION ALL with LIMIT"
     sql: |
-      SELECT name FROM fop_files
+      SELECT ID, name FROM fop_files
       UNION ALL
-      SELECT CAST(result AS VARCHAR) AS name FROM renderjob
+      SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
       LIMIT 3
     expect:
-      error: true
+      rows: 3
 
   - name: "UNION ALL with ORDER BY and LIMIT"
     sql: |
@@ -101,7 +109,46 @@ test_cases:
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
       ORDER BY ID LIMIT 4
     expect:
-      error: true
+      rows: 4
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 2
+          name: "image2.png"
+        - ID: 3
+          name: "image3.png"
+        - ID: 4
+          name: "image4.png"
+
+  - name: "UNION ALL with ORDER BY DESC and LIMIT"
+    sql: |
+      SELECT ID, name FROM fop_files
+      UNION ALL
+      SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
+      ORDER BY ID DESC LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - ID: 103
+          name: "3"
+        - ID: 102
+          name: "3"
+        - ID: 101
+          name: "1"
+
+  - name: "UNION ALL with ORDER BY and OFFSET"
+    sql: |
+      SELECT ID, name FROM fop_files WHERE ID <= 3
+      UNION ALL
+      SELECT ID, name FROM fop_files WHERE ID >= 4
+      ORDER BY ID LIMIT 2 OFFSET 1
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          name: "image2.png"
+        - ID: 3
+          name: "image3.png"
 
   # === UNION ALL in subquery / derived table ===
 
@@ -141,7 +188,12 @@ test_cases:
       SELECT result AS ignored_id, CAST(result AS VARCHAR) AS ignored_label FROM renderjob WHERE ID = 102
       ORDER BY file_id
     expect:
-      error: true
+      rows: 2
+      data:
+        - file_id: 1
+          label: "image1.png"
+        - file_id: 3
+          label: "3"
 
   - name: "UNION ALL with inner ORDER BY/LIMIT per branch"
     sql: |
@@ -186,7 +238,12 @@ test_cases:
       SELECT result AS ID, NULL AS name FROM renderjob WHERE ID = 102
       ORDER BY ID
     expect:
-      error: true
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: null
 
   # === Must-fail cases ===
 

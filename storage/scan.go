@@ -62,6 +62,11 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	// TODO: enable scan_batch rewrite after fixing edge cases with scalar subselects
+	// and cross-join GROUP BY. The infrastructure is ready in scan_batch_rewrite.go.
+	// if rewritten := tryScanBatchRewrite(v); !rewritten.IsNil() {
+	// 	return oc.OptimizeSub(rewritten, useResult)
+	// }
 	return optimizeScanShared(v, oc, 7, 8, 9, 10, 11)
 }
 
