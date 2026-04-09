@@ -422,11 +422,38 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "merge",
-		Desc: "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
+		Desc: "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one. If any input is a FastDict, produces a FastDict result preserving dict semantics.",
 		Fn: func(a ...Scmer) Scmer {
 			lists := a
 			if len(a) == 1 {
 				lists = asSlice(a[0], "merge")
+			}
+			// Check if any input is a FastDict — if so, merge into FastDict
+			hasFD := false
+			for _, v := range lists {
+				if v.IsFastDict() {
+					hasFD = true
+					break
+				}
+			}
+			if hasFD {
+				result := NewFastDictValue(0)
+				for _, v := range lists {
+					if v.IsFastDict() {
+						fd := v.FastDict()
+						for i := 0; i < len(fd.Pairs); i += 2 {
+							result.Set(fd.Pairs[i], fd.Pairs[i+1], nil)
+						}
+					} else if v.IsSlice() {
+						sl := v.Slice()
+						for i := 0; i+1 < len(sl); i += 2 {
+							result.Set(sl[i], sl[i+1], nil)
+						}
+					} else if !v.IsNil() {
+						panic("merge: cannot merge non-dict value into FastDict")
+					}
+				}
+				return NewFastDict(result)
 			}
 			size := 0
 			for _, v := range lists {

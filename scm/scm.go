@@ -30,6 +30,7 @@ import (
 	"github.com/jtolds/gls"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 	"unsafe"
@@ -511,17 +512,19 @@ restart:
 			}
 			return ApplyPromise(procedure, args)
 		default:
-			// Show full call expression for debugging
+			// Show full call expression + Go stack for debugging
 			callExpr := "("
 			for i, el := range list {
 				if i > 0 { callExpr += " " }
 				s, _ := el.AppendString(nil)
-				if len(s) > 50 { s = s[:50] + "..." }
+				if len(s) > 80 { s = s[:80] + "..." }
 				callExpr += s
-				if i > 3 { callExpr += " ..."; break }
+				if i > 5 { callExpr += " ..."; break }
 			}
+			goStack := string(debug.Stack())
 			callExpr += ")"
-			panic("Unknown function: " + list[0].String() + " in expression: " + callExpr)
+			typeInfo := fmt.Sprintf("tag=%d", list[0].GetTag())
+			panic("Unknown function: " + list[0].String() + " [" + typeInfo + "] in expression: " + callExpr + "\nGo stack:\n" + goStack)
 		}
 	default:
 		panic("Unknown expression type - EVAL " + expression.String())

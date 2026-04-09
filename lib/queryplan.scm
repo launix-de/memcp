@@ -3561,18 +3561,22 @@ seeing the correctly prefixed outer alias. */
 		false))))
 	(define sq_scalar_projection_tbls (filter _sq_scalar_tbls (lambda (t)
 		(not (has? sq_scalar_condition_tbls t)))))
+	/* save original tables — the schema reduce must only iterate over tables that
+	existed before sq_cache integration. sq_cache tables already have their schemas
+	in _sq_schs and don't need materialized_source_schema lookup. */
+	(define tables_pre_sq tables)
 	(set tables (merge tables _sq_tbls sq_scalar_condition_tbls sq_scalar_projection_tbls))
 	(define _sq_schs (coalesceNil (sq_cache "schemas") '()))
 	(if (not (equal? _sq_schs '())) (set schemas (merge schemas _sq_schs)))
 	/* ensure materialized temp sources have a visible schema under their current alias.
 	This keeps later planner passes from guessing temp columns via ad-hoc name heuristics. */
-	(set schemas (reduce tables (lambda (acc td) (match td
+	(set schemas (reduce tables_pre_sq (lambda (acc td) (match td
 		'(tv tschema ttbl _ _)
 		(begin
 			(define _existing (if (has_assoc? acc tv) (acc tv) nil))
 			(define _resolved (coalesce _existing (materialized_source_schema tschema ttbl tv acc)))
 			(if (nil? _resolved) acc
-				(begin (acc tv _resolved) acc)))
+				(merge acc (list tv _resolved))))
 		acc)) schemas))
 	/* Design contract: logical get_column/aggregate/window sentinels should stay
 	as long as possible and join semantics must stay attached to their stage.

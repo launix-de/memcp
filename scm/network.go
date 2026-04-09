@@ -30,6 +30,7 @@ import "net/http"
 import "sync/atomic"
 import "encoding/json"
 import "path/filepath"
+import "runtime/debug"
 import "github.com/gorilla/websocket"
 
 var httpServersMu sync.Mutex
@@ -317,7 +318,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			defer func() {
 				if r := recover(); r != nil {
 					if fmt.Sprint(r) != "websocket closed" {
-						PrintError("error in http handler: " + fmt.Sprint(r))
+						PrintError("error in http handler: " + fmt.Sprint(r) + "\n" + string(debug.Stack()))
 					}
 					// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
 					func() {
