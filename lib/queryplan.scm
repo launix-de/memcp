@@ -4658,12 +4658,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	(if stage_group (begin
 		/* merge stage-condition from scoped stages into the local condition.
 		This injects the inner subquery WHERE exactly when the owning stage
-		is processed, preventing cross-stage condition leakage. */
+		is processed, preventing cross-stage condition leakage.
+		stage-condition is already prefixed — merge AFTER replace_find_column
+		to avoid crash on prefixed aliases that replace_find_column doesn't know. */
 		(define scoped_cond (stage_condition stage))
-		(if (and (not (nil? scoped_cond)) (not (equal? scoped_cond true)))
-			(set condition (if (or (nil? condition) (equal? condition true))
-				scoped_cond
-				(list (quote and) condition scoped_cond))))
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		/* Design contract:
 		Keep get_column / aggregate / window sentinels logical until the final scan
@@ -5158,8 +5156,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 				/* preparation */
 				(define tblvar_cols (merge_unique (map resolved_stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
-				/* skip replace_find_column for scoped stages — columns already resolved */
-				(if (not _scoped_stage) (set condition (replace_find_column (coalesceNil condition true))))
+				(set condition (replace_find_column (coalesceNil condition true)))
+				/* merge stage-condition AFTER replace_find_column (already prefixed) */
+				(if (and (not (nil? scoped_cond)) (not (equal? scoped_cond true)))
+					(set condition (if (or (nil? condition) (equal? condition true))
+						scoped_cond
+						(list (quote and) condition scoped_cond))))
 				(set condition (lower_visible_materialized_aggs_single condition))
 				(if materialized_source
 					(set condition (rewrite_materialized_source_aggs_single condition)))
