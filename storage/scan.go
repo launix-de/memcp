@@ -83,7 +83,7 @@ func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm
 }
 
 func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
-	ss := scm.GetCurrentSessionState()
+	ss := SessionStateFromTx(currentTx)
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
@@ -255,7 +255,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	akkumulator := neutral
 	var outCount int64
 	if ss == nil {
-		ss = scm.GetCurrentSessionState()
+		ss = SessionStateFromTx(currentTx)
 	}
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
@@ -297,7 +297,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		// all shard write locks, so checking after our own t.mu.Lock() is TOCTOU-safe.
 		// waitTableLock only uses tableLockMu (not t.mu), so no deadlock.
 		if t.t.tableLockOwner.Load() != nil {
-			t.t.waitTableLock(scm.GetCurrentSessionState(), true)
+			t.t.waitTableLock(ss, true)
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
@@ -331,7 +331,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		if t.t.tableLockOwner.Load() != nil {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(scm.GetCurrentSessionState(), hasMutationCallback)
+			t.t.waitTableLock(ss, hasMutationCallback)
 			t.mu.RLock()
 			locked = true
 		}
@@ -485,7 +485,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	akkumulator := neutral
 	var outCount int64
 	if ss == nil {
-		ss = scm.GetCurrentSessionState()
+		ss = SessionStateFromTx(currentTx)
 	}
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
@@ -520,7 +520,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			defer currentTx.ExitShardWrite(t)
 		}
 		if t.t.tableLockOwner.Load() != nil {
-			t.t.waitTableLock(scm.GetCurrentSessionState(), true)
+			t.t.waitTableLock(ss, true)
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
@@ -553,7 +553,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		if t.t.tableLockOwner.Load() != nil {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(scm.GetCurrentSessionState(), hasMutationCallback)
+			t.t.waitTableLock(ss, hasMutationCallback)
 			t.mu.RLock()
 			locked = true
 		}

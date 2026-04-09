@@ -107,6 +107,7 @@ type TxContext struct {
 	SnapshotEpoch uint64 // ACID: snapshot boundary
 	Depth         uint32 // nesting depth for savepoints / triggers
 	Session       scm.Scmer
+	SessionState  *scm.SessionState // cached to avoid GLS stack-walking
 
 	// Per-shard state, nil until first write (zero-alloc for read-only transactions).
 	shards map[*storageShard]*storageShardTransaction
@@ -602,6 +603,16 @@ func CurrentTx() *TxContext {
 	return tx
 }
 
+// SessionStateFromTx returns the SessionState from the given tx, falling back
+// to GLS lookup only when tx is nil. This avoids the expensive gls stack walk
+// (24% CPU in profiling) on the hot scan path.
+func SessionStateFromTx(tx *TxContext) *scm.SessionState {
+	if tx != nil && tx.SessionState != nil {
+		return tx.SessionState
+	}
+	return scm.GetCurrentSessionState()
+}
+
 // WithAutocommit executes fn inside an implicit TxCursorStability transaction
 // if no explicit transaction is already active in session, and commits it
 // afterwards. If an explicit transaction is active (session["transaction"] != nil),
@@ -618,6 +629,7 @@ func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Sc
 
 	tx := NewTxContext(TxCursorStability)
 	tx.Session = scm.NewFunc(sessionFn)
+	tx.SessionState = scm.GetCurrentSessionState()
 	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 
 	var result scm.Scmer
@@ -667,6 +679,7 @@ func initTransaction(en scm.Env) {
 			}
 			tx := NewTxContext(TxCursorStability)
 			tx.Session = a[0]
+			tx.SessionState = scm.GetCurrentSessionState()
 			sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
