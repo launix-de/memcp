@@ -3175,31 +3175,83 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
 			(and all_ok (_outer_ref_is_direct_column outer_schemas ref)))
 			true)))
-	(define _try_unnest_scalar_subselect (lambda (subquery outer_schemas) (match subquery
+	(define unnest_scalar_subselect (lambda (subquery outer_schemas) (match subquery
 		'(_ _ flds _ g h o l off) (begin
-			(define _value_expr (match flds
+			(define value_expr (match flds
 				(cons _ (cons v _)) v
 				nil))
-			(if (and (_subquery_has_outer_refs subquery outer_schemas)
+			(define has_outer_refs (_subquery_has_outer_refs subquery outer_schemas))
+			(define has_aggregates (not (equal? (extract_aggregates (coalesceNil value_expr true)) '())))
+			/* Aggregate subselects always produce 1 row — LIMIT 1 is redundant */
+			(define effective_limit (if (and has_aggregates (or (nil? l) (equal? l 1))) nil l))
+			/* Path A: correlated non-aggregate — full Neumann decorrelation to LEFT JOIN */
+			(if (and has_outer_refs
 				(_subquery_outer_refs_are_direct_columns subquery outer_schemas)
 				(not (_contains_inner_select_marker subquery))
-				(not (nil? _value_expr))
-				(equal? (extract_aggregates _value_expr) '())
+				(not (nil? value_expr))
+				(not has_aggregates)
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				(nil? l)
-				(nil? off))
+				(or (nil? effective_limit) (and (equal? effective_limit 1) (or (nil? o) (equal? o '()))))
+				(or (nil? off) (equal? off 0)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
-						/* Scalar subselect unnesting yields null-preserving LEFT JOIN helper
-						tables for SELECT/expr projection. Keep them separate from COUNT/IN/EXISTS
-						helper tables so their joinexpr stays attached to the table entry and is
-						not re-applied globally as a filter later. */
 						(sq_cache "scalar_tables" (merge tbls (coalesceNil (sq_cache "scalar_tables") '())))
 						subst)
 					nil)
-				nil))
+				/* Path B: aggregate or uncorrelated — inject tables + scoped group stage
+				into the outer query. build_queryplan turns this into keytable + createcolumn. */
+				(begin
+					(match (apply untangle_query (merge subquery (list outer_schemas)))
+						'(schema2 tables2 fields2 condition2 groups2 schemas2 rfcol2 init2)
+						(begin
+							(if (and (not (nil? init2)) (not (equal? init2 '())))
+								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) init2)))
+							(define groups2 (coalesceNil groups2 '()))
+							/* strip redundant LIMIT from aggregate stages */
+							(define groups2 (if has_aggregates
+								(map groups2 (lambda (s)
+									(make_group_stage (stage_group_cols s) (stage_having_expr s)
+										(stage_order_list s) nil nil
+										(stage_partition_aliases s) (stage_init_code s))))
+								groups2))
+							/* inject GROUP BY (1) for aggregates without explicit GROUP */
+							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
+								(list (make_group_stage '(1) nil nil nil nil nil nil))
+								groups2))
+							/* generate unique alias */
+							(define sq_idx (coalesceNil (sq_cache "idx") 0))
+							(sq_cache "idx" (+ sq_idx 1))
+							(define sq_alias (concat "sq" sq_idx))
+							/* prefix inner table aliases */
+							(define prefixed_tables (map tables2 (lambda (td) (match td
+								'(alias s t io je) (list (concat sq_alias "\0" alias) s t io je)
+								td))))
+							(define prefixed_aliases (map prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
+							/* register prefixed tables */
+							(sq_cache "tables" (merge prefixed_tables (coalesceNil (sq_cache "tables") '())))
+							/* register prefixed schemas */
+							(sq_cache "schemas" (merge
+								(extract_assoc schemas2 (lambda (k v) (list (concat sq_alias "\0" k) v)))
+								(coalesceNil (sq_cache "schemas") '())))
+							/* register scoped group stages with partition-aliases */
+							(define scoped_stages (map groups2 (lambda (stage)
+								(make_group_stage (stage_group_cols stage) (stage_having_expr stage)
+									(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
+									prefixed_aliases (stage_init_code stage)))))
+							(sq_cache "groups" (merge scoped_stages (coalesceNil (sq_cache "groups") '())))
+							/* prefix value expression column refs */
+							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))
+							(define prefix_expr (lambda (expr) (match expr
+								'((symbol get_column) alias ti col ci) (if (nil? alias) expr
+									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
+								'((quote get_column) alias ti col ci) (if (nil? alias) expr
+									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
+								(cons sym args) (cons (prefix_expr sym) (map args prefix_expr))
+								expr)))
+							(prefix_expr value_expr2))
+						nil))))
 		nil)))
 	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
 		(define _resolve_outer (lambda (expr) (match expr
@@ -3422,8 +3474,8 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 				(match kind
 					(quote inner_select) (match args
 						(cons subquery '()) (coalesce
-							(_try_unnest_scalar_subselect subquery outer_schemas)
-							(build_scalar_subselect subquery outer_schemas))
+							(unnest_scalar_subselect subquery outer_schemas)
+							(error (concat "unnest_scalar_subselect returned nil for subquery — build_scalar_subselect is removed")))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_in) (match args
 						(cons target_expr (cons subquery '()))
