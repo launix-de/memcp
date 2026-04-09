@@ -47,9 +47,12 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 }
 
 func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	if rewritten := tryScanOrderBatchRewrite(v); !rewritten.IsNil() {
-		return oc.OptimizeSub(rewritten, useResult)
-	}
+	// NOTE: scan_order has no reduce2, so batch-rewrite cannot flush the last
+	// partial batch. Disabled until scan_order gains reduce2 or an alternative
+	// flush mechanism is implemented.
+	// if rewritten := tryScanOrderBatchRewrite(v); !rewritten.IsNil() {
+	// 	return oc.OptimizeSub(rewritten, useResult)
+	// }
 	mapEnd, reduceIdx, neutralIdx, outerIdx := 12, 13, 14, 15
 	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
