@@ -2501,6 +2501,9 @@ seeing the correctly prefixed outer alias. */
 							(and has_stage2 (not (nil? (stage_limit_val stage2))))
 							(and has_stage2 (not (nil? (stage_offset_val stage2))))
 						))
+						/* Aggregate subselects (COUNT/SUM/...) always produce exactly one row,
+						so they always benefit from keytable caching via createcolumn.
+						Session-sensitive aggregates get per-session variants automatically. */
 						(define use_direct_agg_scan (and
 							(not (nil? _agg_args))
 							(equal? (count _agg_args) 3)
@@ -2511,7 +2514,6 @@ seeing the correctly prefixed outer alias. */
 							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
 							(not (nil? tables2))
 							(not (equal? tables2 '()))
-							(or scalar_has_outer_ref scalar_uses_session_state)
 						))
 						(define use_direct_scalar_scan (and
 							(not use_direct_agg_scan)
