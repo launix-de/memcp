@@ -2316,6 +2316,18 @@ seeing the correctly prefixed outer alias. */
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
+						/* Logical optimization: aggregates (COUNT/SUM/...) always produce
+						exactly one row. LIMIT 1 on them is redundant and prevents the
+						physical planner from using keytable caching. Strip it. */
+						(define agg_limit_redundant (and
+							(or (equal? raw_limit 1) (nil? raw_limit))
+							(or (nil? raw_order) (equal? raw_order '()))
+							(reduce_assoc fields2 (lambda (a k v)
+								(or a (match v
+									'((symbol aggregate) _ _ _) true
+									'((quote aggregate) _ _ _) true
+									false))) false)))
+						(define raw_limit (if agg_limit_redundant nil raw_limit))
 						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
 							(if (or raw_group raw_having raw_order raw_limit raw_offset)
 								(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset nil nil))
