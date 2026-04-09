@@ -607,206 +607,9 @@ raw _unn_* occurrence aliases into physical temp column names. */
 	table-source
 )))
 
-(define extend_codegen_lambda (lambda (fn extra_params)
-	(match fn
-		'((symbol lambda) params body) (list (quote lambda) (merge (list params extra_params)) body)
-		'((symbol lambda) params body numvars) (list (quote lambda) (merge (list params extra_params)) body numvars)
-		'((quote lambda) params body) (list (quote lambda) (merge (list params extra_params)) body)
-		'((quote lambda) params body numvars) (list (quote lambda) (merge (list params extra_params)) body numvars)
-		_ fn
-	)
-))
+/* scan_batch peephole optimization has been moved to the Go optimizer hook
+in storage/scan_batch_rewrite.go (optimizeScan → tryScanBatchRewrite). */
 
-(define append_codegen_list (lambda (lst extra_items)
-	(if (list? lst)
-		(merge (list lst extra_items))
-		lst)
-))
-
-/* nested scan batching is a peephole optimizer pass over the generated
-queryplan AST: once build_scan has emitted a child scan tree, rewrite only the
-first reachable scan/scan_batch node so it can consume parent batchdata via #N
-pseudocolumns without changing the higher-level join planning rules. */
-/* batchify_first_scan: peephole rewrite that converts the first reachable
-scan/scan_batch in a plan tree into a scan_batch that consumes parent
-batchdata via #N pseudocolumns.  Uses two-level match: outer match
-destructures the AST node, inner match dispatches on the head symbol name
-(via (string head)) so (symbol X) and (quote X) are handled uniformly.
-Virtual tables (where tbl is a list, not a string) are excluded via
-(string? tbl) and fall through without rewriting. */
-(define batchify_first_scan (lambda (plan batch_params batch_pseudocols stride_expr batchdata_sym)
-	(match plan
-		/* scan / scan_batch with a real (string) table name */
-		(cons scanhead (cons tx (cons schema (cons (string? tbl) rest))))
-		(match (string scanhead)
-			"scan" (match rest
-				(merge '(filtercols filterfn mapcols mapfn reduce neutral reduce2 isOuter) _)
-				(if isOuter nil
-					(list (quote scan_batch) tx schema tbl
-						(append_codegen_list filtercols batch_pseudocols)
-						(extend_codegen_lambda filterfn batch_params)
-						(append_codegen_list mapcols batch_pseudocols)
-						(extend_codegen_lambda mapfn batch_params)
-						stride_expr batchdata_sym
-						reduce neutral reduce2 isOuter))
-				nil)
-			"scan_batch" (match rest
-				(merge '(filtercols filterfn mapcols mapfn inner_stride inner_batchdata reduce neutral reduce2 isOuter) _)
-				(if isOuter nil
-					(list (quote scan_batch) tx schema tbl
-						(append_codegen_list filtercols batch_pseudocols)
-						(extend_codegen_lambda filterfn batch_params)
-						(append_codegen_list mapcols batch_pseudocols)
-						(extend_codegen_lambda mapfn batch_params)
-						inner_stride inner_batchdata
-						reduce neutral reduce2 isOuter))
-				nil)
-			nil)
-		/* wrapper nodes: recurse into the contained value/scan */
-		(cons wraphead (cons arg1 arg2))
-		(match (string wraphead)
-			"nth" (begin /* (nth inner_scan idx) */
-				(define rewritten (batchify_first_scan arg1 batch_params batch_pseudocols stride_expr batchdata_sym))
-				(if (nil? rewritten) nil
-					(list (quote nth) rewritten (car arg2))))
-			"define" (begin /* (define sym value) */
-				(define rewritten (batchify_first_scan (car arg2) batch_params batch_pseudocols stride_expr batchdata_sym))
-				(if (nil? rewritten) nil
-					(list (quote define) arg1 rewritten)))
-			"set" (begin /* (set sym value) */
-				(define rewritten (batchify_first_scan (car arg2) batch_params batch_pseudocols stride_expr batchdata_sym))
-				(if (nil? rewritten) nil
-					(list (quote set) arg1 rewritten)))
-			"begin" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
-			"!begin" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
-			"begin_mut" (batchify_begin_forms plan wraphead rest batch_params batch_pseudocols stride_expr batchdata_sym)
-			nil)
-		nil)))
-
-/* batchify_begin_forms: helper for batchifying inside begin/!begin/begin_mut blocks.
-Tries preferred forms (scan, scan_batch, nth, begin variants) first, then
-falls back to any form. */
-(define batchify_begin_forms (lambda (plan head rest batch_params batch_pseudocols stride_expr batchdata_sym) (begin
-	(define rewrite_forms_by_predicate (lambda (forms should_try)
-		(match forms
-			'() nil
-			(cons form tail) (begin
-				(if (should_try form)
-					(begin
-						(define rewritten_form (batchify_first_scan form batch_params batch_pseudocols stride_expr batchdata_sym))
-						(if (nil? rewritten_form)
-							(match (rewrite_forms_by_predicate tail should_try)
-								nil nil
-								rewritten_tail (cons form rewritten_tail))
-							(cons rewritten_form tail)))
-					(match (rewrite_forms_by_predicate tail should_try)
-						nil nil
-						rewritten_tail (cons form rewritten_tail)))))))
-	(define is_preferred_form (lambda (form) (match form
-		(cons fh _) (match (string fh)
-			"scan" true "scan_batch" true "nth" true
-			"begin" true "!begin" true "begin_mut" true
-			false)
-		false)))
-	(match (rewrite_forms_by_predicate rest is_preferred_form)
-		nil (match (rewrite_forms_by_predicate rest (lambda (form) true))
-			nil nil
-			rewritten_rest (cons head rewritten_rest))
-		rewritten_rest (cons head rewritten_rest)))))
-
-/* builds the outer scan shell for the peephole-rewritten child plan. the join
-order and scan tree come from build_scan already; this helper only swaps the
-row-at-a-time inner scan calls for buffered scan_batch flushes. */
-(define build_batched_regular_scan (lambda (schema tbl filtercols outer_filter_lambda scan_mapcols scan_mapfn_params batch_map_params direct_inner_scan batched_inner_scan batch_stride batch_capacity is_update_target isOuter) (begin
-	(define _outer_batch_row_lambda
-		(list (quote lambda) scan_mapfn_params
-			(list (quote begin)
-				(list (quote define) (symbol "__record") (list (quote list)))
-				(cons (quote append_mut) (cons (symbol "__record") batch_map_params)))))
-	(if (nil? batched_inner_scan)
-		(scan_wrapper 'scan schema tbl
-			(cons list filtercols)
-			outer_filter_lambda
-			scan_mapcols
-			(list (symbol "lambda") scan_mapfn_params direct_inner_scan)
-			(if is_update_target (symbol "+") nil)
-			(if is_update_target 0 nil)
-			nil
-			isOuter)
-		(begin
-			(define _inner_flush_define
-				(list (quote define) (symbol "__inner_flush")
-					(list (quote lambda) (list (symbol "__batchbuf")) batched_inner_scan)))
-			(if is_update_target
-				(list (quote begin)
-					_inner_flush_define
-					(list (quote nth)
-						(list (quote scan) '(session "__memcp_tx") schema (scan-runtime-source tbl)
-							(cons list filtercols)
-							outer_filter_lambda
-							scan_mapcols
-							_outer_batch_row_lambda
-							(list (quote lambda) (list (symbol "acc") (symbol "rowvals"))
-								(list (quote begin)
-									(list (quote define) (symbol "__state")
-										(list (quote if) (list (quote nil?) (list (quote nth) (symbol "acc") 1))
-											(list (quote list) (list (quote nth) (symbol "acc") 0) (list (quote list)))
-											(symbol "acc")))
-									(list (quote define) (symbol "__batchdata0") (list (quote nth) (symbol "__state") 1))
-									(list (quote define) (symbol "__batchdata") (list (quote apply) (quote append_mut) (list (quote cons) (symbol "__batchdata0") (symbol "rowvals"))))
-									(list (quote nth_mut) (symbol "__state") 1 (symbol "__batchdata"))
-									(list (quote if) (list (quote >=) (list (quote count) (symbol "__batchdata")) batch_capacity)
-										(list (quote begin)
-											(list (quote nth_mut) (symbol "__state") 0
-												(list (quote +) (list (quote nth) (symbol "__state") 0) (list (symbol "__inner_flush") (symbol "__batchdata"))))
-											(list (quote reset_mut) (symbol "__batchdata")))
-										true)
-									(symbol "__state")))
-							(list (quote list) 0 nil)
-							(list (quote lambda) (list (symbol "acc") (symbol "shardstate"))
-								(list (quote begin)
-									(list (quote define) (symbol "__shardbuf") (list (quote nth) (symbol "shardstate") 1))
-									(list (quote define) (symbol "__shardresult")
-										(list (quote if)
-											(list (quote or)
-												(list (quote nil?) (symbol "__shardbuf"))
-												(list (quote equal?) (list (quote count) (symbol "__shardbuf")) 0))
-											(list (quote nth) (symbol "shardstate") 0)
-											(list (quote +) (list (quote nth) (symbol "shardstate") 0) (list (symbol "__inner_flush") (symbol "__shardbuf")))))
-									(list (quote list) (list (quote +) (list (quote nth) (symbol "acc") 0) (symbol "__shardresult")) nil)))
-							isOuter)
-						0))
-				(list (quote begin)
-					_inner_flush_define
-					(list (quote scan) '(session "__memcp_tx") schema (scan-runtime-source tbl)
-						(cons list filtercols)
-						outer_filter_lambda
-						scan_mapcols
-						_outer_batch_row_lambda
-						(list (quote lambda) (list (symbol "batchdata") (symbol "rowvals"))
-							(list (quote begin)
-								(list (quote define) (symbol "__batchbuf0")
-									(list (quote if) (list (quote nil?) (symbol "batchdata"))
-										(list (quote list))
-										(symbol "batchdata")))
-								(list (quote define) (symbol "__batchbuf") (list (quote apply) (quote append_mut) (list (quote cons) (symbol "__batchbuf0") (symbol "rowvals"))))
-								(list (quote if) (list (quote >=) (list (quote count) (symbol "__batchbuf")) batch_capacity)
-									(list (quote begin)
-										(list (symbol "__inner_flush") (symbol "__batchbuf"))
-										(list (quote reset_mut) (symbol "__batchbuf")))
-									true)
-								(symbol "__batchbuf")))
-						nil
-						(list (quote lambda) (list (symbol "acc") (symbol "shardbuf"))
-							(list (quote begin)
-								(list (quote if)
-									(list (quote or)
-										(list (quote nil?) (symbol "shardbuf"))
-										(list (quote equal?) (list (quote count) (symbol "shardbuf")) 0))
-									true
-									(list (symbol "__inner_flush") (symbol "shardbuf")))
-								nil))
-						isOuter))))))))
 /* returns a list of all aggregates in this expr */
 (define extract_aggregates (lambda (expr)
 	(match expr
@@ -2606,8 +2409,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 												(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
 												(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
 												(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
-												(cons (quote !begin) (merge _init_stmts (list
-													(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+												(define _sq_scan_expr
 													(if use_ordered_scalar
 														(list (quote scan_order)
 															(list (quote session) "__memcp_tx")
@@ -2637,9 +2439,20 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 																(list (symbol _sq_promise_name) "once" valuebody "scalar subselect returned more than one row"))
 															nil
 															nil
-															false))
-													(list (symbol _sq_promise_name) "value")
-												)))
+															false)))
+												/* non-correlated scalar subselect: hoist into init so it runs once */
+												(if (and (not scalar_has_outer_ref) (not scalar_uses_session_state))
+													(begin
+														(define _sq_var_name (concat "__scalar_val_" _sq_hash))
+														(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) _init_stmts (list
+															(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+															_sq_scan_expr
+															(list (quote set) (symbol _sq_var_name) (list (symbol _sq_promise_name) "value")))))
+														(symbol _sq_var_name))
+													(cons (quote !begin) (merge _init_stmts (list
+														(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+														_sq_scan_expr
+														(list (symbol _sq_promise_name) "value")))))
 										))
 								)))
 								(build_scalar_subselect_fallback))
@@ -4366,25 +4179,145 @@ second table carries strictly more local WHERE predicates than the first. */
 			(define output_cols (match branch_meta
 				(cons first_meta _) (nth first_meta 1)
 				_ '()))
-			(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
-				(error "UNION ALL with global ORDER BY/LIMIT/OFFSET is not supported yet"))
 			(if (not (reduce branch_meta (lambda (ok meta) (and ok (equal? (nth meta 2) expected_cols))) true))
 				(error "UNION ALL branches must project the same number of columns"))
-			(define branch_plans (map branch_meta (lambda (meta) (begin
-				(define branch (nth meta 0))
-				(define branch_plan (build_queryplan_term branch))
-				(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
-					(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
-				)))))
-				(list (quote begin)
-					(list (quote set) (symbol "__union_prev_resultrow") (symbol "resultrow"))
-					(list (quote set) (symbol "resultrow")
-						(list (quote lambda) (list (symbol "row"))
-							(list (symbol "__union_prev_resultrow") normalized_row)))
-					branch_plan
-					(list (quote set) (symbol "resultrow") (symbol "__union_prev_resultrow")))
-			))))
-			(cons (quote begin) branch_plans)
+			(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+				/* === UNION ALL with ORDER BY / LIMIT / OFFSET ===
+				Emit scan_order_multi for materialization-free sorted merge across tables. */
+				(begin
+					/* Resolve each branch through untangle_query + join_reorder */
+					(define resolved_branches (map branches (lambda (branch) (begin
+						(match branch '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2) (begin
+							(if (or (not (nil? order2)) (not (nil? limit2)) (not (nil? offset2)))
+								(error "UNION ALL branch ORDER/LIMIT/OFFSET is not supported yet"))
+							(if (or (not (nil? group2)) (not (nil? having2)))
+								(error "UNION ALL ORDER BY with GROUP BY branches not yet supported"))
+							(define _uq (apply untangle_query (merge branch (list nil))))
+							(define _uq7 (list (nth _uq 0) (nth _uq 1) (nth _uq 2) (nth _uq 3) (nth _uq 4) (nth _uq 5) (nth _uq 6)))
+							(define _jr (apply join_reorder _uq7))
+							(define jr_tables (nth _jr 1))
+							(if (not (equal? (count jr_tables) 1))
+								(error "UNION ALL ORDER BY requires single-table branches (no joins)"))
+							(define tbldef (car jr_tables))
+							(define jr_fields (nth _jr 2))
+							(define jr_condition ((nth _jr 6) (coalesceNil (nth _jr 3) true)))
+							(list tbldef jr_fields jr_condition))
+						_ (error "UNION ALL branch must be a SELECT query"))
+					))))
+
+					/* Parse ORDER BY: resolve each item to position in output_cols */
+					(define order_items (map order (lambda (item) (match item '(col dir) (begin
+						(define col_name (match col
+							'((symbol get_column) _ _ cn _) cn
+							'((quote get_column) _ _ cn _) cn
+							_ (if (number? col) nil (to_string col))))
+						/* Try name match first, then positional */
+						(define pos (reduce (produceN expected_cols (lambda (i) i)) (lambda (found i)
+							(if (not (nil? found)) found
+								(if (equal?? col_name (nth output_cols i)) i nil))) nil))
+						(set pos (if (nil? pos)
+							(if (and (number? col) (> col 0) (<= col expected_cols))
+								(- col 1)
+								nil)
+							pos))
+						(if (nil? pos) (error (concat "UNION ALL ORDER BY: column not found: " col)))
+						(list pos dir))
+					))))
+
+					/* Build per-branch scan parameters */
+					(define scan_specs (map resolved_branches (lambda (rb) (begin
+						(define tbldef (nth rb 0))
+						(define fields (nth rb 1))
+						(define condition (nth rb 2))
+						(match tbldef '(tblvar tbl_schema tbl isOuter joinexpr) (begin
+							/* filter: columns from condition */
+							(define filtercols (merge_unique (list
+								(extract_columns_for_tblvar tblvar condition)
+								(extract_outer_columns_for_tblvar tblvar condition))))
+							(define filter_ast (list (quote lambda)
+								(map filtercols (lambda (c) (symbol (concat tblvar "." c))))
+								(optimize (replace_columns_from_expr condition))))
+
+							/* fields by position */
+							(define field_names (extract_assoc fields (lambda (k v) k)))
+							(define field_exprs (extract_assoc fields (lambda (k v) v)))
+
+							/* sort columns for this branch: map ORDER BY positions to physical columns */
+							(define sortcols (map order_items (lambda (oi) (match oi '(pos _dir) (begin
+								(define expr (nth field_exprs pos))
+								(match expr
+									'((symbol get_column) (eval tblvar) _ col _) col
+									'((quote get_column) (eval tblvar) _ col _) col
+									_ (begin
+										/* complex expression: emit lambda-based sort column */
+										(define sort_expr_cols (extract_columns_for_tblvar tblvar expr))
+										(list (quote lambda)
+											(map sort_expr_cols (lambda (c) (symbol (concat tblvar "." c))))
+											(replace_columns_from_expr expr)))))))))
+
+							/* map: all columns needed for output field expressions + sort cols */
+							(define all_output_cols (merge_unique (extract_assoc fields (lambda (k v)
+								(extract_columns_for_tblvar tblvar v)))))
+							(define sort_phys_cols (merge_unique (map sortcols (lambda (sc)
+								(if (string? sc) (list sc)
+									(match sc
+										'((quote lambda) params body) (extract_columns_for_tblvar tblvar body)
+										'((symbol lambda) params body) (extract_columns_for_tblvar tblvar body)
+										'()))))))
+							(define mapcols (merge_unique (list all_output_cols sort_phys_cols)))
+
+							/* map lambda: emit resultrow with normalized output aliases */
+							(define map_ast (list (quote lambda)
+								(map mapcols (lambda (c) (symbol (concat tblvar "." c))))
+								(list (symbol "resultrow")
+									(cons (symbol "list")
+										(merge (map (produceN expected_cols (lambda (i) i)) (lambda (i)
+											(list (nth output_cols i) (replace_columns_from_expr (nth field_exprs i))))))))))
+
+							(list tbl_schema tbl filtercols filter_ast sortcols mapcols map_ast))
+						_ (error "invalid table definition in UNION ALL branch"))
+					))))
+
+					/* Sort directions (shared): extract from order_items */
+					(define sort_dirs (map order_items (lambda (oi) (match oi '(_pos dir) dir))))
+
+					(define limit_val (if (nil? limit) -1 limit))
+					(define offset_val (if (nil? offset) 0 offset))
+
+					/* Emit scan_order_multi call */
+					(merge (list (symbol "scan_order_multi") '(session "__memcp_tx"))
+						(list
+							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 0))))
+							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 1))))
+							(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 2)))))
+							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 3))))
+							(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 4)))))
+							(cons (symbol "list") sort_dirs)
+							0
+							offset_val
+							limit_val
+							(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 5)))))
+							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 6))))
+						))
+				)
+				/* === UNION ALL without ORDER BY === */
+				(begin
+					(define branch_plans (map branch_meta (lambda (meta) (begin
+						(define branch (nth meta 0))
+						(define branch_plan (build_queryplan_term branch))
+						(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
+							(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
+						)))))
+						(list (quote begin)
+							(list (quote set) (symbol "__union_prev_resultrow") (symbol "resultrow"))
+							(list (quote set) (symbol "resultrow")
+								(list (quote lambda) (list (symbol "row"))
+									(list (symbol "__union_prev_resultrow") normalized_row)))
+							branch_plan
+							(list (quote set) (symbol "resultrow") (symbol "__union_prev_resultrow")))
+					))))
+					(cons (quote begin) branch_plans))
+			)
 		))
 	)
 )))
