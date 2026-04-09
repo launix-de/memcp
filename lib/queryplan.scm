@@ -1765,13 +1765,15 @@ is_dedup=true: leave aggregates intact (for dedup stages)
 is_dedup=false: replace aggregates with column fetches (for normal group stages) */
 (define make_col_replacer (lambda (grouptbl condition is_dedup expr_name src_tblvar agg_col_name) (begin
 	(define colname (lambda (expr) (if (nil? expr_name) (concat expr) (expr_name expr))))
+	/* strip_agg_scope: remove optional 4th scope-tag from aggregate tuple */
+	(define strip_agg_scope (lambda (r) (match r '(a b c _s) (list a b c) r)))
 	(define replacer (lambda (expr) (match expr
 		(cons (symbol aggregate) rest) (if is_dedup
 			expr
-			'('get_column grouptbl false (agg_col_name rest) false))
+			'('get_column grouptbl false (agg_col_name (strip_agg_scope rest)) false))
 		(cons '(quote aggregate) rest) (if is_dedup
 			expr
-			'('get_column grouptbl false (agg_col_name rest) false))
+			'('get_column grouptbl false (agg_col_name (strip_agg_scope rest)) false))
 		'((symbol get_column) (eval src_tblvar) ti col ci) '('get_column grouptbl ti (colname '('get_column src_tblvar ti col ci)) ci)
 		/* rewrite (outer tblvar.col) inside scalar subselects to reference keytable column */
 		'('outer sym) (begin
@@ -3254,7 +3256,18 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							(if (and (not (nil? condition2)) (not (equal? condition2 true)))
 								(sq_cache "condition" (cons (prefix_expr condition2)
 									(coalesceNil (sq_cache "condition") '()))))
-							(prefix_expr value_expr2))
+							/* Bind aggregates to their scoped table via a 4th data element.
+							(aggregate 1 + 0) → (aggregate 1 + 0 "sq0\0pb_doc")
+							The string scope-tag is pure data (not compiled by the optimizer).
+							build_queryplan uses it to assign aggregates to the correct stage. */
+							(define bind_agg_scope (lambda (expr) (match expr
+								(cons (symbol aggregate) '(ae ar an))
+								(list (quote aggregate) ae ar an (car prefixed_aliases))
+								(cons '(quote aggregate) '(ae ar an))
+								(list (quote aggregate) ae ar an (car prefixed_aliases))
+								(cons sym args) (cons (bind_agg_scope sym) (map args bind_agg_scope))
+								expr)))
+							(bind_agg_scope (prefix_expr value_expr2)))
 						nil))))
 		nil)))
 	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
@@ -4700,12 +4713,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			/* TODO: outer tables that only join on group */
 			'('(tblvar schema tbl isOuter _)) (begin
 				(define ags (filter ags (lambda (ag) (match ag
+					/* scope-tagged aggregate: accept only if scope matches current stage */
+					'(agg_expr _ _ scope_alias)
+					(if (nil? _stage_scope) true (has? _stage_scope scope_alias))
 					'(agg_expr _ _)
 					(begin
 						(define refs (extract_tblvars agg_expr))
 						(or (equal? refs '())
 							(has? refs tblvar)))
 					false))))
+				/* strip scope-tag for downstream (expects 3-element tuples) */
+				(set ags (map ags (lambda (ag) (match ag '(a b c _s) (list a b c) ag))))
 				/* prepare preaggregate */
 				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
 				(define materialized_source (materialized-source? tbl))
@@ -5355,21 +5373,31 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch (_group_value_ag_expr (group_value_local_expr expr)))
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr)))
 									(cons (symbol aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest count_ag)))
-										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
-										(match agg_rest
+									/* scope-tagged aggregate from another stage: pass through */
+									(if (and (not (nil? _stage_scope)) (>= (count agg_rest) 4)
+										(not (has? _stage_scope (nth agg_rest 3))))
+										expr
+									(begin (define agg_rest_stripped (match agg_rest '(a b c _s) (list a b c) agg_rest))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest_stripped count_ag)))
+										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest_stripped) (equal? (extract_tblvars expr) '())))
+										(match agg_rest_stripped
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (replace_group_field_expr agg_expr) agg_reduce agg_neutral)
 											_ expr)
-										(replace_group_key_or_fetch expr))
+										(replace_group_key_or_fetch expr))))
 									(cons '(quote aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest count_ag)))
-										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
-										(match agg_rest
+									/* scope-tagged aggregate from another stage: pass through */
+									(if (and (not (nil? _stage_scope)) (>= (count agg_rest) 4)
+										(not (has? _stage_scope (nth agg_rest 3))))
+										expr
+									(begin (define agg_rest_stripped (match agg_rest '(a b c _s) (list a b c) agg_rest))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest_stripped count_ag)))
+										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest_stripped) (equal? (extract_tblvars expr) '())))
+										(match agg_rest_stripped
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (replace_group_field_expr agg_expr) agg_reduce agg_neutral)
 											_ expr)
-										(replace_group_key_or_fetch expr))
+										(replace_group_key_or_fetch expr))))
 									(cons sym args)
 									(if (_field_needs_group_value_agg expr)
 										(replace_group_key_or_fetch (_group_value_ag_expr (group_value_local_expr expr)))
