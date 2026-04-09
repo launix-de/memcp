@@ -3229,8 +3229,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 						(sq_cache "scalar_tables" (merge tbls (coalesceNil (sq_cache "scalar_tables") '())))
 						subst)
 					nil)
-				/* Path B: aggregate or uncorrelated — inject tables + scoped group stage
-				into the outer query. build_queryplan turns this into keytable + createcolumn. */
+				/* Path B: UNCORRELATED single-table aggregate — inject tables + scoped
+				group stage. Correlated aggregates and multi-table subselects (nested
+				inner selects) fall through to build_scalar_subselect (legacy path). */
+				(if (or has_outer_refs (not has_aggregates) (_contains_inner_select_marker subquery) (expr_uses_session_state subquery)) nil
 				(begin
 					(match (apply untangle_query (merge subquery (list outer_schemas)))
 						'(schema2 tables2 fields2 condition2 groups2 schemas2 rfcol2 init2)
@@ -3340,7 +3342,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 								(cons sym args) (cons (bind_agg_scope sym) (map args bind_agg_scope))
 								expr)))
 							(bind_agg_scope (prefix_expr value_expr2)))
-						nil))))
+						nil)))))
 		nil)))
 	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
 		(define _resolve_outer (lambda (expr) (match expr
@@ -3564,7 +3566,7 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 					(quote inner_select) (match args
 						(cons subquery '()) (coalesce
 							(unnest_scalar_subselect subquery outer_schemas)
-							(error (concat "unnest_scalar_subselect returned nil for subquery — build_scalar_subselect is removed")))
+							(build_scalar_subselect subquery outer_schemas))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_in) (match args
 						(cons target_expr (cons subquery '()))
