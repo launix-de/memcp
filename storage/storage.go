@@ -2199,6 +2199,10 @@ func Init(en scm.Env) {
 				}
 				t := db.GetTable(scm.String(tableArg))
 				if t == nil {
+					if len(scm.String(tableArg)) > 0 && scm.String(tableArg)[0] == '.' {
+						// temp table does not exist yet - return empty schema
+						return scm.NewSlice(nil)
+					}
 					panic("table " + scm.String(a[0]) + "." + scm.String(tableArg) + " does not exist")
 				}
 				return t.ShowColumns()
