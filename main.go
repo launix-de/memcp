@@ -733,6 +733,7 @@ func main() {
 	go (func() {
 		<-cancelChan
 		exitroutine()
+		pprof.StopCPUProfile() // flush profile before exit (os.Exit skips defers)
 		os.Exit(1)
 	})()
 
@@ -748,7 +749,9 @@ func main() {
 			panic(err)
 		}
 		defer f.Close()
-		pprof.StartCPUProfile(f)
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "pprof: %v\n", err)
+		}
 		defer pprof.StopCPUProfile()
 	}
 
@@ -775,6 +778,8 @@ func main() {
 		<-replDone
 	}
 
+	// flush CPU profile before shutdown (exitroutine may block, and os.Exit skips defers)
+	pprof.StopCPUProfile()
 	// normal shutdown
 	exitroutine()
 }
