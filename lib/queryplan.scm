@@ -1578,6 +1578,8 @@ column descriptors suitable for the schemas assoc in untangle_query.
 Does NOT handle FK→PK reuse (returns nil for that case — caller must check). */
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
 	(define keytable_source_name (planner-temp-source-name tbl tblvar))
+	(if (equal? keytable_source_name "")
+		(error (concat "make_keytable_schema: empty source name for tbl=" tbl " tblvar=" tblvar)))
 	(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
 	(define key_names (map keys (lambda (k)
 		(sanitize_temp_name

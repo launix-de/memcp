@@ -37,9 +37,7 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 		(if cached cached
 			(begin
 				(define formula (with_session session (lambda () (parse_fn schema query policy))))
-				(if (expr_uses_session_state formula)
-					true
-					(queryplan_cache cache_key formula))
+				(queryplan_cache cache_key formula)
 				formula)))))
 
 /* helper: build a policy function for table-level access checks

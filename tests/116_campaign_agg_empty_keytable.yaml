@@ -1,0 +1,116 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Regression: GROUP BY over derived table with session-filtered correlated
+# subselects produces empty keytable name (createcolumn: table .() does not exist).
+
+metadata:
+  version: "1.0"
+  description: "Campaign-style GROUP BY over session-filtered derived table"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ca_campaign"
+  - sql: "DROP TABLE IF EXISTS ca_target"
+  - sql: "DROP TABLE IF EXISTS ca_state"
+  - sql: "DROP TABLE IF EXISTS ca_contact"
+  - sql: |
+      CREATE TABLE ca_campaign (ID INT PRIMARY KEY, name VARCHAR(50))
+  - sql: |
+      CREATE TABLE ca_state (ID INT PRIMARY KEY, name VARCHAR(50))
+  - sql: |
+      CREATE TABLE ca_contact (ID INT PRIMARY KEY, name VARCHAR(50), firma INT)
+  - sql: |
+      CREATE TABLE ca_target (ID INT PRIMARY KEY AUTO_INCREMENT, campaign INT, target INT, state INT)
+  - sql: |
+      INSERT INTO ca_campaign VALUES (1, 'Spring'), (2, 'Fall')
+  - sql: |
+      INSERT INTO ca_state VALUES (1, 'new'), (2, 'contacted'), (3, 'done')
+  - sql: |
+      INSERT INTO ca_contact VALUES (10, 'Alice', 1), (11, 'Bob', 2)
+  - sql: |
+      INSERT INTO ca_target (campaign, target, state) VALUES
+        (1, 10, 1), (1, 11, 2), (1, 10, 3), (2, 11, 1)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ca_target"
+  - sql: "DROP TABLE IF EXISTS ca_state"
+  - sql: "DROP TABLE IF EXISTS ca_contact"
+  - sql: "DROP TABLE IF EXISTS ca_campaign"
+
+test_cases:
+  - name: "set session"
+    session_id: "ca_sess"
+    sql: "SET @fop_user = 1"
+    expect:
+      rows_affected: 0
+
+  - name: "GROUP BY state over session-filtered derived campaign targets"
+    session_id: "ca_sess"
+    sql: |
+      SELECT COUNT(*) AS cnt, t.state AS state
+      FROM (
+        SELECT ct.ID AS ID, ct.state AS state
+        FROM ca_target ct
+        WHERE ct.campaign = 1
+          AND COALESCE((SELECT TRUE FROM ca_contact cx WHERE cx.ID = ct.target LIMIT 1), FALSE)
+          AND COALESCE((SELECT TRUE FROM ca_campaign cp WHERE cp.ID = ct.campaign LIMIT 1), FALSE)
+      ) t
+      WHERE TRUE
+      GROUP BY t.state
+      ORDER BY t.state
+    expect:
+      rows: 3
+      data:
+        - cnt: 1
+          state: 1
+        - cnt: 1
+          state: 2
+        - cnt: 1
+          state: 3
+
+  - name: "COUNT+GROUP over derived with session permission chain and LEFT JOINs"
+    session_id: "ca_sess"
+    sql: |
+      SELECT COUNT(*) AS cnt,
+        t.state AS state,
+        t.state_can_view AS state_can_view,
+        MAX(t.state_desc) AS state_desc
+      FROM (
+        SELECT ct.ID AS ID,
+          ct.state AS state,
+          rs.state_can_view AS state_can_view,
+          rs.state_desc AS state_desc
+        FROM ca_target ct
+        LEFT JOIN (
+          SELECT ID AS state_id,
+            name AS state_desc,
+            TRUE AS state_can_view
+          FROM ca_state
+        ) rs ON rs.state_id = ct.state
+        LEFT JOIN (
+          SELECT ID AS contact_id,
+            name AS contact_desc,
+            COALESCE((SELECT TRUE FROM ca_campaign c WHERE c.ID = ca_contact.firma LIMIT 1), FALSE) AS contact_can_view
+          FROM ca_contact
+        ) rc ON rc.contact_id = ct.target
+        WHERE ct.campaign = 1
+          AND ((TRUE) AND (COALESCE((SELECT ((TRUE)) FROM ca_campaign cp WHERE cp.ID = ct.campaign LIMIT 1), FALSE))
+            AND (COALESCE((SELECT ((TRUE)) FROM ca_contact cx WHERE cx.ID = ct.target LIMIT 1), FALSE))
+            AND (TRUE) AND (TRUE))
+      ) t
+      WHERE (TRUE)
+      GROUP BY state
+      ORDER BY state
+    expect:
+      rows: 3
+      data:
+        - cnt: 1
+          state: 1
+          state_can_view: true
+          state_desc: "new"
+        - cnt: 1
+          state: 2
+          state_can_view: true
+          state_desc: "contacted"
+        - cnt: 1
+          state: 3
+          state_can_view: true
+          state_desc: "done"
