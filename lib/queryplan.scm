@@ -3315,9 +3315,18 @@ seeing the correctly prefixed outer alias. */
 							(if (and (not (nil? init2)) (not (equal? init2 '())))
 								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) init2)))
 							(define groups2 (coalesceNil groups2 '()))
+							/* Aggregate subselects always produce 1 row — strip redundant
+							LIMIT/OFFSET from their group stages so they don't create
+							partition stages that interfere with build_queryplan. */
+							(define groups2 (if has_aggregates
+								(map groups2 (lambda (s)
+									(make_group_stage (stage_group_cols s) (stage_having_expr s)
+										(stage_order_list s) nil nil
+										(stage_partition_aliases s) (stage_init_code s))))
+								groups2))
 							/* inject GROUP BY (1) for aggregates without explicit GROUP */
 							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
-								(list (make_group_stage nil nil nil nil nil nil nil))
+								(list (make_group_stage '(1) nil nil nil nil nil nil))
 								groups2))
 							/* generate unique alias for this subquery */
 							(define sq_idx (coalesceNil (sq_cache "idx") 0))
@@ -6769,14 +6778,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			)
 		)
 	) (optimize (begin
-			/* Grouping for the current stage is done. Remaining group stages are
-			either scoped (partition-aliases set) — those belong to independent
-			unnested aggregate subselects and will be processed when their
-			keytable-backed aggregate column is read — or unscoped, which is
-			an error (multiple unscoped GROUP stages would be ambiguous). */
+			/* Process remaining scoped group stages (independent unnested aggregate
+			subselects). Each scoped stage targets different tables and produces
+			its own keytable + createcolumn block. Unscoped remaining stages are
+			an error (multiple unscoped GROUP stages would be ambiguous).
+			We recursively call build_queryplan for each remaining scoped stage
+			so its aggregate markers get resolved into keytable lookups. */
 			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '())))
 				(if (reduce rest_groups (lambda (ok s) (and ok (not (nil? (stage_partition_aliases s))))) true)
-					nil /* all remaining stages are scoped — OK, they are independent subquery aggregates */
+					(begin
+						/* Re-invoke build_queryplan with rest_groups to process the
+						remaining scoped aggregate stages. This peels off one stage
+						per recursion level, resolving aggregate markers in fields. */
+						(set grouped_plan (build_queryplan schema tables fields condition rest_groups schemas replace_find_column update_target)))
 					(error "non-group stage must be last")))
 			(if has_window (begin
 				/* ========= Window function scan path (LAG/LEAD) ========= */
