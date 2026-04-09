@@ -1,0 +1,158 @@
+metadata:
+  version: "1.0"
+  description: "Scalar subselect patterns: derived tables, CASE WHEN, badge queries, permission checks"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sq_uconf"
+  - sql: "DROP TABLE IF EXISTS sq_ptype"
+  - sql: "DROP TABLE IF EXISTS sq_prop"
+  - sql: "DROP TABLE IF EXISTS sq_doc"
+  - sql: "DROP TABLE IF EXISTS sq_cat"
+  - sql: "DROP TABLE IF EXISTS sq_rev"
+  - sql: "DROP TABLE IF EXISTS sq_plz"
+  - sql: "CREATE TABLE sq_uconf (ID INT PRIMARY KEY, deftype VARCHAR(50))"
+  - sql: "INSERT INTO sq_uconf (ID, deftype) VALUES (1, 'invoice')"
+  - sql: "CREATE TABLE sq_ptype (ID INT PRIMARY KEY, name VARCHAR(50), type VARCHAR(20))"
+  - sql: |
+      INSERT INTO sq_ptype (ID, name, type) VALUES
+        (1, 'Date', 'date'), (2, 'Amount', 'number'), (3, 'Notes', 'text')
+  - sql: "CREATE TABLE sq_prop (ID INT PRIMARY KEY, type INT, dateVal VARCHAR(20), textVal VARCHAR(100), numVal DECIMAL(10,2), doc INT)"
+  - sql: |
+      INSERT INTO sq_prop (ID, type, dateVal, textVal, numVal, doc) VALUES
+        (1, 1, '2025-01-01', NULL, NULL, 1),
+        (2, 2, NULL, NULL, 99.50, 1),
+        (3, 3, NULL, 'note', NULL, 2),
+        (4, 1, '2025-06-15', NULL, NULL, 2)
+  - sql: "CREATE TABLE sq_doc (ID INT PRIMARY KEY, type VARCHAR(50), archive BOOLEAN DEFAULT FALSE, boxid INT, date VARCHAR(20))"
+  - sql: |
+      INSERT INTO sq_doc (ID, type, archive, boxid, date) VALUES
+        (1, 'invoice', FALSE, 1, '2025-01-01'),
+        (2, 'invoice', FALSE, 2, '2025-02-01'),
+        (3, 'receipt', TRUE, 1, '2025-03-01')
+  - sql: "CREATE TABLE sq_cat (ID INT PRIMARY KEY, name VARCHAR(50), parent INT)"
+  - sql: |
+      INSERT INTO sq_cat (ID, name, parent) VALUES
+        (1, 'Invoices', NULL), (2, 'Receipts', NULL), (3, 'Sub', 1)
+  - sql: "CREATE TABLE sq_rev (ID INT PRIMARY KEY, doc INT, created VARCHAR(20), file INT)"
+  - sql: |
+      INSERT INTO sq_rev (ID, doc, created, file) VALUES
+        (1, 1, '2025-01-01', 100), (2, 1, '2025-01-02', 101), (3, 2, '2025-02-01', 102)
+  - sql: "CREATE TABLE sq_plz (ID INT PRIMARY KEY, PLZ VARCHAR(10), Ort VARCHAR(100))"
+  - sql: |
+      INSERT INTO sq_plz (ID, PLZ, Ort) VALUES
+        (1, '10115', 'Berlin'), (2, '10117', 'Berlin'),
+        (3, '80331', 'Muenchen'), (4, '80333', 'Muenchen'),
+        (5, '50667', 'Koeln'), (6, '10115', 'Berlin Mitte')
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sq_uconf"
+  - sql: "DROP TABLE IF EXISTS sq_ptype"
+  - sql: "DROP TABLE IF EXISTS sq_prop"
+  - sql: "DROP TABLE IF EXISTS sq_doc"
+  - sql: "DROP TABLE IF EXISTS sq_cat"
+  - sql: "DROP TABLE IF EXISTS sq_rev"
+  - sql: "DROP TABLE IF EXISTS sq_plz"
+
+test_cases:
+  # Pattern 1: Scalar subselects in SELECT list (12s in prod)
+  # Repeated scalar subselect on same correlation in SELECT list
+  - name: "Scalar subselect in SELECT list - repeated type lookup"
+    sql: |
+      SELECT
+        sq_prop.ID,
+        sq_prop.dateVal,
+        ('date') = ((SELECT sq_ptype.type FROM sq_ptype WHERE sq_ptype.ID = sq_prop.type LIMIT 1)) AS dateVis,
+        ('number') = ((SELECT sq_ptype.type FROM sq_ptype WHERE sq_ptype.ID = sq_prop.type LIMIT 1)) AS numVis,
+        ('text') = ((SELECT sq_ptype.type FROM sq_ptype WHERE sq_ptype.ID = sq_prop.type LIMIT 1)) AS textVis
+      FROM sq_prop
+    expect:
+      rows: 4
+
+  # Pattern 2: Derived table with CASE WHEN + scalar subselect (8-10s in prod)
+  # Config-lookup scalar subselect inside CASE WHEN
+  - name: "Derived table with CASE WHEN scalar subselect"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_doc.ID,
+          CASE
+            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+              AND ((sq_doc.type) IS NULL))
+              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            THEN 'green'
+            ELSE 'gray'
+          END AS color,
+          sq_doc.date
+        FROM sq_doc
+        WHERE NOT sq_doc.archive
+      ) AS t
+      WHERE TRUE
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 2
+
+  # Pattern 3: GROUP BY with MIN(CONCAT(...)) (6s in prod)
+  # Aggregation with string concat in GROUP BY
+  - name: "GROUP BY with MIN CONCAT"
+    sql: |
+      SELECT sq_plz.PLZ AS value, MIN(CONCAT(sq_plz.PLZ, ' - ', sq_plz.Ort)) AS `desc`
+      FROM sq_plz
+      WHERE TRUE
+      GROUP BY sq_plz.PLZ
+      LIMIT 20000
+    expect:
+      rows: 5
+
+  # Pattern 4: Derived table with LEFT JOIN + scalar subselect (10s in prod)
+  # LEFT JOIN derived table + correlated scalar subselect
+  - name: "Derived table with LEFT JOIN and scalar subselect"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_rev.ID,
+          sq_rev.created,
+          sq_rev.doc,
+          (SELECT sq_doc.date FROM sq_doc WHERE sq_doc.ID = sq_rev.doc LIMIT 1) AS docDate,
+          1
+        FROM sq_rev
+        LEFT JOIN (
+          SELECT ID AS docID, sq_doc.date AS docDate, (TRUE) AS canView
+          FROM sq_doc
+        ) refDoc ON refDoc.docID = sq_rev.doc
+        WHERE TRUE
+      ) AS t
+      WHERE TRUE
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 3
+
+  # Pattern 5: Badge query - multiple unrelated scalar subselects (duration overflow in prod)
+  # Multiple independent scalar subselects in a single SELECT (no FROM table)
+  - name: "Multiple unrelated scalar subselects (badge pattern)"
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM sq_doc WHERE TRUE
+          AND (((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+            AND ((sq_doc.type) IS NULL))
+            OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1))))
+          AND (NOT (sq_doc.archive))
+        LIMIT 1) AS badgeDoc,
+        (SELECT COUNT(1) FROM sq_rev WHERE TRUE LIMIT 1) AS revCount
+    expect:
+      rows: 1
+      data:
+        - badgeDoc: 2
+          revCount: 3
+
+  # Pattern 6: Nested COALESCE with scalar subselect fallback
+  - name: "Nested COALESCE permission check pattern"
+    sql: |
+      SELECT
+        sq_prop.ID,
+        (TRUE) AND (COALESCE(
+          (SELECT (TRUE) FROM sq_cat WHERE sq_cat.ID = sq_prop.type LIMIT 1),
+          FALSE
+        )) AS canView
+      FROM sq_prop
+    expect:
+      rows: 4
