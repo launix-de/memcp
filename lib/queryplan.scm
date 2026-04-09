@@ -1397,14 +1397,22 @@ Returns (keytable_name init_code fk_pk_col) where init_code is plan-time code th
 the table exists at execution time (survives cache eviction of sloppy tables).
 fk_pk_col is non-nil when FK→PK reuse is active (parent table used instead of temp keytable).
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
+/* make_keytable: compute keytable name, schema, and idempotent runtime init_code.
+Returns (keytable_name kt_schema_def init_code).
+- keytable_name: canonical dot-prefixed table name for the group/dedup keytable
+- kt_schema_def: column schema for the planner (so build_scan can resolve get_columns)
+- init_code: runtime expression — createtable returns true on first creation (caller
+  uses this as guard for initial collect + trigger deploy), false on subsequent calls
+  (incremental maintenance via triggers). partitiontable + touch_keytable are idempotent.
+For FK→PK reuse: returns (parent_tbl parent_schema fk_init_code) where parent_schema
+comes from show() on the existing parent table and fk_init_code creates the alias column. */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
-	(define physical_tbl (string? tbl))
+	/* physical_tbl: true for real user tables, false for planner-internal temps
+	(dot-prefixed keytables/prejoins) that may not exist in storage at compile time */
+	(define physical_tbl (and (string? tbl) (> (strlen tbl) 0) (not (equal? (substr tbl 0 1) "."))))
 	(define keytable_source_name (planner-temp-source-name tbl tblvar))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
-	reuse the parent (referenced) table instead of creating a temp keytable.
-	The rest of the grouped pipeline must still see the normal logical key name,
-	so install a temp alias column on the parent table when the physical PK name
-	differs from the canonical GROUP BY key name. */
+	reuse the parent (referenced) table instead of creating a temp keytable. */
 	(define fk_result (if (and physical_tbl (nil? condition_suffix) (equal? 1 (count keys)))
 		(match (car keys)
 			'('get_column (eval tblvar) false scol false) (begin
@@ -1420,19 +1428,14 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 									'(list) '(list) alias_map)))
 						(define parent_tbl (car fk_info))
 						(define parent_col (car (cdr fk_info)))
-						(if (equal? key_name parent_col)
-							(list parent_tbl nil key_name nil)
-							(begin
-								(createcolumn schema parent_tbl key_name "any" '() '("temp" true)
-									(list parent_col)
-									(eval (list 'lambda (list (symbol parent_col)) (symbol parent_col))))
-								(list parent_tbl
-									(list 'createcolumn schema parent_tbl key_name "any"
-										(list 'quote '())
-										(list 'quote '("temp" true))
-										(list 'quote (list parent_col))
-										(list 'lambda (list (symbol parent_col)) (symbol parent_col)))
-									key_name nil))))
+						(define parent_schema (show schema parent_tbl))
+						(define fk_init (if (equal? key_name parent_col) nil
+							(list 'createcolumn schema parent_tbl key_name "any"
+								(list 'quote '())
+								(list 'quote '("temp" true))
+								(list 'quote (list parent_col))
+								(list 'lambda (list (symbol parent_col)) (symbol parent_col)))))
+						(list parent_tbl parent_schema fk_init key_name))
 					nil))
 			nil)
 		nil))
@@ -1452,40 +1455,29 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(define keytable_name (if (nil? condition_suffix)
 				(concat "." keytable_source_name ":" key_names)
 				(concat "." keytable_source_name ":" key_names "|" condition_name)))
-			/* compute column definitions and partition spec at compile time */
-			(define kt_cols (cons
-				'("unique" "group" key_names)
-				(map key_names (lambda (colname) '("column" colname "any" '() '())))))
-			(define kt_partition (if physical_tbl
-				(merge (map (produceN (count keys)) (lambda (i)
-					(match (key_at i)
-						'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
-						'()))))
-				'()))
-			/* Keytable creation is runtime-only via init_code below.
-			compile-time createtable was removed because it deadlocks
-			when multiple scoped stages create keytables recursively. */
-			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
+			/* column definitions for runtime createtable */
 			(define kt_cols_code (cons 'list
 				(cons
 					(cons 'list (cons "unique" (cons "group" (list (cons 'list key_names)))))
 					(map key_names (lambda (colname) (list 'list "column" colname "any" '(list) '(list)))))))
+			/* partition spec: shardcolumn deferred to runtime (table may not exist at compile time) */
 			(define kt_partition_code (cons 'list (if physical_tbl
 				(merge (map (produceN (count keys)) (lambda (i)
 					(match (key_at i)
-						'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
+						'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (list 'shardcolumn schema tbl scol)))
 						'()))))
 				'())))
+			/* init_code: idempotent runtime keytable creation.
+			createtable returns true on first creation — caller wraps collect + trigger deploy
+			in this guard. On subsequent calls createtable returns false (table already exists,
+			incrementally maintained by triggers). partitiontable and touch_keytable are idempotent. */
 			(define init_code (list 'begin
-				(list 'define '__kt_created (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true))
-				(list 'if '__kt_created
+				(list 'if (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true)
 					(list 'partitiontable schema keytable_name kt_partition_code)
 					nil)
-				(list 'touch_keytable schema keytable_name)
-				'__kt_created))
-			/* return (name init_code nil schema_def) — 4th element = keytable schema for planner */
+				(list 'touch_keytable schema keytable_name)))
 			(define kt_schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
-			(list keytable_name init_code nil kt_schema_def)))
+			(list keytable_name kt_schema_def init_code nil)))
 )))
 
 /* build_agg_window_plan: generates the full plan for aggregate window functions (SUM/COUNT/MIN/MAX OVER).
@@ -1505,11 +1497,10 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 		partition_exprs
 		(merge (map wf_resolved (lambda (wf) (match wf '(fn args _) args '())))))))
 	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
-	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
+	(match kt_result '(grouptbl kt_schema_def keytable_init fk_pk_col) (begin
 		(define is_fk_reuse (not (nil? fk_pk_col)))
-		/* register keytable schema so planner can resolve columns at compile time */
-		(define kt_schema_def (if (>= (count kt_result) 4) (nth kt_result 3) nil))
-		(if (and (not (nil? kt_schema_def)) (not is_fk_reuse))
+		/* register keytable schema so planner can resolve columns */
+		(if (not (nil? kt_schema_def))
 			(set schemas (merge schemas (list grouptbl kt_schema_def))))
 		(define tblvar_cols (if has_partition (merge_unique (map group_keys (lambda (col) (extract_columns_for_tblvar tblvar col)))) '()))
 		(define materialized_cols (if materialized_source
@@ -1639,7 +1630,8 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 			expr)))
 		(define new_fields (map_assoc fields (lambda (k v) (replace_wf_with_fetch (replace_find_column v)))))
 		(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
-		(list 'begin keytable_init '('time collect_plan "collect") '('time compute_plan "compute") scan_plan)))
+		/* init_code guard: createtable returns true on first creation -> collect + compute */
+		(list 'begin '('if keytable_init '('begin '('time collect_plan "collect") '('time compute_plan "compute")) nil) scan_plan)))
 )))
 
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table
@@ -5214,12 +5206,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define kt_result (make_keytable schema tbl resolved_stage_group tblvar
 					(if (and is_dedup (not session_sensitive_group_domain)) collect_condition nil)))
 				(set grouptbl (car kt_result))
-				(define keytable_init (car (cdr kt_result)))
-				(define fk_pk_col (car (cdr (cdr kt_result))))
+				(define kt_schema_def (nth kt_result 1))
+				(define keytable_init (nth kt_result 2))
+				(define fk_pk_col (nth kt_result 3))
 				(define is_fk_reuse (not (nil? fk_pk_col)))
-				/* register keytable schema so downstream planner can resolve columns
-				without needing the table to exist in storage at compile time */
-				(define kt_schema_def (if (>= (count kt_result) 4) (nth kt_result 3) nil))
+				/* register keytable schema so build_scan can resolve get_columns */
 				(if (not (nil? kt_schema_def))
 					(set schemas (merge schemas (list grouptbl kt_schema_def))))
 
@@ -5304,10 +5295,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(merge schemas (list grouptbl dedup_visible_schema))
 						replace_find_column
 						update_target))
+					/* init_code guard: collect dedup keys on first keytable creation */
 					(cons 'begin (merge
-						(if (nil? keytable_init) '() (list keytable_init))
+						(list (list 'if keytable_init (make_collect true) nil))
 						(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
-						(list (make_collect true))
 						(list grouped_plan)))
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
@@ -5685,23 +5676,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1))) nil
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
+						/* collect + trigger deploy on first keytable creation only.
+						createtable inside init_code returns true on first creation.
+						scoped GROUPs always re-collect (stale data from prior queries). */
 						(define collect_plan (if is_fk_reuse '()
-							(if (not (nil? _stage_scope))
-								/* scoped GROUPs: always collect (keytable may have stale data from prior queries) */
-								(list (make_collect false))
-								/* Normal and session-sensitive groups: collect only when keytable
-								was just created or is empty. Trigger-based incremental maintenance
-								(register_keytable_cleanup) keeps the domain current between queries.
-								For session-sensitive groups the domain is global and StorageComputeProxy
-								session variants handle per-session aggregation. */
-								(list (list 'if (list 'or keytable_init (list 'table_empty? schema grouptbl))
-									(make_collect false)
-									nil)))))
+							(list (list 'if keytable_init
+								(list 'begin (make_collect false) cleanup_plan)
+								nil))))
 						(cons 'begin (merge
-							(if (nil? keytable_init) '() (list keytable_init))
 							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
 							(if (nil? group_value_local_compute_plan) '() (list group_value_local_compute_plan))
-							(if (nil? cleanup_plan) '() (list cleanup_plan))
 							collect_plan
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
 							(list compute_plan)
@@ -6140,10 +6124,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(merge (map variant_exprs (lambda (variant_expr)
 							(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
 				(planned_materialized_fields prejointbl prejoin_schema_def)
-				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
-				(createtable schema prejointbl
-					(map prejoin_column_names (lambda (col) '("column" col "any" '() '())))
-					query_temp_table_options true)
+				/* prejoin table creation deferred to runtime (guard at plan assembly below) */
 				/* legacy nested-loop materializer retained temporarily for trigger backfill paths.
 				Query-time prejoin filling uses the canonical build_queryplan row stream below. */
 				(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
@@ -6616,13 +6597,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
+						/* createtable returns true on first creation -> materialize + deploy triggers */
 						(list 'if (list 'createtable pj_schema prejointbl
 							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							query_temp_table_options_code true)
 							(list 'time prejoin_materialize_plan "materialize")
-							(list 'if (list 'table_empty? pj_schema prejointbl)
-								(list 'time prejoin_materialize_plan "materialize")
-								nil)))
+							nil))
 					pj_trigger_registrations
 					(list grouped_result)))
 			)
