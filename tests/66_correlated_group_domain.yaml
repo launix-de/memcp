@@ -1,0 +1,70 @@
+# Correlated scalar subqueries over grouped derived tables with an outer grouped
+# domain. This exercises Neumann-style domain extension across multiple group
+# stages without relying on app-specific table names.
+
+metadata:
+  version: "1.0"
+  description: "Correlated scalar subquery across nested group domains"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cgd_state"
+  - sql: "CREATE TABLE cgd_state (ID INT PRIMARY KEY, parent INT, grp INT)"
+  - sql: "INSERT INTO cgd_state VALUES (1, NULL, 10), (2, 1, 10), (3, NULL, 20), (4, 1, 20), (5, 3, 20)"
+
+test_cases:
+
+  - name: "scalar subquery over grouped inner derived table"
+    sql: |
+      SELECT t.grp, COUNT(*) AS cnt, SUM(t.child_groups) AS child_groups
+      FROM (
+        SELECT s1.ID, s1.grp,
+          COALESCE((SELECT COUNT(*)
+            FROM (
+              SELECT s2.parent, s2.grp, COUNT(*) AS cnt
+              FROM cgd_state s2
+              GROUP BY s2.parent, s2.grp
+            ) g
+            WHERE g.parent = s1.ID AND g.grp = s1.grp
+          ), 0) AS child_groups
+        FROM cgd_state s1
+      ) t
+      GROUP BY t.grp
+      ORDER BY t.grp
+    expect:
+      rows: 2
+      data:
+        - grp: 10
+          cnt: 2
+          child_groups: 1
+        - grp: 20
+          cnt: 3
+          child_groups: 1
+
+  - name: "outer grouped domain feeds correlated grouped scalar subquery"
+    sql: |
+      SELECT o.grp,
+        COALESCE((SELECT SUM(i.cnt)
+          FROM (
+            SELECT s2.parent, s2.grp, COUNT(*) AS cnt
+            FROM cgd_state s2
+            GROUP BY s2.parent, s2.grp
+          ) i
+          WHERE i.parent = o.sample_id AND i.grp = o.grp
+        ), 0) AS score
+      FROM (
+        SELECT grp, MIN(ID) AS sample_id
+        FROM cgd_state
+        GROUP BY grp
+      ) o
+      ORDER BY o.grp
+    expect:
+      rows: 2
+      data:
+        - grp: 10
+          score: 1
+        - grp: 20
+          score: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cgd_state"

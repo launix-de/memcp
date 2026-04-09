@@ -1188,11 +1188,12 @@ get_column markers and may no longer run schema-based repair heuristics. */
 			(stage_preserve_cache_meta stage (make_partition_stage spa
 				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
-			(stage_preserve_cache_meta stage (make_group_stage
+			(stage_preserve_cache_meta stage (make_group_stage_with_condition
 				(map sg fin)
 				(fin sh)
 				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
-				sl soff spa (stage_init_code stage)))))
+				sl soff spa (stage_init_code stage)
+				(begin (define sc (stage_condition stage)) (if (nil? sc) nil (fin sc)))))))
 )))
 (define finalize_logical_stage (lambda (stage all_schemas rewrite_expr enforce_contract)
 	(finalize_logical_stage_scoped stage all_schemas all_schemas rewrite_expr enforce_contract)
@@ -1214,11 +1215,12 @@ get_column markers and may no longer run schema-based repair heuristics. */
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
 			/* group stage (possibly scoped with aliases) */
-			(stage_preserve_cache_meta stage (make_group_stage
+			(stage_preserve_cache_meta stage (make_group_stage_with_condition
 				(map sg canon)
 				(canon sh)
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-				sl soff spa (stage_init_code stage)))))
+				sl soff spa (stage_init_code stage)
+				(begin (define sc (stage_condition stage)) (if (nil? sc) nil (canon sc)))))))
 )))
 
 (import "sql-metadata.scm")
@@ -1243,6 +1245,25 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(list (quote dedup) false)
 		(list (quote partition-aliases) (normalize_stage_aliases aliases))
 		(list (quote init) init)
+		(list (quote stage-condition) nil)
+	)
+))
+/* make_group_stage_with_condition: like make_group_stage but carries the inner
+subquery's WHERE condition scoped to this stage's tables. build_queryplan merges
+it into the local condition when the stage is processed, preventing cross-stage
+condition leakage. Uses canonical column names for keytable cache reuse. */
+(define make_group_stage_with_condition (lambda (group having order limit offset aliases init cond)
+	(list
+		(cons (quote group-cols) (coalesce group '()))
+		(list (quote having) having)
+		(list (quote order) (coalesce order '()))
+		(list (quote limit-partition-cols) 0)
+		(list (quote limit) limit)
+		(list (quote offset) offset)
+		(list (quote dedup) false)
+		(list (quote partition-aliases) (normalize_stage_aliases aliases))
+		(list (quote init) init)
+		(list (quote stage-condition) cond)
 	)
 ))
 (define make_partition_stage (lambda (aliases order partition_cols limit offset init)
@@ -1319,6 +1340,12 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 (define stage_init_code (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
 		(cons (quote init) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_condition (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote stage-condition) rest) (if (nil? rest) nil (car rest))
 		_ nil
 	) acc)
 ) nil)))
@@ -3091,7 +3118,109 @@ seeing the correctly prefixed outer alias. */
 						(sq_cache "scalar_tables" (merge tbls (coalesceNil (sq_cache "scalar_tables") '())))
 						subst)
 					nil)
-				nil))
+				/* Path B: aggregate or uncorrelated — inject tables + scoped group stage
+				into the outer query. build_queryplan turns this into keytable + createcolumn.
+				Neumann Γ_{A∪D;f}: GROUP BY = correlation domain (or (1) for uncorrelated). */
+				(begin
+					(define has_aggregates (not (equal? (extract_aggregates (coalesceNil _value_expr true)) '())))
+					(match (apply untangle_query (merge subquery (list outer_schemas)))
+						'(schema2 tables2 fields2 condition2 groups2 schemas2 rfcol2 init2)
+						(begin
+							(if (and (not (nil? init2)) (not (equal? init2 '())))
+								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) init2)))
+							(define groups2 (coalesceNil groups2 '()))
+							/* strip redundant LIMIT from aggregate stages (aggregates produce 1 row) */
+							(define groups2 (if has_aggregates
+								(map groups2 (lambda (s)
+									(make_group_stage (stage_group_cols s) (stage_having_expr s)
+										(stage_order_list s) nil nil
+										(stage_partition_aliases s) (stage_init_code s))))
+								groups2))
+							/* inject GROUP BY (1) for aggregates without explicit GROUP */
+							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
+								(list (make_group_stage '(1) nil nil nil nil nil nil))
+								groups2))
+							/* generate unique alias prefix */
+							(define sq_idx (coalesceNil (sq_cache "idx") 0))
+							(sq_cache "idx" (+ sq_idx 1))
+							(define sq_alias (concat "sq" sq_idx))
+							/* identify inner vs outer table aliases */
+							(define inner_aliases (map tables2 (lambda (td) (match td '(a _ _ _ _) a ""))))
+							/* prefix inner table aliases */
+							(define prefixed_tables (map tables2 (lambda (td) (match td
+								'(alias s t io je) (list (concat sq_alias "\0" alias) s t io je)
+								td))))
+							(define prefixed_aliases (map prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
+							/* prefix_expr: only prefix inner aliases, leave outer refs untouched */
+							(define prefix_expr (lambda (expr) (match expr
+								'((symbol get_column) alias ti col ci) (if (or (nil? alias) (not (has? inner_aliases alias))) expr
+									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
+								'((quote get_column) alias ti col ci) (if (or (nil? alias) (not (has? inner_aliases alias))) expr
+									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
+								(cons sym args) (cons (prefix_expr sym) (map args prefix_expr))
+								expr)))
+							/* register prefixed tables */
+							(sq_cache "tables" (merge prefixed_tables (coalesceNil (sq_cache "tables") '())))
+							/* register prefixed schemas */
+							(sq_cache "schemas" (merge
+								(extract_assoc schemas2 (lambda (k v) (list (concat sq_alias "\0" k) v)))
+								(coalesceNil (sq_cache "schemas") '())))
+							/* split condition: correlation equalities → outer condition (for JOIN),
+							local filters → stage-condition (for keytable scan) */
+							(define flatten_and (lambda (expr) (match expr
+								(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)))
+									(merge (map parts flatten_and))
+									(list expr))
+								(list expr))))
+							(define is_inner_ref (lambda (expr)
+								(reduce (extract_tblvars expr) (lambda (acc tv) (and acc (has? inner_aliases tv))) true)))
+							(define is_outer_ref (lambda (expr)
+								(and (not (equal? (extract_tblvars expr) '()))
+									(reduce (extract_tblvars expr) (lambda (acc tv) (and acc (not (has? inner_aliases tv)))) true))))
+							(define cond_parts (if (or (nil? condition2) (equal? condition2 true)) '() (flatten_and condition2)))
+							(define is_correlation_part (lambda (part) (match part
+								'((symbol equal??) left right) (or (and (is_inner_ref left) (is_outer_ref right))
+									(and (is_inner_ref right) (is_outer_ref left)))
+								'((quote equal??) left right) (or (and (is_inner_ref left) (is_outer_ref right))
+									(and (is_inner_ref right) (is_outer_ref left)))
+								_ false)))
+							(define local_parts (filter cond_parts (lambda (p) (not (is_correlation_part p)))))
+							(define corr_parts (filter cond_parts is_correlation_part))
+							/* correlation equalities → global condition for GROUP BY key JOIN */
+							(if (not (equal? corr_parts '()))
+								(sq_cache "condition" (merge
+									(map corr_parts prefix_expr)
+									(coalesceNil (sq_cache "condition") '()))))
+							/* local filter → stage-condition */
+							(define local_condition (if (equal? local_parts '()) nil
+								(prefix_expr (if (equal? 1 (count local_parts)) (car local_parts)
+									(cons (quote and) local_parts)))))
+							/* for correlated aggregates: extract GROUP BY domain from correlation */
+							(define correlation_keys (filter (map cond_parts (lambda (part) (match part
+								'((symbol equal??) left right)
+								(if (and (is_inner_ref left) (is_outer_ref right)) left
+									(if (and (is_inner_ref right) (is_outer_ref left)) right nil))
+								'((quote equal??) left right)
+								(if (and (is_inner_ref left) (is_outer_ref right)) left
+									(if (and (is_inner_ref right) (is_outer_ref left)) right nil))
+								_ nil))) (lambda (x) (not (nil? x)))))
+							(define group_keys (if (and has_aggregates (equal? correlation_keys '())) '(1)
+								(if (not (equal? correlation_keys '())) (map correlation_keys prefix_expr)
+									'(1))))
+							/* inject GROUP BY with correct domain keys */
+							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
+								(list (make_group_stage group_keys nil nil nil nil nil nil))
+								groups2))
+							/* register scoped group stages with partition-aliases + stage-condition */
+							(define scoped_stages (map groups2 (lambda (stage)
+								(make_group_stage_with_condition (stage_group_cols stage) (stage_having_expr stage)
+									(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
+									prefixed_aliases (stage_init_code stage) local_condition))))
+							(sq_cache "groups" (merge scoped_stages (coalesceNil (sq_cache "groups") '())))
+							/* return prefixed value expression */
+							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))
+							(prefix_expr value_expr2))
+						nil))))
 		nil)))
 	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
 		(define _resolve_outer (lambda (expr) (match expr
@@ -3885,6 +4014,10 @@ seeing the correctly prefixed outer alias. */
 	row-domain and their joinexpr must participate in global filtering. */
 	(define _sq_jes (filter (map (merge _sq_tbls sq_scalar_condition_tbls) (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 	(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
+	/* integrate correlation equalities from Path B aggregate subselects */
+	(define _sq_conds (coalesceNil (sq_cache "condition") '()))
+	(if (not (equal? _sq_conds '()))
+		(set condition (cons (quote and) (cons condition _sq_conds))))
 	/* integrate partition stages from non-aggregate LIMIT unnesting */
 	(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
 	(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
@@ -4580,11 +4713,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define raw_stage_post_group_condition raw_stage_having)
 		(define raw_stage_order stage_order)
 		(define raw_fields fields)
-		(set stage_group (map stage_group replace_find_column))
-		(set stage_having (replace_find_column stage_having))
-		(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
-		(define is_dedup (stage_is_dedup stage))
 		(define _scoped_stage (not (nil? (stage_partition_aliases stage))))
+		/* scoped stages from Neumann unnesting have prefixed refs — skip replace_find_column */
+		(if (not _scoped_stage) (begin
+			(set stage_group (map stage_group replace_find_column))
+			(set stage_having (replace_find_column stage_having))
+			(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))))
+		(define is_dedup (stage_is_dedup stage))
 		(define _field_agg_has_nested_agg (lambda (args)
 			(reduce args (lambda (acc arg)
 				(or acc (not (equal? (extract_aggregates arg) '()))))
@@ -4596,10 +4731,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(and (equal? (extract_tblvars expr) '()) (_field_agg_has_nested_agg args))
 			(cons _ args) (reduce args (lambda (acc arg) (or acc (_needs_outer_group_expr arg))) false)
 			false)))
+		/* Only NON-scoped later group stages trigger aggregate deferral.
+		Scoped stages from Neumann unnesting are independent and processed
+		in their own recursive build_queryplan call. */
 		(define _has_existing_later_group_stage (reduce rest_groups (lambda (acc s)
 			(or acc (begin
 				(define _later_sg (stage_group_cols s))
-				(and (not (nil? _later_sg)) (not (equal? _later_sg '()))))))
+				(define later_is_scoped (not (nil? (stage_partition_aliases s))))
+				(and (not later_is_scoped) (not (nil? _later_sg)) (not (equal? _later_sg '()))))))
 			false))
 		(define _needs_synthetic_outer_group (and _scoped_stage
 			(not _has_existing_later_group_stage)
@@ -5032,6 +5171,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* preparation */
 				(define tblvar_cols (merge_unique (map resolved_stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
 				(set condition (replace_find_column (coalesceNil condition true)))
+				/* merge stage-condition AFTER replace_find_column (already prefixed) */
+				(define scoped_cond (stage_condition stage))
+				(if (and (not (nil? scoped_cond)) (not (equal? scoped_cond true)))
+					(set condition (if (or (nil? condition) (equal? condition true))
+						scoped_cond
+						(list (quote and) condition scoped_cond))))
 				(set condition (lower_visible_materialized_aggs_single condition))
 				(if materialized_source
 					(set condition (rewrite_materialized_source_aggs_single condition)))
