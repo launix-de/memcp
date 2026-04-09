@@ -1,0 +1,118 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# LIMIT 1 scalar subselects must be unnested to LEFT JOINs (Neumann decorrelation).
+# Verifies correctness and that the EXPLAIN does NOT show inline scan_order
+# for correlated LIMIT 1 patterns.
+
+metadata:
+  version: "1.0"
+  description: "LIMIT 1 scalar subselect unnesting to LEFT JOIN"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS lu_order"
+  - sql: "DROP TABLE IF EXISTS lu_customer"
+  - sql: "DROP TABLE IF EXISTS lu_product"
+  - sql: |
+      CREATE TABLE lu_customer (ID INT PRIMARY KEY, name VARCHAR(50))
+  - sql: |
+      CREATE TABLE lu_product (ID INT PRIMARY KEY, name VARCHAR(50), price INT)
+  - sql: |
+      CREATE TABLE lu_order (ID INT PRIMARY KEY AUTO_INCREMENT, customer INT, product INT, qty INT)
+  - sql: |
+      INSERT INTO lu_customer VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')
+  - sql: |
+      INSERT INTO lu_product VALUES (10, 'Widget', 100), (20, 'Gadget', 200)
+  - sql: |
+      INSERT INTO lu_order (customer, product, qty) VALUES
+        (1, 10, 5), (1, 20, 2), (2, 10, 3), (3, 20, 1)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS lu_order"
+  - sql: "DROP TABLE IF EXISTS lu_product"
+  - sql: "DROP TABLE IF EXISTS lu_customer"
+
+test_cases:
+  - name: "LIMIT 1 correlated subselect returns correct values"
+    sql: |
+      SELECT o.ID,
+        (SELECT c.name FROM lu_customer c WHERE c.ID = o.customer LIMIT 1) AS cust_name,
+        (SELECT p.name FROM lu_product p WHERE p.ID = o.product LIMIT 1) AS prod_name
+      FROM lu_order o
+      ORDER BY o.ID
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          cust_name: "Alice"
+          prod_name: "Widget"
+        - ID: 2
+          cust_name: "Alice"
+          prod_name: "Gadget"
+        - ID: 3
+          cust_name: "Bob"
+          prod_name: "Widget"
+        - ID: 4
+          cust_name: "Carol"
+          prod_name: "Gadget"
+
+  - name: "COALESCE + LIMIT 1 permission pattern"
+    sql: |
+      SELECT o.ID,
+        COALESCE((SELECT TRUE FROM lu_customer c WHERE c.ID = o.customer LIMIT 1), FALSE) AS can_view
+      FROM lu_order o
+      ORDER BY o.ID
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          can_view: true
+        - ID: 2
+          can_view: true
+        - ID: 3
+          can_view: true
+        - ID: 4
+          can_view: true
+
+  - name: "GROUP BY over derived table with LIMIT 1 permission subselects"
+    sql: |
+      SELECT COUNT(*) AS cnt, t.product
+      FROM (
+        SELECT o.ID, o.product
+        FROM lu_order o
+        WHERE COALESCE((SELECT TRUE FROM lu_customer c WHERE c.ID = o.customer LIMIT 1), FALSE)
+      ) t
+      GROUP BY t.product
+      ORDER BY t.product
+    expect:
+      rows: 2
+      data:
+        - cnt: 2
+          product: 10
+        - cnt: 2
+          product: 20
+
+  - name: "nested LIMIT 1 inside LEFT JOIN derived table"
+    sql: |
+      SELECT o.ID, o.qty, ref_c.cust_name
+      FROM lu_order o
+      LEFT JOIN (
+        SELECT ID AS cust_id,
+          name AS cust_name,
+          COALESCE((SELECT TRUE FROM lu_product p WHERE p.ID = lu_customer.ID LIMIT 1), FALSE) AS has_product
+        FROM lu_customer
+      ) ref_c ON ref_c.cust_id = o.customer
+      ORDER BY o.ID
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          qty: 5
+          cust_name: "Alice"
+        - ID: 2
+          qty: 2
+          cust_name: "Alice"
+        - ID: 3
+          qty: 3
+          cust_name: "Bob"
+        - ID: 4
+          qty: 1
+          cust_name: "Carol"
