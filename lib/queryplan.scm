@@ -3080,8 +3080,8 @@ seeing the correctly prefixed outer alias. */
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				(nil? l)
-				(nil? off))
+				(or (nil? l) (equal? l 1)) /* LIMIT 1 = at most one row = LEFT JOIN */
+				(or (nil? off) (equal? off 0)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
 						/* Scalar subselect unnesting yields null-preserving LEFT JOIN helper
