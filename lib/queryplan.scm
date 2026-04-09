@@ -3245,10 +3245,33 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 										(stage_order_list s) nil nil
 										(stage_partition_aliases s) (stage_init_code s))))
 								groups2))
-							/* inject GROUP BY (1) for aggregates without explicit GROUP */
-							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
-								(list (make_group_stage '(1) nil nil nil nil nil nil))
-								groups2))
+							/* For aggregates without explicit GROUP BY, determine group keys:
+							- Uncorrelated: GROUP BY (1) — single global group
+							- Correlated: GROUP BY <inner_correlation_columns> — one group per
+							  outer correlation value, enabling keytable JOIN on group keys.
+							  This is Neumann's Γ_{D;f} where D = correlation domain. */
+							(define inner_aliases (map tables2 (lambda (td) (match td '(a _ _ _ _) a ""))))
+							(define is_inner_ref (lambda (expr)
+								(reduce (extract_tblvars expr) (lambda (acc tv) (and acc (has? inner_aliases tv))) true)))
+							(define is_outer_ref (lambda (expr)
+								(and (not (equal? (extract_tblvars expr) '()))
+									(reduce (extract_tblvars expr) (lambda (acc tv) (and acc (not (has? inner_aliases tv)))) true))))
+							/* extract correlation equalities: (equal?? inner_expr outer_expr) */
+							(define flatten_and (lambda (expr) (match expr
+								(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)))
+									(merge (map parts flatten_and))
+									(list expr))
+								(list expr))))
+							(define cond_parts (if (or (nil? condition2) (equal? condition2 true)) '() (flatten_and condition2)))
+							(define correlation_keys (filter (map cond_parts (lambda (part) (match part
+								'((symbol equal??) left right)
+								(if (and (is_inner_ref left) (is_outer_ref right)) left
+									(if (and (is_inner_ref right) (is_outer_ref left)) right nil))
+								'((quote equal??) left right)
+								(if (and (is_inner_ref left) (is_outer_ref right)) left
+									(if (and (is_inner_ref right) (is_outer_ref left)) right nil))
+								_ nil))) (lambda (x) (not (nil? x)))))
+							(define group_keys (if (equal? correlation_keys '()) '(1) correlation_keys))
 							/* generate unique alias */
 							(define sq_idx (coalesceNil (sq_cache "idx") 0))
 							(sq_cache "idx" (+ sq_idx 1))
@@ -3267,23 +3290,43 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							/* prefix value expression column refs */
 							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))
 							(define prefix_expr (lambda (expr) (match expr
-								'((symbol get_column) alias ti col ci) (if (nil? alias) expr
+								'((symbol get_column) alias ti col ci) (if (or (nil? alias) (not (has? inner_aliases alias))) expr
 									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
-								'((quote get_column) alias ti col ci) (if (nil? alias) expr
+								'((quote get_column) alias ti col ci) (if (or (nil? alias) (not (has? inner_aliases alias))) expr
 									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
 								(cons sym args) (cons (prefix_expr sym) (map args prefix_expr))
 								expr)))
-							/* prefix the inner WHERE condition and attach it to the scoped stage,
-							NOT to the outer global condition. This prevents cross-stage condition
-							leakage when multiple independent subselects inject their own stages. */
-							(define prefixed_condition (if (and (not (nil? condition2)) (not (equal? condition2 true)))
-								(prefix_expr condition2)
-								nil))
+							/* inject GROUP BY with prefixed keys */
+							(define prefixed_group_keys (map group_keys prefix_expr))
+							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
+								(list (make_group_stage prefixed_group_keys nil nil nil nil nil nil))
+								groups2))
+							/* Split condition into correlation equalities (→ outer condition for
+							JOIN) and local filters (→ stage-condition for keytable scan).
+							Correlation equalities are handled by GROUP BY keys + JOIN; they
+							must NOT stay in stage-condition or they'd reference outer tables
+							inside the createcolumn scan where outer refs aren't available. */
+							(define is_correlation_part (lambda (part) (match part
+								'((symbol equal??) left right) (or (and (is_inner_ref left) (is_outer_ref right))
+									(and (is_inner_ref right) (is_outer_ref left)))
+								'((quote equal??) left right) (or (and (is_inner_ref left) (is_outer_ref right))
+									(and (is_inner_ref right) (is_outer_ref left)))
+								_ false)))
+							(define local_cond_parts (filter cond_parts (lambda (p) (not (is_correlation_part p)))))
+							(define corr_cond_parts (filter cond_parts is_correlation_part))
+							(define prefixed_local_condition (if (equal? local_cond_parts '()) nil
+								(prefix_expr (if (equal? 1 (count local_cond_parts)) (car local_cond_parts)
+									(cons (quote and) local_cond_parts)))))
+							/* correlation equalities go into outer condition for GROUP BY key JOIN */
+							(if (not (equal? corr_cond_parts '()))
+								(sq_cache "condition" (merge
+									(map corr_cond_parts prefix_expr)
+									(coalesceNil (sq_cache "condition") '()))))
 							/* register scoped group stages with partition-aliases + stage-condition */
 							(define scoped_stages (map groups2 (lambda (stage)
 								(make_group_stage_with_condition (stage_group_cols stage) (stage_having_expr stage)
 									(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
-									prefixed_aliases (stage_init_code stage) prefixed_condition))))
+									prefixed_aliases (stage_init_code stage) prefixed_local_condition))))
 							(sq_cache "groups" (merge scoped_stages (coalesceNil (sq_cache "groups") '())))
 							/* Bind aggregates to their scoped table via a 4th data element.
 							(aggregate 1 + 0) → (aggregate 1 + 0 "sq0\0pb_doc")
@@ -4044,9 +4087,12 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 	row-domain and their joinexpr must participate in global filtering. */
 	(define _sq_jes (filter (map (merge _sq_tbls sq_scalar_condition_tbls) (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 	(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
-	/* Path B conditions are now carried as stage-condition on each scoped
-	group stage. build_queryplan merges them when the stage is processed.
-	No global condition injection needed here. */
+	/* Local filters from Path B are carried as stage-condition on scoped stages.
+	Correlation equalities from correlated aggregate subselects go into the
+	global condition for GROUP BY key JOIN resolution. */
+	(define _sq_conds (coalesceNil (sq_cache "condition") '()))
+	(if (not (equal? _sq_conds '()))
+		(set condition (cons (quote and) (cons condition _sq_conds))))
 	/* integrate partition stages from non-aggregate LIMIT unnesting */
 	(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
 	(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
