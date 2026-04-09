@@ -1,0 +1,58 @@
+metadata:
+  version: "1.0"
+  description: "UNION ALL must preserve duplicate rows"
+
+test_cases:
+  - name: "UNION ALL with identical literal rows"
+    sql: "SELECT 1 AS x UNION ALL SELECT 1 AS x"
+    expect:
+      rows: 2
+      data:
+        - x: 1
+        - x: 1
+
+  - name: "UNION ALL with three identical rows"
+    sql: "SELECT 1 AS x UNION ALL SELECT 1 AS x UNION ALL SELECT 1 AS x"
+    expect:
+      rows: 3
+      data:
+        - x: 1
+        - x: 1
+        - x: 1
+
+  - name: "UNION ALL mixed duplicates and unique"
+    sql: "SELECT 1 AS x UNION ALL SELECT 2 AS x UNION ALL SELECT 1 AS x"
+    expect:
+      rows: 3
+      data:
+        - x: 1
+        - x: 2
+        - x: 1
+
+  - name: "Create test table for UNION ALL"
+    sql: "CREATE TABLE union_dup_test (id INT PRIMARY KEY, val VARCHAR(20))"
+
+  - name: "Insert duplicate values"
+    sql: "INSERT INTO union_dup_test (id, val) VALUES (1, 'aaa'), (2, 'aaa'), (3, 'bbb')"
+
+  - name: "UNION ALL from table with duplicate values"
+    sql: "SELECT val FROM union_dup_test WHERE val = 'aaa' UNION ALL SELECT val FROM union_dup_test WHERE val = 'aaa'"
+    expect:
+      rows: 4
+      data:
+        - val: "aaa"
+        - val: "aaa"
+        - val: "aaa"
+        - val: "aaa"
+
+  - name: "SELECT without UNION returns consecutive duplicates"
+    sql: "SELECT val FROM union_dup_test ORDER BY val"
+    expect:
+      rows: 3
+      data:
+        - val: "aaa"
+        - val: "aaa"
+        - val: "bbb"
+
+  - name: "Cleanup"
+    sql: "DROP TABLE union_dup_test"
