@@ -2459,8 +2459,7 @@ seeing the correctly prefixed outer alias. */
 												(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
 												(define _sq_promise_name (concat "__scalar_promise_" _sq_hash))
 												(define _init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
-												(cons (quote !begin) (merge _init_stmts (list
-													(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+												(define _sq_scan_expr
 													(if use_ordered_scalar
 														(list (quote scan_order)
 															(list (quote session) "__memcp_tx")
@@ -2490,9 +2489,20 @@ seeing the correctly prefixed outer alias. */
 																(list (symbol _sq_promise_name) "once" valuebody "scalar subselect returned more than one row"))
 															nil
 															nil
-															false))
-													(list (symbol _sq_promise_name) "value")
-												)))
+															false)))
+												/* non-correlated scalar subselect: hoist into init so it runs once */
+												(if (and (not scalar_has_outer_ref) (not scalar_uses_session_state))
+													(begin
+														(define _sq_var_name (concat "__scalar_val_" _sq_hash))
+														(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) _init_stmts (list
+															(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+															_sq_scan_expr
+															(list (quote set) (symbol _sq_var_name) (list (symbol _sq_promise_name) "value")))))
+														(symbol _sq_var_name))
+													(cons (quote !begin) (merge _init_stmts (list
+														(list (quote set) (symbol _sq_promise_name) (list (quote newpromise)))
+														_sq_scan_expr
+														(list (symbol _sq_promise_name) "value")))))
 										))
 								)))
 								(build_scalar_subselect_fallback))
