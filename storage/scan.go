@@ -62,6 +62,9 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	if rewritten := tryScanBatchRewrite(v); !rewritten.IsNil() {
+		return oc.OptimizeSub(rewritten, useResult)
+	}
 	return optimizeScanShared(v, oc, 7, 8, 9, 10, 11)
 }
 

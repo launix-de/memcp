@@ -1,0 +1,132 @@
+# scan_batch optimizer hook tests
+# Verifies that nested-loop joins are automatically rewritten to scan_batch
+# by the Go optimizer (tryScanBatchRewrite).
+
+metadata:
+  version: "1.0"
+  description: "scan_batch optimizer hook for nested-loop join batching"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sb_orders"
+  - sql: "DROP TABLE IF EXISTS sb_customers"
+  - sql: |
+      CREATE TABLE sb_customers (
+        cid INT PRIMARY KEY,
+        name VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE sb_orders (
+        oid INT PRIMARY KEY,
+        cid INT,
+        amount INT
+      )
+  - sql: |
+      INSERT INTO sb_customers (cid, name) VALUES
+      (1, 'Alice'), (2, 'Bob'), (3, 'Carol')
+  - sql: |
+      INSERT INTO sb_orders (oid, cid, amount) VALUES
+      (10, 1, 100), (20, 1, 200), (30, 2, 150), (40, 3, 50), (50, 3, 300)
+
+test_cases:
+
+  # === Functional: join results must be correct with batching ===
+
+  - name: "Correlated join produces correct results"
+    sql: |
+      SELECT c.name, o.amount
+      FROM sb_customers c, sb_orders o
+      WHERE o.cid = c.cid AND c.cid <= 2
+      ORDER BY c.name, o.amount
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          amount: 100
+        - name: "Alice"
+          amount: 200
+        - name: "Bob"
+          amount: 150
+
+  - name: "Correlated join with aggregate"
+    sql: |
+      SELECT c.name, SUM(o.amount) AS total
+      FROM sb_customers c, sb_orders o
+      WHERE o.cid = c.cid
+      GROUP BY c.name
+      ORDER BY c.name
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          total: 300
+        - name: "Bob"
+          total: 150
+        - name: "Carol"
+          total: 350
+
+  - name: "Correlated join COUNT"
+    sql: |
+      SELECT c.name, COUNT(*) AS cnt
+      FROM sb_customers c, sb_orders o
+      WHERE o.cid = c.cid
+      GROUP BY c.name
+      ORDER BY c.name
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          cnt: 2
+        - name: "Bob"
+          cnt: 1
+        - name: "Carol"
+          cnt: 2
+
+  - name: "Scalar correlated subselect with join still works"
+    sql: |
+      SELECT c.name,
+        (SELECT o.amount FROM sb_orders o WHERE o.cid = c.cid ORDER BY o.amount LIMIT 1) AS min_order
+      FROM sb_customers c
+      ORDER BY c.name
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          min_order: 100
+        - name: "Bob"
+          min_order: 150
+        - name: "Carol"
+          min_order: 50
+
+  # === Cross-join must NOT be batched (no outer refs) but still correct ===
+
+  - name: "Cross-join without correlation produces correct count"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM sb_customers c, sb_orders o
+    expect:
+      rows: 1
+      data:
+        - cnt: 15
+
+  # === EXPLAIN: verify scan_batch appears in plan ===
+
+  - name: "EXPLAIN correlated join uses scan_batch"
+    sql: |
+      EXPLAIN SELECT c.name, o.amount
+      FROM sb_customers c, sb_orders o
+      WHERE o.cid = c.cid
+    expect:
+      rows: 1
+      data_contains:
+        - code: "scan_batch"
+
+  - name: "EXPLAIN cross-join does NOT use scan_batch"
+    sql: |
+      EXPLAIN SELECT COUNT(*) FROM sb_customers c, sb_orders o
+    expect:
+      rows: 1
+      data_not_contains:
+        - code: "scan_batch"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sb_orders"
+  - sql: "DROP TABLE IF EXISTS sb_customers"
