@@ -810,6 +810,113 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_order_multi",
+		Desc: "does an ordered parallel filter and serial map-reduce pass across multiple tables simultaneously, merging results into a single sorted stream",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			// Parameters:
+			// 0: tx
+			// 1: schemas list
+			// 2: tables list
+			// 3: filterColumns per table (list of lists)
+			// 4: filterFns per table (list of lambdas)
+			// 5: sortcols per table (list of lists)
+			// 6: sortdirs (shared list)
+			// 7: limitPartitionCols
+			// 8: offset
+			// 9: limit
+			// 10: mapColumns per table (list of lists)
+			// 11: mapFns per table (list of lambdas)
+			// 12: reduce (optional)
+			// 13: neutral (optional)
+			// 14: isOuter (optional)
+			currentTx := scmerToTxContext(a[0])
+			schemas := mustScmerSlice(a[1], "schemas")
+			tables := mustScmerSlice(a[2], "tables")
+			filterColsArr := mustScmerSlice(a[3], "filterColumns")
+			filterFnArr := mustScmerSlice(a[4], "filterFns")
+			sortcolsArr := mustScmerSlice(a[5], "sortcols")
+			sortdirsVals := mustScmerSlice(a[6], "sortdirs")
+			limitPartitionCols := scm.ToInt(a[7])
+			offset := scm.ToInt(a[8])
+			limit := scm.ToInt(a[9])
+			mapColsArr := mustScmerSlice(a[10], "mapColumns")
+			mapFnArr := mustScmerSlice(a[11], "mapFns")
+
+			aggregate := scm.NewNil()
+			if len(a) > 12 {
+				aggregate = a[12]
+			}
+			neutral := scm.NewNil()
+			if len(a) > 13 {
+				neutral = a[13]
+			}
+			isOuter := len(a) > 14 && scm.ToBool(a[14])
+
+			n := len(schemas)
+			if len(tables) != n || len(filterColsArr) != n || len(filterFnArr) != n || len(sortcolsArr) != n || len(mapColsArr) != n || len(mapFnArr) != n {
+				panic("scan_order_multi: all per-table arrays must have the same length")
+			}
+
+			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortdirsVals))
+			for i, dir := range sortdirsVals {
+				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
+			}
+
+			specs := make([]scanOrderTableSpec, n)
+			for i := 0; i < n; i++ {
+				db := GetDatabase(scm.String(schemas[i]))
+				if db == nil {
+					if isOuter && i == 0 {
+						mapfn := scm.OptimizeProcToSerialFunction(mapFnArr[0])
+						mCols := scmerSliceToStrings(mustScmerSlice(mapColsArr[0], "mapColumns[0]"))
+						mapparams := make([]scm.Scmer, len(mCols))
+						reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+						if !aggregate.IsNil() {
+							reducefn = scm.OptimizeProcToSerialFunction(aggregate)
+						}
+						return reducefn(neutral, mapfn(mapparams...))
+					}
+					panic("database " + scm.String(schemas[i]) + " does not exist")
+				}
+				t := db.GetTable(scm.String(tables[i]))
+				if t == nil {
+					panic("table " + scm.String(schemas[i]) + "." + scm.String(tables[i]) + " does not exist")
+				}
+				specs[i] = scanOrderTableSpec{
+					table:         t,
+					conditionCols: scmerSliceToStrings(mustScmerSlice(filterColsArr[i], "filterColumns[i]")),
+					condition:     filterFnArr[i],
+					sortcols:      mustScmerSlice(sortcolsArr[i], "sortcols[i]"),
+					callbackCols:  scmerSliceToStrings(mustScmerSlice(mapColsArr[i], "mapColumns[i]")),
+					callback:      mapFnArr[i],
+				}
+			}
+
+			return scanOrderMulti(currentTx, specs, sortdirs, int(limitPartitionCols), int(offset), int(limit), aggregate, neutral, isOuter)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context"},
+				{Kind: "list", ParamName: "schemas", ParamDesc: "list of database names, one per table"},
+				{Kind: "list", ParamName: "tables", ParamDesc: "list of table names"},
+				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of filter column lists, one per table"},
+				{Kind: "list", ParamName: "filterFns", ParamDesc: "list of filter lambdas, one per table"},
+				{Kind: "list", ParamName: "sortcols", ParamDesc: "list of sort column lists, one per table"},
+				{Kind: "list", ParamName: "sortdirs", ParamDesc: "list of sort direction comparators (shared)"},
+				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "number of leading sort columns forming partition key"},
+				{Kind: "number", ParamName: "offset", ParamDesc: "number of items to skip"},
+				{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read"},
+				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of map column lists, one per table"},
+				{Kind: "list", ParamName: "mapFns", ParamDesc: "list of map lambdas, one per table"},
+				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) aggregation function", Optional: true},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for reduce", Optional: true},
+				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, emit null row when no hits", Optional: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any"},
+			Optimize: optimizeScanOrderMulti,
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "createdatabase",
 		Desc: "creates a new database",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
