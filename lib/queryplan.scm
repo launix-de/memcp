@@ -1421,7 +1421,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 						(define parent_tbl (car fk_info))
 						(define parent_col (car (cdr fk_info)))
 						(if (equal? key_name parent_col)
-							(list parent_tbl nil key_name)
+							(list parent_tbl nil key_name nil)
 							(begin
 								(createcolumn schema parent_tbl key_name "any" '() '("temp" true)
 									(list parent_col)
@@ -1432,7 +1432,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 										(list 'quote '("temp" true))
 										(list 'quote (list parent_col))
 										(list 'lambda (list (symbol parent_col)) (symbol parent_col)))
-									key_name))))
+									key_name nil))))
 					nil))
 			nil)
 		nil))
@@ -1507,6 +1507,10 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
 	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
 		(define is_fk_reuse (not (nil? fk_pk_col)))
+		/* register keytable schema so planner can resolve columns at compile time */
+		(define kt_schema_def (if (>= (count kt_result) 4) (nth kt_result 3) nil))
+		(if (and (not (nil? kt_schema_def)) (not is_fk_reuse))
+			(set schemas (merge schemas (list grouptbl kt_schema_def))))
 		(define tblvar_cols (if has_partition (merge_unique (map group_keys (lambda (col) (extract_columns_for_tblvar tblvar col)))) '()))
 		(define materialized_cols (if materialized_source
 			(materialized_source_physical_schema schema tbl tblvar schemas)
