@@ -3175,11 +3175,11 @@ seeing the correctly prefixed outer alias. */
 		'(quote not) true
 		_ false
 	)))
-	(define _contains_inner_select_marker (lambda (expr) (match expr
+	(define contains_inner_select_marker (lambda (expr) (match expr
 		(cons sym args) (or
 			(not (nil? (inner_select_kind sym)))
-			(_contains_inner_select_marker sym)
-			(reduce args (lambda (found arg) (or found (_contains_inner_select_marker arg))) false))
+			(contains_inner_select_marker sym)
+			(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
 		false)))
 	(define count_subquery_cache_policy (lambda (query)
 		(match query
@@ -3192,7 +3192,7 @@ seeing the correctly prefixed outer alias. */
 					(quote uncached-count)
 					nil))
 			nil)))
-	/* _unnest_count_subselect: shared helper for IN/EXISTS/NOT IN/NOT EXISTS rewrite.
+	/* unnest_count_subselect: shared helper for IN/EXISTS/NOT IN/NOT EXISTS rewrite.
 	Rewrites semi-joins (EXISTS/IN) and anti-joins (NOT EXISTS/NOT IN) as COUNT(*)
 	aggregates instead of direct semi/anti-join operators. This is intentional:
 	the COUNT-based approach produces a keytable computed column that benefits from
@@ -3223,7 +3223,7 @@ seeing the correctly prefixed outer alias. */
 	Builds a COUNT(*) subquery from the original, optionally adding an equality condition
 	(for IN/NOT IN: first_field = target_expr). Returns (substitution tables) or nil.
 	comparison: (quote >) for positive match, (quote equal?) for negated match */
-	(define _subquery_outer_refs (lambda (query outer_schemas) (begin
+	(define subquery_outer_refs (lambda (query outer_schemas) (begin
 		(match (apply untangle_query (merge query (list outer_schemas)))
 			'(_ tables2 fields2 condition2 _groups2 schemas2 _rfcol2 _init2) (begin
 				(define _inner_aliases (map tables2 (lambda (td) (match td '(a _ _ _ _) a ""))))
@@ -3244,8 +3244,8 @@ seeing the correctly prefixed outer alias. */
 					(merge (extract_assoc fields2 (lambda (_k v) (_eor v))))
 					(_eor (coalesceNil condition2 true))))
 			'()))))
-	(define _subquery_has_outer_refs (lambda (query outer_schemas)
-		(not (equal? (_subquery_outer_refs query outer_schemas) '()))))
+	(define subquery_has_outer_refs (lambda (query outer_schemas)
+		(not (equal? (subquery_outer_refs query outer_schemas) '()))))
 	(define _outer_ref_is_direct_column (lambda (outer_schemas ref) (match (split ref ".")
 		(list alias col) (begin
 			(define cols (if (has_assoc? outer_schemas alias) (outer_schemas alias) nil))
@@ -3266,37 +3266,102 @@ seeing the correctly prefixed outer alias. */
 						'((symbol get_column) _ _ _ _) true
 						_ false))))
 		_ false)))
-	(define _subquery_outer_refs_are_direct_columns (lambda (query outer_schemas)
-		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
+	(define subquery_outer_refs_are_direct_columns (lambda (query outer_schemas)
+		(reduce (subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
 			(and all_ok (_outer_ref_is_direct_column outer_schemas ref)))
 			true)))
-	(define _try_unnest_scalar_subselect (lambda (subquery outer_schemas) (match subquery
+	/* unnest_scalar_subselect: decorrelate a scalar subselect into the flat IR.
+	Per Neumann, EVERY subquery can be unnested. Correlated subselects become
+	LEFT JOINs; uncorrelated subselects become cross-joins with a 1-row
+	aggregate table. The result is a substitution expression (get_column ref)
+	that replaces the original inner_select marker in the field list. */
+	(define unnest_scalar_subselect (lambda (subquery outer_schemas) (match subquery
 		'(_ _ flds _ g h o l off) (begin
-			(define _value_expr (match flds
+			(define value_expr (match flds
 				(cons _ (cons v _)) v
 				nil))
-			(if (and (_subquery_has_outer_refs subquery outer_schemas)
-				(_subquery_outer_refs_are_direct_columns subquery outer_schemas)
-				(not (_contains_inner_select_marker subquery))
-				(not (nil? _value_expr))
-				(equal? (extract_aggregates _value_expr) '())
+			(define has_outer_refs (subquery_has_outer_refs subquery outer_schemas))
+			(define outer_refs_are_direct (if has_outer_refs
+				(subquery_outer_refs_are_direct_columns subquery outer_schemas) true))
+			(define has_inner_markers (contains_inner_select_marker subquery))
+			(define has_aggregates (not (equal? (extract_aggregates (coalesceNil value_expr true)) '())))
+			/* Aggregate subselects always produce 1 row — LIMIT 1 is redundant */
+			(define effective_limit (if (and has_aggregates (or (nil? l) (equal? l 1))) nil l))
+			(define effective_offset (if (and has_aggregates (or (nil? off) (equal? off 0))) nil off))
+			/* Path A: non-aggregate, direct outer refs, no nested markers —
+			full Neumann decorrelation to LEFT JOIN via unnest_subselect */
+			(if (and has_outer_refs outer_refs_are_direct
+				(not has_inner_markers) (not (nil? value_expr))
+				(not has_aggregates)
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				(or (nil? l) (and (equal? l 1) (or (nil? o) (equal? o '()))))
-				(or (nil? off) (equal? off 0)))
+				(or (nil? effective_limit) (and (equal? effective_limit 1) (or (nil? o) (equal? o '()))))
+				(or (nil? effective_offset) (equal? effective_offset 0)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
-						/* Scalar subselect unnesting yields null-preserving LEFT JOIN helper
-						tables for SELECT/expr projection. Keep them separate from COUNT/IN/EXISTS
-						helper tables so their joinexpr stays attached to the table entry and is
-						not re-applied globally as a filter later. */
 						(sq_cache "scalar_tables" (merge tbls (coalesceNil (sq_cache "scalar_tables") '())))
 						subst)
+					/* unnest_subselect returned nil — fall through to aggregate path */
 					nil)
-				nil))
-		nil)))
-	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
+				/* Path B: aggregate or uncorrelated — untangle the subquery and
+				inject its tables + group stages into the outer query's flat IR.
+				build_queryplan will turn aggregates into keytable + createcolumn
+				that gets cached across queries and session-variant aware. */
+				(begin
+					(match (apply untangle_query (merge subquery (list outer_schemas)))
+						'(schema2 tables2 fields2 condition2 groups2 schemas2 rfcol2 init2)
+						(begin
+							(if (and (not (nil? init2)) (not (equal? init2 '())))
+								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) init2)))
+							(define groups2 (coalesceNil groups2 '()))
+							/* inject GROUP BY (1) for aggregates without explicit GROUP */
+							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
+								(list (make_group_stage nil nil nil nil nil nil nil))
+								groups2))
+							/* generate unique alias for this subquery */
+							(define sq_idx (coalesceNil (sq_cache "idx") 0))
+							(sq_cache "idx" (+ sq_idx 1))
+							(define sq_alias (concat "sq" sq_idx))
+							/* extract the value column name */
+							(define value_key (car (extract_assoc fields2 (lambda (k v) k))))
+							/* inject the inner tables into the outer query's table list.
+							For uncorrelated: isOuter=false (cross-join).
+							Prefix inner aliases to avoid collision. */
+							(define prefixed_tables (map tables2 (lambda (td) (match td
+								'(alias s t io je) (list (concat sq_alias "\0" alias) s t io je)
+								td))))
+							(define prefixed_aliases (map prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
+							(sq_cache "tables" (merge prefixed_tables (coalesceNil (sq_cache "tables") '())))
+							/* inject schemas with prefixed aliases */
+							(define prefixed_schemas (extract_assoc schemas2 (lambda (k v)
+								(list (concat sq_alias "\0" k) v))))
+							(sq_cache "schemas" (merge prefixed_schemas (coalesceNil (sq_cache "schemas") '())))
+							/* inject GROUP BY (1) for aggregates. Partition-aliases scope to this subquery. */
+							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
+								(list (make_group_stage '(1) nil nil nil nil prefixed_aliases nil))
+								groups2))
+							(if (not (equal? groups2 '()))
+								(sq_cache "groups" (merge
+									(map groups2 (lambda (stage)
+										(make_group_stage (stage_group_cols stage) (stage_having_expr stage) (stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage) prefixed_aliases (stage_init_code stage))))
+									(coalesceNil (sq_cache "groups") '()))))
+							/* prefix the value field expression's column references */
+							(define value_expr (car (extract_assoc fields2 (lambda (k v) v))))
+							(define prefix_expr (lambda (expr) (match expr
+								'((symbol get_column) alias ti col ci) (if (nil? alias) expr
+									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
+								'((quote get_column) alias ti col ci) (if (nil? alias) expr
+									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
+								(cons sym args) (cons (prefix_expr sym) (map args prefix_expr))
+								expr)))
+							/* for aggregates: the value is the aggregate expression itself,
+							build_queryplan will create the keytable + createcolumn.
+							Return the prefixed value expression directly. */
+							(prefix_expr value_expr))
+						(error "unnest_scalar_subselect: untangle failed")))))
+		(error "unnest_scalar_subselect: invalid subquery shape"))))
+	(define unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
 		(define _resolve_outer (lambda (expr) (match expr
 			'((symbol get_column) nil ti col ci) (begin
 				(define _resolved (reduce_assoc outer_schemas (lambda (a alias cols)
@@ -3353,7 +3418,7 @@ seeing the correctly prefixed outer alias. */
 				(define _first_field (if (nil? target_expr) nil
 					(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons _ (cons v _)) v nil) nil)))
 				(define target_expr resolved_target_expr)
-				(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
+				(if (and (nil? target_expr) (not (subquery_has_outer_refs subquery outer_schemas)))
 					(begin
 						(define _count_sq (match subquery
 							'(s t f c g h o l off) (list s t
@@ -3423,7 +3488,7 @@ seeing the correctly prefixed outer alias. */
 	/* replace_inner_selects: walks an expression tree and replaces inner_select markers
 	with their Neumann-decorrelated equivalents. Scalar subselects go through
 	unnest_subselect directly; IN/EXISTS/NOT IN/NOT EXISTS are first rewritten to
-	COUNT(*) aggregates via _unnest_count_subselect, then decorrelated via Path A.
+	COUNT(*) aggregates via unnest_count_subselect, then decorrelated via Path A.
 	Returns the rewritten expression with subselects replaced by get_column refs
 	or comparison expressions on the unnested aggregate columns. */
 	(define replace_inner_selects (lambda (expr outer_schemas) (match expr
@@ -3495,7 +3560,7 @@ seeing the correctly prefixed outer alias. */
 									(cons target_expr (cons subquery '()))
 									(coalesce
 										(union_in_expr target_expr subquery true)
-										(_unnest_count_subselect subquery outer_schemas target_expr (quote equal?))
+										(unnest_count_subselect subquery outer_schemas target_expr (quote equal?))
 										expr)
 									_ nil)
 								(if (equal?? inner_kind (quote inner_select_exists))
@@ -3506,7 +3571,7 @@ seeing the correctly prefixed outer alias. */
 											(if (expr_uses_session_state subquery)
 												(list (quote not) (build_exists_subselect subquery outer_schemas))
 												(coalesce
-													(_unnest_count_subselect subquery outer_schemas nil (quote equal?))
+													(unnest_count_subselect subquery outer_schemas nil (quote equal?))
 													(list (quote not) (build_exists_subselect subquery outer_schemas)))))
 										_ nil)
 									nil)))
@@ -3516,15 +3581,13 @@ seeing the correctly prefixed outer alias. */
 			(if (nil? not_expr)
 				(match kind
 					(quote inner_select) (match args
-						(cons subquery '()) (coalesce
-							(_try_unnest_scalar_subselect subquery outer_schemas)
-							(build_scalar_subselect subquery outer_schemas))
+						(cons subquery '()) (unnest_scalar_subselect subquery outer_schemas)
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_in) (match args
 						(cons target_expr (cons subquery '()))
 						(coalesce
 							(union_in_expr target_expr subquery false)
-							(_unnest_count_subselect subquery outer_schemas target_expr (quote >))
+							(unnest_count_subselect subquery outer_schemas target_expr (quote >))
 							expr)
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_exists) (match args
@@ -3534,7 +3597,7 @@ seeing the correctly prefixed outer alias. */
 							(if (expr_uses_session_state subquery)
 								(build_exists_subselect subquery outer_schemas)
 								(coalesce
-									(_unnest_count_subselect subquery outer_schemas nil (quote >))
+									(unnest_count_subselect subquery outer_schemas nil (quote >))
 									(build_exists_subselect subquery outer_schemas))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
@@ -6706,8 +6769,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			)
 		)
 	) (optimize (begin
-			/* grouping has been removed; now to the real data: */
-			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '()))) (error "non-group stage must be last"))
+			/* Grouping for the current stage is done. Remaining group stages are
+			either scoped (partition-aliases set) — those belong to independent
+			unnested aggregate subselects and will be processed when their
+			keytable-backed aggregate column is read — or unscoped, which is
+			an error (multiple unscoped GROUP stages would be ambiguous). */
+			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '())))
+				(if (reduce rest_groups (lambda (ok s) (and ok (not (nil? (stage_partition_aliases s))))) true)
+					nil /* all remaining stages are scoped — OK, they are independent subquery aggregates */
+					(error "non-group stage must be last")))
 			(if has_window (begin
 				/* ========= Window function scan path (LAG/LEAD) ========= */
 				/* Case 8: different OVER clauses */
