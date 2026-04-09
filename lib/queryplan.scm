@@ -1462,9 +1462,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 						'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
 						'()))))
 				'()))
-			/* create at compile time (needed for recursive build_queryplan) */
-			(createtable schema keytable_name kt_cols query_temp_table_options true)
-			(partitiontable schema keytable_name kt_partition)
+			/* Keytable creation is runtime-only via init_code below.
+			compile-time createtable was removed because it deadlocks
+			when multiple scoped stages create keytables recursively. */
 			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
 			(define kt_cols_code (cons 'list
 				(cons
@@ -1483,8 +1483,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					nil)
 				(list 'touch_keytable schema keytable_name)
 				'__kt_created))
-			/* return (name init_code nil) — third element nil means no FK reuse */
-			(list keytable_name init_code nil)))
+			/* return (name init_code nil schema_def) — 4th element = keytable schema for planner */
+			(define kt_schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
+			(list keytable_name init_code nil kt_schema_def)))
 )))
 
 /* build_agg_window_plan: generates the full plan for aggregate window functions (SUM/COUNT/MIN/MAX OVER).
@@ -5212,6 +5213,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define keytable_init (car (cdr kt_result)))
 				(define fk_pk_col (car (cdr (cdr kt_result))))
 				(define is_fk_reuse (not (nil? fk_pk_col)))
+				/* register keytable schema so downstream planner can resolve columns
+				without needing the table to exist in storage at compile time */
+				(define kt_schema_def (if (>= (count kt_result) 4) (nth kt_result 3) nil))
+				(if (not (nil? kt_schema_def))
+					(set schemas (merge schemas (list grouptbl kt_schema_def))))
 
 				/* make_collect: builds collect plan with optional WHERE filter
 				with_filter=true: apply WHERE condition (for DEDUP)
