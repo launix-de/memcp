@@ -1310,11 +1310,12 @@ get_column markers and may no longer run schema-based repair heuristics. */
 			(stage_preserve_cache_meta stage (make_partition_stage spa
 				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
-			(stage_preserve_cache_meta stage (make_group_stage
+			(stage_preserve_cache_meta stage (make_group_stage_with_condition
 				(map sg fin)
 				(fin sh)
 				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
-				sl soff spa (stage_init_code stage)))))
+				sl soff spa (stage_init_code stage)
+				(begin (define sc (stage_condition stage)) (if (nil? sc) nil (fin sc)))))))
 )))
 (define finalize_logical_stage (lambda (stage all_schemas rewrite_expr enforce_contract)
 	(finalize_logical_stage_scoped stage all_schemas all_schemas rewrite_expr enforce_contract)
@@ -1336,11 +1337,12 @@ get_column markers and may no longer run schema-based repair heuristics. */
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
 			/* group stage (possibly scoped with aliases) */
-			(stage_preserve_cache_meta stage (make_group_stage
+			(stage_preserve_cache_meta stage (make_group_stage_with_condition
 				(map sg canon)
 				(canon sh)
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-				sl soff spa (stage_init_code stage)))))
+				sl soff spa (stage_init_code stage)
+				(begin (define sc (stage_condition stage)) (if (nil? sc) nil (canon sc)))))))
 )))
 
 (import "sql-metadata.scm")
@@ -1354,6 +1356,10 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(if (list? aliases)
 			aliases
 			(list aliases)))))
+/* stage-condition: optional WHERE condition scoped to this stage's tables.
+For scoped stages from Neumann unnesting, carries the inner subquery's WHERE
+so build_queryplan applies it as keytable scan filter without polluting the
+global condition (which would cause cross-stage condition leakage). */
 (define make_group_stage (lambda (group having order limit offset aliases init)
 	(list
 		(cons (quote group-cols) (coalesce group '()))
@@ -1365,6 +1371,21 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(list (quote dedup) false)
 		(list (quote partition-aliases) (normalize_stage_aliases aliases))
 		(list (quote init) init)
+		(list (quote stage-condition) nil)
+	)
+))
+(define make_group_stage_with_condition (lambda (group having order limit offset aliases init cond)
+	(list
+		(cons (quote group-cols) (coalesce group '()))
+		(list (quote having) having)
+		(list (quote order) (coalesce order '()))
+		(list (quote limit-partition-cols) 0)
+		(list (quote limit) limit)
+		(list (quote offset) offset)
+		(list (quote dedup) false)
+		(list (quote partition-aliases) (normalize_stage_aliases aliases))
+		(list (quote init) init)
+		(list (quote stage-condition) cond)
 	)
 ))
 (define make_partition_stage (lambda (aliases order partition_cols limit offset init)
@@ -1441,6 +1462,12 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 (define stage_init_code (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
 		(cons (quote init) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_condition (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote stage-condition) rest) (if (nil? rest) nil (car rest))
 		_ nil
 	) acc)
 ) nil)))
@@ -3237,12 +3264,6 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 							(sq_cache "schemas" (merge
 								(extract_assoc schemas2 (lambda (k v) (list (concat sq_alias "\0" k) v)))
 								(coalesceNil (sq_cache "schemas") '())))
-							/* register scoped group stages with partition-aliases */
-							(define scoped_stages (map groups2 (lambda (stage)
-								(make_group_stage (stage_group_cols stage) (stage_having_expr stage)
-									(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
-									prefixed_aliases (stage_init_code stage)))))
-							(sq_cache "groups" (merge scoped_stages (coalesceNil (sq_cache "groups") '())))
 							/* prefix value expression column refs */
 							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))
 							(define prefix_expr (lambda (expr) (match expr
@@ -3252,10 +3273,18 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
 								(cons sym args) (cons (prefix_expr sym) (map args prefix_expr))
 								expr)))
-							/* inject subquery WHERE condition into outer query */
-							(if (and (not (nil? condition2)) (not (equal? condition2 true)))
-								(sq_cache "condition" (cons (prefix_expr condition2)
-									(coalesceNil (sq_cache "condition") '()))))
+							/* prefix the inner WHERE condition and attach it to the scoped stage,
+							NOT to the outer global condition. This prevents cross-stage condition
+							leakage when multiple independent subselects inject their own stages. */
+							(define prefixed_condition (if (and (not (nil? condition2)) (not (equal? condition2 true)))
+								(prefix_expr condition2)
+								nil))
+							/* register scoped group stages with partition-aliases + stage-condition */
+							(define scoped_stages (map groups2 (lambda (stage)
+								(make_group_stage_with_condition (stage_group_cols stage) (stage_having_expr stage)
+									(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
+									prefixed_aliases (stage_init_code stage) prefixed_condition))))
+							(sq_cache "groups" (merge scoped_stages (coalesceNil (sq_cache "groups") '())))
 							/* Bind aggregates to their scoped table via a 4th data element.
 							(aggregate 1 + 0) → (aggregate 1 + 0 "sq0\0pb_doc")
 							The string scope-tag is pure data (not compiled by the optimizer).
@@ -4015,10 +4044,9 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 	row-domain and their joinexpr must participate in global filtering. */
 	(define _sq_jes (filter (map (merge _sq_tbls sq_scalar_condition_tbls) (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 	(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
-	/* integrate WHERE conditions from aggregate/uncorrelated scalar subselects (Path B) */
-	(define _sq_conds (coalesceNil (sq_cache "condition") '()))
-	(if (not (equal? _sq_conds '()))
-		(set condition (cons (quote and) (cons condition _sq_conds))))
+	/* Path B conditions are now carried as stage-condition on each scoped
+	group stage. build_queryplan merges them when the stage is processed.
+	No global condition injection needed here. */
 	/* integrate partition stages from non-aggregate LIMIT unnesting */
 	(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
 	(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
@@ -4582,6 +4610,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(set has_window false)))
 
 	(if stage_group (begin
+		/* merge stage-condition from scoped stages into the local condition.
+		This injects the inner subquery WHERE exactly when the owning stage
+		is processed, preventing cross-stage condition leakage. */
+		(define scoped_cond (stage_condition stage))
+		(if (and (not (nil? scoped_cond)) (not (equal? scoped_cond true)))
+			(set condition (if (or (nil? condition) (equal? condition true))
+				scoped_cond
+				(list (quote and) condition scoped_cond))))
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		/* Design contract:
 		Keep get_column / aggregate / window sentinels logical until the final scan
@@ -5313,14 +5349,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(cons (quote and) _dedup_terms))))
 						nil))
 					(define transformed_rest_groups (map rest_groups (lambda (s)
-						(stage_preserve_cache_meta s (make_group_stage
+						(stage_preserve_cache_meta s (make_group_stage_with_condition
 							(map (stage_group_cols s) _dedup_resolve)
 							(_dedup_resolve (stage_having_expr s))
 							(map (coalesce (stage_order_list s) '()) (lambda (o) (match o '(col dir) (list (_dedup_resolve col) dir))))
 							(stage_limit_val s)
 							(stage_offset_val s)
 							(stage_partition_aliases s)
-							(stage_init_code s)))
+							(stage_init_code s)
+							(begin (define sc (stage_condition s)) (if (nil? sc) nil (_dedup_resolve sc)))))
 					)))
 					(define grouped_plan (build_queryplan schema
 						(if _dedup_kt_is_outer
