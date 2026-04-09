@@ -1426,6 +1426,11 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 						(define parent_tbl (car fk_info))
 						(define parent_col (car (cdr fk_info)))
 						(define parent_schema (show schema parent_tbl))
+						/* FK-reuse createcolumn on parent: safe at compile time (parent is a physical table) */
+						(if (not (equal? key_name parent_col))
+							(createcolumn schema parent_tbl key_name "any" '() '("temp" true)
+								(list parent_col)
+								(eval (list 'lambda (list (symbol parent_col)) (symbol parent_col)))))
 						(define fk_init (if (equal? key_name parent_col) nil
 							(list 'createcolumn schema parent_tbl key_name "any"
 								(list 'quote '())
