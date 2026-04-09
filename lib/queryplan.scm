@@ -6804,8 +6804,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(define orc_reduceinit (if has_partition (list inner_reduceinit nil) inner_reduceinit))
 							/* unique temp column name */
 							(define orc_col_name (concat ".orc_" wf_fn "_" tbl))
-							/* compile time: add bare column so the scan plan can reference it */
-							(createcolumn schema tbl orc_col_name "any" '() '("temp" true))
+							/* register column in planner schema so downstream plan can reference it
+							without the column existing in storage at compile time */
+							(planned_materialized_fields tbl (list (list "Field" orc_col_name "Type" "any")))
 							/* replace window_func references with ORC column read */
 							(define replace_wf (lambda (expr) (match expr
 								(cons (symbol window_func) _) '((quote get_column) (eval tblvar) false (eval orc_col_name) false)
