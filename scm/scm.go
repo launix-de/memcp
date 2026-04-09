@@ -511,7 +511,17 @@ restart:
 			}
 			return ApplyPromise(procedure, args)
 		default:
-			panic("Unknown function: " + list[0].String())
+			// Show full call expression for debugging
+			callExpr := "("
+			for i, el := range list {
+				if i > 0 { callExpr += " " }
+				s, _ := el.AppendString(nil)
+				if len(s) > 50 { s = s[:50] + "..." }
+				callExpr += s
+				if i > 3 { callExpr += " ..."; break }
+			}
+			callExpr += ")"
+			panic("Unknown function: " + list[0].String() + " in expression: " + callExpr)
 		}
 	default:
 		panic("Unknown expression type - EVAL " + expression.String())

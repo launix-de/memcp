@@ -3572,7 +3572,7 @@ seeing the correctly prefixed outer alias. */
 			(define _existing (if (has_assoc? acc tv) (acc tv) nil))
 			(define _resolved (coalesce _existing (materialized_source_schema tschema ttbl tv acc)))
 			(if (nil? _resolved) acc
-				(merge acc (list tv _resolved))))
+				(begin (acc tv _resolved) acc)))
 		acc)) schemas))
 	/* Design contract: logical get_column/aggregate/window sentinels should stay
 	as long as possible and join semantics must stay attached to their stage.
