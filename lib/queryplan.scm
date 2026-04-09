@@ -3269,8 +3269,8 @@ seeing the correctly prefixed outer alias. */
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				(nil? l)
-				(nil? off))
+				(or (nil? l) (and (equal? l 1) (or (nil? o) (equal? o '()))))
+				(or (nil? off) (equal? off 0)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
 						/* Scalar subselect unnesting yields null-preserving LEFT JOIN helper
@@ -3739,17 +3739,22 @@ seeing the correctly prefixed outer alias. */
 					/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 					/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
 					(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
+					/* Check if any NON-partition group stage requires materialization.
+					Partition stages (from Neumann LIMIT unnesting) are handled by
+					build_queryplan's partition separation and do not need materialization. */
 					(define unsupported_groups (if groups2_present
 						(reduce groups2 (lambda (acc stage)
-							(or acc
-								(begin
-									(define g (stage_group_cols stage))
-									(and (not (nil? g)) (not (equal? g '())))
-								)
-								(not (nil? (stage_having_expr stage)))
-								(not (nil? (stage_limit_val stage)))
-								(not (nil? (stage_offset_val stage)))
-							)
+							(if (not (nil? (stage_partition_aliases stage)))
+								acc /* skip partition stages */
+								(or acc
+									(begin
+										(define g (stage_group_cols stage))
+										(and (not (nil? g)) (not (equal? g '())))
+									)
+									(not (nil? (stage_having_expr stage)))
+									(not (nil? (stage_limit_val stage)))
+									(not (nil? (stage_offset_val stage)))
+								))
 						) false)
 						false))
 					/* Nested derived-table flattening must not descend into precomputed runtime blocks
