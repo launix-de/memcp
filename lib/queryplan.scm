@@ -4121,10 +4121,28 @@ second table carries strictly more local WHERE predicates than the first. */
 		(list '() '()))
 		'(out seg) (merge out (jqr_reorder_inner_segment seg condition))
 		tables_))))
-(define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
-	(list schema
-		(if (jqr_has_order_sensitive_stage groups) tables (jqr_reorder_segments tables condition))
-		fields condition groups schemas replace_find_column)))
+(define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column) (begin
+		(define jqr_constant_scalar_aliases (reduce (coalesceNil groups '()) (lambda (acc stage)
+			(begin
+				(define _spa (stage_partition_aliases stage))
+				(define _spc (coalesceNil (stage_limit_partition_cols stage) 0))
+				(if (or (nil? _spa) (not (equal? _spc 0)))
+					acc
+					(merge acc _spa))))
+			'()))
+		(define jqr_constant_scalar_tables (filter tables (lambda (td) (match td
+			'(alias _ _ _ _) (has? jqr_constant_scalar_aliases alias)
+			false))))
+		(define jqr_regular_tables (filter tables (lambda (td) (match td
+			'(alias _ _ _ _) (not (has? jqr_constant_scalar_aliases alias))
+			true))))
+		(list schema
+			(merge
+				jqr_constant_scalar_tables
+				(if (jqr_has_order_sensitive_stage groups)
+					jqr_regular_tables
+					(jqr_reorder_segments jqr_regular_tables condition)))
+			fields condition groups schemas replace_find_column))))
 
 (define build_queryplan_term (lambda (query) (begin
 	(define union_parts (query_union_all_parts query))
