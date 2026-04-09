@@ -1597,6 +1597,8 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
 	(define physical_tbl (string? tbl))
 	(define keytable_source_name (planner-temp-source-name tbl tblvar))
+	(if (equal? keytable_source_name "")
+		(error (concat "make_keytable: empty source name for tbl=" tbl " tblvar=" tblvar)))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
 	reuse the parent (referenced) table instead of creating a temp keytable.
 	The rest of the grouped pipeline must still see the normal logical key name,
