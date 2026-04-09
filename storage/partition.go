@@ -782,16 +782,20 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			}
 			// Shift delta btree indexes
 			for _, index := range s.Indexes {
-				if index.deltaBtree != nil {
+				if len(index.sessionKeys) > 0 {
+					index.markVariantsDirty()
+					continue
+				}
+				if index.baseState.deltaBtree != nil {
 					// Rebuild with shifted recids
 					items := make([]indexPair, 0)
-					index.deltaBtree.Ascend(func(item indexPair) bool {
+					index.baseState.deltaBtree.Ascend(func(item indexPair) bool {
 						items = append(items, indexPair{item.itemid + int(mainN), item.data})
 						return true
 					})
-					index.deltaBtree.Clear(false)
+					index.baseState.deltaBtree.Clear(false)
 					for _, item := range items {
-						index.deltaBtree.ReplaceOrInsert(item)
+						index.baseState.deltaBtree.ReplaceOrInsert(item)
 					}
 				}
 			}

@@ -912,7 +912,7 @@ func Init(en scm.Env) {
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for reduce", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, emit null row when no hits", Optional: true},
 			},
-			Return: &scm.TypeDescriptor{Kind: "any"},
+			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrderMulti,
 		},
 	})
@@ -2334,7 +2334,7 @@ func Init(en scm.Env) {
 						for _, ix := range s.Indexes {
 							idxSlice = append(idxSlice, scm.NewSlice([]scm.Scmer{
 								scm.NewString("cols"), scm.NewString(ix.String()),
-								scm.NewString("active"), scm.NewBool(ix.active),
+								scm.NewString("active"), scm.NewBool(ix.baseState.active),
 								scm.NewString("native"), scm.NewBool(ix.Native),
 								scm.NewString("savings"), scm.NewFloat(ix.Savings),
 								scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),

@@ -112,7 +112,6 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	analyzeStart := time.Now()
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
-	boundaries = dropSessionVariantBoundaries(t, boundaries)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	if Settings.ScanDebugging {
@@ -356,7 +355,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	var buf [1024]uint32
 	hadValue := false
 
-	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
 		// filter in-place: overwrite batch with passing IDs
 		outN := 0
 		for _, idx := range batch {
@@ -593,7 +592,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			activeLower, activeUpperLast = indexFromBoundaries(activeBoundaries)
 		}
 
-		t.iterateIndex(activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
 			if ss != nil && ss.IsKilled() {
 				panic("query killed")
 			}

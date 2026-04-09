@@ -405,7 +405,6 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// Boundary analysis per table
 		analyzeStart := time.Now()
 		bounds := extractBoundaries(spec.conditionCols, spec.condition)
-		bounds = dropSessionVariantBoundaries(t, bounds)
 		reorderByFrequency(bounds, t)
 		bounds = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		lower, upperLast := indexFromBoundaries(bounds)
@@ -846,7 +845,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		resultCap := 1024
 		result.items = make([]uint32, resultCap)
 		resultN := 0
-		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
 			// filter in-place: overwrite batch with passing IDs
 			outN := 0
 			for _, idx := range batch {
