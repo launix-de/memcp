@@ -1583,9 +1583,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 						'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
 						'()))))
 				'()))
-			/* create at compile time (needed for recursive build_queryplan) */
-			(createtable schema keytable_name kt_cols query_temp_table_options true)
-			(partitiontable schema keytable_name kt_partition)
+			/* Keytable creation happens ONLY at runtime via init_code below.
+			The query plan cache means compile-time createtable would only run on
+			first parse, leaving the keytable vulnerable to cache eviction before
+			the next (cached) execution. Runtime init is idempotent and fast. */
 			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
 			(define kt_cols_code (cons 'list
 				(cons
