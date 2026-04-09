@@ -2764,10 +2764,16 @@ seeing the correctly prefixed outer alias. */
 								(sq_cache "condition" (merge
 									(map corr_parts prefix_expr)
 									(coalesceNil (sq_cache "condition") '()))))
-							/* local filter → stage-condition */
+							/* local filter → stage-condition (for aggregate stages) or
+							global condition (for non-aggregate joins). Per Neumann: uncorrelated
+							subselects become regular joins — their WHERE is a join filter. */
 							(define local_condition (if (equal? local_parts '()) nil
 								(prefix_expr (if (equal? 1 (count local_parts)) (car local_parts)
 									(cons (quote and) local_parts)))))
+							/* non-aggregate without stages: inject condition globally as join filter */
+							(if (and (not has_aggregates) (not (nil? local_condition)))
+								(sq_cache "condition" (cons local_condition
+									(coalesceNil (sq_cache "condition") '()))))
 							/* for correlated aggregates: extract GROUP BY domain from correlation */
 							(define correlation_keys (filter (map cond_parts (lambda (part) (match part
 								'((symbol equal??) left right)
