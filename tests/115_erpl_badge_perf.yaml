@@ -1,0 +1,89 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Regression: badge/count queries with correlated session subselects
+# must complete in reasonable time (<500ms).
+
+metadata:
+  version: "1.0"
+  description: "Badge count queries with session-filtered correlated subselects"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS bp_doc"
+  - sql: "DROP TABLE IF EXISTS bp_doctype"
+  - sql: "DROP TABLE IF EXISTS bp_user"
+  - sql: "DROP TABLE IF EXISTS bp_userconfig"
+  - sql: |
+      CREATE TABLE bp_user (ID INT PRIMARY KEY, vorname VARCHAR(50), nachname VARCHAR(50), superadmin INT DEFAULT 0, archive INT DEFAULT 0)
+  - sql: |
+      CREATE TABLE bp_userconfig (ID INT PRIMARY KEY, default_doctype INT)
+  - sql: |
+      CREATE TABLE bp_doctype (ID INT PRIMARY KEY, name VARCHAR(50), hasReminder INT DEFAULT 0, capabilityRead INT)
+  - sql: |
+      CREATE TABLE bp_doc (ID INT PRIMARY KEY AUTO_INCREMENT, type INT, archive INT DEFAULT 0)
+  - sql: |
+      INSERT INTO bp_user VALUES (1, 'Alice', 'Admin', 0, 0)
+  - sql: |
+      INSERT INTO bp_userconfig VALUES (1, 1)
+  - sql: |
+      INSERT INTO bp_doctype VALUES (1, 'Invoice', 1, NULL), (2, 'Letter', 0, NULL)
+  - sql: |
+      INSERT INTO bp_doc (type, archive) VALUES (1, 0), (1, 0), (1, 1), (2, 0), (2, 0)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS bp_doc"
+  - sql: "DROP TABLE IF EXISTS bp_doctype"
+  - sql: "DROP TABLE IF EXISTS bp_userconfig"
+  - sql: "DROP TABLE IF EXISTS bp_user"
+
+test_cases:
+  - name: "set session"
+    session_id: "bp_sess"
+    sql: "SET @fop_user = 1"
+    expect:
+      rows_affected: 0
+
+  - name: "badge count with correlated session subselect"
+    session_id: "bp_sess"
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM bp_doc d
+         WHERE TRUE
+           AND (((SELECT default_doctype FROM bp_userconfig WHERE ID = 1 LIMIT 1) IS NULL AND d.type IS NULL)
+                OR d.type = (SELECT default_doctype FROM bp_userconfig WHERE ID = 1 LIMIT 1))
+           AND NOT d.archive
+         LIMIT 1) AS badgeDoc
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          badgeDoc: 2
+
+  - name: "docType list with permission subselects"
+    session_id: "bp_sess"
+    sql: |
+      SELECT dt.ID, dt.name,
+        (SELECT COUNT(*) FROM bp_doc WHERE type = dt.ID AND NOT archive) AS doc_count
+      FROM bp_doctype dt
+      WHERE dt.hasReminder = 1
+      ORDER BY dt.name
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "Invoice"
+          doc_count: 2
+
+  - name: "badge count warm (second run, must be fast)"
+    session_id: "bp_sess"
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM bp_doc d
+         WHERE TRUE
+           AND (((SELECT default_doctype FROM bp_userconfig WHERE ID = 1 LIMIT 1) IS NULL AND d.type IS NULL)
+                OR d.type = (SELECT default_doctype FROM bp_userconfig WHERE ID = 1 LIMIT 1))
+           AND NOT d.archive
+         LIMIT 1) AS badgeDoc
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          badgeDoc: 2
