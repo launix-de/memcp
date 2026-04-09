@@ -1477,7 +1477,12 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 				(list 'if (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true)
 					(list 'partitiontable schema keytable_name kt_partition_code)
 					nil)
-				(list 'touch_keytable schema keytable_name)))
+				(list 'touch_keytable schema keytable_name)
+				/* returns true when collect + trigger deploy is needed:
+				   createtable=true (new) OR table_empty (restart recovery) */
+				(list 'or
+					(list 'not (list 'has? (list 'show schema) keytable_name))
+					(list 'table_empty? schema keytable_name))))
 			(define kt_schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 			(list keytable_name kt_schema_def init_code nil)))
 )))
