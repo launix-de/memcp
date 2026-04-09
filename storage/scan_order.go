@@ -238,7 +238,7 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
-	ss := scm.GetCurrentSessionState()
+	ss := SessionStateFromTx(currentTx)
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
@@ -613,7 +613,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	result = new(shardqueue)
 	result.shard = t
 	if ss == nil {
-		ss = scm.GetCurrentSessionState()
+		ss = SessionStateFromTx(currentTx)
 	}
 	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
 		if len(args) < 2 {

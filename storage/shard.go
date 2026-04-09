@@ -1350,7 +1350,7 @@ type ShardMapReducer struct {
 func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) *ShardMapReducer {
 	mr := &ShardMapReducer{
 		shard:            t,
-		sessionState:     scm.GetCurrentSessionState(),
+		sessionState:     SessionStateFromTx(currentTx),
 		currentTx:        currentTx,
 		acidMode:         currentTx != nil && currentTx.Mode == TxACID,
 		mainGetters:      make([]mapArgGetter, len(cols)),
