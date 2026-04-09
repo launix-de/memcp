@@ -1,0 +1,92 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Tests that GROUP BY keytable caches are actually REUSED across queries.
+# The second execution must NOT re-collect (keytable already populated).
+# Validates via EXPLAIN that createcolumn appears (keytable path) and
+# by checking that repeated queries return correct results.
+
+metadata:
+  version: "1.0"
+  description: "Keytable cache reuse validation"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS kcr_data"
+  - sql: |
+      CREATE TABLE kcr_data (id INT PRIMARY KEY AUTO_INCREMENT, category INT, val INT)
+  - sql: |
+      INSERT INTO kcr_data (category, val) VALUES
+        (1, 10), (1, 20), (2, 30), (2, 40), (3, 50)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS kcr_data"
+
+test_cases:
+  - name: "GROUP BY cold run (creates keytable)"
+    sql: |
+      SELECT category, COUNT(*) AS cnt, SUM(val) AS total
+      FROM kcr_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 2
+          total: 30
+        - category: 2
+          cnt: 2
+          total: 70
+        - category: 3
+          cnt: 1
+          total: 50
+
+  - name: "GROUP BY warm run (must reuse keytable — same result)"
+    sql: |
+      SELECT category, COUNT(*) AS cnt, SUM(val) AS total
+      FROM kcr_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 2
+          total: 30
+        - category: 2
+          cnt: 2
+          total: 70
+        - category: 3
+          cnt: 1
+          total: 50
+
+  - name: "EXPLAIN shows createcolumn (keytable path, not inline scan)"
+    sql: |
+      EXPLAIN SELECT category, COUNT(*) AS cnt
+      FROM kcr_data
+      GROUP BY category
+    expect:
+      rows: 1
+    validate_contains: "createcolumn"
+
+  - name: "EXPLAIN shows keytable name starting with dot"
+    sql: |
+      EXPLAIN SELECT category, COUNT(*) AS cnt
+      FROM kcr_data
+      GROUP BY category
+    expect:
+      rows: 1
+    validate_contains: ".kcr_data:"
+
+  - name: "uncorrelated scalar COUNT subselect uses keytable"
+    sql: |
+      EXPLAIN SELECT (SELECT COUNT(*) FROM kcr_data WHERE category = 1) AS cnt
+    expect:
+      rows: 1
+    validate_contains: "createcolumn"
+
+  - name: "uncorrelated scalar COUNT returns correct value"
+    sql: |
+      SELECT (SELECT COUNT(*) FROM kcr_data WHERE category = 1) AS cnt
+    expect:
+      rows: 1
+      data:
+        - cnt: 2

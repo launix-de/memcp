@@ -3067,7 +3067,7 @@ seeing the correctly prefixed outer alias. */
 		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
 			(and all_ok (_outer_ref_is_direct_column outer_schemas ref)))
 			true)))
-	(define _try_unnest_scalar_subselect (lambda (subquery outer_schemas) (match subquery
+	(define unnest_scalar_subselect (lambda (subquery outer_schemas) (match subquery
 		'(_ _ flds _ g h o l off) (begin
 			(define _value_expr (match flds
 				(cons _ (cons v _)) v
@@ -3314,7 +3314,7 @@ seeing the correctly prefixed outer alias. */
 				(match kind
 					(quote inner_select) (match args
 						(cons subquery '()) (coalesce
-							(_try_unnest_scalar_subselect subquery outer_schemas)
+							(unnest_scalar_subselect subquery outer_schemas)
 							(build_scalar_subselect subquery outer_schemas))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
 					(quote inner_select_in) (match args

@@ -1,0 +1,85 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Badge queries: no-FROM SELECT with multiple independent scalar subselects.
+# Must use parallel_map for concurrent evaluation.
+# Performance: second run must be significantly faster than sequential.
+
+metadata:
+  version: "1.0"
+  description: "Parallel badge query with independent scalar subselects"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS pb_doc"
+  - sql: "DROP TABLE IF EXISTS pb_ticket"
+  - sql: "DROP TABLE IF EXISTS pb_mail"
+  - sql: |
+      CREATE TABLE pb_doc (ID INT PRIMARY KEY AUTO_INCREMENT, type INT, archive INT DEFAULT 0)
+  - sql: |
+      CREATE TABLE pb_ticket (ID INT PRIMARY KEY AUTO_INCREMENT, state INT, assigned INT)
+  - sql: |
+      CREATE TABLE pb_mail (ID INT PRIMARY KEY AUTO_INCREMENT, unread INT DEFAULT 1, box INT)
+  - sql: |
+      INSERT INTO pb_doc (type, archive) VALUES (1,0),(1,0),(2,0),(1,1),(2,1)
+  - sql: |
+      INSERT INTO pb_ticket (state, assigned) VALUES (1,1),(1,2),(2,1),(1,1)
+  - sql: |
+      INSERT INTO pb_mail (unread, box) VALUES (1,1),(1,1),(0,1),(1,2)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS pb_doc"
+  - sql: "DROP TABLE IF EXISTS pb_ticket"
+  - sql: "DROP TABLE IF EXISTS pb_mail"
+
+test_cases:
+  - name: "badge query with 3 independent subselects"
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM pb_doc WHERE NOT archive LIMIT 1) AS badgeDoc,
+        (SELECT COUNT(1) FROM pb_ticket WHERE state = 1 LIMIT 1) AS badgeTicket,
+        (SELECT COUNT(1) FROM pb_mail WHERE unread = 1 LIMIT 1) AS badgeMail
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          badgeDoc: 3
+          badgeTicket: 3
+          badgeMail: 3
+
+  - name: "EXPLAIN shows parallel_map for badge subselects"
+    sql: |
+      EXPLAIN SELECT 1,
+        (SELECT COUNT(1) FROM pb_doc WHERE NOT archive LIMIT 1) AS badgeDoc,
+        (SELECT COUNT(1) FROM pb_ticket WHERE state = 1 LIMIT 1) AS badgeTicket,
+        (SELECT COUNT(1) FROM pb_mail WHERE unread = 1 LIMIT 1) AS badgeMail
+    expect:
+      rows: 1
+    validate_contains: "parallel_map"
+
+  - name: "badge with session-filtered subselects"
+    session_id: "pb_sess"
+    setup:
+      - sql: "SET @fop_user = 1"
+        session_id: "pb_sess"
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM pb_ticket WHERE state = 1 AND assigned = @fop_user LIMIT 1) AS myTickets,
+        (SELECT COUNT(1) FROM pb_mail WHERE unread = 1 LIMIT 1) AS unreadMail
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          myTickets: 2
+          unreadMail: 3
+
+  - name: "badge query second run (must be fast, cached plan)"
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM pb_doc WHERE NOT archive LIMIT 1) AS badgeDoc,
+        (SELECT COUNT(1) FROM pb_ticket WHERE state = 1 LIMIT 1) AS badgeTicket,
+        (SELECT COUNT(1) FROM pb_mail WHERE unread = 1 LIMIT 1) AS badgeMail
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          badgeDoc: 3
+          badgeTicket: 3
+          badgeMail: 3
