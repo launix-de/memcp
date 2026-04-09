@@ -3473,7 +3473,10 @@ seeing the correctly prefixed outer alias. */
 				(define canonical_col (if ci (coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
 				'((quote get_column) resolved_alias false canonical_col false))
 		)
-		'((symbol get_column) alias_ ti col ci) (begin
+		'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (not ti) (not ci))
+			/* already resolved: alias is set, no table-info or case-insensitive flags */
+			expr
+			(begin
 			(define resolved_alias (reduce_assoc schemas (lambda (a alias cols)
 				(if (and (schema_alias_matches alias_ alias ti)
 					(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
@@ -3486,10 +3489,12 @@ seeing the correctly prefixed outer alias. */
 					(define canonical_col (if ci
 						(coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col)
 						col))
-					'((quote get_column) resolved_alias false canonical_col false))))
+					'((quote get_column) resolved_alias false canonical_col false)))))
 		/* omit strict failure for false/false refs: freshly created temp columns are
 		allowed to pass through unresolved until their stage materializes them */
-		'((quote get_column) alias_ ti col ci) (begin
+		'((quote get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (not ti) (not ci))
+			expr
+			(begin
 			(define resolved_alias (reduce_assoc schemas (lambda (a alias cols)
 				(if (and (schema_alias_matches alias_ alias ti)
 					(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
@@ -3502,7 +3507,7 @@ seeing the correctly prefixed outer alias. */
 					(define canonical_col (if ci
 						(coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col)
 						col))
-					'((quote get_column) resolved_alias false canonical_col false))))
+					'((quote get_column) resolved_alias false canonical_col false)))))
 		(cons sym args) /* function call */ (if (_is_opaque_scope_sym sym)
 			expr
 			(cons sym (map args replace_find_column)))
