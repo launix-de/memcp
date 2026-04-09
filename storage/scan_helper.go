@@ -293,12 +293,19 @@ func touchTempColumns(t *table, colSets ...[]string) {
 	}
 }
 
-// dropSessionVariantBoundaries removes index/range pushdown on session-sensitive
-// computed columns. Their visible values depend on tx/session state, while the
-// physical keytable/index domain is global; using such columns for iterateIndex
-// would therefore visit a stale/shared row subset and miss rows that only match
-// in the current session variant.
-func dropSessionVariantBoundaries(t *table, in boundaries) boundaries {
+// dropUnsafeComputeBoundaries removes index/range pushdown on StorageComputeProxy
+// columns.
+//
+// These columns are lazy caches, not stable physical index keys:
+//   - session-sensitive proxies expose per-session variants while the shard index
+//     domain is global
+//   - ordered temp columns (ORC/window caches) may be only partially materialized
+//     between queries and become incrementally valid via validMask
+//
+// Using them for iterateIndex can therefore prune rows that would match once the
+// proxy is read/recomputed during the scan itself. Keep such predicates as
+// post-filter conditions instead of index boundaries.
+func dropUnsafeComputeBoundaries(t *table, in boundaries) boundaries {
 	if len(in) == 0 {
 		return in
 	}
@@ -331,7 +338,7 @@ func dropSessionVariantBoundaries(t *table, in boundaries) boundaries {
 					}
 				}()
 				cs := s.getColumnStorageOrPanicEx(b.col, false)
-				if proxy, ok := cs.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+				if _, ok := cs.(*StorageComputeProxy); ok {
 					drop = true
 				}
 			}()

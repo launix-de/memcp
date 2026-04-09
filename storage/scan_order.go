@@ -405,7 +405,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// Boundary analysis per table
 		analyzeStart := time.Now()
 		bounds := extractBoundaries(spec.conditionCols, spec.condition)
-		bounds = dropSessionVariantBoundaries(t, bounds)
+		bounds = dropUnsafeComputeBoundaries(t, bounds)
 		reorderByFrequency(bounds, t)
 		bounds = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		lower, upperLast := indexFromBoundaries(bounds)
@@ -629,10 +629,20 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	if !hadValue && isOuter && len(tables) > 0 {
 		cbCols := tables[0].callbackCols
 		cb := tables[0].callback
-		callbackFn := scm.OptimizeProcToSerialFunction(cb)
-		aggregateFn := scm.OptimizeProcToSerialFunction(aggregate)
-		nullRow := buildOuterNullCallbackRow(cbCols)
-		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...))
+		if aggregate.IsNil() {
+			scm.Apply(cb, buildOuterNullCallbackRow(cbCols)...)
+		} else {
+			var nullMapper *ShardMapReducer
+			if len(q.q) > 0 {
+				nullMapper = q.q[0].mapper
+			} else if len(tables[0].table.Shards) > 0 {
+				nullMapper = tables[0].table.Shards[0].OpenMapReducer(cbCols, cb, aggregate, false, 0, nil, currentTx)
+				defer nullMapper.Close()
+			}
+			if nullMapper != nil {
+				akkumulator = nullMapper.reduceFn(akkumulator, outerNullMappedResult(nullMapper, neutral, aggregate, cbCols))
+			}
+		}
 	}
 	return akkumulator
 }

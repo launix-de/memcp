@@ -34,6 +34,27 @@ func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 	return make([]scm.Scmer, len(callbackCols))
 }
 
+func outerNullMappedResult(mapper *ShardMapReducer, neutral scm.Scmer, aggregate scm.Scmer, callbackCols []string) scm.Scmer {
+	nullRow := buildOuterNullCallbackRow(callbackCols)
+	mapped := mapper.mapFn(nullRow...)
+	if aggregate.IsNil() {
+		return mapped
+	}
+	return mapper.reduceFn(neutral, mapped)
+}
+
+func outerNullMappedResultForTable(t *table, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, currentTx *TxContext) scm.Scmer {
+	if aggregate.IsNil() {
+		return scm.Apply(callback, buildOuterNullCallbackRow(callbackCols)...)
+	}
+	if len(t.Shards) == 0 {
+		return scm.NewNil()
+	}
+	mapper := t.Shards[0].OpenMapReducer(callbackCols, callback, aggregate, false, 0, nil, currentTx)
+	defer mapper.Close()
+	return outerNullMappedResult(mapper, neutral, aggregate, callbackCols)
+}
+
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
 // optimizeScan is the Optimize hook for the scan declaration.
@@ -112,7 +133,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	analyzeStart := time.Now()
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
-	boundaries = dropSessionVariantBoundaries(t, boundaries)
+	boundaries = dropUnsafeComputeBoundaries(t, boundaries)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	if Settings.ScanDebugging {
@@ -180,8 +201,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 			}
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := buildOuterNullCallbackRow(callbackCols)
-			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
+			akkumulator = fn(akkumulator, outerNullMappedResultForTable(t, callbackCols, callback, aggregate, neutral, currentTx)) // outer join: push one NULL row
 		}
 	} else if !aggregate.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
@@ -203,8 +223,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 			}
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := buildOuterNullCallbackRow(callbackCols)
-			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
+			akkumulator = fn(akkumulator, outerNullMappedResultForTable(t, callbackCols, callback, aggregate, neutral, currentTx)) // outer join: push one NULL row
 		}
 	} else {
 		for msg := range values {
@@ -222,8 +241,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 			hadValue = hadValue || msg.outCount > 0
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := buildOuterNullCallbackRow(callbackCols)
-			scm.Apply(callback, nullRow...) // outer join: push one NULL row
+			_ = outerNullMappedResultForTable(t, callbackCols, callback, aggregate, neutral, currentTx) // outer join: push one NULL row
 		}
 	}
 	if scanErr.r != nil {

@@ -1,0 +1,41 @@
+# Nested derived window functions ordered by an inner window result.
+# Regression for recursive ORC lowering in build_queryplan.
+
+metadata:
+  version: "1.0"
+  description: "Nested derived ROW_NUMBER over inner ROW_NUMBER"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nwd_hist"
+  - sql: "CREATE TABLE nwd_hist (ID INT PRIMARY KEY, parent INT, ts INT)"
+  - sql: "INSERT INTO nwd_hist VALUES (1, 1, 1000), (2, 1, 2000), (3, 2, 3000)"
+
+test_cases:
+  - name: "nested derived ROW_NUMBER ordered by inner ROW_NUMBER"
+    sql: |
+      SELECT q2.id, q2.grp, q2.r2
+      FROM (
+        SELECT q1.id, q1.grp,
+               ROW_NUMBER() OVER (PARTITION BY q1.grp ORDER BY q1.r1) AS r2
+        FROM (
+          SELECT h.ID AS id, h.parent AS grp,
+                 ROW_NUMBER() OVER (PARTITION BY h.parent ORDER BY h.ts) AS r1
+          FROM nwd_hist h
+        ) q1
+      ) q2
+      ORDER BY q2.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          grp: 1
+          r2: 1
+        - id: 2
+          grp: 1
+          r2: 2
+        - id: 3
+          grp: 2
+          r2: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nwd_hist"
