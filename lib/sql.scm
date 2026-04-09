@@ -219,12 +219,9 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username") session))
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
-					(set last_row nil)
 					(define resultrow (lambda (row) (begin
 						(set resultrow_called true)
-						(if (equal? row last_row)
-							true
-							(begin (set last_row row) (original_resultrow row))))))
+						(original_resultrow row))))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
 					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -259,12 +256,9 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					(session "schema" schema)
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
-					(set last_row nil)
 					(define resultrow (lambda (row) (begin
 						(set resultrow_called true)
-						(if (equal? row last_row)
-							true
-							(begin (set last_row row) (original_resultrow row))))))
+						(original_resultrow row))))
 					(define handled (match query
 						(regex "SELECT\\s+c\\.relname\\s+as\\s+tblname\\s+FROM\\s+pg_catalog\\.pg_class" _)
 						(begin
