@@ -4603,10 +4603,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(and (equal? (extract_tblvars expr) '()) (_field_agg_has_nested_agg args))
 			(cons _ args) (reduce args (lambda (acc arg) (or acc (_needs_outer_group_expr arg))) false)
 			false)))
+		/* Only NON-scoped (global) later group stages trigger aggregate deferral.
+		Other scoped stages from Neumann unnesting are independent — their
+		aggregates are processed in their own recursive build_queryplan call,
+		not by deferring to a later global stage. */
 		(define _has_existing_later_group_stage (reduce rest_groups (lambda (acc s)
 			(or acc (begin
 				(define _later_sg (stage_group_cols s))
-				(and (not (nil? _later_sg)) (not (equal? _later_sg '()))))))
+				(define later_is_scoped (not (nil? (stage_partition_aliases s))))
+				(and (not later_is_scoped) (not (nil? _later_sg)) (not (equal? _later_sg '()))))))
 			false))
 		(define _needs_synthetic_outer_group (and _scoped_stage
 			(not _has_existing_later_group_stage)
