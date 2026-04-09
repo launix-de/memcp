@@ -6605,9 +6605,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				Subsequent calls: table exists, triggers active, incremental maintenance. */
 				(cons 'begin (merge
 					(list
-						(list 'if (list 'createtable pj_schema prejointbl
-							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
-							query_temp_table_options_code true)
+						/* createtable true = new table, table_empty = restart recovery shell */
+						(list 'if (list 'or
+							(list 'createtable pj_schema prejointbl
+								(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
+								query_temp_table_options_code true)
+							(list 'table_empty? pj_schema prejointbl))
 							(cons 'begin (cons (list 'time prejoin_materialize_plan "materialize") pj_trigger_registrations))
 							nil))
 					(list grouped_result)))
