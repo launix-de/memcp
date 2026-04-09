@@ -196,17 +196,14 @@ builds, because their truth value depends on current session state. */
 			(if (nil? latest_def) '() (_expand_alias_cols tblvar latest_def)))
 		(list col expr)
 )))))))
+/* materialized_source_schema: resolve schema for a materialized temp source
+(keytable, prejoin) using planner-internal metadata only. No storage access --
+keytables/prejoins may not exist at compile time (runtime-only creation). */
 (define materialized_source_schema (lambda (tschema ttbl alias schemas)
 	(begin
 		(define alias_cols (if (or (nil? alias) (not (has_assoc? schemas alias))) '() (coalesceNil (schemas alias) '())))
 		(define planned_cols (coalesceNil (planned_materialized_fields ttbl) '()))
-		(define shown_cols (if (and (string? ttbl)
-			(>= (strlen ttbl) 1)
-			(equal? (substr ttbl 0 1) ".")
-			(has? (show tschema) ttbl))
-			(show tschema ttbl)
-			'()))
-		(merge_schema_fields_unique (list alias_cols planned_cols shown_cols)))))
+		(merge_schema_fields_unique (list alias_cols planned_cols)))))
 (define materialized_source_physical_schema (lambda (tschema ttbl alias schemas)
 	(begin
 		(define planned_cols (coalesceNil (planned_materialized_fields ttbl) '()))
@@ -6594,16 +6591,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										/* emit the register call as an S-expression to be executed at query time */
 										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
-				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
+				/* assemble: createtable returns true on first creation -> materialize + deploy triggers.
+				Subsequent calls: table exists, triggers active, incremental maintenance. */
 				(cons 'begin (merge
 					(list
-						/* createtable returns true on first creation -> materialize + deploy triggers */
 						(list 'if (list 'createtable pj_schema prejointbl
 							(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							query_temp_table_options_code true)
-							(list 'time prejoin_materialize_plan "materialize")
+							(cons 'begin (cons (list 'time prejoin_materialize_plan "materialize") pj_trigger_registrations))
 							nil))
-					pj_trigger_registrations
 					(list grouped_result)))
 			)
 		)
