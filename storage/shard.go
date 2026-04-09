@@ -2751,16 +2751,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// publish the new shard pointer and then save atomically at the
 		// table/database level to avoid transient, inconsistent schemas.
 
-		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-			// remove old log file
-			// TODO: this should be in sync with setting the new pointer
-			logfile := t.logfile
-			t.logfile = nil
-			if logfile != nil {
-				logfile.Close()
-			}
-			t.t.schema.persistence.RemoveLog(t.uuid.String())
-		}
+		// Keep the old WAL until the caller has durably published the new shard
+		// list and saved schema.json. Otherwise a crash between rebuild and
+		// publish can leave schema.json pointing at the old shard UUID after its
+		// WAL was already removed, losing rows that only existed in the old log.
 
 		// Only after a successful rebuild, schedule old shard files for deletion.
 		runtime.SetFinalizer(t, func(t *storageShard) {
