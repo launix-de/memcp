@@ -4226,7 +4226,11 @@ second table carries strictly more local WHERE predicates than the first. */
 							(define all_output_cols (merge_unique (extract_assoc fields (lambda (k v)
 								(extract_columns_for_tblvar tblvar v)))))
 							(define sort_phys_cols (merge_unique (map sortcols (lambda (sc)
-								(if (string? sc) (list sc) '())))))
+								(if (string? sc) (list sc)
+									(match sc
+										'((quote lambda) params body) (extract_columns_for_tblvar tblvar body)
+										'((symbol lambda) params body) (extract_columns_for_tblvar tblvar body)
+										'()))))))
 							(define mapcols (merge_unique (list all_output_cols sort_phys_cols)))
 
 							/* map lambda: emit resultrow with normalized output aliases */

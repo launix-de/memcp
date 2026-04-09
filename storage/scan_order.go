@@ -451,8 +451,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			}(done)
 		}
 
-		// Per-table logging (best-effort, async)
-		if Settings.ScanDebugging || inputCount > int64(Settings.AnalyzeMinItems) {
+		// Per-table logging (best-effort, async) — inputCount is 0 here (set
+		// after merge), so this fires only when ScanDebugging is enabled.
+		if Settings.ScanDebugging {
 			go func(tbl *table, cCols []string, cond scm.Scmer, scols []scm.Scmer, bnds boundaries, anNs int64) {
 				defer func() { _ = recover() }()
 				filterEnc := ""
