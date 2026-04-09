@@ -3296,10 +3296,10 @@ ordinary group/keytable rewrites, not as later physical planner semantics.
 									(list (quote get_column) (concat sq_alias "\0" alias) ti col ci))
 								(cons sym args) (cons (prefix_expr sym) (map args prefix_expr))
 								expr)))
-							/* inject GROUP BY with prefixed keys */
-							(define prefixed_group_keys (map group_keys prefix_expr))
+							/* inject GROUP BY with prefixed keys — build_queryplan skips
+							replace_find_column on scoped stage group keys (already resolved) */
 							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
-								(list (make_group_stage prefixed_group_keys nil nil nil nil nil nil))
+								(list (make_group_stage (map group_keys prefix_expr) nil nil nil nil nil nil))
 								groups2))
 							/* Split condition into correlation equalities (→ outer condition for
 							JOIN) and local filters (→ stage-condition for keytable scan).
@@ -4680,11 +4680,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define raw_stage_post_group_condition raw_stage_having)
 		(define raw_stage_order stage_order)
 		(define raw_fields fields)
-		(set stage_group (map stage_group replace_find_column))
-		(set stage_having (replace_find_column stage_having))
-		(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
+		(define scoped_stage (not (nil? (stage_partition_aliases stage))))
+		/* scoped stages from Path B have prefixed keys — skip replace_find_column */
+		(if (not scoped_stage) (begin
+			(set stage_group (map stage_group replace_find_column))
+			(set stage_having (replace_find_column stage_having))
+			(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))))
 		(define is_dedup (stage_is_dedup stage))
-		(define _scoped_stage (not (nil? (stage_partition_aliases stage))))
 		(define _field_agg_has_nested_agg (lambda (args)
 			(reduce args (lambda (acc arg)
 				(or acc (not (equal? (extract_aggregates arg) '()))))
@@ -4706,7 +4708,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define later_is_scoped (not (nil? (stage_partition_aliases s))))
 				(and (not later_is_scoped) (not (nil? _later_sg)) (not (equal? _later_sg '()))))))
 			false))
-		(define _needs_synthetic_outer_group (and _scoped_stage
+		(define _needs_synthetic_outer_group (and scoped_stage
 			(not _has_existing_later_group_stage)
 			(or
 				(reduce_assoc fields (lambda (acc _k expr) (or acc (_needs_outer_group_expr expr))) false)
@@ -4716,7 +4718,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define _has_later_group_stage (or _has_existing_later_group_stage _needs_synthetic_outer_group))
 		(define _defer_field_agg (lambda (expr args)
 			(and (equal? (extract_tblvars expr) '())
-				_scoped_stage
+				scoped_stage
 				_has_later_group_stage
 				(_field_agg_has_nested_agg args))))
 		(define extract_stage_field_aggregates (lambda (expr deferred_outer) (match expr
