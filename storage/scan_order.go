@@ -265,8 +265,122 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
-// map reduce implementation based on scheme scripts
-func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+// scanOrderTableSpec holds per-table parameters for scanOrderMulti.
+type scanOrderTableSpec struct {
+	table         *table
+	conditionCols []string
+	condition     scm.Scmer
+	sortcols      []scm.Scmer
+	callbackCols  []string
+	callback      scm.Scmer
+}
+
+// extendBoundariesWithSortCols appends sort columns to the boundaries when all
+// existing filter boundaries are point lookups and the comparators are
+// index-order compatible (ASC). This lets the shard return rows already sorted
+// by ORDER BY, reducing the cross-shard merge to merging pre-sorted runs.
+func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) boundaries {
+	if len(b) == 0 {
+		return b
+	}
+	allEq := true
+	for _, bi := range b {
+		if !boundaryIsPoint(bi) {
+			allEq = false
+			break
+		}
+	}
+	canAppendSortPrefix := len(sortcols) > 0
+	for i := range sortcols {
+		if i >= len(sortdirs) || sortdirs[i] == nil {
+			continue // default ASC
+		}
+		asc := false
+		probeOK := true
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					probeOK = false
+				}
+			}()
+			if scm.ToBool(sortdirs[i](scm.NewInt(1), scm.NewInt(2))) &&
+				!scm.ToBool(sortdirs[i](scm.NewInt(2), scm.NewInt(1))) {
+				asc = true
+			}
+		}()
+		if !probeOK || !asc {
+			canAppendSortPrefix = false
+			break
+		}
+	}
+	if !allEq || !canAppendSortPrefix {
+		return b
+	}
+	for _, scol := range sortcols {
+		if scol.IsString() {
+			col := scol.String()
+			already := false
+			for _, bi := range b {
+				if bi.col == col {
+					already = true
+					break
+				}
+			}
+			if !already {
+				b = append(b, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil()})
+			}
+			continue
+		}
+		proc, ok := scol.Any().(scm.Proc)
+		if !ok && scol.IsProc() {
+			proc = *scol.Proc()
+			ok = true
+		}
+		if !ok {
+			continue
+		}
+		var procParams []scm.Scmer
+		if proc.Params.IsSlice() {
+			procParams = proc.Params.Slice()
+		}
+		if len(procParams) == 0 {
+			continue
+		}
+		sortCondCols := make([]string, len(procParams))
+		for j, param := range procParams {
+			if param.IsSymbol() {
+				sortCondCols[j] = param.String()
+			} else {
+				sortCondCols[j] = scm.String(param)
+			}
+		}
+		if !isRawDataset(procParams, proc.Body) {
+			continue
+		}
+		canon := canonicalColName(proc.Body, procParams, sortCondCols)
+		mc, mf := buildComputedFn(proc.Body, proc.Params, proc.En, sortCondCols)
+		if mf.IsNil() || mc == nil {
+			continue
+		}
+		already := false
+		for _, bi := range b {
+			if bi.col == canon {
+				already = true
+				break
+			}
+		}
+		if !already {
+			b = append(b, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
+		}
+	}
+	return b
+}
+
+// scanOrderMulti performs an ordered scan across one or more tables, merging
+// results from all tables' shards into a single globally sorted stream.
+// Each table has its own filter, sort columns and map function, but sort
+// directions, offset/limit, reduce and neutral are shared.
+func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")

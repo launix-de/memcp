@@ -286,6 +286,12 @@ scope is gone. */
 			false
 		))
 ))
+(define planner-temp-source-name (lambda (tbl tblvar)
+	(if (string? tbl)
+		tbl
+		(if (materialized-source? tbl)
+			(concat "mat_" (fnv_hash (string tbl)))
+			(string tblvar)))))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
 defines the physical prejoin column names. */
@@ -558,6 +564,28 @@ raw _unn_* occurrence aliases into physical temp column names. */
 						_
 						(rewrite_materialized_source_columns tbl tblvar node)))))))
 		(lower_node expr)
+)))
+
+/* preserve_current_materialized_field_refs: like lower_materialized_source_expr
+but keeps references to planned temp columns intact instead of lowering them.
+This prevents serializing nested window/subquery materializations into keytable names. */
+(define preserve_current_materialized_field_refs (lambda (tbl tblvar expr)
+	(begin
+		(define planned_cols (coalesceNil (planned_materialized_fields tbl) '()))
+		(define preserve_node (lambda (node) (match node
+			'((symbol get_column) (eval tblvar) _ col _)
+			(if (nil? (find_materialized_field_by_name planned_cols col))
+				(lower_materialized_source_expr tbl tblvar node)
+				(list (quote get_column) tblvar false col false))
+			'((quote get_column) (eval tblvar) _ col _)
+			(if (nil? (find_materialized_field_by_name planned_cols col))
+				(lower_materialized_source_expr tbl tblvar node)
+				(list (quote get_column) tblvar false col false))
+			(cons sym args) (cons sym (map args preserve_node))
+			_ node)))
+		(if (materialized-source? tbl)
+			(preserve_node expr)
+			expr)
 )))
 
 /* returns a list of all tblvar aliases referenced via get_column in expr */
@@ -1332,11 +1360,14 @@ Returns (keytable_name key_col_names schema_def) where schema_def is a list of
 column descriptors suitable for the schemas assoc in untangle_query.
 Does NOT handle FK→PK reuse (returns nil for that case — caller must check). */
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
-	(define alias_map (list (list tblvar (concat schema "." tbl))))
+	(define keytable_source_name (planner-temp-source-name tbl tblvar))
+	(if (equal? keytable_source_name "")
+		(error (concat "make_keytable_schema: empty source name for tbl=" tbl " tblvar=" tblvar)))
+	(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
 	(define key_names (map keys (lambda (k)
 		(sanitize_temp_name
 			(canonical_expr_name (normalize_canonical_aliases (lower_materialized_source_expr tbl tblvar k)) '(list) '(list) alias_map)))))
-	(define keytable_name (concat "." tbl ":" key_names))
+	(define keytable_name (concat "." keytable_source_name ":" key_names))
 	(define schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 	(list keytable_name key_names schema_def)
 )))
@@ -1348,9 +1379,7 @@ fk_pk_col is non-nil when FK→PK reuse is active (parent table used instead of 
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
 	(define physical_tbl (string? tbl))
-	(define keytable_source_name (if physical_tbl
-		tbl
-		(string tblvar)))
+	(define keytable_source_name (planner-temp-source-name tbl tblvar))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
 	reuse the parent (referenced) table instead of creating a temp keytable.
 	The rest of the grouped pipeline must still see the normal logical key name,
@@ -1413,10 +1442,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 						'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
 						'()))))
 				'()))
-			/* Keytable creation happens ONLY at runtime via init_code below.
-			The query plan cache means compile-time createtable would only run on
-			first parse, leaving the keytable vulnerable to cache eviction before
-			the next (cached) execution. Runtime init is idempotent and fast. */
+			/* create at compile time (needed for recursive build_queryplan) */
+			(createtable schema keytable_name kt_cols query_temp_table_options true)
+			(partitiontable schema keytable_name kt_partition)
 			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
 			(define kt_cols_code (cons 'list
 				(cons
