@@ -2784,11 +2784,14 @@ seeing the correctly prefixed outer alias. */
 							(define groups2 (if (and has_aggregates (or (nil? groups2) (equal? groups2 '())))
 								(list (make_group_stage group_keys nil nil nil nil nil nil))
 								groups2))
-							/* register scoped group stages with partition-aliases + stage-condition */
+							/* register group stages: aggregate stages get partition-aliases (scoped
+							to inner tables for keytable creation). ORDER/LIMIT stages from non-aggregate
+							subselects stay unscoped — they are regular stages processed by build_queryplan. */
+							(define needs_scope (or has_aggregates (not (equal? correlation_keys '()))))
 							(define scoped_stages (map groups2 (lambda (stage)
 								(make_group_stage_with_condition (stage_group_cols stage) (stage_having_expr stage)
 									(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
-									prefixed_aliases (stage_init_code stage) local_condition))))
+									(if needs_scope prefixed_aliases nil) (stage_init_code stage) local_condition))))
 							(sq_cache "groups" (merge scoped_stages (coalesceNil (sq_cache "groups") '())))
 							/* return prefixed value expression */
 							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))

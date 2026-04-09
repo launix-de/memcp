@@ -696,6 +696,8 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		return fmt.Sprint(s.Parser()), dst
 	case tagSourceInfo:
 		return s.SourceInfo().value.AppendString(dst)
+	case tagNthLocalVar:
+		return fmt.Sprintf("(var %d)", s.NthLocalVar()), dst
 	case tagJIT:
 		return "[jit lambda]", dst
 	default:
