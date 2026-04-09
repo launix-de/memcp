@@ -2251,8 +2251,7 @@ seeing the correctly prefixed outer alias. */
 								more complex handling, fall back for now */
 								(define us_outer_in_fields (not (equal?
 									(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v)))) '())))
-								(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
-									(begin
+								(begin
 										/* === Neumann unnesting: nD domain, single or multi-table === */
 										/* generate unique alias using fnv_hash to avoid collisions across nesting levels */
 										(define us_sq_idx (coalesceNil (sq_cache "idx") 0))
@@ -2535,7 +2534,6 @@ seeing the correctly prefixed outer alias. */
 													nil /* multi-table or computed value: not yet handled */
 											))
 										)
-									)
 								)
 					)))
 					nil /* untangle failed */
