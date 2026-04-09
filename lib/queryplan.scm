@@ -4392,11 +4392,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define _grp_tables_raw (if (not (nil? _stage_scope))
 			/* scoped GROUP: only the tables listed in the stage's aliases */
 			(filter tables (lambda (t) (match t '(tv _ _ _ _) (has? _stage_scope tv) false)))
-			/* global GROUP: all tables except partition-staged */
-			(filter tables (lambda (t) (match t '(tv _ _ _ _) (not (has? _grp_ps_aliases tv)) true)))))
-		(define _grp_ps_tables_raw (filter tables (lambda (t) (match t '(tv _ _ _ _)
-			(and (not (has? (coalesceNil _stage_scope '()) tv))
-				(or (has? _grp_ps_aliases tv) (not (nil? _stage_scope))))
+			/* global GROUP: INNER JOIN tables except partition-staged.
+			LEFT JOIN tables are pass-through (joined AFTER group, not prejoined). */
+			(filter tables (lambda (t) (match t '(tv _ _ isOuter _)
+				(and (not isOuter) (not (has? _grp_ps_aliases tv))) true)))))
+		(define _grp_ps_tables_raw (filter tables (lambda (t) (match t '(tv _ _ isOuter _)
+			(or isOuter
+				(and (not (has? (coalesceNil _stage_scope '()) tv))
+					(or (has? _grp_ps_aliases tv) (not (nil? _stage_scope)))))
 			false))))
 		(define _grp_ps_visible_aliases (merge_unique (map _grp_ps_tables_raw (lambda (td) (match td
 			'(tv tschema ttbl _ _)
@@ -5088,7 +5091,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch (_group_value_ag_expr (group_value_local_expr expr)))
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr)))
 									(cons (symbol aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) )
 										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
@@ -5096,7 +5099,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											_ expr)
 										(replace_group_key_or_fetch expr))
 									(cons '(quote aggregate) agg_rest)
-									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
+									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) )
 										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
