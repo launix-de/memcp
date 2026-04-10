@@ -2822,12 +2822,19 @@ across all nesting levels, preventing alias collisions after derived table flatt
 							(define is_outer_ref (lambda (expr)
 								(and (not (equal? (extract_tblvars expr) '()))
 									(reduce (extract_tblvars expr) (lambda (acc tv) (and acc (not (has? inner_aliases tv)))) true))))
+							/* Session references: (session "key") or (context "session") — treated
+							as domain keys like outer refs (Neumann: session = implicit outer binding) */
+							(define is_session_ref (lambda (expr) (expr_uses_session_state expr)))
 							(define cond_parts (if (or (nil? condition2) (equal? condition2 true)) '() (flatten_and condition2)))
 							(define is_correlation_part (lambda (part) (match part
 								'((symbol equal??) left right) (or (and (is_inner_ref left) (is_outer_ref right))
-									(and (is_inner_ref right) (is_outer_ref left)))
+									(and (is_inner_ref right) (is_outer_ref left))
+									(and (is_inner_ref left) (is_session_ref right))
+									(and (is_inner_ref right) (is_session_ref left)))
 								'((quote equal??) left right) (or (and (is_inner_ref left) (is_outer_ref right))
-									(and (is_inner_ref right) (is_outer_ref left)))
+									(and (is_inner_ref right) (is_outer_ref left))
+									(and (is_inner_ref left) (is_session_ref right))
+									(and (is_inner_ref right) (is_session_ref left)))
 								_ false)))
 							(define local_parts (filter cond_parts (lambda (p) (not (is_correlation_part p)))))
 							(define corr_parts (filter cond_parts is_correlation_part))
@@ -2846,14 +2853,16 @@ across all nesting levels, preventing alias collisions after derived table flatt
 							(if (and (not has_aggregates) (not (nil? local_condition)))
 								(sq_cache "condition" (cons local_condition
 									(coalesceNil (sq_cache "condition") '()))))
-							/* for correlated aggregates: extract GROUP BY domain from correlation */
+							/* for correlated/session aggregates: extract GROUP BY domain from
+							correlation equalities AND session equalities. Session refs are
+							treated as implicit outer bindings (domain keys on the keytable). */
 							(define correlation_keys (filter (map cond_parts (lambda (part) (match part
 								'((symbol equal??) left right)
-								(if (and (is_inner_ref left) (is_outer_ref right)) left
-									(if (and (is_inner_ref right) (is_outer_ref left)) right nil))
+								(if (and (is_inner_ref left) (or (is_outer_ref right) (is_session_ref right))) left
+									(if (and (is_inner_ref right) (or (is_outer_ref left) (is_session_ref left))) right nil))
 								'((quote equal??) left right)
-								(if (and (is_inner_ref left) (is_outer_ref right)) left
-									(if (and (is_inner_ref right) (is_outer_ref left)) right nil))
+								(if (and (is_inner_ref left) (or (is_outer_ref right) (is_session_ref right))) left
+									(if (and (is_inner_ref right) (or (is_outer_ref left) (is_session_ref left))) right nil))
 								_ nil))) (lambda (x) (not (nil? x)))))
 							(define group_keys (if (and has_aggregates (equal? correlation_keys '())) '(1)
 								(if (not (equal? correlation_keys '())) (map correlation_keys prefix_expr)
