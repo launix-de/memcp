@@ -3076,16 +3076,26 @@ seeing the correctly prefixed outer alias. */
 			(define _value_expr (match flds
 				(cons _ (cons v _)) v
 				nil))
-			(if (and (_subquery_has_outer_refs subquery outer_schemas)
-				(_subquery_outer_refs_are_direct_columns subquery outer_schemas)
+			(define _has_outer (_subquery_has_outer_refs subquery outer_schemas))
+			/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
+			(prejoin scoping bug when unnested table meets GROUP stage) */
+			(define _outer_has_group (or group having _cd_has))
+			(if (and
+				/* correlated: outer refs must be direct columns */
+				(or (not _has_outer)
+					(_subquery_outer_refs_are_direct_columns subquery outer_schemas))
+				/* uncorrelated + outer GROUP: not yet safe (needs group-barrier) */
+				(or _has_outer (not _outer_has_group))
 				(not (_contains_inner_select_marker subquery))
 				(not (nil? _value_expr))
 				(equal? (extract_aggregates _value_expr) '())
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				(nil? l)
-				(nil? off))
+				/* correlated: no LIMIT allowed (not yet supported in unnesting).
+				   uncorrelated: LIMIT required (preserves multi-row error semantics) */
+				(if _has_outer (nil? l) (not (nil? l)))
+				(if _has_outer (nil? off) (nil? off)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
 						/* Scalar subselect unnesting yields null-preserving LEFT JOIN helper
