@@ -901,6 +901,9 @@ func (s Scmer) Any() any {
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:
+		if s.GetTag() >= 100 {
+			return unsafe.Pointer(s.ptr) // custom tags return raw pointer
+		}
 		panic(fmt.Sprintf("unknown tag %d in Any", s.GetTag()))
 	}
 }
