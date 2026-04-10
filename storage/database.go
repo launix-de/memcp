@@ -659,6 +659,22 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 				t.Shards = newShardList
 			}
 
+			// Update per-column statistics from rebuilt shards (O(1) per shard per column).
+			rowEst := uint64(t.CountEstimate())
+			for ci := range t.Columns {
+				var distinctSum uint64
+				for _, shard := range newShardList {
+					if shard == nil {
+						continue
+					}
+					if cs, ok := shard.columns[t.Columns[ci].Name]; ok {
+						distinctSum += uint64(cs.DistinctCount())
+					}
+				}
+				atomic.StoreUint64(&t.Columns[ci].DistinctEstimate, distinctSum)
+				atomic.StoreUint64(&t.Columns[ci].RowEstimate, rowEst)
+			}
+
 			// Collect replaced shards for deferred cleanup (see comment above).
 			if len(replaced) > 0 {
 				replacedMu.Lock()

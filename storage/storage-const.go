@@ -72,3 +72,5 @@ func (s *StorageConst) Deserialize(f io.Reader) uint {
 	s.value = scm.TransformFromJSON(v)
 	return uint(s.count)
 }
+
+func (s *StorageConst) DistinctCount() uint { return 1 }

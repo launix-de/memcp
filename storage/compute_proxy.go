@@ -1011,3 +1011,10 @@ func (p *StorageComputeProxy) deserializeComputeProxyV2(f io.Reader) uint {
 	p.isOrdered = isOrderedByte != 0
 	return n
 }
+
+func (s *StorageComputeProxy) DistinctCount() uint {
+	if s.main == nil {
+		return 0
+	}
+	return s.main.DistinctCount()
+}

@@ -52,6 +52,12 @@ type column struct {
 	sanitizer          func(scm.Scmer) scm.Scmer
 	lastAccessed       int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
 
+	// Statistics — updated at rebuild time, O(1) access for query planning.
+	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
+	// RowEstimate is the table-wide CountEstimate() at last rebuild.
+	DistinctEstimate uint64 `json:"-"`
+	RowEstimate      uint64 `json:"-"`
+
 	// ORC fields — non-empty OrcSortCols signals this is an ordered-reduce computed column.
 	// The column value is produced by a scan_order pass rather than per-row computation.
 	OrcSortCols   []string  `json:",omitempty"` // ORDER BY column names (partition cols first, then order cols)
@@ -836,6 +842,8 @@ func (c *column) Show(keyType string) scm.Scmer {
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
+		scm.NewString("DistinctEstimate"), scm.NewInt(int64(atomic.LoadUint64(&c.DistinctEstimate))),
+		scm.NewString("RowEstimate"), scm.NewInt(int64(atomic.LoadUint64(&c.RowEstimate))),
 	})
 }
 

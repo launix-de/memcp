@@ -291,3 +291,5 @@ func (s *OverlayBlob) ReleaseBlobs(count uint) {
 		}
 	}
 }
+
+func (s *OverlayBlob) DistinctCount() uint { return s.Base.DistinctCount() }
