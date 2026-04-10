@@ -3406,9 +3406,29 @@ seeing the correctly prefixed outer alias. */
 							nil)))
 						(_check_wf_limit condition)
 					))
-					/* if groups2 had only pass-through stages (no GROUP/HAVING/LIMIT/OFFSET), strip them for flattening */
+					/* Strip pass-through stages for flattening, but PROPAGATE scoped stages
+					(from inner scalar subselect unnesting) to the outer query. Without this,
+					inner keytables are never created and inner subselect values are undefined. */
 					(if (and groups2_present (not unsupported_groups))
-						(set groups2 nil))
+						(begin
+							/* Propagate scoped stages (from inner scalar subselect unnesting)
+							to the outer query. Rename partition-aliases and expressions with
+							the derived table prefix so they match the flattened table names. */
+							(define scoped_stages_to_propagate (filter (map groups2 (lambda (s)
+								(if (nil? (stage_partition_aliases s)) nil
+									(make_group_stage_with_condition
+										(map (coalesceNil (stage_group_cols s) '()) replace_column_alias)
+										(if (nil? (stage_having_expr s)) nil (replace_column_alias (stage_having_expr s)))
+										(if (nil? (stage_order_list s)) nil
+											(map (stage_order_list s) (lambda (o) (match o '(col dir) (list (replace_column_alias col) dir) o))))
+										(stage_limit_val s) (stage_offset_val s)
+										(map (stage_partition_aliases s) (lambda (a) (concat id "\0" a)))
+										(stage_init_code s)
+										(if (nil? (stage_condition s)) nil (replace_column_alias (stage_condition s)))))))
+								(lambda (s) (not (nil? s)))))
+							(if (not (equal? scoped_stages_to_propagate '()))
+								(sq_cache "groups" (merge scoped_stages_to_propagate (coalesceNil (sq_cache "groups") '()))))
+							(set groups2 nil)))
 					(if use_materialize
 						(begin
 							(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
