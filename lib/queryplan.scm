@@ -3438,6 +3438,20 @@ across all nesting levels, preventing alias collisions after derived table flatt
 							/* Propagate scoped stages (from inner scalar subselect unnesting)
 							to the outer query. Rename partition-aliases and expressions with
 							the derived table prefix so they match the flattened table names. */
+							/* Rename aliases: partition_aliases reference inner table names
+							that must be mapped to their flattened equivalents. The inner_alias_map
+							covers schemas2 keys. For aliases not in schemas2 (e.g., from nested
+							unnesting), try extracting the base table name for lookup. */
+							(define rename_partition_alias (lambda (a) (begin
+								(define direct (lookup_new_alias a))
+								(if (not (nil? direct)) direct
+									/* Try without NUL prefix: inner scoped aliases may have sq0\0tbl format */
+									(begin
+										(define parts (split a "\0"))
+										(define base (if (> (count parts) 1) (nth parts (- (count parts) 1)) a))
+										(define base_match (lookup_new_alias base))
+										(if (not (nil? base_match)) base_match
+											(concat id "\0" a)))))))
 							(define scoped_stages_to_propagate (filter (map groups2 (lambda (s)
 								(if (nil? (stage_partition_aliases s)) nil
 									(make_group_stage_with_condition
@@ -3446,7 +3460,7 @@ across all nesting levels, preventing alias collisions after derived table flatt
 										(if (nil? (stage_order_list s)) nil
 											(map (stage_order_list s) (lambda (o) (match o '(col dir) (list (replace_column_alias col) dir) o))))
 										(stage_limit_val s) (stage_offset_val s)
-										(map (stage_partition_aliases s) (lambda (a) (concat id "\0" a)))
+										(map (stage_partition_aliases s) rename_partition_alias)
 										(stage_init_code s)
 										(if (nil? (stage_condition s)) nil (replace_column_alias (stage_condition s)))))))
 								(lambda (s) (not (nil? s)))))
