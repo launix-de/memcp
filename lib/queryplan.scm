@@ -2935,9 +2935,45 @@ across all nesting levels, preventing alias collisions after derived table flatt
 										(list (make_once_per_partition_stage
 											group_keys nil nil 2
 											prefixed_aliases nil local_condition))))))
-							/* return prefixed value expression */
+							/* return prefixed value expression, binding table-less aggregates
+							to the first inner alias so scoped stages can claim only their own.
+							Without this, multiple COUNT(*) subselects in one query would all
+							be claimed by whichever scoped stage processes first. */
 							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))
-							(prefix_expr value_expr2))
+							(define prefixed_value (prefix_expr value_expr2))
+							(define scope_alias (if (not (equal? prefixed_aliases '())) (car prefixed_aliases) nil))
+							(define bind_scope (lambda (expr) (match expr
+								(cons (symbol aggregate) rest) (match rest
+									'(agg_expr agg_reduce agg_neutral)
+									/* Scope-bind: wrap agg_expr to carry scope_alias as table ref.
+									(+ agg_expr (* 0 (coalesceNil (get_column scope "col") 0)))
+									= agg_expr + 0 = agg_expr semantically, but extract_tblvars
+									finds scope_alias → scoped stage claims only its own aggregates. */
+									(if (and (not (nil? scope_alias)) (equal? (extract_tblvars agg_expr) '()))
+										(begin
+											(define scope_col (if (and (not (nil? group_keys)) (not (equal? group_keys '())))
+												(car group_keys) nil))
+											(if (nil? scope_col) expr
+												(list (quote aggregate) (list (quote +) agg_expr (list (quote *) 0 (list (quote coalesceNil) scope_col 0))) agg_reduce agg_neutral)))
+										expr)
+									_ expr)
+								(cons '(quote aggregate) rest) (match rest
+									'(agg_expr agg_reduce agg_neutral)
+									/* Scope-bind: wrap agg_expr to carry scope_alias as table ref.
+									(+ agg_expr (* 0 (coalesceNil (get_column scope "col") 0)))
+									= agg_expr + 0 = agg_expr semantically, but extract_tblvars
+									finds scope_alias → scoped stage claims only its own aggregates. */
+									(if (and (not (nil? scope_alias)) (equal? (extract_tblvars agg_expr) '()))
+										(begin
+											(define scope_col (if (and (not (nil? group_keys)) (not (equal? group_keys '())))
+												(car group_keys) nil))
+											(if (nil? scope_col) expr
+												(list (quote aggregate) (list (quote +) agg_expr (list (quote *) 0 (list (quote coalesceNil) scope_col 0))) agg_reduce agg_neutral)))
+										expr)
+									_ expr)
+								(cons sym args) (cons sym (map args bind_scope))
+								expr)))
+							(bind_scope prefixed_value))
 						nil))))
 		nil)))
 	(define unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
