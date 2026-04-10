@@ -1526,6 +1526,9 @@ func Init(en scm.Env) {
 		Name: "register_keytable_cleanup",
 		Desc: "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewBool(false)
+			}
 			baseTable := TableFromScmer(a[0])
 			ktTable := TableFromScmer(a[1])
 			ktSchema := ktTable.schema.Name
