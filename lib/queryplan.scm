@@ -2951,8 +2951,15 @@ across all nesting levels, preventing alias collisions after derived table flatt
 									finds scope_alias → scoped stage claims only its own aggregates. */
 									(if (and (not (nil? scope_alias)) (equal? (extract_tblvars agg_expr) '()))
 										(begin
-											(define scope_col (if (and (not (nil? group_keys)) (not (equal? group_keys '())))
-												(car group_keys) nil))
+											/* Use a REAL column from the source table for scope-binding.
+											group_keys may be (1) for uncorrelated — literal, no table ref.
+											Fall back to first physical column from schemas2. */
+											(define src_alias (if (not (equal? inner_aliases '())) (car inner_aliases) nil))
+											(define scope_col (if (nil? src_alias) nil
+												(reduce (coalesceNil (schemas2 src_alias) '()) (lambda (found coldef)
+													(if (not (nil? found)) found
+														(list (quote get_column) scope_alias false (coldef "Field") false)))
+													nil)))
 											(if (nil? scope_col) expr
 												(list (quote aggregate) (list (quote +) agg_expr (list (quote *) 0 (list (quote coalesceNil) scope_col 0))) agg_reduce agg_neutral)))
 										expr)
@@ -2965,8 +2972,15 @@ across all nesting levels, preventing alias collisions after derived table flatt
 									finds scope_alias → scoped stage claims only its own aggregates. */
 									(if (and (not (nil? scope_alias)) (equal? (extract_tblvars agg_expr) '()))
 										(begin
-											(define scope_col (if (and (not (nil? group_keys)) (not (equal? group_keys '())))
-												(car group_keys) nil))
+											/* Use a REAL column from the source table for scope-binding.
+											group_keys may be (1) for uncorrelated — literal, no table ref.
+											Fall back to first physical column from schemas2. */
+											(define src_alias (if (not (equal? inner_aliases '())) (car inner_aliases) nil))
+											(define scope_col (if (nil? src_alias) nil
+												(reduce (coalesceNil (schemas2 src_alias) '()) (lambda (found coldef)
+													(if (not (nil? found)) found
+														(list (quote get_column) scope_alias false (coldef "Field") false)))
+													nil)))
 											(if (nil? scope_col) expr
 												(list (quote aggregate) (list (quote +) agg_expr (list (quote *) 0 (list (quote coalesceNil) scope_col 0))) agg_reduce agg_neutral)))
 										expr)
