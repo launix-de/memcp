@@ -217,7 +217,7 @@ test_cases:
           value: "(and (and (>= (get_column \"rs_data\" false \"val\" false) 50) (<= (get_column \"rs_data\" false \"val\" false) 150)) true)"
         - stage: "untangle"
           kind: "groups"
-          value: "(((group-cols) (having nil) (order (((get_column \"rs_data\" false \"id\" false) <))) (limit-partition-cols 0) (limit 5) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil)))"
+          value: "(((group-cols) (having nil) (order (((get_column \"rs_data\" false \"id\" false) <))) (limit-partition-cols 0) (limit 5) (offset nil) (group-alias nil) (dedup false) (partition-aliases nil) (init nil) (once-limit nil)))"
         - stage: "untangle"
           kind: "init"
           value: "()"
