@@ -2913,7 +2913,7 @@ across all nesting levels, preventing alias collisions after derived table flatt
 									nil))))
 								(lambda (s) (not (nil? s)))))
 							(if (not (equal? group_stages_out '()))
-								(sq_cache "groups" (merge group_stages_out (coalesceNil (sq_cache "groups") '()))))
+								(sq_cache "groups" (merge (coalesceNil (sq_cache "groups") '()) group_stages_out)))
 							/* Non-aggregate subselects: once-per-partition semantics.
 							With ORDER/LIMIT: use partition-stage (scan_order on inner table).
 							Without ORDER/LIMIT: use once-per-partition GROUP stage (keytable
@@ -2931,10 +2931,10 @@ across all nesting levels, preventing alias collisions after derived table flatt
 											(coalesceNil (sq_cache "partition_stages") '()))))
 									/* No ORDER/LIMIT: once-per-partition GROUP stage for error semantics */
 									(sq_cache "groups" (merge
+										(coalesceNil (sq_cache "groups") '())
 										(list (make_once_per_partition_stage
 											group_keys nil nil 2
-											prefixed_aliases nil local_condition))
-										(coalesceNil (sq_cache "groups") '())))))
+											prefixed_aliases nil local_condition))))))
 							/* return prefixed value expression */
 							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))
 							(prefix_expr value_expr2))
