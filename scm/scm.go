@@ -514,6 +514,10 @@ restart:
 			panic("Unknown function: " + list[0].String())
 		}
 	default:
+		if expression.GetTag() >= 100 {
+			// custom tags (e.g. TagTable) are opaque literals
+			return expression
+		}
 		panic("Unknown expression type - EVAL " + expression.String())
 	}
 	return
