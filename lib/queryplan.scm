@@ -5367,7 +5367,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define _real_outer_ps_tables (filter _grp_ps_tables (lambda (td) (match td
 							'(_ _ ttbl _ _) (not (equal? ttbl ".(1)"))
 							true))))
-						(define _kt_is_outer (and (not (nil? _stage_scope)) (not (equal? _real_outer_ps_tables '()))))
+						/* _kt_is_outer: keytable is LEFT JOINed to outer stream.
+						True when real outer tables exist, OR when session-domain keys
+						need a fetch filter (even without outer tables, e.g., no-FROM queries). */
+						(define has_session_key_corr (reduce _cond_key_corr (lambda (acc p) (or acc (expr_uses_session_state p))) false))
+						(define _kt_is_outer (and (not (nil? _stage_scope)) (or (not (equal? _real_outer_ps_tables '())) has_session_key_corr)))
 						(define _kt_terms (if _kt_is_outer
 							(filter (map _cond_non_agg _grp_join_term) (lambda (x) (not (nil? x))))
 							'()))
