@@ -53,12 +53,12 @@ Uses code-generator pattern: values baked into quoted lambda body at register ti
 so no closure capture — the trigger body serializes cleanly as a self-contained expression. */
 (define register_prejoin_invalidation (lambda (src_schema src_table pj_schema pj_table) (begin
 	(define prefix (concat ".prejoin:" pj_table "|" src_table "|"))
-	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
-	(createtrigger src_schema src_table (concat prefix "after_insert")     "after_insert"     "" drop_body false)
-	(createtrigger src_schema src_table (concat prefix "after_update")     "after_update"     "" drop_body false)
-	(createtrigger src_schema src_table (concat prefix "after_delete")     "after_delete"     "" drop_body false)
-	(createtrigger src_schema src_table (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
-	(createtrigger src_schema src_table (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable (list 'table pj_schema pj_table) true))))
+	(createtrigger (table src_schema src_table) (concat prefix "after_insert")     "after_insert"     "" drop_body false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_update")     "after_update"     "" drop_body false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_delete")     "after_delete"     "" drop_body false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
 	true)))
 
 /* Registers incremental maintenance triggers on src_table to keep pj_table in sync.
@@ -67,12 +67,12 @@ Lifecycle triggers use code-generator pattern for the drop body as well.
 update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure capture). */
 (define register_prejoin_incremental (lambda (src_schema src_table pj_schema pj_table delete_fn insert_fn update_fn) (begin
 	(define prefix (concat ".pj_incr:" pj_table "|" src_table "|"))
-	(createtrigger src_schema src_table (concat prefix "after_delete") "after_delete" "" delete_fn false)
-	(createtrigger src_schema src_table (concat prefix "after_insert") "after_insert" "" insert_fn false)
-	(createtrigger src_schema src_table (concat prefix "after_update") "after_update" "" update_fn false)
-	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
-	(createtrigger src_schema src_table (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
-	(createtrigger src_schema src_table (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_delete") "after_delete" "" delete_fn false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_insert") "after_insert" "" insert_fn false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_update") "after_update" "" update_fn false)
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable (list 'table pj_schema pj_table) true))))
+	(createtrigger (table src_schema src_table) (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
+	(createtrigger (table src_schema src_table) (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
 	true)))
 
 /* prejoin_canonical_sources maps a materialized prejoin table name to an assoc
@@ -1488,11 +1488,11 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 						(define parent_schema (show schema parent_tbl))
 						/* FK-reuse createcolumn on parent: safe at compile time (parent is a physical table) */
 						(if (not (equal? key_name parent_col))
-							(createcolumn schema parent_tbl key_name "any" '() '("temp" true)
+							(createcolumn (table schema parent_tbl) key_name "any" '() '("temp" true)
 								(list parent_col)
 								(eval (list 'lambda (list (symbol parent_col)) (symbol parent_col)))))
 						(define fk_init (if (equal? key_name parent_col) nil
-							(list 'createcolumn schema parent_tbl key_name "any"
+							(list 'createcolumn (list 'table schema parent_tbl) key_name "any"
 								(list 'quote '())
 								(list 'quote '("temp" true))
 								(list 'quote (list parent_col))
@@ -1526,7 +1526,7 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 			(define kt_partition_code (cons 'list (if physical_tbl
 				(merge (map (produceN (count keys)) (lambda (i)
 					(match (key_at i)
-						'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (list 'shardcolumn schema tbl scol)))
+						'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (list 'shardcolumn (list 'table schema tbl) scol)))
 						'()))))
 				'())))
 			/* init_code: idempotent runtime keytable creation.
@@ -1535,14 +1535,14 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 			incrementally maintained by triggers). partitiontable and touch_keytable are idempotent. */
 			(define init_code (list 'begin
 				(list 'if (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true)
-					(list 'partitiontable schema keytable_name kt_partition_code)
+					(list 'partitiontable (list 'table schema keytable_name) kt_partition_code)
 					nil)
-				(list 'touch_keytable schema keytable_name)
+				(list 'touch_keytable (list 'table schema keytable_name))
 				/* returns true when collect + trigger deploy is needed:
 				   createtable=true (new) OR table_empty (restart recovery) */
 				(list 'or
 					(list 'not (list 'has? (list 'show schema) keytable_name))
-					(list 'table_empty? schema keytable_name))))
+					(list 'table_empty? (list 'table schema keytable_name)))))
 			(define kt_schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 			(list keytable_name kt_schema_def init_code nil)))
 )))
@@ -1629,7 +1629,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 			'()))
 		/* collect plan */
 		(define collect_plan (if (equal? group_keys '(1))
-			'('insert schema grouptbl '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
+			'('insert '('table schema grouptbl) '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
 			(begin
 				(define keycols (merge_unique (map group_keys (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
 				(scan_wrapper 'scan schema tbl
@@ -1639,7 +1639,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
 					'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
 					'(list)
-					'('lambda '('acc 'sharddict) '('insert schema grouptbl (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
+					'('lambda '('acc 'sharddict) '('insert '('table schema grouptbl) (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
 					isOuter))))
 		/* aggregate descriptors */
 		(define agg_col_name (make_aggregate_cache_col_name expr_name condition window_runtime_suffix))
@@ -1655,7 +1655,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 		(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 			(define runtime_expr (lower_window_runtime_expr expr))
 			(define cols (extract_columns_for_tblvar tblvar runtime_expr))
-			'('createcolumn schema grouptbl (agg_col_name ag) "any" '(list) '(list "temp" true)
+			'('createcolumn '('table schema grouptbl) (agg_col_name ag) "any" '(list) '(list "temp" true)
 				(cons list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 				'('lambda (map group_keys (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
 					(scan_wrapper 'scan schema tbl
@@ -1679,7 +1679,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 					(define kt_key_names (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 					/* outer refs need raw column names (tblvar.col), not canonical expr_name */
 					(define raw_col_names (map group_keys (lambda (col) (match col '('get_column _ _ c _) c (expr_name col)))))
-					(list 'scan '(session "__memcp_tx") schema grouptbl
+					(list 'scan '(session "__memcp_tx") (list 'table schema grouptbl)
 						(cons 'list kt_key_names)
 						/* filter: (equal? grouptbl.kt_key (outer tblvar.raw_col)) — zip kt_key_names with raw_col_names */
 						(list 'lambda
@@ -1689,7 +1689,7 @@ Result query runs on the BASE table; window_func expressions are replaced with s
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false))
-					(list 'scan '(session "__memcp_tx") schema grouptbl '(list) '('lambda '() true)
+					(list 'scan '(session "__memcp_tx") (list 'table schema grouptbl) '(list) '('lambda '() true)
 						(list 'list ag_col)
 						'('lambda '('__v) '__v)
 						'('lambda '('__a '__b) '__b) nil nil false)))
@@ -1809,7 +1809,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW session) ...) and
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(list 'scan '(session "__memcp_tx") schema tbl
+					(list 'scan '(session "__memcp_tx") (list 'table schema tbl)
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -1824,7 +1824,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW session) ...) and
 						/* reduce2: outermost inserts into pjtbl, inner levels merge */
 						(if is_outermost
 							(list 'lambda (list 'acc 'shard_rows)
-								(list 'insert pj_schema pjtbl (cons 'list mat_col_names) 'shard_rows (list) (list 'lambda (list) true) true))
+								(list 'insert (list 'table pj_schema pjtbl) (cons 'list mat_col_names) 'shard_rows (list) (list 'lambda (list) true) true))
 							(list 'lambda (list 'acc 'shard_rows) (list 'merge 'acc 'shard_rows)))
 						isOuter)
 				))
@@ -2634,7 +2634,7 @@ seeing the correctly prefixed outer alias. */
 									(list (quote createtable) schema2_us "(1)"
 										(list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '()))
 										(list "engine" "sloppy") true)
-									(list (quote insert) schema2_us "(1)" (list "1") (list (list 1)) '() (list (quote lambda) '() true) true)))
+									(list (quote insert) (list (quote table) schema2_us "(1)") (list "1") (list (list 1)) '() (list (quote lambda) '() true) true)))
 								(if (or (nil? tables2_us) (equal? tables2_us '()))
 									(begin
 										(set tables2_us (list (list "(1)" schema2_us "(1)" false nil)))
@@ -3429,8 +3429,8 @@ seeing the correctly prefixed outer alias. */
 				(createtable schema ".(1)"
 					(list (list "unique" "group" (list "1")) (list "column" "1" "any" (list) (list)))
 					(list "engine" "sloppy") true)
-				(if (table_empty? schema ".(1)")
-					(insert schema ".(1)" (list "1") (list (list 1)) (list) (lambda () true) true)
+				(if (table_empty? (table schema ".(1)"))
+					(insert (table schema ".(1)") (list "1") (list (list 1)) (list) (lambda () true) true)
 					nil))
 			(list (list ".(1)" schema ".(1)" false nil)))
 		tables))
@@ -5341,7 +5341,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					'('time '('begin
 						/* If grouping is global (group='(1)), avoid base scan and insert one key row */
 						(if (equal? resolved_stage_group '(1))
-							'('insert schema grouptbl '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
+							'('insert '('table schema grouptbl) '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
 							(begin
 								/* key columns */
 								(set keycols (merge_unique (map resolved_stage_group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
@@ -5794,7 +5794,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(list (expr_name expr) (expr_name expr))
 						))))
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1))) nil
-							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
+							(list 'register_keytable_cleanup (list 'table schema tbl) (list 'table schema grouptbl) tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
 						/* collect + trigger deploy on first keytable creation only.
 						createtable inside init_code returns true on first creation.
@@ -6272,7 +6272,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									'(list)
 									/* reduce2: outermost inserts into prejoin, inner levels merge */
 									(if is_outermost
-										'('lambda '('acc 'shard_rows) '('insert prejoin_schema prejointbl (cons 'list prejoin_column_names) 'shard_rows '(list) '('lambda '() true) true))
+										'('lambda '('acc 'shard_rows) '('insert '('table prejoin_schema prejointbl) (cons 'list prejoin_column_names) 'shard_rows '(list) '('lambda '() true) true))
 										'('lambda '('acc 'shard_rows) '('merge 'acc 'shard_rows)))
 									isOuter
 								)
@@ -6303,7 +6303,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(list 'set _pj_prev_rr (symbol "resultrow"))
 						(list 'set (symbol "resultrow")
 							(list 'lambda (list _pj_row_sym)
-								(list 'insert prejoin_schema prejointbl
+								(list 'insert (list 'table prejoin_schema prejointbl)
 									(cons 'list prejoin_column_names)
 									(list 'list
 										(cons 'list (map prejoin_column_names (lambda (col)
@@ -6697,7 +6697,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(build_pj_insert_scan tables condition trigger_tv true prejoin_schema prejoin_table_name prejoin_columns prejoin_column_names))))
 										(define insert_fn
 											(eval (list 'lambda (list 'OLD 'NEW 'session)
-												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
+												(list 'if (list 'table_empty? (list 'table prejoin_schema prejoin_table_name))
 													true
 													(list raw_insert_fn 'OLD 'NEW 'session)))))
 										/* UPDATE trigger: delete old prejoin rows + insert new for any row change.
@@ -6708,7 +6708,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(define raw_update_fn (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'begin (list delete_fn 'OLD 'NEW 'session) (list raw_insert_fn 'OLD 'NEW 'session)))))
 										(define update_fn
 											(eval (list 'lambda (list 'OLD 'NEW 'session)
-												(list 'if (list 'table_empty? prejoin_schema prejoin_table_name)
+												(list 'if (list 'table_empty? (list 'table prejoin_schema prejoin_table_name))
 													true
 													(list raw_update_fn 'OLD 'NEW 'session)))))
 										/* emit the register call as an S-expression to be executed at query time */
@@ -6723,7 +6723,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list 'createtable pj_schema prejointbl
 								(cons 'list (map prejoin_column_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 								query_temp_table_options_code true)
-							(list 'table_empty? pj_schema prejointbl))
+							(list 'table_empty? (list 'table pj_schema prejointbl)))
 							(cons 'begin (cons (list 'time prejoin_materialize_plan "materialize") pj_trigger_registrations))
 							nil))
 					(list grouped_result)))
@@ -6923,7 +6923,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								orc_sort_dirs_vals))
 							/* partitioncount is auto-detected from reduceinit shape: (list init nil) → 1 partition key */
 							(define orc_setup (lambda ()
-								(createcolumn schema tbl orc_col_name "any" '()
+								(createcolumn (table schema tbl) orc_col_name "any" '()
 									(list "sortcols" full_sort_cols "sortdirs" full_sort_dirs
 										"mapcols" extra_mapcols
 										"mapfn" orc_mapfn "reducefn" orc_reducefn
