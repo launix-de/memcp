@@ -4220,11 +4220,11 @@ second table carries strictly more local WHERE predicates than the first. */
 							(< (car a) (car b))))))
 					(define all_join_terms (jqr_flatten_join_terms segment))
 					(define combined_je (combine_and_terms all_join_terms))
-					(map (produceN (count sorted)) (lambda (i)
+					(map (produceN (count sorted)) (lambda (i) (begin
 						(define td (nth (nth sorted i) 2))
 						(if (equal? i 0)
 							(jqr_td_with_joinexpr td true)
-							(jqr_td_with_joinexpr td combined_je)))))))))))
+							(jqr_td_with_joinexpr td combined_je))))))))))))
 
 (define jqr_reorder_segments (lambda (tables_ condition schemas) (begin
 	(match (reduce tables_
