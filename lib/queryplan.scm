@@ -5033,16 +5033,21 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				group key plus LEFT JOIN ON-clause; leaving them here leaks outer refs
 				into the cache formula and breaks skip-level COUNT reuse. Immediate
 				correlations to the current outer row still stay in the compute path. */
+				/* Detect key-correlation parts: equalities where one side is a GROUP key
+				and the other is an outer ref OR a session ref. These become keytable
+				JOIN conditions (_kt_je), not collect filters. */
+				(define _grp_is_outer_or_session (lambda (expr)
+					(or (_grp_has_explicit_outer expr) (expr_uses_session_state expr))))
 				(define _grp_key_corr_part (lambda (part) (match part
 					'((symbol equal??) left right) (if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
-						(and (not (_grp_refs_src_tbl right)) (_grp_has_explicit_outer right))
+						(and (not (_grp_refs_src_tbl right)) (_grp_is_outer_or_session right))
 						(if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
-							(and (not (_grp_refs_src_tbl left)) (_grp_has_explicit_outer left))
+							(and (not (_grp_refs_src_tbl left)) (_grp_is_outer_or_session left))
 							false))
 					'((quote equal??) left right) (if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
-						(and (not (_grp_refs_src_tbl right)) (_grp_has_explicit_outer right))
+						(and (not (_grp_refs_src_tbl right)) (_grp_is_outer_or_session right))
 						(if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
-							(and (not (_grp_refs_src_tbl left)) (_grp_has_explicit_outer left))
+							(and (not (_grp_refs_src_tbl left)) (_grp_is_outer_or_session left))
 							false))
 					false)))
 				(define _cond_key_corr (if (nil? _stage_scope) '()
