@@ -800,6 +800,13 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 				t := TableFromScmer(items[tableIdx])
 				info.schema = t.schema.Name
 				info.table = t.Name
+			} else if items[tableIdx].IsSlice() {
+				// unfolded (table schema name) expression
+				sl := items[tableIdx].Slice()
+				if len(sl) == 3 && scm.String(sl[0]) == "table" {
+					info.schema = scm.String(sl[1])
+					info.table = scm.String(sl[2])
+				}
 			} else {
 				info.schema = ""
 				info.table = scm.String(items[tableIdx])
@@ -998,10 +1005,18 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 	if len(items) >= 4 && items[0].IsSymbol() {
 		sym := items[0].String()
 		tableIdx := 2
-		if (sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order") &&
-			len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
-			t := TableFromScmer(items[tableIdx])
-			if t.schema.Name == schema && t.Name == table {
+		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
+			var tSchema, tName string
+			if len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
+				t := TableFromScmer(items[tableIdx])
+				tSchema, tName = t.schema.Name, t.Name
+			} else if len(items) > tableIdx && items[tableIdx].IsSlice() {
+				sl := items[tableIdx].Slice()
+				if len(sl) == 3 && scm.String(sl[0]) == "table" {
+					tSchema, tName = scm.String(sl[1]), scm.String(sl[2])
+				}
+			}
+			if tSchema == schema && tName == table {
 				return items
 			}
 		}
@@ -1034,13 +1049,11 @@ func isAdditiveReduce(reduce scm.Scmer) bool {
 // isAdditiveAggregate checks whether a scan node represents an additive aggregate
 // (reduce=+, neutral=0) whose mapFn contains no inner scans.
 func isAdditiveAggregate(scanNode []scm.Scmer) bool {
-	if len(scanNode) < 9 {
+	if len(scanNode) < 8 {
 		return false
 	}
+	// scan layout: [fn, tx, table, filterCols, filter, mapCols, map, reduce, neutral, ...]
 	mapFnIdx, reduceIdx, neutralIdx := 6, 7, 8
-	if len(scanNode) > 1 && !scanNode[1].IsString() {
-		mapFnIdx, reduceIdx, neutralIdx = 7, 8, 9
-	}
 	if len(scanNode) <= neutralIdx {
 		return false
 	}
@@ -1462,10 +1475,8 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			if !exists {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
+					// scan layout: [fn, tx, table, filterCols, filter, mapCols, map, ...]
 					mapColsIdx, mapFnIdx := 5, 6
-					if len(scanNode) > 1 && !scanNode[1].IsString() {
-						mapColsIdx, mapFnIdx = 6, 7
-					}
 					if isConstantOneAggregate(scanNode[mapFnIdx]) {
 						body = scm.NewSlice([]scm.Scmer{
 							scm.NewSymbol("invalidatecolumn"),
