@@ -660,22 +660,18 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 			}
 
 			// Update per-column statistics from rebuilt shards.
-			// Use newShardList first (freshly compressed columns have accurate stats).
-			// Fall back to origShardList for shards whose columns are already loaded.
+			// The new shards have freshly compressed columns with accurate stats.
 			rowEst := uint64(t.CountEstimate())
 			for ci := range t.Columns {
 				var distinctSum uint64
 				colName := t.Columns[ci].Name
-				for i, shard := range newShardList {
+				for _, shard := range newShardList {
 					if shard == nil {
 						continue
 					}
+					// columns are populated during rebuild — access directly
 					if cs, ok := shard.columns[colName]; ok && cs != nil {
 						distinctSum += uint64(cs.DistinctCount())
-					} else if i < len(origShardList) && origShardList[i] != nil {
-						if cs2, ok2 := origShardList[i].columns[colName]; ok2 && cs2 != nil {
-							distinctSum += uint64(cs2.DistinctCount())
-						}
 					}
 				}
 				atomic.StoreUint64(&t.Columns[ci].DistinctEstimate, distinctSum)

@@ -802,12 +802,12 @@ func (t *table) ShowColumns() scm.Scmer {
 				}
 			}
 		}
-		result[i] = v.Show(keyType)
+		result[i] = v.Show(keyType, t)
 	}
 	return scm.NewSlice(result)
 }
 
-func (c *column) Show(keyType string) scm.Scmer {
+func (c *column) Show(keyType string, t *table) scm.Scmer {
 	dims := make([]scm.Scmer, len(c.Typdimensions))
 	for i, v := range c.Typdimensions {
 		dims[i] = scm.NewInt(int64(v))
@@ -842,9 +842,16 @@ func (c *column) Show(keyType string) scm.Scmer {
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
-		scm.NewString("DistinctEstimate"), scm.NewInt(int64(atomic.LoadUint64(&c.DistinctEstimate))),
-		scm.NewString("RowEstimate"), scm.NewInt(int64(atomic.LoadUint64(&c.RowEstimate))),
+		scm.NewString("DistinctEstimate"), scm.NewInt(int64(c.distinctEstimateFor(t))),
+		scm.NewString("RowEstimate"), scm.NewInt(int64(t.CountEstimate())),
 	})
+}
+
+// distinctEstimateFor returns the cached DistinctEstimate for this column.
+// Returns 0 if no statistics are available yet (populated at rebuild time).
+// Never acquires shard locks — safe to call during query compilation.
+func (c *column) distinctEstimateFor(t *table) uint {
+	return uint(atomic.LoadUint64(&c.DistinctEstimate))
 }
 
 func (c *column) UpdateSanitizer() {
