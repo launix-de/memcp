@@ -847,11 +847,19 @@ func (c *column) Show(keyType string, t *table) scm.Scmer {
 	})
 }
 
-// distinctEstimateFor returns the cached DistinctEstimate for this column.
-// Returns 0 if no statistics are available yet (populated at rebuild time).
+// distinctEstimateFor returns the DistinctEstimate for this column.
+// Uses cached value from rebuild if available. Falls back to CountEstimate
+// (conservative upper bound) when no rebuild statistics exist yet.
 // Never acquires shard locks — safe to call during query compilation.
 func (c *column) distinctEstimateFor(t *table) uint {
-	return uint(atomic.LoadUint64(&c.DistinctEstimate))
+	cached := atomic.LoadUint64(&c.DistinctEstimate)
+	if cached > 0 {
+		return uint(cached)
+	}
+	// No rebuild statistics yet — use row count as conservative upper bound.
+	// This ensures join_reorder can still compare table sizes even before
+	// the first rebuild runs.
+	return uint(t.CountEstimate())
 }
 
 func (c *column) UpdateSanitizer() {
