@@ -3144,19 +3144,18 @@ seeing the correctly prefixed outer alias. */
 				/* correlated: outer refs must be direct columns */
 				(or (not _has_outer)
 					(_subquery_outer_refs_are_direct_columns subquery outer_schemas))
-				/* uncorrelated + outer GROUP: not yet safe (needs group-barrier).
-				   correlated + LIMIT + outer GROUP: also blocked (prejoin scoping bug) */
-				(or (and _has_outer (nil? l)) (not _outer_has_group))
+				/* outer GROUP: blocked for now (prejoin scoping bug, needs group-barrier) */
+				(not _outer_has_group)
 				(not (_contains_inner_select_marker subquery))
 				(not (nil? _value_expr))
 				(equal? (extract_aggregates _value_expr) '())
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				/* correlated: no LIMIT (not yet supported, needs once-per-partition IR).
+				/* correlated: LIMIT allowed (partition-stage enforces per-partition limit).
 				   uncorrelated: LIMIT required (preserves multi-row error semantics) */
-				(if _has_outer (nil? l) (not (nil? l)))
-				(if _has_outer (nil? off) (nil? off)))
+				(or _has_outer (not (nil? l)))
+				(or (not _has_outer) (nil? off)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
 						/* Scalar subselect unnesting yields null-preserving LEFT JOIN helper
