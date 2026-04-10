@@ -3092,9 +3092,9 @@ seeing the correctly prefixed outer alias. */
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				/* uncorrelated: LIMIT is fine (produces 1-row CROSS JOIN) */
-				(or (not _has_outer) (nil? l))
-				(or (not _has_outer) (nil? off)))
+				/* uncorrelated: only unnest if LIMIT is present (preserves multi-row error semantics) */
+				(or _has_outer (not (nil? l)))
+				(or _has_outer (nil? off)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
 						/* Scalar subselect unnesting yields null-preserving LEFT JOIN helper
