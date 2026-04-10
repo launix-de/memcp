@@ -2852,20 +2852,27 @@ seeing the correctly prefixed outer alias. */
 							If groups2 is empty: create new stage with group_keys.
 							If groups2 has stages with (1) global group: replace (1) with domain keys.
 							Otherwise: extend existing group keys with domain. */
+							/* Prefix group keys with domain extension, and ALWAYS prefix
+							HAVING/ORDER expressions (they reference inner table aliases). */
+							(define prefix_stage (lambda (stage new_keys) (begin
+								(make_group_stage new_keys
+									(if (nil? (stage_having_expr stage)) nil (prefix_expr (stage_having_expr stage)))
+									(if (nil? (stage_order_list stage)) nil
+										(map (stage_order_list stage) (lambda (o) (match o '(col dir) (list (prefix_expr col) dir) o))))
+									(stage_limit_val stage) (stage_offset_val stage)
+									(stage_partition_aliases stage) (stage_init_code stage)))))
 							(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
 								(if has_aggregates
 									(list (make_group_stage group_keys nil nil nil nil nil nil))
 									groups2)
-								(if (not (equal? correlation_keys '()))
-									(map groups2 (lambda (stage) (begin
-										(define existing_keys (stage_group_cols stage))
-										(define extended_keys (if (equal? existing_keys '(1))
+								(map groups2 (lambda (stage) (begin
+									(define existing_keys (stage_group_cols stage))
+									(define extended_keys (if (equal? correlation_keys '())
+										(map existing_keys prefix_expr)
+										(if (equal? existing_keys '(1))
 											group_keys
-											(merge existing_keys group_keys)))
-										(make_group_stage extended_keys (stage_having_expr stage)
-											(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
-											(stage_partition_aliases stage) (stage_init_code stage)))))
-									groups2)))
+											(merge (map existing_keys prefix_expr) group_keys))))
+									(prefix_stage stage extended_keys))))))
 							/* Scoped stages: all go through the keytable path with partition-aliases.
 							Aggregate stages use standard aggregate reducers.
 							Non-aggregate stages use once-per-partition semantics (once-limit). */
