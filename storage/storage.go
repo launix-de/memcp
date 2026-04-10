@@ -368,11 +368,18 @@ func Init(en scm.Env) {
 			},
 			Return: &scm.TypeDescriptor{Kind: "table"},
 			Optimize: func(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-				// optimize args only — do NOT fold to a constant pointer because
-				// DDL (DROP/CREATE TABLE) can invalidate the pointer and cached
-				// query plans would then reference a stale/deleted table.
 				for i := 1; i < len(v); i++ {
 					v[i], _ = oc.OptimizeSub(v[i], true)
+				}
+				// fold at compile time if both args are constant strings
+				if len(v) == 3 && v[1].GetTag() == scm.TagString && v[2].GetTag() == scm.TagString {
+					db := GetDatabase(scm.String(v[1]))
+					if db != nil {
+						t := db.GetTable(scm.String(v[2]))
+						if t != nil {
+							return NewTableScmer(t), nil
+						}
+					}
 				}
 				return scm.NewSlice(v), nil
 			},
