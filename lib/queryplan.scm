@@ -5338,7 +5338,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr)))
 									(cons (symbol aggregate) agg_rest)
 									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) )
-										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
+										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '()))
+										/* scope-bound aggregate referencing a DIFFERENT table: defer
+										(it belongs to another scoped stage, not this one) */
+										(and (not (nil? _stage_scope))
+											(not (equal? (extract_tblvars expr) '()))
+											(not (reduce (extract_tblvars expr) (lambda (acc tv) (or acc (equal?? tv tblvar))) false))))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (replace_group_field_expr agg_expr) agg_reduce agg_neutral)
@@ -5346,7 +5351,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch expr))
 									(cons '(quote aggregate) agg_rest)
 									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) )
-										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
+										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '()))
+										(and (not (nil? _stage_scope))
+											(not (equal? (extract_tblvars expr) '()))
+											(not (reduce (extract_tblvars expr) (lambda (acc tv) (or acc (equal?? tv tblvar))) false))))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (replace_group_field_expr agg_expr) agg_reduce agg_neutral)
