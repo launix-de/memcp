@@ -4208,14 +4208,23 @@ second table carries strictly more local WHERE predicates than the first. */
 			(if (reduce segment (lambda (acc td) (or acc (jqr_td_outer td))) false)
 				segment
 				(begin
-					(define scored (map segment (lambda (td) (list (jqr_estimate_rows td condition schemas) td))))
-					(define sorted (sort scored (lambda (a b) (< (car a) (car b)))))
+					/* score each table: estimated rows (from statistics) with predicate count as tiebreaker */
+					(define condition_terms (flatten_and_terms (coalesceNil condition true)))
+					(define scored (map segment (lambda (td) (list
+						(jqr_estimate_rows td condition schemas)
+						(- 0 (jqr_local_term_count (jqr_td_alias td) condition_terms)) /* negate: more predicates = lower score = scanned first */
+						td))))
+					(define sorted (sort scored (lambda (a b)
+						(if (equal? (car a) (car b))
+							(< (cadr a) (cadr b))  /* tiebreaker: more local predicates first */
+							(< (car a) (car b))))))
 					(define all_join_terms (jqr_flatten_join_terms segment))
 					(define combined_je (combine_and_terms all_join_terms))
 					(map (produceN (count sorted)) (lambda (i)
+						(define td (nth (nth sorted i) 2))
 						(if (equal? i 0)
-							(jqr_td_with_joinexpr (cadr (nth sorted i)) true)
-							(jqr_td_with_joinexpr (cadr (nth sorted i)) combined_je)))))))))))
+							(jqr_td_with_joinexpr td true)
+							(jqr_td_with_joinexpr td combined_je)))))))))))
 
 (define jqr_reorder_segments (lambda (tables_ condition schemas) (begin
 	(match (reduce tables_
