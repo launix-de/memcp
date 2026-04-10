@@ -284,7 +284,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 									(define cols (car (cdr (cdr stmt))))
 									(define vals (car (cdr (cdr (cdr stmt)))))
 									(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
-									(list (list (symbol "insert") schema tbl
+									(list (list (symbol "insert") (list (symbol "table") schema tbl)
 										(cons (symbol "list") cols)
 										(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
 										(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil)))
@@ -320,7 +320,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 										(list (list (symbol "begin")
 											(list (symbol "set") (symbol "resultrow")
 												(list (symbol "lambda") (list (symbol "item"))
-													(list (symbol "insert") schema tbl
+													(list (symbol "insert") (list (symbol "table") schema tbl)
 														(cons (symbol "list") cols)
 														(list (symbol "list")
 															(cons (symbol "list")
