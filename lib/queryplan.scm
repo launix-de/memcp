@@ -1473,7 +1473,7 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 	(define fk_result (if (and physical_tbl (nil? condition_suffix) (equal? 1 (count keys)))
 		(match (car keys)
 			'('get_column (eval tblvar) false scol false) (begin
-				(define fk_info (get_fk_target schema tbl scol))
+				(define fk_info (get_fk_target (table schema tbl) scol))
 				(if (not (nil? fk_info))
 					(begin
 						(define alias_map (list (list tblvar (concat schema "." tbl))))
