@@ -1186,12 +1186,18 @@ get_column markers and may no longer run schema-based repair heuristics. */
 			(stage_preserve_cache_meta stage (make_partition_stage spa
 				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
-			(stage_preserve_cache_meta stage (make_group_stage_with_condition
-				(map sg fin)
-				(fin sh)
-				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
-				sl soff spa (stage_init_code stage)
-				(begin (define sc (stage_condition stage)) (if (nil? sc) nil (fin sc)))))))
+			(begin
+				(define rebuilt (make_group_stage_with_condition
+					(map sg fin)
+					(fin sh)
+					(map so (lambda (o) (match o '(c d) (list (fin c) d))))
+					sl soff spa (stage_init_code stage)
+					(begin (define sc (stage_condition stage)) (if (nil? sc) nil (fin sc)))))
+				/* preserve once-limit from once-per-partition stages */
+				(define sol (stage_once_limit stage))
+				(stage_preserve_cache_meta stage
+					(if (nil? sol) rebuilt
+						(merge rebuilt (list (list (quote once-limit) sol))))))))
 )))
 (define finalize_logical_stage (lambda (stage all_schemas rewrite_expr enforce_contract)
 	(finalize_logical_stage_scoped stage all_schemas all_schemas rewrite_expr enforce_contract)
@@ -1213,12 +1219,17 @@ get_column markers and may no longer run schema-based repair heuristics. */
 				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
 				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
 			/* group stage (possibly scoped with aliases) */
-			(stage_preserve_cache_meta stage (make_group_stage_with_condition
-				(map sg canon)
-				(canon sh)
-				(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-				sl soff spa (stage_init_code stage)
-				(begin (define sc (stage_condition stage)) (if (nil? sc) nil (canon sc)))))))
+			(begin
+				(define rebuilt (make_group_stage_with_condition
+					(map sg canon)
+					(canon sh)
+					(map so (lambda (o) (match o '(c d) (list (canon c) d))))
+					sl soff spa (stage_init_code stage)
+					(begin (define sc (stage_condition stage)) (if (nil? sc) nil (canon sc)))))
+				(define sol (stage_once_limit stage))
+				(stage_preserve_cache_meta stage
+					(if (nil? sol) rebuilt
+						(merge rebuilt (list (list (quote once-limit) sol))))))))
 )))
 
 (import "sql-metadata.scm")
