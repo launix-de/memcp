@@ -931,3 +931,10 @@ func (s *StorageString) proposeCompression(i uint32) ColumnStorage {
 	*/
 	return nil
 }
+
+func (s *StorageString) DistinctCount() uint {
+	if s.nodict {
+		return s.count // no dedup in nodict mode — count is upper bound
+	}
+	return s.count // dict entry count = distinct values
+}

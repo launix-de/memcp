@@ -104,3 +104,5 @@ func (s *StoragePrefix) proposeCompression(i uint32) ColumnStorage {
 	// TODO: if s.values proposes a StoragePrefix, build it into our cascade??
 	return nil
 }
+
+func (s *StoragePrefix) DistinctCount() uint { return s.values.DistinctCount() }

@@ -181,3 +181,5 @@ func (s *StorageDecimal) Deserialize(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &s.scaleExp)
 	return s.inner.DeserializeEx(f, true) // reads magic 10 + data
 }
+
+func (s *StorageDecimal) DistinctCount() uint { return s.inner.DistinctCount() }
