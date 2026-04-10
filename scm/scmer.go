@@ -420,7 +420,7 @@ func (s Scmer) IsCustom(tag uint16) bool {
 
 func (s Scmer) Custom(tag uint16) unsafe.Pointer {
 	if s.GetTag() != tag {
-		panic("wrong custom tag")
+		panic(fmt.Sprintf("wrong custom tag: expected %d, got %d (value: %s)", tag, s.GetTag(), s.String()))
 	}
 	return unsafe.Pointer(s.ptr)
 }

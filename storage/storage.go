@@ -350,15 +350,13 @@ func Init(en scm.Env) {
 		Name: "table",
 		Desc: "resolves a schema+table name pair into a table handle",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			db := GetDatabase(schema)
+			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
-				panic("database " + schema + " does not exist")
+				return scm.NewNil()
 			}
-			tableName := scm.String(a[1])
-			t := db.GetTable(tableName)
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
-				panic("table " + schema + "." + tableName + " does not exist")
+				return scm.NewNil()
 			}
 			return NewTableScmer(t)
 		},
@@ -370,19 +368,11 @@ func Init(en scm.Env) {
 			},
 			Return: &scm.TypeDescriptor{Kind: "table"},
 			Optimize: func(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-				// optimize args first
+				// optimize args only — do NOT fold to a constant pointer because
+				// DDL (DROP/CREATE TABLE) can invalidate the pointer and cached
+				// query plans would then reference a stale/deleted table.
 				for i := 1; i < len(v); i++ {
 					v[i], _ = oc.OptimizeSub(v[i], true)
-				}
-				// fold at compile time if both args are constant strings
-				if len(v) == 3 && v[1].GetTag() == scm.TagString && v[2].GetTag() == scm.TagString {
-					db := GetDatabase(scm.String(v[1]))
-					if db != nil {
-						t := db.GetTable(scm.String(v[2]))
-						if t != nil {
-							return NewTableScmer(t), nil
-						}
-					}
 				}
 				return scm.NewSlice(v), nil
 			},
@@ -1450,8 +1440,14 @@ func Init(en scm.Env) {
 		Name: "droptable",
 		Desc: "removes a table",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			t := TableFromScmer(a[0])
 			ifexists := len(a) > 1 && scm.ToBool(a[1])
+			if a[0].IsNil() {
+				if ifexists {
+					return scm.NewBool(false)
+				}
+				panic("droptable: table does not exist")
+			}
+			t := TableFromScmer(a[0])
 			DropTable(t.schema.Name, t.Name, ifexists)
 			return scm.NewBool(true)
 		},

@@ -644,18 +644,26 @@ while still recursing into deeper helper lineage when needed. */
 
 /* scalar subselect helper wrappers */
 (define scalar_scan (lambda (schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2) (begin
-	(define result (scan (session "__memcp_tx") schema (scan-runtime-source tbl) filtercols filterfn mapcols mapfn reduce neutral reduce2))
+	(define result (scan (session "__memcp_tx") (scan-runtime-table schema tbl) filtercols filterfn mapcols mapfn reduce neutral reduce2))
 	(if (equal? result neutral) nil result)
 )))
 (define scalar_scan_order (lambda (schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral) (begin
-	(define result (scan_order (session "__memcp_tx") schema (scan-runtime-source tbl) filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
+	(define result (scan_order (session "__memcp_tx") (scan-runtime-table schema tbl) filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
 	(if (equal? result neutral) nil result)
 )))
-(define scan-runtime-source (lambda (table-source) (match table-source
+/* scan-runtime-table: resolves a table source at runtime (direct call context) */
+(define scan-runtime-table (lambda (schema tbl) (match tbl
+	'(materialized-subquery key) ((context "session") key)
+	'((symbol materialized-subquery) key) ((context "session") key)
+	'((quote materialized-subquery) key) ((context "session") key)
+	(table schema tbl)
+)))
+/* scan-codegen-table: generates a table expression for codegen (list context) */
+(define scan-codegen-table (lambda (schema tbl) (match tbl
 	'(materialized-subquery key) (list (list (quote context) "session") key)
 	'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
 	'((quote materialized-subquery) key) (list (list (quote context) "session") key)
-	table-source
+	(list (quote table) schema tbl)
 )))
 
 /* scan_batch peephole optimization has been moved to the Go optimizer hook
@@ -2527,8 +2535,7 @@ seeing the correctly prefixed outer alias. */
 													(if use_ordered_scalar
 														(list (quote scan_order)
 															(list (quote session) "__memcp_tx")
-															schema3
-															(scan-runtime-source tbl3)
+															(scan-codegen-table schema3 tbl3)
 															(cons list filtercols)
 															(list (quote lambda) filterparams filterbody)
 															(cons list ordercols)
@@ -2544,8 +2551,7 @@ seeing the correctly prefixed outer alias. */
 															false)
 														(list (quote scan)
 															(list (quote session) "__memcp_tx")
-															schema3
-															(scan-runtime-source tbl3)
+															(scan-codegen-table schema3 tbl3)
 															(cons list filtercols)
 															(list (quote lambda) filterparams filterbody)
 															(cons list mapcols)
@@ -5089,7 +5095,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(define lowered_expr (group_value_local_key_expr expr))
 					(define col_name (group_value_local_col_name expr))
 					(define cols (extract_columns_for_tblvar tblvar lowered_expr))
-					(list (quote createcolumn) schema tbl col_name "any" '(list) '(list "temp" true)
+					(list (quote createcolumn) (list (quote table) schema tbl) col_name "any" '(list) '(list "temp" true)
 						(cons (quote list) cols)
 						(list (quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col))))
 							(replace_columns_from_expr lowered_expr))))))
@@ -5358,7 +5364,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									'(list) /* empty dict */
 									'((quote lambda) '('acc 'sharddict)
 										'('insert
-											schema grouptbl
+											'('table schema grouptbl)
 											(cons 'list (map resolved_stage_group expr_name))
 											'('assoc_keys_as_dataset_rows 'sharddict (count resolved_stage_group)) /* turn keys from assoc into dataset rows */
 											'(list) '('lambda '() true) true)
@@ -5736,7 +5742,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							)))
 							/* COUNT column itself must not filter by itself (circular); all others filter by COUNT>0 */
 							(define this_options (if (and needs_count (equal? (agg_col_name ag) count_col_name)) '(list "temp" true) createcol_options))
-							'((quote createcolumn) schema grouptbl (agg_col_name ag) "any" '(list) this_options
+							'((quote createcolumn) '('table schema grouptbl) (agg_col_name ag) "any" '(list) this_options
 								(cons list (map resolved_stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 								'((quote lambda) (map resolved_stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
 									(scan_wrapper 'scan schema tbl
@@ -5880,8 +5886,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(list (quote set) (symbol pn)
 													(list (quote scan)
 														'(session "__memcp_tx")
-														schema
-														(scan-runtime-source grouptbl)
+														(scan-codegen-table schema grouptbl)
 														(list (quote list) acn)
 														(list (quote lambda) (list (symbol acn)) true)
 														(list (quote list) acn)
