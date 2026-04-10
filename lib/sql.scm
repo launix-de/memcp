@@ -56,9 +56,9 @@ if the user is not allowed to access this property, the function will throw an e
 			'("admin") (lambda (a) a)
 			(lambda (a b) (or a b))
 			false))
-		(if is_admin (lambda (schema table write) true) /* admin -> allow all */
+		(if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
 			/* else: complicated policy */
-			(lambda (schema table write)
+			(lambda (schema tblname write)
 				(begin
 					/* Allow virtual INFORMATION_SCHEMA for all users */
 					(if (equal?? schema "information_schema") true (begin
@@ -82,7 +82,7 @@ if the user is not allowed to access this property, the function will throw an e
 ))
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
-	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
+	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema tblname write) true)))
 	(insert (table "system" "user") '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
 ))
 
@@ -125,7 +125,7 @@ if the user is not allowed to access this property, the function will throw an e
 /* error query log table */
 (if (not (has? (show "system_statistic") "errors")) (begin
 	(print "creating table system_statistic.errors")
-	(eval (parse_sql "system_statistic" "CREATE TABLE errors(datetime text, database text, user text, query text, error text) ENGINE=SLOPPY" (lambda (schema table write) true)))
+	(eval (parse_sql "system_statistic" "CREATE TABLE errors(datetime text, database text, user text, query text, error text) ENGINE=SLOPPY" (lambda (schema tblname write) true)))
 ))
 
 /* global counter incremented on each logged error — used by dashboard WebSocket to trigger refresh */
@@ -155,13 +155,13 @@ qry    — query text (pass "" when unknown) */
 /* print log table */
 (if (not (has? (show "system_statistic") "logs")) (begin
 	(print "creating table system_statistic.logs")
-	(eval (parse_sql "system_statistic" "CREATE TABLE logs(datetime text, message text) ENGINE=SLOPPY" (lambda (schema table write) true)))
+	(eval (parse_sql "system_statistic" "CREATE TABLE logs(datetime text, message text) ENGINE=SLOPPY" (lambda (schema tblname write) true)))
 ))
 
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
 	(print "creating table system.access")
-	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema table write) true)))
+	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
 
 /* migration: ensure unique (username, database) constraint on system.access */

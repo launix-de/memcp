@@ -54,7 +54,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (count result2) 1) true "SELECT COUNT(*) should return 1 row")
 
 	/* Basic parsing tests - just verify the SQL parses correctly without executing */
-	(define allow (lambda (schema table write) true))
+	(define allow (lambda (schema tblname write) true))
 	(assert (list? (parse_sql "system" "SELECT 1" allow)) true "Simple SELECT should parse")
 	(assert (list? (parse_sql "system" "SELECT * FROM user" allow)) true "SELECT * should parse")
 	(assert (list? (parse_sql "system" "INSERT INTO user VALUES (1, 'test', 'pass')" allow)) true "INSERT should parse")

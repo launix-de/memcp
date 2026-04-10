@@ -661,7 +661,7 @@ consumer stage. */
 	(seen)
 )))
 (define rdf_ensure_table (lambda (schema)
-	(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)" (lambda (schema table write) true)))
+	(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)" (lambda (schema tblname write) true)))
 ))
 (define rdf_insert_triples (lambda (schema triples)
 	(if (equal? triples '())

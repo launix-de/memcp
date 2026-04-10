@@ -37,7 +37,7 @@ test_cases:
   - name: "Decode JSON from table via scm"
     scm: |
       (begin
-        (set rows (scan (session "__memcp_tx") "memcp-tests" "ser_test" '("id") (lambda (id) (equal? id 2)) '("data") (lambda (data) data) (lambda (a b) b) nil))
+        (set rows (scan (session "__memcp_tx") (table "memcp-tests" "ser_test") '("id") (lambda (id) (equal? id 2)) '("data") (lambda (data) data) (lambda (a b) b) nil))
         (set decoded (json_decode rows))
         (get_assoc decoded "key"))
     expect:

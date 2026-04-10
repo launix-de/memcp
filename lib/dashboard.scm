@@ -366,7 +366,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* Metrics tracing: periodically insert rows into system_statistic.perf_metrics */
 (if (not (has? (show "system_statistic") "perf_metrics")) (begin
 	(print "creating table system_statistic.perf_metrics")
-	(eval (parse_sql "system_statistic" "CREATE TABLE perf_metrics(time text, cpu float, mem_available bigint, mem_total bigint, shard_memory bigint, shard_budget bigint, connections int, max_connections int, rps float, eps float) ENGINE=SLOPPY" (lambda (schema table write) true)))
+	(eval (parse_sql "system_statistic" "CREATE TABLE perf_metrics(time text, cpu float, mem_available bigint, mem_total bigint, shard_memory bigint, shard_budget bigint, connections int, max_connections int, rps float, eps float) ENGINE=SLOPPY" (lambda (schema tblname write) true)))
 ))
 
 /* self-scheduling tracing loop via setTimeout */
