@@ -13,7 +13,7 @@ test_cases:
     scm: |
       (if
         (equal?
-          (scan nil "system" "user"
+          (scan nil (table "system" "user")
             '("username")
             (lambda (username) (equal? username "auth_scan_nil_repro"))
             '("password")

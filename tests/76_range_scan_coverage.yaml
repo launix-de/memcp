@@ -34,7 +34,7 @@ test_cases:
             (* i 3)
             (nth '("alpha" "beta" "gamma" "delta") (- i (* 4 (floor (/ i 4)))))
             (+ 1.0 (* i 0.5))))))
-        (insert "memcp-tests" "rs_data" '("id" "val" "category" "price") rows)
+        (insert (table "memcp-tests" "rs_data") '("id" "val" "category" "price") rows)
         200)
 
   # ========================================================================
@@ -395,7 +395,7 @@ test_cases:
       (begin
         (set rows (map (produceN 100) (lambda (i)
           (list (floor (/ i 10)) (- i (* 10 (floor (/ i 10)))) (* i i)))))
-        (insert "memcp-tests" "rs_multi" '("a" "b" "c") rows)
+        (insert (table "memcp-tests" "rs_multi") '("a" "b" "c") rows)
         100)
 
   - name: "Multi-col: range on first key"

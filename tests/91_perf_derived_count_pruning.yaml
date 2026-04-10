@@ -33,14 +33,14 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 3)))))
-            (insert "{database}" "perf_main" '("id" "payload") rows)
+            (insert (table "{database}" "perf_main") '("id" "payload") rows)
             (set detail_n (* {rows} 2))
             (set details (map (produceN detail_n) (lambda (i)
               (list
                 i
                 (floor (/ i 2))
                 (+ 1 (* i 5))))))
-            (insert "{database}" "perf_detail" '("id" "parent" "val") details)
+            (insert (table "{database}" "perf_detail") '("id" "parent" "val") details)
             (rebuild)
             "ok")
     sql: |

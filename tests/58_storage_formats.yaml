@@ -33,7 +33,7 @@ test_cases:
       (begin
         (set b (map (produceN 30) (lambda (i)
           (list i (/ (* (+ i 1) 3.14159265) (+ i 2.71828))))))
-        (insert "memcp-tests" "sf_float" '("id" "val") b)
+        (insert (table "memcp-tests" "sf_float") '("id" "val") b)
         30)
 
   - name: "Float: verify cell id=0"
@@ -81,7 +81,7 @@ test_cases:
         (define cities '("Berlin" "Munich" "Hamburg" "Cologne" "Frankfurt"))
         (set b (map (produceN 200) (lambda (i)
           (list i (nth cities (- i (* 5 (floor (/ i 5)))))))))
-        (insert "memcp-tests" "sf_string_dict" '("id" "city") b)
+        (insert (table "memcp-tests" "sf_string_dict") '("id" "city") b)
         200)
 
   - name: "Dict: verify id=0 Berlin"
@@ -137,7 +137,7 @@ test_cases:
       (begin
         (set b (map (produceN 150) (lambda (i)
           (list i (concat "item_" i "_description_unique_" (* i 7))))))
-        (insert "memcp-tests" "sf_string_nodict" '("id" "description") b)
+        (insert (table "memcp-tests" "sf_string_nodict") '("id" "description") b)
         150)
 
   - name: "Nodict: verify id=0"
@@ -193,7 +193,7 @@ test_cases:
       (begin
         (set b (map (produceN 10) (lambda (i)
           (list (* i 20) (* i 200)))))
-        (insert "memcp-tests" "sf_sparse" '("id" "rare_val") b)
+        (insert (table "memcp-tests" "sf_sparse") '("id" "rare_val") b)
         10)
 
   - name: "Insert sparse NULL rows batch 1 (id 1-19)"
@@ -343,7 +343,7 @@ test_cases:
       (begin
         (set b (map (produceN 100) (lambda (i)
           (list i (+ 100 (* i 2))))))
-        (insert "memcp-tests" "sf_seq" '("id" "seq_val") b)
+        (insert (table "memcp-tests" "sf_seq") '("id" "seq_val") b)
         100)
 
   - name: "Seq: verify id=0 (start=100)"
@@ -380,7 +380,7 @@ test_cases:
       (begin
         (set b (map (produceN 50) (lambda (i)
           (list (+ i 100) (+ 500 (* i 3))))))
-        (insert "memcp-tests" "sf_seq" '("id" "seq_val") b)
+        (insert (table "memcp-tests" "sf_seq") '("id" "seq_val") b)
         50)
 
   - name: "Seq: verify second run id=100 (500)"

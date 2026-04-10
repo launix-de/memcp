@@ -21,7 +21,7 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-        (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+        (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
         61000)
 
   - name: "RC: verify initial count"
@@ -41,7 +41,7 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
-        (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+        (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
         200)
 
   - name: "RC: concurrent DELETE 50 rows"
@@ -165,7 +165,7 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-            (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
             61000)
       - name: "RC-del: rebuild"
         parallel: repart_del
@@ -207,7 +207,7 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-            (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
             61000)
       - name: "RC-repeat: rebuild"
         parallel: repart_repeat
@@ -227,7 +227,7 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
-            (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
             200)
       - name: "RC-repeat: count after ops"
         sql: "SELECT COUNT(*) AS cnt FROM rc_data"

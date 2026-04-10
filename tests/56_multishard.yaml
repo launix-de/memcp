@@ -25,21 +25,21 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 20000) (lambda (i) (list i i (concat "n" i)))))
-        (insert "memcp-tests" "ms_data" '("id" "val" "name") b)
+        (insert (table "memcp-tests" "ms_data") '("id" "val" "name") b)
         20000)
 
   - name: "Insert batch 2 (rows 20000-39999)"
     scm: |
       (begin
         (set b (map (produceN 20000) (lambda (i) (list (+ i 20000) (+ i 20000) (concat "n" (+ i 20000))))))
-        (insert "memcp-tests" "ms_data" '("id" "val" "name") b)
+        (insert (table "memcp-tests" "ms_data") '("id" "val" "name") b)
         20000)
 
   - name: "Insert batch 3 (rows 40000-60999)"
     scm: |
       (begin
         (set b (map (produceN 21000) (lambda (i) (list (+ i 40000) (+ i 40000) (concat "n" (+ i 40000))))))
-        (insert "memcp-tests" "ms_data" '("id" "val" "name") b)
+        (insert (table "memcp-tests" "ms_data") '("id" "val" "name") b)
         21000)
 
   - name: "Rebuild to trigger repartition into multiple shards"

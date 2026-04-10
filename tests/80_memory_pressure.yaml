@@ -23,7 +23,7 @@ test_cases:
               (sha256 (concat "s6:" i))
               (sha256 (concat "s7:" i))
               (sha256 (concat "s8:" i)))))
-        (insert "memcp-tests" "mp_pressure" '("id" "a" "b" "c" "d" "e" "f")
+        (insert (table "memcp-tests" "mp_pressure") '("id" "a" "b" "c" "d" "e" "f")
           (parallelN 4001 (lambda (i) (list i
             (imod (* i 54321) 999983)
             (imod (* i 12347) 999979)
@@ -158,7 +158,7 @@ test_cases:
   - name: "MP: create temp computed column"
     scm: |
       (begin
-        (createcolumn "memcp-tests" "mp_pressure" "tmp_sum" "any" '() '("temp" true)
+        (createcolumn (table "memcp-tests" "mp_pressure") "tmp_sum" "any" '() '("temp" true)
           '("a" "b") (lambda (a b) (+ a b)))
         "ok")
     expect: {}

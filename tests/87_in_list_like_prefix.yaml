@@ -17,7 +17,7 @@ test_cases:
       - sql: "CREATE TABLE inlike (id INT, name VARCHAR(100), val INT)"
       - scm: |
           (begin
-            (insert "memcp-tests" "inlike" '("id" "name" "val")
+            (insert (table "memcp-tests" "inlike") '("id" "name" "val")
               (map (produceN 200) (lambda (i)
                 (list i (concat "item" i) (* i 5)))))
             (rebuild))

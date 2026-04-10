@@ -18,7 +18,7 @@ test_cases:
       - sql: "CREATE TABLE eager_idx (id INT, val INT, name VARCHAR(50))"
       - scm: |
           (begin
-            (insert "memcp-tests" "eager_idx" '("id" "val" "name")
+            (insert (table "memcp-tests" "eager_idx") '("id" "val" "name")
               (map (produceN 100) (lambda (i)
                 (list i (* i 3) (concat "row" i)))))
             (rebuild))

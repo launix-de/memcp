@@ -18,7 +18,7 @@ test_cases:
       - sql: "CREATE TABLE native_idx (id INT, val INT, name VARCHAR(50))"
       - scm: |
           (begin
-            (insert "memcp-tests" "native_idx" '("id" "val" "name")
+            (insert (table "memcp-tests" "native_idx") '("id" "val" "name")
               (map (produceN 200) (lambda (i)
                 (list i (* i 7) (concat "row" i)))))
             (rebuild))

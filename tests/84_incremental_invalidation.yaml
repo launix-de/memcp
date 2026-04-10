@@ -77,7 +77,7 @@ test_cases:
 
   - name: "Create partitioned ORC column"
     scm: |
-      (createcolumn "memcp-tests" "inv_part" "rn" "INT" '()
+      (createcolumn (table "memcp-tests" "inv_part") "rn" "INT" '()
         (list
           "sortcols"  '("grp" "val")
           "sortdirs"  (list false false)
@@ -150,7 +150,7 @@ test_cases:
     scm: |
       (begin
         (define rows (produceN 100 (lambda (i) (list (+ i 1) (mod (+ i 1) 10) (* (+ i 1) 7)))))
-        (insert "memcp-tests" "inv_conc" '("id" "grp" "val") rows '() (lambda () true) false))
+        (insert (table "memcp-tests" "inv_conc") '("id" "grp" "val") rows '() (lambda () true) false))
 
   - name: "Create large cross-join table for slow queries"
     sql: |
@@ -160,7 +160,7 @@ test_cases:
     scm: |
       (begin
         (define rows (produceN 200 (lambda (i) (list (+ i 1) (+ i 1)))))
-        (insert "memcp-tests" "inv_big" '("id" "v") rows '() (lambda () true) false))
+        (insert (table "memcp-tests" "inv_big") '("id" "v") rows '() (lambda () true) false))
 
   - name: "Warm up aggregate cache"
     sql: "SELECT grp, SUM(val) AS total FROM inv_conc GROUP BY grp ORDER BY grp"
@@ -220,7 +220,7 @@ test_cases:
     scm: |
       (begin
         (define rows (produceN 10000 (lambda (i) (list (+ i 1) (mod (* (+ i 1) 37) 9973)))))
-        (insert "memcp-tests" "inv_orc_big" '("id" "val") rows '() (lambda () true) false))
+        (insert (table "memcp-tests" "inv_orc_big") '("id" "val") rows '() (lambda () true) false))
 
   - name: "Concurrent: INSERT during ORC scan_order"
     steps:

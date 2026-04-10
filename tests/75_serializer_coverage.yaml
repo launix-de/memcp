@@ -20,7 +20,7 @@ test_cases:
   - name: "Insert JSON-encoded data into table"
     scm: |
       (begin
-        (insert "memcp-tests" "ser_test" '("id" "data")
+        (insert (table "memcp-tests" "ser_test") '("id" "data")
           (list
             (list 1 (json_encode '("a" "b" "c")))
             (list 2 (json_encode_assoc '("key" "value" "num" 42)))

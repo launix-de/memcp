@@ -168,7 +168,7 @@ test_cases:
       (begin
         (set b (map (produceN 10000) (lambda (i)
           (if (equal? 99 (- i (* 100 (floor (/ i 100))))) (list i 1) (list i 0)))))
-        (insert "memcp-tests" "se_bulk" '("id" "category") b)
+        (insert (table "memcp-tests" "se_bulk") '("id" "category") b)
         10000)
 
   - name: "Bulk: verify cell id=0 (should be 0)"
@@ -577,7 +577,7 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 30) (lambda (i) (list i 42))))
-        (insert "memcp-tests" "se_single" '("id" "val") b)
+        (insert (table "memcp-tests" "se_single") '("id" "val") b)
         30)
 
   - name: "Single: verify cell id=0"
@@ -627,7 +627,7 @@ test_cases:
                       (if (< i 196)
                         (list i "pink")
                         (list i "black")))))))))))
-        (insert "memcp-tests" "se_max8" '("id" "color") b)
+        (insert (table "memcp-tests" "se_max8") '("id" "color") b)
         200)
 
   - name: "Max8: verify red"

@@ -39,7 +39,7 @@ test_cases:
 
   - name: "Materialize rank column via createcolumn ORC"
     scm: |
-      (createcolumn "memcp-tests" "orc_rank" "rank" "INT" '()
+      (createcolumn (table "memcp-tests" "orc_rank") "rank" "INT" '()
         (list
           "sortcols"  '("score")
           "sortdirs"  (list false)
@@ -93,7 +93,7 @@ test_cases:
 
   - name: "Materialize running_total column via createcolumn ORC"
     scm: |
-      (createcolumn "memcp-tests" "orc_sales" "running_total" "INT" '()
+      (createcolumn (table "memcp-tests" "orc_sales") "running_total" "INT" '()
         (list
           "sortcols"  '("day")
           "sortdirs"  (list false)

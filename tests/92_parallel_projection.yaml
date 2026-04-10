@@ -24,7 +24,7 @@ test_cases:
       (begin
         (define tables '("pp_data_1" "pp_data_2" "pp_data_3" "pp_data_4"))
         (map tables (lambda (tbl)
-          (insert "memcp-tests" tbl '("id" "score")
+          (insert (table "memcp-tests" tbl) '("id" "score")
             (map (produceN 30000) (lambda (i) (list i (* i 7)))))))
         (* 4 30000))
 
