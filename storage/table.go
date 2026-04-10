@@ -847,29 +847,11 @@ func (c *column) Show(keyType string, t *table) scm.Scmer {
 	})
 }
 
-// distinctEstimateFor returns the sum of per-shard DistinctCount for this column.
-// Reads from cached DistinctEstimate if available, otherwise computes on-demand.
+// distinctEstimateFor returns the cached DistinctEstimate for this column.
+// Returns 0 if no statistics are available yet (populated at rebuild time).
+// Never acquires shard locks — safe to call during query compilation.
 func (c *column) distinctEstimateFor(t *table) uint {
-	cached := atomic.LoadUint64(&c.DistinctEstimate)
-	if cached > 0 {
-		return uint(cached)
-	}
-	// On-demand: iterate active shards and sum DistinctCount
-	var sum uint64
-	for _, shard := range t.ActiveShards() {
-		if shard == nil {
-			continue
-		}
-		unlock := shard.GetRead()
-		if cs, ok := shard.columns[c.Name]; ok && cs != nil {
-			sum += uint64(cs.DistinctCount())
-		}
-		unlock()
-	}
-	if sum > 0 {
-		atomic.StoreUint64(&c.DistinctEstimate, sum)
-	}
-	return uint(sum)
+	return uint(atomic.LoadUint64(&c.DistinctEstimate))
 }
 
 func (c *column) UpdateSanitizer() {
