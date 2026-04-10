@@ -2746,7 +2746,9 @@ across all nesting levels, preventing alias collisions after derived table flatt
 				(equal? (extract_aggregates value_expr) '())
 				(nil? h)
 				(or (nil? g) (equal? g '()))
-				(or (nil? o) (equal? o '()))
+				/* ORDER BY: allowed for correlated LIMIT 1 (partition-stage handles ORDER
+				on the inner scan via scan_order). Blocked for other cases. */
+				(or (nil? o) (equal? o '()) (and has_outer (equal? l 1)))
 				/* correlated: LIMIT 1 = at most one row = LEFT JOIN semantics.
 				   uncorrelated: LIMIT required (preserves multi-row error semantics) */
 				(if has_outer (or (nil? l) (equal? l 1)) (not (nil? l)))
