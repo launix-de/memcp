@@ -4492,9 +4492,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define _stage_scope (stage_partition_aliases stage))
 		(define _grp_tables_raw (if (not (nil? _stage_scope))
 			/* scoped GROUP: only the tables listed in the stage's aliases.
-			Override isOuter to false: these are keytable sources, not LEFT JOINs. */
+			Override isOuter to false: these are keytable sources, not LEFT JOINs.
+			Keep joinexpr: it may contain the inner WHERE condition (stage-condition). */
 			(filter (map tables (lambda (t) (match t
-				'(tv s tbl isOuter je) (if (has? _stage_scope tv) (list tv s tbl false nil) nil)
+				'(tv s tbl isOuter je) (if (has? _stage_scope tv) (list tv s tbl false je) nil)
 				nil))) (lambda (t) (not (nil? t))))
 			/* global GROUP: INNER JOIN tables except partition-staged.
 			LEFT JOIN tables are pass-through (joined AFTER group, not prejoined). */
