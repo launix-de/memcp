@@ -4363,8 +4363,7 @@ second table carries strictly more local WHERE predicates than the first. */
 					/* Emit scan_order_multi call */
 					(merge (list (symbol "scan_order_multi") '(session "__memcp_tx"))
 						(list
-							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 0))))
-							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 1))))
+							(cons (symbol "list") (map scan_specs (lambda (s) (list (symbol "table") (nth s 0) (nth s 1)))))
 							(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 2)))))
 							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 3))))
 							(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 4)))))
