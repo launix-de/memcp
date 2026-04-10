@@ -3015,9 +3015,14 @@ seeing the correctly prefixed outer alias. */
 					(if (and (not (nil? target_expr)) (nil? _first_field))
 						nil
 						(begin
+							/* The condition is BOTH in the WHERE (for correlation → JOIN) and
+							could be in the aggregate IF. Since WHERE already filters matching
+							rows, the aggregate can simply be COUNT(*) = (aggregate 1 + 0).
+							Putting the condition inside the aggregate causes (outer ...) refs
+							that are unavailable in the keytable createcolumn context. */
 							(define _count_sq (match subquery
 								'(s t f c g h o l off) (list s t
-									(list "__cnt" (list (quote aggregate) (count-map-expr-for c) (symbol "+") 0))
+									(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
 									(if (nil? target_expr) c
 										(if (or (nil? c) (equal? c true))
 											(list (quote equal??) _first_field target_expr)
@@ -4486,16 +4491,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define _grp_ps_aliases (merge (map partition_stages (lambda (s) (coalesceNil (stage_partition_aliases s) '())))))
 		(define _stage_scope (stage_partition_aliases stage))
 		(define _grp_tables_raw (if (not (nil? _stage_scope))
-			/* scoped GROUP: only the tables listed in the stage's aliases */
-			(filter tables (lambda (t) (match t '(tv _ _ _ _) (has? _stage_scope tv) false)))
+			/* scoped GROUP: only the tables listed in the stage's aliases.
+			Override isOuter to false: these are keytable sources, not LEFT JOINs. */
+			(filter (map tables (lambda (t) (match t
+				'(tv s tbl isOuter je) (if (has? _stage_scope tv) (list tv s tbl false nil) nil)
+				nil))) (lambda (t) (not (nil? t))))
 			/* global GROUP: INNER JOIN tables except partition-staged.
 			LEFT JOIN tables are pass-through (joined AFTER group, not prejoined). */
 			(filter tables (lambda (t) (match t '(tv _ _ isOuter _)
 				(and (not isOuter) (not (has? _grp_ps_aliases tv))) true)))))
+		/* Pass-through tables: tables NOT consumed by the current GROUP stage.
+		For scoped stages: source tables (in _stage_scope) are consumed, even if
+		isOuter — they become the keytable source, not pass-through. */
 		(define _grp_ps_tables_raw (filter tables (lambda (t) (match t '(tv _ _ isOuter _)
-			(or isOuter
-				(and (not (has? (coalesceNil _stage_scope '()) tv))
-					(or (has? _grp_ps_aliases tv) (not (nil? _stage_scope)))))
+			(and (not (has? (coalesceNil _stage_scope '()) tv))
+				(or isOuter
+					(and (or (has? _grp_ps_aliases tv) (not (nil? _stage_scope))))))
 			false))))
 		(define _grp_ps_visible_aliases (merge_unique (map _grp_ps_tables_raw (lambda (td) (match td
 			'(tv tschema ttbl _ _)
@@ -5378,9 +5389,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define grouped_visible_schema
 							(extract_assoc grouped_output_fields (lambda (k v)
 								(list "Field" k "Type" "any" "Expr" v))))
+						/* For scoped GROUP stages: source tables (in _stage_scope) have been
+						absorbed into the keytable. Remove them from pass-through to prevent
+						duplicate physical tables in the prejoin (source ≠ keytable). */
+						(define ps_tables_for_grouped (if _kt_is_outer
+							(filter _grp_ps_tables (lambda (td) (match td
+								'(tv _ _ _ _) (not (has? (coalesceNil _stage_scope '()) tv))
+								true)))
+							_grp_ps_tables))
 						(define grouped_plan (build_queryplan schema
 							(if _kt_is_outer
-								(merge _grp_ps_tables (list (list grouptbl schema grouptbl true _kt_je)))
+								(merge ps_tables_for_grouped (list (list grouptbl schema grouptbl true _kt_je)))
 								(list (list grouptbl schema grouptbl false nil)))
 							grouped_output_fields
 							_gp_condition
