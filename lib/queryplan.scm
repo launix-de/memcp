@@ -2675,15 +2675,25 @@ seeing the correctly prefixed outer alias. */
 			(define value_expr (match flds
 				(cons _ (cons v _)) v
 				nil))
-			(if (and (subquery_has_outer_refs subquery outer_schemas)
-				(subquery_outer_refs_are_direct_columns subquery outer_schemas)
+			(define has_outer (subquery_has_outer_refs subquery outer_schemas))
+			/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
+			(prejoin scoping bug when unnested table meets GROUP stage) */
+			(define outer_has_group (or group having))
+			(if (and
+				/* correlated: outer refs must be direct columns */
+				(or (not has_outer)
+					(subquery_outer_refs_are_direct_columns subquery outer_schemas))
+				/* uncorrelated + outer GROUP: not yet safe (needs group-barrier) */
+				(or has_outer (not outer_has_group))
 				(not (contains_inner_select_marker subquery))
 				(not (nil? value_expr))
 				(equal? (extract_aggregates value_expr) '())
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				(or (nil? l) (equal? l 1)) /* LIMIT 1 = at most one row = LEFT JOIN */
+				/* correlated: LIMIT 1 = at most one row = LEFT JOIN semantics.
+				   uncorrelated: LIMIT required (preserves multi-row error semantics) */
+				(if has_outer (or (nil? l) (equal? l 1)) (not (nil? l)))
 				(or (nil? off) (equal? off 0)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
