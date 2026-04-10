@@ -802,12 +802,12 @@ func (t *table) ShowColumns() scm.Scmer {
 				}
 			}
 		}
-		result[i] = v.Show(keyType)
+		result[i] = v.Show(keyType, t)
 	}
 	return scm.NewSlice(result)
 }
 
-func (c *column) Show(keyType string) scm.Scmer {
+func (c *column) Show(keyType string, t *table) scm.Scmer {
 	dims := make([]scm.Scmer, len(c.Typdimensions))
 	for i, v := range c.Typdimensions {
 		dims[i] = scm.NewInt(int64(v))
@@ -842,9 +842,34 @@ func (c *column) Show(keyType string) scm.Scmer {
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
-		scm.NewString("DistinctEstimate"), scm.NewInt(int64(atomic.LoadUint64(&c.DistinctEstimate))),
-		scm.NewString("RowEstimate"), scm.NewInt(int64(atomic.LoadUint64(&c.RowEstimate))),
+		scm.NewString("DistinctEstimate"), scm.NewInt(int64(c.distinctEstimateFor(t))),
+		scm.NewString("RowEstimate"), scm.NewInt(int64(t.CountEstimate())),
 	})
+}
+
+// distinctEstimateFor returns the sum of per-shard DistinctCount for this column.
+// Reads from cached DistinctEstimate if available, otherwise computes on-demand.
+func (c *column) distinctEstimateFor(t *table) uint {
+	cached := atomic.LoadUint64(&c.DistinctEstimate)
+	if cached > 0 {
+		return uint(cached)
+	}
+	// On-demand: iterate active shards and sum DistinctCount
+	var sum uint64
+	for _, shard := range t.ActiveShards() {
+		if shard == nil {
+			continue
+		}
+		unlock := shard.GetRead()
+		if cs, ok := shard.columns[c.Name]; ok && cs != nil {
+			sum += uint64(cs.DistinctCount())
+		}
+		unlock()
+	}
+	if sum > 0 {
+		atomic.StoreUint64(&c.DistinctEstimate, sum)
+	}
+	return uint(sum)
 }
 
 func (c *column) UpdateSanitizer() {
