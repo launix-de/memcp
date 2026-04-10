@@ -2027,6 +2027,16 @@ seeing the correctly prefixed outer alias. */
 	expr
 )))
 
+/* Global nested-alias counter: shared across all recursive untangle_query calls
+within one top-level query compilation. Produces unique aliases like nested0, nested1...
+across all nesting levels, preventing alias collisions after derived table flattening. */
+(define nested_alias_counter (newpromise))
+(nested_alias_counter "value" 0)
+(define next_nested_alias (lambda () (begin
+	(define n (nested_alias_counter "value"))
+	(nested_alias_counter "value" (+ n 1))
+	(concat "nested" n))))
+
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
@@ -3219,6 +3229,14 @@ seeing the correctly prefixed outer alias. */
 				(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2) (begin
 					(if (and (not (nil? _init2)) (not (equal? _init2 '())))
 						(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) _init2)))
+					/* Build alias rename map: each inner table gets a globally unique alias.
+					This prevents alias collisions when derived tables are nested multiple
+					levels deep (the old id\0alias approach produced double-prefixed aliases). */
+					(define inner_alias_map (map (extract_assoc schemas2 (lambda (k v) k))
+						(lambda (alias) (list alias (next_nested_alias)))))
+					(define lookup_new_alias (lambda (old_alias)
+						(reduce inner_alias_map (lambda (acc pair) (if (not (nil? acc)) acc
+							(if (equal?? (car pair) old_alias) (cadr pair) nil))) nil)))
 					/* helper function add prefix to tblalias of every expression */
 					(define replace_column_alias (lambda (expr) (match expr
 						'((symbol get_column) nil ti col ci) (begin
@@ -3232,7 +3250,7 @@ seeing the correctly prefixed outer alias. */
 									acc)) '()))
 							(define matches (reduce matches (lambda (acc alias) (append_unique acc alias)) '()))
 							(match matches
-								(cons only '()) '('get_column (concat id "\0" only) ti col ci)
+								(cons only '()) '('get_column (coalesce (lookup_new_alias only) (concat id "\0" only)) ti col ci)
 								'() (begin
 									/* column not in schemas2 - check if it's a SELECT alias in fields2 */
 									(if (nil? (fields2 col))
@@ -3244,16 +3262,22 @@ seeing the correctly prefixed outer alias. */
 								(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 							)
 						)
-						'((symbol get_column) alias_ ti col ci) (if (not (nil? (schemas2 alias_)))
-							'('get_column (concat id "\0" alias_) ti col ci)
-							expr) /* alias not in schemas2 → inner subselect scope, leave as-is */
+						'((symbol get_column) alias_ ti col ci) (begin
+							(define new_alias (lookup_new_alias alias_))
+							(if (not (nil? new_alias))
+								'('get_column new_alias ti col ci)
+								(if (not (nil? (schemas2 alias_)))
+									'('get_column (concat id "\0" alias_) ti col ci)
+									expr))) /* alias not in schemas2 → inner subselect scope, leave as-is */
 						'((symbol outer) outer_arg) (begin
 							/* prefix outer variable reference if it refers to a table in schemas2 */
 							(define s (string outer_arg))
 							(define parts (split s "."))
 							(match parts
 								(list tbl col) (if (not (nil? (schemas2 tbl)))
-									(list (quote outer) (symbol (concat id "\0" tbl "." col)))
+									(begin
+										(define new_a (lookup_new_alias tbl))
+										(list (quote outer) (symbol (concat (coalesce new_a (concat id "\0" tbl)) "." col))))
 									(list (quote outer) outer_arg))
 								_ (list (quote outer) (replace_column_alias outer_arg))
 							)
@@ -3265,7 +3289,7 @@ seeing the correctly prefixed outer alias. */
 					)))
 					/* prefix all table aliases and transform their joinexprs */
 					(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
-						(list (concat id "\0" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+						(list (coalesce (lookup_new_alias alias) (concat id "\0" alias)) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
 					/* helper function to transform joinexpr: only transform references to subquery alias id */
 					(define transform_joinexpr (lambda (expr) (match expr
 						'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
@@ -3491,7 +3515,7 @@ seeing the correctly prefixed outer alias. */
 								(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)) (not (_check_inner_select joinexpr2)))
 									(list (quote if) joinexpr2 expr nil)
 									expr)))
-							(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
+							(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (coalesce (lookup_new_alias k) (concat id "\0" k)) v))))))
 						)
 					)
 				) (error "non matching return value for untangle_query"))
