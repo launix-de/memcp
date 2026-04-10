@@ -88,6 +88,7 @@ const (
 	TagDate    = tagDate
 	TagCString = tagCString
 	TagBString = tagBString
+	TagTable   = 101 // custom tag for *table pointers
 )
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
@@ -698,6 +699,8 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		return s.SourceInfo().value.AppendString(dst)
 	case tagJIT:
 		return "[jit lambda]", dst
+	case TagTable:
+		return "<table>", dst
 	default:
 		if s.GetTag() == tagAny {
 			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr))), dst

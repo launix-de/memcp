@@ -25,8 +25,19 @@ import "errors"
 import "strings"
 import "strconv"
 import "encoding/json"
+import "unsafe"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
+
+// NewTableScmer wraps a *table into a Scmer with TagTable.
+func NewTableScmer(t *table) scm.Scmer {
+	return scm.NewCustom(scm.TagTable, unsafe.Pointer(t))
+}
+
+// TableFromScmer extracts a *table from a TagTable Scmer.
+func TableFromScmer(s scm.Scmer) *table {
+	return (*table)(s.Custom(scm.TagTable))
+}
 
 type dataset []scm.Scmer
 type column struct {
