@@ -29,14 +29,22 @@ import "unsafe"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
+// TagTable is the custom Scmer tag for *table pointers.
+const TagTable = 101
+
 // NewTableScmer wraps a *table into a Scmer with TagTable.
 func NewTableScmer(t *table) scm.Scmer {
-	return scm.NewCustom(scm.TagTable, unsafe.Pointer(t))
+	return scm.NewCustom(TagTable, unsafe.Pointer(t))
 }
 
 // TableFromScmer extracts a *table from a TagTable Scmer.
 func TableFromScmer(s scm.Scmer) *table {
-	return (*table)(s.Custom(scm.TagTable))
+	return (*table)(s.Custom(TagTable))
+}
+
+// String implements serialization for table pointers: (table "schema" "name")
+func (t *table) String() string {
+	return "(table \"" + t.schema.Name + "\" \"" + t.Name + "\")"
 }
 
 type dataset []scm.Scmer

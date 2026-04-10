@@ -88,13 +88,16 @@ const (
 	TagDate    = tagDate
 	TagCString = tagCString
 	TagBString = tagBString
-	TagTable   = 101 // custom tag for *table pointers
 )
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
 // ptr points into the StorageString dictionary; val is the 48-bit aux value carrying
 // format (bits 47-44), nibbleOffset (bit 43), and charLen (bits 42-0).
 var CStringDecompress func(ptr *byte, val uint64) string
+
+// CustomStringer maps custom tags to their serialization functions.
+// Registered by the storage package at init time. Key = tag ID.
+var CustomStringer [256]func(ptr unsafe.Pointer) string
 
 // NewCString creates a lazy compressed-string Scmer.
 // ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
@@ -699,11 +702,13 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		return s.SourceInfo().value.AppendString(dst)
 	case tagJIT:
 		return "[jit lambda]", dst
-	case TagTable:
-		return "<table>", dst
 	default:
 		if s.GetTag() == tagAny {
 			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr))), dst
+		}
+		tag := s.GetTag()
+		if int(tag) < len(CustomStringer) && CustomStringer[tag] != nil {
+			return CustomStringer[tag](unsafe.Pointer(s.ptr)), dst
 		}
 		return fmt.Sprintf("<custom %d>", s.GetTag()), dst
 	}

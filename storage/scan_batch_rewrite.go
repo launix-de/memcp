@@ -49,21 +49,21 @@ func tryScanOrderBatchRewrite(v []scm.Scmer) scm.Scmer {
 }
 
 func tryScanBatchRewrite(v []scm.Scmer) scm.Scmer {
-	// scan: [fn, tx, schema, tbl, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
-	if len(v) < 8 {
+	// scan: [fn, tx, tbl, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
+	if len(v) < 7 {
 		return scm.NewNil()
 	}
-	if !v[3].IsString() {
+	if !v[2].IsCustom(TagTable) {
 		return scm.NewNil()
 	}
-	if len(v) > 11 && scm.ToBool(v[11]) {
+	if len(v) > 10 && scm.ToBool(v[10]) {
 		return scm.NewNil()
 	}
-	if len(v) > 8 && !v[8].IsNil() {
+	if len(v) > 7 && !v[7].IsNil() {
 		return scm.NewNil()
 	}
 	// scan tail after mapfn: reduce, neutral, reduce2, isOuter
-	return tryScanBatchRewriteMapfn(v, 6, 7, true)
+	return tryScanBatchRewriteMapfn(v, 5, 6, true)
 }
 
 // tryScanBatchRewriteMapfn is the shared implementation for scan and scan_order batch rewrite.
@@ -99,10 +99,10 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	}
 
 	// Inner scan must also be a real table (not list) and not outer
-	if len(innerScanSlice) < 8 || !innerScanSlice[3].IsString() {
+	if len(innerScanSlice) < 7 || !innerScanSlice[2].IsCustom(TagTable) {
 		return scm.NewNil()
 	}
-	if len(innerScanSlice) > 11 && scm.ToBool(innerScanSlice[11]) {
+	if len(innerScanSlice) > 10 && scm.ToBool(innerScanSlice[10]) {
 		return scm.NewNil()
 	}
 
@@ -115,11 +115,11 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	}
 	hasOuterRef := false
 	// Check inner filterfn and mapfn bodies for outer param references
-	if len(innerScanSlice) > 5 {
-		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[5], outerParamSet)
+	if len(innerScanSlice) > 4 {
+		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[4], outerParamSet)
 	}
-	if len(innerScanSlice) > 7 {
-		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[7], outerParamSet)
+	if len(innerScanSlice) > 6 {
+		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[6], outerParamSet)
 	}
 	if !hasOuterRef {
 		return scm.NewNil()
@@ -371,27 +371,27 @@ func astContainsSymbol(expr scm.Scmer, symbols map[string]bool) bool {
 // 4. Replacing outer param symbols in filter/map bodies with #N symbols
 // 5. Inserting stride and __batchbuf after mapfn
 func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.Scmer, replaceMap map[string]string, stride int) []scm.Scmer {
-	// inner = [scan, tx, schema, tbl, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
+	// inner = [scan, tx, tbl, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
 	result := make([]scm.Scmer, 0, len(inner)+2)
 
 	// [0] scan_batch
 	result = append(result, scm.NewSymbol("scan_batch"))
-	// [1..3] tx, schema, tbl
-	result = append(result, inner[1], inner[2], inner[3])
-	// [4] filtercols: append #N
-	result = append(result, appendToScmerList(inner[4], pseudocols))
-	// [5] filterfn: extend params + replace body symbols
-	result = append(result, extendAndRewriteLambda(inner[5], pseudoparams, replaceMap))
-	// [6] mapcols: append #N
-	result = append(result, appendToScmerList(inner[6], pseudocols))
-	// [7] mapfn: extend params + replace body symbols
-	result = append(result, extendAndRewriteLambda(inner[7], pseudoparams, replaceMap))
-	// [8] stride
+	// [1..2] tx, tbl
+	result = append(result, inner[1], inner[2])
+	// [3] filtercols: append #N
+	result = append(result, appendToScmerList(inner[3], pseudocols))
+	// [4] filterfn: extend params + replace body symbols
+	result = append(result, extendAndRewriteLambda(inner[4], pseudoparams, replaceMap))
+	// [5] mapcols: append #N
+	result = append(result, appendToScmerList(inner[5], pseudocols))
+	// [6] mapfn: extend params + replace body symbols
+	result = append(result, extendAndRewriteLambda(inner[6], pseudoparams, replaceMap))
+	// [7] stride
 	result = append(result, scm.NewInt(int64(stride)))
-	// [9] batchdata (symbol __batchbuf from the flush lambda)
+	// [8] batchdata (symbol __batchbuf from the flush lambda)
 	result = append(result, scm.NewSymbol("__batchbuf"))
-	// [10..] reduce, neutral, reduce2, isOuter from original
-	for i := 8; i < len(inner); i++ {
+	// [9..] reduce, neutral, reduce2, isOuter from original
+	for i := 7; i < len(inner); i++ {
 		result = append(result, inner[i])
 	}
 	return result

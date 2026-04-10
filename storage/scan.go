@@ -65,11 +65,11 @@ func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.
 	if rewritten := tryScanBatchRewrite(v); !rewritten.IsNil() {
 		return oc.OptimizeSub(rewritten, useResult)
 	}
-	return optimizeScanShared(v, oc, 7, 8, 9, 10, 11)
+	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
 }
 
 func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	return optimizeScanShared(v, oc, 9, 10, 11, 12, 13)
+	return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
 }
 
 // scanResult bundles per-shard outputs to minimize allocations and type assertions.

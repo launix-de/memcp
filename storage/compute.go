@@ -790,18 +790,19 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 	if len(items) >= 5 && items[0].IsSymbol() {
 		sym := items[0].String()
 		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
-			schemaIdx, tableIdx := 1, 2
+			tableIdx := 2
 			condColsIdx, filterIdx := 3, 4
-			if len(items) > 1 && !items[1].IsString() {
-				schemaIdx, tableIdx = 2, 3
-				condColsIdx, filterIdx = 4, 5
-			}
 			if len(items) <= filterIdx {
 				return nil
 			}
-			info := scanJoinInfo{
-				schema: scm.String(items[schemaIdx]),
-				table:  scm.String(items[tableIdx]),
+			var info scanJoinInfo
+			if items[tableIdx].IsCustom(TagTable) {
+				t := TableFromScmer(items[tableIdx])
+				info.schema = t.schema.Name
+				info.table = t.Name
+			} else {
+				info.schema = ""
+				info.table = scm.String(items[tableIdx])
 			}
 			// condCols = (list "col1" "col2" ...), filter = lambda
 			condCols := extractStringListFromAST(items[condColsIdx])
@@ -994,16 +995,15 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) >= 5 && items[0].IsSymbol() {
+	if len(items) >= 4 && items[0].IsSymbol() {
 		sym := items[0].String()
-		schemaIdx, tableIdx := 1, 2
-		if len(items) > 1 && !items[1].IsString() {
-			schemaIdx, tableIdx = 2, 3
-		}
+		tableIdx := 2
 		if (sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order") &&
-			len(items) > tableIdx &&
-			scm.String(items[schemaIdx]) == schema && scm.String(items[tableIdx]) == table {
-			return items
+			len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
+			t := TableFromScmer(items[tableIdx])
+			if t.schema.Name == schema && t.Name == table {
+				return items
+			}
 		}
 	}
 	for _, item := range items {
