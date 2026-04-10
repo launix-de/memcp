@@ -2855,12 +2855,18 @@ seeing the correctly prefixed outer alias. */
 											(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)
 											(stage_partition_aliases stage) (stage_init_code stage)))))
 									groups2)))
-							/* Aggregate/correlated stages get partition-aliases (scoped to inner tables).
-							Non-aggregate ORDER/LIMIT stages become partition stages instead. */
-							(define needs_scope (or has_aggregates (not (equal? correlation_keys '()))))
-							/* Separate GROUP stages (aggregate/correlated) from ORDER/LIMIT stages (non-aggregate).
-							GROUP stages → sq_cache "groups" with partition-aliases.
-							ORDER/LIMIT-only stages → sq_cache "partition_stages" (applied as scan_order). */
+							/* Scoped stages: all go through the keytable path with partition-aliases.
+							Aggregate stages use standard aggregate reducers.
+							Non-aggregate stages use once-per-partition semantics (once-limit). */
+							(define needs_scope (not (equal? prefixed_aliases '())))
+							/* Collect ORDER/LIMIT from non-group stages (ORDER BY on subselect) */
+							(define inner_order (reduce groups2 (lambda (acc s) (if (not (nil? acc)) acc
+								(if (or (nil? (stage_group_cols s)) (equal? (stage_group_cols s) '()))
+									(stage_order_list s) nil))) nil))
+							(define inner_limit (reduce groups2 (lambda (acc s) (if (not (nil? acc)) acc
+								(if (or (nil? (stage_group_cols s)) (equal? (stage_group_cols s) '()))
+									(stage_limit_val s) nil))) nil))
+							/* Propagate GROUP stages with partition-aliases */
 							(define group_stages_out (filter (map groups2 (lambda (stage) (begin
 								(define g (stage_group_cols stage))
 								(if (and (not (nil? g)) (not (equal? g '())))
@@ -2869,28 +2875,29 @@ seeing the correctly prefixed outer alias. */
 										(if needs_scope prefixed_aliases nil) (stage_init_code stage) local_condition)
 									nil))))
 								(lambda (s) (not (nil? s)))))
-							(define order_stages_out (filter (map groups2 (lambda (stage) (begin
-								(define g (stage_group_cols stage))
-								(define has_order_or_limit (or (not (nil? (stage_order_list stage))) (not (nil? (stage_limit_val stage)))))
-								(if (and (or (nil? g) (equal? g '())) has_order_or_limit)
-									stage nil))))
-								(lambda (s) (not (nil? s)))))
 							(if (not (equal? group_stages_out '()))
 								(sq_cache "groups" (merge group_stages_out (coalesceNil (sq_cache "groups") '()))))
-							/* ORDER/LIMIT stages → partition stages for correct scan_order application */
-							(if (not (equal? order_stages_out '()))
-								(begin
-									(define part_order (merge (map order_stages_out (lambda (s)
-										(map (coalesceNil (stage_order_list s) '()) (lambda (o)
-											(match o '(col dir) (list (prefix_expr col) dir) o)))))))
-									(define part_limit (reduce order_stages_out (lambda (acc s)
-										(coalesce acc (stage_limit_val s))) nil))
-									(define part_offset (reduce order_stages_out (lambda (acc s)
-										(coalesce acc (stage_offset_val s))) nil))
-									(sq_cache "partition_stages" (cons
-										(make_partition_stage prefixed_aliases part_order 0
-											(coalesceNil part_limit 1) (coalesceNil part_offset 0) nil)
-										(coalesceNil (sq_cache "partition_stages") '())))))
+							/* Non-aggregate subselects: once-per-partition semantics.
+							With ORDER/LIMIT: use partition-stage (scan_order on inner table).
+							Without ORDER/LIMIT: use once-per-partition GROUP stage (keytable
+							with once-reducer for scalar error detection). */
+							(define has_inner_order_limit (or (not (nil? inner_order)) (not (nil? inner_limit))))
+							(if (and (not has_aggregates) needs_scope (equal? group_stages_out '()))
+								(if has_inner_order_limit
+									/* ORDER/LIMIT: partition-stage for correct scan_order */
+									(begin
+										(define prefixed_order (if (nil? inner_order) nil
+											(map inner_order (lambda (o) (match o '(col dir) (list (prefix_expr col) dir) o)))))
+										(sq_cache "partition_stages" (cons
+											(make_partition_stage prefixed_aliases (coalesceNil prefixed_order '()) 0
+												(coalesceNil inner_limit 1) 0 nil)
+											(coalesceNil (sq_cache "partition_stages") '()))))
+									/* No ORDER/LIMIT: once-per-partition GROUP stage for error semantics */
+									(sq_cache "groups" (merge
+										(list (make_once_per_partition_stage
+											group_keys nil nil 2
+											prefixed_aliases nil local_condition))
+										(coalesceNil (sq_cache "groups") '())))))
 							/* return prefixed value expression */
 							(define value_expr2 (car (extract_assoc fields2 (lambda (k v) v))))
 							(prefix_expr value_expr2))
