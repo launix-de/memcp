@@ -395,6 +395,7 @@ layout. */
 		(list (quote dedup) (stage_is_dedup stage))
 		(list (quote partition-aliases) (stage_partition_aliases stage))
 		(list (quote init) (stage_init_code stage))
+		(list (quote once-limit) (stage_once_limit stage))
 	)
 ))
 (define explain_normalize_stages (lambda (stages)
@@ -1240,6 +1241,51 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(list (quote dedup) false)
 		(list (quote partition-aliases) (normalize_stage_aliases aliases))
 		(list (quote init) init)
+		(list (quote stage-condition) nil)
+		(list (quote once-limit) nil)
+	)
+))
+/* make_group_stage_with_condition: like make_group_stage but carries the inner
+subquery's WHERE condition scoped to this stage's tables. build_queryplan merges
+it into the local condition when the stage is processed, preventing cross-stage
+condition leakage. Uses canonical column names for keytable cache reuse. */
+(define make_group_stage_with_condition (lambda (group having order limit offset aliases init cond)
+	(list
+		(cons (quote group-cols) (coalesce group '()))
+		(list (quote having) having)
+		(list (quote order) (coalesce order '()))
+		(list (quote limit-partition-cols) 0)
+		(list (quote limit) limit)
+		(list (quote offset) offset)
+		(list (quote dedup) false)
+		(list (quote partition-aliases) (normalize_stage_aliases aliases))
+		(list (quote init) init)
+		(list (quote stage-condition) cond)
+		(list (quote once-limit) nil)
+	)
+))
+/* make_once_per_partition_stage: scoped GROUP stage with once-per-partition semantics.
+Non-aggregate fields in this stage are computed via a per-domain-key scan with
+LIMIT = once_limit on the inner scan. The reducer signals an error if more rows
+than once_limit are found (scalar subselect "more than one row" semantics).
+- once_limit = 1: take first matching row (SQL LIMIT 1 subselect)
+- once_limit = 2: take first, error on second (scalar subselect without LIMIT)
+- once_limit = nil: standard aggregate semantics (no once constraint)
+ORDER on the stage controls the inner scan order (which row is "first").
+HAVING filters keytable rows after createcolumn (empty → NULL via LEFT JOIN). */
+(define make_once_per_partition_stage (lambda (group having order once_limit aliases init cond)
+	(list
+		(cons (quote group-cols) (coalesce group '()))
+		(list (quote having) having)
+		(list (quote order) (coalesce order '()))
+		(list (quote limit-partition-cols) 0)
+		(list (quote limit) nil)
+		(list (quote offset) nil)
+		(list (quote dedup) false)
+		(list (quote partition-aliases) (normalize_stage_aliases aliases))
+		(list (quote init) init)
+		(list (quote stage-condition) cond)
+		(list (quote once-limit) once_limit)
 	)
 ))
 (define make_partition_stage (lambda (aliases order partition_cols limit offset init)
@@ -1316,6 +1362,20 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 (define stage_init_code (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
 		(cons (quote init) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_condition (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote stage-condition) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+/* stage_once_limit: per-partition scan limit for scalar subselect semantics.
+nil = standard aggregate. 1 = take first row. 2 = take first, error on second. */
+(define stage_once_limit (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote once-limit) rest) (if (nil? rest) nil (car rest))
 		_ nil
 	) acc)
 ) nil)))
@@ -3084,15 +3144,16 @@ seeing the correctly prefixed outer alias. */
 				/* correlated: outer refs must be direct columns */
 				(or (not _has_outer)
 					(_subquery_outer_refs_are_direct_columns subquery outer_schemas))
-				/* uncorrelated + outer GROUP: not yet safe (needs group-barrier) */
-				(or _has_outer (not _outer_has_group))
+				/* uncorrelated + outer GROUP: not yet safe (needs group-barrier).
+				   correlated + LIMIT + outer GROUP: also blocked (prejoin scoping bug) */
+				(or (and _has_outer (nil? l)) (not _outer_has_group))
 				(not (_contains_inner_select_marker subquery))
 				(not (nil? _value_expr))
 				(equal? (extract_aggregates _value_expr) '())
 				(nil? h)
 				(or (nil? g) (equal? g '()))
 				(or (nil? o) (equal? o '()))
-				/* correlated: no LIMIT allowed (not yet supported in unnesting).
+				/* correlated: no LIMIT (not yet supported, needs once-per-partition IR).
 				   uncorrelated: LIMIT required (preserves multi-row error semantics) */
 				(if _has_outer (nil? l) (not (nil? l)))
 				(if _has_outer (nil? off) (nil? off)))
@@ -4913,10 +4974,29 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(list (quote equal?) (quote acc) nil)
 								(quote item)
 								(quote acc)))))
+				/* once-per-partition reducer: error on second non-nil value.
+				Used for scalar subselects without LIMIT (must return exactly 1 row).
+				once_limit=2 → error on 2nd row. once_limit=1 → take first, ignore rest. */
+				(define once_limit_val (stage_once_limit stage))
+				(define group_value_reduce (if (nil? once_limit_val)
+					_group_any_reduce
+					(if (equal? once_limit_val 1)
+						/* LIMIT 1: take first non-nil value, ignore subsequent */
+						_group_any_reduce
+						/* once_limit >= 2: error on second non-nil value */
+						(list (quote lambda)
+							(list (quote acc) (quote item))
+							(list (quote if)
+								(list (quote equal?) (quote item) nil)
+								(quote acc)
+								(list (quote if)
+									(list (quote equal?) (quote acc) nil)
+									(quote item)
+									(list (quote error) "Subquery returns more than 1 row")))))))
 				(define _group_value_ag (lambda (expr)
-					(list expr _group_any_reduce nil)))
+					(list expr group_value_reduce nil)))
 				(define _group_value_ag_expr (lambda (expr)
-					(list (quote aggregate) expr _group_any_reduce nil)))
+					(list (quote aggregate) expr group_value_reduce nil)))
 				(define _outer_stage_aliases (map _grp_ps_tables (lambda (td) (match td
 					'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)
 					""))))
