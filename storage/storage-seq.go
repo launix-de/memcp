@@ -268,3 +268,5 @@ func (s *StorageSeq) proposeCompression(i uint32) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }
+
+func (s *StorageSeq) DistinctCount() uint { return uint(s.count) }

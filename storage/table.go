@@ -52,6 +52,12 @@ type column struct {
 	sanitizer          func(scm.Scmer) scm.Scmer
 	lastAccessed       int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
 
+	// Statistics — updated at rebuild time, O(1) access for query planning.
+	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
+	// RowEstimate is the table-wide CountEstimate() at last rebuild.
+	DistinctEstimate uint64 `json:"-"`
+	RowEstimate      uint64 `json:"-"`
+
 	// ORC fields — non-empty OrcSortCols signals this is an ordered-reduce computed column.
 	// The column value is produced by a scan_order pass rather than per-row computation.
 	OrcSortCols   []string  `json:",omitempty"` // ORDER BY column names (partition cols first, then order cols)
@@ -796,12 +802,12 @@ func (t *table) ShowColumns() scm.Scmer {
 				}
 			}
 		}
-		result[i] = v.Show(keyType)
+		result[i] = v.Show(keyType, t)
 	}
 	return scm.NewSlice(result)
 }
 
-func (c *column) Show(keyType string) scm.Scmer {
+func (c *column) Show(keyType string, t *table) scm.Scmer {
 	dims := make([]scm.Scmer, len(c.Typdimensions))
 	for i, v := range c.Typdimensions {
 		dims[i] = scm.NewInt(int64(v))
@@ -836,7 +842,16 @@ func (c *column) Show(keyType string) scm.Scmer {
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
+		scm.NewString("DistinctEstimate"), scm.NewInt(int64(c.distinctEstimateFor(t))),
+		scm.NewString("RowEstimate"), scm.NewInt(int64(t.CountEstimate())),
 	})
+}
+
+// distinctEstimateFor returns the cached DistinctEstimate for this column.
+// Returns 0 if no statistics are available yet (populated at rebuild time).
+// Never acquires shard locks — safe to call during query compilation.
+func (c *column) distinctEstimateFor(t *table) uint {
+	return uint(atomic.LoadUint64(&c.DistinctEstimate))
 }
 
 func (c *column) UpdateSanitizer() {

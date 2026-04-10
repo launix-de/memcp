@@ -177,6 +177,9 @@ type ColumnStorage interface {
 	build(uint32, scm.Scmer)
 	finish()
 
+	// statistics — collected at rebuild time, cheap O(1) access for query planning
+	DistinctCount() uint // estimated number of distinct values in this shard column
+
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
 	Serialize(io.Writer)        // write content to Writer
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)

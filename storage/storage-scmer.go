@@ -273,3 +273,5 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 	// don't propose another pass
 	return nil
 }
+
+func (s *StorageSCMER) DistinctCount() uint { return uint(len(s.values)) }

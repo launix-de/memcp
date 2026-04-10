@@ -161,3 +161,7 @@ func (s *StorageSparse) finish() {
 func (s *StorageSparse) proposeCompression(i uint32) ColumnStorage {
 	return nil
 }
+
+func (s *StorageSparse) DistinctCount() uint {
+	return uint(len(s.values)) + 1 // +1 for nil values
+}

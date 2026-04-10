@@ -29,6 +29,7 @@ import "fmt"
 import "runtime"
 import "sync"
 import "sync/atomic"
+import "github.com/carli2/hybridsort"
 import "github.com/jtolds/gls"
 
 // optimizeMap is the optimizer hook for `map`. It applies default optimization
@@ -1770,6 +1771,49 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sort",
+		Desc: "returns a sorted copy of a list using a comparator (lambda (a b) truthy/falsy)",
+		Fn: func(a ...Scmer) Scmer {
+			src := a[0].Slice()
+			cmp := a[1]
+			dst := make([]Scmer, len(src))
+			copy(dst, src)
+			hybridsort.SliceStable(dst, func(i, j int) bool {
+				return ToBool(Apply(cmp, dst[i], dst[j]))
+			})
+			return NewSlice(dst)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", NoEscape: true},
+				{Kind: "func", ParamName: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+			},
+			Return:   FreshAlloc,
+			Const:    true,
+			Optimize: FirstParameterMutable("sort_mut"),
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sort_mut",
+		Desc: "sorts a list in-place using a comparator (lambda (a b) truthy/falsy)",
+		Fn: func(a ...Scmer) Scmer {
+			src := a[0].Slice()
+			cmp := a[1]
+			hybridsort.SliceStable(src, func(i, j int) bool {
+				return ToBool(Apply(cmp, src[i], src[j]))
+			})
+			return a[0]
+		},
+		Type: &TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list"},
+				{Kind: "func", ParamName: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+			},
+			Return: &TypeDescriptor{Kind: "list"},
 		},
 	})
 }

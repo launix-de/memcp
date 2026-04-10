@@ -4042,33 +4042,74 @@ second table carries strictly more local WHERE predicates than the first. */
 				(not (nil? (stage_limit_val stage)))
 				(not (nil? (stage_offset_val stage)))))
 		false)))
-(define jqr_reorder_inner_segment (lambda (segment condition) (begin
-	(if (not (equal? (count segment) 2))
+/* jqr_estimate_rows: estimate filtered row count using cached statistics */
+(define jqr_estimate_rows (lambda (td condition schemas) (begin
+	(define alias (jqr_td_alias td))
+	(define cols (if (has_assoc? schemas alias) (schemas alias) '()))
+	(define base_rows (reduce cols (lambda (acc coldef)
+		(if (> acc 0) acc
+			(begin (define re (coldef "RowEstimate"))
+				(if (and (not (nil? re)) (> re 0)) re 0)))) 0))
+	(if (equal? base_rows 0) 1000000
+		(begin
+			(define condition_terms (flatten_and_terms (coalesceNil condition true)))
+			(define selectivity (reduce condition_terms (lambda (sel term)
+				(match term
+					'((symbol equal??) left right) (begin
+						(define col_name (match left
+							'((symbol get_column) (eval alias) _ c _) c
+							'((quote get_column) (eval alias) _ c _) c
+							nil))
+						(define col_name (if (nil? col_name) (match right
+							'((symbol get_column) (eval alias) _ c _) c
+							'((quote get_column) (eval alias) _ c _) c
+							nil) col_name))
+						(if (nil? col_name) sel
+							(begin
+								(define distinct (reduce cols (lambda (acc coldef)
+									(if (> acc 0) acc
+										(if (equal?? (coldef "Field") col_name)
+											(begin (define de (coldef "DistinctEstimate"))
+												(if (and (not (nil? de)) (> de 0)) de 0))
+											0))) 0))
+								(if (> distinct 1) (* sel (/ 1.0 distinct)) sel))))
+					_ sel)) 1.0))
+			(max 1 (* base_rows selectivity)))))))
+(define jqr_reorder_inner_segment (lambda (segment condition schemas) (begin
+	(if (< (count segment) 2)
 		segment
 		(begin
-			(define td1 (nth segment 0))
-			(define td2 (nth segment 1))
-			(if (or (jqr_td_outer td1) (jqr_td_outer td2))
+			(if (reduce segment (lambda (acc td) (or acc (jqr_td_outer td))) false)
 				segment
 				(begin
+					/* score each table: estimated rows (from statistics) with predicate count as tiebreaker */
 					(define condition_terms (flatten_and_terms (coalesceNil condition true)))
-					(define local1 (jqr_local_term_count (jqr_td_alias td1) condition_terms))
-					(define local2 (jqr_local_term_count (jqr_td_alias td2) condition_terms))
-					(if (> local2 local1)
-						(list
-							(jqr_td_with_joinexpr td2 true)
-							(jqr_td_with_joinexpr td1 (combine_and_terms (jqr_flatten_join_terms segment))))
-						segment))))))))
-(define jqr_reorder_segments (lambda (tables_ condition) (begin
+					(define scored (map segment (lambda (td) (list
+						(jqr_estimate_rows td condition schemas)
+						(- 0 (jqr_local_term_count (jqr_td_alias td) condition_terms)) /* negate: more predicates = lower score = scanned first */
+						td))))
+					(define sorted (sort scored (lambda (a b)
+						(if (equal? (car a) (car b))
+							(< (cadr a) (cadr b))  /* tiebreaker: more local predicates first */
+							(< (car a) (car b))))))
+					(define all_join_terms (jqr_flatten_join_terms segment))
+					(define combined_je (combine_and_terms all_join_terms))
+					(map (produceN (count sorted)) (lambda (i) (begin
+						(define td (nth (nth sorted i) 2))
+						(if (equal? i 0)
+							(jqr_td_with_joinexpr td true)
+							(jqr_td_with_joinexpr td combined_je))))))))))))
+
+(define jqr_reorder_segments (lambda (tables_ condition schemas) (begin
 	(match (reduce tables_
 		(lambda (state td) (match state
 			'(out seg)
 			(if (jqr_td_outer td)
-				(list (merge out (jqr_reorder_inner_segment seg condition) (list td)) '())
+				(list (merge out (jqr_reorder_inner_segment seg condition schemas) (list td)) '())
 				(list out (merge seg (list td))))
 			state))
 		(list '() '()))
-		'(out seg) (merge out (jqr_reorder_inner_segment seg condition))
+		'(out seg) (merge out (jqr_reorder_inner_segment seg condition schemas))
 		tables_))))
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column) (begin
 		(define jqr_constant_scalar_aliases (reduce (coalesceNil groups '()) (lambda (acc stage)
@@ -4090,7 +4131,7 @@ second table carries strictly more local WHERE predicates than the first. */
 				jqr_constant_scalar_tables
 				(if (jqr_has_order_sensitive_stage groups)
 					jqr_regular_tables
-					(jqr_reorder_segments jqr_regular_tables condition)))
+					(jqr_reorder_segments jqr_regular_tables condition schemas)))
 			fields condition groups schemas replace_find_column))))
 
 (define build_queryplan_term (lambda (query) (begin

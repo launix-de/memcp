@@ -594,3 +594,5 @@ func (s *StorageEnum) rebuildCodec() {
 		}
 	}
 }
+
+func (s *StorageEnum) DistinctCount() uint { return uint(s.k) }
