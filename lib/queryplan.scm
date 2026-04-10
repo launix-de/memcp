@@ -5318,8 +5318,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* Session-sensitive groups use a GLOBAL keytable domain (no condition suffix)
 				so all group keys are present regardless of session. The per-session filtering
 				happens in createcolumn via StorageComputeProxy session variants. */
+				/* Include condition suffix for keytable naming: dedup stages always,
+				scoped stages when they have a local condition (different WHERE
+				clauses on the same physical table need distinct keytables). */
 				(define kt_result (make_keytable schema tbl resolved_stage_group tblvar
-					(if (and is_dedup (not session_sensitive_group_domain)) collect_condition nil)))
+					(if (or (and is_dedup (not session_sensitive_group_domain))
+						(and _scoped_stage (not (or (nil? collect_condition) (equal? collect_condition true)))))
+						collect_condition nil)))
 				(set grouptbl (car kt_result))
 				(define kt_schema_def (nth kt_result 1))
 				(define keytable_init (nth kt_result 2))
