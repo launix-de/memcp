@@ -638,7 +638,7 @@ while still recursing into deeper helper lineage when needed. */
 		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (symbol (concat "__unresolved__." col)) (symbol (concat tblvar "." col)))
 		'((quote get_column) tblvar _ col _) (if (nil? tblvar) (symbol (concat "__unresolved__." col)) (symbol (concat tblvar "." col)))
 		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
-		expr /* literals */
+		expr /* literals — includes true/false/nil symbols */
 	)
 ))
 
@@ -2219,8 +2219,11 @@ across all nesting levels, preventing alias collisions after derived table flatt
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us _init2_us) (begin
 						(if (and (not (nil? _init2_us)) (not (equal? _init2_us '())))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) _init2_us)))
-						/* no-table subselect without aggregates: return field expression directly */
-						(if (and (or (nil? tables2_us) (equal? tables2_us '()))
+						/* no-table subselect without aggregates: return field expression directly.
+						Treat the synthetic .(1) DUAL table as "no table" — it carries no user data. */
+						(define _us_only_dual (and (not (nil? tables2_us)) (equal? 1 (count tables2_us))
+							(match (car tables2_us) '(_ _ t _ _) (equal? t ".(1)") false)))
+						(if (and (or (nil? tables2_us) (equal? tables2_us '()) _us_only_dual)
 							(not (reduce_assoc fields2_us (lambda (a k v) (or a
 								(begin (define _nta (lambda (e) (match e (cons (symbol aggregate) _) true (cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false) false))) (_nta v)))) false)))
 							(list (car (extract_assoc fields2_us (lambda (k v) v))) '())
@@ -2765,8 +2768,11 @@ across all nesting levels, preventing alias collisions after derived table flatt
 				on the inner scan via scan_order). Blocked for other cases. */
 				(or (nil? o) (equal? o '()) (and has_outer (equal? l 1)))
 				/* correlated: LIMIT 1 = at most one row = LEFT JOIN semantics.
-				   uncorrelated: LIMIT required (preserves multi-row error semantics) */
-				(if has_outer (or (nil? l) (equal? l 1)) (not (nil? l)))
+				   uncorrelated: LIMIT required (preserves multi-row error semantics).
+				   Exception: no-table subselects always return exactly 1 row. */
+				(define _sq_tables (match subquery '(_ t _ _ _ _ _ _ _) t nil))
+				(if has_outer (or (nil? l) (equal? l 1))
+					(or (not (nil? l)) (nil? _sq_tables) (equal? _sq_tables '())))
 				(or (nil? off) (equal? off 0)))
 				(match (unnest_subselect subquery outer_schemas)
 					'(subst tbls) (begin
