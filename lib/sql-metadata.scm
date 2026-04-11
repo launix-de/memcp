@@ -172,7 +172,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "schemata"))
-	(merge '(scanfn '(session "__memcp_tx") schema 
+	(merge '(scanfn '(session "__memcp_tx")
 		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
@@ -181,21 +181,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		info_schema_table_row's (show schema tbl true) calls do not execute inside
 		a scan callback where locks are held (which deadlocks). */
 		'('define '__info_tables_data '('merge '('map '('show) '('lambda '('s) '('map '('show 's) '('lambda '('t) '('info_schema_table_row 's 't)))))))
-		(merge '(scanfn '(session "__memcp_tx") schema '__info_tables_data) rest))
+		(merge '(scanfn '(session "__memcp_tx") '__info_tables_data) rest))
 	'((ignorecase "information_schema") (ignorecase "columns"))
-	(merge '(scanfn '(session "__memcp_tx") schema 
+	(merge '(scanfn '(session "__memcp_tx")
 		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "Field") "data_type" '((quote col) "RawType") "column_type" '((quote concat) '((quote col) "Type") '((quote col) "Dimensions")))))))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "statistics"))
-	(merge '(scanfn '(session "__memcp_tx") schema '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
+	(merge '(scanfn '(session "__memcp_tx") '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
 	'((ignorecase "information_schema") (ignorecase "files"))
-	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
+	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
 	'((ignorecase "information_schema") (ignorecase "partitions"))
-	(merge '(scanfn '(session "__memcp_tx") schema '(list)) rest) /* empty: no MySQL partitions */
+	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* empty: no MySQL partitions */
 		'(schema tbl) /* normal case */
 		(begin
 			/* scan helpers receive a runtime source as their table argument.
@@ -208,5 +208,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
 				'((quote materialized-subquery) key) (list (list (quote context) "session") key)
 				table_source)))
-		(merge (list scanfn '(session "__memcp_tx") schema (scan-table-source tbl)) rest))
+		(define tbl_resolved (scan-table-source tbl))
+		/* materialized subqueries produce list expressions — pass as-is; real tables get (table schema name) */
+		(define tbl_arg (if (string? tbl_resolved) (list 'table schema tbl_resolved) tbl_resolved))
+		(merge (list scanfn '(session "__memcp_tx") tbl_arg) rest))
 ))))

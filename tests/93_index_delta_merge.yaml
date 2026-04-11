@@ -27,7 +27,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (insert "memcp-tests" "idx_merge" '("id" "cat" "val")
+            (insert (table "memcp-tests" "idx_merge") '("id" "cat" "val")
               (map (produceN 200) (lambda (i) (list i (- i (* 10 (floor (/ i 10)))) (* i 7)))))
             (rebuild))
     sql: "SELECT COUNT(*) AS cnt FROM idx_merge"

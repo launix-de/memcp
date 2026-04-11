@@ -27,22 +27,24 @@ import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
 func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	// scan_order_multi args: 0=fn, 1=tx, 2=schemas, 3=tables, 4=filterCols, 5=filterFns,
-	// 6=sortcols, 7=sortdirs, 8=partCols, 9=offset, 10=limit, 11=mapCols, 12=mapFns,
-	// 13=reduce, 14=neutral, 15=isOuter
-	for i := 1; i <= 12 && i < len(v); i++ {
+	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=filterCols, 4=filterFns,
+	// 5=sortcols, 6=sortdirs, 7=partCols, 8=offset, 9=limit, 10=mapCols, 11=mapFns,
+	// 12=reduce, 13=neutral, 14=isOuter
+	for i := 1; i <= 11 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
-	if len(v) > 13 && !v[13].IsNil() {
+	oc.Ome.IncrLoopDepth()
+	if len(v) > 12 && !v[12].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false})
+		v[12], _ = oc.OptimizeSub(v[12], true)
+	}
+	if len(v) > 13 {
 		v[13], _ = oc.OptimizeSub(v[13], true)
 	}
 	if len(v) > 14 {
 		v[14], _ = oc.OptimizeSub(v[14], true)
 	}
-	if len(v) > 15 {
-		v[15], _ = oc.OptimizeSub(v[15], true)
-	}
+	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
 }
 
@@ -53,10 +55,11 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	// if rewritten := tryScanOrderBatchRewrite(v); !rewritten.IsNil() {
 	// 	return oc.OptimizeSub(rewritten, useResult)
 	// }
-	mapEnd, reduceIdx, neutralIdx, outerIdx := 12, 13, 14, 15
+	mapEnd, reduceIdx, neutralIdx, outerIdx := 11, 12, 13, 14
 	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
+	oc.Ome.IncrLoopDepth()
 	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false})
 		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
@@ -67,6 +70,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
+	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
 }
 

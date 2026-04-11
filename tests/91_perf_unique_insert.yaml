@@ -21,7 +21,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert "{database}" "perf_source" '("id" "val" "name") rows)
+            (insert (table "{database}" "perf_source") '("id" "val" "name") rows)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
     warmup: false
@@ -38,10 +38,10 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert "{database}" "perf_unique" '("id" "val" "name") rows)
+            (insert (table "{database}" "perf_unique") '("id" "val" "name") rows)
             (rebuild)
             (set rows2 (map (produceN {rows}) (lambda (i) (list (+ i {rows}) (+ i {rows}) (concat "new_" i)))))
-            (insert "{database}" "perf_source" '("id" "val" "name") rows2)
+            (insert (table "{database}" "perf_source") '("id" "val" "name") rows2)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
     warmup: false
@@ -56,7 +56,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert "{database}" "perf_unique" '("id" "val" "name") rows)
+            (insert (table "{database}" "perf_unique") '("id" "val" "name") rows)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id + {rows}, val, CONCAT('dup_', name) FROM perf_unique"
     threshold_ms: 30000

@@ -50,7 +50,7 @@ test_cases:
               (list 18 "Herbert" "Krause" "1976-11-13")
               (list 19 "Ute" "Schulze" "1989-09-21")
               (list 20 "Dieter" "Huber" "1972-02-08")))
-            (insert "memcp-tests" "ft_customers" '("id" "vorname" "nachname" "birthdate") rows))
+            (insert (table "memcp-tests" "ft_customers") '("id" "vorname" "nachname" "birthdate") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_customers"
     expect:
@@ -138,7 +138,7 @@ test_cases:
                   22777 "Hans Klausner"
                   29999 "Klausmüller Gerd"
                   _ (concat "Person_" i))))))
-            (insert "memcp-tests" "ft_large" '("id" "name") rows))
+            (insert (table "memcp-tests" "ft_large") '("id" "name") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large"
     expect:
@@ -421,7 +421,7 @@ test_cases:
                 0 "Animal"
                 1 "Person"
                 _ "Object")))))
-            (insert "memcp-tests" "ft_alternating" '("id" "name") rows))
+            (insert (table "memcp-tests" "ft_alternating") '("id" "name") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_alternating"
     expect:

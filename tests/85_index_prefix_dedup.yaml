@@ -25,7 +25,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (insert "memcp-tests" "idx_nopfx" '("a" "b" "c")
+            (insert (table "memcp-tests" "idx_nopfx") '("a" "b" "c")
               (map (produceN 200) (lambda (i) (list i (* i 2) (* i 5)))))
             (rebuild))
     sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx"
@@ -161,7 +161,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (insert "memcp-tests" "idx_rev" '("p" "q" "r")
+            (insert (table "memcp-tests" "idx_rev") '("p" "q" "r")
               (map (produceN 200) (lambda (i) (list i (* i 4) (* i 9)))))
             (rebuild))
     sql: "SELECT COUNT(*) AS cnt FROM idx_rev"
@@ -275,7 +275,7 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (insert "memcp-tests" "idx_nonoverlap" '("x" "y" "z")
+            (insert (table "memcp-tests" "idx_nonoverlap") '("x" "y" "z")
               (map (produceN 200) (lambda (i) (list i (* i 3) (* i 7)))))
             (rebuild))
     sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap"

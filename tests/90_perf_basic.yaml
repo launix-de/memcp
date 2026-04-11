@@ -21,7 +21,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert "{database}" "perf_main" '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
@@ -39,7 +39,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert "{database}" "perf_main" '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
@@ -57,7 +57,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert "{database}" "perf_main" '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
@@ -75,7 +75,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert "{database}" "perf_main" '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
@@ -93,7 +93,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert "{database}" "perf_main" '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
@@ -114,9 +114,9 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
-            (insert "{database}" "perf_main" '("id" "category" "value" "name") rows)
+            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows)
             (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
-            (insert "{database}" "perf_dim" '("cat_id" "label") dims)
+            (insert (table "{database}" "perf_dim") '("cat_id" "label") dims)
             (rebuild)
             "ok")
     sql: "SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id"
@@ -134,9 +134,9 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
-            (insert "{database}" "perf_main" '("id" "category" "value" "name") rows)
+            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows)
             (set ranges (map (produceN 20) (lambda (i) (list i (* i (/ (* {rows} 71) 20)) (* (+ i 1) (/ (* {rows} 71) 20))))))
-            (insert "{database}" "perf_ranges" '("range_id" "low_val" "high_val") ranges)
+            (insert (table "{database}" "perf_ranges") '("range_id" "low_val" "high_val") ranges)
             (rebuild)
             "ok")
     sql: "SELECT r.range_id, m.id FROM perf_ranges r JOIN perf_main m ON m.value >= r.low_val AND m.value < r.high_val"
@@ -158,9 +158,9 @@ test_cases:
             (set dim {rows})
             (set n (* dim dim))
             (set a (map (produceN n) (lambda (i) (list (floor (/ i dim)) (- i (* dim (floor (/ i dim)))) (+ 1 i)))))
-            (insert "{database}" "perf_mat_a" '("r" "c" "v") a)
+            (insert (table "{database}" "perf_mat_a") '("r" "c" "v") a)
             (set b (map (produceN n) (lambda (i) (list (floor (/ i dim)) (- i (* dim (floor (/ i dim)))) (+ 1 (* 3 i))))))
-            (insert "{database}" "perf_mat_b" '("r" "c" "v") b)
+            (insert (table "{database}" "perf_mat_b") '("r" "c" "v") b)
             (rebuild)
             "ok")
     sql: "SELECT a.r, b.c, a.v * b.v AS v FROM perf_mat_a a JOIN perf_mat_b b ON a.c = b.r"
@@ -178,13 +178,13 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
-            (insert "{database}" "perf_main" '("id" "category" "value" "name") rows)
+            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows)
             (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
-            (insert "{database}" "perf_dim" '("cat_id" "label") dims)
+            (insert (table "{database}" "perf_dim") '("cat_id" "label") dims)
             (rebuild)
             (set delta_n (floor (/ {rows} 10)))
             (set delta (map (produceN delta_n) (lambda (i) (list (+ i {rows}) (- i (* 100 (floor (/ i 100)))) (* (+ i {rows}) 71) (concat "delta_" i)))))
-            (insert "{database}" "perf_main" '("id" "category" "value" "name") delta)
+            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") delta)
             "ok")
     sql: "SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id"
     threshold_ms: 30000

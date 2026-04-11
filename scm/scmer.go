@@ -95,6 +95,10 @@ const (
 // format (bits 47-44), nibbleOffset (bit 43), and charLen (bits 42-0).
 var CStringDecompress func(ptr *byte, val uint64) string
 
+// CustomStringer maps custom tags to their serialization functions.
+// Registered by the storage package at init time. Key = tag ID.
+var CustomStringer [256]func(ptr unsafe.Pointer) string
+
 // NewCString creates a lazy compressed-string Scmer.
 // ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
 // format: storage.StringFormat value (4 bits); nibbleOff: 0 or 1; charLen: original char count.
@@ -416,7 +420,7 @@ func (s Scmer) IsCustom(tag uint16) bool {
 
 func (s Scmer) Custom(tag uint16) unsafe.Pointer {
 	if s.GetTag() != tag {
-		panic("wrong custom tag")
+		panic(fmt.Sprintf("wrong custom tag: expected %d, got %d (value: %s)", tag, s.GetTag(), s.String()))
 	}
 	return unsafe.Pointer(s.ptr)
 }
@@ -702,6 +706,10 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		if s.GetTag() == tagAny {
 			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr))), dst
 		}
+		tag := s.GetTag()
+		if int(tag) < len(CustomStringer) && CustomStringer[tag] != nil {
+			return CustomStringer[tag](unsafe.Pointer(s.ptr)), dst
+		}
 		return fmt.Sprintf("<custom %d>", s.GetTag()), dst
 	}
 }
@@ -893,6 +901,9 @@ func (s Scmer) Any() any {
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:
+		if s.GetTag() >= 100 {
+			return unsafe.Pointer(s.ptr) // custom tags return raw pointer
+		}
 		panic(fmt.Sprintf("unknown tag %d in Any", s.GetTag()))
 	}
 }

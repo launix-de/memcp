@@ -116,21 +116,21 @@ PERF_TARGET_MIN_MS = 10000  # target minimum query time (10s)
 PERF_TARGET_MAX_MS = 20000  # target maximum query time (20s)
 PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
-PERF_MAX_ROWS = 10_000_000  # allow large datasets for proper calibration
-PERF_MAX_RAM_FRACTION = 0.3  # max 30% of RAM for table data
+PERF_MAX_ROWS = 5_000_000  # cap at 5M rows to prevent OOM
+PERF_MAX_RAM_FRACTION = 0.15  # max 15% of AVAILABLE RAM for table data
 
-def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
-    """Calculate max rows based on available RAM (30% limit)."""
+def get_max_rows_for_ram(bytes_per_row: int = 256) -> int:
+    """Calculate max rows based on available RAM (uses MemAvailable, not MemTotal)."""
     try:
         with open('/proc/meminfo', 'r') as f:
             for line in f:
-                if line.startswith('MemTotal:'):
-                    total_kb = int(line.split()[1])
-                    max_bytes = int(total_kb * 1024 * PERF_MAX_RAM_FRACTION)
+                if line.startswith('MemAvailable:'):
+                    avail_kb = int(line.split()[1])
+                    max_bytes = int(avail_kb * 1024 * PERF_MAX_RAM_FRACTION)
                     return max_bytes // bytes_per_row
     except:
         pass
-    return 10_000_000  # fallback: 10M rows
+    return 1_000_000  # fallback: 1M rows (conservative)
 
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False):

@@ -284,7 +284,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 									(define cols (car (cdr (cdr stmt))))
 									(define vals (car (cdr (cdr (cdr stmt)))))
 									(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
-									(list (list (symbol "insert") schema tbl
+									(list (list (symbol "insert") (list (symbol "table") schema tbl)
 										(cons (symbol "list") cols)
 										(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
 										(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil)))
@@ -320,7 +320,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 										(list (list (symbol "begin")
 											(list (symbol "set") (symbol "resultrow")
 												(list (symbol "lambda") (list (symbol "item"))
-													(list (symbol "insert") schema tbl
+													(list (symbol "insert") (list (symbol "table") schema tbl)
 														(cons (symbol "list") cols)
 														(list (symbol "list")
 															(cons (symbol "list")
@@ -769,7 +769,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" sql_expression "," sql_expression "," sql_expression ")") nil) /* ignore */
-		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn schema tbl col "auto_increment" val) (error "unknown pg_catalog key: " key)))
+		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn '('table schema tbl) col "auto_increment" val) (error "unknown pg_catalog key: " key)))
 
 		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "TRUE" true) true)
@@ -919,7 +919,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	))
 	(define sql_insert_select_plan (lambda (schema2 tbl coldesc inner ignoreexists updaterows updaterows2 updatecols) (begin
 		'('begin
-			'('set 'resultrow '('lambda '('item) '('insert schema2 tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
+			'('set 'resultrow '('lambda '('item) '('insert '('table schema2 tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
 				(if (and ignoreexists (nil? updaterows))
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
@@ -1191,7 +1191,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(begin
 					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
 					(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
-				'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+				'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
 					(if (and ignoreexists (nil? updaterows))
 						'((quote lambda) '() 0)
 						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
@@ -1273,7 +1273,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define coldesc (map assignments (lambda (a) (match a '(col _) col))))
 			(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
-			'('insert (coalesce schema2 schema) tbl (cons list coldesc) '(list (cons list dataset)) '(list)
+			'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) '(list (cons list dataset)) '(list)
 				(if ignoreexists '('lambda '() true) nil)
 				false '('lambda '('id) '('session "last_insert_id" 'id))))))
 
@@ -1352,7 +1352,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '((quote createcolumn) schema id col type dimensions (cons 'list typeparams))))
+			) (lambda (id) '((quote createcolumn) '((quote table) schema id) col type dimensions (cons 'list typeparams))))
 			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)
@@ -1362,7 +1362,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
+			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema id) col "type" type) '((quote altercolumn) '((quote table) schema id) col "dimensions" dimensions) 1)))
 			(parser '((atom "CHANGE" true)
 				(define oldcol sql_identifier)
 				(define col sql_identifier)
@@ -1373,31 +1373,31 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
+			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema id) col "type" type) '((quote altercolumn) '((quote table) schema id) col "dimensions" dimensions) 1)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "TYPE" true) (define type sql_column_type) (define dimensions (or
 				(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 				(parser '("(" (define a sql_int) ")") '((quote list) a))
 				(parser empty '((quote list)))
-			))) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
+			))) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema id) col "type" type) '((quote altercolumn) '((quote table) schema id) col "dimensions" dimensions) 1)))
 			(parser '((atom "CONVERT" true) (atom "TO" true) (atom "CHARACTER" true) (atom "SET" true) (define charset sql_identifier) (? (atom "COLLATE" true) (define coll sql_identifier))) (lambda (id) true))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop_if_exists" col)))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
-			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
-			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
-			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) schema id "engine" "cache")))
-			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) schema id "engine" "logged")))
-			(parser '((atom "ENGINE" true) "=" (atom "LOGGED" true)) (lambda (id) '((quote altertable) schema id "engine" "logged")))
-			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
-			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) schema id "collation" collation)))
-			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) schema id "auto_increment" ai)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema id) "drop_if_exists" col)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema id) "drop" col)))
+			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "memory")))
+			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "sloppy")))
+			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "cache")))
+			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "logged")))
+			(parser '((atom "ENGINE" true) "=" (atom "LOGGED" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "logged")))
+			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) '((quote table) schema id) "engine" "safe")))
+			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '((quote table) schema id) "collation" collation)))
+			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '((quote table) schema id) "auto_increment" ai)))
 			/* ALTER COLUMN operations for defaults */
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) schema id col "default" def)))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) schema id col "default" nil)))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) schema id col "collation" coll)))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) '((quote table) schema id) col "default" def)))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) '((quote table) schema id) col "default" nil)))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) '((quote table) schema id) col "collation" coll)))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
@@ -1429,14 +1429,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
-					'((quote scan) '(session "__memcp_tx") "system" "access"
+					'((quote scan) '(session "__memcp_tx") '('table "system" "access")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
 						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 						(quote +)
 						0)
-					'((quote scan) '(session "__memcp_tx") "system" "user"
+					'((quote scan) '(session "__memcp_tx") '('table "system" "user")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -1448,12 +1448,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "CREATE" true) (atom "USER" true) (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "user" '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
+				'('insert '('table "system" "user") '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
 
 		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
@@ -1463,32 +1463,31 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
 		/* GRANT <anything> ON db.* TO user -> insert access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
+				'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 		/* GRANT <anything> ON db.table TO user -> also insert access at db level (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
+				'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 
 		/* REVOKE syntax (MySQL-style) -> mirror GRANT behavior */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					'(session "__memcp_tx")
-					"system"
-					"access"
+					'('table "system" "access")
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
@@ -1501,8 +1500,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					'(session "__memcp_tx")
-					"system"
-					"access"
+					'('table "system" "access")
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
@@ -1609,7 +1607,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
-					'((quote scan) '(session "__memcp_tx") "system" "access"
+					'((quote scan) '(session "__memcp_tx") '('table "system" "access")
 						'('list "database")
 						'((quote lambda) '('database) '((quote equal??) (quote database) id))
 						'(list "$update")
@@ -1640,7 +1638,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			))
 			"(" (define cols (+ sql_index_column ",")) ")"
 			(? (atom "USING" true) (atom "BTREE" true))
-		) (match tbl '(schema2 t) '('createkey (coalesce schema2 schema) t idx true (cons (quote list) cols))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols))))
 		(parser '((atom "CREATE" true)
 			(atom "INDEX" true)
 			(define idx sql_identifier)
@@ -1662,7 +1660,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			))
 			(atom "USING" true) (atom "BTREE" true)
 			"(" (define cols (+ sql_index_column ",")) ")"
-		) (match tbl '(schema2 t) '('createkey (coalesce schema2 schema) t idx true (cons (quote list) cols))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols))))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier) (? (atom "ON" true) (define tbl sql_identifier))) "ignore")
 
 		/* CREATE TRIGGER syntax */
@@ -1685,7 +1683,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(define body sql_trigger_body)
 		) (begin
 				(define compiled (compile_trigger_body schema timing (car (cdr body))))
-				(list 'createtrigger schema tbl name timing (car body) (list 'quote (list 'deferred_trigger compiled)) true)
+				(list 'createtrigger (list 'table schema tbl) name timing (car body) (list 'quote (list 'deferred_trigger compiled)) true)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))

@@ -167,7 +167,7 @@ test_cases:
           (begin
             (set rows (map (produceN 200000) (lambda (i)
               (list i (* 7 (- (* i 31337) (* (floor (/ (* i 31337) 200000)) 200000))) (floor (/ i 40000))))))
-            (insert "memcp-tests" "ord_stress" (list "id" "val" "grp") rows))
+            (insert (table "memcp-tests" "ord_stress") (list "id" "val" "grp") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ord_stress"
     expect:

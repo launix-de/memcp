@@ -15,7 +15,7 @@ setup:
         (set rows (map (produceN 20000) (lambda (i)
           (list (+ i 1) (concat "v" (+ i 1)))))
         )
-        (insert "memcp-tests" "rc_data" '("id" "val") rows)
+        (insert (table "memcp-tests" "rc_data") '("id" "val") rows)
         20000)
 
 test_cases:

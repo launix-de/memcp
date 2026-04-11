@@ -47,7 +47,7 @@ test_cases:
   - name: "Seed crash_safe with 100 rows"
     setup:
       - scm: |
-          (insert "memcp-tests" "crash_safe" '("val" "name")
+          (insert (table "memcp-tests" "crash_safe") '("val" "name")
             (map (produceN 100) (lambda (i)
               (list i (concat "row" i)))))
     sql: "SELECT COUNT(*) AS cnt FROM crash_safe"
@@ -70,7 +70,7 @@ test_cases:
   - name: "Insert 50 delta rows then crash"
     setup:
       - scm: |
-          (insert "memcp-tests" "crash_safe" '("val" "name")
+          (insert (table "memcp-tests" "crash_safe") '("val" "name")
             (map (produceN 50) (lambda (i)
               (list (+ 100 i) (concat "delta" i)))))
     sql: "SELECT COUNT(*) AS cnt FROM crash_safe"
@@ -115,7 +115,7 @@ test_cases:
   - name: "Seed crash_insert with 20 known rows"
     setup:
       - scm: |
-          (insert "memcp-tests" "crash_insert" '("val")
+          (insert (table "memcp-tests" "crash_insert") '("val")
             (map (produceN 20) (lambda (i) (list i))))
     sql: "SELECT COUNT(*) AS cnt FROM crash_insert"
     expect:
@@ -141,7 +141,7 @@ test_cases:
   - name: "Large insert interrupted by crash"
     parallel: crash_insert
     scm: |
-      (insert "memcp-tests" "crash_insert" '("val")
+      (insert (table "memcp-tests" "crash_insert") '("val")
         (map (produceN 100000) (lambda (i) (list (+ 20 i)))))
     expect:
       interrupted_ok: true
@@ -169,7 +169,7 @@ test_cases:
   - name: "Seed crash_update with 1000 rows"
     setup:
       - scm: |
-          (insert "memcp-tests" "crash_update" '("id" "val" "status")
+          (insert (table "memcp-tests" "crash_update") '("id" "val" "status")
             (map (produceN 1000) (lambda (i)
               (list i i "original"))))
     sql: "SELECT COUNT(*) AS cnt FROM crash_update WHERE status = 'original'"
@@ -212,7 +212,7 @@ test_cases:
   - name: "Seed crash_count with 30 categorized rows"
     setup:
       - scm: |
-          (insert "memcp-tests" "crash_count" '("category" "amount")
+          (insert (table "memcp-tests" "crash_count") '("category" "amount")
             (map (produceN 30) (lambda (i)
               (list (concat "cat" (mod i 3)) (* i 10)))))
     sql: "SELECT COUNT(*) AS cnt FROM crash_count"
@@ -230,7 +230,7 @@ test_cases:
   - name: "Insert 30 more rows then crash"
     scm: |
       (begin
-        (insert "memcp-tests" "crash_count" '("category" "amount")
+        (insert (table "memcp-tests" "crash_count") '("category" "amount")
           (map (produceN 30) (lambda (i)
             (list (concat "cat" (mod (+ i 30) 3)) (* (+ i 30) 10)))))
         (crash))
@@ -264,7 +264,7 @@ test_cases:
   - name: "Seed crash_clean with data"
     setup:
       - scm: |
-          (insert "memcp-tests" "crash_clean" '("data")
+          (insert (table "memcp-tests" "crash_clean") '("data")
             (map (produceN 40) (lambda (i)
               (list (concat "item" i)))))
     sql: "SELECT COUNT(*) AS cnt FROM crash_clean"
@@ -286,7 +286,7 @@ test_cases:
   - name: "Insert more then crash"
     scm: |
       (begin
-        (insert "memcp-tests" "crash_clean" '("data")
+        (insert (table "memcp-tests" "crash_clean") '("data")
           (map (produceN 20) (lambda (i)
             (list (concat "item" (+ i 40))))))
         (crash))
@@ -685,7 +685,7 @@ test_cases:
   - name: "Seed crash_rebuild with data for rebuild"
     setup:
       - scm: |
-          (insert "memcp-tests" "crash_rebuild" '("val")
+          (insert (table "memcp-tests" "crash_rebuild") '("val")
             (map (produceN 200) (lambda (i) (list i))))
     sql: "SELECT COUNT(*) AS cnt FROM crash_rebuild"
     expect:
@@ -702,7 +702,7 @@ test_cases:
     scm: |
       (begin
         (rebuild)
-        (insert "memcp-tests" "crash_rebuild" '("val")
+        (insert (table "memcp-tests" "crash_rebuild") '("val")
           (map (produceN 100) (lambda (i) (list (+ 200 i)))))
         "ok")
     expect:

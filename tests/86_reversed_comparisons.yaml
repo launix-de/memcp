@@ -19,7 +19,7 @@ test_cases:
       - scm: "(rebuild)"
       - scm: |
           (begin
-            (insert "memcp-tests" "rev_cmp" '("id" "val" "name")
+            (insert (table "memcp-tests" "rev_cmp") '("id" "val" "name")
               (map (produceN 200) (lambda (i)
                 (if (equal? i 150) (list i (* i 3) nil)
                   (list i (* i 3) (concat "item" i))))))

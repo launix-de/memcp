@@ -38,7 +38,7 @@ this is how rdf works:
 	(set old_handler (coalesce http_handler handler_404))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan nil "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (time (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
@@ -59,13 +59,13 @@ this is how rdf works:
 	)))
 	(define handle_ttl_load (lambda (req res schema ttl_data) (begin
 		/* check for password */
-		(set pw (scan nil "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
 			/*(print "Loading TTL data into: " schema)*/
 			/* ensure rdf table exists */
-			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)" (lambda (schema table write) true)))
+			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)" (lambda (schema tblname write) true)))
 			/* load the TTL data */
 			(load_ttl schema ttl_data)
 			((res "println") "TTL data loaded successfully")

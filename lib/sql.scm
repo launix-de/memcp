@@ -51,19 +51,19 @@ if the user is not allowed to access this property, the function will throw an e
 */
 (define sql_policy (lambda (username)
 	(begin
-		(define is_admin (scan nil "system" "user"
+		(define is_admin (scan nil (table "system" "user")
 			'("username") (lambda (u) (equal?? u username))
 			'("admin") (lambda (a) a)
 			(lambda (a b) (or a b))
 			false))
-		(if is_admin (lambda (schema table write) true) /* admin -> allow all */
+		(if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
 			/* else: complicated policy */
-			(lambda (schema table write)
+			(lambda (schema tblname write)
 				(begin
 					/* Allow virtual INFORMATION_SCHEMA for all users */
 					(if (equal?? schema "information_schema") true (begin
 						/* Database-level check via system.access */
-						(define access_count (scan nil "system" "access"
+						(define access_count (scan nil (table "system" "access")
 							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
 							'() (lambda () 1)
 							+ 0))
@@ -82,8 +82,8 @@ if the user is not allowed to access this property, the function will throw an e
 ))
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
-	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
-	(insert "system" "user" '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
+	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema tblname write) true)))
+	(insert (table "system" "user") '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
 ))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
@@ -92,8 +92,8 @@ if the user is not allowed to access this property, the function will throw an e
 		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "admin")
 			true
 			(begin
-				(createcolumn "system" "user" "admin" "boolean" '() '())
-				(scan nil "system" "user" '() (lambda () true) '("$update") (lambda ($update) ($update '("admin" true))))
+				(createcolumn (table "system" "user") "admin" "boolean" '() '())
+				(scan nil (table "system" "user") '() (lambda () true) '("$update") (lambda ($update) ($update '("admin" true))))
 			)
 		)
 	) true)
@@ -103,7 +103,7 @@ if the user is not allowed to access this property, the function will throw an e
 (try (lambda () (begin
 	(if (has? (show "system") "user") (begin
 		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "id")
-			(dropcolumn "system" "user" "id")
+			(dropcolumn (table "system" "user") "id")
 			true)
 	) true)
 )) (lambda (e) true))
@@ -111,21 +111,21 @@ if the user is not allowed to access this property, the function will throw an e
 /* migration: ensure root always has admin=true */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
-		(scan nil "system" "user" '("username") (lambda (username) (equal? username "root")) '("$update") (lambda ($update) ($update '("admin" true))))
+		(scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("$update") (lambda ($update) ($update '("admin" true))))
 		true)
 )) (lambda (e) true))
 
 /* ensure unique username constraint to avoid duplicates */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
-		(createkey "system" "user" "uniq_username" true '("username"))
+		(createkey (table "system" "user") "uniq_username" true '("username"))
 		true)
 )) (lambda (e) true))
 
 /* error query log table */
 (if (not (has? (show "system_statistic") "errors")) (begin
 	(print "creating table system_statistic.errors")
-	(eval (parse_sql "system_statistic" "CREATE TABLE errors(datetime text, database text, user text, query text, error text) ENGINE=SLOPPY" (lambda (schema table write) true)))
+	(eval (parse_sql "system_statistic" "CREATE TABLE errors(datetime text, database text, user text, query text, error text) ENGINE=SLOPPY" (lambda (schema tblname write) true)))
 ))
 
 /* global counter incremented on each logged error — used by dashboard WebSocket to trigger refresh */
@@ -144,7 +144,7 @@ qry    — query text (pass "" when unknown) */
 	(error_log_counter "count" (+ (error_log_counter "count") 1))
 	(if (settings "ErrorQueryLog") (begin
 		(try (lambda () (begin
-			(insert "system_statistic" "errors"
+			(insert (table "system_statistic" "errors")
 				'("datetime" "database" "user" "query" "error")
 				(list (list (now) db usr qry (concat errmsg))))
 			/* trimming moved to 15-minute cron in dashboard.scm */
@@ -155,19 +155,19 @@ qry    — query text (pass "" when unknown) */
 /* print log table */
 (if (not (has? (show "system_statistic") "logs")) (begin
 	(print "creating table system_statistic.logs")
-	(eval (parse_sql "system_statistic" "CREATE TABLE logs(datetime text, message text) ENGINE=SLOPPY" (lambda (schema table write) true)))
+	(eval (parse_sql "system_statistic" "CREATE TABLE logs(datetime text, message text) ENGINE=SLOPPY" (lambda (schema tblname write) true)))
 ))
 
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
 	(print "creating table system.access")
-	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema table write) true)))
+	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
 
 /* migration: ensure unique (username, database) constraint on system.access */
 (try (lambda () (begin
 	(if (has? (show "system") "access")
-		(createkey "system" "access" "uniq_user_db" true '("username" "database"))
+		(createkey (table "system" "access") "uniq_user_db" true '("username" "database"))
 		true)
 )) (lambda (e) true))
 
@@ -192,7 +192,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan nil "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -245,7 +245,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan nil "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -303,7 +303,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	/* handler for raw Scheme code execution (global, no schema) */
 	(define handle_scm (lambda (req res code) (begin
 		/* check for password - must be admin */
-		(set pw (scan nil "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
 		(if (and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
 			(begin
 				(try (lambda () (begin
@@ -372,7 +372,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 (service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
-(set mysql_auth (lambda (username_) (scan nil "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
+(set mysql_auth (lambda (username_) (scan nil (table "system" "user") '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 (set mysql_handler (lambda (schema sql resultrow_sql session) (begin
 	(session "schema" schema)

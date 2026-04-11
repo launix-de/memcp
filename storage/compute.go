@@ -703,23 +703,26 @@ func (t *table) registerORCTriggers(name string) {
 			// Invalidate from composite sort key onwards via validMask scan
 			switch timing {
 			case AfterInsert:
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("NEW")})
+				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
+				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")})
 			case AfterDelete:
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("OLD")})
+				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
+				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")})
 			case AfterUpdate:
 				// For UPDATE: invalidate from both OLD and NEW positions
+				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
 				body = scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("begin"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("OLD")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("NEW")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")}),
 				})
 			}
 		} else {
 			// No sort key: full column invalidation
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewString(t.Name)})
 			body = scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("invalidatecolumn"),
-				scm.NewString(t.schema.Name),
-				scm.NewString(t.Name),
+				tblExpr,
 				scm.NewString(name),
 			})
 		}
@@ -790,18 +793,36 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 	if len(items) >= 5 && items[0].IsSymbol() {
 		sym := items[0].String()
 		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
-			schemaIdx, tableIdx := 1, 2
+			tableIdx := 2
 			condColsIdx, filterIdx := 3, 4
-			if len(items) > 1 && !items[1].IsString() {
-				schemaIdx, tableIdx = 2, 3
-				condColsIdx, filterIdx = 4, 5
-			}
 			if len(items) <= filterIdx {
 				return nil
 			}
-			info := scanJoinInfo{
-				schema: scm.String(items[schemaIdx]),
-				table:  scm.String(items[tableIdx]),
+			var info scanJoinInfo
+			if items[tableIdx].IsCustom(TagTable) {
+				t := TableFromScmer(items[tableIdx])
+				info.schema = t.schema.Name
+				info.table = t.Name
+			} else if items[tableIdx].IsSlice() {
+				// unfolded (table schema name) expression
+				sl := items[tableIdx].Slice()
+				if len(sl) == 3 && scm.String(sl[0]) == "table" {
+					info.schema = scm.String(sl[1])
+					info.table = scm.String(sl[2])
+				}
+			} else if items[tableIdx].IsSymbol() {
+				// pre-resolved tbl:schema:name symbol — extract schema and table from name
+				symStr := scm.String(items[tableIdx])
+				if strings.HasPrefix(symStr, "tbl:") {
+					parts := strings.SplitN(symStr[4:], ":", 2)
+					if len(parts) == 2 {
+						info.schema = parts[0]
+						info.table = parts[1]
+					}
+				}
+			} else {
+				info.schema = ""
+				info.table = scm.String(items[tableIdx])
 			}
 			// condCols = (list "col1" "col2" ...), filter = lambda
 			condCols := extractStringListFromAST(items[condColsIdx])
@@ -994,16 +1015,31 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) >= 5 && items[0].IsSymbol() {
+	if len(items) >= 4 && items[0].IsSymbol() {
 		sym := items[0].String()
-		schemaIdx, tableIdx := 1, 2
-		if len(items) > 1 && !items[1].IsString() {
-			schemaIdx, tableIdx = 2, 3
-		}
-		if (sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order") &&
-			len(items) > tableIdx &&
-			scm.String(items[schemaIdx]) == schema && scm.String(items[tableIdx]) == table {
-			return items
+		tableIdx := 2
+		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
+			var tSchema, tName string
+			if len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
+				t := TableFromScmer(items[tableIdx])
+				tSchema, tName = t.schema.Name, t.Name
+			} else if len(items) > tableIdx && items[tableIdx].IsSlice() {
+				sl := items[tableIdx].Slice()
+				if len(sl) == 3 && scm.String(sl[0]) == "table" {
+					tSchema, tName = scm.String(sl[1]), scm.String(sl[2])
+				}
+			} else if len(items) > tableIdx && items[tableIdx].IsSymbol() {
+				symStr := scm.String(items[tableIdx])
+				if strings.HasPrefix(symStr, "tbl:") {
+					parts := strings.SplitN(symStr[4:], ":", 2)
+					if len(parts) == 2 {
+						tSchema, tName = parts[0], parts[1]
+					}
+				}
+			}
+			if tSchema == schema && tName == table {
+				return items
+			}
 		}
 	}
 	for _, item := range items {
@@ -1034,13 +1070,11 @@ func isAdditiveReduce(reduce scm.Scmer) bool {
 // isAdditiveAggregate checks whether a scan node represents an additive aggregate
 // (reduce=+, neutral=0) whose mapFn contains no inner scans.
 func isAdditiveAggregate(scanNode []scm.Scmer) bool {
-	if len(scanNode) < 9 {
+	if len(scanNode) < 8 {
 		return false
 	}
+	// scan layout: [fn, tx, table, filterCols, filter, mapCols, map, reduce, neutral, ...]
 	mapFnIdx, reduceIdx, neutralIdx := 6, 7, 8
-	if len(scanNode) > 1 && !scanNode[1].IsString() {
-		mapFnIdx, reduceIdx, neutralIdx = 7, 8, 9
-	}
 	if len(scanNode) <= neutralIdx {
 		return false
 	}
@@ -1254,10 +1288,11 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr"), valueExpr}),
 	})
 
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
-		scm.NewString(targetSchema), scm.NewString(targetTable),
+		tableExpr,
 		scm.NewSlice(filterColElems),
 		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
 		resultCols,
@@ -1289,8 +1324,7 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		})
 		invalidateBody := scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewString(targetSchema),
-			scm.NewString(targetTable),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
 			scm.NewString(colName),
 		})
 		// Build (and (equal? (get_assoc "OLD" "srcCol1") (get_assoc "NEW" "srcCol1")) ...)
@@ -1328,8 +1362,7 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		// Fallback: full invalidation.
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewString(targetSchema),
-			scm.NewString(targetTable),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
 			scm.NewString(colName),
 		})
 	}
@@ -1374,10 +1407,11 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 	// Build result col list: '("$invalidate:colName")
 	invColName := "$invalidate:" + colName
 
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
-		scm.NewString(targetSchema), scm.NewString(targetTable),
+		tableExpr,
 		scm.NewSlice(filterColElems),
 		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString(invColName)}),
@@ -1406,8 +1440,7 @@ func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, s
 		// Fallback: full invalidation
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewString(targetSchema),
-			scm.NewString(targetTable),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
 			scm.NewString(colName),
 		})
 	}
@@ -1462,15 +1495,13 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			if !exists {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
+					// scan layout: [fn, tx, table, filterCols, filter, mapCols, map, ...]
 					mapColsIdx, mapFnIdx := 5, 6
-					if len(scanNode) > 1 && !scanNode[1].IsString() {
-						mapColsIdx, mapFnIdx = 6, 7
-					}
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
 					if isConstantOneAggregate(scanNode[mapFnIdx]) {
 						body = scm.NewSlice([]scm.Scmer{
 							scm.NewSymbol("invalidatecolumn"),
-							scm.NewString(targetSchema),
-							scm.NewString(t.Name),
+							tblExpr,
 							scm.NewString(name),
 						})
 					} else {
@@ -1478,10 +1509,10 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					}
 				} else {
 					// Full invalidation: for non-additive aggregates and AfterInvalidate propagation.
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
-						scm.NewString(targetSchema),
-						scm.NewString(t.Name),
+						tblExpr,
 						scm.NewString(name),
 					})
 				}
