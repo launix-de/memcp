@@ -658,12 +658,12 @@ while still recursing into deeper helper lineage when needed. */
 	'((quote materialized-subquery) key) ((context "session") key)
 	(table schema tbl)
 )))
-/* scan-codegen-table: generates a table reference for codegen — uses pre-resolved symbol */
+/* scan-codegen-table: generates a table expression for codegen */
 (define scan-codegen-table (lambda (schema tbl) (match tbl
 	'(materialized-subquery key) (list (list (quote context) "session") key)
 	'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
 	'((quote materialized-subquery) key) (list (list (quote context) "session") key)
-	(symbol (concat "tbl:" schema ":" tbl))
+	(list (quote table) schema tbl)
 )))
 
 /* tbl-define-code: generates (define tbl:schema:name (table schema name)) for init blocks */
@@ -7403,12 +7403,30 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	)))
 )))
 )
+/* _replace_table_with_sym: replaces (table schema name) AST nodes with tbl:schema:name symbols
+   for tables that have pre-resolved defines. tbl_map is an assoc list of (schema.name . symbol). */
+(define _replace_table_with_sym (lambda (expr tbl_map)
+	(if (not (list? expr)) expr
+		(if (and (equal? (count expr) 3) (equal? (car expr) 'table) (string? (nth expr 1)) (string? (nth expr 2)))
+			(begin
+				(define key (concat (nth expr 1) ":" (nth expr 2)))
+				(define sym (get_assoc tbl_map key))
+				(if (nil? sym) expr sym))
+			(map expr (lambda (e) (_replace_table_with_sym e tbl_map)))))))
+
 /* build_queryplan: wraps _build_queryplan_inner with table-pointer pre-resolution */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
-	(define _tbl_defines (filter (map tables (lambda (td) (match td
-		'(_ tschema tname _ _) (if (string? tname) (tbl-define-code tschema tname) nil)
+	/* Collect base tables that can be pre-resolved */
+	(define _tbl_entries (filter (map tables (lambda (td) (match td
+		'(_ tschema tname _ _) (if (string? tname) (list tschema tname) nil)
 		nil))) (lambda (d) (not (nil? d)))))
+	(define _tbl_defines (map _tbl_entries (lambda (e) (tbl-define-code (car e) (car (cdr e))))))
+	(define _tbl_map (merge (map _tbl_entries (lambda (e)
+		(list (concat (car e) ":" (car (cdr e))) (symbol (concat "tbl:" (car e) ":" (car (cdr e)))))))))
 	(define _plan (_build_queryplan_inner schema tables fields condition groups schemas replace_find_column update_target))
 	(if (equal? _tbl_defines '()) _plan
-		(cons '!begin (merge _tbl_defines (list _plan))))
+		(begin
+			/* Replace (table schema name) calls with pre-resolved symbols in the plan */
+			(define _opt_plan (_replace_table_with_sym _plan _tbl_map))
+			(cons '!begin (merge _tbl_defines (list _opt_plan)))))
 )))
