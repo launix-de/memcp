@@ -1601,7 +1601,7 @@ func Init(en scm.Env) {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
 					scm.NewSymbol("session"),
-					scm.NewString(baseSchema), scm.NewString(baseTable.Name),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(baseSchema), scm.NewString(baseTable.Name)}),
 					scanFilterCols(baseCols),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
 						buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols)))),
@@ -1616,7 +1616,7 @@ func Init(en scm.Env) {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
 					scm.NewSymbol("session"),
-					scm.NewString(ktSchema), scm.NewString(ktName),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
 					scanFilterCols(ktCols),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
 						buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols)))),
@@ -1631,7 +1631,7 @@ func Init(en scm.Env) {
 			buildInsert := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("insert"),
-					scm.NewString(ktSchema), scm.NewString(ktName),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
 					scanFilterCols(ktCols),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
 						fkValListExpr(dictSym, baseCols)}),
