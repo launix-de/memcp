@@ -658,13 +658,17 @@ while still recursing into deeper helper lineage when needed. */
 	'((quote materialized-subquery) key) ((context "session") key)
 	(table schema tbl)
 )))
-/* scan-codegen-table: generates a table expression for codegen (list context) */
+/* scan-codegen-table: generates a table reference for codegen — uses pre-resolved symbol */
 (define scan-codegen-table (lambda (schema tbl) (match tbl
 	'(materialized-subquery key) (list (list (quote context) "session") key)
 	'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
 	'((quote materialized-subquery) key) (list (list (quote context) "session") key)
-	(list (quote table) schema tbl)
+	(symbol (concat "tbl:" schema ":" tbl))
 )))
+
+/* tbl-define-code: generates (define tbl:schema:name (table schema name)) for init blocks */
+(define tbl-define-code (lambda (schema tbl)
+	(list 'define (symbol (concat "tbl:" schema ":" tbl)) (list 'table schema tbl))))
 
 /* scan_batch peephole optimization has been moved to the Go optimizer hook
 in storage/scan_batch_rewrite.go (optimizeScan → tryScanBatchRewrite). */
@@ -1541,11 +1545,13 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 			createtable returns true on first creation — caller wraps collect + trigger deploy
 			in this guard. On subsequent calls createtable returns false (table already exists,
 			incrementally maintained by triggers). partitiontable and touch_keytable are idempotent. */
-			(define init_code (list 'begin
+			(define init_code (list '!begin
 				(list 'if (list 'createtable schema keytable_name kt_cols_code query_temp_table_options_code true)
 					(list 'partitiontable (list 'table schema keytable_name) kt_partition_code)
 					nil)
 				(list 'touch_keytable (list 'table schema keytable_name))
+				/* pre-resolve keytable pointer for inner loops */
+				(tbl-define-code schema keytable_name)
 				/* returns true when collect + trigger deploy is needed:
 				   createtable=true (new) OR table_empty (restart recovery) */
 				(list 'or
@@ -4546,8 +4552,7 @@ Key helpers:
 */
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
 When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
-(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
-	/*(print "build queryplan " '(schema tables fields condition groups schemas))*/
+(define _build_queryplan_inner (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
 
 	/* TODO: order tables: outer joins behind */
 	(set groups (coalesceNil groups '()))
@@ -7398,3 +7403,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	)))
 )))
 )
+/* build_queryplan: wraps _build_queryplan_inner with table-pointer pre-resolution */
+(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
+	(define _tbl_defines (filter (map tables (lambda (td) (match td
+		'(_ tschema tname _ _) (if (string? tname) (tbl-define-code tschema tname) nil)
+		nil))) (lambda (d) (not (nil? d)))))
+	(define _plan (_build_queryplan_inner schema tables fields condition groups schemas replace_find_column update_target))
+	(if (equal? _tbl_defines '()) _plan
+		(cons '!begin (merge _tbl_defines (list _plan))))
+)))

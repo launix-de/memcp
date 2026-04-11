@@ -242,18 +242,30 @@ type optimizerMetainfo struct {
 	nextSlot             *int            // pointer to lambda's slot counter; nil outside lambda
 	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
+	loopDepth            int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
 	return
 }
+
+// IncrLoopDepth increments the loop nesting depth. Called by scan optimizer hooks
+// before optimizing callback lambdas (filter/map/reduce).
+func (ome *optimizerMetainfo) IncrLoopDepth() { ome.loopDepth++ }
+
+// DecrLoopDepth decrements the loop nesting depth.
+func (ome *optimizerMetainfo) DecrLoopDepth() { ome.loopDepth-- }
+
+// LoopDepth returns the current loop nesting depth.
+func (ome *optimizerMetainfo) LoopDepth() int { return ome.loopDepth }
 func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
 	for k, v := range ome.variableReplacement {
 		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
 	}
 	result.setBlacklist = ome.setBlacklist
+	result.loopDepth = ome.loopDepth
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
 }
@@ -273,6 +285,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.setBlacklist = ome.setBlacklist
 	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
 	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
+	result.loopDepth = ome.loopDepth
 	return
 }
 
@@ -398,6 +411,11 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 				if s2, ok := scmerSymbol(slice[1]); ok && s2 == sym {
 					return val, tiTransfer
 				}
+			}
+			// Do not inline function calls into loops — the define was hoisted
+			// out of the loop intentionally (e.g. table pointer pre-resolution).
+			if ome.loopDepth > 0 && replacement.IsSlice() {
+				return val, tiTransfer
 			}
 			return OptimizeEx(replacement, env, ome, useResult)
 		}

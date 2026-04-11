@@ -41,11 +41,15 @@ func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 // ensuring the accumulator parameter is marked as owned (enabling _mut swaps
 // like set_assoc → set_assoc_mut inside the reduce body).
 func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceIdx, neutralIdx, reduce2Idx, outerIdx int) (scm.Scmer, *scm.TypeDescriptor) {
+	// Non-callback args (tx, table, filtercols, mapcols, etc.) at loop depth 0
 	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
+	// Callback lambdas execute per-row → increment loop depth so the optimizer
+	// does not inline hoisted defines (like table pointers) back into the loop.
+	oc.Ome.IncrLoopDepth()
 	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
+		oc.SetCallbackOwned([]bool{true, false})
 		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
 	}
 	if len(v) > neutralIdx {
@@ -58,6 +62,7 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
+	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
 }
 

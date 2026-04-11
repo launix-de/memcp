@@ -33,6 +33,7 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	for i := 1; i <= 11 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
+	oc.Ome.IncrLoopDepth()
 	if len(v) > 12 && !v[12].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false})
 		v[12], _ = oc.OptimizeSub(v[12], true)
@@ -43,6 +44,7 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	if len(v) > 14 {
 		v[14], _ = oc.OptimizeSub(v[14], true)
 	}
+	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
 }
 
@@ -57,6 +59,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
+	oc.Ome.IncrLoopDepth()
 	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false})
 		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
@@ -67,6 +70,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
+	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
 }
 
