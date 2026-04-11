@@ -428,10 +428,10 @@ func loadPersistedTriggerPlan(schemaName, tableName string, trigger *TriggerDesc
 		panic("persisted trigger parse did not return an AST")
 	}
 	items := plan.Slice()
-	if len(items) < 7 {
+	if len(items) < 6 {
 		panic("persisted trigger AST is incomplete")
 	}
-	trigger.Func, trigger.FuncPlan = unwrapDeferredTriggerBody(items[6])
+	trigger.Func, trigger.FuncPlan = unwrapDeferredTriggerBody(items[5])
 }
 
 // SharedResource impl for database

@@ -1712,7 +1712,7 @@ func Init(en scm.Env) {
 			// table recreation with the same name and cause cross-suite flakes.
 			dropBody := scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("droptable"),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
+				NewTableScmer(ktTable),
 				scm.NewBool(true),
 			})
 			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {

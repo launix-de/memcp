@@ -209,7 +209,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				'((quote materialized-subquery) key) (list (list (quote context) "session") key)
 				table_source)))
 		(define tbl_resolved (scan-table-source tbl))
-		/* materialized subqueries produce list expressions — pass as-is; real tables use pre-resolved symbol */
-		(define tbl_arg (if (string? tbl_resolved) (symbol (concat "__tbl:" schema "." tbl_resolved)) tbl_resolved))
+		/* materialized subqueries produce list expressions — pass as-is; real tables get (table schema name) */
+		(define tbl_arg (if (string? tbl_resolved) (list 'table schema tbl_resolved) tbl_resolved))
 		(merge (list scanfn '(session "__memcp_tx") tbl_arg) rest))
 ))))
