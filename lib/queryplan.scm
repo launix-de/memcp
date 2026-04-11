@@ -5500,10 +5500,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list expr))))
 
 						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_group_key_or_fetch col) dir))))))
+						/* Order matters: scoped GROUP stages (from rest_groups) must come
+						BEFORE pure ORDER/LIMIT stages, otherwise the non-group scan path
+						sees unprocessed scoped GROUPs in rest_groups and errors. */
 						(define next_groups (merge
-							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset nil nil)) '())
 							(if _needs_synthetic_outer_group (list (make_group_stage '(1) nil nil nil nil nil nil)) '())
 							rest_groups
+							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset nil nil)) '())
 						))
 						/* FK reuse: extract child FK column name */
 						(define fk_child_col (if is_fk_reuse
@@ -6717,11 +6720,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '())))
 				(begin
 					(define _rg_all_pure (reduce rest_groups (lambda (ok s) (and ok
-						(or (nil? (stage_group_cols s)) (equal? (stage_group_cols s) '()))
+						(begin (define _rgg (stage_group_cols s))
+							(or (nil? _rgg) (equal? _rgg '()) (equal? _rgg '(1))))
 						(nil? (stage_having_expr s))
 						(not (stage_is_dedup s)))) true))
 					(if (not _rg_all_pure)
-						(error "non-group stage must be last")
+						(error (concat "non-group stage must be last: " (count rest_groups) " stages, first=" (string (car rest_groups))))
 						(begin
 							(reduce rest_groups (lambda (acc s) (begin
 								(if (and (nil? stage_order) (not (nil? (stage_order_list s))))
