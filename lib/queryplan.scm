@@ -6710,7 +6710,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		)
 	) (optimize (begin
 			/* grouping has been removed; now to the real data: */
-			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '()))) (error "non-group stage must be last"))
+			/* Absorb leftover pure ORDER/LIMIT stages (no GROUP BY, from unnested
+			scalar subselects with ORDER BY LIMIT 1 in the SELECT list). These
+			were propagated as rest_groups but have no GROUP BY keys — fold them
+			into stage_order/stage_limit instead of erroring. */
+			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '())))
+				(begin
+					(define _rg_all_pure (reduce rest_groups (lambda (ok s) (and ok
+						(or (nil? (stage_group_cols s)) (equal? (stage_group_cols s) '()))
+						(nil? (stage_having_expr s))
+						(not (stage_is_dedup s)))) true))
+					(if (not _rg_all_pure)
+						(error "non-group stage must be last")
+						(begin
+							(reduce rest_groups (lambda (acc s) (begin
+								(if (and (nil? stage_order) (not (nil? (stage_order_list s))))
+									(set stage_order (stage_order_list s)))
+								(if (and (nil? stage_limit) (not (nil? (stage_limit_val s))))
+									(set stage_limit (stage_limit_val s)))
+								(if (and (equal? stage_offset 0) (not (nil? (stage_offset_val s))))
+									(set stage_offset (stage_offset_val s)))
+								nil)) nil)
+							(set rest_groups '())))))
 			(if has_window (begin
 				/* ========= Window function scan path (LAG/LEAD) ========= */
 				/* Case 8: different OVER clauses */
