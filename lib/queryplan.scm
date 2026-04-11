@@ -53,7 +53,7 @@ Uses code-generator pattern: values baked into quoted lambda body at register ti
 so no closure capture — the trigger body serializes cleanly as a self-contained expression. */
 (define register_prejoin_invalidation (lambda (src_schema src_table pj_schema pj_table) (begin
 	(define prefix (concat ".prejoin:" pj_table "|" src_table "|"))
-	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable (list 'table pj_schema pj_table) true))))
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
 	(createtrigger (table src_schema src_table) (concat prefix "after_insert")     "after_insert"     "" drop_body false)
 	(createtrigger (table src_schema src_table) (concat prefix "after_update")     "after_update"     "" drop_body false)
 	(createtrigger (table src_schema src_table) (concat prefix "after_delete")     "after_delete"     "" drop_body false)
@@ -70,7 +70,7 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(createtrigger (table src_schema src_table) (concat prefix "after_delete") "after_delete" "" delete_fn false)
 	(createtrigger (table src_schema src_table) (concat prefix "after_insert") "after_insert" "" insert_fn false)
 	(createtrigger (table src_schema src_table) (concat prefix "after_update") "after_update" "" update_fn false)
-	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable (list 'table pj_schema pj_table) true))))
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
 	(createtrigger (table src_schema src_table) (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
 	(createtrigger (table src_schema src_table) (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
 	true)))

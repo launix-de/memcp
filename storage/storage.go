@@ -1440,20 +1440,14 @@ func Init(en scm.Env) {
 		Name: "droptable",
 		Desc: "removes a table",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			ifexists := len(a) > 1 && scm.ToBool(a[1])
-			if a[0].IsNil() {
-				if ifexists {
-					return scm.NewBool(false)
-				}
-				panic("droptable: table does not exist")
-			}
-			t := TableFromScmer(a[0])
-			DropTable(t.schema.Name, t.Name, ifexists)
+			ifexists := len(a) > 2 && scm.ToBool(a[2])
+			DropTable(scm.String(a[0]), scm.String(a[1]), ifexists)
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
+				{Kind: "string", ParamName: "schema"},
+				{Kind: "string", ParamName: "table"},
 				{Kind: "bool", ParamName: "ifexists", ParamDesc: "if true, don't throw an error if it already exists", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
@@ -1712,7 +1706,8 @@ func Init(en scm.Env) {
 			// table recreation with the same name and cause cross-suite flakes.
 			dropBody := scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("droptable"),
-				NewTableScmer(ktTable),
+				scm.NewString(ktSchema),
+				scm.NewString(ktName),
 				scm.NewBool(true),
 			})
 			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {

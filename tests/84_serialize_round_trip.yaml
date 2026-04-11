@@ -177,4 +177,4 @@ test_cases:
   - name: "Cleanup sr_data"
     sql: "DROP TABLE IF EXISTS sr_data"
   - name: "Cleanup hidden sloppy table"
-    scm: '(droptable (table "memcp-tests" ".sr_hidden") true)'
+    scm: '(droptable "memcp-tests" ".sr_hidden" true)'
