@@ -30,6 +30,7 @@ If missing, create a venv and install, e.g.:
 
 import sys
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Dependency checks with clear install hints
@@ -116,21 +117,66 @@ PERF_TARGET_MIN_MS = 10000  # target minimum query time (10s)
 PERF_TARGET_MAX_MS = 20000  # target maximum query time (20s)
 PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
-PERF_MAX_ROWS = 5_000_000  # cap at 5M rows to prevent OOM
-PERF_MAX_RAM_FRACTION = 0.15  # max 15% of AVAILABLE RAM for table data
+PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 
-def get_max_rows_for_ram(bytes_per_row: int = 256) -> int:
-    """Calculate max rows based on available RAM (uses MemAvailable, not MemTotal)."""
+def get_mem_total_kb() -> int:
+    """Read MemTotal once."""
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    return int(line.split()[1])
+    except:
+        pass
+    return 4 * 1024 * 1024  # fallback 4GB
+
+def get_mem_available_kb() -> int:
+    """Read current MemAvailable."""
     try:
         with open('/proc/meminfo', 'r') as f:
             for line in f:
                 if line.startswith('MemAvailable:'):
-                    avail_kb = int(line.split()[1])
-                    max_bytes = int(avail_kb * 1024 * PERF_MAX_RAM_FRACTION)
-                    return max_bytes // bytes_per_row
+                    return int(line.split()[1])
     except:
         pass
-    return 1_000_000  # fallback: 1M rows (conservative)
+    return 0
+
+_MEM_TOTAL_KB = get_mem_total_kb()
+_MEM_LIMIT_KB = int(_MEM_TOTAL_KB * (1.0 - PERF_MAX_RAM_FRACTION))  # abort threshold
+
+def check_ram_pressure() -> bool:
+    """Return True if MemAvailable is below the safety threshold.
+    Called during long-running operations (insert, query) to abort before OOM."""
+    return get_mem_available_kb() < _MEM_LIMIT_KB
+
+def get_max_rows_for_ram(bytes_per_row: int = 1024) -> int:
+    """Estimate max safe rows based on currently available RAM."""
+    avail_kb = get_mem_available_kb()
+    headroom_kb = avail_kb - _MEM_LIMIT_KB
+    if headroom_kb <= 0:
+        return 1000
+    return max(1000, (headroom_kb * 1024) // bytes_per_row)
+
+# Global RAM pressure flag — set by monitor thread, checked by test execution
+ram_pressure_abort = threading.Event()
+
+def _ram_monitor_loop(interval: float = 2.0):
+    """Background thread: poll MemAvailable every `interval` seconds.
+    Sets ram_pressure_abort when memory drops below the safety threshold."""
+    while not ram_pressure_abort.is_set():
+        if check_ram_pressure():
+            avail_mb = get_mem_available_kb() // 1024
+            limit_mb = _MEM_LIMIT_KB // 1024
+            print(f"\n🛑 RAM PRESSURE: MemAvailable={avail_mb}MB < limit={limit_mb}MB — aborting perf test!", flush=True)
+            ram_pressure_abort.set()
+            return
+        ram_pressure_abort.wait(interval)
+
+def start_ram_monitor():
+    """Start the background RAM monitor thread (daemon — dies with main process)."""
+    t = threading.Thread(target=_ram_monitor_loop, daemon=True)
+    t.start()
+    return t
 
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False):
@@ -192,16 +238,24 @@ class SQLTestRunner:
             for name, result in self.perf_results.items():
                 current_rows = result["rows"]
                 test_time = result["time_ms"]
+                target_ms = (PERF_TARGET_MIN_MS + PERF_TARGET_MAX_MS) / 2  # aim for middle of range
 
-                if test_time < PERF_TARGET_MIN_MS:
-                    new_rows = int(current_rows * PERF_SCALE_FACTOR)
+                if test_time < 1:
+                    # Too fast to measure — jump to 10× rows
+                    new_rows = current_rows * 10
+                elif test_time < PERF_TARGET_MIN_MS:
+                    # Proportional scale: if 1.6ms with 13K rows, target 15s → need ~122M rows
+                    # Cap the scale factor at 10× per iteration to avoid OOM
+                    scale = min(target_ms / test_time, 10.0)
+                    new_rows = int(current_rows * scale)
                 elif test_time > PERF_TARGET_MAX_MS:
-                    new_rows = max(1000, int(current_rows / PERF_SCALE_FACTOR))
+                    scale = max(target_ms / test_time, 0.1)
+                    new_rows = max(1000, int(current_rows * scale))
                 else:
                     new_rows = current_rows
 
-                # Apply RAM limit and hard cap
-                new_rows = min(new_rows, max_rows, PERF_MAX_ROWS)
+                # Apply RAM limit
+                new_rows = min(new_rows, max_rows)
 
                 self.perf_baselines[name] = {
                     "time_ms": round(test_time, 1),
@@ -405,6 +459,10 @@ class SQLTestRunner:
         if test_case.get("disabled"):
             print(f"⏭️  Skipped (disabled): {name}")
             return True
+        # Abort immediately if RAM monitor flagged pressure
+        if ram_pressure_abort.is_set():
+            print(f"⏭️  {name} (skipped — RAM pressure abort)")
+            return False
         self.test_count += 1
         is_noncritical = bool(test_case.get("noncritical"))
         if is_noncritical:
@@ -899,6 +957,7 @@ class SQLTestRunner:
         # Load performance baselines for this machine
         if PERF_TEST_ENABLED:
             self.load_perf_baselines()
+            start_ram_monitor()
             if PERF_CALIBRATE:
                 self.perf_baselines = {}  # reset rows to PERF_DEFAULT_ROWS
                 print("🔧 Calibration mode: resetting baselines to current times")
