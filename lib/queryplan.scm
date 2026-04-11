@@ -2505,8 +2505,23 @@ across all nesting levels, preventing alias collisions after derived table flatt
 																			(if (nil? je) _my_cond
 																				(list (quote and) je _my_cond)))))))
 															td))))))
-												/* substitution: reference the prefixed value column */
-												(define us_subst_raw (_us_prefix_ria us_value_expr))
+												/* substitution: reference the prefixed value column.
+												scope_bind_agg adds a zero-cost table ref to bare aggregates
+												so scoped GROUP stages can distinguish them (Neumann scope). */
+												(define scope_bind_agg (lambda (raw_expr scope_a src_a)
+													(match raw_expr
+														'((symbol aggregate) ae ar an)
+														(if (or (nil? scope_a) (nil? src_a) (not (equal? (extract_tblvars ae) '())) (not (has_assoc? schemas2_us src_a))) raw_expr
+															(begin (define sbc (reduce (schemas2_us src_a) (lambda (f cd) (if (not (nil? f)) f
+																(list (quote get_column) scope_a false (cd "Field") false))) nil))
+																(if (nil? sbc) raw_expr (list (quote aggregate) (list (quote +) ae (list (quote *) 0 (list (quote coalesceNil) sbc 0))) ar an))))
+														raw_expr)))
+												(define us_subst_raw_pre (_us_prefix_ria us_value_expr))
+												(define us_subst_raw (if (and us_has_outer (not (nil? us_prefixed_tables)) (not (equal? us_prefixed_tables '())))
+													(scope_bind_agg us_subst_raw_pre
+														(match (car us_prefixed_tables) '(a _ _ _ _) a nil)
+														(match (car tables2_us) '(a _ _ _ _) a nil))
+													us_subst_raw_pre))
 												(define us_is_count (match us_value_expr
 													'((symbol aggregate) _ (symbol +) 0) true
 													'((quote aggregate) _ (symbol +) 0) true
