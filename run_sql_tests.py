@@ -142,12 +142,16 @@ def get_mem_available_kb() -> int:
     return 0
 
 _MEM_TOTAL_KB = get_mem_total_kb()
-_MEM_LIMIT_KB = int(_MEM_TOTAL_KB * (1.0 - PERF_MAX_RAM_FRACTION))  # abort threshold
+_MEM_AVAIL_AT_START_KB = get_mem_available_kb()
+_MEM_BUDGET_KB = int(_MEM_TOTAL_KB * PERF_MAX_RAM_FRACTION)  # max RAM the perf tests may consume
 
 def check_ram_pressure() -> bool:
-    """Return True if MemAvailable is below the safety threshold.
-    Called during long-running operations (insert, query) to abort before OOM."""
-    return get_mem_available_kb() < _MEM_LIMIT_KB
+    """Return True if perf tests have consumed more than PERF_MAX_RAM_FRACTION of total RAM.
+    Compares current MemAvailable against the value at startup minus the budget."""
+    min_avail = _MEM_AVAIL_AT_START_KB - _MEM_BUDGET_KB
+    if min_avail < _MEM_TOTAL_KB * 0.10:  # never go below 10% total as safety floor
+        min_avail = int(_MEM_TOTAL_KB * 0.10)
+    return get_mem_available_kb() < min_avail
 
 def get_max_rows_for_ram(bytes_per_row: int = 1024) -> int:
     """Estimate max safe rows based on currently available RAM."""
