@@ -229,7 +229,7 @@ test_cases:
           value: false
         - stage: "plan"
           kind: "root"
-          value: "scan_order"
+          value: "!begin"
 
   - name: "EXPLAIN REORDER exposes table order"
     sql: "EXPLAIN REORDER SELECT a.id, b.id FROM rs_data a, rs_data b WHERE a.id = b.id"
