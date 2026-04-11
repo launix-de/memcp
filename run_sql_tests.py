@@ -119,7 +119,7 @@ PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_ROWS = 5_000_000  # cap at 5M rows to prevent OOM
 PERF_MAX_RAM_FRACTION = 0.15  # max 15% of AVAILABLE RAM for table data
 
-def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
+def get_max_rows_for_ram(bytes_per_row: int = 256) -> int:
     """Calculate max rows based on available RAM (uses MemAvailable, not MemTotal)."""
     try:
         with open('/proc/meminfo', 'r') as f:
