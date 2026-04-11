@@ -2541,7 +2541,7 @@ seeing the correctly prefixed outer alias. */
 													(if use_ordered_scalar
 														(list (quote scan_order)
 															(list (quote session) "__memcp_tx")
-															(scan-codegen-table schema3 tbl3)
+															(list (quote table) schema3 tbl3)
 															(cons list filtercols)
 															(list (quote lambda) filterparams filterbody)
 															(cons list ordercols)
@@ -2557,7 +2557,7 @@ seeing the correctly prefixed outer alias. */
 															false)
 														(list (quote scan)
 															(list (quote session) "__memcp_tx")
-															(scan-codegen-table schema3 tbl3)
+															(list (quote table) schema3 tbl3)
 															(cons list filtercols)
 															(list (quote lambda) filterparams filterbody)
 															(cons list mapcols)

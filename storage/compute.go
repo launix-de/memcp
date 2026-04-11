@@ -810,6 +810,16 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 					info.schema = scm.String(sl[1])
 					info.table = scm.String(sl[2])
 				}
+			} else if items[tableIdx].IsSymbol() {
+				// pre-resolved tbl:schema:name symbol — extract schema and table from name
+				symStr := scm.String(items[tableIdx])
+				if strings.HasPrefix(symStr, "tbl:") {
+					parts := strings.SplitN(symStr[4:], ":", 2)
+					if len(parts) == 2 {
+						info.schema = parts[0]
+						info.table = parts[1]
+					}
+				}
 			} else {
 				info.schema = ""
 				info.table = scm.String(items[tableIdx])
@@ -1017,6 +1027,14 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 				sl := items[tableIdx].Slice()
 				if len(sl) == 3 && scm.String(sl[0]) == "table" {
 					tSchema, tName = scm.String(sl[1]), scm.String(sl[2])
+				}
+			} else if len(items) > tableIdx && items[tableIdx].IsSymbol() {
+				symStr := scm.String(items[tableIdx])
+				if strings.HasPrefix(symStr, "tbl:") {
+					parts := strings.SplitN(symStr[4:], ":", 2)
+					if len(parts) == 2 {
+						tSchema, tName = parts[0], parts[1]
+					}
 				}
 			}
 			if tSchema == schema && tName == table {

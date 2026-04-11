@@ -22,6 +22,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import "regexp"
+import "strings"
 
 var SettingsHaveGoodBacktraces bool
 
@@ -412,11 +413,6 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 					return val, tiTransfer
 				}
 			}
-			// Do not inline function calls into loops — the define was hoisted
-			// out of the loop intentionally (e.g. table pointer pre-resolution).
-			if ome.loopDepth > 0 && replacement.IsSlice() {
-				return val, tiTransfer
-			}
 			return OptimizeEx(replacement, env, ome, useResult)
 		}
 		return val, tiTransfer
@@ -679,6 +675,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 			// Bring back old criterion: inline if used < 2 OR RHS is not a list
 			shouldReplace := usedVariables[sym] < 2 || !normalized.IsSlice()
+			// Convention: symbols starting with "tbl:" are pre-resolved table
+			// pointers that must not be inlined back into inner loops.
+			if strings.HasPrefix(string(sym), "tbl:") {
+				shouldReplace = false
+			}
 			// Never inline aliases to symbols; this preserves outer/old-handler semantics
 			if normalized.IsSymbol() {
 				shouldReplace = false

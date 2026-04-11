@@ -361,8 +361,7 @@ func Init(en scm.Env) {
 			return NewTableScmer(t)
 		},
 		Type: &scm.TypeDescriptor{
-			Kind:           "func",
-			HasSideEffects: true, // prevent optimizer from inlining (define tbl:x (table ...)) back into loops
+			Kind: "func",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema"},
 				{Kind: "string", ParamName: "table"},
