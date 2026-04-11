@@ -17,38 +17,61 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /*
 
-How MemCPs query plan builder works
------------------------------------
+How MemCP's query plan builder works
+-------------------------------------
 
-MemCP will not implement any filtering or ordering on scheme lists directly since this will be very costly.
-Instead, the storage engine is used to do these operations. The storage engine will automatically analyze a
-lambda expression for filtering/ordering and will eventually create and use indexes.
+Design principle: every filter, sort and aggregation runs on a SINGLE base table
+via the storage engine. The storage engine analyzes lambda expressions to build
+and use indexes automatically. This means multi-table operations must first be
+materialized into a single temporary table before the storage engine can process them.
 
-Every filter and sort will be executed on a base table. Therefore, in GROUP BY clauses, a temporary table
-has to be created. Also for cross joins (joins that either have no equality condition between the tables or
-the equality is not on a unique column), there has to be a temporary cross-table.
+Pipeline: SQL → untangle_query → join_reorder → build_queryplan → scan code
 
-when building a queryplan, there is a parameter `tables` which contains all tables that have to be joined.
-Relevant for the iterator is now the "core". which is:
-the list of tables in tables t1 that are not connected over a join t1,t2,t1.col1=t2.col2 where there is a unique key (t2.col2)
-(helper function (unique? schema tbl col col col))
+1. untangle_query: parses the query tuple into a flat IR (tables, fields, condition,
+   groups, schemas). Correlated subqueries are decorrelated here via Neumann unnesting
+   (NK15/BTW2025): each subquery becomes additional tables + scoped GROUP stages in
+   the flat IR. No inline/nested evaluation of subqueries.
 
-if the core consists of a single table, scan this table
-if the core consists of two or more tables, create a temporary join table --> prejoins
-if there is a group function, create a temporary preaggregate table
-(helper function temptable(tbllist, collist) -> tbllist is the list of tables to be joined and collist is the list of (table, col) that will also be unique)
+2. join_reorder: cost-based reordering of the table list using shard statistics.
+
+3. build_queryplan: generates executable Scheme code from the IR.
+   - Single-table core: scan directly on that table.
+   - Multi-table core: create a PREJOIN — a temporary materialized join table.
+     Prejoins exist so that GROUP BY keytables (aggregate caches) can operate on a
+     single base table with trigger-based incremental maintenance. Without prejoins,
+     keytables would need to track changes across multiple source tables, which is
+     not supported by the storage engine's single-table trigger model.
+   - GROUP BY: create a KEYTABLE — a temporary sloppy-engine table keyed by the
+     group columns, with computed aggregate columns (createcolumn). Keytables are
+     incrementally maintained via triggers on the source table (or prejoin).
+   - Scoped GROUP stages (from unnested subqueries): keytables with partition-aliases
+     that scope aggregate computation to specific inner tables. LEFT JOINed back to
+     the outer query for NULL-preserving semantics.
+
+Key helpers:
+- build_queryplan: generates the full query plan including keytable init, collect,
+  createcolumn, and the final scan with filter/map/resultrow
+- build_scan: generates nested scan loops over the table list
+- extract_columns_for_tblvar: extracts column names referenced by an expression
+- replace_columns_from_expr: rewrites get_column markers to runtime variable refs
+- scan_wrapper: adds transaction context and information_schema overrides to scans
+- make_keytable: creates canonically named sloppy temp tables for GROUP BY caches
 
 */
 
-/* helper functions:
-- (build_queryplan schema tables fields condition groups schemas) builds a lisp expression that runs the query and calls resultrow for each result tuple
-- (build_scan schema tables cols map reduce neutral neutral2 condition groups) builds a lisp expression that scans the tables
-- (extract_columns_for_tblvar expr tblvar) extracts a list of used columns for each tblvar '(tblvar col)
-- (replace_columns expr) replaces all (get_column ...) and (aggregate ...) with values
+/* === Prejoin trigger registration ===
+Prejoins are temporary materialized join tables that flatten multi-table cores
+into a single table. This is required because keytables (GROUP BY caches) and
+the storage engine's scan/index infrastructure operate on a single base table.
+Without prejoins, aggregate caches would need cross-table trigger coordination
+which the storage engine does not support.
 
-*/
+Prejoins are maintained via triggers on each source table:
+- Invalidation triggers: drop the prejoin on any source DML (simple but costly)
+- Incremental triggers: apply row-level insert/delete/update to the prejoin
+  (avoids full recompute, keeps the prejoin warm across DML operations)
 
-/* Registers invalidation triggers on src_table to drop pj_table on any DML.
+Registers invalidation triggers on src_table to drop pj_table on any DML.
 Uses code-generator pattern: values baked into quoted lambda body at register time,
 so no closure capture — the trigger body serializes cleanly as a self-contained expression. */
 (define register_prejoin_invalidation (lambda (src_schema src_table pj_schema pj_table) (begin
