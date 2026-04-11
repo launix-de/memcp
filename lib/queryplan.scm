@@ -2430,7 +2430,8 @@ across all nesting levels, preventing alias collisions after derived table flatt
 														(if (nil? je) nil (_us_prefix_ria je)))
 													td))))
 												/* inner condition (non-correlated), prefixed */
-												(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
+												(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil
+																			(_us_prefix_ria (_us_ror us_inner_cond_raw))))
 												/* domain columns + original GROUP BY → scoped GROUP stage */
 												(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
 												(define us_orig_having (if us_has_stages (stage_having_expr (car _us_own_stages)) nil))
