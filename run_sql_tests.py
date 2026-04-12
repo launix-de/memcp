@@ -52,7 +52,6 @@ import json
 import socket
 import subprocess
 import time
-import threading
 import multiprocessing
 import re
 import random
@@ -118,67 +117,73 @@ PERF_TARGET_MAX_MS = 20000  # target maximum query time (20s)
 PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
+PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
 
-def get_mem_total_kb() -> int:
-    """Read MemTotal once."""
+def read_meminfo_mb(key: str) -> int:
+    """Read a /proc/meminfo value (in MB). Returns 0 if unreadable."""
     try:
         with open('/proc/meminfo', 'r') as f:
             for line in f:
-                if line.startswith('MemTotal:'):
-                    return int(line.split()[1])
-    except:
-        pass
-    return 4 * 1024 * 1024  # fallback 4GB
-
-def get_mem_available_kb() -> int:
-    """Read current MemAvailable."""
-    try:
-        with open('/proc/meminfo', 'r') as f:
-            for line in f:
-                if line.startswith('MemAvailable:'):
-                    return int(line.split()[1])
+                if line.startswith(key + ':'):
+                    return int(line.split()[1]) // 1024
     except:
         pass
     return 0
 
-_MEM_TOTAL_KB = get_mem_total_kb()
-_MEM_AVAIL_AT_START_KB = get_mem_available_kb()
-_MEM_BUDGET_KB = int(_MEM_TOTAL_KB * PERF_MAX_RAM_FRACTION)  # max RAM the perf tests may consume
+def mem_total_mb() -> int:
+    v = read_meminfo_mb('MemTotal')
+    return v if v > 0 else 4 * 1024  # fallback 4GB
+
+def mem_available_mb() -> int:
+    return read_meminfo_mb('MemAvailable')
+
+mem_total = mem_total_mb()
+mem_avail_at_start = mem_available_mb()
+mem_budget = int(mem_total * PERF_MAX_RAM_FRACTION)  # MB — max RAM the perf tests may consume
+# Absolute floor: never let MemAvailable drop below 10% of total.
+mem_abort_floor = max(mem_avail_at_start - mem_budget, int(mem_total * 0.10))
 
 def check_ram_pressure() -> bool:
-    """Return True if perf tests have consumed more than PERF_MAX_RAM_FRACTION of total RAM.
-    Compares current MemAvailable against the value at startup minus the budget."""
-    min_avail = _MEM_AVAIL_AT_START_KB - _MEM_BUDGET_KB
-    if min_avail < _MEM_TOTAL_KB * 0.10:  # never go below 10% total as safety floor
-        min_avail = int(_MEM_TOTAL_KB * 0.10)
-    return get_mem_available_kb() < min_avail
+    """True when MemAvailable has fallen below the safety floor."""
+    return mem_available_mb() < mem_abort_floor
 
-def get_max_rows_for_ram(bytes_per_row: int = 1024) -> int:
-    """Estimate max safe rows based on currently available RAM."""
-    avail_kb = get_mem_available_kb()
-    headroom_kb = avail_kb - _MEM_LIMIT_KB
-    if headroom_kb <= 0:
+def max_rows_for_ram(bytes_per_row: int = 1024) -> int:
+    """Estimate a safe row cap based on currently available RAM headroom above the abort floor."""
+    headroom_mb = mem_available_mb() - mem_abort_floor
+    if headroom_mb <= 0:
         return 1000
-    return max(1000, (headroom_kb * 1024) // bytes_per_row)
+    return max(1000, (headroom_mb * 1024 * 1024) // bytes_per_row)
 
-# Global RAM pressure flag — set by monitor thread, checked by test execution
+# Global RAM pressure flag — set by monitor thread OR inline checks, read everywhere.
 ram_pressure_abort = threading.Event()
 
-def _ram_monitor_loop(interval: float = 2.0):
+def trip_ram_abort(reason: str):
+    """Record RAM abort, kill memcp so it releases RAM immediately, set the flag."""
+    if ram_pressure_abort.is_set():
+        return
+    avail = mem_available_mb()
+    print(f"\n🛑 RAM PRESSURE: MemAvailable={avail}MB < floor={mem_abort_floor}MB ({reason}) — aborting + killing memcp", flush=True)
+    ram_pressure_abort.set()
+    pid = find_memcp_pid()
+    if pid:
+        try:
+            os.kill(pid, 9)
+            print(f"   SIGKILL sent to memcp pid={pid}", flush=True)
+        except Exception as e:
+            print(f"   SIGKILL failed: {e}", flush=True)
+
+def ram_monitor_loop(interval: float = 0.5):
     """Background thread: poll MemAvailable every `interval` seconds.
-    Sets ram_pressure_abort when memory drops below the safety threshold."""
+    Shorter interval than insert latency for single large inserts."""
     while not ram_pressure_abort.is_set():
         if check_ram_pressure():
-            avail_mb = get_mem_available_kb() // 1024
-            limit_mb = _MEM_LIMIT_KB // 1024
-            print(f"\n🛑 RAM PRESSURE: MemAvailable={avail_mb}MB < limit={limit_mb}MB — aborting perf test!", flush=True)
-            ram_pressure_abort.set()
+            trip_ram_abort("monitor thread")
             return
         ram_pressure_abort.wait(interval)
 
 def start_ram_monitor():
     """Start the background RAM monitor thread (daemon — dies with main process)."""
-    t = threading.Thread(target=_ram_monitor_loop, daemon=True)
+    t = threading.Thread(target=ram_monitor_loop, daemon=True)
     t.start()
     return t
 
@@ -227,7 +232,7 @@ class SQLTestRunner:
         if not self.perf_results:
             return
 
-        max_rows = get_max_rows_for_ram()
+        max_rows = max_rows_for_ram()
 
         if PERF_NORECALIBRATE:
             # Just update times, keep existing rows
@@ -516,7 +521,7 @@ class SQLTestRunner:
                 threshold_ms = yaml_threshold_ms
 
             # Use baseline rows (which may have been scaled), capped by current RAM
-            perf_rows = min(baseline_rows, get_max_rows_for_ram())
+            perf_rows = min(baseline_rows, max_rows_for_ram())
 
             if not PERF_TEST_ENABLED:
                 print(f"⏭️  {name} (skipped - set PERF_TEST=1 to run)")
@@ -532,6 +537,13 @@ class SQLTestRunner:
         heap_bytes = 0
         if test_setup_steps and isinstance(test_setup_steps, list):
             for step in test_setup_steps:
+                # Inline RAM guard between every setup step — catches large
+                # inserts before the next one starts (monitor thread alone is
+                # too slow for single-shot allocations).
+                if check_ram_pressure():
+                    trip_ram_abort(f"setup step of {name}")
+                if ram_pressure_abort.is_set():
+                    return self._record_fail(name, "Aborted: RAM pressure during setup", None, None, None, is_noncritical)
                 if "sql" in step:
                     sql_code = step["sql"]
                     if is_perf_test:
@@ -759,15 +771,26 @@ class SQLTestRunner:
             memcp_pid = find_memcp_pid() if is_perf_test else None
             start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
 
-            # Execute query (with ns-precision timing)
-            start_ns = time.monotonic_ns()
-            response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id, timeout=sql_timeout, params=sql_params)
-            elapsed_ns = time.monotonic_ns() - start_ns
+            # Execute query. For perf tests, repeat N times and report the
+            # median — a single run is dominated by GC jitter on short queries.
+            # For non-perf tests, one run is sufficient.
+            repeat = PERF_REPEAT if is_perf_test else 1
+            samples_ns: list = []
+            response = None
+            for _ in range(repeat):
+                start_ns = time.monotonic_ns()
+                response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id, timeout=sql_timeout, params=sql_params)
+                samples_ns.append(time.monotonic_ns() - start_ns)
+                if response is None or response.status_code != 200:
+                    break  # don't hammer a broken endpoint
+            samples_ns.sort()
+            elapsed_ns = samples_ns[len(samples_ns) // 2]  # median
             elapsed_ms = elapsed_ns / 1_000_000
             elapsed_sec = elapsed_ms / 1000
 
             if self.log_times:
-                print(f"QUERY_TIME ns={elapsed_ns} name={name}")
+                min_ns, max_ns = samples_ns[0], samples_ns[-1]
+                print(f"QUERY_TIME median_ns={elapsed_ns} min_ns={min_ns} max_ns={max_ns} n={len(samples_ns)} name={name}")
 
             # End CPU measurement
             end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
