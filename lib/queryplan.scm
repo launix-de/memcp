@@ -2536,7 +2536,14 @@ across all nesting levels, preventing alias collisions after derived table flatt
 													'((quote aggregate) _ (symbol +) 0) true
 													'((quote aggregate) _ '(symbol +) 0) true
 													false))
-												(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
+												/* SQL: scalar COUNT(*) on empty set returns 0.
+												BUT if HAVING filters out the only group, scalar subselect
+												yields 0 rows → NULL, not 0. Only coalesce-to-0 when there
+												is no HAVING clause to eliminate the row. */
+												(define us_has_having (and us_has_stages (not (nil? (stage_having_expr (car _us_own_stages))))))
+												(define us_subst (if (and us_is_count (not us_has_having))
+													(list (quote coalesceNil) us_subst_raw 0)
+													us_subst_raw))
 												/* return substitution + empty table entries (tables already in sq_cache) */
 												(list us_subst '()))
 											/* === B/C: Non-aggregate === */
