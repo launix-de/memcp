@@ -245,15 +245,14 @@ class SQLTestRunner:
                 target_ms = (PERF_TARGET_MIN_MS + PERF_TARGET_MAX_MS) / 2  # aim for middle of range
 
                 if test_time < 1:
-                    # Too fast to measure — jump to 10× rows
-                    new_rows = current_rows * 10
+                    # Too fast to measure — double rows
+                    new_rows = current_rows * 2
                 elif test_time < PERF_TARGET_MIN_MS:
-                    # Proportional scale: if 1.6ms with 13K rows, target 15s → need ~122M rows
-                    # Cap the scale factor at 10× per iteration to avoid OOM
-                    scale = min(target_ms / test_time, 10.0)
+                    # Proportional scale capped at 3× per iteration
+                    scale = min(target_ms / test_time, 3.0)
                     new_rows = int(current_rows * scale)
                 elif test_time > PERF_TARGET_MAX_MS:
-                    scale = max(target_ms / test_time, 0.1)
+                    scale = max(target_ms / test_time, 0.3)
                     new_rows = max(1000, int(current_rows * scale))
                 else:
                     new_rows = current_rows
@@ -516,8 +515,8 @@ class SQLTestRunner:
             else:
                 threshold_ms = yaml_threshold_ms
 
-            # Use baseline rows (which may have been scaled)
-            perf_rows = baseline_rows
+            # Use baseline rows (which may have been scaled), capped by current RAM
+            perf_rows = min(baseline_rows, get_max_rows_for_ram())
 
             if not PERF_TEST_ENABLED:
                 print(f"⏭️  {name} (skipped - set PERF_TEST=1 to run)")
