@@ -223,6 +223,12 @@ func Equal(a, b Scmer) bool {
 
 	switch ta {
 	case tagBool:
+		// Strict: bool vs composite (list, vector, assoc, promise, func) is false.
+		// Fixes false positives like (equal? true '(a b)) which treated any non-empty
+		// slice as truthy → would return true.
+		if tb == tagSlice || tb == tagVector || tb == tagFastDict || tb == tagPromise || tb == tagFunc {
+			return false
+		}
 		return a.Bool() == b.Bool()
 	case tagDate:
 		if tb == tagString || tb == tagSymbol {
