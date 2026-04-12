@@ -508,12 +508,16 @@ func Init(en scm.Env) {
 			stride := int(scm.ToInt(a[layout.strideIdx]))
 			batchdata := mustScmerSlice(a[layout.batchDataIdx], "batchdata")
 			tableArg := a[layout.tableIdx]
-			isOuter := len(a) > layout.outerIdx+1 && scm.ToBool(a[layout.outerIdx+1])
+			// scan_batch inserts stride+batchdata (2 slots) between mapfn and
+			// reduce, so reduce/neutral/reduce2/isOuter sit at scanLayout's
+			// reduceIdx/neutralIdx/reduce2Idx/outerIdx + 2.
+			const sbShift = 2
+			isOuter := len(a) > layout.outerIdx+sbShift && scm.ToBool(a[layout.outerIdx+sbShift])
 
 			if list, ok := scmerSlice(tableArg); ok {
 				neutral := scm.NewNil()
-				if len(a) > layout.neutralIdx+1 {
-					neutral = a[layout.neutralIdx+1]
+				if len(a) > layout.neutralIdx+sbShift {
+					neutral = a[layout.neutralIdx+sbShift]
 				}
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
@@ -521,8 +525,8 @@ func Init(en scm.Env) {
 				mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
 				mapparams := make([]scm.Scmer, len(mapcols))
 				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if len(a) > layout.reduceIdx+1 {
-					reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx+1])
+				if len(a) > layout.reduceIdx+sbShift {
+					reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx+sbShift])
 				}
 				hadValue := false
 				batchCount := 0
@@ -560,11 +564,11 @@ func Init(en scm.Env) {
 					}
 					result = reducefn(result, mapfn(mapparams...))
 				}
-				if len(a) > layout.reduce2Idx+1 && !a[layout.reduce2Idx+1].IsNil() {
-					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx+1])
+				if len(a) > layout.reduce2Idx+sbShift && !a[layout.reduce2Idx+sbShift].IsNil() {
+					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx+sbShift])
 					base := neutral
-					if len(a) > layout.neutralIdx+1 {
-						base = a[layout.neutralIdx+1]
+					if len(a) > layout.neutralIdx+sbShift {
+						base = a[layout.neutralIdx+sbShift]
 					}
 					result = reduce2fn(base, result)
 				}
@@ -574,16 +578,16 @@ func Init(en scm.Env) {
 			t := TableFromScmer(a[layout.tableIdx])
 
 			aggregate := scm.NewNil()
-			if len(a) > layout.reduceIdx+1 {
-				aggregate = a[layout.reduceIdx+1]
+			if len(a) > layout.reduceIdx+sbShift {
+				aggregate = a[layout.reduceIdx+sbShift]
 			}
 			neutral := scm.NewNil()
-			if len(a) > layout.neutralIdx+1 {
-				neutral = a[layout.neutralIdx+1]
+			if len(a) > layout.neutralIdx+sbShift {
+				neutral = a[layout.neutralIdx+sbShift]
 			}
 			reduce2 := scm.NewNil()
-			if len(a) > layout.reduce2Idx+1 {
-				reduce2 = a[layout.reduce2Idx+1]
+			if len(a) > layout.reduce2Idx+sbShift {
+				reduce2 = a[layout.reduce2Idx+sbShift]
 			}
 			return t.scanWithBatch(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
 		},
