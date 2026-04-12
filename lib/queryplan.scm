@@ -1206,9 +1206,18 @@ get_column markers and may no longer run schema-based repair heuristics. */
 	(if (stage_is_dedup stage)
 		(stage_preserve_cache_meta stage (make_dedup_stage (map sg fin) spa))
 		(if (and (not (nil? spa)) (or (nil? sg) (equal? sg '())))
-			(stage_preserve_cache_meta stage (make_partition_stage spa
-				(map so (lambda (o) (match o '(c d) (list (fin c) d))))
-				(coalesceNil (stage_limit_partition_cols stage) 0) sl soff (stage_init_code stage)))
+			(begin
+				/* Partition stage path: preserve stage-condition AND once-limit
+				through rebuild. make_partition_stage defaults them to nil; use
+				make_stage directly to keep the full field set. */
+				(define sol (stage_once_limit stage))
+				(define sc_raw (stage_condition stage))
+				(define sc (if (nil? sc_raw) nil (fin sc_raw)))
+				(stage_preserve_cache_meta stage
+					(make_stage '() nil
+						(map so (lambda (o) (match o '(c d) (list (fin c) d))))
+						(coalesceNil (stage_limit_partition_cols stage) 0)
+						sl soff false spa (stage_init_code stage) sc sol)))
 			(begin
 				(define rebuilt (make_group_stage_with_condition
 					(map sg fin)
@@ -2570,7 +2579,9 @@ across all nesting levels, preventing alias collisions after derived table flatt
 															(b) explicit LIMIT from SQL, (c) uncorrelated needs global limit=1.
 															Indirect-only correlations skip: join chain guarantees 1 row. */
 															(if (or (not (equal? us_part_order '())) us_has_limit (not us_has_outer)) (begin
-																(define us_part_stage (make_partition_stage (list us_sq_prefix) us_part_order us_dom_count (coalesceNil us_orig_limit 1) (coalesceNil us_orig_offset 0) nil))
+																(define _us_effective_limit (if (nil? us_orig_limit) 2 us_orig_limit))
+																(define _us_once_limit (if (nil? us_orig_limit) 2 nil))
+																(define us_part_stage (make_stage '() nil us_part_order us_dom_count _us_effective_limit (coalesceNil us_orig_offset 0) false (list us_sq_prefix) nil nil _us_once_limit))
 																(sq_cache "partition_stages" (cons us_part_stage (coalesceNil (sq_cache "partition_stages") '()))))))
 														/* propagate inner scoped stages with renaming */
 														(if (not (equal? _us_inner_stages '()))
@@ -3622,7 +3633,8 @@ across all nesting levels, preventing alias collisions after derived table flatt
 		(reduce ss (lambda (acc s) (begin
 			(define key (string (stage_partition_aliases s)))
 			(if (reduce acc (lambda (found e) (or found (equal?? (string (stage_partition_aliases e)) key))) false) acc (merge acc (list s))))) '())))
-	(set groups (if (equal? _sq_pstages '()) groups (merge (_dedup_stages _sq_pstages) (coalesceNil groups '()))))
+	(define _dds (_dedup_stages _sq_pstages))
+	(set groups (if (equal? _sq_pstages '()) groups (merge _dds (coalesceNil groups '()))))
 	(set groups (if (equal? _sq_prop_groups '()) groups (merge (_dedup_stages _sq_prop_groups) (coalesceNil groups '()))))
 	/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 	but ONLY for columns referencing derived table aliases (keys in renamelist).
@@ -4247,7 +4259,6 @@ Key helpers:
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
 When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
-	/*(print "build queryplan " '(schema tables fields condition groups schemas))*/
 
 	/* TODO: order tables: outer joins behind */
 	(set groups (coalesceNil groups '()))
@@ -7118,6 +7129,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															_ '()))))))
 														/* emit init code from partition stage if present */
 														(define _ps_init2 (stage_init_code _ps))
+														(define _ps_once_limit (stage_once_limit _ps))
+														(define _ps_reduce (if (equal?? _ps_once_limit 2)
+															(list (quote lambda) (list (quote acc) (quote item))
+																(list (quote if) (list (quote nil?) (quote item))
+																	(quote acc)
+																	(list (quote if) (list (quote nil?) (quote acc))
+																		(quote item)
+																		(list (quote error) "Subquery returns more than 1 row"))))
+															nil))
+														(define _ps_neutral nil)
 														(define _ps_scan (scan_wrapper 'scan_order schema tbl
 															(cons list (merge_unique _ps_filtercols cols))
 															'((quote lambda) (map (merge_unique _ps_filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
@@ -7126,7 +7147,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															_ps_partcols _ps_offset _ps_limit
 															scan_mapcols
 															(list (symbol "lambda") scan_mapfn_params scan_body)
-															nil nil isOuter))
+															_ps_reduce _ps_neutral isOuter))
 														(if (nil? _ps_init2) _ps_scan (list (quote begin) _ps_init2 _ps_scan)))
 													/* === regular scan === */
 													(scan_wrapper 'scan schema tbl
