@@ -3960,15 +3960,20 @@ across all nesting levels, preventing alias collisions after derived table flatt
 	(set having (finalize_visible_expr having))
 
 	/* LEFT JOIN pruning: remove LEFT JOINed tables that are not referenced
-	anywhere in the query (fields, condition, having, order, or sibling
-	joinexprs). A LEFT JOIN that is never read contributes only NULL columns
-	and cannot filter rows, so it is safe to drop entirely. */
+	anywhere in the query (fields, condition, having, order, sibling joinexprs,
+	or GROUP stage partition-aliases). A LEFT JOIN that is never read contributes
+	only NULL columns and cannot filter rows, so it is safe to drop entirely.
+	Exception: tables listed in scoped GROUP stage partition-aliases are needed
+	for keytable aggregate computation even without direct field references. */
+	(define _sq_group_aliases (merge (map (coalesceNil (sq_cache "groups") '()) (lambda (s)
+		(if (list? s) (coalesceNil (stage_partition_aliases s) '()) '())))))
 	(define _all_referenced_aliases (merge_unique (list
 		(extract_all_table_aliases fields)
 		(extract_all_table_aliases conditionAll)
 		(extract_all_table_aliases (coalesceNil having true))
 		(merge (map (coalesceNil order '()) (lambda (o) (extract_all_table_aliases o))))
-		(merge (map tables (lambda (td) (match td '(_ _ _ _ je) (if (nil? je) '() (extract_all_table_aliases je)) '())))))))
+		(merge (map tables (lambda (td) (match td '(_ _ _ _ je) (if (nil? je) '() (extract_all_table_aliases je)) '()))))
+		_sq_group_aliases)))
 	(set tables (filter tables (lambda (td) (match td
 		'(alias _ _ isOuter _) (or (not isOuter) (has? _all_referenced_aliases (string alias)))
 		true))))
