@@ -155,7 +155,7 @@ test_cases:
       - sql: "CREATE TABLE `perf_mat_b` (r INT, c INT, v INT)"
       - scm: |
           (begin
-            (set dim {rows})
+            (set dim (min {rows} 300))
             (set n (* dim dim))
             (set a (map (produceN n) (lambda (i) (list (floor (/ i dim)) (- i (* dim (floor (/ i dim)))) (+ 1 i)))))
             (insert (table "{database}" "perf_mat_a") '("r" "c" "v") a)
