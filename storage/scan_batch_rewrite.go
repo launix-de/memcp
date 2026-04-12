@@ -26,34 +26,19 @@ const batchCapacityRows = 128
 // a buffer, and the inner scan becomes scan_batch consuming the buffer via #N
 // pseudo-columns. Returns the rewritten AST or nil if the pattern doesn't match.
 // tryScanOrderBatchRewrite attempts batch rewrite for scan_order's mapfn.
-// scan_order: [fn, tx, schema, tbl, filtercols, filterfn, sortcols, sortdirs,
-//              partcols, offset, limit, mapcols, mapfn, reduce, neutral, isOuter]
-// mapfn is at index 12, reduce at 13, isOuter at 15.
+// DISABLED pending separate review — scan_order batch semantics need the
+// ordered-result-preservation path and are different from plain scan. Leave
+// scan_order unbatched for now.
 func tryScanOrderBatchRewrite(v []scm.Scmer) scm.Scmer {
-	// scan_order: [fn, tx, schema, tbl, filtercols, filterfn, sortcols, sortdirs,
-	//              partcols, offset, limit, mapcols, mapfn, reduce, neutral, isOuter]
-	if len(v) < 13 {
-		return scm.NewNil()
-	}
-	if !v[3].IsString() {
-		return scm.NewNil()
-	}
-	if len(v) > 15 && scm.ToBool(v[15]) {
-		return scm.NewNil()
-	}
-	if len(v) > 13 && !v[13].IsNil() {
-		return scm.NewNil()
-	}
-	// scan_order tail after mapfn: reduce, neutral, isOuter (no reduce2)
-	return tryScanBatchRewriteMapfn(v, 11, 12, false)
+	return scm.NewNil()
 }
 
 func tryScanBatchRewrite(v []scm.Scmer) scm.Scmer {
 	// scan: [fn, tx, tbl, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
+	// v[2] (tbl) is always a table reference — shape-agnostic (TagTable at
+	// runtime, (table schema tbl) list or tbl:schema:name symbol at optimize
+	// time). We trust that and just pass it through unchanged.
 	if len(v) < 7 {
-		return scm.NewNil()
-	}
-	if !v[2].IsCustom(TagTable) {
 		return scm.NewNil()
 	}
 	if len(v) > 10 && scm.ToBool(v[10]) {
@@ -98,8 +83,9 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 		return scm.NewNil()
 	}
 
-	// Inner scan must also be a real table (not list) and not outer
-	if len(innerScanSlice) < 7 || !innerScanSlice[2].IsCustom(TagTable) {
+	// Inner scan — v[2] is always a table reference (see tryScanBatchRewrite);
+	// we only check arity and that it's not an outer scan.
+	if len(innerScanSlice) < 7 {
 		return scm.NewNil()
 	}
 	if len(innerScanSlice) > 10 && scm.ToBool(innerScanSlice[10]) {
