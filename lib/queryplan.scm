@@ -1266,39 +1266,44 @@ All stages have init: nil = no init code, or code to run before the scan. */
 		(if (list? aliases)
 			aliases
 			(list aliases)))))
-(define make_group_stage (lambda (group having order limit offset aliases init)
+/* Unified stage constructor. All stage variants (group, partition, dedup,
+once-per-partition, group-with-cond) share one field layout. Wrapper
+constructors below set sensible defaults — any fork can mutate via
+stage accessors without risking field-layout drift. Fields:
+- group-cols: grouping keys; empty ⇒ no GROUP BY, rows flow per partition
+- having: post-aggregation filter (nil = none)
+- order: sort spec inside partition; first `limit-partition-cols` are partition keys
+- limit-partition-cols: N = prefix of `order` is partition key; rest is sort
+- limit / offset: per-partition row count (nil = unbounded)
+- dedup: if true, stage only collects distinct group keys (no aggregate computation)
+- partition-aliases: which _unn_* tables this stage scopes
+- init: init code (nil = none)
+- stage-condition: per-partition predicate applied before sort/limit (nil = none)
+- once-limit: multi-row-error semantics; nil=none, 1=take first, 2=error on 2nd */
+(define make_stage (lambda (group having order limit_partition_cols limit offset dedup aliases init cond once_limit)
 	(list
 		(cons (quote group-cols) (coalesce group '()))
 		(list (quote having) having)
 		(list (quote order) (coalesce order '()))
-		(list (quote limit-partition-cols) 0)
+		(list (quote limit-partition-cols) (coalesce limit_partition_cols 0))
 		(list (quote limit) limit)
 		(list (quote offset) offset)
-		(list (quote dedup) false)
+		(list (quote dedup) (coalesce dedup false))
 		(list (quote partition-aliases) (normalize_stage_aliases aliases))
 		(list (quote init) init)
-		(list (quote stage-condition) nil)
-		(list (quote once-limit) nil)
+		(list (quote stage-condition) cond)
+		(list (quote once-limit) once_limit)
 	)
+))
+(define make_group_stage (lambda (group having order limit offset aliases init)
+	(make_stage group having order 0 limit offset false aliases init nil nil)
 ))
 /* make_group_stage_with_condition: like make_group_stage but carries the inner
 subquery's WHERE condition scoped to this stage's tables. build_queryplan merges
 it into the local condition when the stage is processed, preventing cross-stage
 condition leakage. Uses canonical column names for keytable cache reuse. */
 (define make_group_stage_with_condition (lambda (group having order limit offset aliases init cond)
-	(list
-		(cons (quote group-cols) (coalesce group '()))
-		(list (quote having) having)
-		(list (quote order) (coalesce order '()))
-		(list (quote limit-partition-cols) 0)
-		(list (quote limit) limit)
-		(list (quote offset) offset)
-		(list (quote dedup) false)
-		(list (quote partition-aliases) (normalize_stage_aliases aliases))
-		(list (quote init) init)
-		(list (quote stage-condition) cond)
-		(list (quote once-limit) nil)
-	)
+	(make_stage group having order 0 limit offset false aliases init cond nil)
 ))
 /* make_once_per_partition_stage: scoped GROUP stage with once-per-partition semantics.
 Non-aggregate fields in this stage are computed via a per-domain-key scan with
@@ -1310,45 +1315,13 @@ than once_limit are found (scalar subselect "more than one row" semantics).
 ORDER on the stage controls the inner scan order (which row is "first").
 HAVING filters keytable rows after createcolumn (empty → NULL via LEFT JOIN). */
 (define make_once_per_partition_stage (lambda (group having order once_limit aliases init cond)
-	(list
-		(cons (quote group-cols) (coalesce group '()))
-		(list (quote having) having)
-		(list (quote order) (coalesce order '()))
-		(list (quote limit-partition-cols) 0)
-		(list (quote limit) nil)
-		(list (quote offset) nil)
-		(list (quote dedup) false)
-		(list (quote partition-aliases) (normalize_stage_aliases aliases))
-		(list (quote init) init)
-		(list (quote stage-condition) cond)
-		(list (quote once-limit) once_limit)
-	)
+	(make_stage group having order 0 nil nil false aliases init cond once_limit)
 ))
 (define make_partition_stage (lambda (aliases order partition_cols limit offset init)
-	(list
-		(cons (quote group-cols) '())
-		(list (quote having) nil)
-		(list (quote order) (coalesce order '()))
-		(list (quote limit-partition-cols) partition_cols)
-		(list (quote limit) limit)
-		(list (quote offset) offset)
-		(list (quote dedup) false)
-		(list (quote partition-aliases) (normalize_stage_aliases aliases))
-		(list (quote init) init)
-	)
+	(make_stage '() nil order partition_cols limit offset false aliases init nil nil)
 ))
 (define make_dedup_stage (lambda (group aliases)
-	(list
-		(cons (quote group-cols) (coalesce group '()))
-		(list (quote having) nil)
-		(list (quote order) '())
-		(list (quote limit-partition-cols) 0)
-		(list (quote limit) nil)
-		(list (quote offset) nil)
-		(list (quote dedup) true)
-		(list (quote partition-aliases) (normalize_stage_aliases aliases))
-		(list (quote init) nil)
-	)
+	(make_stage group nil '() 0 nil nil true aliases nil nil nil)
 ))
 (define stage_group_cols (lambda (stage) (reduce stage (lambda (acc item)
 	(if (nil? acc) (match item
