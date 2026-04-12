@@ -2607,8 +2607,12 @@ across all nesting levels, preventing alias collisions after derived table flatt
 																	(define _psh (if (nil? (stage_having_expr s)) nil (_us_ria (stage_having_expr s))))
 																	(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_ria c) d) o))))
 																	(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
+																	(define _pspc (coalesceNil (stage_limit_partition_cols s) 0))
+																	(define _ps_is_partition (or (nil? _psg) (equal? _psg '())))
 																	(stage_preserve_cache_meta s
-																		(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s))))))
+																		(if _ps_is_partition
+																			(make_partition_stage _psa _pso _pspc (stage_limit_val s) (stage_offset_val s) (stage_init_code s))
+																			(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s)))))))
 																(coalesceNil (sq_cache "groups") '()))))
 														/* direct table entry with join condition (like non-agg non-LIMIT path) */
 														(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
