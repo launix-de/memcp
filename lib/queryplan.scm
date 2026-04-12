@@ -3480,12 +3480,15 @@ across all nesting levels, preventing alias collisions after derived table flatt
 		'((symbol get_column) _ _ "*" _) expr
 		'((quote get_column) _ _ "*" _) expr
 		'((symbol get_column) nil _ col ci) (begin
-			/* First try main tables (aliases without ':' or '_unn_' prefix) */
+			/* First try main tables (aliases without ':', '_unn_', 'nested' prefix).
+			'nested'N is the synthetic alias given to inlined derived tables; their
+			columns should not shadow unqualified refs to user tables. */
 			(define _is_main_alias (lambda (alias) (begin
 				(define s (string alias))
 				(and (not (strlike s "%:%"))
 					(not (strlike s "%\0%"))
-					(not (and (>= (strlen s) 5) (equal? (substr s 0 5) "_unn_")))))))
+					(not (and (>= (strlen s) 5) (equal? (substr s 0 5) "_unn_")))
+					(not (and (>= (strlen s) 6) (equal? (substr s 0 6) "nested")))))))
 			(define main_match (reduce_assoc schemas (lambda (a alias cols)
 				(if (and (_is_main_alias alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 					alias a)) nil))
