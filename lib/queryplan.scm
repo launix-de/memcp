@@ -4389,6 +4389,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define raw_stage_post_group_condition raw_stage_having)
 		(define raw_stage_order stage_order)
 		(define raw_fields fields)
+		/* dedup literal group-cols: two uncorrelated aggregate subselects contribute
+		(1) each, merging into (1 1) which would create duplicate keytable columns
+		with Field="1". Collapse structurally identical group-col expressions. */
+		(set stage_group (reduce stage_group (lambda (acc gc)
+			(if (reduce acc (lambda (found existing) (or found (equal? existing gc))) false) acc (merge acc (list gc)))) '()))
 		(define _scoped_stage (not (nil? (stage_partition_aliases stage))))
 		/* scoped stages from Neumann unnesting have prefixed refs — skip replace_find_column */
 		(if (not _scoped_stage) (begin
