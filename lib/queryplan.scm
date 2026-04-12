@@ -2258,7 +2258,14 @@ across all nesting levels, preventing alias collisions after derived table flatt
 								Detects both explicit (outer tbl.col) AND bare (get_column tbl false col false)
 								where tbl is NOT in the inner table set (from nested unnesting).
 								Skip opaque scopes (!begin, scan, etc.). */
-								(define us_inner_aliases (map tables2_us (lambda (td) (match td '(a _ _ _ _) a ""))))
+								(define _us_own_stages (filter (coalesceNil groups2_us '()) (lambda (s) (nil? (stage_partition_aliases s)))))
+								(define _us_inner_stages (filter (coalesceNil groups2_us '()) (lambda (s) (not (nil? (stage_partition_aliases s))))))
+								(define _us_inner_aliases (merge (map _us_inner_stages (lambda (s) (coalesceNil (stage_partition_aliases s) '())))))
+								(define _us_own_tables (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (not (has? _us_inner_aliases a)) true))))
+								/* us_inner_aliases: OWN FROM aliases only. Propagated _unn_* from nested
+								decorrelation are "scope" but their refs are still correlation domain for
+								this subselect (outer-like semantics). */
+								(define us_inner_aliases (map _us_own_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
 								(define _us_eor (lambda (expr) (match expr
 									(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
 										(match args (cons sym_arg '()) (list (string sym_arg)) '())
@@ -2274,13 +2281,6 @@ across all nesting levels, preventing alias collisions after derived table flatt
 									(_us_eor condition2_us)))
 								/* feasibility checks */
 								(define us_has_outer (not (equal? us_outer_refs '())))
-								/* separate own stages from inner scoped stages (from nested decorrelation) —
-								must be defined BEFORE _us_inner_aliases which depends on _us_inner_stages */
-								(define _us_own_stages (filter (coalesceNil groups2_us '()) (lambda (s) (nil? (stage_partition_aliases s)))))
-								(define _us_inner_stages (filter (coalesceNil groups2_us '()) (lambda (s) (not (nil? (stage_partition_aliases s))))))
-								/* count only OWN tables (not inner scoped ones from nested decorrelation) */
-								(define _us_inner_aliases (merge (map _us_inner_stages (lambda (s) (coalesceNil (stage_partition_aliases s) '())))))
-								(define _us_own_tables (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (not (has? _us_inner_aliases a)) true))))
 								(define us_single_tbl (and (list? _us_own_tables) (equal? (count _us_own_tables) 1)))
 								/* check for aggregates in fields */
 								(define _us_agg (lambda (expr) (match expr
@@ -3579,7 +3579,16 @@ across all nesting levels, preventing alias collisions after derived table flatt
 	existed before sq_cache integration. sq_cache tables already have their schemas
 	in _sq_schs and don't need materialized_source_schema lookup. */
 	(define tables_pre_sq tables)
-	(set tables (merge tables _sq_tbls sq_scalar_condition_tbls sq_scalar_projection_tbls))
+	/* Dedup unnested tables by alias: identical subselects appearing in multiple
+	places in a query (e.g., same scalar subselect used as projection and inside
+	another subselect's WHERE) unnest to the same _unn_* alias. Without dedup
+	they accumulate as duplicate table entries and duplicate partition stages,
+	which poisons condition routing downstream. */
+	(define _dedup_tables_by_alias (lambda (ts)
+		(reduce ts (lambda (acc td) (match td
+			'(a _ _ _ _) (if (reduce acc (lambda (found e) (or found (match e '(b _ _ _ _) (equal?? a b) false))) false) acc (merge acc (list td)))
+			acc)) '())))
+	(set tables (_dedup_tables_by_alias (merge tables _sq_tbls sq_scalar_condition_tbls sq_scalar_projection_tbls)))
 	(define _sq_schs (coalesceNil (sq_cache "schemas") '()))
 	(if (not (equal? _sq_schs '())) (set schemas (merge schemas _sq_schs)))
 	/* ensure materialized temp sources have a visible schema under their current alias.
@@ -3607,8 +3616,14 @@ across all nesting levels, preventing alias collisions after derived table flatt
 	/* integrate partition stages from non-aggregate LIMIT unnesting */
 	(define _sq_pstages (coalesceNil (sq_cache "partition_stages") '()))
 	(define _sq_prop_groups (coalesceNil (sq_cache "groups") '()))
-	(set groups (if (equal? _sq_pstages '()) groups (merge _sq_pstages (coalesceNil groups '()))))
-	(set groups (if (equal? _sq_prop_groups '()) groups (merge _sq_prop_groups (coalesceNil groups '()))))
+	/* Dedup stages by partition-aliases signature: identical repeated subselects
+	produce duplicate stages that break downstream scan_order emission. */
+	(define _dedup_stages (lambda (ss)
+		(reduce ss (lambda (acc s) (begin
+			(define key (string (stage_partition_aliases s)))
+			(if (reduce acc (lambda (found e) (or found (equal?? (string (stage_partition_aliases e)) key))) false) acc (merge acc (list s))))) '())))
+	(set groups (if (equal? _sq_pstages '()) groups (merge (_dedup_stages _sq_pstages) (coalesceNil groups '()))))
+	(set groups (if (equal? _sq_prop_groups '()) groups (merge (_dedup_stages _sq_prop_groups) (coalesceNil groups '()))))
 	/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
 	but ONLY for columns referencing derived table aliases (keys in renamelist).
 	Uses schemas to find canonical column name without calling replace_find_column. */
