@@ -5215,11 +5215,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
 						(define agg_col_name (make_aggregate_cache_col_name expr_name condition nil))
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name tblvar agg_col_name))
-						(define replace_group_key_or_fetch (lambda (expr) (if
-							(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
-							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
-							(replace_agg_with_fetch expr)
-						)))
+						(define replace_group_key_or_fetch (lambda (expr)
+							/* Only composite expressions (lists) qualify as group-key rewrite
+							candidates. Bare literals (ints, strings, bools, nil) as sub-expressions
+							in e.g. (equal?? X 1) must stay literal — coincidental match with a
+							group-col literal would wrongly rewrite to a scope-dependent keytable
+							column ref. Literals evaluate to themselves; no rewrite needed. */
+							(if (and (list? expr)
+									(reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false))
+								'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
+								(replace_agg_with_fetch expr))))
 						/* scoped GROUP stages from unnesting must not eagerly rewrite later
 						outer aggregates like COUNT(*) in the SELECT list. Those belong to
 						subsequent global group stages and carry no refs to the current
