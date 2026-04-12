@@ -2526,7 +2526,13 @@ across all nesting levels, preventing alias collisions after derived table flatt
 																(if (nil? sbc) raw_expr (list (quote aggregate) (list (quote +) ae (list (quote *) 0 (list (quote coalesceNil) sbc 0))) ar an))))
 														raw_expr)))
 												(define us_subst_raw_pre (_us_prefix_ria us_value_expr))
-												(define us_subst_raw (if (and us_has_outer (not (nil? us_prefixed_tables)) (not (equal? us_prefixed_tables '())))
+												/* Scope-bind aggregate markers to their _unn_* table even for
+												uncorrelated subselects. Two parallel uncorrelated aggregate
+												subselects (e.g., COUNT(1) in SELECT list) otherwise produce
+												structurally-identical (aggregate ...) markers that downstream
+												col_replacer can't distinguish — both resolve to the same
+												keytable column. */
+												(define us_subst_raw (if (and (not (nil? us_prefixed_tables)) (not (equal? us_prefixed_tables '())))
 													(scope_bind_agg us_subst_raw_pre
 														(match (car us_prefixed_tables) '(a _ _ _ _) a nil)
 														(match (car tables2_us) '(a _ _ _ _) a nil))
