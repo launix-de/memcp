@@ -3776,11 +3776,14 @@ across all nesting levels, preventing alias collisions after derived table flatt
 				(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))
 				(coalesceNil (stage_partition_aliases stage) '())))))))
 	/* prune unused LEFT JOINs and unreferenced .(1) DUAL tables.
-	.(1) is only pruned if other tables remain (it's the scan driver otherwise). */
+	.(1) is only pruned if other tables remain (it's the scan driver otherwise).
+	But don't prune .(1) when all remaining tables are LEFT JOIN outers —
+	DUAL is the only INNER base then. */
 	(define _has_non_dual (reduce tables (lambda (a t) (or a (match t '(_ _ tbl _ _) (not (equal? tbl ".(1)")) true))) false))
+	(define _has_inner_base (reduce tables (lambda (a t) (or a (match t '(_ _ tbl isOuter _) (and (not isOuter) (not (equal? tbl ".(1)"))) false))) false))
 	(define _pruned_tables (filter tables (lambda (t) (match t
 		'(alias _ tbl isOuter _) (if isOuter (has? _used_tvs alias)
-			(if (and _has_non_dual (equal? tbl ".(1)")) (has? _used_tvs alias) true))
+			(if (and _has_non_dual _has_inner_base (equal? tbl ".(1)")) (has? _used_tvs alias) true))
 		true))))
 	/* rebuild condition: drop AND-parts that reference ONLY eliminated aliases */
 	(define _elim_aliases (filter (map tables (lambda (t) (match t
@@ -3935,12 +3938,34 @@ second table carries strictly more local WHERE predicates than the first. */
 		(define jqr_regular_tables (filter tables (lambda (td) (match td
 			'(alias _ _ _ _) (not (has? jqr_constant_scalar_aliases alias))
 			true))))
-		(list schema
-			(merge
-				jqr_constant_scalar_tables
-				(if (jqr_has_order_sensitive_stage groups)
-					jqr_regular_tables
-					(jqr_reorder_segments jqr_regular_tables condition schemas)))
+		/* constant_scalar_tables are LEFT JOIN outers that produce exactly one
+		row from an uncorrelated partition-staged subselect. They must NOT be
+		the outermost scan — they need a base (DUAL or regular table) that
+		gets emitted independently. Split regular_tables into the base (first
+		non-outer) and the rest; place the base ahead of constant_scalar. */
+		(define _jqr_ordered_regular (if (jqr_has_order_sensitive_stage groups)
+			jqr_regular_tables
+			(jqr_reorder_segments jqr_regular_tables condition schemas)))
+		(define _jqr_first_inner_idx (reduce _jqr_ordered_regular (lambda (acc_seen td) (match acc_seen
+			'(i found) (if found acc_seen (match td '(_ _ _ isOuter _) (if (not isOuter) (list (+ i 1) true) (list (+ i 1) false)) (list (+ i 1) false)))
+			(list 0 false)))
+			(list 0 false)))
+		(define _jqr_base_pos (match _jqr_first_inner_idx '(i _) (- i 1) -1))
+		(define _jqr_final_tables (if (and (> _jqr_base_pos -1) (not (equal? jqr_constant_scalar_tables '())))
+			(begin
+				(define _jqr_before (reduce _jqr_ordered_regular (lambda (acc td) (match acc
+					'(taken lst) (if (equal? taken _jqr_base_pos) (list (+ taken 1) lst) (list (+ taken 1) (merge lst (list td))))))
+					(list 0 '())))
+				(define _jqr_base_and_rest (match _jqr_before '(_ front_lst) (begin
+					(define _rest (reduce _jqr_ordered_regular (lambda (acc td) (match acc
+						'(taken lst) (if (< taken (+ _jqr_base_pos 1)) (list (+ taken 1) lst) (list (+ taken 1) (merge lst (list td))))))
+						(list 0 '())))
+					(define _base (nth _jqr_ordered_regular _jqr_base_pos))
+					(match _rest '(_ rest_lst) (list front_lst _base rest_lst)))))
+				(match _jqr_base_and_rest '(front base rest)
+					(merge front (list base) jqr_constant_scalar_tables rest)))
+			(merge jqr_constant_scalar_tables _jqr_ordered_regular)))
+		(list schema _jqr_final_tables
 			fields condition groups schemas replace_find_column))))
 
 (define build_queryplan_term (lambda (query) (begin
