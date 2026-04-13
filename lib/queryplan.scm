@@ -2414,9 +2414,20 @@ across all nesting levels, preventing alias collisions after derived table flatt
 												/* inner condition (non-correlated), prefixed */
 												(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil
 																			(_us_prefix_ria (_us_ror us_inner_cond_raw))))
+												/* For inner COUNT(DISTINCT) the rewrite emits 2 own stages:
+												[dedup(X), group(1)+count]. Use LAST for us_group_stage semantics;
+												earlier stages (dedup) propagate as scoped stages so build_queryplan's
+												dedup-keytable path chains into the count stage via transformed_rest_groups. */
+												(define _us_last_own_stage (if us_has_stages
+													(reduce _us_own_stages (lambda (_acc s) s) nil)
+													nil))
+												(define _us_early_own_stages (if (> (count _us_own_stages) 1)
+													(reduce _us_own_stages (lambda (acc s)
+														(if (equal? s _us_last_own_stage) acc (merge acc (list s)))) '())
+													'()))
 												/* domain columns + original GROUP BY → scoped GROUP stage */
-												(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
-												(define us_orig_having (if us_has_stages (stage_having_expr (car _us_own_stages)) nil))
+												(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols _us_last_own_stage) '()) '()))
+												(define us_orig_having (if us_has_stages (stage_having_expr _us_last_own_stage) nil))
 												(define _us_dom_group_cols (map us_domain_cols (lambda (dc) (_us_prefix_ria (nth dc 0)))))
 												(define us_new_group (merge _us_dom_group_cols
 													(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1)))
@@ -2433,9 +2444,9 @@ across all nesting levels, preventing alias collisions after derived table flatt
 												/* preserve ORDER+LIMIT only for explicit GROUP BY subselects.
 												For pure aggregates (Neumann domain extension), the LIMIT refers
 												to the inner result per outer row, not the keytable total. */
-												(define us_orig_order_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
-												(define us_orig_limit_a (if (and us_has_grp us_has_stages) (stage_limit_val (car _us_own_stages)) nil))
-												(define us_orig_offset_a (if (and us_has_grp us_has_stages) (stage_offset_val (car _us_own_stages)) nil))
+												(define us_orig_order_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list _us_last_own_stage) '()) '()))
+												(define us_orig_limit_a (if (and us_has_grp us_has_stages) (stage_limit_val _us_last_own_stage) nil))
+												(define us_orig_offset_a (if (and us_has_grp us_has_stages) (stage_offset_val _us_last_own_stage) nil))
 												(define us_new_order (map us_orig_order_a (lambda (oi) (match oi '(col dir) (list (_us_prefix_ria col) dir) oi))))
 												(define us_group_stage
 													(stage_with_cache_query
@@ -2451,10 +2462,24 @@ across all nesting levels, preventing alias collisions after derived table flatt
 													(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
 													(stage_preserve_cache_meta s
 														(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s)))))))
+												/* Propagate early own stages (e.g. DEDUP from COUNT DISTINCT rewrite) as
+												scoped stages. They'll be processed BEFORE us_group_stage by
+												build_queryplan's dedup path, which creates a keytable and chains
+												the count stage via transformed_rest_groups over that keytable. */
+												(define _us_prefixed_early_own_stages (map _us_early_own_stages (lambda (s) (begin
+													(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_prefix_ria))
+													(define _psh (if (nil? (stage_having_expr s)) nil (_us_prefix_ria (stage_having_expr s))))
+													(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_prefix_ria c) d) o))))
+													(stage_preserve_cache_meta s
+														(if (stage_is_dedup s)
+															(make_dedup_stage _psg us_stage_aliases)
+															(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) us_stage_aliases (stage_init_code s))))))))
 												/* register prefixed tables */
 												(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
-												/* register scoped GROUP stage + propagated inner stages */
-												(sq_cache "groups" (merge (list us_group_stage) _us_prefixed_inner_stages (coalesceNil (sq_cache "groups") '())))
+												/* register scoped GROUP stage + propagated inner stages.
+												Early own stages (e.g. DEDUP) must precede us_group_stage so dedup's
+												keytable becomes the source of the count stage. */
+												(sq_cache "groups" (merge _us_prefixed_early_own_stages (list us_group_stage) _us_prefixed_inner_stages (coalesceNil (sq_cache "groups") '())))
 												/* register schemas for prefixed aliases */
 												(define us_prefixed_schemas (merge (map us_prefixed_tables (lambda (td) (match td
 													'(a _ _ _ _) (begin
@@ -5179,6 +5204,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(if (equal? 1 (count _dedup_terms)) (car _dedup_terms)
 									(cons (quote and) _dedup_terms))))
 						nil))
+					/* Transform rest_groups' partition-aliases: after dedup, the source is
+					the keytable (grouptbl), not the original tables in _stage_scope.
+					Stages sharing this stage's scope must now reference grouptbl so their
+					scope-lookup in the recursive build_queryplan finds the keytable. */
+					(define _dedup_stage_scope (coalesceNil _stage_scope '()))
+					(define _dedup_remap_alias (lambda (a)
+						(if (has? _dedup_stage_scope a) grouptbl a)))
 					(define transformed_rest_groups (map rest_groups (lambda (s)
 						(stage_preserve_cache_meta s (make_group_stage
 							(map (stage_group_cols s) _dedup_resolve)
@@ -5186,7 +5218,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(map (coalesce (stage_order_list s) '()) (lambda (o) (match o '(col dir) (list (_dedup_resolve col) dir))))
 							(stage_limit_val s)
 							(stage_offset_val s)
-							(stage_partition_aliases s)
+							(map (coalesceNil (stage_partition_aliases s) '()) _dedup_remap_alias)
 							(stage_init_code s)))
 					)))
 					(define dedup_output_fields
