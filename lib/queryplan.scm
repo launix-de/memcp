@@ -5290,17 +5290,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(list _tbl _col) (list (quote get_column) _tbl false _col false)
 									_ expr)))))
 						(define _grp_join_term (lambda (part) (match part
-							'((symbol equal??) left right) (if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
+							'((symbol equal??) left right) (if (and (list? left) (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false))
 								(if (_grp_refs_src_tbl right) nil
 									(list (quote equal??) (replace_group_key_or_fetch left) (_grp_join_outer_expr right)))
-								(if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
+								(if (and (list? right) (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false))
 									(if (_grp_refs_src_tbl left) nil
 										(list (quote equal??) (_grp_join_outer_expr left) (replace_group_key_or_fetch right)))
 									nil))
-							'((quote equal??) left right) (if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false)
+							'((quote equal??) left right) (if (and (list? left) (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr left))) false))
 								(if (_grp_refs_src_tbl right) nil
 									(list (quote equal??) (replace_group_key_or_fetch left) (_grp_join_outer_expr right)))
-								(if (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false)
+								(if (and (list? right) (reduce resolved_stage_group (lambda (acc group_expr) (or acc (equal? group_expr right))) false))
 									(if (_grp_refs_src_tbl left) nil
 										(list (quote equal??) (_grp_join_outer_expr left) (replace_group_key_or_fetch right)))
 									nil))
