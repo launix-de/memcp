@@ -267,6 +267,33 @@ func scmerSliceToStrings(list []scm.Scmer) []string {
 	return out
 }
 
+// decodePerTableInts accepts nil (= all -1), or a list of length n of ints.
+// Sentinel -1 disables per-table offset/limit for that entry.
+func decodePerTableInts(v scm.Scmer, n int, ctx string) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = -1
+	}
+	if v.IsNil() {
+		return out
+	}
+	slice, ok := scmerSlice(v)
+	if !ok {
+		panic(ctx + ": expected list or nil")
+	}
+	if len(slice) != n {
+		panic(fmt.Sprintf("%s: expected length %d, got %d", ctx, n, len(slice)))
+	}
+	for i, entry := range slice {
+		if entry.IsNil() {
+			out[i] = -1
+		} else {
+			out[i] = int(scm.ToInt(entry))
+		}
+	}
+	return out
+}
+
 func parseBatchPseudoColName(name string) (int, bool) {
 	if len(name) < 2 || name[0] != '#' {
 		return 0, false
@@ -757,43 +784,47 @@ func Init(en scm.Env) {
 		Desc: "does an ordered parallel filter and serial map-reduce pass across multiple tables simultaneously, merging results into a single sorted stream",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			// Parameters:
-			// 0: tx
-			// 1: tables list (table handles)
-			// 2: filterColumns per table (list of lists)
-			// 3: filterFns per table (list of lambdas)
-			// 4: sortcols per table (list of lists)
-			// 5: sortdirs (shared list)
-			// 6: limitPartitionCols
-			// 7: offset
-			// 8: limit
-			// 9: mapColumns per table (list of lists)
-			// 10: mapFns per table (list of lambdas)
-			// 11: reduce (optional)
-			// 12: neutral (optional)
-			// 13: isOuter (optional)
+			// 0:  tx
+			// 1:  tables list (table handles)
+			// 2:  filterColumns per table (list of lists)
+			// 3:  filterFns per table (list of lambdas)
+			// 4:  sortcols per table (list of lists)
+			// 5:  sortdirs (shared list — used for both per-table top-K and outer merge)
+			// 6:  perTableOffset (list of int, or nil; -1 per entry = disable for that table)
+			// 7:  perTableLimit  (list of int, or nil; -1 per entry = disable for that table)
+			// 8:  limitPartitionCols (global Top-K-per-partition across merge)
+			// 9:  offset (global)
+			// 10: limit  (global; -1 = unlimited)
+			// 11: mapColumns per table (list of lists)
+			// 12: mapFns per table (list of lambdas)
+			// 13: reduce (optional)
+			// 14: neutral (optional)
+			// 15: isOuter (optional)
 			currentTx := scmerToTxContext(a[0])
 			tables := mustScmerSlice(a[1], "tables")
 			filterColsArr := mustScmerSlice(a[2], "filterColumns")
 			filterFnArr := mustScmerSlice(a[3], "filterFns")
 			sortcolsArr := mustScmerSlice(a[4], "sortcols")
 			sortdirsVals := mustScmerSlice(a[5], "sortdirs")
-			limitPartitionCols := scm.ToInt(a[6])
-			offset := scm.ToInt(a[7])
-			limit := scm.ToInt(a[8])
-			mapColsArr := mustScmerSlice(a[9], "mapColumns")
-			mapFnArr := mustScmerSlice(a[10], "mapFns")
+			n := len(tables)
+			perTableOffsets := decodePerTableInts(a[6], n, "perTableOffset")
+			perTableLimits := decodePerTableInts(a[7], n, "perTableLimit")
+			limitPartitionCols := scm.ToInt(a[8])
+			offset := scm.ToInt(a[9])
+			limit := scm.ToInt(a[10])
+			mapColsArr := mustScmerSlice(a[11], "mapColumns")
+			mapFnArr := mustScmerSlice(a[12], "mapFns")
 
 			aggregate := scm.NewNil()
-			if len(a) > 11 {
-				aggregate = a[11]
+			if len(a) > 13 {
+				aggregate = a[13]
 			}
 			neutral := scm.NewNil()
-			if len(a) > 12 {
-				neutral = a[12]
+			if len(a) > 14 {
+				neutral = a[14]
 			}
-			isOuter := len(a) > 13 && scm.ToBool(a[13])
+			isOuter := len(a) > 15 && scm.ToBool(a[15])
 
-			n := len(tables)
 			if len(filterColsArr) != n || len(filterFnArr) != n || len(sortcolsArr) != n || len(mapColsArr) != n || len(mapFnArr) != n {
 				panic("scan_order_multi: all per-table arrays must have the same length")
 			}
@@ -813,6 +844,8 @@ func Init(en scm.Env) {
 					sortcols:      mustScmerSlice(sortcolsArr[i], "sortcols[i]"),
 					callbackCols:  scmerSliceToStrings(mustScmerSlice(mapColsArr[i], "mapColumns[i]")),
 					callback:      mapFnArr[i],
+					perTableOffset: perTableOffsets[i],
+					perTableLimit:  perTableLimits[i],
 				}
 			}
 
@@ -826,9 +859,11 @@ func Init(en scm.Env) {
 				{Kind: "list", ParamName: "filterFns", ParamDesc: "list of filter lambdas, one per table"},
 				{Kind: "list", ParamName: "sortcols", ParamDesc: "list of sort column lists, one per table"},
 				{Kind: "list", ParamName: "sortdirs", ParamDesc: "list of sort direction comparators (shared)"},
+				{Kind: "list", ParamName: "perTableOffset", ParamDesc: "per-table offset (list of int; -1 disables)"},
+				{Kind: "list", ParamName: "perTableLimit", ParamDesc: "per-table limit (list of int; -1 disables)"},
 				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "number of leading sort columns forming partition key"},
-				{Kind: "number", ParamName: "offset", ParamDesc: "number of items to skip"},
-				{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read"},
+				{Kind: "number", ParamName: "offset", ParamDesc: "number of items to skip (global)"},
+				{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read (global; -1 = unlimited)"},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of map column lists, one per table"},
 				{Kind: "list", ParamName: "mapFns", ParamDesc: "list of map lambdas, one per table"},
 				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) aggregation function", Optional: true},

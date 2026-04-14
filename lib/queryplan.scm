@@ -4407,7 +4407,9 @@ second table carries strictly more local WHERE predicates than the first. */
 					(define limit_val (if (nil? limit) -1 limit))
 					(define offset_val (if (nil? offset) 0 offset))
 
-					/* Emit scan_order_multi call */
+					/* Emit scan_order_multi call. Per-table offset/limit are nil here
+					(no per-branch ORDER+LIMIT in this codepath); if a branch ever carries
+					its own order+limit, populate the nil lists with per-branch ints. */
 					(merge (list (symbol "scan_order_multi") '(session "__memcp_tx"))
 						(list
 							(cons (symbol "list") (map scan_specs (lambda (s) (list (symbol "table") (nth s 0) (nth s 1)))))
@@ -4415,6 +4417,8 @@ second table carries strictly more local WHERE predicates than the first. */
 							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 3))))
 							(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 4)))))
 							(cons (symbol "list") sort_dirs)
+							nil
+							nil
 							0
 							offset_val
 							limit_val

@@ -28,21 +28,22 @@ import "github.com/launix-de/memcp/scm"
 
 func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
 	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=filterCols, 4=filterFns,
-	// 5=sortcols, 6=sortdirs, 7=partCols, 8=offset, 9=limit, 10=mapCols, 11=mapFns,
-	// 12=reduce, 13=neutral, 14=isOuter
-	for i := 1; i <= 11 && i < len(v); i++ {
+	// 5=sortcols, 6=sortdirs, 7=perTableOffset, 8=perTableLimit,
+	// 9=partCols, 10=offset, 11=limit, 12=mapCols, 13=mapFns,
+	// 14=reduce, 15=neutral, 16=isOuter
+	for i := 1; i <= 13 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	oc.Ome.IncrLoopDepth()
-	if len(v) > 12 && !v[12].IsNil() {
+	if len(v) > 14 && !v[14].IsNil() {
 		oc.SetCallbackOwned([]bool{true, false})
-		v[12], _ = oc.OptimizeSub(v[12], true)
-	}
-	if len(v) > 13 {
-		v[13], _ = oc.OptimizeSub(v[13], true)
-	}
-	if len(v) > 14 {
 		v[14], _ = oc.OptimizeSub(v[14], true)
+	}
+	if len(v) > 15 {
+		v[15], _ = oc.OptimizeSub(v[15], true)
+	}
+	if len(v) > 16 {
+		v[16], _ = oc.OptimizeSub(v[16], true)
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
@@ -117,6 +118,7 @@ type shardqueue struct {
 	mapper       *ShardMapReducer
 	callbackCols []string  // per-table map columns (for multi-table merge)
 	callback     scm.Scmer // per-table map function (for multi-table merge)
+	tableIdx     int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
@@ -277,6 +279,13 @@ type scanOrderTableSpec struct {
 	sortcols      []scm.Scmer
 	callbackCols  []string
 	callback      scm.Scmer
+	// perTableOffset / perTableLimit: -1 disables per-table limiting for this
+	// table; otherwise the first `perTableOffset` rows (in merge order) are
+	// skipped and at most `perTableLimit` rows are emitted from this table.
+	// NOTE: only well-defined when per-table sort direction matches the global
+	// merge direction (shared sortdirs). Callers must enforce this.
+	perTableOffset int
+	perTableLimit  int
 }
 
 // extendBoundariesWithSortCols appends sort columns to the boundaries when all
@@ -406,6 +415,21 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		t := spec.table
 		touchTempColumns(t, spec.conditionCols, spec.callbackCols)
 
+		// Per-table top-K hint: when perTableLimit is set, each shard only
+		// needs to return the top (perTableOffset + perTableLimit) rows in
+		// per-table sort order. This prunes work at the shard level before
+		// the merge enforces the per-table offset/limit globally.
+		shardTotalLimit := total_limit
+		if spec.perTableLimit >= 0 {
+			ptTotal := spec.perTableLimit
+			if spec.perTableOffset > 0 {
+				ptTotal += spec.perTableOffset
+			}
+			if shardTotalLimit < 0 || ptTotal < shardTotalLimit {
+				shardTotalLimit = ptTotal
+			}
+		}
+
 		// Boundary analysis per table
 		analyzeStart := time.Now()
 		bounds := extractBoundaries(spec.conditionCols, spec.condition)
@@ -434,6 +458,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		condition := spec.condition
 		sortcols := spec.sortcols
 		tableBounds := bounds
+		tableIdx := ti
+		shardLimit := shardTotalLimit
 
 		done := t.iterateShardsParallel(tableBounds, func(s *storageShard, solo bool) {
 			if ss != nil && ss.IsKilled() {
@@ -444,9 +470,10 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 					q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 				}
 			}()
-			res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, total_limit, callbackCols, currentTx, ss)
+			res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 			res.callbackCols = callbackCols
 			res.callback = callback
+			res.tableIdx = tableIdx
 			q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 		})
 		if done != nil {
@@ -536,11 +563,40 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	partOffset := offset
 	partLimit := limit
 
+	// Per-table offset/limit state. Applied BEFORE partition/global logic.
+	// -1 entries disable per-table limiting for that table.
+	tablePartOffset := make([]int, len(tables))
+	tablePartLimit := make([]int, len(tables))
+	for ti := range tables {
+		tablePartOffset[ti] = tables[ti].perTableOffset
+		tablePartLimit[ti] = tables[ti].perTableLimit
+	}
+
 	for !breakCaught && len(q.q) > 0 {
 		qx := q.q[0]
 
 		if len(qx.items) == 0 {
 			heap.Pop(&q)
+			continue
+		}
+
+		// Per-table limit: discard remaining shardqueue items once the
+		// per-table quota is exhausted. Sibling shardqueues of the same
+		// tableIdx are dropped as they reach the heap top.
+		ti := qx.tableIdx
+		if ti < len(tablePartLimit) && tablePartLimit[ti] == 0 {
+			heap.Pop(&q)
+			continue
+		}
+		// Per-table offset skip: consume leading items without emitting.
+		if ti < len(tablePartOffset) && tablePartOffset[ti] > 0 {
+			tablePartOffset[ti]--
+			qx.items = qx.items[1:]
+			if len(qx.items) > 0 {
+				heap.Fix(&q, 0)
+			} else {
+				heap.Pop(&q)
+			}
 			continue
 		}
 
@@ -587,6 +643,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			break
 		}
 		partLimit--
+		if ti < len(tablePartLimit) && tablePartLimit[ti] > 0 {
+			tablePartLimit[ti]--
+		}
 
 		// Pop one item from the global merge
 		item := qx.items[0]
@@ -643,12 +702,14 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 // scan_order delegates to scanOrderMulti with a single-element table spec.
 func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
-		table:         t,
-		conditionCols: conditionCols,
-		condition:     condition,
-		sortcols:      sortcols,
-		callbackCols:  callbackCols,
-		callback:      callback,
+		table:          t,
+		conditionCols:  conditionCols,
+		condition:      condition,
+		sortcols:       sortcols,
+		callbackCols:   callbackCols,
+		callback:       callback,
+		perTableOffset: -1,
+		perTableLimit:  -1,
 	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter)
 }
 
