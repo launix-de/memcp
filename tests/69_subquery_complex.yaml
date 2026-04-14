@@ -353,13 +353,13 @@ test_cases:
         - dname: "Empty"
           any_emp: null
 
-  - name: "Correlated subselect without LIMIT returns one row (implicit LIMIT 1)"
+  - name: "Correlated subselect without LIMIT errors on multiple rows"
     sql: |
       SELECT d.dname,
         (SELECT e.name FROM sq_emp e WHERE e.did = d.did) AS emp
       FROM sq_dept d WHERE d.did = 1
     expect:
-      rows: 1
+      error: true
 
   - name: "COUNT correlated subselect with LIMIT 1 (redundant LIMIT)"
     sql: |
