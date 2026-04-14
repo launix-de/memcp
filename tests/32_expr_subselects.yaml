@@ -78,12 +78,24 @@ test_cases:
       data:
         - v: 42
 
+  - name: "Scalar subselect without LIMIT rejects multiple rows"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
+    expect:
+      error: true
+
   - name: "Scalar subselect ORDER BY LIMIT 1"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 3 ORDER BY val DESC LIMIT 1) AS v"
     expect:
       rows: 1
       data:
         - v: 42
+
+  - name: "Scalar subselect ORDER BY LIMIT 1 OFFSET 1"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = 3 ORDER BY val DESC LIMIT 1 OFFSET 1) AS v"
+    expect:
+      rows: 1
+      data:
+        - v: 41
 
   - name: "Scalar subselect aggregate COUNT"
     sql: "SELECT (SELECT COUNT(1) FROM t2 WHERE owner = 2 LIMIT 1) AS cnt"
@@ -126,6 +138,25 @@ test_cases:
       rows: 1
       data:
         - v: 55
+
+  - name: "Scalar correlated subselect without LIMIT rejects multiple rows"
+    sql: "SELECT id, (SELECT val FROM t2 WHERE owner = t3.id) AS v FROM t3 ORDER BY id"
+    expect:
+      error: true
+
+  - name: "Scalar correlated subselect ORDER BY LIMIT 1"
+    sql: "SELECT id, (SELECT val FROM t2 WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          v: 42
+        - id: 2
+          v: 42
+        - id: 3
+          v: 42
+        - id: 4
+          v: 55
 
   - name: "Derived table with scalar aggregate subselect"
     sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM t2 WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
