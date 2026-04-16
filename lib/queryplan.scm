@@ -630,6 +630,19 @@ while still recursing into deeper helper lineage when needed. */
 	)
 ))
 
+/* true iff expr contains a direct tblvar.* wildcard reference.
+Used by derived-table flattening: an empty referenced-column set can mean either
+"outer query needs nothing from this wrapper" (good, prune all inner fields) or
+"outer query asked for tblvar.*" (must retain the full projected column set). */
+(define expr_has_tblvar_wildcard_ref (lambda (tblvar expr)
+	(match expr
+		'((symbol get_column) (eval tblvar) _ col _) (equal? col "*")
+		'((quote get_column) (eval tblvar) _ col _) (equal? col "*")
+		(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_tblvar_wildcard_ref tblvar arg))) false)
+		false
+	)
+))
+
 /* changes (get_column tblvar ti col ci) into its symbol */
 (define replace_columns_from_expr (lambda (expr)
 	(match expr
@@ -3534,7 +3547,14 @@ seeing the correctly prefixed outer alias. */
 						(extract_columns_for_tblvar id (coalesceNil having true))
 						(merge (map (coalesceNil order '()) (lambda (o) (extract_columns_for_tblvar id o))))
 						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_columns_for_tblvar id gexpr)))))))
-					(define pruned_fields2 (if (equal? flatten_referenced_cols '()) fields2
+					(define flatten_uses_subquery_wildcard (or
+						(expr_has_tblvar_wildcard_ref id fields)
+						(expr_has_tblvar_wildcard_ref id condition)
+						(expr_has_tblvar_wildcard_ref id (coalesceNil having true))
+						(reduce (coalesceNil order '()) (lambda (acc o) (or acc (expr_has_tblvar_wildcard_ref id o))) false)
+						(reduce (coalesceNil group '()) (lambda (acc gexpr) (or acc (expr_has_tblvar_wildcard_ref id gexpr))) false)))
+					(define pruned_fields2 (if flatten_uses_subquery_wildcard
+						fields2
 						(filter_assoc fields2 (lambda (k v) (has? flatten_referenced_cols k)))))
 					(define expr_contains_materialized_helper (lambda (expr) (match expr
 						_ (if (materialized-source? expr)
