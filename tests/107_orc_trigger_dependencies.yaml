@@ -1,0 +1,168 @@
+metadata:
+  version: "1.0"
+  description: "ORC trigger dependencies: nested scans register precise source triggers"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS orc_dep_base"
+  - sql: "DROP TABLE IF EXISTS orc_dep_src"
+  - sql: "DROP TABLE IF EXISTS orc_dep_fb_base"
+  - sql: "DROP TABLE IF EXISTS orc_dep_fb_src"
+
+
+test_cases:
+  - name: "Create ORC dependency base table"
+    sql: |
+      CREATE TABLE orc_dep_base (
+        id INT PRIMARY KEY,
+        sortk INT,
+        ref_id INT,
+        running INT
+      )
+
+  - name: "Create ORC dependency source table"
+    sql: |
+      CREATE TABLE orc_dep_src (
+        ref_id INT PRIMARY KEY,
+        val INT,
+        note TEXT
+      )
+
+  - name: "Insert ORC dependency base rows"
+    sql: |
+      INSERT INTO orc_dep_base (id, sortk, ref_id) VALUES
+      (1, 10, 1),
+      (2, 20, 2),
+      (3, 30, 1)
+
+  - name: "Insert ORC dependency source rows"
+    sql: |
+      INSERT INTO orc_dep_src (ref_id, val, note) VALUES
+      (1, 100, 'match-a'),
+      (2, 200, 'match-b'),
+      (99, 999, 'other')
+
+  - name: "Create ORC column with nested source scan"
+    scm: |
+      (createcolumn (table "memcp-tests" "orc_dep_base") "running" "INT" '()
+        (list
+          "sortcols"  '("sortk")
+          "sortdirs"  (list false)
+          "partitioncount" 0
+          "mapcols"   '("ref_id")
+          "mapfn"     (lambda ($set ref_id)
+                        (list $set
+                          (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_src")
+                            '("ref_id")
+                            (lambda (src.ref_id) (equal? src.ref_id (outer ref_id)))
+                            '("val")
+                            (lambda (val) val)
+                            + 0)))
+          "reducefn"  (lambda (acc mapped)
+                        (begin
+                          (define new_acc (+ acc (cadr mapped)))
+                          ((car mapped) new_acc)
+                          new_acc))
+          "reduceinit" 0))
+
+  - name: "Initial nested-scan ORC result"
+    sql: "SELECT id, running FROM orc_dep_base ORDER BY sortk"
+    expect:
+      rows: 3
+      data:
+        - {id: 1, running: 100}
+        - {id: 2, running: 300}
+        - {id: 3, running: 400}
+
+  - name: "Source table gets three system triggers for analyzable nested ORC dependency"
+    scm: |
+      (begin
+        (define info (show "memcp-tests" "orc_dep_src" true))
+        (count (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system")))))
+    expect:
+      data: [3]
+
+  - name: "Irrelevant source-column update"
+    sql: "UPDATE orc_dep_src SET note = 'changed-only-note' WHERE ref_id = 1"
+
+  - name: "Irrelevant source-column update keeps ORC value"
+    sql: "SELECT running FROM orc_dep_base WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {running: 100}
+
+  - name: "Unrelated-key source update"
+    sql: "UPDATE orc_dep_src SET val = 1001 WHERE ref_id = 99"
+
+  - name: "Unrelated-key source update keeps ORC value"
+    sql: "SELECT running FROM orc_dep_base WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {running: 100}
+
+  - name: "Create fallback ORC base table"
+    sql: |
+      CREATE TABLE orc_dep_fb_base (
+        id INT PRIMARY KEY,
+        sortk INT,
+        ref_id INT,
+        running INT
+      )
+
+  - name: "Create fallback ORC source table"
+    sql: |
+      CREATE TABLE orc_dep_fb_src (
+        ref_id INT PRIMARY KEY,
+        val INT
+      )
+
+  - name: "Insert fallback ORC base rows"
+    sql: |
+      INSERT INTO orc_dep_fb_base (id, sortk, ref_id) VALUES
+      (1, 10, 1),
+      (2, 20, 2)
+
+  - name: "Insert fallback ORC source rows"
+    sql: |
+      INSERT INTO orc_dep_fb_src (ref_id, val) VALUES
+      (1, 11),
+      (2, 22)
+
+  - name: "Create ORC column with non-analyzable nested scan filter"
+    scm: |
+      (createcolumn (table "memcp-tests" "orc_dep_fb_base") "running" "INT" '()
+        (list
+          "sortcols"  '("sortk")
+          "sortdirs"  (list false)
+          "partitioncount" 0
+          "mapcols"   '("ref_id")
+          "mapfn"     (lambda ($set ref_id)
+                        (list $set
+                          (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_fb_src")
+                            '("ref_id")
+                            (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer ref_id)))
+                            '("val")
+                            (lambda (val) val)
+                            + 0)))
+          "reducefn"  (lambda (acc mapped)
+                        (begin
+                          (define new_acc (+ acc (cadr mapped)))
+                          ((car mapped) new_acc)
+                          new_acc))
+          "reduceinit" 0))
+
+  - name: "Fallback source table still gets three system triggers"
+    scm: |
+      (begin
+        (define info (show "memcp-tests" "orc_dep_fb_src" true))
+        (count (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system")))))
+    expect:
+      data: [3]
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS orc_dep_base"
+  - sql: "DROP TABLE IF EXISTS orc_dep_src"
+  - sql: "DROP TABLE IF EXISTS orc_dep_fb_base"
+  - sql: "DROP TABLE IF EXISTS orc_dep_fb_src"

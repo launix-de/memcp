@@ -19,6 +19,7 @@ package storage
 import "sync"
 import "time"
 import "strings"
+import "strconv"
 import "runtime/debug"
 import "sync/atomic"
 import "github.com/jtolds/gls"
@@ -657,10 +658,32 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 }
 
+func stripSourceInfo(expr scm.Scmer) scm.Scmer {
+	return expr
+}
+
+func callHeadIs(head scm.Scmer, names ...string) bool {
+	head = stripSourceInfo(head)
+	for _, name := range names {
+		if head.SymbolEquals(name) {
+			return true
+		}
+	}
+	if d := scm.DeclarationForValue(head); d != nil {
+		for _, name := range names {
+			if d.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // registerORCTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers on the
 // table itself so that any mutation invalidates the ORC column.
 // The triggers are idempotent (skipped if already registered).
 func (t *table) registerORCTriggers(name string) {
+	t.removeORCDependencyTriggers(name)
 	// Find the column to check for partition support
 	var col *column
 	for _, c := range t.Columns {
@@ -670,6 +693,10 @@ func (t *table) registerORCTriggers(name string) {
 		}
 	}
 	hasSortKey := col != nil && len(col.OrcSortCols) > 0
+	relevantCols := []string(nil)
+	if col != nil {
+		relevantCols = mergeUniqueStrings(col.OrcSortCols, col.OrcMapCols)
+	}
 
 	// Build composite sort key expression: (list (get_assoc dict "col1") (get_assoc dict "col2") ...)
 	buildSortKeyExpr := func(dictSym string) scm.Scmer {
@@ -726,6 +753,9 @@ func (t *table) registerORCTriggers(name string) {
 				scm.NewString(name),
 			})
 		}
+		if timing == AfterUpdate {
+			body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
+		}
 		t.AddTrigger(TriggerDescription{
 			Name:     triggerName,
 			Timing:   timing,
@@ -734,6 +764,10 @@ func (t *table) registerORCTriggers(name string) {
 			Func:     buildFKProc(body),
 		})
 	}
+	if col != nil {
+		refs := append(extractScanJoinInfo(col.OrcMapFn), extractScanJoinInfo(col.OrcReduceFn)...)
+		t.registerORCDependencyTriggers(name, col, refs)
+	}
 }
 
 type tableRef struct{ schema, table string }
@@ -741,6 +775,7 @@ type tableRef struct{ schema, table string }
 // extractScannedTables walks a Scheme expression tree and returns all
 // (schema, table) pairs referenced by scan/scan_order/scalar_scan/scalar_scan_order.
 func extractScannedTables(expr scm.Scmer) []tableRef {
+	expr = stripSourceInfo(expr)
 	if expr.IsProc() {
 		return extractScannedTables(expr.Proc().Body)
 	}
@@ -748,15 +783,12 @@ func extractScannedTables(expr scm.Scmer) []tableRef {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) >= 3 && items[0].IsSymbol() {
-		sym := items[0].String()
-		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
-			result := []tableRef{{scm.String(items[1]), scm.String(items[2])}}
-			for _, item := range items[3:] {
-				result = append(result, extractScannedTables(item)...)
-			}
-			return result
+	if len(items) >= 3 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+		result := []tableRef{{scm.String(items[1]), scm.String(items[2])}}
+		for _, item := range items[3:] {
+			result = append(result, extractScannedTables(item)...)
 		}
+		return result
 	}
 	var result []tableRef
 	for _, item := range items {
@@ -772,6 +804,8 @@ type scanJoinInfo struct {
 	table     string
 	srcCols   []string // source table columns in equality filter
 	inputCols []string // corresponding computor input column names
+	condCols  []string // source table columns read by the scan filter
+	mapCols   []string // source table columns read by the scan mapper
 }
 
 // extractScanJoinInfo walks a computor lambda and returns one scanJoinInfo per
@@ -786,55 +820,55 @@ func extractScanJoinInfo(computor scm.Scmer) []scanJoinInfo {
 }
 
 func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
+	expr = stripSourceInfo(expr)
 	if !expr.IsSlice() {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) >= 5 && items[0].IsSymbol() {
-		sym := items[0].String()
-		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
-			tableIdx := 2
-			condColsIdx, filterIdx := 3, 4
-			if len(items) <= filterIdx {
-				return nil
-			}
-			var info scanJoinInfo
-			if items[tableIdx].IsCustom(TagTable) {
-				t := TableFromScmer(items[tableIdx])
-				info.schema = t.schema.Name
-				info.table = t.Name
-			} else if items[tableIdx].IsSlice() {
-				// unfolded (table schema name) expression
-				sl := items[tableIdx].Slice()
-				if len(sl) == 3 && scm.String(sl[0]) == "table" {
-					info.schema = scm.String(sl[1])
-					info.table = scm.String(sl[2])
-				}
-			} else if items[tableIdx].IsSymbol() {
-				// pre-resolved tbl:schema:name symbol — extract schema and table from name
-				symStr := scm.String(items[tableIdx])
-				if strings.HasPrefix(symStr, "tbl:") {
-					parts := strings.SplitN(symStr[4:], ":", 2)
-					if len(parts) == 2 {
-						info.schema = parts[0]
-						info.table = parts[1]
-					}
-				}
-			} else {
-				info.schema = ""
-				info.table = scm.String(items[tableIdx])
-			}
-			// condCols = (list "col1" "col2" ...), filter = lambda
-			condCols := extractStringListFromAST(items[condColsIdx])
-			if len(condCols) > 0 {
-				info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols)
-			}
-			result := []scanJoinInfo{info}
-			for _, item := range items[filterIdx+1:] {
-				result = append(result, extractScanJoinInfoBody(item)...)
-			}
-			return result
+	if len(items) >= 5 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+		tableIdx := 2
+		condColsIdx, filterIdx := 3, 4
+		if len(items) <= filterIdx {
+			return nil
 		}
+		var info scanJoinInfo
+		tableExpr := stripSourceInfo(items[tableIdx])
+		if tableExpr.IsCustom(TagTable) {
+			t := TableFromScmer(tableExpr)
+			info.schema = t.schema.Name
+			info.table = t.Name
+		} else if tableExpr.IsSlice() {
+			sl := tableExpr.Slice()
+			if len(sl) == 3 && callHeadIs(sl[0], "table") {
+				info.schema = scm.String(sl[1])
+				info.table = scm.String(sl[2])
+			}
+		} else if tableExpr.IsSymbol() {
+			symStr := scm.String(tableExpr)
+			if strings.HasPrefix(symStr, "tbl:") {
+				parts := strings.SplitN(symStr[4:], ":", 2)
+				if len(parts) == 2 {
+					info.schema = parts[0]
+					info.table = parts[1]
+				}
+			}
+		} else {
+			info.schema = ""
+			info.table = scm.String(tableExpr)
+		}
+		condCols := extractStringListFromAST(items[condColsIdx])
+		info.condCols = condCols
+		if len(items) > 5 {
+			info.mapCols = extractStringListFromAST(items[5])
+		}
+		if len(condCols) > 0 {
+			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols)
+		}
+		result := []scanJoinInfo{info}
+		for _, item := range items[filterIdx+1:] {
+			result = append(result, extractScanJoinInfoBody(item)...)
+		}
+		return result
 	}
 	var result []scanJoinInfo
 	for _, item := range items {
@@ -856,11 +890,12 @@ func extractStringListFromAST(expr scm.Scmer) []string {
 	// Accept first element as either symbol "list" or resolved native function.
 	// Reject if it's a literal value (string/int/float/nil/bool).
 	first := items[0]
-	if first.IsSymbol() {
-		if first.String() != "list" {
-			return nil
-		}
+	first = stripSourceInfo(first)
+	if callHeadIs(first, "list") {
+		// ok
 	} else if first.IsString() || first.IsInt() || first.IsFloat() || first.IsNil() || first.IsBool() {
+		return nil
+	} else {
 		return nil
 	}
 	// first is symbol "list" or resolved function — extract string elements
@@ -878,9 +913,9 @@ func extractStringListFromAST(expr scm.Scmer) []string {
 // (equal? filterParam (outer inputCol)) and returns matched srcCol/inputCol pairs.
 // filterParam is matched by position against condCols.
 func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inputCols []string) {
-	// Unwrap lambda to get params and body
 	var params []scm.Scmer
 	var body scm.Scmer
+	filterExpr = stripSourceInfo(filterExpr)
 	if filterExpr.IsProc() {
 		proc := filterExpr.Proc()
 		if proc.Params.IsSlice() {
@@ -889,8 +924,7 @@ func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inp
 		body = proc.Body
 	} else if filterExpr.IsSlice() {
 		items := filterExpr.Slice()
-		// (lambda (params...) body)
-		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+		if len(items) >= 3 && callHeadIs(items[0], "lambda") {
 			if items[1].IsSlice() {
 				params = items[1].Slice()
 			}
@@ -900,19 +934,15 @@ func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inp
 	if len(params) == 0 || body.IsNil() {
 		return nil, nil
 	}
-
-	// Build param name → index map
 	paramIdx := make(map[string]int, len(params))
 	for i, p := range params {
+		p = stripSourceInfo(p)
 		if p.IsSymbol() {
 			paramIdx[p.String()] = i
 		}
 	}
-
-	// Collect equality comparisons from body
 	equalities := collectEqualities(body)
 	for _, eq := range equalities {
-		// Check pattern: (equal? paramRef (outer inputExpr)) or reversed
 		pIdx, iCol := matchJoinEquality(eq[0], eq[1], paramIdx, len(params), nil)
 		if pIdx < 0 {
 			pIdx, iCol = matchJoinEquality(eq[1], eq[0], paramIdx, len(params), nil)
@@ -928,18 +958,18 @@ func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inp
 // collectEqualities extracts pairs of expressions from (equal? A B) forms,
 // handling (and ...) wrapping.
 func collectEqualities(body scm.Scmer) [][2]scm.Scmer {
+	body = stripSourceInfo(body)
 	if !body.IsSlice() {
 		return nil
 	}
 	items := body.Slice()
-	if len(items) < 1 || !items[0].IsSymbol() {
+	if len(items) < 1 {
 		return nil
 	}
-	sym := items[0].String()
-	if sym == "equal?" && len(items) == 3 {
+	if callHeadIs(items[0], "equal?") && len(items) == 3 {
 		return [][2]scm.Scmer{{items[1], items[2]}}
 	}
-	if sym == "and" {
+	if callHeadIs(items[0], "and") {
 		var result [][2]scm.Scmer
 		for _, item := range items[1:] {
 			result = append(result, collectEqualities(item)...)
@@ -955,6 +985,8 @@ func collectEqualities(body scm.Scmer) [][2]scm.Scmer {
 // NthLocalVar (the optimizer may hoist the outer ref into a closure capture).
 // Returns the param index and input column name, or (-1, "") on mismatch.
 func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, computorParams []scm.Scmer) (int, string) {
+	a = stripSourceInfo(a)
+	b = stripSourceInfo(b)
 	var idx int
 	if a.IsSymbol() {
 		var ok bool
@@ -970,34 +1002,27 @@ func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, 
 	} else {
 		return -1, ""
 	}
-	// b must be (outer <expr>)
 	if b.IsSlice() {
 		bItems := b.Slice()
-		if len(bItems) == 2 && bItems[0].IsSymbol() && bItems[0].String() == "outer" {
-			inner := bItems[1]
+		if len(bItems) == 2 && callHeadIs(bItems[0], "outer") {
+			inner := stripSourceInfo(bItems[1])
 			if inner.IsSymbol() {
 				return idx, inner.String()
 			}
 			if inner.IsSlice() {
 				gcItems := inner.Slice()
-				if len(gcItems) >= 4 && gcItems[0].IsSymbol() && gcItems[0].String() == "get_column" {
+				if len(gcItems) >= 4 && callHeadIs(gcItems[0], "get_column") {
 					return idx, scm.String(gcItems[3])
 				}
 			}
 		}
 	}
-	// The optimizer may hoist (outer (get_column tblvar _ col _)) into a
-	// NthLocalVar referencing the computor's params. Detect by checking
-	// if b is an NthLocalVar whose index maps to a computor param whose name
-	// encodes the original column reference.
 	if b.IsNthLocalVar() && computorParams != nil {
 		bIdx := int(b.NthLocalVar())
-		// Filter params come first, computor params follow after paramCount
 		cIdx := bIdx - paramCount
 		if cIdx >= 0 && cIdx < len(computorParams) {
-			p := computorParams[cIdx]
+			p := stripSourceInfo(computorParams[cIdx])
 			if p.IsSymbol() {
-				// Computor param name is "tblvar.col" or the stringified expression
 				return idx, p.String()
 			}
 		}
@@ -1008,6 +1033,7 @@ func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, 
 // findScanNode walks a computor expression and returns the scan AST node
 // (as a []Scmer slice) for the given source schema+table. Returns nil if not found.
 func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
+	expr = stripSourceInfo(expr)
 	if expr.IsProc() {
 		return findScanNode(expr.Proc().Body, schema, table)
 	}
@@ -1015,10 +1041,9 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) >= 4 && items[0].IsSymbol() {
-		sym := items[0].String()
+	if len(items) >= 4 {
 		tableIdx := 2
-		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
+		if callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
 			var tSchema, tName string
 			if len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
 				t := TableFromScmer(items[tableIdx])
@@ -1114,6 +1139,7 @@ func isConstantOneAggregate(mapFn scm.Scmer) bool {
 
 // containsScan returns true if the expression contains a scan/scan_order/etc. call.
 func containsScan(expr scm.Scmer) bool {
+	expr = stripSourceInfo(expr)
 	if expr.IsProc() {
 		return containsScan(expr.Proc().Body)
 	}
@@ -1121,11 +1147,8 @@ func containsScan(expr scm.Scmer) bool {
 		return false
 	}
 	items := expr.Slice()
-	if len(items) >= 1 && items[0].IsSymbol() {
-		sym := items[0].String()
-		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
-			return true
-		}
+	if len(items) >= 1 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+		return true
 	}
 	for _, item := range items {
 		if containsScan(item) {
@@ -1301,6 +1324,67 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 	})
 }
 
+func mergeUniqueStrings(parts ...[]string) []string {
+	if len(parts) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	for _, part := range parts {
+		for _, item := range part {
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func scanRelevantSourceCols(ref scanJoinInfo) []string {
+	return mergeUniqueStrings(ref.condCols, ref.mapCols)
+}
+
+func buildColsChangedExpr(cols []string) scm.Scmer {
+	if len(cols) == 0 {
+		return scm.NewBool(true)
+	}
+	checks := make([]scm.Scmer, len(cols))
+	for i, col := range cols {
+		checks[i] = scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("not"),
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("equal?"),
+				fkGetAssocExpr("OLD", col),
+				fkGetAssocExpr("NEW", col),
+			}),
+		})
+	}
+	if len(checks) == 1 {
+		return checks[0]
+	}
+	parts := make([]scm.Scmer, 1+len(checks))
+	parts[0] = scm.NewSymbol("or")
+	copy(parts[1:], checks)
+	return scm.NewSlice(parts)
+}
+
+func wrapUpdateBodyWithRelevantChangeGuard(body scm.Scmer, cols []string) scm.Scmer {
+	if len(cols) == 0 {
+		return body
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("if"),
+		buildColsChangedExpr(cols),
+		body,
+		scm.NewBool(true),
+	})
+}
+
 // buildIncrementalBody constructs the trigger body for incremental aggregate
 // updates. For AfterInsert it adds the delta, for AfterUpdate it subtracts
 // OLD and adds NEW. For AfterDelete it falls back to selective invalidation
@@ -1446,6 +1530,63 @@ func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, s
 	}
 }
 
+func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols, srcCols, inputCols []string, dictSym string) scm.Scmer {
+	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
+	resultCols := make([]scm.Scmer, 1+len(sortCols))
+	resultCols[0] = scm.NewSymbol("list")
+	mapParams := make([]scm.Scmer, len(sortCols))
+	for i, col := range sortCols {
+		resultCols[1+i] = scm.NewString(col)
+		mapParams[i] = scm.NewSymbol(targetTable + "." + col)
+	}
+	var sortKeyExpr scm.Scmer
+	if len(sortCols) == 1 {
+		sortKeyExpr = mapParams[0]
+	} else {
+		parts := make([]scm.Scmer, 1+len(mapParams))
+		parts[0] = scm.NewSymbol("list")
+		copy(parts[1:], mapParams)
+		sortKeyExpr = scm.NewSlice(parts)
+	}
+	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
+	mapBody := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("begin"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(colName), sortKeyExpr}),
+		scm.NewInt(0),
+	})
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("scan"),
+		scm.NewSymbol("session"),
+		tblExpr,
+		scm.NewSlice(filterColElems),
+		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		scm.NewSlice(resultCols),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(mapParams), mapBody}),
+		scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(), scm.NewBool(false),
+	})
+}
+
+func buildSelectiveORCInvalidationBody(targetSchema, targetTable, colName string, sortCols, srcCols, inputCols []string, timing TriggerTiming) scm.Scmer {
+	switch timing {
+	case AfterInsert:
+		return buildInvalidateORCScan(targetSchema, targetTable, colName, sortCols, srcCols, inputCols, "NEW")
+	case AfterDelete:
+		return buildInvalidateORCScan(targetSchema, targetTable, colName, sortCols, srcCols, inputCols, "OLD")
+	case AfterUpdate:
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("begin"),
+			buildInvalidateORCScan(targetSchema, targetTable, colName, sortCols, srcCols, inputCols, "OLD"),
+			buildInvalidateORCScan(targetSchema, targetTable, colName, sortCols, srcCols, inputCols, "NEW"),
+		})
+	default:
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)}),
+			scm.NewString(colName),
+		})
+	}
+}
+
 // registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
 // on source tables so that changes automatically invalidate the computed column.
 // Also installs AfterDropTable so that dropping a source table cascades to the target.
@@ -1455,7 +1596,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 	// Collect trigger names placed on source tables for self-cleanup
 	type triggerRef struct{ schema, name string }
 	var registeredNames []triggerRef
-	for _, ref := range refs {
+	for refIdx, ref := range refs {
 		srcDB := GetDatabase(ref.schema)
 		if srcDB == nil {
 			continue
@@ -1471,6 +1612,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 
 		// Determine trigger bodies: selective if join pairs are available
 		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
+		relevantCols := scanRelevantSourceCols(ref)
 
 		// Check if this scan is an additive aggregate eligible for incremental update.
 		var scanNode []scm.Scmer
@@ -1483,7 +1625,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 		}
 
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
-			triggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + timing.String()
+			triggerName := ".cache:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
 			// idempotency: skip if trigger already exists
 			exists := false
 			for _, tr := range srcTable.Triggers {
@@ -1515,6 +1657,9 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 						tblExpr,
 						scm.NewString(name),
 					})
+				}
+				if timing == AfterUpdate {
+					body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
 				}
 				srcTable.AddTrigger(TriggerDescription{
 					Name:     triggerName,
@@ -1583,6 +1728,123 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 				Func:     buildFKProc(scm.NewSlice(calls)),
 			})
 		}
+	}
+}
+
+func (t *table) registerORCDependencyTriggers(name string, col *column, refs []scanJoinInfo) {
+	if len(refs) == 0 {
+		return
+	}
+	targetSchema := t.schema.Name
+	type triggerRef struct{ schema, name string }
+	var registeredNames []triggerRef
+	for refIdx, ref := range refs {
+		srcDB := GetDatabase(ref.schema)
+		if srcDB == nil {
+			continue
+		}
+		srcTable := srcDB.GetTable(ref.table)
+		if srcTable == nil {
+			continue
+		}
+		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
+		relevantCols := scanRelevantSourceCols(ref)
+		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
+			exists := false
+			for _, tr := range srcTable.Triggers {
+				if tr.Name == triggerName {
+					exists = true
+					break
+				}
+			}
+			if exists {
+				continue
+			}
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
+			body := scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("invalidatecolumn"),
+				tblExpr,
+				scm.NewString(name),
+			})
+			if selective {
+				body = buildSelectiveORCInvalidationBody(targetSchema, t.Name, name, col.OrcSortCols, ref.srcCols, ref.inputCols, timing)
+			}
+			if timing == AfterUpdate {
+				body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
+			}
+			srcTable.AddTrigger(TriggerDescription{
+				Name:     triggerName,
+				Timing:   timing,
+				IsSystem: true,
+				Priority: 100,
+				Func:     buildFKProc(body),
+			})
+			if srcTable != t {
+				registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
+			}
+		}
+	}
+	if len(registeredNames) == 0 {
+		return
+	}
+	selfCleanupName := ".orcdep_cleanup:" + t.Name + ":" + name
+	exists := false
+	for _, tr := range t.Triggers {
+		if tr.Name == selfCleanupName {
+			exists = true
+			break
+		}
+	}
+	if exists {
+		return
+	}
+	calls := []scm.Scmer{scm.NewSymbol("begin")}
+	for _, rn := range registeredNames {
+		calls = append(calls, scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("droptrigger"),
+			scm.NewString(rn.schema),
+			scm.NewString(rn.name),
+			scm.NewBool(true),
+		}))
+	}
+	t.AddTrigger(TriggerDescription{
+		Name:     selfCleanupName,
+		Timing:   AfterDropTable,
+		IsSystem: true,
+		Priority: 50,
+		Func:     buildFKProc(scm.NewSlice(calls)),
+	})
+}
+
+func (t *table) removeORCDependencyTriggers(name string) {
+	prefix := ".orcdep:" + t.Name + ":" + name + "|"
+	for _, srcTable := range t.schema.tables.GetAll() {
+		changed := false
+		newTriggers := make([]TriggerDescription, 0, len(srcTable.Triggers))
+		for _, tr := range srcTable.Triggers {
+			if strings.HasPrefix(tr.Name, prefix) {
+				changed = true
+				continue
+			}
+			newTriggers = append(newTriggers, tr)
+		}
+		if changed {
+			srcTable.Triggers = newTriggers
+		}
+	}
+	cleanupName := ".orcdep_cleanup:" + t.Name + ":" + name
+	changed := false
+	newTriggers := make([]TriggerDescription, 0, len(t.Triggers))
+	for _, tr := range t.Triggers {
+		if tr.Name == cleanupName {
+			changed = true
+			continue
+		}
+		newTriggers = append(newTriggers, tr)
+	}
+	if changed {
+		t.Triggers = newTriggers
 	}
 }
 
