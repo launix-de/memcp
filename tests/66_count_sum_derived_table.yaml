@@ -68,6 +68,24 @@ test_cases:
         - cnt: 3
           total: 60
 
+  - name: "EXPLAIN IR prunes unused scalar payload from COUNT(*) derived table"
+    sql: |
+      EXPLAIN IR
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT SUM(d.val) FROM csd_detail d WHERE d.parent = m.ID), 0) AS total_val,
+          EXISTS (SELECT 1 FROM csd_detail d2 WHERE d2.parent = m.ID) AS has_detail
+        FROM csd_main m
+      ) t
+    expect:
+      contains:
+        - '"kind": "tables", "value": "((\"t\\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"'
+        - '"kind": "fields", "value": "(\"cnt\" (aggregate 1 + 0))"'
+      not_contains:
+        - 'total_val'
+        - 'has_detail'
+        - 'csd_detail'
+
   - name: "EXPLAIN IR keeps non-window derived aggregates flattened"
     sql: |
       EXPLAIN IR
