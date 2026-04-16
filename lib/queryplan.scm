@@ -297,6 +297,30 @@ scope is gone. */
 	(list (list (quote context) "session") (materialized-subquery-key id subquery))))
 (define materialized-subquery-init (lambda (id subquery rows_expr)
 	(list (list (quote context) "session") (materialized-subquery-key id subquery) rows_expr)))
+/* planner_collect_rows_ast: execute inner_plan through a sink callback and
+persist produced rows in a session list. Keep this as the fallback bridge for
+runtime materialization paths that still operate outside the logical IR. */
+(define planner_collect_rows_ast (lambda (rows_sym sink_sym item_sym inner_plan limit_val cnt_sym) (begin
+	(define append_row_ast (list rows_sym "rows"
+		(list (quote merge) (list rows_sym "rows") (list (quote list) item_sym))))
+	(list (quote begin)
+		(list (quote set) rows_sym (list (quote newsession)))
+		(list rows_sym "rows" '())
+		(if (nil? limit_val)
+			(list (quote define) sink_sym
+				(list (quote lambda) (list item_sym)
+					append_row_ast))
+			(list (quote begin)
+				(list (quote set) cnt_sym 0)
+				(list (quote define) sink_sym
+					(list (quote lambda) (list item_sym)
+						(list (quote if) (list (quote <) cnt_sym limit_val)
+							(list (quote begin)
+								(list (quote set) cnt_sym (list (quote +) cnt_sym 1))
+								append_row_ast)
+							nil)))))
+		inner_plan
+		(list rows_sym "rows")))))
 (define materialized-source? (lambda (table-source)
 	(or
 		(and (string? table-source) (>= (strlen table-source) 1) (equal? (substr table-source 0 1) "."))
@@ -400,24 +424,34 @@ layout. */
 (define explain_normalize_stages (lambda (stages)
 	(map stages explain_normalize_stage)
 ))
-/* explain_queryplan_ir: expose planner IR around untangle_query/join_reorder.
+/* explain_queryplan_ir: expose planner IR around the logical query-term planner.
 Returns compact stage/kind/value rows for stable SQL-level inspection. */
 (define explain_queryplan_ir (lambda (query) (begin
-	(define _uq_result (apply untangle_query (merge query (list nil))))
-	(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
-	(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
-	(define _jr_result (apply join_reorder _uq_7tuple))
-	(define _plan (apply build_queryplan (merge _jr_result (list nil))))
-	(explain_emit_rows (list
-		(list "stage" "untangle" "kind" "tables" "value" (serialize (nth _uq_result 1)))
-		(list "stage" "untangle" "kind" "fields" "value" (serialize (nth _uq_result 2)))
-		(list "stage" "untangle" "kind" "condition" "value" (serialize (nth _uq_result 3)))
-		(list "stage" "untangle" "kind" "groups" "value" (serialize (explain_normalize_stages (nth _uq_result 4))))
-		(list "stage" "untangle" "kind" "init" "value" (serialize _uq_init))
-		(list "stage" "reorder" "kind" "tables" "value" (serialize (nth _jr_result 1)))
-		(list "stage" "reorder" "kind" "changed" "value" (not (equal? (nth _uq_result 1) (nth _jr_result 1))))
-		(list "stage" "plan" "kind" "root" "value" (explain_plan_root _plan))
-	))
+	(define logical_term (untangle_query_term query nil))
+	(match logical_term
+		'(select_core_term schema tables fields condition groups schemas replace_find_column init) (begin
+			(define _uq_7tuple (list schema tables fields condition groups schemas replace_find_column))
+			(define _jr_result (apply join_reorder _uq_7tuple))
+			(define _plan (apply build_queryplan (merge _jr_result (list nil))))
+			(explain_emit_rows (list
+				(list "stage" "untangle" "kind" "tables" "value" (serialize tables))
+				(list "stage" "untangle" "kind" "fields" "value" (serialize fields))
+				(list "stage" "untangle" "kind" "condition" "value" (serialize condition))
+				(list "stage" "untangle" "kind" "groups" "value" (serialize (explain_normalize_stages groups)))
+				(list "stage" "untangle" "kind" "init" "value" (serialize init))
+				(list "stage" "reorder" "kind" "tables" "value" (serialize (nth _jr_result 1)))
+				(list "stage" "reorder" "kind" "changed" "value" (not (equal? tables (nth _jr_result 1))))
+				(list "stage" "plan" "kind" "root" "value" (explain_plan_root _plan))
+			)))
+		'(union_all_term branches order limit offset)
+			(explain_emit_rows (list
+				(list "stage" "term" "kind" "root" "value" "union_all")
+				(list "stage" "term" "kind" "branches" "value" (count branches))
+				(list "stage" "term" "kind" "order" "value" (serialize (coalesceNil order '())))
+				(list "stage" "term" "kind" "limit" "value" (serialize limit))
+				(list "stage" "term" "kind" "offset" "value" (serialize offset))))
+		_ (error "invalid logical query term for EXPLAIN IR")
+	)
 )))
 /* explain_queryplan_reorder: focused view for join-reorder work. */
 (define explain_queryplan_reorder (lambda (query) (begin
@@ -444,7 +478,7 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 				"outer" nil
 				"joinexpr" "true"
 			)
-		)))
+		))))
 	))
 	(explain_emit_rows (merge
 		(table_rows_for_stage "untangle" (nth _uq_result 1))
@@ -1450,6 +1484,46 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 		(stage_cache_query old_stage)
 	)
 ))
+(define stage_has_group_boundary (lambda (stage) (begin
+	(define sg (coalesceNil (stage_group_cols stage) '()))
+	(or
+		(stage_is_dedup stage)
+		(and (not (nil? sg)) (not (equal? sg '())))
+		(not (nil? (stage_having_expr stage)))
+		(not (nil? (stage_condition stage)))
+	)
+)))
+(define rewrite_stage_for_flattened_aliases (lambda (stage rewrite_expr rewrite_alias) (begin
+	(define sg (coalesceNil (stage_group_cols stage) '()))
+	(define sh (stage_having_expr stage))
+	(define so (coalesceNil (stage_order_list stage) '()))
+	(define sl (stage_limit_val stage))
+	(define soff (stage_offset_val stage))
+	(define spa_raw (stage_partition_aliases stage))
+	(define spa (coalesceNil spa_raw '()))
+	(define sc (stage_condition stage))
+	(define init (stage_init_code stage))
+	(define fin_order (map so (lambda (o) (match o '(c d) (list (rewrite_expr c) d) o))))
+	(define fin_aliases (if (or (nil? spa_raw) (equal? spa '())) nil (map spa rewrite_alias)))
+	(if (stage_is_dedup stage)
+		(stage_preserve_cache_meta stage
+			(make_dedup_stage (map sg rewrite_expr) fin_aliases))
+		(if (and (not (nil? fin_aliases)) (or (nil? sg) (equal? sg '())))
+			(stage_preserve_cache_meta stage
+				(make_partition_stage fin_aliases fin_order
+					(coalesceNil (stage_limit_partition_cols stage) 0) sl soff init))
+			(stage_preserve_cache_meta stage
+				(if (nil? sc)
+					(make_group_stage
+						(map sg rewrite_expr)
+						(if (nil? sh) nil (rewrite_expr sh))
+						fin_order sl soff fin_aliases init)
+					(make_group_stage_with_condition
+						(map sg rewrite_expr)
+						(if (nil? sh) nil (rewrite_expr sh))
+						fin_order sl soff fin_aliases init
+						(rewrite_expr sc)))))))
+)))
 
 /* query term helpers */
 (define query_union_all_parts (lambda (query) (match query
@@ -1462,6 +1536,156 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 (define query_branch_field_names (lambda (query) (match query
 	'(schema tables fields condition group having order limit offset) (extract_assoc fields (lambda (k v) k))
 	_ '()
+)))
+(define make_select_core_term (lambda (uq_result)
+	(list
+		(quote select_core_term)
+		(nth uq_result 0)
+		(nth uq_result 1)
+		(nth uq_result 2)
+		(nth uq_result 3)
+		(nth uq_result 4)
+		(nth uq_result 5)
+		(nth uq_result 6)
+		(if (>= (count uq_result) 8) (nth uq_result 7) '())
+	)
+))
+(define logical_query_term_is_select_core (lambda (term) (match term
+	'(select_core_term _ _ _ _ _ _ _ _) true
+	false
+)))
+(define logical_query_term_is_union_all (lambda (term) (match term
+	'(union_all_term _ _ _ _) true
+	false
+)))
+(define expr_has_any_wildcard_ref (lambda (expr) (match expr
+	'((symbol get_column) _ _ "*" _) true
+	'((quote get_column) _ _ "*" _) true
+	(cons sym args) (or (expr_has_any_wildcard_ref sym) (reduce args (lambda (found arg) (or found (expr_has_any_wildcard_ref arg))) false))
+	false
+)))
+(define lookup_query_field_expr (lambda (fields col col_insensitive)
+	(reduce_assoc fields (lambda (acc k v)
+		(if (not (nil? acc)) acc
+			(if ((if col_insensitive equal?? equal?) k col) v nil)))
+		nil)
+))
+(define rewrite_union_wrapper_expr (lambda (expr wrapper_alias branch_fields) (match expr
+	'((symbol get_column) alias_ ti col ci) (if (or (equal?? alias_ wrapper_alias) (nil? alias_))
+		(coalesce (lookup_query_field_expr branch_fields col ci) expr)
+		expr)
+	'((quote get_column) alias_ ti col ci) (if (or (equal?? alias_ wrapper_alias) (nil? alias_))
+		(coalesce (lookup_query_field_expr branch_fields col ci) expr)
+		expr)
+	(cons sym args) (cons (rewrite_union_wrapper_expr sym wrapper_alias branch_fields)
+		(map args (lambda (arg) (rewrite_union_wrapper_expr arg wrapper_alias branch_fields))))
+	expr
+)))
+(define query_union_branch_is_simple_select (lambda (branch) (match branch
+	'(_ _ fields _ group having order limit offset)
+	(and
+		(or (nil? group) (equal? group '()))
+		(nil? having)
+		(nil? order)
+		(nil? limit)
+		(nil? offset)
+		(reduce_assoc fields (lambda (acc _k v) (and acc (equal? (extract_aggregates v) '()))) true))
+	false
+)))
+(define rewrite_query_term (lambda (query) (begin
+	(define select_has_from_subquery (lambda (query2) (match query2
+		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
+			(reduce tables2 (lambda (acc td) (or acc (match td
+				'(_ _ (string? _tbl) _ _) false
+				'(_ _ _ _ _) true
+				false))) false)
+		false
+	)))
+	(define rewrite_select_core_over_union_from (lambda (query2) (match query2
+		'(schema tables fields condition group having order limit offset)
+			(if (not (equal? (count tables) 1))
+				query2
+				(match (car tables)
+					'(id schemax subquery false nil) (begin
+						(define union_parts (query_union_all_parts subquery))
+						(if (or
+								(nil? union_parts)
+								(not (or (nil? group) (equal? group '())))
+								(not (nil? having))
+								(reduce_assoc fields (lambda (acc _k v) (or acc (not (equal? (extract_aggregates v) '())))) false)
+								(expr_has_any_wildcard_ref fields)
+								(expr_has_any_wildcard_ref condition)
+								(reduce (coalesceNil order '()) (lambda (acc item) (or acc (match item
+									'(col _dir) (expr_has_any_wildcard_ref col)
+									false))) false))
+							query2
+							(match union_parts '(branches union_order union_limit union_offset)
+								(if (or (not (nil? union_order)) (not (nil? union_limit)) (not (nil? union_offset)))
+									query2
+									(if (not (reduce branches (lambda (acc branch) (and acc (query_union_branch_is_simple_select branch))) true))
+										query2
+										(list (quote union_all)
+											(map branches (lambda (branch) (match branch
+												'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2) (begin
+													(define rewritten_condition (rewrite_union_wrapper_expr (coalesceNil condition true) id fields2))
+													(list schema2 tables2
+														(map_assoc fields (lambda (k v) (rewrite_union_wrapper_expr v id fields2)))
+														(if (or (nil? rewritten_condition) (equal? rewritten_condition true))
+															condition2
+															(if (or (nil? condition2) (equal? condition2 true))
+																rewritten_condition
+																(list (quote and) condition2 rewritten_condition)))
+														nil nil nil nil nil)
+												)
+												_ branch)))
+											order limit offset)))))
+					query2))
+		query2))))
+	(define top_union_parts (query_union_all_parts query))
+	(if (not (nil? top_union_parts))
+		(match top_union_parts '(branches order limit offset)
+			(list (quote union_all) (map branches rewrite_query_term) order limit offset))
+		(if (not (select_has_from_subquery query))
+			query
+			(rewrite_select_core_over_union_from (match query
+				'(schema tables fields condition group having order limit offset)
+					(list schema
+						(map tables (lambda (tbldesc) (match tbldesc
+							'(alias schema2 (string? tbl) isOuter joinexpr) tbldesc
+							'(id schemax subquery isOuter joinexpr) (list id schemax (rewrite_query_term subquery) isOuter joinexpr)
+							tbldesc)))
+						fields condition group having order limit offset)
+				query))))
+)))
+(define logical_query_term_output_cols (lambda (term) (match term
+	'(select_core_term _ _ fields _ _ _ _ _) (extract_assoc fields (lambda (k v) k))
+	'(union_all_term branches _ _ _) (if (or (nil? branches) (equal? branches '()))
+		'()
+		(logical_query_term_output_cols (car branches)))
+	_ (error "invalid logical query term")
+)))
+(define untangle_query_term (lambda (query outer_schemas) (begin
+	(define rewritten_query (rewrite_query_term query))
+	(define union_parts (query_union_all_parts rewritten_query))
+	(if (nil? union_parts)
+		(if (query_is_select_core rewritten_query)
+			(make_select_core_term (apply untangle_query (merge rewritten_query (list outer_schemas))))
+			(error "invalid SELECT query term"))
+		(match union_parts '(branches order limit offset) (begin
+			(if (or (nil? branches) (equal? branches '()))
+				(error "UNION ALL requires at least one branch"))
+			(list (quote union_all_term)
+				(map branches (lambda (branch) (untangle_query_term branch outer_schemas)))
+				order limit offset)
+		))))
+)))
+(define query_has_from_subquery (lambda (query) (match query
+	'(schema tables fields condition group having order limit offset)
+	(reduce tables (lambda (acc td) (or acc (match td
+		'(_ _ (string? _tbl) _ _) false
+		'(_ _ _ _ _) true
+		false))) false)
+	false
 )))
 
 /* make_keytable_schema: compute keytable name and schema without creating the table.
@@ -3199,19 +3423,12 @@ seeing the correctly prefixed outer alias. */
 								(define _count_alias (concat "_uncorr_cnt_" _count_idx))
 								(define mat_source (materialized-subquery-source _count_alias _count_sq))
 								(define _count_rows_sym (symbol (concat "__uncorr_count_rows:" _count_idx)))
-								(define _count_rr_sym (symbol (concat "__uncorr_count_rr:" _count_idx)))
-								(define materialized_rows (list (quote begin)
-									(list (quote set) _count_rows_sym (list (quote newsession)))
-									(list _count_rows_sym "rows" '())
-									(list (quote set) _count_rr_sym (symbol "resultrow"))
-									(list (quote set) (symbol "resultrow")
-										(list (quote lambda) (list (symbol "item"))
-											(list _count_rows_sym "rows"
-												(list (quote merge) (list _count_rows_sym "rows") (list (quote list) (symbol "item")))))
-									)
-									(build_queryplan_term _count_sq)
-									(list (quote set) (symbol "resultrow") _count_rr_sym)
-									(list _count_rows_sym "rows")))
+								(define _count_sink_sym (symbol (concat "__uncorr_count_sink:" _count_idx)))
+								(define materialized_rows
+									(planner_collect_rows_ast _count_rows_sym _count_sink_sym (symbol "item")
+										(build_queryplan_term_with_sink _count_sq (list (quote callback) _count_sink_sym))
+										nil
+										nil))
 								/* D = ∅: materialize the helper once and expose it as a normal
 								one-row relation with visible column __cnt. The outer query still
 								sees a regular table input, not a nested runtime subquery. */
@@ -3401,28 +3618,20 @@ seeing the correctly prefixed outer alias. */
 					(define output_cols (match branches
 						(cons first_branch _) (query_branch_field_names first_branch)
 						_ '()))
-					(if (or (nil? output_cols) (equal? output_cols '()))
-						(error "UNION ALL subquery must project at least one column"))
-					(define rows_sym (symbol (concat "__from_union_rows:" id)))
-					(define resultrow_sym (symbol (concat "__from_union_resultrow:" id)))
-					(define mat_source (materialized-subquery-source id subquery))
-					(planned_materialized_fields mat_source
-						(map output_cols (lambda (col) (list "Field" col "Type" "any"))))
-					(define materialized_rows (list (quote begin)
-						(list (quote set) rows_sym (list (quote newsession)))
-						(list rows_sym "rows" '())
-						(list (quote set) resultrow_sym (symbol "resultrow"))
-						(list (quote set) (symbol "resultrow")
-							(list (quote lambda) (list (symbol "item"))
-								(list rows_sym "rows"
-									(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
-						)
-						(build_queryplan_term subquery)
-						(list (quote set) (symbol "resultrow") resultrow_sym)
-						(list rows_sym "rows")
-					))
-					(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-						(list (materialized-subquery-init id subquery materialized_rows))))
+						(if (or (nil? output_cols) (equal? output_cols '()))
+							(error "UNION ALL subquery must project at least one column"))
+						(define rows_sym (symbol (concat "__from_union_rows:" id)))
+						(define row_sink_sym (symbol (concat "__from_union_sink:" id)))
+						(define mat_source (materialized-subquery-source id subquery))
+						(planned_materialized_fields mat_source
+							(map output_cols (lambda (col) (list "Field" col "Type" "any"))))
+						(define materialized_rows
+							(planner_collect_rows_ast rows_sym row_sink_sym (symbol "item")
+								(build_queryplan_term_with_sink subquery (list (quote callback) row_sink_sym))
+								nil
+								nil))
+						(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
+							(list (materialized-subquery-init id subquery materialized_rows))))
 					(list
 						(list (list id schemax (materialized-subquery-source id subquery) isOuter joinexpr))
 						'()
@@ -3590,17 +3799,16 @@ seeing the correctly prefixed outer alias. */
 					/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 					/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
 					(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
-					(define unsupported_groups (if groups2_present
-						(reduce groups2 (lambda (acc stage)
-							(or acc
-								(begin
-									(define g (stage_group_cols stage))
-									(and (not (nil? g)) (not (equal? g '())))
-								)
-								(not (nil? (stage_having_expr stage)))
+					(define flatten_groups2 (if groups2_present
+						(filter groups2 (lambda (stage)
+							(or
 								(not (nil? (stage_limit_val stage)))
 								(not (nil? (stage_offset_val stage)))
-							)
+								(not (nil? (stage_partition_aliases stage))))))
+						'()))
+					(define unsupported_groups (if groups2_present
+						(reduce groups2 (lambda (acc stage)
+							(or acc (stage_has_group_boundary stage))
 						) false)
 						false))
 					/* Nested derived-table flattening must not descend into precomputed runtime blocks
@@ -3609,11 +3817,22 @@ seeing the correctly prefixed outer alias. */
 					(define subquery_has_runtime_joinexpr (reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
 						'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_opaque_scope (replace_column_alias inner_joinexpr)))
 						_ false))) false))
+					(define outer_has_non_group_stage (or
+						(not (equal? (coalesceNil order '()) '()))
+						(not (nil? limit))
+						(not (nil? offset))))
+					(define outer_has_group_stage (or
+						(not (nil? group))
+						(not (nil? having))
+						(reduce_assoc fields (lambda (acc _k v) (or acc (not (equal? (extract_aggregates v) '())))) false)))
 					(define use_materialize (or
 						subquery_has_window
 						unsupported_groups
 						flatten_has_dangling_output_ref
 						subquery_has_runtime_joinexpr
+						(and (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
+						(and (not (equal? flatten_groups2 '())) outer_has_group_stage)
+						(and (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))
 						(and flatten_has_helper_backed_projection outer_uses_subquery_group_boundary)))
 					/* Window-function LIMIT pushdown */
 					(define mat_limit nil)
@@ -3627,51 +3846,40 @@ seeing the correctly prefixed outer alias. */
 							nil)))
 						(_check_wf_limit condition)
 					))
-					/* if groups2 had only pass-through stages (no GROUP/HAVING/LIMIT/OFFSET), strip them for flattening */
-					(if (and groups2_present (not unsupported_groups))
-						(set groups2 nil))
+					(define flatten_stage_alias (lambda (alias)
+						(if (nil? alias) nil
+							(if (or (not (nil? (schemas2 alias)))
+									(and (symbol? alias) (not (nil? (schemas2 (string alias)))))
+									(and (string? alias) (not (nil? (schemas2 (symbol alias))))))
+								(concat id "\0" alias)
+								alias))))
+					/* pass-through stage semantics stay on the flattened plan.
+					Pure inner ORDER BY without LIMIT/OFFSET is dropped; the outer ORDER BY wins. */
+					(if (and groups2_present (not use_materialize) (not (equal? flatten_groups2 '())))
+						(sq_cache "groups" (merge
+							(map flatten_groups2 (lambda (stage)
+								(rewrite_stage_for_flattened_aliases stage replace_column_alias flatten_stage_alias)))
+							(coalesceNil (sq_cache "groups") '()))))
 					(if use_materialize
 						(begin
-							(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
-							(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
-							(define resultrow_sym (symbol (concat "__from_subquery_resultrow:" id)))
-							/* Build the materialized inner plan from the already untangled IR of
-							this subquery. Replanning from the raw AST here can drift from the
-							current alias/scope environment and reintroduce wrapper-specific
-							regressions. */
-							(define mat_inner_plan (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 nil))
-							(define mat_init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
-							(define mat_inner_plan (if (equal? mat_init_stmts '())
-								mat_inner_plan
-								(cons (quote !begin) (merge mat_init_stmts (list mat_inner_plan)))))
-							(define materialized_rows (list (quote begin)
-								(list (quote set) rows_sym (list (quote newsession)))
-								(list rows_sym "rows" '())
-								(list (quote set) resultrow_sym (symbol "resultrow"))
+								(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
+								(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
+								(define row_sink_sym (symbol (concat "__from_subquery_sink:" id)))
 								(define cnt_sym (symbol (concat "__from_subquery_cnt:" id)))
-								(if (nil? mat_limit)
-									/* no limit */
-									(list (quote set) (symbol "resultrow")
-										(list (quote lambda) (list (symbol "item"))
-											(list rows_sym "rows"
-												(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
-									)
-									/* with limit: stop collecting after mat_limit rows */
-									(list (quote begin)
-										(list (quote set) cnt_sym 0)
-										(list (quote set) (symbol "resultrow")
-											(list (quote lambda) (list (symbol "item"))
-												(list (quote if) (list (quote <) cnt_sym mat_limit)
-													(list (quote begin)
-														(list (quote set) cnt_sym (list (quote +) cnt_sym 1))
-														(list rows_sym "rows"
-															(list (quote merge) (list rows_sym "rows") (list (quote list) (symbol "item")))))
-													nil))))
-								)
-								mat_inner_plan
-								(list (quote set) (symbol "resultrow") resultrow_sym)
-								(list rows_sym "rows")
-							))
+								/* Build the materialized inner plan from the already untangled IR of
+								this subquery. Replanning from the raw AST here can drift from the
+								current alias/scope environment and reintroduce wrapper-specific
+								regressions. */
+								(define mat_inner_plan (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 nil))
+								(define mat_init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+								(define mat_inner_plan (if (equal? mat_init_stmts '())
+									mat_inner_plan
+									(cons (quote !begin) (merge mat_init_stmts (list mat_inner_plan)))))
+								(define materialized_rows
+									(planner_collect_rows_ast rows_sym row_sink_sym (symbol "item")
+										(build_queryplan_term_with_sink subquery (list (quote callback) row_sink_sym))
+										mat_limit
+										cnt_sym))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
 								(list (materialized-subquery-init id subquery materialized_rows))))
 							(define mat_source (materialized-subquery-source id subquery))
@@ -4222,29 +4430,31 @@ second table carries strictly more local WHERE predicates than the first. */
 				(jqr_reorder_segments jqr_regular_tables condition schemas)))
 		fields condition groups schemas replace_find_column))))
 
-(define build_queryplan_term (lambda (query) (begin
-	(define union_parts (query_union_all_parts query))
-	(if (nil? union_parts)
-		(if (query_is_select_core query)
-			(begin
-				(define _uq_result (apply untangle_query (merge query (list nil))))
-				(define _uq_init (if (>= (count _uq_result) 8) (nth _uq_result 7) '()))
-				(define _uq_7tuple (list (nth _uq_result 0) (nth _uq_result 1) (nth _uq_result 2) (nth _uq_result 3) (nth _uq_result 4) (nth _uq_result 5) (nth _uq_result 6)))
-				(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
-				(parallelize_resultrows (if (equal? _uq_init '()) _plan (cons (quote begin) (merge _uq_init (list _plan))))))
-			(error "invalid SELECT query term"))
-		(match union_parts '(branches order limit offset) (begin
-			(if (or (nil? branches) (equal? branches '()))
+(define build_queryplan_term_from_logical_with_sink (lambda (logical_term sink_mode) (begin
+	(define term_sink_emit_row (lambda (row_expr) (match sink_mode
+		'(callback sink_fn) (list sink_fn row_expr)
+		_ (list (symbol "resultrow") row_expr))))
+	(if (logical_query_term_is_select_core logical_term)
+		(match logical_term '(select_core_term schema tables fields condition groups schemas replace_find_column init) (begin
+			(define _uq_7tuple (list schema tables fields condition groups schemas replace_find_column))
+			(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
+			(define _full_plan (parallelize_resultrows (if (equal? init '()) _plan (cons (quote begin) (merge init (list _plan))))))
+			(match sink_mode
+				'(callback sink_fn) (list (quote begin)
+					(list (quote set) (symbol "__term_prev_resultrow") (symbol "resultrow"))
+					(list (quote set) (symbol "resultrow")
+						(list (quote lambda) (list (symbol "item"))
+							(list sink_fn (symbol "item"))))
+					_full_plan
+					(list (quote set) (symbol "resultrow") (symbol "__term_prev_resultrow")))
+				_ _full_plan)))
+		(if (logical_query_term_is_union_all logical_term)
+			(match logical_term '(union_all_term branches order limit offset) (begin
+				(if (or (nil? branches) (equal? branches '()))
 				(error "UNION ALL requires at least one branch"))
 			(define branch_meta (map branches (lambda (branch) (begin
-				(if (not (query_is_select_core branch))
-					(error "UNION ALL branch must be a SELECT query"))
-				(match branch '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2) (begin
-					(if (or (not (nil? order2)) (not (nil? limit2)) (not (nil? offset2)))
-						(error "UNION ALL branch ORDER/LIMIT/OFFSET is not supported yet"))
-					(define branch_cols (query_branch_field_names branch))
-					(list branch branch_cols (count branch_cols) schema2))
-					_ (error "UNION ALL branch must be a SELECT query"))
+				(define branch_cols (logical_query_term_output_cols branch))
+				(list branch branch_cols (count branch_cols))
 			))))
 			(define expected_cols (match branch_meta
 				(cons first_meta _) (nth first_meta 2)
@@ -4258,15 +4468,16 @@ second table carries strictly more local WHERE predicates than the first. */
 				/* === UNION ALL with ORDER BY / LIMIT / OFFSET ===
 				Emit scan_order_multi for materialization-free sorted merge across tables. */
 				(begin
-					/* Resolve each branch through untangle_query + join_reorder */
+					/* Resolve each branch through join_reorder on the already logical select_core. */
 					(define resolved_branches (map branches (lambda (branch) (begin
-						(match branch '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2) (begin
-							(if (or (not (nil? order2)) (not (nil? limit2)) (not (nil? offset2)))
-								(error "UNION ALL branch ORDER/LIMIT/OFFSET is not supported yet"))
-							(if (or (not (nil? group2)) (not (nil? having2)))
-								(error "UNION ALL ORDER BY with GROUP BY branches not yet supported"))
-							(define _uq (apply untangle_query (merge branch (list nil))))
-							(define _uq7 (list (nth _uq 0) (nth _uq 1) (nth _uq 2) (nth _uq 3) (nth _uq 4) (nth _uq 5) (nth _uq 6)))
+						(if (not (logical_query_term_is_select_core branch))
+							(error "UNION ALL ORDER BY requires SELECT branches"))
+						(match branch '(select_core_term schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 init2) (begin
+							(if (not (equal? (coalesceNil groups2 '()) '()))
+								(error "UNION ALL ORDER BY with staged branches not yet supported"))
+							(if (not (equal? (coalesceNil init2 '()) '()))
+								(error "UNION ALL ORDER BY with initialized branches not yet supported"))
+							(define _uq7 (list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2))
 							(define _jr (apply join_reorder _uq7))
 							(define jr_tables (nth _jr 1))
 							(if (not (equal? (count jr_tables) 1))
@@ -4275,7 +4486,7 @@ second table carries strictly more local WHERE predicates than the first. */
 							(define jr_fields (nth _jr 2))
 							(define jr_condition ((nth _jr 6) (coalesceNil (nth _jr 3) true)))
 							(list tbldef jr_fields jr_condition))
-							_ (error "UNION ALL branch must be a SELECT query"))
+							_ (error "UNION ALL ORDER BY requires SELECT branches"))
 					))))
 
 					/* Parse ORDER BY: resolve each item to position in output_cols */
@@ -4339,15 +4550,15 @@ second table carries strictly more local WHERE predicates than the first. */
 										'()))))))
 							(define mapcols (merge_unique (list all_output_cols sort_phys_cols)))
 
-							/* map lambda: emit resultrow with normalized output aliases */
-							(define map_ast (list (quote lambda)
-								(map mapcols (lambda (c) (symbol (concat tblvar "." c))))
-								(list (symbol "resultrow")
-									(cons (symbol "list")
-										(merge (map (produceN expected_cols (lambda (i) i)) (lambda (i)
-											(list (nth output_cols i) (replace_columns_from_expr (nth field_exprs i))))))))))
+								/* map lambda: emit rows with normalized output aliases */
+								(define map_ast (list (quote lambda)
+									(map mapcols (lambda (c) (symbol (concat tblvar "." c))))
+									(term_sink_emit_row
+										(cons (symbol "list")
+											(merge (map (produceN expected_cols (lambda (i) i)) (lambda (i)
+												(list (nth output_cols i) (replace_columns_from_expr (nth field_exprs i))))))))))
 
-							(list tbl_schema tbl filtercols filter_ast sortcols mapcols map_ast))
+								(list tbl_schema tbl filtercols filter_ast sortcols mapcols map_ast))
 							_ (error "invalid table definition in UNION ALL branch"))
 					))))
 
@@ -4376,27 +4587,37 @@ second table carries strictly more local WHERE predicates than the first. */
 							(cons (symbol "list") (map scan_specs (lambda (s) (nth s 6))))
 					))
 				)
-				/* === UNION ALL without ORDER BY === */
-				(begin
-					(define branch_plans (map branch_meta (lambda (meta) (begin
-						(define branch (nth meta 0))
-						(define branch_plan (build_queryplan_term branch))
-						(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
-							(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
-						)))))
-						(list (quote begin)
-							(list (quote set) (symbol "__union_prev_resultrow") (symbol "resultrow"))
-							(list (quote set) (symbol "resultrow")
-								(list (quote lambda) (list (symbol "row"))
-									(list (symbol "__union_prev_resultrow") normalized_row)))
-							branch_plan
-							(list (quote set) (symbol "resultrow") (symbol "__union_prev_resultrow")))
-					))))
-					(cons (quote begin) branch_plans))
-			)
-		))
-	)
-)))
+					/* === UNION ALL without ORDER BY === */
+					(begin
+						(define branch_plans (map (produceN (count branch_meta)) (lambda (branch_idx) (begin
+							(define meta (nth branch_meta branch_idx))
+							(define branch (nth meta 0))
+							(define branch_sink_sym (symbol (concat "__union_branch_sink:" branch_idx)))
+							(define branch_plan (build_queryplan_term_from_logical_with_sink branch (list (quote callback) branch_sink_sym)))
+							(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
+								(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
+							)))))
+							(list (quote begin)
+								(list (quote define) branch_sink_sym
+									(list (quote lambda) (list (symbol "row"))
+										(term_sink_emit_row normalized_row)))
+								branch_plan)
+							))))
+						(cons (quote begin) branch_plans))
+					)
+				))
+			(error "invalid logical query term"))
+		)
+	))))
+(define build_queryplan_term_with_sink (lambda (query sink_mode)
+	(build_queryplan_term_from_logical_with_sink (untangle_query_term query nil) sink_mode)
+))
+(define build_queryplan_term_from_logical (lambda (logical_term)
+	(build_queryplan_term_from_logical_with_sink logical_term '(resultrow))
+))
+(define build_queryplan_term (lambda (query)
+	(build_queryplan_term_with_sink query '(resultrow))
+))
 
 /* build_dml_plan: route UPDATE/DELETE through the full query planner pipeline.
 schema: target schema

@@ -1,11 +1,25 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 # Derived table containing correlated scalar subselects with ORDER BY LIMIT.
 # Pattern: SELECT t.* FROM (SELECT m.*, COALESCE((SELECT h.col
 #   FROM hist h WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0)
 #   AS dynamic_val FROM main m LEFT JOIN ...) t
 #
-# When the outer derived table contains ORDER BY or LIMIT from
-# unsupported_groups, it triggers materialization. The materialized
-# rows variable must be accessible to scan.
+# The planner should keep inner ORDER BY/LIMIT as a pass-through stage
+# when flattening is otherwise safe, instead of materializing the wrapper.
 
 metadata:
   version: "1.0"
@@ -96,6 +110,27 @@ test_cases:
       data:
         - cnt: 2
           total: 500
+
+  - name: "EXPLAIN IR keeps derived ORDER BY LIMIT as flattened stage"
+    sql: |
+      EXPLAIN IR
+      SELECT t.ID, t.latest_val FROM (
+        SELECT m.ID AS ID,
+          COALESCE((SELECT h.val FROM dtl_hist h
+            WHERE h.parent = m.ID ORDER BY h.ts DESC LIMIT 1), 0) AS latest_val
+        FROM dtl_main m
+        ORDER BY m.ID DESC LIMIT 1
+      ) t
+    expect:
+      contains:
+        - '"kind": "tables", "value": "((\"t\u0000m\" \"memcp-tests\" \"dtl_main\" false nil))"'
+        - '"kind": "groups"'
+        - 'limit) 1'
+        - 'desc'
+        - 'latest_val'
+      not_contains:
+        - '__mat:'
+
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
