@@ -231,39 +231,12 @@ test_cases:
           kind: "root"
           value: "!begin"
 
-  - name: "EXPLAIN REORDER exposes table order"
-    sql: "EXPLAIN REORDER SELECT a.id, b.id FROM rs_data a, rs_data b WHERE a.id = b.id"
+  - name: "EXPLAIN IR exposes table order"
+    sql: "EXPLAIN IR SELECT a.id, b.id FROM rs_data a, rs_data b WHERE a.id = b.id"
     expect:
-      rows: 4
-      data:
-        - stage: "untangle"
-          position: 0
-          alias: "a"
-          schema: "memcp-tests"
-          table: "rs_data"
-          outer: false
-          joinexpr: "true"
-        - stage: "untangle"
-          position: 1
-          alias: "b"
-          schema: "memcp-tests"
-          table: "rs_data"
-          outer: false
-          joinexpr: "true"
-        - stage: "reorder"
-          position: 0
-          alias: "a"
-          schema: "memcp-tests"
-          table: "rs_data"
-          outer: false
-          joinexpr: "true"
-        - stage: "reorder"
-          position: 1
-          alias: "b"
-          schema: "memcp-tests"
-          table: "rs_data"
-          outer: false
-          joinexpr: "true"
+      contains:
+        - '"stage": "untangle", "kind": "tables", "value": "((\"a\" \"memcp-tests\" \"rs_data\" false nil) (\"b\" \"memcp-tests\" \"rs_data\" false nil))"'
+        - '"stage": "reorder", "kind": "tables", "value": "((\"a\" \"memcp-tests\" \"rs_data\" false true) (\"b\" \"memcp-tests\" \"rs_data\" false true))"'
 
   - name: "Create selective join tables"
     sql: "CREATE TABLE perf_dim (cat_id INT PRIMARY KEY, label VARCHAR(20))"
@@ -285,73 +258,19 @@ test_cases:
     expect:
       affected_rows: 3
 
-  - name: "EXPLAIN REORDER swaps to selective driver"
-    sql: "EXPLAIN REORDER SELECT d.label, m.id FROM perf_main m JOIN perf_dim d ON m.category = d.cat_id WHERE d.label = 'one'"
+  - name: "EXPLAIN IR swaps to selective driver"
+    sql: "EXPLAIN IR SELECT d.label, m.id FROM perf_main m JOIN perf_dim d ON m.category = d.cat_id WHERE d.label = 'one'"
     expect:
-      rows: 4
-      data:
-        - stage: "untangle"
-          position: 0
-          alias: "m"
-          schema: "memcp-tests"
-          table: "perf_main"
-          outer: false
-          joinexpr: "true"
-        - stage: "untangle"
-          position: 1
-          alias: "d"
-          schema: "memcp-tests"
-          table: "perf_dim"
-          outer: false
-          joinexpr: "(equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))"
-        - stage: "reorder"
-          position: 0
-          alias: "d"
-          schema: "memcp-tests"
-          table: "perf_dim"
-          outer: false
-          joinexpr: "true"
-        - stage: "reorder"
-          position: 1
-          alias: "m"
-          schema: "memcp-tests"
-          table: "perf_main"
-          outer: false
-          joinexpr: "(equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))"
+      contains:
+        - '"stage": "untangle", "kind": "tables", "value": "((\"m\" \"memcp-tests\" \"perf_main\" false nil) (\"d\" \"memcp-tests\" \"perf_dim\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
+        - '"stage": "reorder", "kind": "tables", "value": "((\"d\" \"memcp-tests\" \"perf_dim\" false true) (\"m\" \"memcp-tests\" \"perf_main\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
 
-  - name: "EXPLAIN REORDER keeps already selective order"
-    sql: "EXPLAIN REORDER SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id WHERE d.label = 'one'"
+  - name: "EXPLAIN IR keeps already selective order"
+    sql: "EXPLAIN IR SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id WHERE d.label = 'one'"
     expect:
-      rows: 4
-      data:
-        - stage: "untangle"
-          position: 0
-          alias: "d"
-          schema: "memcp-tests"
-          table: "perf_dim"
-          outer: false
-          joinexpr: "true"
-        - stage: "untangle"
-          position: 1
-          alias: "m"
-          schema: "memcp-tests"
-          table: "perf_main"
-          outer: false
-          joinexpr: "(equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))"
-        - stage: "reorder"
-          position: 0
-          alias: "d"
-          schema: "memcp-tests"
-          table: "perf_dim"
-          outer: false
-          joinexpr: "true"
-        - stage: "reorder"
-          position: 1
-          alias: "m"
-          schema: "memcp-tests"
-          table: "perf_main"
-          outer: false
-          joinexpr: "(equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))"
+      contains:
+        - '"stage": "untangle", "kind": "tables", "value": "((\"d\" \"memcp-tests\" \"perf_dim\" false nil) (\"m\" \"memcp-tests\" \"perf_main\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
+        - '"stage": "reorder", "kind": "tables", "value": "((\"d\" \"memcp-tests\" \"perf_dim\" false true) (\"m\" \"memcp-tests\" \"perf_main\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
   # ========================================================================
   # 7. Compress and re-test (exercises range scans on compressed storage)
   # ========================================================================
