@@ -4329,6 +4329,61 @@ seeing the correctly prefixed outer alias. */
 	Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
 	(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
 	(define _sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
+	/* Deduplicate identical scalar projection LEFT JOIN helpers before they
+	enter the normal table pipeline. join_reorder can move helpers, but it cannot
+	recognize that two _unn_ aliases describe the same LEFT JOIN relation once
+	they have already been materialized as distinct table entries. */
+	(define scalar_left_join_dedup_key (lambda (td) (match td
+		'(tv tschema ttbl isOuter joinexpr) (begin
+			(define _dedup_alias_map
+				(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+					(set_assoc acc (string alias_v) "__scalar_left_join__"))
+					'()))
+			(serialize (list
+				tschema
+				(rewrite_source_aliases _dedup_alias_map ttbl)
+				isOuter
+				(rewrite_source_aliases _dedup_alias_map (coalesceNil joinexpr true)))))
+		nil)))
+	(define _sq_scalar_dedup_state (reduce _sq_scalar_tbls (lambda (state td) (match state
+		'(kept key_map alias_map) (match td
+			'(tv _ _ _ _) (begin
+				(define _dedup_key (scalar_left_join_dedup_key td))
+				(define _canonical_alias (get_assoc key_map _dedup_key))
+				(if (nil? _canonical_alias)
+					(list
+						(merge kept (list td))
+						(set_assoc key_map _dedup_key tv)
+						alias_map)
+					(list
+						kept
+						key_map
+						(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+							(set_assoc acc (string alias_v) _canonical_alias))
+							alias_map))))
+			td)
+		state))
+		(list '() '() '())))
+	(define _sq_scalar_tbls (nth _sq_scalar_dedup_state 0))
+	(define _sq_scalar_alias_map (nth _sq_scalar_dedup_state 2))
+	(define rewrite_scalar_left_join_aliases (lambda (expr)
+		(if (equal? _sq_scalar_alias_map '())
+			expr
+			(rewrite_source_aliases _sq_scalar_alias_map expr))))
+	(if (not (equal? _sq_scalar_alias_map '()))
+		(begin
+			(set tables (map tables (lambda (td) (match td
+				'(tv tschema ttbl toisOuter tje)
+				(list tv tschema ttbl toisOuter
+					(if (nil? tje) nil (rewrite_scalar_left_join_aliases tje)))
+				td))))
+			(set fields (map_assoc fields (lambda (k v) (rewrite_scalar_left_join_aliases v))))
+			(set condition (rewrite_scalar_left_join_aliases condition))
+			(set group (map group rewrite_scalar_left_join_aliases))
+			(set having (rewrite_scalar_left_join_aliases having))
+			(set order (map order (lambda (o) (match o
+				'(col dir) (list (rewrite_scalar_left_join_aliases col) dir)
+				o))))))
 	/* Contract: scalar helper tables used only for SELECT/expr projection keep
 	their LEFT JOIN joinexpr local so NULL-preserving semantics survive.
 	When the current WHERE references such a helper, it is no longer a pure
