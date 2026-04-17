@@ -220,6 +220,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (stage_outer_sources stage_part_with_sources) (list (list "outer_t" "id" iap_outer_source_expr))) true "stage_outer_sources reads optional outer correlation tuples")
 	(assert (equal? (stage_outer_sources (stage_preserve_cache_meta stage_part_with_sources (make_partition_stage '("u") '() 1 5 0 nil)))
 		(list (list "outer_t" "id" iap_outer_source_expr))) true "stage_preserve_cache_meta preserves outer-sources")
+	(define stage_part_rewritten (rewrite_stage_for_flattened_aliases
+		stage_part_with_sources
+		(lambda (expr) (match expr
+			'((quote get_column) "helper_t" ti col ci) (list 'get_column "helper_t_flat" ti col ci)
+			'((symbol get_column) "helper_t" ti col ci) (list 'get_column "helper_t_flat" ti col ci)
+			expr))
+		(lambda (alias_) (match alias_
+			"u" "u_flat"
+			"outer_t" "outer_t_flat"
+			alias_))))
+	(assert (equal? (stage_outer_sources stage_part_rewritten)
+		(list (list "outer_t_flat" "id" (list 'get_column "helper_t_flat" false "owner" false)))) true "rewrite_stage_for_flattened_aliases rewrites outer-sources along aliases and expressions")
+	(assert (equal? (extract_stage_outer_source_cols_for_tblvar "outer_t_flat" (list stage_part_rewritten))
+		'("id")) true "extract_stage_outer_source_cols_for_tblvar exposes metadata-backed outer columns")
 	(define stage_marked (cons (list 'anti-pass-needed "helper_t" "outer_t" "id" iap_outer_source_expr) stage_part_with_sources))
 	(assert (equal? (stage_anti_pass_marker stage_marked) (list "helper_t" "outer_t" "id" iap_outer_source_expr)) true "stage_anti_pass_marker extracts marker payload")
 	(assert (equal? (iap_collect_markers (list stage_part_with_sources stage_marked)) (list (list "helper_t" "outer_t" "id" iap_outer_source_expr))) true "iap_collect_markers collects only marked stages")
@@ -237,7 +251,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (serialize (iap_build_antifilter "memcp-tests" "helper_tbl"
 		iap_join_expr
 		"helper_t"))
-		"(nil? (scalar_scan \"memcp-tests\" \"helper_tbl\" (list \"owner\") (lambda (helper_t.owner) (and helper_t.owner helper_t.owner (outer outer_t.id))) (list) (lambda () 1) (lambda (acc item) 1) nil nil))") true "iap_build_antifilter lowers helper and outer refs for scalar_scan")
+		"(nil? (scalar_scan \"memcp-tests\" \"helper_tbl\" '(\"owner\") (lambda (helper_t.owner) (and helper_t.owner helper_t.owner (outer outer_t.id))) '() (lambda () 1) (lambda (acc item) 1) nil nil))") true "iap_build_antifilter lowers helper and outer refs for scalar_scan")
 	(define iap_helper_td (list "helper_t" "memcp-tests" "sq" true
 		(list '= (list 'get_column "helper_t" false "owner" false) (list 'get_column "outer_t" false "id" false))))
 	(assert (equal? (iap_find_td (list (list "outer_t" "memcp-tests" "t3" false true) iap_helper_td) "helper_t")
