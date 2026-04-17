@@ -78,6 +78,14 @@ test_cases:
       data:
         - v: 42
 
+  - name: "EXPLAIN IR exposes uncorrelated scalar fallback reasons"
+    sql: "EXPLAIN IR SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
+    expect:
+      contains:
+        - "scalar-events"
+        - "inline-uncorrelated"
+        - "legacy-fallback-non-aggregate"
+
   - name: "Scalar subselect without LIMIT rejects multiple rows"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
@@ -163,6 +171,15 @@ test_cases:
         - id: 4
           v: 55
 
+  - name: "EXPLAIN IR exposes correlated scalar unnest reason"
+    sql: "EXPLAIN IR SELECT id, (SELECT val FROM t2 WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
+    expect:
+      contains:
+        - "scalar-events"
+        - "prefer-unnest"
+      not_contains:
+        - "__scalar_promise_"
+
   - name: "Derived table with scalar aggregate subselect"
     sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM t2 WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
     expect:
@@ -176,6 +193,20 @@ test_cases:
           cnt: 2
         - id: 4
           cnt: 1
+
+  - name: "EXPLAIN IR exposes correlated aggregate inline reason"
+    sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM t2 WHERE owner = t1.id LIMIT 1) AS cnt FROM t1"
+    expect:
+      contains:
+        - "scalar-events"
+        - "inline-direct-agg-scan"
+
+  - name: "EXPLAIN IR exposes grouped scalar fallback reason"
+    sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM t2 GROUP BY owner HAVING owner = t1.id) AS cnt FROM t1"
+    expect:
+      contains:
+        - "scalar-events"
+        - "inline-grouped-non-domain-correlation"
 
   - name: "Scalar subselect preserves outer rows on missing ref"
     sql: "SELECT id, (SELECT description FROM t4 WHERE id = t3.ref) AS d FROM t3 ORDER BY id"

@@ -561,6 +561,62 @@ layout. */
 	(cons (quote begin) (map rows (lambda (row)
 		(list (quote resultrow) (cons (quote list) row))))))
 )
+(define planner_debug_settings (newsession))
+(define planner_debug_scalar_events (newsession))
+(define planner_debug_scalar_trace_enabled (lambda ()
+	(equal? (planner_debug_settings "scalar-trace") true)))
+(define planner_debug_reset_scalar_events (lambda ()
+	(planner_debug_scalar_events "rows" '())))
+(define planner_debug_record_scalar_event (lambda (kind reason)
+	(if (planner_debug_scalar_trace_enabled)
+		(planner_debug_scalar_events "rows" (merge
+			(coalesceNil (planner_debug_scalar_events "rows") '())
+			(list (list kind reason))))
+		nil)))
+(define planner_debug_get_scalar_events (lambda ()
+	(coalesceNil (planner_debug_scalar_events "rows") '())))
+(define explain_plan_root_with_scalar_debug (lambda (plan) (begin
+		(define scalar_events (planner_debug_get_scalar_events))
+		(if (equal? scalar_events '())
+			(explain_plan_root plan)
+			(concat (explain_plan_root plan) " scalar-events=" (serialize scalar_events))))))
+(define scalar_subselect_inline_reason (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
+	(if (nil? _agg_args)
+		(quote legacy-fallback-non-aggregate)
+		(if (not (equal? (count _agg_args) 3))
+			(quote legacy-fallback-non-trivial-aggregate)
+			(if (not direct_agg_stages_simple)
+				(quote legacy-fallback-complex-group-stage)
+				(if (and raw_contains_skip_level_nested_outer_ref (not scalar_uses_session_state))
+					(quote legacy-fallback-skip-level-outer-ref)
+					(if (not (nil? stage2_post_group_condition))
+						(quote legacy-fallback-post-group-filter)
+						(if (not (or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1))))
+							(quote legacy-fallback-explicit-group-keys)
+							(if (or (nil? tables2) (equal? tables2 '()))
+								(quote legacy-fallback-no-inner-tables)
+								(if (not (or scalar_has_outer_ref scalar_uses_session_state))
+									(quote legacy-fallback-uncorrelated-aggregate)
+									(quote inline-direct-agg-scan))))))))))))
+(define scalar_subselect_inline_strategy scalar_subselect_inline_reason)
+(define scalar_subselect_lowering_reason_from_facts (lambda (_has_outer _has_agg_or_stage _outer_refs_are_direct_columns _outer_has_group _contains_inner_select_marker _value_expr _value_expr_is_direct_column _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer)
+	(if (not _has_outer)
+		(quote inline-uncorrelated)
+		(if (nil? _value_expr)
+			(quote inline-missing-value-expr)
+			(if _has_agg_or_stage
+				(if (not (or _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer))
+					(quote inline-grouped-non-domain-correlation)
+					(if (and _contains_inner_select_marker (not _allow_grouped_direct_non_equality_outer))
+						(quote inline-grouped-inner-select-marker)
+						(quote prefer-unnest)))
+				(if (not _outer_refs_are_direct_columns)
+					(quote inline-non-grouped-non-direct-outer-refs)
+					(if _outer_has_group
+						(quote inline-non-grouped-outer-group-barrier)
+						(if (and _contains_inner_select_marker (not _value_expr_is_direct_column))
+							(quote inline-non-grouped-inner-select-marker)
+							(quote prefer-unnest)))))))))
 (define explain_plan_root (lambda (plan)
 	(match plan
 		(cons sym _) (string sym)
@@ -587,13 +643,15 @@ layout. */
 /* explain_queryplan_ir: expose planner IR around the logical query-term planner.
 Returns compact stage/kind/value rows for stable SQL-level inspection. */
 (define explain_queryplan_ir (lambda (query) (begin
+	(planner_debug_settings "scalar-trace" true)
+	(planner_debug_reset_scalar_events)
 	(define logical_term (untangle_query_term query nil))
 	(match logical_term
 		'(select_core_term schema tables fields condition groups schemas replace_find_column init) (begin
 			(define _uq_7tuple (list schema tables fields condition groups schemas replace_find_column))
 			(define _jr_result (apply join_reorder _uq_7tuple))
 			(define _plan (apply build_queryplan (merge _jr_result (list nil))))
-			(explain_emit_rows (list
+			(define _rows (list
 				(list "stage" "untangle" "kind" "tables" "value" (serialize tables))
 				(list "stage" "untangle" "kind" "fields" "value" (serialize fields))
 				(list "stage" "untangle" "kind" "condition" "value" (serialize condition))
@@ -601,15 +659,18 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 				(list "stage" "untangle" "kind" "init" "value" (serialize init))
 				(list "stage" "reorder" "kind" "tables" "value" (serialize (nth _jr_result 1)))
 				(list "stage" "reorder" "kind" "changed" "value" (not (equal? tables (nth _jr_result 1))))
-				(list "stage" "plan" "kind" "root" "value" (explain_plan_root _plan))
-		)))
+				(list "stage" "plan" "kind" "root" "value" (explain_plan_root_with_scalar_debug _plan))))
+			(planner_debug_settings "scalar-trace" false)
+			(explain_emit_rows _rows))
 		'(union_all_term branches order limit offset)
-		(explain_emit_rows (list
-			(list "stage" "term" "kind" "root" "value" "union_all")
-			(list "stage" "term" "kind" "branches" "value" (count branches))
-			(list "stage" "term" "kind" "order" "value" (serialize (coalesceNil order '())))
-			(list "stage" "term" "kind" "limit" "value" (serialize limit))
-			(list "stage" "term" "kind" "offset" "value" (serialize offset))))
+		(begin
+			(planner_debug_settings "scalar-trace" false)
+			(explain_emit_rows (list
+				(list "stage" "term" "kind" "root" "value" "union_all")
+				(list "stage" "term" "kind" "branches" "value" (count branches))
+				(list "stage" "term" "kind" "order" "value" (serialize (coalesceNil order '())))
+				(list "stage" "term" "kind" "limit" "value" (serialize limit))
+				(list "stage" "term" "kind" "offset" "value" (serialize offset)))))
 		_ (error "invalid logical query term for EXPLAIN IR")
 	)
 )))
@@ -2903,26 +2964,50 @@ seeing the correctly prefixed outer alias. */
 				(expr_uses_session_state subquery)
 				(_raw_query_contains_skip_level_nested_outer_ref subquery (_raw_query_local_aliases subquery))))
 		nil)))
-	(define scalar_subselect_inline_strategy (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
-		(if (and
-			(not (nil? _agg_args))
-			(equal? (count _agg_args) 3)
-			direct_agg_stages_simple
-			(or
-				(not raw_contains_skip_level_nested_outer_ref)
-				scalar_uses_session_state)
-			(nil? stage2_post_group_condition)
-			(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
-			(not (nil? tables2))
-			(not (equal? tables2 '()))
-			(or scalar_has_outer_ref scalar_uses_session_state))
-			(quote direct-agg-scan)
-			(quote legacy-fallback))))
+	(define scalar_subselect_inline_reason (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
+		(if (nil? _agg_args)
+			(quote legacy-fallback-non-aggregate)
+			(if (not (equal? (count _agg_args) 3))
+				(quote legacy-fallback-non-trivial-aggregate)
+				(if (not direct_agg_stages_simple)
+					(quote legacy-fallback-complex-group-stage)
+					(if (and raw_contains_skip_level_nested_outer_ref (not scalar_uses_session_state))
+						(quote legacy-fallback-skip-level-outer-ref)
+						(if (not (nil? stage2_post_group_condition))
+							(quote legacy-fallback-post-group-filter)
+							(if (not (or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1))))
+								(quote legacy-fallback-explicit-group-keys)
+								(if (or (nil? tables2) (equal? tables2 '()))
+									(quote legacy-fallback-no-inner-tables)
+									(if (not (or scalar_has_outer_ref scalar_uses_session_state))
+										(quote legacy-fallback-uncorrelated-aggregate)
+										(quote inline-direct-agg-scan)))))))))))
+	(define scalar_subselect_inline_strategy scalar_subselect_inline_reason)
+	(define scalar_subselect_lowering_reason_from_facts (lambda (_has_outer _has_agg_or_stage _outer_refs_are_direct_columns _outer_has_group _contains_inner_select_marker _value_expr _value_expr_is_direct_column _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer)
+		(if (not _has_outer)
+			(quote inline-uncorrelated)
+			(if (nil? _value_expr)
+				(quote inline-missing-value-expr)
+				(if _has_agg_or_stage
+					(if (not (or _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer))
+						(quote inline-grouped-non-domain-correlation)
+						(if (and _contains_inner_select_marker (not _allow_grouped_direct_non_equality_outer))
+							(quote inline-grouped-inner-select-marker)
+							(quote prefer-unnest)))
+					(if (not _outer_refs_are_direct_columns)
+						(quote inline-non-grouped-non-direct-outer-refs)
+						(if _outer_has_group
+							(quote inline-non-grouped-outer-group-barrier)
+							(if (and _contains_inner_select_marker (not _value_expr_is_direct_column))
+								(quote inline-non-grouped-inner-select-marker)
+								(quote prefer-unnest)))))))))
 
 	(define build_scalar_subselect_inline_with_strategy (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
 		(if (not (nil? union_parts))
-			(error "scalar subselect UNION ALL is not supported yet")
+			(begin
+				(planner_debug_record_scalar_event (quote inline-strategy) (quote inline-union-all-not-supported))
+				(error "scalar subselect UNION ALL is not supported yet"))
 			(begin
 				(match (scalar_subselect_shape_facts subquery outer_schemas)
 					'(raw_group raw_having raw_order raw_limit raw_offset _raw_value_expr _raw_has_outer _raw_outer_refs_are_direct_columns _raw_contains_inner_select_marker _raw_has_aggregate scalar_uses_session_state raw_contains_skip_level_nested_outer_ref)
@@ -3154,8 +3239,9 @@ seeing the correctly prefixed outer alias. */
 									stage2_group
 									tables2
 									scalar_has_outer_ref))
+								(planner_debug_record_scalar_event (quote inline-strategy) scalar_strategy)
 								(list scalar_strategy
-									(if (equal? scalar_strategy (quote direct-agg-scan))
+									(if (equal? scalar_strategy (quote inline-direct-agg-scan))
 										(build_scalar_subselect_via_direct_agg_scan)
 										(build_scalar_subselect_via_legacy_fallback)))
 							)
@@ -3861,7 +3947,7 @@ seeing the correctly prefixed outer alias. */
 							true))))
 				false))
 		false)))
-	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
+	(define scalar_subselect_lowering_reason (lambda (subquery outer_schemas)
 		(match (scalar_subselect_shape_facts subquery outer_schemas)
 			'(_g h _o _l _off _value_expr _has_outer _outer_refs_are_direct_columns _contains_inner_select_marker _has_aggregate _uses_session_state _contains_skip_level_nested_outer_ref) (begin
 				(define _has_agg_or_stage (or
@@ -3881,26 +3967,19 @@ seeing the correctly prefixed outer alias. */
 						(not _outer_has_group)
 						_outer_refs_are_direct_columns
 						(_raw_subquery_has_non_equality_outer_condition subquery outer_schemas)))
-				(if _has_outer
-					(if _has_agg_or_stage
-						(and
-							(or
-								(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
-								_allow_grouped_direct_non_equality_outer)
-							(if _contains_inner_select_marker _allow_grouped_direct_non_equality_outer true)
-							(not (nil? _value_expr))
-							true)
-						(and
-							_outer_refs_are_direct_columns
-							(not _outer_has_group)
-							(if _contains_inner_select_marker _value_expr_is_direct_column true)
-							(not (nil? _value_expr))
-							(not _has_aggregate)
-							(nil? h)
-							(or (nil? _g) (equal? _g '()))
-							true))
-					false))
+				(scalar_subselect_lowering_reason_from_facts
+					_has_outer
+					_has_agg_or_stage
+					_outer_refs_are_direct_columns
+					_outer_has_group
+					_contains_inner_select_marker
+					_value_expr
+					_value_expr_is_direct_column
+					(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
+					_allow_grouped_direct_non_equality_outer))
 			nil)))
+	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
+		(equal? (scalar_subselect_lowering_reason subquery outer_schemas) (quote prefer-unnest))))
 	(define _unnest_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(match (unnest_subselect subquery outer_schemas)
 			'(subst tbls) (begin
@@ -3912,10 +3991,12 @@ seeing the correctly prefixed outer alias. */
 				subst)
 			nil)
 	)))
-	(define scalar_subselect_lowering_policy (lambda (subquery outer_schemas)
-		(if (scalar_subselect_unnest_applicable subquery outer_schemas)
+	(define scalar_subselect_lowering_policy (lambda (subquery outer_schemas) (begin
+		(define lowering_reason (scalar_subselect_lowering_reason subquery outer_schemas))
+		(planner_debug_record_scalar_event (quote lowering) lowering_reason)
+		(if (equal? lowering_reason (quote prefer-unnest))
 			(quote prefer-unnest)
-			(quote inline-only))))
+			(quote inline-only)))))
 	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
 		(match (scalar_subselect_lowering_policy subquery outer_schemas)
 			(quote prefer-unnest) (begin
