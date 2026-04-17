@@ -192,6 +192,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(try (lambda () (require_canonical_logical_expr "unit" case_expr)) (lambda (e) (planner_contract "raw" true)))
 	(assert (planner_contract "raw") true "planner contract rejects raw case-insensitive get_column markers")
 	(assert (equal? (require_canonical_logical_expr "unit" case_expr_canon) case_expr_canon) true "planner contract accepts canonical logical expr")
+	(define stage_global (make_group_stage '(1) nil '() nil nil nil nil))
+	(define stage_scoped (make_group_stage '(1) nil '() nil nil '("u") nil))
+	(define stage_part (make_partition_stage '("u") '() 1 5 0 nil))
+	(define stage_once (make_once_per_partition_stage '(1) nil '() 2 '("u") nil nil))
+	(assert (equal? (stage_kind stage_global) 'global-group) true "stage_kind classifies global group stages")
+	(assert (equal? (stage_kind stage_scoped) 'scoped-group) true "stage_kind classifies scoped group stages")
+	(assert (equal? (stage_kind stage_part) 'partition) true "stage_kind classifies partition stages")
+	(assert (equal? (stage_kind (make_dedup_stage '(1) '("u"))) 'dedup) true "stage_kind classifies dedup stages")
+	(assert (equal? (stage_kind stage_once) 'once-per-partition) true "stage_kind classifies once-per-partition stages")
+	(assert (equal? (stage_once_limit stage_once) 2) true "stage_once_limit reads once-per-partition limit")
+	(assert (stage_is_scoped? stage_scoped) true "stage_is_scoped? is true for scoped stages")
+	(assert (stage_is_scoped? stage_global) false "stage_is_scoped? is false for global stages")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))
