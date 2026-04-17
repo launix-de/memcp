@@ -336,6 +336,75 @@ primitive: callers stay responsible for registering visible schema metadata. */
 		mat_source
 		(materialized-subquery-init id subquery materialized_rows))
 )))
+/* build_legacy_prejoin_materialize_plan: isolate the remaining session/resultrow-
+backed prejoin filler used by trigger backfill paths. This is intentionally a
+legacy fallback wrapper; query-time prejoin filling stays on the canonical
+build_queryplan row stream. */
+(define build_legacy_prejoin_materialize_plan (lambda (schema prejoin_schema prejointbl prejoin_columns prejoin_column_names prejoin_source_tables raw_condition covered_partition_stages schemas replace_find_column) (begin
+	(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
+		(match scan_tables
+			(cons '(tblvar schema tbl isOuter joinexpr) rest) (begin
+				/* columns needed from this table for materialization + condition */
+				(set cols (merge_unique (list
+					(extract_columns_for_tblvar tblvar scan_condition)
+					(merge_unique (map prejoin_columns (lambda (mc) (extract_columns_for_tblvar tblvar (cadr mc)))))
+					(extract_outer_columns_for_tblvar tblvar scan_condition)
+					(merge_unique (map prejoin_columns (lambda (mc) (extract_outer_columns_for_tblvar tblvar (cadr mc)))))
+					(extract_later_joinexpr_columns_for_tblvar tblvar rest)
+				)))
+				(match (split_scan_condition isOuter joinexpr scan_condition rest) '(now_condition later_condition) (begin
+					(set filtercols (merge_unique (list
+						(extract_columns_for_tblvar tblvar now_condition)
+						(extract_outer_columns_for_tblvar tblvar now_condition))))
+					(scan_wrapper 'scan schema tbl
+						(cons list filtercols)
+						'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+						(cons list cols)
+						'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_materialize_scan rest later_condition false))
+						/* reduce: merge sub-results */
+						'('lambda '('acc 'sub) '('merge 'acc 'sub))
+						'(list)
+						/* reduce2: outermost inserts into prejoin, inner levels merge */
+						(if is_outermost
+							'('lambda '('acc 'shard_rows) '('insert '('table prejoin_schema prejointbl) (cons 'list prejoin_column_names) 'shard_rows '(list) '('lambda '() true) true))
+							'('lambda '('acc 'shard_rows) '('merge 'acc 'shard_rows)))
+						isOuter
+					)
+				))
+			)
+			'() /* base case: produce one row wrapped in a list */
+			'('if (optimize (replace_columns_from_expr (coalesceNil scan_condition true)))
+				(list (quote list) (cons (quote list) (map prejoin_columns (lambda (mc) (replace_columns_from_expr (cadr mc))))))
+				'(list))
+		)
+	))
+	(define prejoin_materialize_fields (merge (map prejoin_columns (lambda (mc) (list (car mc) (cadr mc))))))
+	(define prejoin_materialize_rowplan (build_queryplan schema
+		prejoin_source_tables
+		prejoin_materialize_fields
+		raw_condition
+		covered_partition_stages
+		schemas
+		replace_find_column
+		nil))
+	(define _pj_prev_rr (symbol "__pj_prev_resultrow"))
+	(define _pj_row_sym (symbol "__pj_row"))
+	(list 'begin
+		(list 'set _pj_prev_rr (symbol "resultrow"))
+		(list 'set (symbol "resultrow")
+			(list 'lambda (list _pj_row_sym)
+				(list 'insert (list 'table prejoin_schema prejointbl)
+					(cons 'list prejoin_column_names)
+					(list 'list
+						(cons 'list (map prejoin_column_names (lambda (col)
+							(list 'get_assoc _pj_row_sym col)))))
+					(list)
+					(list 'lambda (list) true)
+					true)))
+		prejoin_materialize_rowplan
+		(list 'set (symbol "resultrow") _pj_prev_rr)
+	)
+)))
 (define materialized-source? (lambda (table-source)
 	(or
 		(and (string? table-source) (>= (strlen table-source) 1) (equal? (substr table-source 0 1) "."))
@@ -6483,74 +6552,21 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
 				(planned_materialized_fields prejointbl prejoin_schema_def)
 				/* prejoin table creation deferred to runtime (guard at plan assembly below) */
-				/* legacy nested-loop materializer retained temporarily for trigger backfill paths.
-				Query-time prejoin filling uses the canonical build_queryplan row stream below. */
-				(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
-					(match scan_tables
-						(cons '(tblvar schema tbl isOuter joinexpr) rest) (begin
-							/* columns needed from this table for materialization + condition */
-							(set cols (merge_unique (list
-								(extract_columns_for_tblvar tblvar scan_condition)
-								(merge_unique (map prejoin_columns (lambda (mc) (extract_columns_for_tblvar tblvar (cadr mc)))))
-								(extract_outer_columns_for_tblvar tblvar scan_condition)
-								(merge_unique (map prejoin_columns (lambda (mc) (extract_outer_columns_for_tblvar tblvar (cadr mc)))))
-								(extract_later_joinexpr_columns_for_tblvar tblvar rest)
-							)))
-							(match (split_scan_condition isOuter joinexpr scan_condition rest) '(now_condition later_condition) (begin
-								(set filtercols (merge_unique (list
-									(extract_columns_for_tblvar tblvar now_condition)
-									(extract_outer_columns_for_tblvar tblvar now_condition))))
-								(scan_wrapper 'scan schema tbl
-									(cons list filtercols)
-									'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-									(cons list cols)
-									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_materialize_scan rest later_condition false))
-									/* reduce: merge sub-results */
-									'('lambda '('acc 'sub) '('merge 'acc 'sub))
-									'(list)
-									/* reduce2: outermost inserts into prejoin, inner levels merge */
-									(if is_outermost
-										'('lambda '('acc 'shard_rows) '('insert '('table prejoin_schema prejointbl) (cons 'list prejoin_column_names) 'shard_rows '(list) '('lambda '() true) true))
-										'('lambda '('acc 'shard_rows) '('merge 'acc 'shard_rows)))
-									isOuter
-								)
-							))
-						)
-						'() /* base case: produce one row wrapped in a list */
-						'('if (optimize (replace_columns_from_expr (coalesceNil scan_condition true)))
-							(list (quote list) (cons (quote list) (map prejoin_columns (lambda (mc) (replace_columns_from_expr (cadr mc))))))
-							'(list))
-					)
-				))
 				(define covered_partition_stages (filter partition_stages (lambda (ps)
 					(reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 						(or acc (has? known_table_aliases a))) false))))
-				(define prejoin_materialize_fields (merge (map prejoin_columns (lambda (mc) (list (car mc) (cadr mc))))))
-				(define prejoin_materialize_rowplan (build_queryplan schema
-					prejoin_source_tables
-					prejoin_materialize_fields
-					raw_condition
-					covered_partition_stages
-					schemas
-					replace_find_column
-					nil))
-				(define prejoin_materialize_plan (begin
-					(define _pj_prev_rr (symbol "__pj_prev_resultrow"))
-					(define _pj_row_sym (symbol "__pj_row"))
-					(list 'begin
-						(list 'set _pj_prev_rr (symbol "resultrow"))
-						(list 'set (symbol "resultrow")
-							(list 'lambda (list _pj_row_sym)
-								(list 'insert (list 'table prejoin_schema prejointbl)
-									(cons 'list prejoin_column_names)
-									(list 'list
-										(cons 'list (map prejoin_column_names (lambda (col)
-											(list 'get_assoc _pj_row_sym col)))))
-									(list)
-									(list 'lambda (list) true)
-									true)))
-						prejoin_materialize_rowplan
-						(list 'set (symbol "resultrow") _pj_prev_rr))))
+				(define prejoin_materialize_plan
+					(build_legacy_prejoin_materialize_plan
+						schema
+						prejoin_schema
+						prejointbl
+						prejoin_columns
+						prejoin_column_names
+						prejoin_source_tables
+						raw_condition
+						covered_partition_stages
+						schemas
+						replace_find_column))
 				/* Design contract:
 				Keep get_column / aggregate / window sentinels logical for as long as
 				possible. Materialized stages may register lineage and visible schemas,
