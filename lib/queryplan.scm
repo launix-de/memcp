@@ -658,16 +658,14 @@ occurrence index so self-joins do not collapse distinct roles. */
 	(define total_counts (newsession))
 	(map tables (lambda (td) (match td
 		'(_ tschema ttbl _ _) (begin
-			(define src_tbl (scan_tagged_table_base ttbl))
-			(define src (concat tschema "." src_tbl))
+			(define src (concat tschema "." ttbl))
 			(total_counts src (+ 1 (coalesceNil (total_counts src) 0)))
 			nil)
 		nil)))
 	(define seen_counts (newsession))
 	(define alias_pairs (map tables (lambda (td) (match td
 		'(tv tschema ttbl _ _) (begin
-			(define src_tbl (scan_tagged_table_base ttbl))
-			(define src (concat tschema "." src_tbl))
+			(define src (concat tschema "." ttbl))
 			(define idx (coalesceNil (seen_counts src) 0))
 			(define canon (if (> (coalesceNil (total_counts src) 0) 1)
 				(concat src "#" idx)
@@ -1894,8 +1892,7 @@ Returns (keytable_name key_col_names schema_def) where schema_def is a list of
 column descriptors suitable for the schemas assoc in untangle_query.
 Does NOT handle FK→PK reuse (returns nil for that case — caller must check). */
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
-	(define keytable_base (scan_tagged_table_base tbl))
-	(define keytable_source_name (planner-temp-source-name keytable_base tblvar))
+	(define keytable_source_name (planner-temp-source-name tbl tblvar))
 	(if (equal? keytable_source_name "")
 		(error (concat "make_keytable_schema: empty source name for tbl=" tbl " tblvar=" tblvar)))
 	(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
@@ -1922,20 +1919,19 @@ uses this as guard for initial collect + trigger deploy), false on subsequent ca
 For FK→PK reuse: returns (parent_tbl parent_schema fk_init_code) where parent_schema
 comes from show() on the existing parent table and fk_init_code creates the alias column. */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
-	(define keytable_base (scan_tagged_table_base tbl))
 	/* physical_tbl: true for real user tables, false for planner-internal temps
 	(dot-prefixed keytables/prejoins) that may not exist in storage at compile time */
-	(define physical_tbl (and (string? keytable_base) (> (strlen keytable_base) 0) (not (equal? (substr keytable_base 0 1) "."))))
-	(define keytable_source_name (planner-temp-source-name keytable_base tblvar))
+	(define physical_tbl (and (string? tbl) (> (strlen tbl) 0) (not (equal? (substr tbl 0 1) "."))))
+	(define keytable_source_name (planner-temp-source-name tbl tblvar))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
 	reuse the parent (referenced) table instead of creating a temp keytable. */
 	(define fk_result (if (and physical_tbl (nil? condition_suffix) (equal? 1 (count keys)))
 		(match (car keys)
 			'('get_column (eval tblvar) false scol false) (begin
-				(define fk_info (get_fk_target (table schema keytable_base) scol))
+				(define fk_info (get_fk_target (table schema tbl) scol))
 				(if (not (nil? fk_info))
 					(begin
-						(define alias_map (list (list tblvar (concat schema "." keytable_base))))
+						(define alias_map (list (list tblvar (concat schema "." tbl))))
 						(define key_name
 							(sanitize_temp_name
 								(canonical_expr_name
@@ -1985,7 +1981,7 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 			(define kt_partition_code (cons 'list (if physical_tbl
 				(merge (map (produceN (count keys)) (lambda (i)
 					(match (key_at i)
-						'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (list 'shardcolumn (list 'table schema keytable_base) scol)))
+						'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (list 'shardcolumn (list 'table schema tbl) scol)))
 						'()))))
 				'())))
 			/* init_code: idempotent runtime keytable creation.
@@ -2270,7 +2266,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW session) ...) and
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(list 'scan '(session "__memcp_tx") (scan-codegen-table schema tbl)
+					(list 'scan '(session "__memcp_tx") (list 'table schema tbl)
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -5784,7 +5780,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(define lowered_expr (group_value_local_key_expr expr))
 					(define col_name (group_value_local_col_name expr))
 					(define cols (extract_columns_for_tblvar tblvar lowered_expr))
-					(list (quote createcolumn) (scan-codegen-table schema tbl) col_name "any" '(list) '(list "temp" true)
+					(list (quote createcolumn) (list (quote table) schema tbl) col_name "any" '(list) '(list "temp" true)
 						(cons (quote list) cols)
 						(list (quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col))))
 							(replace_columns_from_expr lowered_expr))))))
@@ -6489,7 +6485,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(list (expr_name expr) (expr_name expr))
 						))))
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1))) nil
-							(list 'register_keytable_cleanup (scan-codegen-table schema tbl) (list 'table schema grouptbl) tblvar
+							(list 'register_keytable_cleanup (list 'table schema tbl) (list 'table schema grouptbl) tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
 						/* collect + trigger deploy on first keytable creation only.
 						createtable inside init_code returns true on first creation.
@@ -6627,11 +6623,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define deferred_prejoin_joinexpr_parts (cadr (cdr _prejoin_joinexpr_split)))
 				(define prejoin_alias_map (build_occurrence_alias_map prejoin_source_tables))
 				(define _prejoin_alias_variants (lambda (tv tschema ttbl)
-					(define _prejoin_tbl_base (scan_tagged_table_base ttbl))
 					(merge
 						(list tv)
 						(if (equal? (visible_occurrence_alias tv) tv) '() (list (visible_occurrence_alias tv)))
-						(if (equal? (visible_occurrence_alias tv) _prejoin_tbl_base) (list (concat tschema "." _prejoin_tbl_base)) '()))))
+						(if (equal? (visible_occurrence_alias tv) ttbl) (list (concat tschema "." ttbl)) '()))))
 				(define known_table_aliases (merge (map prejoin_source_tables (lambda (t) (match t
 					'(tv tschema ttbl _ _) (_prejoin_alias_variants tv tschema ttbl)
 					'())))))
@@ -6850,62 +6845,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							acc
 							(merge acc (list mc))))
 					prejoin_columns_base))
-				/* Aggregates over flattened derived/scalar payloads need the row-local
-				input expression materialized on the prejoin as well. Otherwise a later
-				createcolumn sees only COUNT's synthetic keytable row and SUM(...) falls
-				back to NULL/0 because the payload expression was never materialized. */
-				(define prejoin_schema_expr (lambda (alias_ col)
-					(begin
-						(define alias_cols (if (has_assoc? schemas alias_) (schemas alias_) nil))
-						(define coldef (if (nil? alias_cols) nil
-							(reduce alias_cols (lambda (found colinfo)
-								(if (not (nil? found))
-									found
-									(if (equal?? (colinfo "Field") col) colinfo nil)))
-								nil)))
-						(if (nil? coldef) nil
-							(begin
-								(define raw_expr (coldef "Expr"))
-								(if (nil? raw_expr) nil (replace_find_column raw_expr)))))))
-				(define prejoin_aggregate_input_expr (lambda (agg_expr)
-					(if (and (prejoin_materializable_projection? agg_expr)
-						(not (equal? (extract_all_get_columns agg_expr) '()))
-						(reduce (extract_all_get_columns agg_expr) (lambda (ok mc) (and ok (match mc
-							'(_ '((symbol get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
-							'(_ '((quote get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
-							false)))
-							true))
-						agg_expr
-						(match agg_expr
-							'((symbol get_column) alias_ _ col _) (begin
-								(define schema_expr (prejoin_schema_expr alias_ col))
-								(if (and (not (nil? schema_expr)) (prejoin_materializable_projection? schema_expr)) schema_expr nil))
-							'((quote get_column) alias_ _ col _) (begin
-								(define schema_expr (prejoin_schema_expr alias_ col))
-								(if (and (not (nil? schema_expr)) (prejoin_materializable_projection? schema_expr)) schema_expr nil))
-							nil))))
-				(define prejoin_aggregate_inputs (merge
-					(extract_assoc resolved_fields (lambda (_field_name field_expr)
-						(filter (map (extract_aggregates field_expr) (lambda (ag) (match ag
-							'(agg_expr _ _) (prejoin_aggregate_input_expr agg_expr)
-							nil)))
-							(lambda (agg_expr) (not (nil? agg_expr))))))
-					(extract_assoc fields (lambda (_field_name field_expr)
-						(filter (map (extract_aggregates field_expr) (lambda (ag) (match ag
-							'(agg_expr _ _) (prejoin_aggregate_input_expr agg_expr)
-							nil)))
-							(lambda (agg_expr) (not (nil? agg_expr))))))))
-				(define prejoin_columns (reduce prejoin_aggregate_inputs
-					(lambda (acc agg_expr)
-						(begin
-							(define canonical_lineage_expr (canonicalize_expr
-								(normalize_canonical_aliases (canonicalize_prejoin_source_expr agg_expr))
-								prejoin_alias_map))
-							(define canon_name (serialize_canonical_expr canonical_lineage_expr))
-							(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false)
-								acc
-								(merge acc (list (list canon_name agg_expr))))))
-					prejoin_columns_projected))
+				(define prejoin_columns prejoin_columns_projected)
 				(define prejoin_column_names (map prejoin_columns car))
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
@@ -6924,7 +6864,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(normalize_canonical_aliases (canonicalize_prejoin_source_expr prejoin_row_domain_raw))
 						prejoin_alias_map)))
 				(define prejointbl (concat ".prejoin:"
-					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." (scan_tagged_table_base ttbl))))
+					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* capture outer schema and table name for trigger code generation */
 				(define prejoin_schema schema)
@@ -7353,7 +7293,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													true
 													(list raw_update_fn 'OLD 'NEW 'session)))))
 										/* emit the register call as an S-expression to be executed at query time */
-										(list 'register_prejoin_incremental src_schema (scan_tagged_table_base src_tbl) prejoin_schema prejoin_table_name
+										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
 				/* assemble: createtable returns true on first creation -> materialize + deploy triggers.
 				Subsequent calls: table exists, triggers active, incremental maintenance. */
@@ -7564,7 +7504,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								orc_sort_dirs_vals))
 							/* partitioncount is auto-detected from reduceinit shape: (list init nil) → 1 partition key */
 							(define orc_setup (lambda ()
-								(createcolumn (scan-codegen-table schema tbl) orc_col_name "any" '()
+								(createcolumn (table schema tbl) orc_col_name "any" '()
 									(list "sortcols" full_sort_cols "sortdirs" full_sort_dirs
 										"mapcols" extra_mapcols
 										"mapfn" orc_mapfn "reducefn" orc_reducefn
@@ -8069,13 +8009,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 for tables that have pre-resolved defines. tbl_map is an assoc list of (schema.name . symbol). */
 (define _replace_table_with_sym (lambda (expr tbl_map)
 	(if (not (list? expr)) expr
-		(if (and (equal? (count expr) 3) (equal? (car expr) 'table) (string? (nth expr 1)))
+		(if (and (equal? (count expr) 3) (equal? (car expr) 'table) (string? (nth expr 1)) (string? (nth expr 2)))
 			(begin
-				(define base_tbl (scan_tagged_table_base (nth expr 2)))
-				(define normalized_expr (if (string? base_tbl) (list 'table (nth expr 1) base_tbl) expr))
-				(define key (if (string? base_tbl) (concat (nth expr 1) ":" base_tbl) nil))
+				(define key (concat (nth expr 1) ":" (nth expr 2)))
 				(define sym (get_assoc tbl_map key))
-				(if (nil? sym) normalized_expr sym))
+				(if (nil? sym) expr sym))
 			(map expr (lambda (e) (_replace_table_with_sym e tbl_map)))))))
 
 /* build_queryplan: wraps _build_queryplan_inner with table-pointer pre-resolution */
