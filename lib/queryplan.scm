@@ -1647,10 +1647,35 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 				(cons (quote cache-query) _) false
 				true))))))
 )
+/* stage_outer_sources: list of correlation tuples carried by scalar/partition
+stages so the post-reorder anti-pass fixup can null-extend outer rows whose
+correlation key has no match in the inner helper (per FAQ point 34 /
+once-limit-rework.md). Each entry is (outer_tblvar outer_colname inner_expr).
+Present only on stages where Path B/C extracted us_domain_cols; nil elsewhere.
+Design: assoc-style add-on; make_stage signature stays stable. Rebuilders must
+preserve via stage_preserve_cache_meta. No consumer reads this field yet —
+inject_anti_passes (next PR) will annotate stages when join_reorder places the
+helper alias above its correlation source, and build_queryplan will emit the
+companion anti-pass scan. */
+(define stage_outer_sources (lambda (stage) (reduce stage (lambda (acc item)
+	(if (nil? acc) (match item
+		(cons (quote outer-sources) rest) (if (nil? rest) nil (car rest))
+		_ nil
+	) acc)
+) nil)))
+(define stage_with_outer_sources (lambda (stage sources)
+	(if (or (nil? sources) (equal? sources '())) stage
+		(cons (list (quote outer-sources) sources)
+			(filter stage (lambda (item) (match item
+				(cons (quote outer-sources) _) false
+				true))))))
+)
 (define stage_preserve_cache_meta (lambda (old_stage new_stage)
-	(stage_with_cache_query
-		(stage_with_cache_policy new_stage (stage_cache_policy old_stage))
-		(stage_cache_query old_stage)
+	(stage_with_outer_sources
+		(stage_with_cache_query
+			(stage_with_cache_policy new_stage (stage_cache_policy old_stage))
+			(stage_cache_query old_stage))
+		(stage_outer_sources old_stage)
 	)
 ))
 (define stage_has_group_boundary (lambda (stage) (begin
