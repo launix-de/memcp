@@ -221,11 +221,15 @@ keytables/prejoins may not exist at compile time (runtime-only creation). */
 		nil
 	)
 ))
-(define register_materialized_subquery_metadata (lambda (mat_source fields_assoc)
+(define register_materialized_subquery_metadata (lambda (mat_source fields_assoc preserve_visible_boundary)
 	(begin
-		(define schema_def (extract_assoc fields_assoc (lambda (k v)
+		(define planned_schema_def (extract_assoc fields_assoc (lambda (k v)
 			(list "Field" k "Type" "any" "Expr" v))))
-		(planned_materialized_fields mat_source schema_def)
+		(define visible_schema_def (if preserve_visible_boundary
+			(extract_assoc fields_assoc (lambda (k v)
+				(list "Field" k "Type" "any")))
+			planned_schema_def))
+		(planned_materialized_fields mat_source planned_schema_def)
 		(prejoin_canonical_sources mat_source
 			(merge (extract_assoc fields_assoc (lambda (k v)
 				(list
@@ -234,7 +238,7 @@ keytables/prejoins may not exist at compile time (runtime-only creation). */
 		(materialized_source_expr_lookup mat_source
 			(merge (extract_assoc fields_assoc (lambda (k v)
 				(map (materialized_source_expr_keys v) (lambda (key) (list key k)))))))
-		schema_def
+		visible_schema_def
 	)
 ))
 /* Some rewrite paths carry alias provenance as (visible_alias canonical_source).
@@ -4066,6 +4070,7 @@ seeing the correctly prefixed outer alias. */
 						(reduce_assoc pruned_fields2 (lambda (acc _k v)
 							(or acc (expr_contains_materialized_helper v)))
 							false))
+					(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
 					(define aggregate_refs_subquery_alias (lambda (expr)
 						(reduce (extract_aggregates expr) (lambda (acc ag)
 							(or acc (match ag
@@ -4073,21 +4078,35 @@ seeing the correctly prefixed outer alias. */
 								(reduce (extract_tblvars agg_expr) (lambda (found tv) (or found (equal?? tv id))) false)
 								false)))
 							false)))
+					(define correlated_inner_select_refs_subquery_alias (lambda (expr)
+						(and
+							(_contains_inner_select_marker expr)
+							(reduce (extract_tblvars expr) (lambda (found tv)
+								(or found (equal?? tv id)))
+								false))))
+					(define grouped_or_helper_boundary
+						(or groups2_present flatten_has_helper_backed_projection))
 					(define outer_uses_subquery_group_boundary (or
-						(reduce_assoc fields (lambda (acc _k v) (or acc (aggregate_refs_subquery_alias v))) false)
+						(reduce_assoc fields (lambda (acc _k v) (or acc
+							(aggregate_refs_subquery_alias v)
+							(and grouped_or_helper_boundary (correlated_inner_select_refs_subquery_alias v)))) false)
+						(and grouped_or_helper_boundary (correlated_inner_select_refs_subquery_alias (coalesceNil condition true)))
 						(reduce (coalesceNil group '()) (lambda (acc gexpr)
 							(or acc (reduce (extract_tblvars gexpr) (lambda (found tv) (or found (equal?? tv id))) false)))
 							false)
 						(reduce (coalesceNil order '()) (lambda (acc o) (or acc (match o
-							'(col _dir) (aggregate_refs_subquery_alias col)
+							'(col _dir) (or
+								(aggregate_refs_subquery_alias col)
+								(and grouped_or_helper_boundary (correlated_inner_select_refs_subquery_alias col)))
 							false)))
 							false)
-						(aggregate_refs_subquery_alias (coalesceNil having true))))
+						(or
+							(aggregate_refs_subquery_alias (coalesceNil having true))
+							(and grouped_or_helper_boundary (correlated_inner_select_refs_subquery_alias (coalesceNil having true))))))
 					/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 					(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
 					/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 					/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
-					(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
 					(define flatten_groups2 (if groups2_present
 						(filter groups2 (lambda (stage)
 							(or
@@ -4171,7 +4190,8 @@ seeing the correctly prefixed outer alias. */
 							(define mat_init (nth materialized_binding 1))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
 								(list mat_init)))
-							(define mat_schema_def (register_materialized_subquery_metadata mat_source fields2))
+							(define mat_schema_def
+								(register_materialized_subquery_metadata mat_source fields2 outer_uses_subquery_group_boundary))
 							(list
 								(list (list id schemax mat_source isOuter joinexpr))
 								'()
@@ -6671,20 +6691,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* capture outer schema and table name for trigger code generation */
-					(define prejoin_schema schema)
-					(define pj_schema schema) /* needed in quoted runtime code below */
-					(define prejoin_table_name prejointbl)
-					(define temp_source_table? materialized-source?)
-					(register_prejoin_materialized_metadata
-						canonicalize_prejoin_source_expr
-						prejointbl
-						prejoin_columns
-						prejoin_alias_map
-						prejoin_source_tables
-						prejoin_schema_def)
-					/* prejoin table creation deferred to runtime (guard at plan assembly below) */
-					(define covered_partition_stages (filter partition_stages (lambda (ps)
-						(reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
+				(define prejoin_schema schema)
+				(define pj_schema schema) /* needed in quoted runtime code below */
+				(define prejoin_table_name prejointbl)
+				(define temp_source_table? materialized-source?)
+				(register_prejoin_materialized_metadata
+					canonicalize_prejoin_source_expr
+					prejointbl
+					prejoin_columns
+					prejoin_alias_map
+					prejoin_source_tables
+					prejoin_schema_def)
+				/* prejoin table creation deferred to runtime (guard at plan assembly below) */
+				(define covered_partition_stages (filter partition_stages (lambda (ps)
+					(reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 						(or acc (has? known_table_aliases a))) false))))
 				(define prejoin_materialize_plan
 					(build_legacy_prejoin_materialize_plan

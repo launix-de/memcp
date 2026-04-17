@@ -65,6 +65,27 @@ test_cases:
           score: 1
         - grp: 20
           score: 1
-
+  - name: "outer grouped domain stays logical in EXPLAIN IR"
+    sql: |
+      EXPLAIN IR SELECT o.grp,
+        COALESCE((SELECT SUM(i.cnt)
+          FROM (
+            SELECT s2.parent, s2.grp, COUNT(*) AS cnt
+            FROM cgd_state s2
+            GROUP BY s2.parent, s2.grp
+          ) i
+          WHERE i.parent = o.sample_id AND i.grp = o.grp
+        ), 0) AS score
+      FROM (
+        SELECT grp, MIN(ID) AS sample_id
+        FROM cgd_state
+        GROUP BY grp
+      ) o
+      ORDER BY o.grp
+    expect:
+      contains:
+        - "\"_unn_"
+      not_contains:
+        - "__mat:o:"
 cleanup:
   - sql: "DROP TABLE IF EXISTS cgd_state"
