@@ -1028,6 +1028,33 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 		(not (nil? (scan_tagged_table_offset tbl)))
 		(not (equal? (scan_tagged_table_partition_cols tbl) 0)))
 ))
+/* Ordered scalar scans currently lower physically via partitioned scan_order.
+The later logical ORDER/LIMIT normalization should keep targeting these small
+helpers instead of rebuilding alias/order logic inline inside untangle_query. */
+(define scalar_scan_domain_order (lambda (domain_cols rewrite_inner_expr sq_alias)
+	(filter
+		(map domain_cols (lambda (dc) (list (rewrite_inner_expr (nth dc 0)) '<)))
+		(lambda (oi) (match oi '(col _)
+			(match col
+				'((symbol get_column) a _ _ _) (equal? a sq_alias)
+				'((quote get_column) a _ _ _) (equal? a sq_alias)
+				false)
+			false))
+)))
+(define scalar_scan_rewrite_order (lambda (order_list rewrite_expr)
+	(map (coalesceNil order_list '()) (lambda (oi) (match oi
+		'(col dir) (list (rewrite_expr col) dir)
+		oi)))
+))
+(define scalar_scan_order_supported (lambda (order_list sq_alias)
+	(reduce order_list (lambda (acc oi) (and acc (match oi
+		'(col _dir) (match col
+			'((symbol get_column) a _ _ _) (equal? a sq_alias)
+			'((quote get_column) a _ _ _) (equal? a sq_alias)
+			false)
+		false)))
+		true)
+))
 (define make_once_limit_scan_contract (lambda (limit_value offset_value partition_cols once_limit tblvar condition joinexpr tbl) (begin
 	(define contract_once_limit (if (nil? once_limit)
 		(if (and (not (nil? limit_value)) (<= limit_value 1))
@@ -3651,19 +3678,9 @@ seeing the correctly prefixed outer alias. */
 														(begin
 															(if (not (equal? _us_inner_tbls_rewritten '()))
 																(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
-															(define us_dom_order (filter (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<)))
-																(lambda (oi) (match oi '(col _) (match col
-																	'((symbol get_column) a _ _ _) (equal? a us_sq_prefix)
-																	'((quote get_column) a _ _ _) (equal? a us_sq_prefix)
-																	false) false))))
-															(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
-															(define us_order_supported (reduce us_renamed_order (lambda (acc oi) (and acc (match oi
-																'(col _dir) (match col
-																	'((symbol get_column) a _ _ _) (equal? a us_sq_prefix)
-																	'((quote get_column) a _ _ _) (equal? a us_sq_prefix)
-																	false)
-																false)))
-																true))
+															(define us_dom_order (scalar_scan_domain_order us_domain_cols _us_ria us_sq_prefix))
+															(define us_renamed_order (scalar_scan_rewrite_order us_orig_order _us_ria))
+															(define us_order_supported (scalar_scan_order_supported us_renamed_order us_sq_prefix))
 															(if (not us_order_supported)
 																nil
 																(begin
