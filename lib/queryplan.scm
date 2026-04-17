@@ -2523,7 +2523,7 @@ seeing the correctly prefixed outer alias. */
 		replace_find_column_subselect
 	)))
 
-	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
+	(define build_scalar_subselect_inline_with_strategy (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
 		(if (not (nil? union_parts))
 			(error "scalar subselect UNION ALL is not supported yet")
@@ -2856,15 +2856,15 @@ seeing the correctly prefixed outer alias. */
 	)
 	)
 	)
-	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
-		(match (build_scalar_subselect_with_strategy subquery outer_schemas)
+	(define build_scalar_subselect_inline (lambda (subquery outer_schemas) (begin
+		(match (build_scalar_subselect_inline_with_strategy subquery outer_schemas)
 			'(_ lowered_expr) lowered_expr
 			nil)
 	)))
 	(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
 		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
 		(list (quote coalesceNil)
-			(build_scalar_subselect
+			(build_scalar_subselect_inline
 				(list schema2 tables2
 					(list "__exists" true)
 					condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
@@ -3469,14 +3469,19 @@ seeing the correctly prefixed outer alias. */
 				subst)
 			nil)
 	)))
-	(define lower_scalar_subselect (lambda (subquery outer_schemas) (begin
+	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
 		(if (scalar_subselect_unnest_applicable subquery outer_schemas)
 			(begin
 				(define lowered_expr (_unnest_scalar_subselect subquery outer_schemas))
 				(if (nil? lowered_expr)
-					(build_scalar_subselect_with_strategy subquery outer_schemas)
+					(build_scalar_subselect_inline_with_strategy subquery outer_schemas)
 					(list (quote unnest) lowered_expr)))
-			(build_scalar_subselect_with_strategy subquery outer_schemas))
+			(build_scalar_subselect_inline_with_strategy subquery outer_schemas))
+	)))
+	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
+		(match (build_scalar_subselect_with_strategy subquery outer_schemas)
+			'(_ lowered_expr) lowered_expr
+			nil)
 	)))
 	(define _unnest_count_subselect (lambda (subquery outer_schemas target_expr comparison) (begin
 		(define _resolve_outer (lambda (expr) (match expr
@@ -3690,7 +3695,7 @@ seeing the correctly prefixed outer alias. */
 			(if (nil? not_expr)
 				(match kind
 					(quote inner_select) (match args
-						(cons subquery '()) (match (lower_scalar_subselect subquery outer_schemas)
+						(cons subquery '()) (match (build_scalar_subselect_with_strategy subquery outer_schemas)
 							'(_ lowered_expr) lowered_expr
 							nil)
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas)))))
