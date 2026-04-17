@@ -2481,10 +2481,11 @@ seeing the correctly prefixed outer alias. */
 	(define limit (if _cd_has nil limit))
 	(define offset (if _cd_has nil offset))
 
-	(define make_replace_find_column_subselect (lambda (schemas2 outer_schemas) (begin
+	(define make_replace_find_column_subselect (lambda (schemas2 outer_schemas preserve_grouped_outer_domain) (begin
 		/* force optimizer to retain both params by using them directly in the outer body */
 		(define _s schemas2)
 		(define _o outer_schemas)
+		(define _preserve_grouped_outer_domain preserve_grouped_outer_domain)
 		(define alias_exists_in_schema (lambda (schemas alias_name table_insensitive) (reduce_assoc schemas (lambda (acc alias cols)
 			(or acc ((if table_insensitive equal?? equal?) alias_name alias))
 		) false)))
@@ -2519,6 +2520,22 @@ seeing the correctly prefixed outer alias. */
 						nil))
 			) nil)
 		))
+		(define outer_expr_is_domain_safe (lambda (expr)
+			(and
+				(not (expr_has_opaque_scope expr))
+				(equal? (extract_aggregates expr) '())
+				(equal? (extract_window_funcs expr) '()))))
+		(define outer_alias_requires_domain_preservation (lambda (outer_alias) (begin
+			(define outer_cols (if (has_assoc? _o outer_alias) (_o outer_alias) nil))
+			(and _preserve_grouped_outer_domain
+				(not (nil? outer_cols))
+				(reduce outer_cols (lambda (needs_preserve coldef)
+					(or needs_preserve
+						(begin
+							(define expr (coalesceNil (coldef "Expr") nil))
+							(and (not (nil? expr))
+								(not (outer_expr_is_domain_safe expr))))))
+					false)))))
 		(define wrap_outer_leaves (lambda (expr) (match expr
 			(cons sym args) (if (is_get_column_sym sym)
 				(match args
@@ -2549,17 +2566,18 @@ seeing the correctly prefixed outer alias. */
 								(error (concat "column " column_name " does not exist in outer query"))
 								expr)
 							(begin
-								/* check if the outer column is a computed expression (derived table) */
 								(define outer_column (coalesce (canonical_column_in_schema _o alias_name table_insensitive column_name column_insensitive) column_name))
 								(define outer_cols (_o outer_alias))
 								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") outer_column)) coldef a)) nil))
 								(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
-								(if (and (not (nil? outer_expr)) (not (expr_has_opaque_scope outer_expr)))
-									/* derived table computed column without opaque scopes: inline expression
-									with leaf get_column nodes replaced by (outer sym) references */
-									(wrap_outer_leaves outer_expr)
-									/* real table column or opaque expression: symbol lookup in outer scope */
-									(list (quote outer) (symbol (concat outer_alias "." outer_column))))))
+								(if (outer_alias_requires_domain_preservation outer_alias)
+									/* grouped/windowed outer aliases define the visible correlation
+									domain; do not collapse them back into base-table refs */
+									(list (quote outer) (symbol (concat outer_alias "." outer_column)))
+									(if (and (not (nil? outer_expr)) (outer_expr_is_domain_safe outer_expr))
+										/* simple pass-through/computed wrapper columns may still inline */
+										(wrap_outer_leaves outer_expr)
+										(list (quote outer) (symbol (concat outer_alias "." outer_column)))))))
 					)
 				)
 			)
@@ -2709,7 +2727,7 @@ seeing the correctly prefixed outer alias. */
 								(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset nil nil))
 								groups2)
 							groups2))
-						(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
+						(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas false))
 						(define field_exprs (extract_assoc fields2 (lambda (k v) v)))
 						(define value_expr (match field_exprs
 							(cons only '()) only
@@ -3009,8 +3027,11 @@ seeing the correctly prefixed outer alias. */
 										(list (make_group_stage raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us nil _nt_virtual_init))
 										groups2_us)
 									groups2_us))
+								(define _us_has_field_aggregate (reduce_assoc fields2_us (lambda (found _k v)
+									(or found (not (equal? (extract_aggregates v) '())))) false))
 								/* resolve columns against inner and outer schemas */
-								(define rfcs_us (make_replace_find_column_subselect schemas2_us outer_schemas))
+								(define rfcs_us (make_replace_find_column_subselect schemas2_us outer_schemas
+									(or _us_has_field_aggregate raw_group_us raw_having_us raw_order_us)))
 								(set fields2_us (map_assoc fields2_us (lambda (k v) (rfcs_us v))))
 								(set condition2_us (rfcs_us (coalesceNil condition2_us true)))
 								/* wrap remaining unresolved qualified refs as (outer tbl.col) */
@@ -3500,6 +3521,26 @@ seeing the correctly prefixed outer alias. */
 			'()))))
 	(define _subquery_has_outer_refs (lambda (query outer_schemas)
 		(not (equal? (_subquery_outer_refs query outer_schemas) '()))))
+	(define _outer_ref_is_domain_column (lambda (outer_schemas ref) (match (split ref ".")
+		(list alias col) (begin
+			(define cols (if (has_assoc? outer_schemas alias) (outer_schemas alias) nil))
+			(define coldef (if (nil? cols)
+				nil
+				(reduce cols (lambda (found cd)
+					(if (or (not (nil? found)) (not (equal?? (cd "Field") col)))
+						found
+						cd))
+					nil)))
+			(if (nil? coldef)
+				false
+				(begin
+					(define expr (coalesceNil (coldef "Expr") nil))
+					(match expr
+						nil true
+						'((quote get_column) _ _ _ _) true
+						'((symbol get_column) _ _ _ _) true
+						_ (not (expr_has_opaque_scope expr))))))
+		_ false)))
 	(define _outer_ref_is_direct_column (lambda (outer_schemas ref) (match (split ref ".")
 		(list alias col) (begin
 			(define cols (if (has_assoc? outer_schemas alias) (outer_schemas alias) nil))
@@ -3524,23 +3565,37 @@ seeing the correctly prefixed outer alias. */
 		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
 			(and all_ok (_outer_ref_is_direct_column outer_schemas ref)))
 			true)))
+	(define _subquery_outer_refs_are_domain_columns (lambda (query outer_schemas)
+		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
+			(and all_ok (_outer_ref_is_domain_column outer_schemas ref)))
+			true)))
 	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
 		(match (scalar_subselect_shape_facts subquery outer_schemas)
 			'(_g h _o _l _off _value_expr _has_outer _outer_refs_are_direct_columns _contains_inner_select_marker _has_aggregate _uses_session_state _contains_skip_level_nested_outer_ref) (begin
+			(define _has_agg_or_stage (or
+				_has_aggregate
+				(not (nil? h))
+				(not (equal? (coalesceNil _g '()) '()))
+				(not (equal? (coalesceNil _o '()) '()))))
+			(define _outer_refs_supported (if _has_agg_or_stage
+				(_subquery_outer_refs_are_domain_columns subquery outer_schemas)
+				_outer_refs_are_direct_columns))
 			/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
 			(prejoin scoping bug when unnested table meets GROUP stage) */
 			(define _outer_has_group (or group having _cd_has))
 			(if (and
-				/* correlated: outer refs must be direct columns */
-				(or (not _has_outer) _outer_refs_are_direct_columns)
-				/* scalar helper scans still rely on build_scan; outer GROUP remains blocked
-				until the prejoin/group barrier can carry helper table metadata safely. */
-				(not _outer_has_group)
+				/* grouped/scalar-stage subselects may correlate against grouped outer
+				domains as long as those refs stay domain-safe */
+				(or (not _has_outer) _outer_refs_supported)
+				/* grouped outer domains are only supported for aggregate/staged
+				scalars; plain correlated lookups stay on the old blocked path */
+				(or (not _outer_has_group) (and _has_outer _has_agg_or_stage))
 				(not _contains_inner_select_marker)
 				(not (nil? _value_expr))
-				(not _has_aggregate)
-				(nil? h)
-				(or (nil? _g) (equal? _g '()))
+				(or _has_agg_or_stage
+					(and
+						(nil? h)
+						(or (nil? _g) (equal? _g '()))))
 				true)
 				true
 				false))
