@@ -3099,11 +3099,18 @@ seeing the correctly prefixed outer alias. */
 								/* count only OWN tables (not inner scoped ones from nested decorrelation) */
 								(define _us_inner_aliases (merge (map _us_inner_stages (lambda (s) (coalesceNil (stage_partition_aliases s) '())))))
 								(define _us_own_tables (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (not (has? _us_inner_aliases a)) true))))
-								(define _us_own_aliases (map _us_own_tables (lambda (td) (match td '(a _ _ _ _) a nil))))
-								(define _us_nested_direct_tbls (filter tables2_us (lambda (t) (match t
-									'(a _ _ _ _) (and (not (has? _us_inner_aliases a)) (not (has? _us_own_aliases a)))
+								(define _us_generated_unnest_alias (lambda (alias_name)
+									(and (string? alias_name)
+										(>= (strlen alias_name) 5)
+										(equal? (substr alias_name 0 5) "_unn_"))))
+								(define _us_base_tables (filter _us_own_tables (lambda (t) (match t
+									'(a _ _ _ _) (not (_us_generated_unnest_alias a))
 									true))))
-								(define us_single_tbl (and (list? _us_own_tables) (equal? (count _us_own_tables) 1)))
+								(define _us_nested_direct_tbls (filter _us_own_tables (lambda (t) (match t
+									'(a _ _ _ _) (_us_generated_unnest_alias a)
+									false))))
+								(define _us_base_aliases (map _us_base_tables (lambda (td) (match td '(a _ _ _ _) a nil))))
+								(define us_single_tbl (and (list? _us_base_tables) (equal? (count _us_base_tables) 1)))
 								/* check for aggregates in fields */
 								(define _us_agg (lambda (expr) (match expr
 									'((symbol aggregate) _ _ _) true
@@ -3141,11 +3148,11 @@ seeing the correctly prefixed outer alias. */
 										/* generate unique alias using fnv_hash to avoid collisions across nesting levels */
 										(define us_sq_idx (coalesceNil (sq_cache "idx") 0))
 										(sq_cache "idx" (+ us_sq_idx 1))
-										(define _us_own_tblname (match (car _us_own_tables) '(_ _ t _ _) (if (string? t) t "x") "x"))
+										(define _us_own_tblname (match (car _us_base_tables) '(_ _ t _ _) (if (string? t) t "x") "x"))
 										(define us_sq_prefix (concat "_unn_" _us_own_tblname "_" us_sq_idx))
 										/* build alias rename map: only OWN tables get prefixed.
 										Inner-scoped tables (from nested decorrelation) keep their alias. */
-										(define us_alias_map (map _us_own_tables (lambda (td) (match td
+										(define us_alias_map (map _us_base_tables (lambda (td) (match td
 											'(alias _ _ _ _) (list alias (if us_single_tbl us_sq_prefix (concat us_sq_prefix "\0" alias)))
 											(list "" "")))))
 										(define _us_lookup (lambda (a) (reduce us_alias_map (lambda (acc p) (if (nil? acc) (if (equal?? a (nth p 0)) (nth p 1) nil) acc)) nil)))
@@ -3345,13 +3352,13 @@ seeing the correctly prefixed outer alias. */
 											/* === B/C: Non-aggregate === */
 											(begin
 												/* value must be a simple column (not computed expression) for direct table entry */
-												(if (and us_single_tbl (equal? _us_nested_direct_tbls '()))
+												(if (and us_single_tbl (not _us_nested_direct_refs_base_aliases))
 													/* === B/C: Non-agg → direct LEFT JOIN table entry ===
 													Path B/C: direct LEFT JOIN helper table with scan metadata.
 													build_scan lowers the helper's scan tag into scalar once-limit
 													behavior instead of routing through partition stages. */
 													(begin
-														(define us_tdesc (car tables2_us))
+														(define us_tdesc (car _us_base_tables))
 														(define us_tblvar (nth us_tdesc 0))
 														(define us_tbl_schema (nth us_tdesc 1))
 														(define us_tbl_name (nth us_tdesc 2))
@@ -3363,6 +3370,13 @@ seeing the correctly prefixed outer alias. */
 														(define _us_inner_tbls_rewritten (map _us_inner_tbls (lambda (td) (match td
 															'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
 															td))))
+														(define _us_nested_direct_refs_base_aliases (reduce _us_nested_direct_tbls (lambda (acc td) (match td
+															'(_ _ _ _ je) (or acc
+																(and (not (nil? je))
+																	(reduce (extract_tblvars je) (lambda (found tv)
+																		(or found (has? _us_base_aliases tv))) false)))
+															_ acc))
+															false))
 														(define us_simple_uncorrelated_cache_key (if (and
 															(not us_has_outer)
 															(equal? _us_inner_tbls '())
@@ -3423,12 +3437,15 @@ seeing the correctly prefixed outer alias. */
 																			(coalesceNil us_orig_offset 0)
 																			us_dom_count
 																			us_once_limit))
-																		(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim)))
-																		/* register schema for own table + pass through inner-scoped schemas */
+																		(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
+																			'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
+																			td))))
+																		(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim))))
+																		/* register schema for own table + pass through inner-scoped and nested-direct schemas */
 																		(define _us_inner_schema (schemas2_us us_tblvar))
 																		(define _us_passthrough_schemas (merge
 																			(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
-																			(merge (map _us_inner_tbls (lambda (td) (match td
+																			(merge (map (merge _us_inner_tbls _us_nested_direct_tbls) (lambda (td) (match td
 																				'(a _ _ _ _) (begin
 																					(define _isch (schemas2_us a))
 																					(if (nil? _isch) '() (list a _isch)))
@@ -3627,6 +3644,10 @@ seeing the correctly prefixed outer alias. */
 				(not (nil? h))
 				(not (equal? (coalesceNil _g '()) '()))
 				(not (equal? (coalesceNil _o '()) '()))))
+			(define _value_expr_is_direct_column (match _value_expr
+				'((symbol get_column) _ _ _ _) true
+				'((quote get_column) _ _ _ _) true
+				false))
 			/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
 			(prejoin scoping bug when unnested table meets GROUP stage) */
 			(define _outer_has_group (or group having _cd_has))
@@ -3640,20 +3661,13 @@ seeing the correctly prefixed outer alias. */
 					(and
 						_outer_refs_are_direct_columns
 						(not _outer_has_group)
-						(not _contains_inner_select_marker)
+						(if _contains_inner_select_marker _value_expr_is_direct_column true)
 						(not (nil? _value_expr))
 						(not _has_aggregate)
 						(nil? h)
 						(or (nil? _g) (equal? _g '()))
 						true))
-				(and
-					(not _outer_has_group)
-					(not _contains_inner_select_marker)
-					(not (nil? _value_expr))
-					(not _has_aggregate)
-					(nil? h)
-					(or (nil? _g) (equal? _g '()))
-					true)))
+				false))
 			nil)))
 	(define _unnest_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(match (unnest_subselect subquery outer_schemas)
@@ -4022,8 +4036,21 @@ seeing the correctly prefixed outer alias. */
 						expr
 					)))
 					/* prefix all table aliases and transform their joinexprs */
+					(define replace_column_alias_table_ref (lambda (tbl)
+						(if (scan_tagged_table_needs_scan_order tbl)
+							(make_scan_tagged_table
+								(scan_tagged_table_base tbl)
+								(map (scan_tagged_table_order tbl) (lambda (o) (match o
+									'(col dir) (list (replace_column_alias col) dir)
+									o)))
+								(scan_tagged_table_limit tbl)
+								(scan_tagged_table_offset tbl)
+								(scan_tagged_table_partition_cols tbl)
+								(scan_tagged_table_once_limit tbl))
+							tbl)))
 					(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
-						(list (concat id "\0" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+						(list (concat id "\0" alias) schema (replace_column_alias_table_ref tbl) a
+							(if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
 					/* helper function to transform joinexpr: only transform references to subquery alias id */
 					(define transform_joinexpr (lambda (expr) (match expr
 						'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
@@ -4108,9 +4135,18 @@ seeing the correctly prefixed outer alias. */
 									(expr_contains_materialized_helper sym)
 									(reduce args (lambda (acc arg) (or acc (expr_contains_materialized_helper arg))) false))
 								false)))))
+					(define flatten_helper_projection_aliases (map (filter tables2 (lambda (td) (match td
+						'(alias _ ttbl _ _) (scan_tagged_table_needs_scan_order ttbl)
+						false))) (lambda (td) (match td '(alias _ _ _ _) alias ""))))
+					(define expr_contains_scan_tagged_helper (lambda (expr)
+						(reduce (extract_tblvars expr) (lambda (acc alias_)
+							(or acc (has? flatten_helper_projection_aliases alias_)))
+							false)))
 					(define flatten_has_helper_backed_projection
 						(reduce_assoc pruned_fields2 (lambda (acc _k v)
-							(or acc (expr_contains_materialized_helper v)))
+							(or acc
+								(expr_contains_materialized_helper v)
+								(expr_contains_scan_tagged_helper v)))
 							false))
 					(define groups2_present (and (not (nil? groups2)) (not (equal? groups2 '()))))
 					(define aggregate_refs_subquery_alias (lambda (expr)
@@ -4505,6 +4541,10 @@ seeing the correctly prefixed outer alias. */
 			(set order (map order (lambda (o) (match o
 				'(col dir) (list (rewrite_scalar_left_join_aliases col) dir)
 				o))))))
+	(define sq_scalar_helper_alias (lambda (t) (match t
+		'(tv _ ttbl _ _)
+		(if (nil? tv) ttbl tv)
+		nil)))
 	/* Contract: scalar helper tables used only for SELECT/expr projection keep
 	their LEFT JOIN joinexpr local so NULL-preserving semantics survive.
 	When the current WHERE references such a helper, it is no longer a pure
@@ -4517,7 +4557,31 @@ seeing the correctly prefixed outer alias. */
 		false))))
 	(define sq_scalar_projection_tbls (filter _sq_scalar_tbls (lambda (t)
 		(not (has? sq_scalar_condition_tbls t)))))
-	(set tables (merge tables _sq_tbls sq_scalar_condition_tbls sq_scalar_projection_tbls))
+	/* Helpers referenced from a sibling JOIN ... ON must appear before the
+	dependent table so split_scan_condition keeps ON semantics intact. */
+	(define joinexpr_ref_aliases (merge_unique (map tables (lambda (td) (match td
+		'(_ _ _ _ je) (if (nil? je) '() (extract_tblvars je))
+		'())))))
+	(define sq_scalar_joinexpr_tbls (filter sq_scalar_projection_tbls (lambda (t)
+		(has? joinexpr_ref_aliases (sq_scalar_helper_alias t)))))
+	(define sq_scalar_tail_projection_tbls (filter sq_scalar_projection_tbls (lambda (t)
+		(not (has? sq_scalar_joinexpr_tbls t)))))
+	(define tables_with_joinexpr_scalar_helpers
+		(match (reduce tables (lambda (state td) (match state
+			'(out remaining) (begin
+				(define je_refs (match td '(_ _ _ _ je) (if (nil? je) '() (extract_tblvars je)) '()))
+				(define emit_helpers (filter remaining (lambda (ht)
+					(has? je_refs (sq_scalar_helper_alias ht)))))
+				(define emit_aliases (map emit_helpers sq_scalar_helper_alias))
+				(list
+					(merge out emit_helpers (list td))
+					(filter remaining (lambda (ht)
+						(not (has? emit_aliases (sq_scalar_helper_alias ht)))))))
+			state))
+			(list '() sq_scalar_joinexpr_tbls))
+			'(ordered remaining) (merge ordered remaining)
+			tables))
+	(set tables (merge tables_with_joinexpr_scalar_helpers _sq_tbls sq_scalar_condition_tbls sq_scalar_tail_projection_tbls))
 	(define _sq_schs (coalesceNil (sq_cache "schemas") '()))
 	(if (not (equal? _sq_schs '())) (set schemas (merge schemas _sq_schs)))
 	/* ensure materialized temp sources have a visible schema under their current alias.
@@ -4590,6 +4654,18 @@ seeing the correctly prefixed outer alias. */
 	(define planner_visible_schemas (merge schemas outer_schemas_chain))
 	(define finalize_visible_expr (lambda (expr)
 		(finalize_logical_expr_scoped expr schemas planner_visible_schemas replace_rename enforce_planner_contract)))
+	(define finalize_visible_table_ref (lambda (tbl)
+		(if (scan_tagged_table_needs_scan_order tbl)
+			(make_scan_tagged_table
+				(scan_tagged_table_base tbl)
+				(map (scan_tagged_table_order tbl) (lambda (o) (match o
+					'(col dir) (list (finalize_visible_expr col) dir)
+					o)))
+				(scan_tagged_table_limit tbl)
+				(scan_tagged_table_offset tbl)
+				(scan_tagged_table_partition_cols tbl)
+				(scan_tagged_table_once_limit tbl))
+			tbl)))
 
 
 	/* Contract boundary for user-visible expressions:
@@ -4605,7 +4681,7 @@ seeing the correctly prefixed outer alias. */
 		(lambda (x) (not (nil? x))))))
 	(set tables (map tables (lambda (td) (match td
 		'(tv tschema ttbl toisOuter tje)
-		(list tv tschema ttbl toisOuter
+		(list tv tschema (finalize_visible_table_ref ttbl) toisOuter
 			(if (nil? tje) nil (finalize_visible_expr tje)))
 		td))))
 	(set group (map group finalize_visible_expr))
@@ -4656,8 +4732,13 @@ seeing the correctly prefixed outer alias. */
 	JOIN alias by construction and must not keep it alive. Only unnested
 	aliases are protected explicitly because they may be referenced indirectly. */
 	(define _unnested_aliases (map _sq_tbls (lambda (t) (match t '(alias _ _ _ _) alias _ nil))))
+	(define _joinexpr_dependency_aliases (merge_unique (map tables (lambda (td) (match td
+		'(alias _ _ _ je) (filter (if (nil? je) '() (extract_tblvars je)) (lambda (ref_alias)
+			(not (equal?? ref_alias alias))))
+		'())))))
 	(define _used_tvs (merge_unique
 		_unnested_aliases
+		_joinexpr_dependency_aliases
 		(merge (extract_assoc _canon_fields (lambda (k v) (extract_tblvars v))))
 		(extract_tblvars _canon_condition)
 		(merge (map _canon_groups (lambda (stage)
@@ -6833,7 +6914,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(normalize_visible_aliases
 							(lower_prejoin_lineage_expr expr)))))
 				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
-				(define prejoin_columns (reduce all_referenced_columns (lambda (acc mc)
+				(define prejoin_columns_base (reduce all_referenced_columns (lambda (acc mc)
 					(begin
 						(define canonical_lineage_expr (canonicalize_expr
 							(normalize_canonical_aliases (canonicalize_prejoin_source_expr (cadr mc)))
@@ -6853,7 +6934,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(and
 						(equal? (extract_aggregates field_expr) '())
 						(equal? (extract_window_funcs field_expr) '()))))
-				(define prejoin_columns (reduce (extract_assoc resolved_fields (lambda (field_name field_expr)
+				(define prejoin_columns_projected (reduce (extract_assoc resolved_fields (lambda (field_name field_expr)
 					(match field_expr
 						'((symbol get_column) _ _ _ _) nil
 						'((quote get_column) _ _ _ _) nil
@@ -6865,7 +6946,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false))
 							acc
 							(merge acc (list mc))))
-					prejoin_columns))
+					prejoin_columns_base))
+				(define prejoin_columns prejoin_columns_projected)
 				(define prejoin_column_names (map prejoin_columns car))
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
