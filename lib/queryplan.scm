@@ -3200,8 +3200,8 @@ seeing the correctly prefixed outer alias. */
 														(stage_with_cache_query
 															(stage_with_cache_policy
 																(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_stage_aliases nil)
-																(count_subquery_cache_policy subquery))
-															(if (nil? (count_subquery_cache_policy subquery)) nil subquery)))
+																(count_subquery_cache_policy subquery target_expr))
+															(if (nil? (count_subquery_cache_policy subquery target_expr)) nil subquery)))
 													/* propagate inner scoped stages with prefix */
 													(define _us_prefixed_inner_stages (map _us_inner_stages (lambda (s) (begin
 														(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_prefix_ria))
@@ -3416,14 +3416,24 @@ seeing the correctly prefixed outer alias. */
 			(_contains_inner_select_marker sym)
 			(reduce args (lambda (found arg) (or found (_contains_inner_select_marker arg))) false))
 		false)))
-	(define count_subquery_cache_policy (lambda (query)
+	(define exists_subquery_uses_session_state_for_row_existence (lambda (query)
+		(match query
+			'(schema2 tables2 _fields2 condition2 group2 having2 _order2 limit2 offset2)
+			(expr_uses_session_state
+				(list schema2 tables2 '() condition2 group2 having2 nil limit2 offset2))
+			(expr_uses_session_state query))))
+	(define count_subquery_cache_policy (lambda (query target_expr)
 		(match query
 			'(s t f c g h o l off) (begin
 				(define only_count (match f
 					'("__cnt" ((quote aggregate) 1 op 0)) (equal?? op (quote +))
 					'("__cnt" ((symbol aggregate) 1 op 0)) (equal?? op (quote +))
 					false))
-				(if (and only_count (equal? g '(1)) (expr_uses_session_state query))
+				(define session_sensitive_count
+					(if (nil? target_expr)
+						(exists_subquery_uses_session_state_for_row_existence query)
+						(expr_uses_session_state query)))
+				(if (and only_count (equal? g '(1)) session_sensitive_count)
 					(quote uncached-count)
 					nil))
 			nil)))
@@ -3754,7 +3764,7 @@ seeing the correctly prefixed outer alias. */
 										(cons subquery '())
 										(coalesce
 											(union_exists_expr subquery true)
-											(if (expr_uses_session_state subquery)
+											(if (exists_subquery_uses_session_state_for_row_existence subquery)
 												(list (quote not) (build_exists_subselect subquery outer_schemas))
 												(coalesce
 													(_unnest_count_subselect subquery outer_schemas nil (quote equal?))
@@ -3782,7 +3792,7 @@ seeing the correctly prefixed outer alias. */
 						(cons subquery '())
 						(coalesce
 							(union_exists_expr subquery false)
-							(if (expr_uses_session_state subquery)
+							(if (exists_subquery_uses_session_state_for_row_existence subquery)
 								(build_exists_subselect subquery outer_schemas)
 								(coalesce
 									(_unnest_count_subselect subquery outer_schemas nil (quote >))
