@@ -1078,6 +1078,29 @@ helpers instead of rebuilding alias/order logic inline inside untangle_query. */
 (define once_limit_scan_contract_partition_cols (lambda (contract) (nth contract 2)))
 (define once_limit_scan_contract_once_limit (lambda (contract) (nth contract 3)))
 (define once_limit_scan_contract_promise_name (lambda (contract) (nth contract 4)))
+(define scalar_scan_partition_stage (lambda (sq_alias part_order domain_count once_contract outer_sources nested_outer_sources)
+	(stage_with_outer_sources
+		(make_stage '() nil part_order domain_count
+			(once_limit_scan_contract_limit once_contract)
+			(once_limit_scan_contract_offset once_contract)
+			false
+			(list sq_alias)
+			nil
+			nil
+			(once_limit_scan_contract_once_limit once_contract))
+		(merge_unique (list outer_sources nested_outer_sources))
+)))
+(define scalar_scan_tagged_table (lambda (tbl_name part_order once_contract outer_sources)
+	(scan_tagged_table_with_outer_sources
+		(make_scan_tagged_table
+			tbl_name
+			part_order
+			(once_limit_scan_contract_limit once_contract)
+			(once_limit_scan_contract_offset once_contract)
+			(once_limit_scan_contract_partition_cols once_contract)
+			(once_limit_scan_contract_once_limit once_contract))
+		outer_sources)
+))
 (define wrap_once_limit_body (lambda (promise_name body)
 	(if (nil? promise_name)
 		body
@@ -3695,16 +3718,13 @@ seeing the correctly prefixed outer alias. */
 																	(define _us_nested_outer_sources (merge_unique
 																		(map _us_inner_stages_rewritten (lambda (s)
 																			(coalesceNil (stage_outer_sources s) '())))))
-																	(define us_part_stage (stage_with_outer_sources
-																		(make_stage '() nil us_part_order us_dom_count
-																			(once_limit_scan_contract_limit us_once_contract)
-																			(once_limit_scan_contract_offset us_once_contract)
-																			false
-																			(list us_sq_prefix)
-																			nil
-																			nil
-																			(once_limit_scan_contract_once_limit us_once_contract))
-																		(merge_unique (list us_outer_sources _us_nested_outer_sources))))
+																	(define us_part_stage (scalar_scan_partition_stage
+																		us_sq_prefix
+																		us_part_order
+																		us_dom_count
+																		us_once_contract
+																		us_outer_sources
+																		_us_nested_outer_sources))
 																	(sq_cache "groups" (merge
 																		(list us_part_stage)
 																		_us_inner_stages_rewritten
@@ -3714,14 +3734,11 @@ seeing the correctly prefixed outer alias. */
 																	(define us_full_lim (if (nil? us_inner_lim)
 																		(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
 																		(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
-																	(define us_tagged_tbl (make_scan_tagged_table
+																	(define us_tagged_tbl (scalar_scan_tagged_table
 																		us_tbl_name
 																		us_part_order
-																		(once_limit_scan_contract_limit us_once_contract)
-																		(once_limit_scan_contract_offset us_once_contract)
-																		(once_limit_scan_contract_partition_cols us_once_contract)
-																		(once_limit_scan_contract_once_limit us_once_contract)))
-																	(define us_tagged_tbl (scan_tagged_table_with_outer_sources us_tagged_tbl us_outer_sources))
+																		us_once_contract
+																		us_outer_sources))
 																	(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
 																		'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
 																		td))))
