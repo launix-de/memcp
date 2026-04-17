@@ -46,6 +46,21 @@ test_cases:
           c1: null
           c2: null
 
+  - name: "EXPLAIN IR deduplicates identical scalar LEFT JOIN helpers"
+    sql: |
+      EXPLAIN IR
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2
+      FROM jd_item
+      ORDER BY id
+    expect:
+      rows: 8
+      contains:
+        - "_unn_jd_ref_0"
+      not_contains:
+        - "_unn_jd_ref_1"
+
   # Three identical subqueries: all three must match
   - name: "Three identical scalar subqueries all agree"
     sql: |
@@ -63,7 +78,7 @@ test_cases:
           c2: Alpha
           c3: Alpha
 
-  # Same table, same condition, but different fields: each column independently correct
+  # Same table, same condition, different fields: one shared LEFT JOIN can provide both columns.
   - name: "Same table same condition different fields both correct"
     sql: |
       SELECT id,
@@ -86,6 +101,21 @@ test_cases:
         - id: 4
           lbl: null
           sc: null
+
+  - name: "EXPLAIN IR reuses one LEFT JOIN helper for different projected fields"
+    sql: |
+      EXPLAIN IR
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS lbl,
+        (SELECT score FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS sc
+      FROM jd_item
+      ORDER BY id
+    expect:
+      rows: 8
+      contains:
+        - "_unn_jd_ref_0"
+      not_contains:
+        - "_unn_jd_ref_1"
 
   # Mix of identical + different-field subqueries
   - name: "Mixed identical and different-field subqueries"

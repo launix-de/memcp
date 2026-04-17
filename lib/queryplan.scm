@@ -3363,71 +3363,88 @@ seeing the correctly prefixed outer alias. */
 														(define _us_inner_tbls_rewritten (map _us_inner_tbls (lambda (td) (match td
 															'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
 															td))))
-														(if (not (equal? _us_inner_tbls_rewritten '()))
-															(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
-														/* Domain columns become the partition prefix for scan_order.
-														Only explicit SQL ORDER BY contributes extra ordering after that prefix. */
-														(define us_dom_order (filter (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<)))
-															(lambda (oi) (match oi '(col _) (match col
-																'((symbol get_column) a _ _ _) (equal? a us_sq_prefix)
-																'((quote get_column) a _ _ _) (equal? a us_sq_prefix)
-																false) false))))
-														(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
-														(define us_order_supported (reduce us_renamed_order (lambda (acc oi) (and acc (match oi
-															'(col _dir) (match col
-																'((symbol get_column) a _ _ _) (equal? a us_sq_prefix)
-																'((quote get_column) a _ _ _) (equal? a us_sq_prefix)
-																false)
-															false)))
-															true))
-														(if (not us_order_supported)
+														(define us_simple_uncorrelated_cache_key (if (and
+															(not us_has_outer)
+															(equal? _us_inner_tbls '())
+															(equal? _us_inner_stages '()))
+															(serialize subquery)
+															nil))
+														(define us_cached_subst (if (nil? us_simple_uncorrelated_cache_key)
 															nil
+															(get_assoc (coalesceNil (sq_cache "scalar_helper_cache") '()) us_simple_uncorrelated_cache_key)))
+														(if (not (nil? us_cached_subst))
+															(list us_cached_subst '())
 															(begin
-																(define us_part_order (merge us_dom_order us_renamed_order))
-																(define us_dom_count (count us_dom_order))
-																(define us_scan_limit (scalar_scan_effective_limit us_orig_limit))
-																(define us_once_limit (scalar_scan_once_limit us_orig_limit))
-																/* propagate inner scoped stages with renaming */
-																(if (not (equal? _us_inner_stages '()))
-																	(sq_cache "groups" (merge
-																		(map _us_inner_stages (lambda (s) (begin
-																			(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_ria))
-																			(define _psh (if (nil? (stage_having_expr s)) nil (_us_ria (stage_having_expr s))))
-																			(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_ria c) d) o))))
-																			(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
-																			(stage_preserve_cache_meta s
-																				(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s))))))
-																		(coalesceNil (sq_cache "groups") '()))))
-																/* direct table entry with join condition (like non-agg non-LIMIT path) */
-																(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
-																(define us_inner_lim (_us_ria us_inner_cond_raw))
-																(define us_full_lim (if (nil? us_inner_lim)
-																	(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
-																	(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
-																(define us_tagged_tbl (make_scan_tagged_table
-																	us_tbl_name
-																	us_part_order
-																	us_scan_limit
-																	(coalesceNil us_orig_offset 0)
-																	us_dom_count
-																	us_once_limit))
-																(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim)))
-																/* register schema for own table + pass through inner-scoped schemas */
-																(define _us_inner_schema (schemas2_us us_tblvar))
-																(define _us_passthrough_schemas (merge
-																	(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
-																	(merge (map _us_inner_tbls (lambda (td) (match td
-																		'(a _ _ _ _) (begin
-																			(define _isch (schemas2_us a))
-																			(if (nil? _isch) '() (list a _isch)))
-																		'()))))))
-																(if (not (equal? _us_passthrough_schemas '()))
-																	(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
-																/* substitution: apply _us_ria to the value expression.
-																If value comes from own table, _us_ria renames it to us_sq_prefix.
-																If value comes from inner-scoped table, it stays unchanged. */
-																(define us_subst (_us_ria us_value_expr))
-																(list us_subst us_tbl_entries))))
+																(if (not (equal? _us_inner_tbls_rewritten '()))
+																	(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
+																/* Domain columns become the partition prefix for scan_order.
+																Only explicit SQL ORDER BY contributes extra ordering after that prefix. */
+																(define us_dom_order (filter (map us_domain_cols (lambda (dc) (list (_us_ria (nth dc 0)) '<)))
+																	(lambda (oi) (match oi '(col _) (match col
+																		'((symbol get_column) a _ _ _) (equal? a us_sq_prefix)
+																		'((quote get_column) a _ _ _) (equal? a us_sq_prefix)
+																		false) false))))
+																(define us_renamed_order (map (coalesceNil us_orig_order '()) (lambda (oi) (match oi '(col dir) (list (_us_ria col) dir) oi))))
+																(define us_order_supported (reduce us_renamed_order (lambda (acc oi) (and acc (match oi
+																	'(col _dir) (match col
+																		'((symbol get_column) a _ _ _) (equal? a us_sq_prefix)
+																		'((quote get_column) a _ _ _) (equal? a us_sq_prefix)
+																		false)
+																	false)))
+																	true))
+																(if (not us_order_supported)
+																	nil
+																	(begin
+																		(define us_part_order (merge us_dom_order us_renamed_order))
+																		(define us_dom_count (count us_dom_order))
+																		(define us_scan_limit (scalar_scan_effective_limit us_orig_limit))
+																		(define us_once_limit (scalar_scan_once_limit us_orig_limit))
+																		/* propagate inner scoped stages with renaming */
+																		(if (not (equal? _us_inner_stages '()))
+																			(sq_cache "groups" (merge
+																				(map _us_inner_stages (lambda (s) (begin
+																					(define _psg (map (coalesceNil (stage_group_cols s) '()) _us_ria))
+																					(define _psh (if (nil? (stage_having_expr s)) nil (_us_ria (stage_having_expr s))))
+																					(define _pso (map (coalesceNil (stage_order_list s) '()) (lambda (o) (match o '(c d) (list (_us_ria c) d) o))))
+																					(define _psa (map (coalesceNil (stage_partition_aliases s) '()) (lambda (a) (coalesceNil (_us_lookup a) a))))
+																					(stage_preserve_cache_meta s
+																						(make_group_stage _psg _psh _pso (stage_limit_val s) (stage_offset_val s) _psa (stage_init_code s))))))
+																				(coalesceNil (sq_cache "groups") '()))))
+																		/* direct table entry with join condition (like non-agg non-LIMIT path) */
+																		(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
+																		(define us_inner_lim (_us_ria us_inner_cond_raw))
+																		(define us_full_lim (if (nil? us_inner_lim)
+																			(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
+																			(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+																		(define us_tagged_tbl (make_scan_tagged_table
+																			us_tbl_name
+																			us_part_order
+																			us_scan_limit
+																			(coalesceNil us_orig_offset 0)
+																			us_dom_count
+																			us_once_limit))
+																		(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim)))
+																		/* register schema for own table + pass through inner-scoped schemas */
+																		(define _us_inner_schema (schemas2_us us_tblvar))
+																		(define _us_passthrough_schemas (merge
+																			(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
+																			(merge (map _us_inner_tbls (lambda (td) (match td
+																				'(a _ _ _ _) (begin
+																					(define _isch (schemas2_us a))
+																					(if (nil? _isch) '() (list a _isch)))
+																				'()))))))
+																		(if (not (equal? _us_passthrough_schemas '()))
+																			(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
+																		/* substitution: apply _us_ria to the value expression.
+																		If value comes from own table, _us_ria renames it to us_sq_prefix.
+																		If value comes from inner-scoped table, it stays unchanged. */
+																		(define us_subst (_us_ria us_value_expr))
+																		(if (not (nil? us_simple_uncorrelated_cache_key))
+																			(sq_cache "scalar_helper_cache"
+																				(set_assoc (coalesceNil (sq_cache "scalar_helper_cache") '())
+																					us_simple_uncorrelated_cache_key
+																					us_subst)))
+																		(list us_subst us_tbl_entries))))))
 													nil /* multi-table or computed value: not yet handled */
 											))
 										)
@@ -4433,6 +4450,61 @@ seeing the correctly prefixed outer alias. */
 	Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
 	(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
 	(define _sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
+	/* Deduplicate identical scalar projection LEFT JOIN helpers before they
+	enter the normal table pipeline. join_reorder can move helpers, but it cannot
+	recognize that two _unn_ aliases describe the same LEFT JOIN relation once
+	they have already been materialized as distinct table entries. */
+	(define scalar_left_join_dedup_key (lambda (td) (match td
+		'(tv tschema ttbl isOuter joinexpr) (begin
+			(define _dedup_alias_map
+				(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+					(set_assoc acc (string alias_v) "__scalar_left_join__"))
+					'()))
+			(serialize (list
+				tschema
+				(rewrite_source_aliases _dedup_alias_map ttbl)
+				isOuter
+				(rewrite_source_aliases _dedup_alias_map (coalesceNil joinexpr true)))))
+		nil)))
+	(define _sq_scalar_dedup_state (reduce _sq_scalar_tbls (lambda (state td) (match state
+		'(kept key_map alias_map) (match td
+			'(tv _ _ _ _) (begin
+				(define _dedup_key (scalar_left_join_dedup_key td))
+				(define _canonical_alias (get_assoc key_map _dedup_key))
+				(if (nil? _canonical_alias)
+					(list
+						(merge kept (list td))
+						(set_assoc key_map _dedup_key tv)
+						alias_map)
+					(list
+						kept
+						key_map
+						(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+							(set_assoc acc (string alias_v) _canonical_alias))
+							alias_map))))
+			td)
+		state))
+		(list '() '() '())))
+	(define _sq_scalar_tbls (nth _sq_scalar_dedup_state 0))
+	(define _sq_scalar_alias_map (nth _sq_scalar_dedup_state 2))
+	(define rewrite_scalar_left_join_aliases (lambda (expr)
+		(if (equal? _sq_scalar_alias_map '())
+			expr
+			(rewrite_source_aliases _sq_scalar_alias_map expr))))
+	(if (not (equal? _sq_scalar_alias_map '()))
+		(begin
+			(set tables (map tables (lambda (td) (match td
+				'(tv tschema ttbl toisOuter tje)
+				(list tv tschema ttbl toisOuter
+					(if (nil? tje) nil (rewrite_scalar_left_join_aliases tje)))
+				td))))
+			(set fields (map_assoc fields (lambda (k v) (rewrite_scalar_left_join_aliases v))))
+			(set condition (rewrite_scalar_left_join_aliases condition))
+			(set group (map group rewrite_scalar_left_join_aliases))
+			(set having (rewrite_scalar_left_join_aliases having))
+			(set order (map order (lambda (o) (match o
+				'(col dir) (list (rewrite_scalar_left_join_aliases col) dir)
+				o))))))
 	/* Contract: scalar helper tables used only for SELECT/expr projection keep
 	their LEFT JOIN joinexpr local so NULL-preserving semantics survive.
 	When the current WHERE references such a helper, it is no longer a pure

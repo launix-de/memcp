@@ -91,6 +91,29 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "EXPLAIN IR reuses uncorrelated scalar helper in CASE WHEN"
+    sql: |
+      EXPLAIN IR
+      SELECT
+        sq_doc.ID,
+        CASE
+          WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+            AND ((sq_doc.type) IS NULL))
+            OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+          THEN 'green'
+          ELSE 'gray'
+        END AS color,
+        sq_doc.date
+      FROM sq_doc
+      WHERE NOT sq_doc.archive
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 8
+      contains:
+        - "_unn_sq_uconf_0"
+      not_contains:
+        - "_unn_sq_uconf_1"
+
   # Pattern 3: GROUP BY with MIN(CONCAT(...)) (6s in prod)
   # Aggregation with string concat in GROUP BY
   - name: "GROUP BY with MIN CONCAT"
