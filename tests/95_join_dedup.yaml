@@ -60,6 +60,7 @@ test_cases:
         - "_unn_jd_ref_0"
       not_contains:
         - "_unn_jd_ref_1"
+        - "scan-tagged-table"
 
   # Three identical subqueries: all three must match
   - name: "Three identical scalar subqueries all agree"
@@ -116,6 +117,7 @@ test_cases:
         - "_unn_jd_ref_0"
       not_contains:
         - "_unn_jd_ref_1"
+        - "scan-tagged-table"
 
   # Mix of identical + different-field subqueries
   - name: "Mixed identical and different-field subqueries"

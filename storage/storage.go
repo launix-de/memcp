@@ -838,12 +838,12 @@ func Init(en scm.Env) {
 			for i := 0; i < n; i++ {
 				t := TableFromScmer(tables[i])
 				specs[i] = scanOrderTableSpec{
-					table:         t,
-					conditionCols: scmerSliceToStrings(mustScmerSlice(filterColsArr[i], "filterColumns[i]")),
-					condition:     filterFnArr[i],
-					sortcols:      mustScmerSlice(sortcolsArr[i], "sortcols[i]"),
-					callbackCols:  scmerSliceToStrings(mustScmerSlice(mapColsArr[i], "mapColumns[i]")),
-					callback:      mapFnArr[i],
+					table:          t,
+					conditionCols:  scmerSliceToStrings(mustScmerSlice(filterColsArr[i], "filterColumns[i]")),
+					condition:      filterFnArr[i],
+					sortcols:       mustScmerSlice(sortcolsArr[i], "sortcols[i]"),
+					callbackCols:   scmerSliceToStrings(mustScmerSlice(mapColsArr[i], "mapColumns[i]")),
+					callback:       mapFnArr[i],
 					perTableOffset: perTableOffsets[i],
 					perTableLimit:  perTableLimits[i],
 				}
