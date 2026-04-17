@@ -205,6 +205,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (stage_is_scoped? stage_scoped) true "stage_is_scoped? is true for scoped stages")
 	(assert (stage_is_scoped? stage_global) false "stage_is_scoped? is false for global stages")
 	(define iap_outer_source_expr (list 'get_column "helper_t" false "owner" false))
+	(define iap_domain_cols (list
+		(list iap_outer_source_expr (list 'get_column "outer_t" false "id" false))
+		(list (list 'get_column "helper_t" false "grp" false) (list 'session "v1"))))
+	(assert (equal? (domain_outer_sources_from_correlation_cols iap_domain_cols (lambda (expr) expr))
+		(list (list "outer_t" "id" iap_outer_source_expr))) true "domain_outer_sources_from_correlation_cols keeps direct outer get_column refs only")
+	(define tagged_helper (make_scan_tagged_table "sq_helper" '() 2 nil 1 2))
+	(define tagged_helper_with_sources (scan_tagged_table_with_outer_sources tagged_helper
+		(list (list "outer_t" "id" iap_outer_source_expr))))
+	(assert (equal? (scan_tagged_table_outer_sources tagged_helper) '()) true "scan_tagged_table_outer_sources is empty by default")
+	(assert (equal? (scan_tagged_table_outer_sources tagged_helper_with_sources)
+		(list (list "outer_t" "id" iap_outer_source_expr))) true "scan_tagged_table_with_outer_sources preserves correlation metadata on tagged helpers")
 	(define stage_part_with_sources (stage_with_outer_sources stage_part (list (list "outer_t" "id" iap_outer_source_expr))))
 	(assert (equal? (stage_outer_sources stage_part_with_sources) (list (list "outer_t" "id" iap_outer_source_expr))) true "stage_outer_sources reads optional outer correlation tuples")
 	(assert (equal? (stage_outer_sources (stage_preserve_cache_meta stage_part_with_sources (make_partition_stage '("u") '() 1 5 0 nil)))
