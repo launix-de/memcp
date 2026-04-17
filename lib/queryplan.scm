@@ -3437,12 +3437,15 @@ seeing the correctly prefixed outer alias. */
 																			(coalesceNil us_orig_offset 0)
 																			us_dom_count
 																			us_once_limit))
-																		(define us_tbl_entries (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim)))
-																		/* register schema for own table + pass through inner-scoped schemas */
+																		(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
+																			'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
+																			td))))
+																		(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim))))
+																		/* register schema for own table + pass through inner-scoped and nested-direct schemas */
 																		(define _us_inner_schema (schemas2_us us_tblvar))
 																		(define _us_passthrough_schemas (merge
 																			(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
-																			(merge (map _us_inner_tbls (lambda (td) (match td
+																			(merge (map (merge _us_inner_tbls _us_nested_direct_tbls) (lambda (td) (match td
 																				'(a _ _ _ _) (begin
 																					(define _isch (schemas2_us a))
 																					(if (nil? _isch) '() (list a _isch)))
