@@ -576,10 +576,10 @@ layout. */
 (define planner_debug_get_scalar_events (lambda ()
 	(coalesceNil (planner_debug_scalar_events "rows") '())))
 (define explain_plan_root_with_scalar_debug (lambda (plan) (begin
-		(define scalar_events (planner_debug_get_scalar_events))
-		(if (equal? scalar_events '())
-			(explain_plan_root plan)
-			(concat (explain_plan_root plan) " scalar-events=" (serialize scalar_events))))))
+	(define scalar_events (planner_debug_get_scalar_events))
+	(if (equal? scalar_events '())
+		(explain_plan_root plan)
+		(concat (explain_plan_root plan) " scalar-events=" (serialize scalar_events))))))
 (define scalar_subselect_inline_reason (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
 	(if (nil? _agg_args)
 		(quote legacy-fallback-non-aggregate)
@@ -1905,6 +1905,67 @@ carrier until session domains are modeled explicitly. */
 		nil)))
 		(lambda (src) (not (nil? src))))
 ))
+(define unnest_expr_outer_refs (lambda (expr inner_aliases) (match expr
+	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+		(match args
+			(cons sym_arg '()) (list (string sym_arg))
+			'())
+		(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+			(match args
+				'(alias_ _ col _) (if (and (not (nil? alias_))
+					(not (reduce inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false)))
+					(list (concat alias_ "." col))
+					'())
+				'())
+			(if (_is_opaque_scope_sym sym)
+				'()
+				(merge_unique (map args (lambda (arg) (unnest_expr_outer_refs arg inner_aliases)))))))
+	'())))
+(define unnest_expr_has_outer_ref (lambda (expr inner_aliases) (match expr
+	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+		true
+		(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+			(match args
+				'(alias_ _ _ _) (and (not (nil? alias_))
+					(not (reduce inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false)))
+				false)
+			(if (_is_opaque_scope_sym sym)
+				false
+				(reduce args (lambda (a b) (or a (unnest_expr_has_outer_ref b inner_aliases))) false))))
+	false)))
+(define unnest_runtime_outer_ref_expr (lambda (expr) (match expr
+	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+		(match args
+			(cons sym_arg '()) (begin
+				(define ps (split (string sym_arg) "."))
+				(match ps
+					(list tbl col) (list (quote get_column) tbl false col false)
+					_ expr))
+			_ expr)
+		(cons (unnest_runtime_outer_ref_expr sym) (map args unnest_runtime_outer_ref_expr)))
+	expr)))
+(define unnest_rewrite_inner_aliases (lambda (expr alias_lookup) (match expr
+	'((symbol get_column) alias_ ti col ci) (begin
+		(define na (alias_lookup alias_))
+		(if (nil? na) expr (list (quote get_column) na false col false)))
+	'((quote get_column) alias_ ti col ci) (begin
+		(define na (alias_lookup alias_))
+		(if (nil? na) expr (list (quote get_column) na false col false)))
+	(cons sym args) (cons (unnest_rewrite_inner_aliases sym alias_lookup) (map args (lambda (arg)
+		(unnest_rewrite_inner_aliases arg alias_lookup))))
+	expr)))
+(define unnest_correlated_domain_col (lambda (part has_outer_ref resolve_outer_ref) (match part
+	'((symbol equal??) a b) (if (has_outer_ref a)
+		(if (not (has_outer_ref b)) (list b (resolve_outer_ref a)) nil)
+		(if (has_outer_ref b) (list a (resolve_outer_ref b)) nil))
+	'((quote equal??) a b) (if (has_outer_ref a)
+		(if (not (has_outer_ref b)) (list b (resolve_outer_ref a)) nil)
+		(if (has_outer_ref b) (list a (resolve_outer_ref b)) nil))
+	nil)))
+(define unnest_correlated_residual_part? (lambda (part has_outer_ref) (match part
+	'((symbol equal??) a b) (if (has_outer_ref a) (has_outer_ref b) (not (has_outer_ref b)))
+	'((quote equal??) a b) (if (has_outer_ref a) (has_outer_ref b) (not (has_outer_ref b)))
+	true)))
 (define stage_has_group_boundary (lambda (stage) (begin
 	(define sg (coalesceNil (stage_group_cols stage) '()))
 	(or
@@ -3348,24 +3409,10 @@ seeing the correctly prefixed outer alias. */
 									e)))
 								(set fields2_us (map_assoc fields2_us (lambda (k v) (_us_wrap v))))
 								(set condition2_us (_us_wrap condition2_us))
-								/* extract all outer references from fields and condition.
-								Detects both explicit (outer tbl.col) AND bare (get_column tbl false col false)
-								where tbl is NOT in the inner table set (from nested unnesting).
-								Skip opaque scopes (!begin, scan, etc.). */
 								(define us_inner_aliases (map tables2_us (lambda (td) (match td '(a _ _ _ _) a ""))))
-								(define _us_eor (lambda (expr) (match expr
-									(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-										(match args (cons sym_arg '()) (list (string sym_arg)) '())
-										(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
-											(match args '(alias_ _ col _) (if (and (not (nil? alias_)) (not (reduce us_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false)))
-												(list (concat alias_ "." col)) '())
-												'())
-											(if (_is_opaque_scope_sym sym) '()
-												(merge_unique (map args _us_eor)))))
-									'())))
 								(define us_outer_refs (merge_unique
-									(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v))))
-									(_us_eor condition2_us)))
+									(merge (extract_assoc fields2_us (lambda (k v) (unnest_expr_outer_refs v us_inner_aliases))))
+									(unnest_expr_outer_refs condition2_us us_inner_aliases)))
 								/* feasibility checks */
 								(define us_has_outer (not (equal? us_outer_refs '())))
 								/* separate own stages from inner scoped stages (from nested decorrelation) —
@@ -3417,7 +3464,7 @@ seeing the correctly prefixed outer alias. */
 								/* check for outer refs in fields (not just condition) — these need
 								more complex handling, fall back for now */
 								(define us_outer_in_fields (not (equal?
-									(merge (extract_assoc fields2_us (lambda (k v) (_us_eor v)))) '())))
+									(merge (extract_assoc fields2_us (lambda (k v) (unnest_expr_outer_refs v us_inner_aliases)))) '())))
 								(if us_outer_in_fields nil /* outer refs in fields: not handled yet */
 									(begin
 										/* === Neumann unnesting: nD domain, single or multi-table === */
@@ -3437,61 +3484,17 @@ seeing the correctly prefixed outer alias. */
 										(define us_value_expr (car (extract_assoc fields2_us (lambda (k v) v))))
 										(define us_value_src (match us_value_expr '((symbol get_column) a _ _ _) a '((quote get_column) a _ _ _) a nil))
 										(define us_value_new (if (nil? us_value_src) us_sq_prefix (coalesceNil (_us_lookup us_value_src) us_sq_prefix)))
-										/* helper: does expr contain outer refs? Detects both (outer ...) and
-										bare get_column refs to non-inner tables. Skip opaque scopes. */
-										(define _us_hor (lambda (expr) (match expr
-											(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-												true
-												(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
-													(match args '(alias_ _ _ _) (and (not (nil? alias_)) (not (reduce us_inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false))) false)
-													(if (_is_opaque_scope_sym sym) false
-														(reduce args (lambda (a b) (or a (_us_hor b))) false))))
-											false)))
-										/* split condition into AND-parts */
-										(define _us_fap (lambda (expr) (match expr
-											(cons sym parts) (if (or (equal? sym (quote and)) (equal? sym '(quote and)) (equal? sym 'and))
-												(merge (map parts _us_fap))
-												(list expr))
-											(list expr))))
-										(define us_cond_parts (_us_fap condition2_us))
+										(define _us_hor (lambda (expr) (unnest_expr_has_outer_ref expr us_inner_aliases)))
+										(define us_cond_parts (flatten_and_terms condition2_us))
 										(define us_inner_parts (filter us_cond_parts (lambda (p) (not (_us_hor p)))))
 										(define us_outer_parts (filter us_cond_parts (lambda (p) (_us_hor p))))
-										/* resolve (outer tbl.col) -> (get_column tbl false col false).
-										Runtime resolves bare symbols via scope chain (multi-level lookup). */
-										(define _us_ror (lambda (expr) (match expr
-											(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-												(match args
-													(cons sym_arg '()) (begin
-														(define ps (split (string sym_arg) "."))
-														(match ps
-															(list tbl col) (list (quote get_column) tbl false col false)
-															_ expr))
-													_ expr)
-												(cons (_us_ror sym) (map args _us_ror)))
-											expr)))
-										/* replace ANY inner alias with its renamed version */
-										(define _us_ria (lambda (expr) (match expr
-											'((symbol get_column) alias_ ti col ci) (begin
-												(define na (_us_lookup alias_))
-												(if (nil? na) expr (list (quote get_column) na false col false)))
-											'((quote get_column) alias_ ti col ci) (begin
-												(define na (_us_lookup alias_))
-												(if (nil? na) expr (list (quote get_column) na false col false)))
-											(cons sym args) (cons (_us_ria sym) (map args _us_ria))
-											expr)))
-										/* extract domain columns from correlated equalities:
-										(equal?? inner_expr outer_expr) → (inner_expr resolved_outer_expr).
-										Only top-level AND parts with the equality pattern produce domain
-										columns; all other outer-referencing predicates still need to stay
-										on the inner scan after outer refs are resolved. */
-										(define us_domain_cols (filter (map us_outer_parts (lambda (part) (match part
-											'((symbol equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
-											'((quote equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
-											nil))) (lambda (x) (not (nil? x)))))
-										(define us_extra_inner_parts (filter us_outer_parts (lambda (part) (match part
-											'((symbol equal??) a b) (if (_us_hor a) (_us_hor b) (not (_us_hor b)))
-											'((quote equal??) a b) (if (_us_hor a) (_us_hor b) (not (_us_hor b)))
-											true))))
+										(define _us_ror unnest_runtime_outer_ref_expr)
+										(define _us_ria (lambda (expr) (unnest_rewrite_inner_aliases expr _us_lookup)))
+										(define us_domain_cols (filter
+											(map us_outer_parts (lambda (part) (unnest_correlated_domain_col part _us_hor _us_ror)))
+											(lambda (x) (not (nil? x)))))
+										(define us_extra_inner_parts (filter us_outer_parts (lambda (part)
+											(unnest_correlated_residual_part? part _us_hor))))
 										(define us_extra_inner_resolved (map us_extra_inner_parts _us_ror))
 										/* inner condition (non-correlated) - kept with original aliases for
 										aggregate path; renamed for non-aggregate path */
