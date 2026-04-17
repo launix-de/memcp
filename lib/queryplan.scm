@@ -405,6 +405,72 @@ build_queryplan row stream. */
 		(list 'set (symbol "resultrow") _pj_prev_rr)
 	)
 )))
+(define register_prejoin_materialized_metadata (lambda (canonicalize_prejoin_source_expr prejointbl prejoin_columns prejoin_alias_map prejoin_source_tables prejoin_schema_def) (begin
+	(define _td_alias_variants (lambda (tv tschema ttbl) (begin
+		(define _raw_aliases (filter (list
+			tv
+			(match tv '(visible _) visible nil)
+			(visible_occurrence_alias tv)
+			(coalesce (resolve_source_alias prejoin_alias_map tv) nil)
+			(if (equal? (visible_occurrence_alias tv) ttbl) (concat tschema "." ttbl) nil))
+			(lambda (x) (not (nil? x)))))
+		(reduce (merge _raw_aliases
+			(merge (map _raw_aliases (lambda (alias_v)
+				(if (string? alias_v) (list (sanitize_temp_name alias_v)) '())))))
+			(lambda (acc alias_v)
+				(if (or (nil? alias_v) (has? acc alias_v))
+					acc
+					(merge acc (list alias_v))))
+			'()))))
+	(define prejoin_variant_exprs (lambda (expr) (match expr
+		'((symbol get_column) alias_ ti col ci) (merge
+			(list expr
+				(canonicalize_prejoin_source_expr expr)
+				(rewrite_source_aliases prejoin_alias_map expr))
+			(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
+				(if (has? (_td_alias_variants tv tschema ttbl) alias_)
+					(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
+						(list (quote get_column) alias_v ti col ci)))
+					'())
+				'())))))
+		'((quote get_column) alias_ ti col ci) (merge
+			(list expr
+				(canonicalize_prejoin_source_expr expr)
+				(rewrite_source_aliases prejoin_alias_map expr))
+			(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
+				(if (has? (_td_alias_variants tv tschema ttbl) alias_)
+					(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
+						(list (quote get_column) alias_v ti col ci)))
+					'())
+				'())))))
+		_ (list expr
+			(canonicalize_prejoin_source_expr expr)
+			(rewrite_source_aliases prejoin_alias_map expr)))))
+	(define prejoin_variant_names (lambda (expr)
+		(reduce (map (prejoin_variant_exprs expr) (lambda (variant_expr)
+			(sanitize_temp_name
+				(serialize_canonical_expr
+					(canonicalize_expr
+						(normalize_canonical_aliases (canonicalize_prejoin_source_expr variant_expr))
+						prejoin_alias_map)))))
+			(lambda (acc variant_name) (append_unique acc variant_name))
+			'())))
+	(prejoin_canonical_sources prejointbl
+		(merge (map prejoin_columns (lambda (mc) (begin
+			(define source_expr (canonicalize_prejoin_source_expr (cadr mc)))
+			(map (reduce (cons (car mc) (prejoin_variant_names (cadr mc)))
+				(lambda (acc variant_name) (append_unique acc variant_name))
+				'())
+				(lambda (variant_name) (list variant_name source_expr))))))))
+	(materialized_source_expr_lookup prejointbl
+		(merge (map prejoin_columns (lambda (mc) (begin
+			(define variant_exprs (reduce (prejoin_variant_exprs (cadr mc))
+				(lambda (acc variant_expr) (append_unique acc variant_expr))
+				'()))
+			(merge (map variant_exprs (lambda (variant_expr)
+				(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
+	(planned_materialized_fields prejointbl prejoin_schema_def)
+)))
 (define materialized-source? (lambda (table-source)
 	(or
 		(and (string? table-source) (>= (strlen table-source) 1) (equal? (substr table-source 0 1) "."))
@@ -6512,70 +6578,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define pj_schema schema) /* needed in quoted runtime code below */
 				(define prejoin_table_name prejointbl)
 				(define temp_source_table? materialized-source?)
-				(define _td_alias_variants (lambda (tv tschema ttbl) (begin
-					(define _raw_aliases (filter (list
-						tv
-						(match tv '(visible _) visible nil)
-						(visible_occurrence_alias tv)
-						(coalesce (resolve_source_alias prejoin_alias_map tv) nil)
-						(if (equal? (visible_occurrence_alias tv) ttbl) (concat tschema "." ttbl) nil))
-						(lambda (x) (not (nil? x)))))
-					(reduce (merge _raw_aliases
-						(merge (map _raw_aliases (lambda (alias_v)
-							(if (string? alias_v) (list (sanitize_temp_name alias_v)) '())))))
-						(lambda (acc alias_v)
-							(if (or (nil? alias_v) (has? acc alias_v))
-								acc
-								(merge acc (list alias_v))))
-						'()))))
-				(define prejoin_variant_exprs (lambda (expr) (match expr
-					'((symbol get_column) alias_ ti col ci) (merge
-						(list expr
-							(canonicalize_prejoin_source_expr expr)
-							(rewrite_source_aliases prejoin_alias_map expr))
-						(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
-							(if (has? (_td_alias_variants tv tschema ttbl) alias_)
-								(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
-									(list (quote get_column) alias_v ti col ci)))
-								'())
-							'())))))
-					'((quote get_column) alias_ ti col ci) (merge
-						(list expr
-							(canonicalize_prejoin_source_expr expr)
-							(rewrite_source_aliases prejoin_alias_map expr))
-						(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
-							(if (has? (_td_alias_variants tv tschema ttbl) alias_)
-								(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
-									(list (quote get_column) alias_v ti col ci)))
-								'())
-							'())))))
-					_ (list expr
-						(canonicalize_prejoin_source_expr expr)
-						(rewrite_source_aliases prejoin_alias_map expr)))))
-				(define prejoin_variant_names (lambda (expr)
-					(reduce (map (prejoin_variant_exprs expr) (lambda (variant_expr)
-						(sanitize_temp_name
-							(serialize_canonical_expr
-								(canonicalize_expr
-									(normalize_canonical_aliases (canonicalize_prejoin_source_expr variant_expr))
-									prejoin_alias_map)))))
-						(lambda (acc variant_name) (append_unique acc variant_name))
-						'())))
-				(prejoin_canonical_sources prejointbl
-					(merge (map prejoin_columns (lambda (mc) (begin
-						(define source_expr (canonicalize_prejoin_source_expr (cadr mc)))
-						(map (reduce (cons (car mc) (prejoin_variant_names (cadr mc)))
-							(lambda (acc variant_name) (append_unique acc variant_name))
-							'())
-							(lambda (variant_name) (list variant_name source_expr))))))))
-				(materialized_source_expr_lookup prejointbl
-					(merge (map prejoin_columns (lambda (mc) (begin
-						(define variant_exprs (reduce (prejoin_variant_exprs (cadr mc))
-							(lambda (acc variant_expr) (append_unique acc variant_expr))
-							'()))
-						(merge (map variant_exprs (lambda (variant_expr)
-							(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
-				(planned_materialized_fields prejointbl prejoin_schema_def)
+				(register_prejoin_materialized_metadata
+					canonicalize_prejoin_source_expr
+					prejointbl
+					prejoin_columns
+					prejoin_alias_map
+					prejoin_source_tables
+					prejoin_schema_def)
 				/* prejoin table creation deferred to runtime (guard at plan assembly below) */
 				(define covered_partition_stages (filter partition_stages (lambda (ps)
 					(reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
