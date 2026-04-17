@@ -321,6 +321,21 @@ runtime materialization paths that still operate outside the logical IR. */
 							nil)))))
 		inner_plan
 		(list rows_sym "rows")))))
+/* legacy_materialized_query_term_binding_ast: centralize the remaining
+session-backed query-term materialization bridge. This is intentionally a
+legacy fallback wrapper around planner_collect_rows_ast, not a new planner
+primitive: callers stay responsible for registering visible schema metadata. */
+(define legacy_materialized_query_term_binding_ast (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
+	(define mat_source (materialized-subquery-source id subquery))
+	(define materialized_rows
+		(planner_collect_rows_ast rows_sym sink_sym (symbol "item")
+			(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))
+			limit_val
+			cnt_sym))
+	(list
+		mat_source
+		(materialized-subquery-init id subquery materialized_rows))
+)))
 (define materialized-source? (lambda (table-source)
 	(or
 		(and (string? table-source) (>= (strlen table-source) 1) (equal? (substr table-source 0 1) "."))
@@ -3440,19 +3455,18 @@ seeing the correctly prefixed outer alias. */
 								(define _count_idx (coalesceNil (sq_cache "idx") 0))
 								(sq_cache "idx" (+ _count_idx 1))
 								(define _count_alias (concat "_uncorr_cnt_" _count_idx))
-								(define mat_source (materialized-subquery-source _count_alias _count_sq))
 								(define _count_rows_sym (symbol (concat "__uncorr_count_rows:" _count_idx)))
 								(define _count_sink_sym (symbol (concat "__uncorr_count_sink:" _count_idx)))
-								(define materialized_rows
-									(planner_collect_rows_ast _count_rows_sym _count_sink_sym (symbol "item")
-										(build_queryplan_term_with_sink _count_sq (list (quote callback) _count_sink_sym))
-										nil
-										nil))
+								(define _count_materialized
+									(legacy_materialized_query_term_binding_ast
+										_count_alias _count_sq _count_rows_sym _count_sink_sym nil nil))
+								(define mat_source (nth _count_materialized 0))
+								(define mat_init (nth _count_materialized 1))
 								/* D = ∅: materialize the helper once and expose it as a normal
 								one-row relation with visible column __cnt. The outer query still
 								sees a regular table input, not a nested runtime subquery. */
 								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-									(list (materialized-subquery-init _count_alias _count_sq materialized_rows))))
+									(list mat_init)))
 								(sq_cache "tables" (merge
 									(list (list _count_alias schema mat_source false nil))
 									(coalesceNil (sq_cache "tables") '())))
@@ -3641,18 +3655,17 @@ seeing the correctly prefixed outer alias. */
 						(error "UNION ALL subquery must project at least one column"))
 					(define rows_sym (symbol (concat "__from_union_rows:" id)))
 					(define row_sink_sym (symbol (concat "__from_union_sink:" id)))
-					(define mat_source (materialized-subquery-source id subquery))
+					(define materialized_binding
+						(legacy_materialized_query_term_binding_ast
+							id subquery rows_sym row_sink_sym nil nil))
+					(define mat_source (nth materialized_binding 0))
+					(define mat_init (nth materialized_binding 1))
 					(planned_materialized_fields mat_source
 						(map output_cols (lambda (col) (list "Field" col "Type" "any"))))
-					(define materialized_rows
-						(planner_collect_rows_ast rows_sym row_sink_sym (symbol "item")
-							(build_queryplan_term_with_sink subquery (list (quote callback) row_sink_sym))
-							nil
-							nil))
 					(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-						(list (materialized-subquery-init id subquery materialized_rows))))
+						(list mat_init)))
 					(list
-						(list (list id schemax (materialized-subquery-source id subquery) isOuter joinexpr))
+						(list (list id schemax mat_source isOuter joinexpr))
 						'()
 						true
 						(list id (map output_cols (lambda (col) (list "Field" col "Type" "any"))))
@@ -3894,14 +3907,13 @@ seeing the correctly prefixed outer alias. */
 							(define mat_inner_plan (if (equal? mat_init_stmts '())
 								mat_inner_plan
 								(cons (quote !begin) (merge mat_init_stmts (list mat_inner_plan)))))
-							(define materialized_rows
-								(planner_collect_rows_ast rows_sym row_sink_sym (symbol "item")
-									(build_queryplan_term_with_sink subquery (list (quote callback) row_sink_sym))
-									mat_limit
-									cnt_sym))
+							(define materialized_binding
+								(legacy_materialized_query_term_binding_ast
+									id subquery rows_sym row_sink_sym mat_limit cnt_sym))
+							(define mat_source (nth materialized_binding 0))
+							(define mat_init (nth materialized_binding 1))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-								(list (materialized-subquery-init id subquery materialized_rows))))
-							(define mat_source (materialized-subquery-source id subquery))
+								(list mat_init)))
 							(define mat_schema_def (register_materialized_subquery_metadata mat_source fields2))
 							(list
 								(list (list id schemax mat_source isOuter joinexpr))
