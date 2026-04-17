@@ -144,6 +144,11 @@ test_cases:
     expect:
       error: true
 
+  - name: "Scalar correlated grouped subselect with non-equality rejects multiple rows"
+    sql: "SELECT id, (SELECT owner FROM t2 WHERE owner <= t3.id GROUP BY owner ORDER BY owner) AS o FROM t3 ORDER BY id"
+    expect:
+      error: true
+
   - name: "Scalar correlated subselect ORDER BY LIMIT 1"
     sql: "SELECT id, (SELECT val FROM t2 WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
     expect:

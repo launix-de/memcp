@@ -824,6 +824,18 @@ while still recursing into deeper helper lineage when needed. */
 	)
 ))
 
+/* extracts unqualified column references (get_column nil ...) from an expression.
+Used by derived-table flattening so wrapper columns referenced without an alias
+still keep their projected field alive. */
+(define extract_unqualified_columns (lambda (expr)
+	(match expr
+		'((symbol get_column) nil _ col _) (if (equal? col "*") '() '(col))
+		'((quote get_column) nil _ col _) (if (equal? col "*") '() '(col))
+		(cons sym args) (merge_unique (map args extract_unqualified_columns))
+		'()
+	)
+))
+
 /* true iff expr contains a direct tblvar.* wildcard reference.
 Used by derived-table flattening: an empty referenced-column set can mean either
 "outer query needs nothing from this wrapper" (good, prune all inner fields) or
@@ -833,6 +845,18 @@ Used by derived-table flattening: an empty referenced-column set can mean either
 		'((symbol get_column) (eval tblvar) _ col _) (equal? col "*")
 		'((quote get_column) (eval tblvar) _ col _) (equal? col "*")
 		(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_tblvar_wildcard_ref tblvar arg))) false)
+		false
+	)
+))
+
+/* true iff expr contains an unqualified * reference.
+Used by derived-table flattening: SELECT * over a wrapper still needs the full
+projected column set even when no alias-qualified t.* appears. */
+(define expr_has_unqualified_wildcard_ref (lambda (expr)
+	(match expr
+		'((symbol get_column) nil _ col _) (equal? col "*")
+		'((quote get_column) nil _ col _) (equal? col "*")
+		(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_unqualified_wildcard_ref arg))) false)
 		false
 	)
 ))
@@ -850,50 +874,92 @@ Used by derived-table flattening: an empty referenced-column set can mean either
 
 /* scan-tagged tables: keep once-limit/order metadata on the table entry so
 build_scan can lower scalar subselects without extra once-limit stages. */
-(define make_scan_tagged_table (lambda (base order limit offset partition_cols once_limit)
+(define make_scan_tagged_table_parts (lambda (base order limit offset partition_cols once_limit outer_sources)
 	(if (and (equal? (coalesceNil order '()) '())
 		(nil? limit)
 		(nil? offset)
 		(equal? (coalesceNil partition_cols 0) 0)
-		(nil? once_limit))
+		(nil? once_limit)
+		(or (nil? outer_sources) (equal? outer_sources '())))
 		base
-		(list (quote scan-tagged-table) base (coalesceNil order '()) limit offset (coalesceNil partition_cols 0) once_limit))
+		(if (or (nil? outer_sources) (equal? outer_sources '()))
+			(list (quote scan-tagged-table) base (coalesceNil order '()) limit offset (coalesceNil partition_cols 0) once_limit)
+			(list (quote scan-tagged-table) base (coalesceNil order '()) limit offset (coalesceNil partition_cols 0) once_limit outer_sources)))
+))
+(define make_scan_tagged_table (lambda (base order limit offset partition_cols once_limit)
+	(make_scan_tagged_table_parts base order limit offset partition_cols once_limit nil)
 ))
 (define scan_tagged_table_base (lambda (tbl) (match tbl
 	'(scan-tagged-table base _ _ _ _ _) base
+	'(scan-tagged-table base _ _ _ _ _ _) base
 	'((symbol scan-tagged-table) base _ _ _ _ _) base
+	'((symbol scan-tagged-table) base _ _ _ _ _ _) base
 	'((quote scan-tagged-table) base _ _ _ _ _) base
+	'((quote scan-tagged-table) base _ _ _ _ _ _) base
 	tbl
 )))
 (define scan_tagged_table_order (lambda (tbl) (match tbl
 	'(scan-tagged-table _ order _ _ _ _) (coalesceNil order '())
+	'(scan-tagged-table _ order _ _ _ _ _) (coalesceNil order '())
 	'((symbol scan-tagged-table) _ order _ _ _ _) (coalesceNil order '())
+	'((symbol scan-tagged-table) _ order _ _ _ _ _) (coalesceNil order '())
 	'((quote scan-tagged-table) _ order _ _ _ _) (coalesceNil order '())
+	'((quote scan-tagged-table) _ order _ _ _ _ _) (coalesceNil order '())
 	'()
 )))
 (define scan_tagged_table_limit (lambda (tbl) (match tbl
 	'(scan-tagged-table _ _ limit _ _ _) limit
+	'(scan-tagged-table _ _ limit _ _ _ _) limit
 	'((symbol scan-tagged-table) _ _ limit _ _ _) limit
+	'((symbol scan-tagged-table) _ _ limit _ _ _ _) limit
 	'((quote scan-tagged-table) _ _ limit _ _ _) limit
+	'((quote scan-tagged-table) _ _ limit _ _ _ _) limit
 	nil
 )))
 (define scan_tagged_table_offset (lambda (tbl) (match tbl
 	'(scan-tagged-table _ _ _ offset _ _) offset
+	'(scan-tagged-table _ _ _ offset _ _ _) offset
 	'((symbol scan-tagged-table) _ _ _ offset _ _) offset
+	'((symbol scan-tagged-table) _ _ _ offset _ _ _) offset
 	'((quote scan-tagged-table) _ _ _ offset _ _) offset
+	'((quote scan-tagged-table) _ _ _ offset _ _ _) offset
 	nil
 )))
 (define scan_tagged_table_partition_cols (lambda (tbl) (match tbl
 	'(scan-tagged-table _ _ _ _ partition_cols _) (coalesceNil partition_cols 0)
+	'(scan-tagged-table _ _ _ _ partition_cols _ _) (coalesceNil partition_cols 0)
 	'((symbol scan-tagged-table) _ _ _ _ partition_cols _) (coalesceNil partition_cols 0)
+	'((symbol scan-tagged-table) _ _ _ _ partition_cols _ _) (coalesceNil partition_cols 0)
 	'((quote scan-tagged-table) _ _ _ _ partition_cols _) (coalesceNil partition_cols 0)
+	'((quote scan-tagged-table) _ _ _ _ partition_cols _ _) (coalesceNil partition_cols 0)
 	0
 )))
 (define scan_tagged_table_once_limit (lambda (tbl) (match tbl
 	'(scan-tagged-table _ _ _ _ _ once_limit) once_limit
+	'(scan-tagged-table _ _ _ _ _ once_limit _) once_limit
 	'((symbol scan-tagged-table) _ _ _ _ _ once_limit) once_limit
+	'((symbol scan-tagged-table) _ _ _ _ _ once_limit _) once_limit
 	'((quote scan-tagged-table) _ _ _ _ _ once_limit) once_limit
+	'((quote scan-tagged-table) _ _ _ _ _ once_limit _) once_limit
 	nil
+)))
+(define scan_tagged_table_outer_sources (lambda (tbl) (match tbl
+	'(scan-tagged-table _ _ _ _ _ _ outer_sources) (coalesceNil outer_sources '())
+	'((symbol scan-tagged-table) _ _ _ _ _ _ outer_sources) (coalesceNil outer_sources '())
+	'((quote scan-tagged-table) _ _ _ _ _ _ outer_sources) (coalesceNil outer_sources '())
+	'()
+)))
+(define scan_tagged_table_with_outer_sources (lambda (tbl outer_sources)
+	(if (or (nil? outer_sources) (equal? outer_sources '()))
+		tbl
+		(make_scan_tagged_table_parts
+			(scan_tagged_table_base tbl)
+			(scan_tagged_table_order tbl)
+			(scan_tagged_table_limit tbl)
+			(scan_tagged_table_offset tbl)
+			(scan_tagged_table_partition_cols tbl)
+			(scan_tagged_table_once_limit tbl)
+			outer_sources)
 )))
 (define scan_tagged_table_needs_scan_order (lambda (tbl)
 	(or (not (equal? (scan_tagged_table_order tbl) '()))
@@ -1757,6 +1823,18 @@ companion anti-pass scan. */
 		(stage_preserve_cache_meta old_stage new_stage)
 		rewrite_expr
 		rewrite_alias)
+))
+/* Extract anti-pass correlation metadata from correlated equality pairs.
+Each domain pair is (inner_expr outer_expr); only direct outer get_column refs
+become outer-sources entries because later anti-pass injection needs a stable
+outer table alias plus column name. Session/runtime bindings stay out of this
+carrier until session domains are modeled explicitly. */
+(define domain_outer_sources_from_correlation_cols (lambda (domain_cols rewrite_inner_expr)
+	(filter (map domain_cols (lambda (dc) (match (nth dc 1)
+		'((symbol get_column) outer_tv _ outer_col _) (list outer_tv outer_col (rewrite_inner_expr (nth dc 0)))
+		'((quote get_column) outer_tv _ outer_col _) (list outer_tv outer_col (rewrite_inner_expr (nth dc 0)))
+		nil)))
+		(lambda (src) (not (nil? src))))
 ))
 (define stage_has_group_boundary (lambda (stage) (begin
 	(define sg (coalesceNil (stage_group_cols stage) '()))
@@ -3307,17 +3385,26 @@ seeing the correctly prefixed outer alias. */
 												(if (nil? na) expr (list (quote get_column) na false col false)))
 											(cons sym args) (cons (_us_ria sym) (map args _us_ria))
 											expr)))
-										/* inner condition (non-correlated) - kept with original aliases for
-										aggregate path; renamed for non-aggregate path */
-										(define us_inner_cond_raw (if (equal? (count us_inner_parts) 0) nil
-											(if (equal? (count us_inner_parts) 1) (car us_inner_parts)
-												(cons (quote and) us_inner_parts))))
 										/* extract domain columns from correlated equalities:
-										(equal?? inner_expr outer_expr) → (inner_expr resolved_outer_expr) */
+										(equal?? inner_expr outer_expr) → (inner_expr resolved_outer_expr).
+										Only top-level AND parts with the equality pattern produce domain
+										columns; all other outer-referencing predicates still need to stay
+										on the inner scan after outer refs are resolved. */
 										(define us_domain_cols (filter (map us_outer_parts (lambda (part) (match part
 											'((symbol equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
 											'((quote equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
 											nil))) (lambda (x) (not (nil? x)))))
+										(define us_extra_inner_parts (filter us_outer_parts (lambda (part) (match part
+											'((symbol equal??) a b) (if (_us_hor a) (_us_hor b) (not (_us_hor b)))
+											'((quote equal??) a b) (if (_us_hor a) (_us_hor b) (not (_us_hor b)))
+											true))))
+										(define us_extra_inner_resolved (map us_extra_inner_parts _us_ror))
+										/* inner condition (non-correlated) - kept with original aliases for
+										aggregate path; renamed for non-aggregate path */
+										(define us_inner_parts_combined (merge us_inner_parts us_extra_inner_resolved))
+										(define us_inner_cond_raw (if (equal? (count us_inner_parts_combined) 0) nil
+											(if (equal? (count us_inner_parts_combined) 1) (car us_inner_parts_combined)
+												(cons (quote and) us_inner_parts_combined))))
 										/* === Three-way branch: aggregate / non-agg+LIMIT / non-agg-no-LIMIT === */
 										(if (or us_has_agg us_has_grp)
 											(if (not us_simple_agg_stages)
@@ -3526,12 +3613,7 @@ seeing the correctly prefixed outer alias. */
 																		(define us_dom_count (count us_dom_order))
 																		(define us_scan_limit (scalar_scan_effective_limit us_orig_limit))
 																		(define us_once_limit (scalar_scan_once_limit us_orig_limit))
-																		(define _us_outer_sources (filter (map us_domain_cols (lambda (dc) (match (nth dc 1)
-																			'((symbol get_column) outer_tv _ outer_col _) (list outer_tv outer_col (nth dc 0))
-																			'((quote get_column) outer_tv _ outer_col _) (list outer_tv outer_col (nth dc 0))
-																			_ nil))) (lambda (x) (not (nil? x)))))
-																		(define _us_outer_sources (map _us_outer_sources (lambda (src)
-																			(list (nth src 0) (nth src 1) (_us_ria (nth src 2))))))
+																		(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
 																		(define _us_inner_stages_rewritten (map _us_inner_stages (lambda (s)
 																			(rewrite_stage_for_flattened_aliases s
 																				_us_ria
@@ -3541,7 +3623,7 @@ seeing the correctly prefixed outer alias. */
 																				(coalesceNil (stage_outer_sources s) '())))))
 																		(define us_part_stage (stage_with_outer_sources
 																			(make_stage '() nil us_part_order us_dom_count us_scan_limit (coalesceNil us_orig_offset 0) false (list us_sq_prefix) nil nil us_once_limit)
-																			(merge_unique (list _us_outer_sources _us_nested_outer_sources))))
+																			(merge_unique (list us_outer_sources _us_nested_outer_sources))))
 																		(sq_cache "groups" (merge
 																			(list us_part_stage)
 																			_us_inner_stages_rewritten
@@ -3751,6 +3833,34 @@ seeing the correctly prefixed outer alias. */
 		(and
 			(not (_subquery_outer_refs_are_direct_columns query outer_schemas))
 			(_subquery_outer_refs_are_domain_columns query outer_schemas))))
+	(define _raw_subquery_has_non_equality_outer_condition (lambda (query outer_schemas) (match query
+		'(_ _ _ raw_condition _ _ _ _ _) (begin
+			(define local_aliases (_raw_query_local_aliases query))
+			(define raw_expr_has_outer_ref (lambda (expr) (match expr
+				'((symbol get_column) alias_ _ _ _) (and (not (nil? alias_))
+					(not (_alias_in_list local_aliases alias_))
+					(has_assoc? outer_schemas alias_))
+				'((quote get_column) alias_ _ _ _) (and (not (nil? alias_))
+					(not (_alias_in_list local_aliases alias_))
+					(has_assoc? outer_schemas alias_))
+				(cons sym args) (if (not (nil? (inner_select_kind sym)))
+					false
+					(reduce args (lambda (acc arg) (or acc (raw_expr_has_outer_ref arg))) false))
+				false)))
+			(define raw_condition_parts (flatten_and_terms (coalesceNil raw_condition true)))
+			(reduce raw_condition_parts (lambda (found part)
+				(or found
+					(and (raw_expr_has_outer_ref part)
+						(match part
+							'((symbol equal??) a b) (if (raw_expr_has_outer_ref a)
+								(raw_expr_has_outer_ref b)
+								(not (raw_expr_has_outer_ref b)))
+							'((quote equal??) a b) (if (raw_expr_has_outer_ref a)
+								(raw_expr_has_outer_ref b)
+								(not (raw_expr_has_outer_ref b)))
+							true))))
+				false))
+		false)))
 	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
 		(match (scalar_subselect_shape_facts subquery outer_schemas)
 			'(_g h _o _l _off _value_expr _has_outer _outer_refs_are_direct_columns _contains_inner_select_marker _has_aggregate _uses_session_state _contains_skip_level_nested_outer_ref) (begin
@@ -3766,11 +3876,18 @@ seeing the correctly prefixed outer alias. */
 				/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
 				(prejoin scoping bug when unnested table meets GROUP stage) */
 				(define _outer_has_group (or group having _cd_has))
+				(define _allow_grouped_direct_non_equality_outer
+					(and
+						(not _outer_has_group)
+						_outer_refs_are_direct_columns
+						(_raw_subquery_has_non_equality_outer_condition subquery outer_schemas)))
 				(if _has_outer
 					(if _has_agg_or_stage
 						(and
-							(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
-							(not _contains_inner_select_marker)
+							(or
+								(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
+								_allow_grouped_direct_non_equality_outer)
+							(if _contains_inner_select_marker _allow_grouped_direct_non_equality_outer true)
 							(not (nil? _value_expr))
 							true)
 						(and
@@ -4153,15 +4270,17 @@ seeing the correctly prefixed outer alias. */
 					/* prefix all table aliases and transform their joinexprs */
 					(define replace_column_alias_table_ref (lambda (tbl)
 						(if (scan_tagged_table_needs_scan_order tbl)
-							(make_scan_tagged_table
-								(scan_tagged_table_base tbl)
-								(map (scan_tagged_table_order tbl) (lambda (o) (match o
-									'(col dir) (list (replace_column_alias col) dir)
-									o)))
-								(scan_tagged_table_limit tbl)
-								(scan_tagged_table_offset tbl)
-								(scan_tagged_table_partition_cols tbl)
-								(scan_tagged_table_once_limit tbl))
+							(scan_tagged_table_with_outer_sources
+								(make_scan_tagged_table
+									(scan_tagged_table_base tbl)
+									(map (scan_tagged_table_order tbl) (lambda (o) (match o
+										'(col dir) (list (replace_column_alias col) dir)
+										o)))
+									(scan_tagged_table_limit tbl)
+									(scan_tagged_table_offset tbl)
+									(scan_tagged_table_partition_cols tbl)
+									(scan_tagged_table_once_limit tbl))
+								(scan_tagged_table_outer_sources tbl))
 							tbl)))
 					(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
 						(list (concat id "\0" alias) schema (replace_column_alias_table_ref tbl) a
@@ -4223,17 +4342,23 @@ seeing the correctly prefixed outer alias. */
 										(not (has? flattened_table_aliases alias_str))))
 								false)))
 							false)))
-					(define flatten_has_dangling_output_ref
-						(reduce_assoc fields2 (lambda (acc _k v)
-							(or acc (has_dangling_flatten_ref (replace_column_alias v))))
-							false))
 					(define flatten_referenced_cols (merge_unique (list
 						(extract_columns_for_tblvar id fields)
 						(extract_columns_for_tblvar id condition)
 						(extract_columns_for_tblvar id (coalesceNil having true))
 						(merge (map (coalesceNil order '()) (lambda (o) (extract_columns_for_tblvar id o))))
-						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_columns_for_tblvar id gexpr)))))))
+						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_columns_for_tblvar id gexpr))))
+						(extract_unqualified_columns fields)
+						(extract_unqualified_columns condition)
+						(extract_unqualified_columns (coalesceNil having true))
+						(merge (map (coalesceNil order '()) (lambda (o) (extract_unqualified_columns o))))
+						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_unqualified_columns gexpr))))
+						(merge (map tables (lambda (td) (match td
+							'(_ _ _ _ outer_joinexpr) (if (nil? outer_joinexpr) '()
+								(extract_columns_for_tblvar id outer_joinexpr))
+							'())))))))
 					(define flatten_uses_subquery_wildcard (or
+						(expr_has_unqualified_wildcard_ref fields)
 						(expr_has_tblvar_wildcard_ref id fields)
 						(expr_has_tblvar_wildcard_ref id condition)
 						(expr_has_tblvar_wildcard_ref id (coalesceNil having true))
@@ -4241,7 +4366,14 @@ seeing the correctly prefixed outer alias. */
 						(reduce (coalesceNil group '()) (lambda (acc gexpr) (or acc (expr_has_tblvar_wildcard_ref id gexpr))) false)))
 					(define pruned_fields2 (if flatten_uses_subquery_wildcard
 						fields2
-						(filter_assoc fields2 (lambda (k v) (has? flatten_referenced_cols k)))))
+						(filter_assoc fields2 (lambda (k v)
+							(reduce flatten_referenced_cols (lambda (keep refcol)
+								(or keep (equal?? refcol k)))
+								false)))))
+					(define flatten_has_dangling_output_ref
+						(reduce_assoc pruned_fields2 (lambda (acc _k v)
+							(or acc (has_dangling_flatten_ref (replace_column_alias v))))
+							false))
 					(define expr_contains_materialized_helper (lambda (expr) (match expr
 						_ (if (materialized-source? expr)
 							true
@@ -4401,7 +4533,7 @@ seeing the correctly prefixed outer alias. */
 								(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)) (not (_check_inner_select joinexpr2)))
 									(list (quote if) joinexpr2 expr nil)
 									expr)))
-							(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
+							(list tablesPrefixed (list id (map_assoc pruned_fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc pruned_fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
 						)
 					)
 				) (error "non matching return value for untangle_query"))
@@ -4805,15 +4937,17 @@ seeing the correctly prefixed outer alias. */
 		(finalize_logical_expr_scoped expr schemas planner_visible_schemas replace_rename enforce_planner_contract)))
 	(define finalize_visible_table_ref (lambda (tbl)
 		(if (scan_tagged_table_needs_scan_order tbl)
-			(make_scan_tagged_table
-				(scan_tagged_table_base tbl)
-				(map (scan_tagged_table_order tbl) (lambda (o) (match o
-					'(col dir) (list (finalize_visible_expr col) dir)
-					o)))
-				(scan_tagged_table_limit tbl)
-				(scan_tagged_table_offset tbl)
-				(scan_tagged_table_partition_cols tbl)
-				(scan_tagged_table_once_limit tbl))
+			(scan_tagged_table_with_outer_sources
+				(make_scan_tagged_table
+					(scan_tagged_table_base tbl)
+					(map (scan_tagged_table_order tbl) (lambda (o) (match o
+						'(col dir) (list (finalize_visible_expr col) dir)
+						o)))
+					(scan_tagged_table_limit tbl)
+					(scan_tagged_table_offset tbl)
+					(scan_tagged_table_partition_cols tbl)
+					(scan_tagged_table_once_limit tbl))
+				(scan_tagged_table_outer_sources tbl))
 			tbl)))
 
 
@@ -4930,15 +5064,21 @@ seeing the correctly prefixed outer alias. */
 /*
 === CONTRACT: join_reorder ===
 
-PURPOSE: Optimize table order for physical scan execution.
-Determines which table to scan first in a nested-loop join based on
-table sizes, available indexes, and predicate selectivity.
-Pure physical optimization — does not change query semantics.
+PURPOSE: Decide the physical table order for scan execution AND attach the
+correctness fixups that the chosen order requires.
+Tables are scored by estimated row count (from statistics) with local
+predicate count as tiebreaker; the cheapest table drives the scan. When a
+scalar LEFT-JOIN helper ends up placed above its outer correlation source
+(helper_pos < outer_pos), join_reorder annotates the helper's partition
+stage with an anti-pass-needed marker so build_queryplan can emit the
+companion null-extension scan (FAQ-unnesting point 35).
 
 INPUT/OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_column)
 
 WHAT IT MAY DO:
 - Reorder tables within a barrier-free scan segment
+- Augment the groups list with anti-pass-needed markers on partition stages
+whose helper was lifted above its correlation source by the reordering
 
 WHAT IT MUST NOT DO:
 - Transform query structure (that is untangle_query's job)
@@ -5060,17 +5200,82 @@ second table carries strictly more local WHERE predicates than the first. */
 	(define jqr_regular_tables (filter tables (lambda (td) (match td
 		'(alias _ _ _ _) (not (has? jqr_constant_scalar_aliases alias))
 		true))))
-	(list schema
-		(merge
-			jqr_constant_scalar_tables
-			(if (jqr_has_order_sensitive_stage groups)
-				jqr_regular_tables
-				(jqr_reorder_segments jqr_regular_tables condition schemas)))
-		fields condition groups schemas replace_find_column))))
+	(define jqr_final_tables (merge
+		jqr_constant_scalar_tables
+		(if (jqr_has_order_sensitive_stage groups)
+			jqr_regular_tables
+			(jqr_reorder_segments jqr_regular_tables condition schemas))))
+	/* FAQ-unnesting point 35: after the physical reorder decision is made,
+	hand the 7-tuple to inject_anti_passes so stages whose helper alias was
+	lifted above its correlation source (helper_pos < outer_pos) pick up an
+	anti-pass-needed marker. build_queryplan consumes the marker to emit a
+	companion null-extension scan. Safe no-op when nothing was lifted. */
+	(inject_anti_passes (list schema jqr_final_tables
+		fields condition groups schemas replace_find_column)))))
 
-/* Accessor for the anti-pass-needed marker attached by the post-reorder
-anti-pass fixup. Marker shape:
-(anti-pass-needed helper_tv outer_tv outer_col inner_expr) */
+/* inject_anti_passes: post-reorder correctness fixup for scalar LEFT-JOIN
+helpers. When join_reorder places a scalar helper carrying a partition-stage
+with outer-sources ABOVE its outer correlation source, scan_order's per-call
+isOuter fallback cannot null-extend outer rows whose correlation key has no
+inner match — the helper scan emits only matched partitions, and plain LEFT
+JOIN semantics drop the unmatched outer rows. Rather than constraining the
+reorderer, we detect the lifting here and annotate the stage with an
+anti-pass-needed marker that build_queryplan consumes to emit a companion
+anti-pass scan over the outer table.
+
+Marker shape (prepended to the stage assoc list):
+(anti-pass-needed helper_tv outer_tv outer_col inner_expr)
+- helper_tv:  alias of the scalar helper whose partition-stage carries outer-sources
+- outer_tv:   alias of the outer table that supplies the correlation key
+- outer_col:  column on outer_tv used as the correlation key
+- inner_expr: the helper-side expression the outer_col was bound to (for plan legibility)
+
+If no stage is lifted, the 7-tuple flows through unchanged. */
+(define iap_build_pos_map (lambda (iap_tables) (begin
+	/* Walk tables in order with an explicit index counter in a 2-element
+	accumulator (next_index, current_map) so reduce stays pure and robust
+	to table-descriptor shape variants — we only extract the alias via a
+	single match pattern. */
+	(define iap_acc (reduce iap_tables (lambda (iap_state iap_td) (begin
+		(define iap_i (nth iap_state 0))
+		(define iap_m (nth iap_state 1))
+		(define iap_tv (match iap_td '(tv _ _ _ _) tv _ nil))
+		(if (nil? iap_tv)
+			(list (+ iap_i 1) iap_m)
+			(list (+ iap_i 1) (merge iap_m (list (list iap_tv iap_i))))))) (list 0 '())))
+	(nth iap_acc 1))))
+
+(define iap_pos_of (lambda (iap_map iap_tv)
+	(reduce iap_map (lambda (iap_acc iap_entry)
+		(if (nil? iap_acc)
+			(if (equal? (nth iap_entry 0) iap_tv) (nth iap_entry 1) nil)
+			iap_acc)) nil)))
+
+(define inject_anti_passes (lambda (iapreorder_result) (match iapreorder_result
+	'(iapschema iaptables iapfields iapcondition iapgroups iapschemas iaprfcol) (begin
+		(define iap_pos_map (iap_build_pos_map iaptables))
+		(define iap_augmented (map (coalesceNil iapgroups '()) (lambda (iap_stage)
+			(begin
+				(define iap_os (stage_outer_sources iap_stage))
+				(define iap_aliases (stage_partition_aliases iap_stage))
+				(if (or (nil? iap_os) (equal? iap_os '())
+					(nil? iap_aliases) (equal? iap_aliases '()))
+					iap_stage
+					(begin
+						(define iap_helper_tv (car iap_aliases))
+						(define iap_src (car iap_os))
+						(define iap_outer_tv (nth iap_src 0))
+						(define iap_hp (iap_pos_of iap_pos_map iap_helper_tv))
+						(define iap_op (iap_pos_of iap_pos_map iap_outer_tv))
+						(if (and (not (nil? iap_hp)) (not (nil? iap_op)) (< iap_hp iap_op))
+							(cons (list (quote anti-pass-needed) iap_helper_tv iap_outer_tv (nth iap_src 1) (nth iap_src 2)) iap_stage)
+							iap_stage))))
+		)))
+		(list iapschema iaptables iapfields iapcondition iap_augmented iapschemas iaprfcol))
+	_ iapreorder_result)))
+
+/* Accessor for the anti-pass-needed marker attached by inject_anti_passes.
+Marker shape: (anti-pass-needed helper_tv outer_tv outer_col inner_expr) */
 (define stage_anti_pass_marker (lambda (iapstage) (reduce iapstage (lambda (iapacc iapitem)
 	(if (nil? iapacc) (match iapitem
 		(cons (quote anti-pass-needed) iaprest) iaprest
