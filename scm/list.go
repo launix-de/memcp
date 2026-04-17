@@ -481,8 +481,9 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list of lists of items", NoEscape: true, Variadic: true},
 			},
-			Return: FreshAlloc,
-			Const:  true,
+			Return:   FreshAlloc,
+			Const:    true,
+			Optimize: optimizeMergeUnique,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1668,6 +1669,71 @@ func init_list() {
 	})
 
 	Declare(&Globalenv, &Declaration{
+		Name: "merge_unique_mut",
+		Desc: "in-place merge_unique (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			if len(a) == 1 {
+				lists := asSlice(a[0], "merge_unique_mut")
+				inputs := append([]Scmer{}, lists...)
+				result := lists[:0]
+				for _, v := range inputs {
+					for _, el := range asSlice(v, "merge_unique_mut item") {
+						duplicate := false
+						for _, existing := range result {
+							if Equal(el, existing) {
+								duplicate = true
+								break
+							}
+						}
+						if !duplicate {
+							result = append(result, el)
+						}
+					}
+				}
+				return NewSlice(result)
+			}
+			base := asSlice(a[0], "merge_unique_mut")
+			inputs := append([]Scmer{}, base...)
+			result := base[:0]
+			for _, el := range inputs {
+				duplicate := false
+				for _, existing := range result {
+					if Equal(el, existing) {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					result = append(result, el)
+				}
+			}
+			for _, v := range a[1:] {
+				for _, el := range asSlice(v, "merge_unique_mut item") {
+					duplicate := false
+					for _, existing := range result {
+						if Equal(el, existing) {
+							duplicate = true
+							break
+						}
+					}
+					if !duplicate {
+						result = append(result, el)
+					}
+				}
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "owned base list or owned list of lists", Variadic: true},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+		},
+	})
+
+	Declare(&Globalenv, &Declaration{
 		Name: "reset_mut",
 		Desc: "resets an owned list to len=0 while preserving capacity",
 		Fn: func(a ...Scmer) Scmer {
@@ -1769,6 +1835,39 @@ func init_list() {
 // optimizeMerge currently only runs the standard optimization pipeline.
 func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	return oc.ApplyDefaultOptimization(v, useResult)
+}
+
+// optimizeMergeUnique keeps merge_unique on the standard variadic path, but
+// additionally treats a direct (list ...) first argument as fresh so the
+// optimizer can swap to merge_unique_mut without changing the global list
+// return contract.
+func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	firstArgListLiteral := false
+	if len(v) > 2 {
+		arg1 := v[1]
+		if stripped, ok := scmerStripSourceInfo(arg1); ok {
+			arg1 = stripped
+		}
+		if inner, ok := scmerSlice(arg1); ok && len(inner) > 0 && scmerIsSymbol(inner[0], "list") {
+			firstArgListLiteral = true
+		}
+	}
+
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if !firstArgListLiteral {
+		return result, td
+	}
+
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) < 2 || !scmerIsSymbol(rv[0], "merge_unique") {
+		return result, td
+	}
+	rv[0] = NewSymbol("merge_unique_mut")
+	if td == nil {
+		td = &TypeDescriptor{}
+	}
+	td.Transfer = true
+	return NewSlice(rv), td
 }
 
 // optimizeCons rewrites cons when the tail is a freshly allocated list:

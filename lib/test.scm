@@ -142,6 +142,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (zip (list (list 1 2) (list 3 4))) (list (list 1 3) (list 2 4))) true "zip list of lists")
 	(assert (equal? (merge (list (list 1 2) (list 3))) '(1 2 3)) true "merge flattens")
 	(assert (equal? (merge_unique (list (list 1 2) (list 2 3))) '(1 2 3)) true "merge_unique removes duplicates")
+	(assert (equal? (merge_unique_mut '(1 2) '(2 3)) '(1 2 3)) true "merge_unique_mut multi-arg semantics")
+	(assert (equal? (merge_unique_mut '(1 1 2) '(2 3)) '(1 2 3)) true "merge_unique_mut deduplicates first arg too")
+	(assert (equal? (merge_unique_mut (list (list 1 2) (list 2 3))) '(1 2 3)) true "merge_unique_mut single-arg list-of-lists semantics")
 
 	/* has? / filter / map / mapIndex / reduce */
 	(assert (has? '("a" "b" "c") "b") true "has? finds element")
@@ -858,6 +861,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((eval (optimize '('lambda '('a 'b) '(append '(list 'a) 'b)))) 10 20) '(10 20) "_mut append on fresh list")
 	/* scan callback ownership: reduce accumulator enables _mut inside reduce body */
 	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: reduce acc enables set_assoc_mut")
+	(define opt_merge_unique_ser (serialize (optimize
+		(list 'lambda
+			(list 'a 'b 'c)
+			(list 'merge_unique
+				(list 'list 'a 'b)
+				(list 'list 'b 'c))))))
+	(assert (match opt_merge_unique_ser (regex "merge_unique_mut" _) true false) true "_mut merge_unique on fresh first arg")
 
 	/* match / match_mut correctness */
 	(print "testing match/match_mut correctness ...")
