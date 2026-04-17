@@ -3709,28 +3709,20 @@ seeing the correctly prefixed outer alias. */
 																		(list us_part_stage)
 																		_us_inner_stages_rewritten
 																		(coalesceNil (sq_cache "groups") '())))
-																	(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
-																	(define us_inner_lim (_us_ria us_inner_cond_raw))
-																	(define us_full_lim (if (nil? us_inner_lim)
-																		(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
-																		(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
-																	(define us_tagged_tbl (make_scan_tagged_table
-																		us_tbl_name
-																		us_part_order
-																		(once_limit_scan_contract_limit us_once_contract)
-																		(once_limit_scan_contract_offset us_once_contract)
-																		(once_limit_scan_contract_partition_cols us_once_contract)
-																		(once_limit_scan_contract_once_limit us_once_contract)))
-																	(define us_tagged_tbl (scan_tagged_table_with_outer_sources us_tagged_tbl us_outer_sources))
-																	(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
-																		'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
-																		td))))
-																	(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim))))
-																	(define _us_inner_schema (schemas2_us us_tblvar))
-																	(define _us_passthrough_schemas (merge
-																		(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
-																		(merge (map (merge _us_inner_tbls _us_nested_direct_tbls) (lambda (td) (match td
-																			'(a _ _ _ _) (begin
+															(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
+															(define us_inner_lim (_us_ria us_inner_cond_raw))
+															(define us_full_lim (if (nil? us_inner_lim)
+																(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
+																(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+															(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
+																'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
+																td))))
+															(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))))
+															(define _us_inner_schema (schemas2_us us_tblvar))
+															(define _us_passthrough_schemas (merge
+																(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
+																(merge (map (merge _us_inner_tbls _us_nested_direct_tbls) (lambda (td) (match td
+																	'(a _ _ _ _) (begin
 																				(define _isch (schemas2_us a))
 																				(if (nil? _isch) '() (list a _isch)))
 																			'()))))))
@@ -8329,8 +8321,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(extract_columns_for_tblvar tblvar effective_later_condition)
 										(extract_outer_columns_for_tblvar tblvar effective_later_condition))))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-									/* check partition_stages for this table (non-first tables may have per-table partition limits) */
-									(define _ps_ord (if (or is_first (not (nil? tbl_once_limit))) nil
+									/* check partition_stages for this table. Tagged scans still override the
+									local stage config, but scoped partition stages must now also work when
+									this helper is the driver after join_reorder. */
+									(define _ps_ord (if (not (nil? tbl_once_limit)) nil
 										(reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil)))
 									(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
 									/* tagged helper scans override the local scan config; otherwise use

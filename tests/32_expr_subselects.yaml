@@ -179,6 +179,7 @@ test_cases:
         - "prefer-unnest"
       not_contains:
         - "__scalar_promise_"
+        - "scan-tagged-table"
 
   - name: "Derived table with scalar aggregate subselect"
     sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM t2 WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
