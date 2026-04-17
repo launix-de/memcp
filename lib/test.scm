@@ -215,6 +215,30 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (scalar_subselect_lowering_reason_from_facts true false true false false 1 true false false)
 		'prefer-unnest) true "scalar_subselect_lowering_reason_from_facts keeps prefer-unnest explicit")
 	(define iap_outer_source_expr (list 'get_column "helper_t" false "owner" false))
+	(define unnest_outer_expr (list 'and
+		(list 'outer 'outer_t.id)
+		(list 'get_column "inner_t" false "v" false)
+		(list 'get_column "sibling_t" false "x" false)))
+	(assert (equal? (unnest_expr_outer_refs unnest_outer_expr '("inner_t"))
+		'("outer_t.id" "sibling_t.x")) true "unnest_expr_outer_refs collects wrapped and free outer references")
+	(assert (equal? (unnest_expr_has_outer_ref unnest_outer_expr '("inner_t")) true) true "unnest_expr_has_outer_ref detects correlated references")
+	(assert (equal? (unnest_runtime_outer_ref_expr (list 'outer 'outer_t.id))
+		(list 'get_column "outer_t" false "id" false)) true "unnest_runtime_outer_ref_expr lowers outer markers to runtime columns")
+	(assert (equal? (unnest_rewrite_inner_aliases
+		(list 'and (list 'get_column "inner_t" false "v" false) (list 'get_column "other_t" false "z" false))
+		(lambda (alias_) (match alias_
+			"inner_t" "inner_t_flat"
+			nil)))
+		(list 'and (list 'get_column "inner_t_flat" false "v" false) (list 'get_column "other_t" false "z" false))) true "unnest_rewrite_inner_aliases only rewrites mapped inner aliases")
+	(assert (equal? (unnest_correlated_domain_col
+		(list 'equal?? (list 'get_column "inner_t" false "id" false) (list 'outer 'outer_t.id))
+		(lambda (expr) (unnest_expr_has_outer_ref expr '("inner_t")))
+		unnest_runtime_outer_ref_expr)
+		(list (list 'get_column "inner_t" false "id" false) (list 'get_column "outer_t" false "id" false))) true "unnest_correlated_domain_col keeps domain equalities explicit")
+	(assert (equal? (unnest_correlated_residual_part?
+		(list '<= (list 'get_column "inner_t" false "id" false) (list 'outer 'outer_t.id))
+		(lambda (expr) (unnest_expr_has_outer_ref expr '("inner_t"))))
+		true) true "unnest_correlated_residual_part? keeps non-equality correlated predicates on the inner side")
 	(define iap_domain_cols (list
 		(list iap_outer_source_expr (list 'get_column "outer_t" false "id" false))
 		(list (list 'get_column "helper_t" false "grp" false) (list 'session "v1"))))
