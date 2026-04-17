@@ -824,6 +824,18 @@ while still recursing into deeper helper lineage when needed. */
 	)
 ))
 
+/* extracts unqualified column references (get_column nil ...) from an expression.
+Used by derived-table flattening so wrapper columns referenced without an alias
+still keep their projected field alive. */
+(define extract_unqualified_columns (lambda (expr)
+	(match expr
+		'((symbol get_column) nil _ col _) (if (equal? col "*") '() '(col))
+		'((quote get_column) nil _ col _) (if (equal? col "*") '() '(col))
+		(cons sym args) (merge_unique (map args extract_unqualified_columns))
+		'()
+	)
+))
+
 /* true iff expr contains a direct tblvar.* wildcard reference.
 Used by derived-table flattening: an empty referenced-column set can mean either
 "outer query needs nothing from this wrapper" (good, prune all inner fields) or
@@ -833,6 +845,18 @@ Used by derived-table flattening: an empty referenced-column set can mean either
 		'((symbol get_column) (eval tblvar) _ col _) (equal? col "*")
 		'((quote get_column) (eval tblvar) _ col _) (equal? col "*")
 		(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_tblvar_wildcard_ref tblvar arg))) false)
+		false
+	)
+))
+
+/* true iff expr contains an unqualified * reference.
+Used by derived-table flattening: SELECT * over a wrapper still needs the full
+projected column set even when no alias-qualified t.* appears. */
+(define expr_has_unqualified_wildcard_ref (lambda (expr)
+	(match expr
+		'((symbol get_column) nil _ col _) (equal? col "*")
+		'((quote get_column) nil _ col _) (equal? col "*")
+		(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_unqualified_wildcard_ref arg))) false)
 		false
 	)
 ))
@@ -4108,17 +4132,23 @@ seeing the correctly prefixed outer alias. */
 										(not (has? flattened_table_aliases alias_str))))
 								false)))
 							false)))
-					(define flatten_has_dangling_output_ref
-						(reduce_assoc fields2 (lambda (acc _k v)
-							(or acc (has_dangling_flatten_ref (replace_column_alias v))))
-							false))
 					(define flatten_referenced_cols (merge_unique (list
 						(extract_columns_for_tblvar id fields)
 						(extract_columns_for_tblvar id condition)
 						(extract_columns_for_tblvar id (coalesceNil having true))
 						(merge (map (coalesceNil order '()) (lambda (o) (extract_columns_for_tblvar id o))))
-						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_columns_for_tblvar id gexpr)))))))
+						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_columns_for_tblvar id gexpr))))
+						(extract_unqualified_columns fields)
+						(extract_unqualified_columns condition)
+						(extract_unqualified_columns (coalesceNil having true))
+						(merge (map (coalesceNil order '()) (lambda (o) (extract_unqualified_columns o))))
+						(merge (map (coalesceNil group '()) (lambda (gexpr) (extract_unqualified_columns gexpr))))
+						(merge (map tables (lambda (td) (match td
+							'(_ _ _ _ outer_joinexpr) (if (nil? outer_joinexpr) '()
+								(extract_columns_for_tblvar id outer_joinexpr))
+							'())))))))
 					(define flatten_uses_subquery_wildcard (or
+						(expr_has_unqualified_wildcard_ref fields)
 						(expr_has_tblvar_wildcard_ref id fields)
 						(expr_has_tblvar_wildcard_ref id condition)
 						(expr_has_tblvar_wildcard_ref id (coalesceNil having true))
@@ -4126,7 +4156,14 @@ seeing the correctly prefixed outer alias. */
 						(reduce (coalesceNil group '()) (lambda (acc gexpr) (or acc (expr_has_tblvar_wildcard_ref id gexpr))) false)))
 					(define pruned_fields2 (if flatten_uses_subquery_wildcard
 						fields2
-						(filter_assoc fields2 (lambda (k v) (has? flatten_referenced_cols k)))))
+						(filter_assoc fields2 (lambda (k v)
+							(reduce flatten_referenced_cols (lambda (keep refcol)
+								(or keep (equal?? refcol k)))
+								false)))))
+					(define flatten_has_dangling_output_ref
+						(reduce_assoc pruned_fields2 (lambda (acc _k v)
+							(or acc (has_dangling_flatten_ref (replace_column_alias v))))
+							false))
 					(define expr_contains_materialized_helper (lambda (expr) (match expr
 						_ (if (materialized-source? expr)
 							true
@@ -4286,7 +4323,7 @@ seeing the correctly prefixed outer alias. */
 								(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)) (not (_check_inner_select joinexpr2)))
 									(list (quote if) joinexpr2 expr nil)
 									expr)))
-							(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
+							(list tablesPrefixed (list id (map_assoc pruned_fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc pruned_fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id "\0" k) v))))))
 						)
 					)
 				) (error "non matching return value for untangle_query"))
