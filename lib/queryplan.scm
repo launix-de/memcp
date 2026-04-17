@@ -3641,6 +3641,10 @@ seeing the correctly prefixed outer alias. */
 				(not (nil? h))
 				(not (equal? (coalesceNil _g '()) '()))
 				(not (equal? (coalesceNil _o '()) '()))))
+			(define _value_expr_is_direct_column (match _value_expr
+				'((symbol get_column) _ _ _ _) true
+				'((quote get_column) _ _ _ _) true
+				false))
 			/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
 			(prejoin scoping bug when unnested table meets GROUP stage) */
 			(define _outer_has_group (or group having _cd_has))
@@ -3648,23 +3652,19 @@ seeing the correctly prefixed outer alias. */
 					(if _has_agg_or_stage
 						(and
 							(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
+							(not _contains_inner_select_marker)
 							(not (nil? _value_expr))
 							true)
 					(and
 						_outer_refs_are_direct_columns
 						(not _outer_has_group)
+						(if _contains_inner_select_marker _value_expr_is_direct_column true)
 						(not (nil? _value_expr))
 						(not _has_aggregate)
 						(nil? h)
 						(or (nil? _g) (equal? _g '()))
 						true))
-				(and
-					(not _outer_has_group)
-					(not (nil? _value_expr))
-					(not _has_aggregate)
-					(nil? h)
-					(or (nil? _g) (equal? _g '()))
-					true)))
+				false))
 			nil)))
 	(define _unnest_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(match (unnest_subselect subquery outer_schemas)
