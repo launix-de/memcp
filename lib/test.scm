@@ -204,6 +204,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (stage_once_limit stage_once) 2) true "stage_once_limit reads once-per-partition limit")
 	(assert (stage_is_scoped? stage_scoped) true "stage_is_scoped? is true for scoped stages")
 	(assert (stage_is_scoped? stage_global) false "stage_is_scoped? is false for global stages")
+	(define iap_outer_source_expr (list 'get_column "helper_t" false "owner" false))
+	(define stage_part_with_sources (stage_with_outer_sources stage_part (list (list "outer_t" "id" iap_outer_source_expr))))
+	(assert (equal? (stage_outer_sources stage_part_with_sources) (list (list "outer_t" "id" iap_outer_source_expr))) true "stage_outer_sources reads optional outer correlation tuples")
+	(assert (equal? (stage_outer_sources (stage_preserve_cache_meta stage_part_with_sources (make_partition_stage '("u") '() 1 5 0 nil)))
+		(list (list "outer_t" "id" iap_outer_source_expr))) true "stage_preserve_cache_meta preserves outer-sources")
+	(define stage_marked (cons (list 'anti-pass-needed "helper_t" "outer_t" "id" iap_outer_source_expr) stage_part_with_sources))
+	(assert (equal? (stage_anti_pass_marker stage_marked) (list "helper_t" "outer_t" "id" iap_outer_source_expr)) true "stage_anti_pass_marker extracts marker payload")
+	(assert (equal? (iap_collect_markers (list stage_part_with_sources stage_marked)) (list (list "helper_t" "outer_t" "id" iap_outer_source_expr))) true "iap_collect_markers collects only marked stages")
+	(define iap_expr (list 'and
+		(list 'get_column "helper_t" false "value" false)
+		(list 'get_column "outer_t" false "id" false)))
+	(assert (equal? (iap_nullify_helper_refs iap_expr "helper_t")
+		(list 'and nil (list 'get_column "outer_t" false "id" false))) true "iap_nullify_helper_refs clears helper refs only")
+	(define iap_join_expr (list 'and
+		(list 'get_column "helper_t" false "owner" false)
+		(list 'get_column "helper_t" false "owner" false)
+		(list 'get_column "outer_t" false "id" false)))
+	(assert (equal? (iap_collect_alias_cols iap_join_expr "helper_t")
+		'("owner")) true "iap_collect_alias_cols dedupes helper columns")
+	(assert (equal? (serialize (iap_build_antifilter "memcp-tests" "helper_tbl"
+		iap_join_expr
+		"helper_t"))
+		"(nil? (scalar_scan \"memcp-tests\" \"helper_tbl\" (list \"owner\") (lambda (helper_t.owner) (and helper_t.owner helper_t.owner (outer outer_t.id))) (list) (lambda () 1) (lambda (acc item) 1) nil nil))") true "iap_build_antifilter lowers helper and outer refs for scalar_scan")
+	(define iap_helper_td (list "helper_t" "memcp-tests" "sq" true
+		(list '= (list 'get_column "helper_t" false "owner" false) (list 'get_column "outer_t" false "id" false))))
+	(assert (equal? (iap_find_td (list (list "outer_t" "memcp-tests" "t3" false true) iap_helper_td) "helper_t")
+		iap_helper_td) true "iap_find_td locates helper table descriptor by alias")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))
