@@ -2674,6 +2674,21 @@ seeing the correctly prefixed outer alias. */
 				(expr_uses_session_state subquery)
 				(_raw_query_contains_skip_level_nested_outer_ref subquery (_raw_query_local_aliases subquery))))
 		nil)))
+	(define scalar_subselect_inline_strategy (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
+		(if (and
+			(not (nil? _agg_args))
+			(equal? (count _agg_args) 3)
+			direct_agg_stages_simple
+			(or
+				(not raw_contains_skip_level_nested_outer_ref)
+				scalar_uses_session_state)
+			(nil? stage2_post_group_condition)
+			(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
+			(not (nil? tables2))
+			(not (equal? tables2 '()))
+			(or scalar_has_outer_ref scalar_uses_session_state))
+			(quote direct-agg-scan)
+			(quote legacy-fallback))))
 
 	(define build_scalar_subselect_inline_with_strategy (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
@@ -2801,20 +2816,6 @@ seeing the correctly prefixed outer alias. */
 							(reduce_assoc fields2 (lambda (found _k v) (or found (contains_outer_ref v))) false)
 							(contains_outer_ref condition2)
 							(reduce (coalesceNil groups2 '()) (lambda (found stage) (or found (stage_contains_outer_ref stage))) false)))
-						(define scalar_direct_agg_scan_applicable (lambda ()
-							(and
-								(not (nil? _agg_args))
-								(equal? (count _agg_args) 3)
-								direct_agg_stages_simple
-								(or
-									(not raw_contains_skip_level_nested_outer_ref)
-									scalar_uses_session_state)
-								(nil? stage2_post_group_condition)
-								(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
-								(not (nil? tables2))
-								(not (equal? tables2 '()))
-								(or scalar_has_outer_ref scalar_uses_session_state)
-						)))
 						(define scalar_subselect_fallback_take_first_without_pushdown (lambda ()
 							(and
 								raw_contains_skip_level_nested_outer_ref
@@ -2915,11 +2916,15 @@ seeing the correctly prefixed outer alias. */
 								(build_scalar_agg_scan tables2 condition2)
 								(cons (quote !begin) (merge init_stmts_agg (list (build_scalar_agg_scan tables2 condition2)))))
 						)))
-						(define scalar_subselect_inline_strategy (lambda ()
-							(if (scalar_direct_agg_scan_applicable)
-								(quote direct-agg-scan)
-								(quote legacy-fallback))))
-						(define scalar_strategy (scalar_subselect_inline_strategy))
+						(define scalar_strategy (scalar_subselect_inline_strategy
+							_agg_args
+							direct_agg_stages_simple
+							raw_contains_skip_level_nested_outer_ref
+							scalar_uses_session_state
+							stage2_post_group_condition
+							stage2_group
+							tables2
+							scalar_has_outer_ref))
 						(list scalar_strategy
 							(if (equal? scalar_strategy (quote direct-agg-scan))
 								(build_scalar_subselect_via_direct_agg_scan)
@@ -3551,10 +3556,17 @@ seeing the correctly prefixed outer alias. */
 				subst)
 			nil)
 	)))
-	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
+	(define scalar_subselect_lowering_policy (lambda (subquery outer_schemas)
 		(if (scalar_subselect_unnest_applicable subquery outer_schemas)
-			(begin
+			(quote prefer-unnest)
+			(quote inline-only))))
+	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
+		(match (scalar_subselect_lowering_policy subquery outer_schemas)
+			(quote prefer-unnest) (begin
 				(define lowered_expr (_unnest_scalar_subselect subquery outer_schemas))
+				/* The current master still permits an inline escape hatch while
+				the remaining Neumann-lowerable shapes are moved off fallback.
+				The policy is explicit now; later PRs can shrink or remove this path. */
 				(if (nil? lowered_expr)
 					(build_scalar_subselect_inline_with_strategy subquery outer_schemas)
 					(list (quote unnest) lowered_expr)))
