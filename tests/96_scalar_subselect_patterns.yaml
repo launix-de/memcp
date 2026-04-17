@@ -91,6 +91,39 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "Derived table pruning drops unused scalar projection for outer count"
+    sql: |
+      EXPLAIN IR
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT
+          sq_doc.ID,
+          sq_doc.date,
+          (SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) AS colorType
+        FROM sq_doc
+        WHERE NOT sq_doc.archive
+      ) AS t
+    expect:
+      contains:
+        - "sq_doc"
+      not_contains:
+        - "_unn_sq_uconf_0"
+
+  - name: "Derived table pruning keeps join key columns used only in outer ON"
+    sql: |
+      SELECT sq_rev.ID
+      FROM sq_rev
+      LEFT JOIN (
+        SELECT sq_doc.ID AS docID, sq_doc.date AS docDate
+        FROM sq_doc
+      ) refDoc ON refDoc.docID = sq_rev.doc
+      ORDER BY sq_rev.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+        - ID: 2
+        - ID: 3
+
   - name: "EXPLAIN IR reuses uncorrelated scalar helper in CASE WHEN"
     sql: |
       EXPLAIN IR
