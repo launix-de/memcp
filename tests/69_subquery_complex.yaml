@@ -185,7 +185,7 @@ test_cases:
 
   # === Nested subselect: inner subselect unnested, then outer level ===
 
-  - name: "Nested correlated subselect - inner unnested, outer inline"
+  - name: "Nested correlated subselect - inner and outer unnested"
     sql: |
       SELECT e.name,
         (SELECT d.dname FROM sq_dept d
@@ -196,6 +196,20 @@ test_cases:
       data:
         - name: "Alice"
           dept: "Engineering"
+
+  - name: "EXPLAIN IR nested correlated subselect keeps helper LEFT JOIN chain"
+    sql: |
+      EXPLAIN IR
+      SELECT e.name,
+        (SELECT d.dname FROM sq_dept d
+         WHERE d.did = (SELECT t.did FROM sq_emp t WHERE t.eid = e.eid) LIMIT 1) AS dept
+      FROM sq_emp e WHERE e.eid = 1
+    expect:
+      contains:
+        - '_unn_sq_emp_0'
+        - '_unn_sq_dept_0'
+      not_contains:
+        - '__scalar_promise_'
 
   # === nD domain: multiple outer references ===
 
