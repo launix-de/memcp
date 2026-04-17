@@ -3227,17 +3227,26 @@ seeing the correctly prefixed outer alias. */
 												(if (nil? na) expr (list (quote get_column) na false col false)))
 											(cons sym args) (cons (_us_ria sym) (map args _us_ria))
 											expr)))
-										/* inner condition (non-correlated) - kept with original aliases for
-										aggregate path; renamed for non-aggregate path */
-										(define us_inner_cond_raw (if (equal? (count us_inner_parts) 0) nil
-											(if (equal? (count us_inner_parts) 1) (car us_inner_parts)
-												(cons (quote and) us_inner_parts))))
 										/* extract domain columns from correlated equalities:
-										(equal?? inner_expr outer_expr) → (inner_expr resolved_outer_expr) */
+										(equal?? inner_expr outer_expr) → (inner_expr resolved_outer_expr).
+										Only top-level AND parts with the equality pattern produce domain
+										columns; all other outer-referencing predicates still need to stay
+										on the inner scan after outer refs are resolved. */
 										(define us_domain_cols (filter (map us_outer_parts (lambda (part) (match part
 											'((symbol equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
 											'((quote equal??) a b) (if (_us_hor a) (if (not (_us_hor b)) (list b (_us_ror a)) nil) (if (_us_hor b) (list a (_us_ror b)) nil))
 											nil))) (lambda (x) (not (nil? x)))))
+										(define us_extra_inner_parts (filter us_outer_parts (lambda (part) (match part
+											'((symbol equal??) a b) (if (_us_hor a) (_us_hor b) (not (_us_hor b)))
+											'((quote equal??) a b) (if (_us_hor a) (_us_hor b) (not (_us_hor b)))
+											true))))
+										(define us_extra_inner_resolved (map us_extra_inner_parts _us_ror))
+										/* inner condition (non-correlated) - kept with original aliases for
+										aggregate path; renamed for non-aggregate path */
+										(define us_inner_parts_combined (merge us_inner_parts us_extra_inner_resolved))
+										(define us_inner_cond_raw (if (equal? (count us_inner_parts_combined) 0) nil
+											(if (equal? (count us_inner_parts_combined) 1) (car us_inner_parts_combined)
+												(cons (quote and) us_inner_parts_combined))))
 										/* === Three-way branch: aggregate / non-agg+LIMIT / non-agg-no-LIMIT === */
 										(if (or us_has_agg us_has_grp)
 											(if (not us_simple_agg_stages)
@@ -3660,6 +3669,34 @@ seeing the correctly prefixed outer alias. */
 		(and
 			(not (_subquery_outer_refs_are_direct_columns query outer_schemas))
 			(_subquery_outer_refs_are_domain_columns query outer_schemas))))
+	(define _raw_subquery_has_non_equality_outer_condition (lambda (query outer_schemas) (match query
+		'(_ _ _ raw_condition _ _ _ _ _) (begin
+			(define local_aliases (_raw_query_local_aliases query))
+			(define raw_expr_has_outer_ref (lambda (expr) (match expr
+				'((symbol get_column) alias_ _ _ _) (and (not (nil? alias_))
+					(not (_alias_in_list local_aliases alias_))
+					(has_assoc? outer_schemas alias_))
+				'((quote get_column) alias_ _ _ _) (and (not (nil? alias_))
+					(not (_alias_in_list local_aliases alias_))
+					(has_assoc? outer_schemas alias_))
+				(cons sym args) (if (not (nil? (inner_select_kind sym)))
+					false
+					(reduce args (lambda (acc arg) (or acc (raw_expr_has_outer_ref arg))) false))
+				false)))
+			(define raw_condition_parts (flatten_and_terms (coalesceNil raw_condition true)))
+			(reduce raw_condition_parts (lambda (found part)
+				(or found
+					(and (raw_expr_has_outer_ref part)
+						(match part
+							'((symbol equal??) a b) (if (raw_expr_has_outer_ref a)
+								(raw_expr_has_outer_ref b)
+								(not (raw_expr_has_outer_ref b)))
+							'((quote equal??) a b) (if (raw_expr_has_outer_ref a)
+								(raw_expr_has_outer_ref b)
+								(not (raw_expr_has_outer_ref b)))
+							true))))
+				false))
+		false)))
 	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
 		(match (scalar_subselect_shape_facts subquery outer_schemas)
 			'(_g h _o _l _off _value_expr _has_outer _outer_refs_are_direct_columns _contains_inner_select_marker _has_aggregate _uses_session_state _contains_skip_level_nested_outer_ref) (begin
@@ -3675,11 +3712,18 @@ seeing the correctly prefixed outer alias. */
 			/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
 			(prejoin scoping bug when unnested table meets GROUP stage) */
 			(define _outer_has_group (or group having _cd_has))
+			(define _allow_grouped_direct_non_equality_outer
+				(and
+					(not _outer_has_group)
+					_outer_refs_are_direct_columns
+					(_raw_subquery_has_non_equality_outer_condition subquery outer_schemas)))
 				(if _has_outer
 					(if _has_agg_or_stage
 						(and
-							(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
-							(not _contains_inner_select_marker)
+							(or
+								(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
+								_allow_grouped_direct_non_equality_outer)
+							(if _contains_inner_select_marker _allow_grouped_direct_non_equality_outer true)
 							(not (nil? _value_expr))
 							true)
 					(and
