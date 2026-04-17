@@ -115,22 +115,6 @@ if the user is not allowed to access this property, the function will throw an e
 		true)
 )) (lambda (e) true))
 
-/* Startup invariant: root is only bootstrapped when the user table itself is
-missing. If system.user exists but no root row is present, treat that as
-persistent corruption instead of silently recreating credentials. */
-(if (has? (show "system") "user") (begin
-	(define _root_count (scan nil (table "system" "user")
-		'("username")
-		(lambda (username) (equal? username "root"))
-		'()
-		(lambda () 1)
-		+
-		0))
-	(if (> _root_count 0)
-		true
-		(error "startup corruption: system.user exists but root account is missing; refusing automatic bootstrap")))
-	true)
-
 /* ensure unique username constraint to avoid duplicates */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
