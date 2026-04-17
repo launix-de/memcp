@@ -65,7 +65,6 @@ test_cases:
           score: 1
         - grp: 20
           score: 1
-
   - name: "outer grouped domain stays logical in EXPLAIN IR"
     sql: |
       EXPLAIN IR SELECT o.grp,
@@ -88,6 +87,5 @@ test_cases:
         - "\"_unn_"
       not_contains:
         - "__mat:o:"
-
 cleanup:
   - sql: "DROP TABLE IF EXISTS cgd_state"
