@@ -3569,6 +3569,10 @@ seeing the correctly prefixed outer alias. */
 		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
 			(and all_ok (_outer_ref_is_domain_column outer_schemas ref)))
 			true)))
+	(define _subquery_outer_refs_need_domain_preservation (lambda (query outer_schemas)
+		(and
+			(not (_subquery_outer_refs_are_direct_columns query outer_schemas))
+			(_subquery_outer_refs_are_domain_columns query outer_schemas))))
 	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
 		(match (scalar_subselect_shape_facts subquery outer_schemas)
 			'(_g h _o _l _off _value_expr _has_outer _outer_refs_are_direct_columns _contains_inner_select_marker _has_aggregate _uses_session_state _contains_skip_level_nested_outer_ref) (begin
@@ -3577,28 +3581,33 @@ seeing the correctly prefixed outer alias. */
 				(not (nil? h))
 				(not (equal? (coalesceNil _g '()) '()))
 				(not (equal? (coalesceNil _o '()) '()))))
-			(define _outer_refs_supported (if _has_agg_or_stage
-				(_subquery_outer_refs_are_domain_columns subquery outer_schemas)
-				_outer_refs_are_direct_columns))
 			/* uncorrelated + outer GROUP BY: defer to group-barrier refactoring
 			(prejoin scoping bug when unnested table meets GROUP stage) */
 			(define _outer_has_group (or group having _cd_has))
-			(if (and
-				/* grouped/scalar-stage subselects may correlate against grouped outer
-				domains as long as those refs stay domain-safe */
-				(or (not _has_outer) _outer_refs_supported)
-				/* grouped outer domains are only supported for aggregate/staged
-				scalars; plain correlated lookups stay on the old blocked path */
-				(or (not _outer_has_group) (and _has_outer _has_agg_or_stage))
-				(not _contains_inner_select_marker)
-				(not (nil? _value_expr))
-				(or _has_agg_or_stage
+				(if _has_outer
+					(if _has_agg_or_stage
+						(and
+							(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
+							(not _contains_inner_select_marker)
+							(not (nil? _value_expr))
+							true)
 					(and
+						_outer_refs_are_direct_columns
+						(not _outer_has_group)
+						(not _contains_inner_select_marker)
+						(not (nil? _value_expr))
+						(not _has_aggregate)
 						(nil? h)
-						(or (nil? _g) (equal? _g '()))))
-				true)
-				true
-				false))
+						(or (nil? _g) (equal? _g '()))
+						true))
+				(and
+					(not _outer_has_group)
+					(not _contains_inner_select_marker)
+					(not (nil? _value_expr))
+					(not _has_aggregate)
+					(nil? h)
+					(or (nil? _g) (equal? _g '()))
+					true)))
 			nil)))
 	(define _unnest_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(match (unnest_subselect subquery outer_schemas)
