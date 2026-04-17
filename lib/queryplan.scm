@@ -1028,21 +1028,29 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 		(not (nil? (scan_tagged_table_offset tbl)))
 		(not (equal? (scan_tagged_table_partition_cols tbl) 0)))
 ))
-(define scalar_scan_effective_limit (lambda (limit_value)
-	(if (nil? limit_value)
-		2
-		(if (<= limit_value 1) limit_value 2))
-))
-(define scalar_scan_once_limit (lambda (limit_value)
-	(if (and (not (nil? limit_value)) (<= limit_value 1))
-		1
-		2)
-))
-(define scan_once_limit_promise_name (lambda (tblvar condition joinexpr tbl once_limit)
-	(if (and (not (nil? once_limit)) (>= once_limit 2))
+(define make_once_limit_scan_contract (lambda (limit_value offset_value partition_cols once_limit tblvar condition joinexpr tbl) (begin
+	(define contract_once_limit (if (nil? once_limit)
+		(if (and (not (nil? limit_value)) (<= limit_value 1))
+			1
+			2)
+		once_limit))
+	(define contract_limit (if (nil? once_limit)
+		(if (nil? limit_value)
+			2
+			(if (<= limit_value 1) limit_value 2))
+		(coalesceNil limit_value -1)))
+	(define contract_offset (coalesceNil offset_value 0))
+	(define contract_partition_cols (coalesceNil partition_cols 0))
+	(define contract_promise_name (if (and (not (nil? tblvar)) (not (nil? tbl)) (>= contract_once_limit 2))
 		(concat "__once_limit_" tblvar "_" (fnv_hash (concat condition "|" joinexpr "|" tbl)))
-		nil)
-))
+		nil))
+	(list contract_limit contract_offset contract_partition_cols contract_once_limit contract_promise_name)
+)))
+(define once_limit_scan_contract_limit (lambda (contract) (nth contract 0)))
+(define once_limit_scan_contract_offset (lambda (contract) (nth contract 1)))
+(define once_limit_scan_contract_partition_cols (lambda (contract) (nth contract 2)))
+(define once_limit_scan_contract_once_limit (lambda (contract) (nth contract 3)))
+(define once_limit_scan_contract_promise_name (lambda (contract) (nth contract 4)))
 (define wrap_once_limit_body (lambda (promise_name body)
 	(if (nil? promise_name)
 		body
@@ -3697,8 +3705,7 @@ seeing the correctly prefixed outer alias. */
 																	(begin
 																		(define us_part_order (merge us_dom_order us_renamed_order))
 																		(define us_dom_count (count us_dom_order))
-																		(define us_scan_limit (scalar_scan_effective_limit us_orig_limit))
-																		(define us_once_limit (scalar_scan_once_limit us_orig_limit))
+																		(define us_once_contract (make_once_limit_scan_contract us_orig_limit us_orig_offset us_dom_count nil nil nil nil nil))
 																		(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
 																		(define _us_inner_stages_rewritten (map _us_inner_stages (lambda (s)
 																			(rewrite_stage_for_flattened_aliases s
@@ -3708,7 +3715,14 @@ seeing the correctly prefixed outer alias. */
 																			(map _us_inner_stages_rewritten (lambda (s)
 																				(coalesceNil (stage_outer_sources s) '())))))
 																		(define us_part_stage (stage_with_outer_sources
-																			(make_stage '() nil us_part_order us_dom_count us_scan_limit (coalesceNil us_orig_offset 0) false (list us_sq_prefix) nil nil us_once_limit)
+																			(make_stage '() nil us_part_order us_dom_count
+																				(once_limit_scan_contract_limit us_once_contract)
+																				(once_limit_scan_contract_offset us_once_contract)
+																				false
+																				(list us_sq_prefix)
+																				nil
+																				nil
+																				(once_limit_scan_contract_once_limit us_once_contract))
 																			(merge_unique (list us_outer_sources _us_nested_outer_sources))))
 																		(sq_cache "groups" (merge
 																			(list us_part_stage)
@@ -3720,10 +3734,18 @@ seeing the correctly prefixed outer alias. */
 																		(define us_full_lim (if (nil? us_inner_lim)
 																			(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
 																			(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+																		(define us_tagged_tbl (make_scan_tagged_table
+																			us_tbl_name
+																			us_part_order
+																			(once_limit_scan_contract_limit us_once_contract)
+																			(once_limit_scan_contract_offset us_once_contract)
+																			(once_limit_scan_contract_partition_cols us_once_contract)
+																			(once_limit_scan_contract_once_limit us_once_contract)))
+																		(define us_tagged_tbl (scan_tagged_table_with_outer_sources us_tagged_tbl us_outer_sources))
 																		(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
 																			'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
 																			td))))
-																		(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))))
+																		(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tagged_tbl true us_full_lim))))
 																		/* register schema for own table + pass through inner-scoped and nested-direct schemas */
 																		(define _us_inner_schema (schemas2_us us_tblvar))
 																		(define _us_passthrough_schemas (merge
@@ -8345,26 +8367,33 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									))))))
 
 									/* offset/limit: tagged helper scans carry their own local limits. */
-									(define scan_offset (if (not (nil? tbl_once_limit))
+									(define ord_raw_scan_offset (if (not (nil? tbl_once_limit))
 										(coalesceNil tbl_scan_offset 0)
 										(if (not (nil? _ps_ord)) (coalesceNil (stage_offset_val _ps_ord) 0)
 											(if is_first stage_offset 0))))
-									(define scan_limit (if (not (nil? tbl_once_limit))
+									(define ord_raw_scan_limit (if (not (nil? tbl_once_limit))
 										(coalesceNil tbl_scan_limit -1)
 										(if (not (nil? _ps_ord)) (coalesceNil (stage_limit_val _ps_ord) -1)
 											(if is_first (coalesceNil stage_limit -1) -1))))
-									(define scan_partcols (if (not (nil? tbl_once_limit))
+									(define ord_raw_scan_partcols (if (not (nil? tbl_once_limit))
 										tbl_scan_partcols
 										(if (not (nil? _ps_ord)) (coalesceNil (stage_limit_partition_cols _ps_ord) 0)
 											(if is_first stage_partcols 0))))
+									(define ord_effective_once_limit (coalesce tbl_once_limit _ps_once_limit))
+									(define ord_once_contract (if (nil? ord_effective_once_limit)
+										nil
+										(make_once_limit_scan_contract ord_raw_scan_limit ord_raw_scan_offset ord_raw_scan_partcols ord_effective_once_limit tblvar condition joinexpr tbl)))
+									(define ord_scan_offset (if (nil? ord_once_contract) ord_raw_scan_offset (once_limit_scan_contract_offset ord_once_contract)))
+									(define ord_scan_limit (if (nil? ord_once_contract) ord_raw_scan_limit (once_limit_scan_contract_limit ord_once_contract)))
+									(define ord_scan_partcols (if (nil? ord_once_contract) ord_raw_scan_partcols (once_limit_scan_contract_partition_cols ord_once_contract)))
 
 									(define ord_scan_mapcols (if is_update_target_ord (cons list (cons "$update" cols)) (cons list cols)))
 									(define ord_scan_mapfn_params (if is_update_target_ord
 										(cons (symbol "$update") (map cols (lambda(col) (symbol (concat tblvar "." col)))))
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									(define ord_child_body (build_scan tables effective_later_condition false (list schema base_tbl tblvar)))
-									(define _ord_once_name (scan_once_limit_promise_name tblvar condition joinexpr tbl (coalesce tbl_once_limit _ps_once_limit)))
-									(define ord_scan_body (wrap_once_limit_body _ord_once_name ord_child_body))
+									(define ord_once_name (if (nil? ord_once_contract) nil (once_limit_scan_contract_promise_name ord_once_contract)))
+									(define ord_scan_body (wrap_once_limit_body ord_once_name ord_child_body))
 									/* emit init code from partition stage if present */
 									(define _ps_init (if (nil? _ps_ord) nil (stage_init_code _ps_ord)))
 									(define _ord_scan_core (scan_wrapper 'scan_order schema base_tbl
@@ -8374,9 +8403,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										/* sortcols, sortdirs */
 										(cons list ordercols)
 										(cons list dirs)
-										scan_partcols
-										scan_offset
-										scan_limit
+										ord_scan_partcols
+										ord_scan_offset
+										ord_scan_limit
 										/* extract columns and store them into variables */
 										ord_scan_mapcols
 										(list (symbol "lambda") ord_scan_mapfn_params ord_scan_body)
@@ -8385,7 +8414,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(if is_update_target_ord 0 nil)
 										isOuter
 									))
-									(define _ord_scan (wrap_once_limit_scan _ord_once_name _ord_scan_core))
+									(define _ord_scan (wrap_once_limit_scan ord_once_name _ord_scan_core))
 									(if (nil? _ps_init) _ord_scan (list (quote begin) _ps_init _ord_scan))
 								))
 							)
@@ -8494,17 +8523,36 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													nil
 													(reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil)))
 												(define _ps_once_limit (if (nil? _ps) nil (stage_once_limit _ps)))
-												(define _scan_once_name (scan_once_limit_promise_name tblvar condition joinexpr tbl (coalesce tbl_once_limit _ps_once_limit)))
-												(define scan_body (wrap_once_limit_body _scan_once_name scan_body))
 												(define _tagged_scan (scan_tagged_table_needs_scan_order tbl))
+												(define scan_raw_partcols (if _tagged_scan
+													tbl_scan_partcols
+													(if (nil? _ps) 0 (coalesceNil (stage_limit_partition_cols _ps) 0))))
+												(define scan_raw_limit (if _tagged_scan
+													(coalesceNil tbl_scan_limit -1)
+													(if (nil? _ps) -1 (coalesceNil (stage_limit_val _ps) -1))))
+												(define scan_raw_offset (if _tagged_scan
+													(coalesceNil tbl_scan_offset 0)
+													(if (nil? _ps) 0 (coalesceNil (stage_offset_val _ps) 0))))
+												(define scan_effective_once_limit (coalesce tbl_once_limit _ps_once_limit))
+												(define scan_once_contract (if (nil? scan_effective_once_limit)
+													nil
+													(make_once_limit_scan_contract scan_raw_limit scan_raw_offset scan_raw_partcols scan_effective_once_limit tblvar condition joinexpr tbl)))
+												(define scan_once_name (if (nil? scan_once_contract) nil (once_limit_scan_contract_promise_name scan_once_contract)))
+												(define scan_body (wrap_once_limit_body scan_once_name scan_body))
 												(if (or _tagged_scan (not (nil? _ps)))
 													/* === table-local scan_order === */
 													(begin
 														(define _ps_filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 														(define _ps_order (if _tagged_scan tbl_scan_order (coalesceNil (stage_order_list _ps) '())))
-														(define _ps_partcols (if _tagged_scan tbl_scan_partcols (coalesceNil (stage_limit_partition_cols _ps) 0)))
-														(define _ps_limit (if _tagged_scan (coalesceNil tbl_scan_limit -1) (coalesceNil (stage_limit_val _ps) -1)))
-														(define _ps_offset (if _tagged_scan (coalesceNil tbl_scan_offset 0) (coalesceNil (stage_offset_val _ps) 0)))
+														(define _ps_partcols (if (nil? scan_once_contract)
+															(if _tagged_scan tbl_scan_partcols (coalesceNil (stage_limit_partition_cols _ps) 0))
+															(once_limit_scan_contract_partition_cols scan_once_contract)))
+														(define _ps_limit (if (nil? scan_once_contract)
+															(if _tagged_scan (coalesceNil tbl_scan_limit -1) (coalesceNil (stage_limit_val _ps) -1))
+															(once_limit_scan_contract_limit scan_once_contract)))
+														(define _ps_offset (if (nil? scan_once_contract)
+															(if _tagged_scan (coalesceNil tbl_scan_offset 0) (coalesceNil (stage_offset_val _ps) 0))
+															(once_limit_scan_contract_offset scan_once_contract)))
 														(define _ps_ordercols (merge (map _ps_order (lambda (oi) (match oi '(col dir) (match col
 															'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
 															'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
@@ -8524,7 +8572,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															scan_mapcols
 															(list (symbol "lambda") scan_mapfn_params scan_body)
 															nil nil isOuter))
-														(define _ps_scan (wrap_once_limit_scan _scan_once_name _ps_scan_core))
+														(define _ps_scan (wrap_once_limit_scan scan_once_name _ps_scan_core))
 														(if (nil? _ps_init2) _ps_scan (list (quote begin) _ps_init2 _ps_scan)))
 													/* === regular scan === */
 													(scan_wrapper 'scan schema base_tbl
