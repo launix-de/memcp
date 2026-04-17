@@ -117,6 +117,34 @@ test_cases:
         - ID: 3
           name: "Charlie"
 
+  - name: "EXISTS ignores session state in projection for row existence"
+    sql: |
+      SELECT ID, name FROM exists_customers
+      WHERE EXISTS (SELECT LAST_INSERT_ID() FROM exists_orders WHERE total > 50)
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          name: "Alice"
+        - ID: 2
+          name: "Bob"
+        - ID: 3
+          name: "Charlie"
+
+  - name: "EXPLAIN EXISTS ignores session state in projection and keeps count cache rewrite"
+    sql: |
+      EXPLAIN SELECT ID, name FROM exists_customers
+      WHERE EXISTS (SELECT LAST_INSERT_ID() FROM exists_orders WHERE total > 50)
+      ORDER BY ID
+    expect:
+      rows: 1
+      contains:
+        - "createcolumn"
+        - "touch_keytable"
+        - ".exists_orders:(1)"
+        - "\"__cnt\""
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS exists_orders"
   - sql: "DROP TABLE IF EXISTS exists_customers"
