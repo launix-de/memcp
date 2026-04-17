@@ -4763,6 +4763,78 @@ second table carries strictly more local WHERE predicates than the first. */
 				(jqr_reorder_segments jqr_regular_tables condition schemas)))
 		fields condition groups schemas replace_find_column))))
 
+/* Accessor for the anti-pass-needed marker attached by the post-reorder
+anti-pass fixup. Marker shape:
+(anti-pass-needed helper_tv outer_tv outer_col inner_expr) */
+(define stage_anti_pass_marker (lambda (iapstage) (reduce iapstage (lambda (iapacc iapitem)
+	(if (nil? iapacc) (match iapitem
+		(cons (quote anti-pass-needed) iaprest) iaprest
+		_ nil)
+		iapacc)) nil)))
+
+/* Collect all anti-pass-needed markers from a groups list. Each marker is a
+4-tuple (helper_tv outer_tv outer_col inner_expr). */
+(define iap_collect_markers (lambda (iap_groups)
+	(reduce (coalesceNil iap_groups '()) (lambda (iap_acc iap_stage) (begin
+		(define iap_m (stage_anti_pass_marker iap_stage))
+		(if (nil? iap_m) iap_acc (merge iap_acc (list iap_m))))) '())))
+
+/* Replace get_column refs on helper alias iap_tv with nil so the anti-pass
+emits NULL-extended rows for helper fields. */
+(define iap_nullify_helper_refs (lambda (iap_expr iap_tv) (match iap_expr
+	'((symbol get_column) a _ _ _) (if (equal?? a iap_tv) nil iap_expr)
+	'((quote get_column) a _ _ _) (if (equal?? a iap_tv) nil iap_expr)
+	(cons iap_sym iap_args) (cons (iap_nullify_helper_refs iap_sym iap_tv)
+		(map iap_args (lambda (iap_a) (iap_nullify_helper_refs iap_a iap_tv))))
+	_ iap_expr)))
+
+/* Extract referenced column names for a single alias from an expression. */
+(define iap_collect_alias_cols_raw (lambda (iap_expr iap_tv) (match iap_expr
+	'((symbol get_column) a _ c _) (if (equal?? a iap_tv) (list c) '())
+	'((quote get_column) a _ c _) (if (equal?? a iap_tv) (list c) '())
+	(cons iap_sym iap_args) (merge (iap_collect_alias_cols_raw iap_sym iap_tv)
+		(reduce (map iap_args (lambda (a) (iap_collect_alias_cols_raw a iap_tv))) merge '()))
+	_ '())))
+(define iap_collect_alias_cols (lambda (iap_expr iap_tv)
+	(reduce (iap_collect_alias_cols_raw iap_expr iap_tv)
+		(lambda (acc c) (if (has? acc c) acc (merge acc (list c)))) '())))
+
+/* Lower get_column refs for scalar_scan's filter lambda: helper refs become
+lambda params, other refs become (outer alias.col) closure captures. */
+(define iap_lower_filter_expr (lambda (iap_expr iap_helper_tv) (match iap_expr
+	'((symbol get_column) a _ c _) (if (equal?? a iap_helper_tv)
+		(symbol (concat a "." c))
+		(list (quote outer) (symbol (concat a "." c))))
+	'((quote get_column) a _ c _) (if (equal?? a iap_helper_tv)
+		(symbol (concat a "." c))
+		(list (quote outer) (symbol (concat a "." c))))
+	(cons iap_sym iap_args) (cons (iap_lower_filter_expr iap_sym iap_helper_tv)
+		(map iap_args (lambda (ia) (iap_lower_filter_expr ia iap_helper_tv))))
+	_ iap_expr)))
+
+/* Build "no helper row matched" predicate for the companion anti-pass plan. */
+(define iap_build_antifilter (lambda (iap_helper_schema iap_helper_tbl iap_helper_je iap_helper_tv) (begin
+	(define iap_filter_cols (iap_collect_alias_cols iap_helper_je iap_helper_tv))
+	(define iap_param_names (map iap_filter_cols (lambda (c) (symbol (concat iap_helper_tv "." c)))))
+	(define iap_filter_body (iap_lower_filter_expr iap_helper_je iap_helper_tv))
+	(list (quote nil?)
+		(list (quote scalar_scan)
+			iap_helper_schema iap_helper_tbl
+			(cons (quote list) iap_filter_cols)
+			(list (quote lambda) iap_param_names iap_filter_body)
+			(list (quote list))
+			(list (quote lambda) (list) 1)
+			(list (quote lambda) (list (quote acc) (quote item)) 1)
+			nil
+			nil)))))
+
+/* Locate a table descriptor by alias in the reordered tables list. */
+(define iap_find_td (lambda (iap_tables iap_alias)
+	(reduce iap_tables (lambda (iap_acc iap_td)
+		(if (nil? iap_acc)
+			(match iap_td '(tv _ _ _ _) (if (equal?? tv iap_alias) iap_td nil) _ nil)
+			iap_acc)) nil)))
+
 (define build_queryplan_term_from_logical_with_sink (lambda (logical_term sink_mode) (begin
 	(define term_sink_emit_row (lambda (row_expr) (match sink_mode
 		'(callback sink_fn) (list sink_fn row_expr)
@@ -4770,7 +4842,34 @@ second table carries strictly more local WHERE predicates than the first. */
 	(if (logical_query_term_is_select_core logical_term)
 		(match logical_term '(select_core_term schema tables fields condition groups schemas replace_find_column init) (begin
 			(define _uq_7tuple (list schema tables fields condition groups schemas replace_find_column))
-			(define _plan (apply build_queryplan (merge (apply join_reorder _uq_7tuple) (list nil))))
+			(define _reorder (apply join_reorder _uq_7tuple))
+			(define _plan (apply build_queryplan (merge _reorder (list nil))))
+			(define _plan (match _reorder
+				'(_r_schema _r_tables _r_fields _r_condition _r_groups _r_schemas _r_rfcol) (begin
+					(define _r_markers (iap_collect_markers _r_groups))
+					(if (equal? _r_markers '()) _plan
+						(begin
+							(define _anti_plans (map _r_markers (lambda (_ap_m) (begin
+								(define _ap_helper_tv (nth _ap_m 0))
+								(define _ap_helper_td (iap_find_td _r_tables _ap_helper_tv))
+								(if (nil? _ap_helper_td) nil
+									(begin
+										(define _ap_helper_schema (nth _ap_helper_td 1))
+										(define _ap_helper_tbl (nth _ap_helper_td 2))
+										(define _ap_helper_je (nth _ap_helper_td 4))
+										(define _ap_antifilter (iap_build_antifilter _ap_helper_schema _ap_helper_tbl _ap_helper_je _ap_helper_tv))
+										(define _ap_tables (filter _r_tables (lambda (_ap_td) (not (equal?? (nth _ap_td 0) _ap_helper_tv)))))
+										(define _ap_fields (map_assoc _r_fields (lambda (_ap_k _ap_v) (iap_nullify_helper_refs _ap_v _ap_helper_tv))))
+										(define _ap_groups (filter (coalesceNil _r_groups '()) (lambda (_ap_s) (nil? (stage_anti_pass_marker _ap_s)))))
+										(define _ap_condition_raw (iap_nullify_helper_refs (coalesceNil _r_condition true) _ap_helper_tv))
+										(define _ap_condition (if (or (nil? _ap_condition_raw) (equal? _ap_condition_raw true))
+											_ap_antifilter
+											(list (quote and) _ap_condition_raw _ap_antifilter)))
+										(apply build_queryplan (list _r_schema _ap_tables _ap_fields _ap_condition _ap_groups _r_schemas _r_rfcol nil))))))))
+							(define _valid_anti_plans (filter _anti_plans (lambda (_ap_p) (not (nil? _ap_p)))))
+							(if (equal? _valid_anti_plans '()) _plan
+								(cons (quote begin) (cons _plan _valid_anti_plans))))))
+				_ _plan))
 			(define _full_plan (parallelize_resultrows (if (equal? init '()) _plan (cons (quote begin) (merge init (list _plan))))))
 			(match sink_mode
 				'(callback sink_fn) (list (quote begin)
