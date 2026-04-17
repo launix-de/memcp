@@ -4816,15 +4816,21 @@ seeing the correctly prefixed outer alias. */
 /*
 === CONTRACT: join_reorder ===
 
-PURPOSE: Optimize table order for physical scan execution.
-Determines which table to scan first in a nested-loop join based on
-table sizes, available indexes, and predicate selectivity.
-Pure physical optimization — does not change query semantics.
+PURPOSE: Decide the physical table order for scan execution AND attach the
+correctness fixups that the chosen order requires.
+Tables are scored by estimated row count (from statistics) with local
+predicate count as tiebreaker; the cheapest table drives the scan. When a
+scalar LEFT-JOIN helper ends up placed above its outer correlation source
+(helper_pos < outer_pos), join_reorder annotates the helper's partition
+stage with an anti-pass-needed marker so build_queryplan can emit the
+companion null-extension scan (FAQ-unnesting point 35).
 
 INPUT/OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_column)
 
 WHAT IT MAY DO:
 - Reorder tables within a barrier-free scan segment
+- Augment the groups list with anti-pass-needed markers on partition stages
+  whose helper was lifted above its correlation source by the reordering
 
 WHAT IT MUST NOT DO:
 - Transform query structure (that is untangle_query's job)
@@ -4945,17 +4951,82 @@ second table carries strictly more local WHERE predicates than the first. */
 	(define jqr_regular_tables (filter tables (lambda (td) (match td
 		'(alias _ _ _ _) (not (has? jqr_constant_scalar_aliases alias))
 		true))))
-	(list schema
-		(merge
-			jqr_constant_scalar_tables
-			(if (jqr_has_order_sensitive_stage groups)
-				jqr_regular_tables
-				(jqr_reorder_segments jqr_regular_tables condition schemas)))
-		fields condition groups schemas replace_find_column))))
+	(define jqr_final_tables (merge
+		jqr_constant_scalar_tables
+		(if (jqr_has_order_sensitive_stage groups)
+			jqr_regular_tables
+			(jqr_reorder_segments jqr_regular_tables condition schemas))))
+	/* FAQ-unnesting point 35: after the physical reorder decision is made,
+	hand the 7-tuple to inject_anti_passes so stages whose helper alias was
+	lifted above its correlation source (helper_pos < outer_pos) pick up an
+	anti-pass-needed marker. build_queryplan consumes the marker to emit a
+	companion null-extension scan. Safe no-op when nothing was lifted. */
+	(inject_anti_passes (list schema jqr_final_tables
+		fields condition groups schemas replace_find_column)))))
 
-/* Accessor for the anti-pass-needed marker attached by the post-reorder
-anti-pass fixup. Marker shape:
-(anti-pass-needed helper_tv outer_tv outer_col inner_expr) */
+/* inject_anti_passes: post-reorder correctness fixup for scalar LEFT-JOIN
+helpers. When join_reorder places a scalar helper carrying a partition-stage
+with outer-sources ABOVE its outer correlation source, scan_order's per-call
+isOuter fallback cannot null-extend outer rows whose correlation key has no
+inner match — the helper scan emits only matched partitions, and plain LEFT
+JOIN semantics drop the unmatched outer rows. Rather than constraining the
+reorderer, we detect the lifting here and annotate the stage with an
+anti-pass-needed marker that build_queryplan consumes to emit a companion
+anti-pass scan over the outer table.
+
+Marker shape (prepended to the stage assoc list):
+  (anti-pass-needed helper_tv outer_tv outer_col inner_expr)
+- helper_tv:  alias of the scalar helper whose partition-stage carries outer-sources
+- outer_tv:   alias of the outer table that supplies the correlation key
+- outer_col:  column on outer_tv used as the correlation key
+- inner_expr: the helper-side expression the outer_col was bound to (for plan legibility)
+
+If no stage is lifted, the 7-tuple flows through unchanged. */
+(define iap_build_pos_map (lambda (iap_tables) (begin
+	/* Walk tables in order with an explicit index counter in a 2-element
+	accumulator (next_index, current_map) so reduce stays pure and robust
+	to table-descriptor shape variants — we only extract the alias via a
+	single match pattern. */
+	(define iap_acc (reduce iap_tables (lambda (iap_state iap_td) (begin
+		(define iap_i (nth iap_state 0))
+		(define iap_m (nth iap_state 1))
+		(define iap_tv (match iap_td '(tv _ _ _ _) tv _ nil))
+		(if (nil? iap_tv)
+			(list (+ iap_i 1) iap_m)
+			(list (+ iap_i 1) (merge iap_m (list (list iap_tv iap_i))))))) (list 0 '())))
+	(nth iap_acc 1))))
+
+(define iap_pos_of (lambda (iap_map iap_tv)
+	(reduce iap_map (lambda (iap_acc iap_entry)
+		(if (nil? iap_acc)
+			(if (equal? (nth iap_entry 0) iap_tv) (nth iap_entry 1) nil)
+			iap_acc)) nil)))
+
+(define inject_anti_passes (lambda (iapreorder_result) (match iapreorder_result
+	'(iapschema iaptables iapfields iapcondition iapgroups iapschemas iaprfcol) (begin
+		(define iap_pos_map (iap_build_pos_map iaptables))
+		(define iap_augmented (map (coalesceNil iapgroups '()) (lambda (iap_stage)
+			(begin
+				(define iap_os (stage_outer_sources iap_stage))
+				(define iap_aliases (stage_partition_aliases iap_stage))
+				(if (or (nil? iap_os) (equal? iap_os '())
+						(nil? iap_aliases) (equal? iap_aliases '()))
+					iap_stage
+					(begin
+						(define iap_helper_tv (car iap_aliases))
+						(define iap_src (car iap_os))
+						(define iap_outer_tv (nth iap_src 0))
+						(define iap_hp (iap_pos_of iap_pos_map iap_helper_tv))
+						(define iap_op (iap_pos_of iap_pos_map iap_outer_tv))
+						(if (and (not (nil? iap_hp)) (not (nil? iap_op)) (< iap_hp iap_op))
+							(cons (list (quote anti-pass-needed) iap_helper_tv iap_outer_tv (nth iap_src 1) (nth iap_src 2)) iap_stage)
+							iap_stage))))
+			)))
+		(list iapschema iaptables iapfields iapcondition iap_augmented iapschemas iaprfcol))
+	_ iapreorder_result)))
+
+/* Accessor for the anti-pass-needed marker attached by inject_anti_passes.
+Marker shape: (anti-pass-needed helper_tv outer_tv outer_col inner_expr) */
 (define stage_anti_pass_marker (lambda (iapstage) (reduce iapstage (lambda (iapacc iapitem)
 	(if (nil? iapacc) (match iapitem
 		(cons (quote anti-pass-needed) iaprest) iaprest
