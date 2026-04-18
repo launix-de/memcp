@@ -1055,6 +1055,24 @@ helpers instead of rebuilding alias/order logic inline inside untangle_query. */
 		false)))
 		true)
 ))
+/* Logical scalar-partition stage: encode partition-topk semantics on the
+stage itself and leave promise/runtime details to build_scan. The stage still
+records scalar cardinality via once-limit, but no once-limit contract or
+runtime promise name is created during unnesting anymore. */
+(define make_scalar_partition_stage (lambda (order_list limit_value offset_value partition_cols aliases outer_sources) (begin
+	(define stage_order (coalesceNil order_list '()))
+	(define stage_partition_cols (coalesceNil partition_cols 0))
+	(define stage_offset (coalesceNil offset_value 0))
+	(define stage_once_limit (if (and (not (nil? limit_value)) (<= limit_value 1))
+		1
+		2))
+	(define stage_limit (if (nil? limit_value)
+		stage_once_limit
+		(if (<= limit_value 1) limit_value 2)))
+	(stage_with_outer_sources
+		(make_stage '() nil stage_order stage_partition_cols stage_limit stage_offset false aliases nil nil stage_once_limit)
+		outer_sources)
+)))
 (define scalar_subselect_alias_map (lambda (base_tables single_tbl sq_prefix)
 	(map base_tables (lambda (td) (match td
 		'(alias _ _ _ _) (list alias (if single_tbl sq_prefix (concat sq_prefix "\0" alias)))
@@ -3704,7 +3722,6 @@ seeing the correctly prefixed outer alias. */
 																		(begin
 																			(define us_part_order (merge us_dom_order us_renamed_order))
 																			(define us_dom_count (count us_dom_order))
-																			(define us_once_contract (make_once_limit_scan_contract us_orig_limit us_orig_offset us_dom_count nil nil nil nil nil))
 																			(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
 																			(define _us_inner_stages_rewritten (scalar_subselect_rewrite_stages
 																				_us_inner_stages
@@ -3713,15 +3730,12 @@ seeing the correctly prefixed outer alias. */
 																			(define _us_nested_outer_sources (merge_unique
 																				(map _us_inner_stages_rewritten (lambda (s)
 																					(coalesceNil (stage_outer_sources s) '())))))
-																			(define us_part_stage (stage_with_outer_sources
-																				(make_stage '() nil us_part_order us_dom_count
-																					(once_limit_scan_contract_limit us_once_contract)
-																					(once_limit_scan_contract_offset us_once_contract)
-																					false
-																					(list us_sq_prefix)
-																					nil
-																					nil
-																					(once_limit_scan_contract_once_limit us_once_contract))
+																			(define us_part_stage (make_scalar_partition_stage
+																				us_part_order
+																				us_orig_limit
+																				us_orig_offset
+																				us_dom_count
+																				(list us_sq_prefix)
 																				(merge_unique (list us_outer_sources _us_nested_outer_sources))))
 																			(sq_cache "groups" (merge
 																				(list us_part_stage)
@@ -4836,6 +4850,17 @@ seeing the correctly prefixed outer alias. */
 	Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
 	(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
 	(define _sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
+	/* Deduplication is only sound while the query still carries purely logical
+	scalar expressions. Legacy inline fallbacks embed physical runtime code
+	(scan, scan_order, !begin, promises) directly into field expressions; alias
+	rewrite across those opaque subplans is not semantics-preserving yet. Keep
+	those queries on the undeduped helper path until the fallback code is gone. */
+	(define scalar_query_has_opaque_runtime (or
+		(reduce_assoc fields (lambda (found _k v) (or found (expr_has_opaque_scope v))) false)
+		(expr_has_opaque_scope condition)
+		(reduce (coalesceNil group '()) (lambda (found expr) (or found (expr_has_opaque_scope expr))) false)
+		(expr_has_opaque_scope having)
+		(reduce (coalesceNil order '()) (lambda (found order_item) (or found (expr_has_opaque_scope order_item))) false)))
 	/* Deduplicate identical scalar projection LEFT JOIN helpers before they
 	enter the normal table pipeline. join_reorder can move helpers, but it cannot
 	recognize that two _unn_ aliases describe the same LEFT JOIN relation once
@@ -4852,25 +4877,27 @@ seeing the correctly prefixed outer alias. */
 				isOuter
 				(rewrite_source_aliases _dedup_alias_map (coalesceNil joinexpr true)))))
 		nil)))
-	(define _sq_scalar_dedup_state (reduce _sq_scalar_tbls (lambda (state td) (match state
-		'(kept key_map alias_map) (match td
-			'(tv _ _ _ _) (begin
-				(define _dedup_key (scalar_left_join_dedup_key td))
-				(define _canonical_alias (get_assoc key_map _dedup_key))
-				(if (nil? _canonical_alias)
-					(list
-						(merge kept (list td))
-						(set_assoc key_map _dedup_key tv)
-						alias_map)
-					(list
-						kept
-						key_map
-						(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
-							(set_assoc acc (string alias_v) _canonical_alias))
-							alias_map))))
-			_ td)
-		_ state))
-		(list '() '() '())))
+	(define _sq_scalar_dedup_state (if scalar_query_has_opaque_runtime
+		(list _sq_scalar_tbls '() '())
+		(reduce _sq_scalar_tbls (lambda (state td) (match state
+			'(kept key_map alias_map) (match td
+				'(tv _ _ _ _) (begin
+					(define _dedup_key (scalar_left_join_dedup_key td))
+					(define _canonical_alias (get_assoc key_map _dedup_key))
+					(if (nil? _canonical_alias)
+						(list
+							(merge kept (list td))
+							(set_assoc key_map _dedup_key tv)
+							alias_map)
+						(list
+							kept
+							key_map
+							(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+								(set_assoc acc (string alias_v) _canonical_alias))
+								alias_map))))
+				_ td)
+			_ state))
+			(list '() '() '()))))
 	(define _sq_scalar_tbls (nth _sq_scalar_dedup_state 0))
 	(define _sq_scalar_alias_map (nth _sq_scalar_dedup_state 2))
 	(define rewrite_scalar_left_join_alias (lambda (alias_)
