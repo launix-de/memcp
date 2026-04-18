@@ -59,30 +59,31 @@ func (d *Declaration) MaxParams() int {
 // TypeDescriptor describes the type of any Scmer value at arbitrary depth.
 // Uses pointers throughout — nil means "unknown / don't care" (conservative).
 type TypeDescriptor struct {
-	Kind      string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
-	NoEscape  bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
-	Transfer  bool                       // callee receives ownership, can mutate
-	Const     bool                       // value is a compile-time constant; for func: safe to constant-fold
-	Optional  bool                       // for func params: parameter is optional
-	Variadic  bool                       // for func params: last param accepts 0+ values
-	Forbidden      bool                  // for func: optimizer-only, hidden from help
-	HasSideEffects bool                  // for func: true = call has side effects, cannot be eliminated even if result unused
-	ParamName string                     // for func params: documentation name
-	ParamDesc string                     // for func params: documentation description
-	Params    []*TypeDescriptor          // for Kind="func": parameter types
-	Return    *TypeDescriptor            // for Kind="func": return type
-	Keys      map[string]*TypeDescriptor // for Kind="assoc": per-key type info
-	Element   *TypeDescriptor            // for Kind="list": element type
+	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
+	NoEscape       bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
+	Transfer       bool                       // callee receives ownership, can mutate
+	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold
+	Length         int                        // exact positive list/assoc length; -1 = unknown
+	Optional       bool                       // for func params: parameter is optional
+	Variadic       bool                       // for func params: last param accepts 0+ values
+	Forbidden      bool                       // for func: optimizer-only, hidden from help
+	HasSideEffects bool                       // for func: true = call has side effects, cannot be eliminated even if result unused
+	ParamName      string                     // for func params: documentation name
+	ParamDesc      string                     // for func params: documentation description
+	Params         []*TypeDescriptor          // for Kind="func": parameter types
+	Return         *TypeDescriptor            // for Kind="func": return type
+	Keys           map[string]*TypeDescriptor // for Kind="assoc": per-key type info
+	Element        *TypeDescriptor            // for Kind="list": element type
 	// Custom optimizer hook for function types. When set, the optimizer calls this
 	// INSTEAD of the default arg optimization + post-processing.
-	Optimize  func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
+	Optimize func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
 	// Optional JIT emitter for native code generation.
-	JITEmit   func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
+	JITEmit func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
 	// Specialized variants keyed by param-ownership bitmask.
 	// Built on-demand by the optimizer when a call site provides owned args.
 	// TODO: deoptimization — if the global function is redefined, all callsites
 	// referencing cached variants must be invalidated (reset to the original code).
-	Variants  map[uint64]Scmer
+	Variants map[uint64]Scmer
 }
 
 // OptimizerContext is an exported wrapper so packages like storage can use
@@ -96,9 +97,10 @@ type OptimizerContext struct {
 // No heap allocation for the common case (Kind + Flags). Extra info (sub-structure
 // types, function signatures) is stored in an optional *TypeDescriptor pointer.
 type TypeInfo struct {
-	kind  uint8
-	flags uint8
-	Extra *TypeDescriptor // nil in common case; only allocated for sub-structure info
+	kind   uint8
+	flags  uint8
+	length int
+	Extra  *TypeDescriptor // nil in common case; only allocated for sub-structure info
 }
 
 // Kind constants for TypeInfo
@@ -122,20 +124,36 @@ const (
 	FlagEscape                     // value may outlive scope
 )
 
+const UnknownLength = -1
+
 func (ti TypeInfo) Transfer() bool { return ti.flags&FlagTransfer != 0 }
 func (ti TypeInfo) Const() bool    { return ti.flags&FlagConst != 0 }
 func (ti TypeInfo) Escape() bool   { return ti.flags&FlagEscape != 0 }
 func (ti TypeInfo) Kind() uint8    { return ti.kind }
+func (ti TypeInfo) Length() int {
+	if ti.length <= 0 {
+		return UnknownLength
+	}
+	return ti.length
+}
 
-func (ti TypeInfo) WithTransfer() TypeInfo   { ti.flags |= FlagTransfer; return ti }
+func (ti TypeInfo) WithTransfer() TypeInfo    { ti.flags |= FlagTransfer; return ti }
 func (ti TypeInfo) WithoutTransfer() TypeInfo { ti.flags &^= FlagTransfer; return ti }
-func (ti TypeInfo) WithConst() TypeInfo      { ti.flags |= FlagConst; return ti }
+func (ti TypeInfo) WithConst() TypeInfo       { ti.flags |= FlagConst; return ti }
 func (ti TypeInfo) WithKind(k uint8) TypeInfo { ti.kind = k; return ti }
+func (ti TypeInfo) WithLength(n int) TypeInfo {
+	if n <= 0 {
+		ti.length = UnknownLength
+	} else {
+		ti.length = n
+	}
+	return ti
+}
 func (ti TypeInfo) WithExtra(td *TypeDescriptor) TypeInfo { ti.Extra = td; return ti }
 
 // MakeTypeInfo builds a TypeInfo from transfer/const bools (no heap allocation).
 func MakeTypeInfo(transfer, constant bool) TypeInfo {
-	var ti TypeInfo
+	ti := TypeInfo{length: UnknownLength}
 	if transfer {
 		ti.flags |= FlagTransfer
 	}
@@ -148,9 +166,9 @@ func MakeTypeInfo(transfer, constant bool) TypeInfo {
 // TypeInfoFromTD converts a *TypeDescriptor to a stack-allocated TypeInfo.
 func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
 	if td == nil {
-		return TypeInfo{}
+		return TypeInfo{length: UnknownLength}
 	}
-	var ti TypeInfo
+	ti := TypeInfo{length: UnknownLength}
 	if td.Transfer {
 		ti.flags |= FlagTransfer
 	}
@@ -177,7 +195,10 @@ func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
 	case "assoc":
 		ti.kind = KindAssoc
 	}
-	if len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
+	if td.Length > 0 {
+		ti.length = td.Length
+	}
+	if td.Length > 0 || len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
 		ti.Extra = td
 	}
 	return ti
@@ -185,22 +206,23 @@ func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
 
 // ToTypeDescriptor converts to a heap-allocated TypeDescriptor (for APIs that need it).
 func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
-	if ti.kind == KindAny && ti.flags == 0 && ti.Extra == nil {
+	if ti.kind == KindAny && ti.flags == 0 && ti.Extra == nil && ti.Length() == UnknownLength {
 		return nil
 	}
-	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape()}
+	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape(), Length: ti.Length()}
 	if ti.Extra != nil {
 		*td = *ti.Extra
 		td.Transfer = ti.Transfer()
 		td.Const = ti.Const()
 		td.NoEscape = !ti.Escape()
+		td.Length = ti.Length()
 	}
 	return td
 }
 
 // NoEscape is a reusable TypeDescriptor annotation for parameters that
 // the callee reads but never stores — safe to back with stack-allocated !list.
-var NoEscape = &TypeDescriptor{Kind: "any", NoEscape: true}
+var NoEscape = &TypeDescriptor{Kind: "any", NoEscape: true, Length: UnknownLength}
 
 var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)
@@ -217,7 +239,7 @@ func DeclareTitle(title string) {
 
 // FreshAlloc is a reusable TypeDescriptor for functions whose return value
 // is always a fresh allocation — safe for _mut swap by the optimizer.
-var FreshAlloc = &TypeDescriptor{Kind: "list", Transfer: true}
+var FreshAlloc = &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}
 
 func (d *Declaration) IsForbidden() bool {
 	return d.Type != nil && d.Type.Forbidden
@@ -574,14 +596,14 @@ func Validate(val Scmer, require string) string {
 					def = def2
 				}
 			}
-				if def != nil {
-					if len(slice)-1 < def.MinParams() {
-						panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
-					}
-					if len(slice)-1 > def.MaxParams() {
-						panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParams()) + " parameters")
-					}
+			if def != nil {
+				if len(slice)-1 < def.MinParams() {
+					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
 				}
+				if len(slice)-1 > def.MaxParams() {
+					panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParams()) + " parameters")
+				}
+			}
 			skipFirst := slice[0].IsSymbol() && (slice[0].SymbolEquals("lambda") || slice[0].SymbolEquals("parser"))
 			returntype := ""
 			for i := 1; i < len(slice); i++ {

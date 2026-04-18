@@ -869,6 +869,79 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (serialize (optimize '('set_assoc '('filter '('list) '('lambda '('x) true)) "k" "v"))) "(set_assoc_mut (filter '() (lambda (x) true 1)) \"k\" \"v\")" "_mut hook: set_assoc -> set_assoc_mut")
 	/* _mut on append with fresh list arg */
 	(assert ((eval (optimize '('lambda '('a 'b) '(append '(list 'a) 'b)))) 10 20) '(10 20) "_mut append on fresh list")
+	(assert ((eval (optimize '('lambda '() '(count '(list))))) ) 0 "length hook: count folds empty list")
+	(assert ((eval (optimize (list 'lambda '()
+		(list 'count (list 'append (list 'list) 1 2 3)))))) 3 "length hook: append preserves empty-base exact length")
+	(assert ((eval (optimize (list 'lambda (list 'a 'b 'c)
+		(list 'count (list 'append (list 'list 'a) 'b 'c))))) 10 20 30) 3 "length hook: count folds exact append length")
+	(assert ((eval (optimize (list 'lambda '()
+		(list 'count (list 'map (list 'produceN 4) (list 'lambda (list 'i) 'i))))))) 4 "length hook: count folds propagated map length")
+	(assert ((eval (optimize (list 'lambda '()
+		(list 'count (list 'mapIndex (list 'produceN 5) (list 'lambda (list 'i 'v) 'i))))))) 5 "length hook: count folds mapIndex over produceN")
+	(assert ((eval (optimize (list 'lambda '()
+		(list 'count (list 'parallel_map (list 'produceN 3) (list 'lambda (list 'v) 'v))))))) 3 "length hook: count folds parallel_map over produceN")
+	(assert ((eval (optimize (list 'lambda '('a 'b 'c)
+		(list 'count (list 'cdr (list 'list 'a 'b 'c)))))) 10 20 30) 2 "length hook: cdr preserves exact tail length")
+	(assert ((eval (optimize (list 'lambda '('a 'b 'c)
+		(list 'count (list 'reverse (list 'list 'a 'b 'c)))))) 10 20 30) 3 "length hook: reverse preserves exact length")
+	(assert ((eval (optimize (list 'lambda '()
+		(list 'count (list 'extract_assoc (list 'list "a" 1 "b" 2) (list 'lambda (list 'k 'v) 'k))))))) 2 "length hook: extract_assoc preserves exact pair count")
+	(assert
+		((eval (optimize
+			(list 'lambda '()
+				(list 'count
+					(list 'merge
+						(list 'map
+							(list 'produceN 3)
+							(list 'lambda (list 'i) (list 'list 'i (list '+ 'i 10))))))))))
+		6
+		"length hook: merge folds map callback list width")
+	(assert
+		((eval (optimize
+			(list 'lambda '()
+				(list 'count
+					(list 'merge
+						(list 'extract_assoc
+							(list 'list "a" 1 "b" 2)
+							(list 'lambda (list 'k 'v) (list 'list 'k 'v)))))))))
+		4
+		"length hook: merge folds extract_assoc callback list width")
+	(assert
+		((eval (optimize
+			(list 'lambda '()
+				(list 'count
+					(list 'merge
+						(list 'produceN 4
+							(list 'lambda (list 'i) (list 'list 'i (list '* 'i 2))))))))))
+		8
+		"length hook: merge folds produceN callback list width")
+	(assert
+		((eval (optimize
+			(list 'lambda '()
+				(list 'count
+					(list 'merge
+						(list 'list
+							(list 'map (list 'produceN 2) (list 'lambda (list 'i) 'i))
+							(list 'extract_assoc (list 'list "a" 1 "b" 2) (list 'lambda (list 'k 'v) 'k)))))))))
+		4
+		"length hook: merge composes exact producer lengths")
+	(assert
+		((eval (optimize
+			(list 'lambda '('a 'b 'c)
+				(list 'count
+					(list 'zip
+						(list 'list
+							(list 'map (list 'produceN 3) (list 'lambda (list 'i) 'i))
+							(list 'reverse (list 'list 'a 'b 'c))))))))
+		 10 20 30)
+		3
+		"length hook: zip preserves exact producer length")
+	(assert
+		((eval (optimize
+			(list 'lambda '()
+				(list 'count (list 'parallelN 4 (list 'lambda (list 'i) 'i)))))))
+		4
+		"length hook: count folds parallelN length")
 	/* scan callback ownership: reduce accumulator enables _mut inside reduce body */
 	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: reduce acc enables set_assoc_mut")
 	(define opt_merge_unique_ser (serialize (optimize

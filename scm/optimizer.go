@@ -393,15 +393,15 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 
 	switch val.GetTag() {
 	case tagNil:
-		return val, TypeInfo{kind: KindNil, flags: FlagTransfer | FlagConst}
+		return val, TypeInfo{kind: KindNil, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagBool:
-		return val, TypeInfo{kind: KindBool, flags: FlagTransfer | FlagConst}
+		return val, TypeInfo{kind: KindBool, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagInt:
-		return val, TypeInfo{kind: KindInt, flags: FlagTransfer | FlagConst}
+		return val, TypeInfo{kind: KindInt, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagFloat:
-		return val, TypeInfo{kind: KindFloat, flags: FlagTransfer | FlagConst}
+		return val, TypeInfo{kind: KindFloat, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagString:
-		return val, TypeInfo{kind: KindString, flags: FlagTransfer | FlagConst}
+		return val, TypeInfo{kind: KindString, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagSymbol:
 		sym := mustSymbol(val)
 		if replacement, ok := ome.variableReplacement[sym]; ok {
@@ -460,9 +460,9 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 
 // Common TypeInfo values (stack-allocated, no heap)
 var (
-	tiConstTransfer = TypeInfo{flags: FlagTransfer | FlagConst}
-	tiTransfer      = TypeInfo{flags: FlagTransfer}
-	tiZero          = TypeInfo{}
+	tiConstTransfer = TypeInfo{flags: FlagTransfer | FlagConst, length: UnknownLength}
+	tiTransfer      = TypeInfo{flags: FlagTransfer, length: UnknownLength}
+	tiZero          = TypeInfo{length: UnknownLength}
 )
 
 // optimizeExCompat is a temporary bridge: calls OptimizeEx and unpacks TypeInfo
@@ -1097,11 +1097,11 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			}
 			result := d.Fn(v[1:]...)
 			result = wrapConstListForCode(result)
-			td := &TypeDescriptor{Transfer: true, Const: true}
+			td := &TypeDescriptor{Transfer: true, Const: true, Length: UnknownLength}
 			if d.Type != nil && d.Type.Return != nil {
 				td = &TypeDescriptor{Transfer: true, Const: true, Kind: d.Type.Return.Kind,
 					Params: d.Type.Return.Params, Return: d.Type.Return.Return,
-					HasSideEffects: d.Type.Return.HasSideEffects}
+					HasSideEffects: d.Type.Return.HasSideEffects, Length: d.Type.Return.Length}
 			}
 			return result, td
 		}
@@ -1113,9 +1113,12 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	td := &TypeDescriptor{Transfer: transferOwnership}
 	if retTD != nil {
 		td.Kind = retTD.Kind
+		td.Length = retTD.Length
 		td.Params = retTD.Params
 		td.Return = retTD.Return
 		td.HasSideEffects = retTD.HasSideEffects
+	} else {
+		td.Length = UnknownLength
 	}
 	return NewSlice(v), td
 }
