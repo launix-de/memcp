@@ -1129,6 +1129,28 @@ runtime promise name is created during unnesting anymore. */
 	(merge_unique (map stages (lambda (stage)
 		(coalesceNil (stage_outer_sources stage) '()))))
 ))
+(define scalar_subselect_schema_entry (lambda (alias_name schemas2_fn) (begin
+	(define schema_cols (schemas2_fn alias_name))
+	(if (nil? schema_cols)
+		'()
+		(list alias_name schema_cols))
+)))
+(define scalar_subselect_passthrough_schemas (lambda (tables schemas2_fn)
+	(merge (map tables (lambda (td) (match td
+		'(alias_name _ _ _ _) (scalar_subselect_schema_entry alias_name schemas2_fn)
+		'()))))
+))
+(define scalar_subselect_prefixed_schemas (lambda (prefixed_tables alias_map schemas2_fn)
+	(merge (map prefixed_tables (lambda (td) (match td
+		'(alias_name _ _ _ _) (begin
+			(define original_alias (scalar_subselect_lookup_original_alias alias_map alias_name))
+			(if (nil? original_alias)
+				'()
+				(begin
+					(define schema_cols (schemas2_fn original_alias))
+					(if (nil? schema_cols) '() (list alias_name schema_cols)))))
+		'()))))
+))
 (define scalar_subselect_correlation_info (lambda (condition_expr inner_aliases rewrite_outer_expr) (begin
 	(define _ss_has_outer (lambda (expr) (unnest_expr_has_outer_ref expr inner_aliases)))
 	(define _ss_cond_parts (flatten_and_terms condition_expr))
@@ -3648,12 +3670,7 @@ seeing the correctly prefixed outer alias. */
 														_us_lookup))
 													(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
 													(sq_cache "groups" (merge (list us_group_stage) _us_prefixed_inner_stages (coalesceNil (sq_cache "groups") '())))
-													(define us_prefixed_schemas (merge (map us_prefixed_tables (lambda (td) (match td
-														'(a _ _ _ _) (begin
-															(define _orig_a (scalar_subselect_lookup_original_alias us_alias_map a))
-															(define _s_cols (if (nil? _orig_a) nil (schemas2_us _orig_a)))
-															(if (nil? _s_cols) '() (list a _s_cols)))
-														'())))))
+													(define us_prefixed_schemas (scalar_subselect_prefixed_schemas us_prefixed_tables us_alias_map schemas2_us))
 													(sq_cache "schemas" (merge us_prefixed_schemas (coalesceNil (sq_cache "schemas") '())))
 													(define us_dom_je_parts (map us_domain_cols_all (lambda (dc)
 														(list (quote equal??) (_us_prefix_ria (nth dc 0)) (nth dc 1)))))
@@ -3774,11 +3791,7 @@ seeing the correctly prefixed outer alias. */
 																			(define _us_inner_schema (schemas2_us us_tblvar))
 																			(define _us_passthrough_schemas (merge
 																				(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
-																				(merge (map (merge _us_inner_tbls _us_nested_direct_tbls) (lambda (td) (match td
-																					'(a _ _ _ _) (begin
-																						(define _isch (schemas2_us a))
-																						(if (nil? _isch) '() (list a _isch)))
-																					'()))))))
+																				(scalar_subselect_passthrough_schemas (merge _us_inner_tbls _us_nested_direct_tbls) schemas2_us)))
 																			(if (not (equal? _us_passthrough_schemas '()))
 																				(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
 																			(define us_subst (_us_ria us_value_expr))
