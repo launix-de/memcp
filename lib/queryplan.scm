@@ -617,6 +617,9 @@ layout. */
 						(if (and _contains_inner_select_marker (not _value_expr_is_direct_column))
 							(quote inline-non-grouped-inner-select-marker)
 							(quote prefer-unnest)))))))))
+(define planner_scalar_subselect_inline_reason scalar_subselect_inline_reason)
+(define planner_scalar_subselect_inline_strategy scalar_subselect_inline_strategy)
+(define planner_scalar_subselect_lowering_reason_from_facts scalar_subselect_lowering_reason_from_facts)
 (define explain_plan_root (lambda (plan)
 	(match plan
 		(cons sym _) (string sym)
@@ -3133,6 +3136,9 @@ seeing the correctly prefixed outer alias. */
 				(expr_uses_session_state subquery)
 				(_raw_query_contains_skip_level_nested_outer_ref subquery (_raw_query_local_aliases subquery))))
 		nil)))
+	(define scalar_subselect_inline_reason planner_scalar_subselect_inline_reason)
+	(define scalar_subselect_inline_strategy planner_scalar_subselect_inline_strategy)
+	(define scalar_subselect_lowering_reason_from_facts planner_scalar_subselect_lowering_reason_from_facts)
 	(define build_scalar_subselect_inline_with_strategy (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
 		(if (not (nil? union_parts))
