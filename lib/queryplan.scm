@@ -617,6 +617,9 @@ layout. */
 						(if (and _contains_inner_select_marker (not _value_expr_is_direct_column))
 							(quote inline-non-grouped-inner-select-marker)
 							(quote prefer-unnest)))))))))
+(define planner_scalar_subselect_inline_reason scalar_subselect_inline_reason)
+(define planner_scalar_subselect_inline_strategy scalar_subselect_inline_strategy)
+(define planner_scalar_subselect_lowering_reason_from_facts scalar_subselect_lowering_reason_from_facts)
 (define explain_plan_root (lambda (plan)
 	(match plan
 		(cons sym _) (string sym)
@@ -1514,6 +1517,59 @@ helper filters can close over them at runtime. */
 				_ '()))))))))
 ))
 
+(define collect_scan_base_cols (lambda (tblvar scan_condition visible_fields tables partition_stages extra_cols)
+	(merge_unique
+		(list
+			(merge_unique
+				(cons
+					(extract_columns_for_tblvar tblvar scan_condition)
+					(extract_assoc visible_fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))
+				)
+			)
+			(merge_unique
+				(cons
+					(extract_outer_columns_for_tblvar tblvar scan_condition)
+					(extract_assoc visible_fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
+				)
+			)
+			(extract_later_joinexpr_columns_for_tblvar tblvar tables)
+			(extract_stage_outer_source_cols_for_tblvar tblvar partition_stages)
+			extra_cols
+		)
+	)
+))
+
+(define extend_scan_cols_for_later_condition (lambda (tblvar cols effective_later_condition)
+	(merge_unique (list
+		cols
+		(extract_columns_for_tblvar tblvar effective_later_condition)
+		(extract_outer_columns_for_tblvar tblvar effective_later_condition)
+	))
+))
+
+(define find_partition_stage_for_alias (lambda (stages tblvar)
+	(reduce (coalesceNil stages '()) (lambda (found stage)
+		(if (nil? found)
+			(if (has? (coalesceNil (stage_partition_aliases stage) '()) tblvar) stage nil)
+			found))
+		nil)
+))
+
+(define _extract_scan_order_terms_for_tblvar (lambda (order_items tblvar pick_col)
+	(merge (map (coalesceNil order_items '()) (lambda (order_item) (match order_item '(col dir) (match col
+		'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list (if pick_col col dir)) '())
+		'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list (if pick_col col dir)) '())
+		_ '()
+	)))))))
+
+(define extract_scan_order_cols_for_tblvar (lambda (order_items tblvar)
+	(_extract_scan_order_terms_for_tblvar order_items tblvar true)
+))
+
+(define extract_scan_order_dirs_for_tblvar (lambda (order_items tblvar)
+	(_extract_scan_order_terms_for_tblvar order_items tblvar false)
+))
+
 /* symbols that canonicalize_columns must NOT recurse into — they have their own scope */
 (define _is_opaque_scope_sym (lambda (sym) (match sym
 	/* inner_select markers are NOT opaque — they are logical markers that
@@ -1880,87 +1936,63 @@ condition leakage. Uses canonical column names for keytable cache reuse. */
 (define make_dedup_stage (lambda (group aliases)
 	(make_stage group nil '() 0 nil nil true aliases nil nil nil)
 ))
-(define stage_group_cols (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote group-cols) cols) cols
-		_ nil
-	) acc)
-) nil)))
-(define stage_having_expr (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote having) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
+(define stage_get (lambda (stage key default)
+	(reduce stage (lambda (acc item)
+		(if (nil? acc)
+			(if (and (list? item) (> (count item) 0) (equal? (car item) key))
+				(if (> (count item) 1) (nth item 1) default)
+				nil)
+			acc)
+		) nil)
+))
+(define stage_get_rest (lambda (stage key default)
+	(reduce stage (lambda (acc item)
+		(if (nil? acc)
+			(if (and (list? item) (> (count item) 0) (equal? (car item) key))
+				(cdr item)
+				nil)
+			acc)
+		) default)
+))
+(define stage_without_key (lambda (stage key)
+	(filter stage (lambda (item)
+		(not (and (list? item) (> (count item) 0) (equal? (car item) key)))))
+))
+(define stage_set (lambda (stage key value)
+	(if (nil? value)
+		(stage_without_key stage key)
+		(cons (list key value) (stage_without_key stage key)))
+))
+(define stage_group_cols (lambda (stage)
+	(coalesceNil (stage_get_rest stage (quote group-cols) nil) nil)))
+(define stage_having_expr (lambda (stage)
+	(stage_get stage (quote having) nil)))
 /* Compatibility alias: older unnesting logic still refers to the logical
 post-group predicate under this name. On current master it is the HAVING expr. */
 (define stage_post_group_condition_expr stage_having_expr)
-(define stage_order_list (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote order) rest) (if (nil? rest) '() (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_limit_val (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote limit) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_offset_val (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote offset) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_limit_partition_cols (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote limit-partition-cols) rest) (if (nil? rest) 0 (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_partition_aliases (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote partition-aliases) rest) (if (nil? rest) nil (normalize_stage_aliases (car rest)))
-		_ nil
-	) acc)
-) nil)))
-(define stage_init_code (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote init) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_condition (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote stage-condition) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_once_limit (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote once-limit) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_cache_policy (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote cache-policy) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_cache_query (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote cache-query) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
-(define stage_is_dedup (lambda (stage) (reduce stage (lambda (acc item)
-	(if acc acc (match item
-		'((quote dedup) true) true
-		_ false
-	))
-) false)))
+(define stage_order_list (lambda (stage)
+	(coalesceNil (stage_get stage (quote order) '()) '())))
+(define stage_limit_val (lambda (stage)
+	(stage_get stage (quote limit) nil)))
+(define stage_offset_val (lambda (stage)
+	(stage_get stage (quote offset) nil)))
+(define stage_limit_partition_cols (lambda (stage)
+	(coalesceNil (stage_get stage (quote limit-partition-cols) 0) 0)))
+(define stage_partition_aliases (lambda (stage)
+	(define raw_aliases (stage_get stage (quote partition-aliases) nil))
+	(if (nil? raw_aliases) nil (normalize_stage_aliases raw_aliases))))
+(define stage_init_code (lambda (stage)
+	(stage_get stage (quote init) nil)))
+(define stage_condition (lambda (stage)
+	(stage_get stage (quote stage-condition) nil)))
+(define stage_once_limit (lambda (stage)
+	(stage_get stage (quote once-limit) nil)))
+(define stage_cache_policy (lambda (stage)
+	(stage_get stage (quote cache-policy) nil)))
+(define stage_cache_query (lambda (stage)
+	(stage_get stage (quote cache-query) nil)))
+(define stage_is_dedup (lambda (stage)
+	(equal? (stage_get stage (quote dedup) false) true)))
 (define stage_kind (lambda (stage) (begin
 	(define sk_aliases (stage_partition_aliases stage))
 	(define sk_group (coalesceNil (stage_group_cols stage) '()))
@@ -1974,19 +2006,11 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 (define stage_is_scoped? (lambda (stage)
 	(not (nil? (stage_partition_aliases stage)))))
 (define stage_with_cache_policy (lambda (stage policy)
-	(if (nil? policy) stage
-		(cons (list (quote cache-policy) policy)
-			(filter stage (lambda (item) (match item
-				(cons (quote cache-policy) _) false
-				true))))))
-)
+	(stage_set stage (quote cache-policy) policy)
+))
 (define stage_with_cache_query (lambda (stage query)
-	(if (nil? query) stage
-		(cons (list (quote cache-query) query)
-			(filter stage (lambda (item) (match item
-				(cons (quote cache-query) _) false
-				true))))))
-)
+	(stage_set stage (quote cache-query) query)
+))
 /* stage_outer_sources: list of correlation tuples carried by scalar/partition
 stages so the post-reorder anti-pass fixup can null-extend outer rows whose
 correlation key has no match in the inner helper (per FAQ point 34 /
@@ -1997,19 +2021,13 @@ preserve via stage_preserve_cache_meta. No consumer reads this field yet —
 inject_anti_passes (next PR) will annotate stages when join_reorder places the
 helper alias above its correlation source, and build_queryplan will emit the
 companion anti-pass scan. */
-(define stage_outer_sources (lambda (stage) (reduce stage (lambda (acc item)
-	(if (nil? acc) (match item
-		(cons (quote outer-sources) rest) (if (nil? rest) nil (car rest))
-		_ nil
-	) acc)
-) nil)))
+(define stage_outer_sources (lambda (stage)
+	(stage_get stage (quote outer-sources) nil)))
 (define stage_with_outer_sources (lambda (stage sources)
-	(if (or (nil? sources) (equal? sources '())) stage
-		(cons (list (quote outer-sources) sources)
-			(filter stage (lambda (item) (match item
-				(cons (quote outer-sources) _) false
-				true))))))
-)
+	(if (or (nil? sources) (equal? sources '()))
+		(stage_set stage (quote outer-sources) nil)
+		(stage_set stage (quote outer-sources) sources)
+)))
 (define stage_preserve_cache_meta (lambda (old_stage new_stage)
 	(stage_with_outer_sources
 		(stage_with_cache_query
@@ -3178,44 +3196,9 @@ seeing the correctly prefixed outer alias. */
 				(expr_uses_session_state subquery)
 				(_raw_query_contains_skip_level_nested_outer_ref subquery (_raw_query_local_aliases subquery))))
 		nil)))
-	(define scalar_subselect_inline_reason (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
-		(if (nil? _agg_args)
-			(quote legacy-fallback-non-aggregate)
-			(if (not (equal? (count _agg_args) 3))
-				(quote legacy-fallback-non-trivial-aggregate)
-				(if (not direct_agg_stages_simple)
-					(quote legacy-fallback-complex-group-stage)
-					(if (and raw_contains_skip_level_nested_outer_ref (not scalar_uses_session_state))
-						(quote legacy-fallback-skip-level-outer-ref)
-						(if (not (nil? stage2_post_group_condition))
-							(quote legacy-fallback-post-group-filter)
-							(if (not (or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1))))
-								(quote legacy-fallback-explicit-group-keys)
-								(if (or (nil? tables2) (equal? tables2 '()))
-									(quote legacy-fallback-no-inner-tables)
-									(if (not (or scalar_has_outer_ref scalar_uses_session_state))
-										(quote legacy-fallback-uncorrelated-aggregate)
-										(quote inline-direct-agg-scan)))))))))))
-	(define scalar_subselect_inline_strategy scalar_subselect_inline_reason)
-	(define scalar_subselect_lowering_reason_from_facts (lambda (_has_outer _has_agg_or_stage _outer_refs_are_direct_columns _outer_has_group _contains_inner_select_marker _value_expr _value_expr_is_direct_column _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer)
-		(if (not _has_outer)
-			(quote inline-uncorrelated)
-			(if (nil? _value_expr)
-				(quote inline-missing-value-expr)
-				(if _has_agg_or_stage
-					(if (not (or _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer))
-						(quote inline-grouped-non-domain-correlation)
-						(if (and _contains_inner_select_marker (not _allow_grouped_direct_non_equality_outer))
-							(quote inline-grouped-inner-select-marker)
-							(quote prefer-unnest)))
-					(if (not _outer_refs_are_direct_columns)
-						(quote inline-non-grouped-non-direct-outer-refs)
-						(if _outer_has_group
-							(quote inline-non-grouped-outer-group-barrier)
-							(if (and _contains_inner_select_marker (not _value_expr_is_direct_column))
-								(quote inline-non-grouped-inner-select-marker)
-								(quote prefer-unnest)))))))))
-
+	(define scalar_subselect_inline_reason planner_scalar_subselect_inline_reason)
+	(define scalar_subselect_inline_strategy planner_scalar_subselect_inline_strategy)
+	(define scalar_subselect_lowering_reason_from_facts planner_scalar_subselect_lowering_reason_from_facts)
 	(define build_scalar_subselect_inline_with_strategy (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
 		(if (not (nil? union_parts))
@@ -8387,54 +8370,25 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(define ut_extra_cols_ord (if is_update_target_ord
 									(merge_unique (extract_assoc visible_ut_cols_ord (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 									'()))
-								(set cols (merge_unique
-									(list
-										(merge_unique
-											(cons
-												(extract_columns_for_tblvar tblvar scan_condition)
-												(extract_assoc visible_fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))
-											)
-										)
-										(merge_unique
-											(cons
-												(extract_outer_columns_for_tblvar tblvar scan_condition)
-												(extract_assoc visible_fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
-											)
-										)
-										(extract_later_joinexpr_columns_for_tblvar tblvar tables)
-										(extract_stage_outer_source_cols_for_tblvar tblvar partition_stages)
-										ut_extra_cols_ord
-									)
-								))
+								(set cols (collect_scan_base_cols tblvar scan_condition visible_fields tables partition_stages ut_extra_cols_ord))
 								(match (split_scan_condition isOuter (replace_find_column (coalesceNil joinexpr true)) scan_condition tables) '(now_condition later_condition) (begin
 									(define effective_later_condition (if (and isOuter (equal? now_condition later_condition)) true later_condition))
-									(set cols (merge_unique (list
-										cols
-										(extract_columns_for_tblvar tblvar effective_later_condition)
-										(extract_outer_columns_for_tblvar tblvar effective_later_condition))))
+									(set cols (extend_scan_cols_for_later_condition tblvar cols effective_later_condition))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* check partition_stages for this table. Tagged scans still override the
 									local stage config, but scoped partition stages must now also work when
 									this helper is the driver after join_reorder. */
-									(define _ps_ord (if (not (nil? tbl_once_limit)) nil
-										(reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil)))
-									(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
+										(define _ps_ord (if (not (nil? tbl_once_limit)) nil
+											(find_partition_stage_for_alias partition_stages tblvar)))
+										(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
 									/* tagged helper scans override the local scan config; otherwise use
 									partition-stage order first and the outer ORDER only on the driver scan. */
 									(define _eff_order (if (not (nil? tbl_once_limit))
 										tbl_scan_order
 										(if (nil? _ps_ord) stage_order (coalesceNil (stage_order_list _ps_ord) '()))))
 									/* extract order cols for this tblvar */
-									(set ordercols (merge (map _eff_order (lambda (order_item) (match order_item '(col dir) (match col
-										'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-										'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-										_ '()
-									))))))
-									(set dirs (merge (map _eff_order (lambda (order_item) (match order_item '(col dir) (match col
-										'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-										'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-										_ '()
-									))))))
+										(set ordercols (extract_scan_order_cols_for_tblvar _eff_order tblvar))
+										(set dirs (extract_scan_order_dirs_for_tblvar _eff_order tblvar))
 
 									/* offset/limit: tagged helper scans carry their own local limits. */
 									(define ord_raw_scan_offset (if (not (nil? tbl_once_limit))
@@ -8537,25 +8491,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ut_extra_cols (if is_update_target
 										(merge_unique (extract_assoc visible_ut_cols (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 										'()))
-									(set cols (merge_unique
-										(list
-											(merge_unique
-												(cons
-													(extract_columns_for_tblvar tblvar scan_condition)
-													(extract_assoc visible_fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))
-												)
-											)
-											(merge_unique
-												(cons
-													(extract_outer_columns_for_tblvar tblvar scan_condition)
-													(extract_assoc visible_fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
-												)
-											)
-											(extract_later_joinexpr_columns_for_tblvar tblvar tables)
-											(extract_stage_outer_source_cols_for_tblvar tblvar partition_stages)
-											ut_extra_cols
-										)
-									))
+									(set cols (collect_scan_base_cols tblvar scan_condition visible_fields tables partition_stages ut_extra_cols))
 									/* For UPDATE target: prepend $update to mapcols */
 									(define scan_mapcols (if is_update_target (cons list (cons "$update" cols)) (cons list cols)))
 									(define scan_mapfn_params (if is_update_target
@@ -8564,10 +8500,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_scan_condition isOuter (replace_find_column (coalesceNil joinexpr true)) scan_condition tables) '(now_condition later_condition) (begin
 										(define effective_later_condition (if (and isOuter (equal? now_condition later_condition)) true later_condition))
-										(set cols (merge_unique (list
-											cols
-											(extract_columns_for_tblvar tblvar effective_later_condition)
-											(extract_outer_columns_for_tblvar tblvar effective_later_condition))))
+										(set cols (extend_scan_cols_for_later_condition tblvar cols effective_later_condition))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 										/* optimize: skip .(1) DUAL scan when no columns needed (1 row, no data) */
 										(if (and (equal? base_tbl ".(1)") (equal? cols (list)) (equal? filtercols (list)))
@@ -8589,9 +8522,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													(if (nil? bound_update_expr) child_scan
 														(list (list (symbol "lambda") (list (symbol "__dml_update_bound")) child_scan) bound_update_expr))))
 												/* check partition_stages: does this table have a per-table partition limit? */
-												(define _ps (if (not (nil? tbl_once_limit))
-													nil
-													(reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil)))
+													(define _ps (if (not (nil? tbl_once_limit))
+														nil
+														(find_partition_stage_for_alias partition_stages tblvar)))
 												(define _ps_once_limit (if (nil? _ps) nil (stage_once_limit _ps)))
 												(define _tagged_scan (scan_tagged_table_needs_scan_order tbl))
 												(define scan_raw_partcols (if _tagged_scan
@@ -8623,14 +8556,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														(define _ps_offset (if (nil? scan_once_contract)
 															(if _tagged_scan (coalesceNil tbl_scan_offset 0) (coalesceNil (stage_offset_val _ps) 0))
 															(once_limit_scan_contract_offset scan_once_contract)))
-														(define _ps_ordercols (merge (map _ps_order (lambda (oi) (match oi '(col dir) (match col
-															'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-															'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-															_ '()))))))
-														(define _ps_dirs (merge (map _ps_order (lambda (oi) (match oi '(col dir) (match col
-															'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-															'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-															_ '()))))))
+															(define _ps_ordercols (extract_scan_order_cols_for_tblvar _ps_order tblvar))
+															(define _ps_dirs (extract_scan_order_dirs_for_tblvar _ps_order tblvar))
 														/* emit init code from partition stage if present */
 														(define _ps_init2 (if _tagged_scan nil (stage_init_code _ps)))
 														(define _ps_scan_core (scan_wrapper 'scan_order schema base_tbl
