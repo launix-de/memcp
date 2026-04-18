@@ -1629,7 +1629,7 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			// Build count-scan: (scan base_schema base_table (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
+			// Build count-scan: (scan (session) (table base_schema base_table) (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
 			buildCountScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
@@ -1644,7 +1644,7 @@ func Init(en scm.Env) {
 				})
 			}
 
-			// Build delete-scan: (scan kt_schema kt_name (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
+			// Build delete-scan: (scan (session) (table kt_schema kt_name) (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
 			buildDeleteScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
