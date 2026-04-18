@@ -1109,6 +1109,9 @@ runtime promise name is created during unnesting anymore. */
 			(if (nil? je) nil (rewrite_expr je)))
 		td)))
 ))
+(define scalar_subselect_rewrite_alias (lambda (lookup_alias alias_name)
+	(coalesceNil (lookup_alias alias_name) alias_name)
+))
 (define scalar_subselect_rewrite_tables (lambda (tables rewrite_expr)
 	(map tables (lambda (td) (match td
 		'(a s t io je) (list a s t io (if (nil? je) nil (rewrite_expr je)))
@@ -1117,6 +1120,14 @@ runtime promise name is created during unnesting anymore. */
 (define scalar_subselect_rewrite_stages (lambda (stages rewrite_expr rewrite_alias)
 	(map stages (lambda (stage)
 		(rewrite_stage_for_flattened_aliases stage rewrite_expr rewrite_alias)))
+))
+(define scalar_subselect_rewrite_stages_with_lookup (lambda (stages rewrite_expr lookup_alias)
+	(scalar_subselect_rewrite_stages stages rewrite_expr (lambda (alias_name)
+		(scalar_subselect_rewrite_alias lookup_alias alias_name)))
+))
+(define scalar_subselect_collect_stage_outer_sources (lambda (stages)
+	(merge_unique (map stages (lambda (stage)
+		(coalesceNil (stage_outer_sources stage) '()))))
 ))
 (define scalar_subselect_correlation_info (lambda (condition_expr inner_aliases rewrite_outer_expr) (begin
 	(define _ss_has_outer (lambda (expr) (unnest_expr_has_outer_ref expr inner_aliases)))
@@ -3631,10 +3642,10 @@ seeing the correctly prefixed outer alias. */
 																(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_stage_aliases nil)
 																(count_subquery_cache_policy subquery target_expr))
 															(if (nil? (count_subquery_cache_policy subquery target_expr)) nil subquery)))
-													(define _us_prefixed_inner_stages (scalar_subselect_rewrite_stages
+													(define _us_prefixed_inner_stages (scalar_subselect_rewrite_stages_with_lookup
 														_us_inner_stages
 														_us_prefix_ria
-														(lambda (a) (coalesceNil (_us_lookup a) a))))
+														_us_lookup))
 													(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
 													(sq_cache "groups" (merge (list us_group_stage) _us_prefixed_inner_stages (coalesceNil (sq_cache "groups") '())))
 													(define us_prefixed_schemas (merge (map us_prefixed_tables (lambda (td) (match td
@@ -3737,13 +3748,11 @@ seeing the correctly prefixed outer alias. */
 																			(define us_part_order (merge us_dom_order us_renamed_order))
 																			(define us_dom_count (count us_dom_order))
 																			(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
-																			(define _us_inner_stages_rewritten (scalar_subselect_rewrite_stages
+																			(define _us_inner_stages_rewritten (scalar_subselect_rewrite_stages_with_lookup
 																				_us_inner_stages
 																				_us_ria
-																				(lambda (a) (coalesceNil (_us_lookup a) a))))
-																			(define _us_nested_outer_sources (merge_unique
-																				(map _us_inner_stages_rewritten (lambda (s)
-																					(coalesceNil (stage_outer_sources s) '())))))
+																				_us_lookup))
+																			(define _us_nested_outer_sources (scalar_subselect_collect_stage_outer_sources _us_inner_stages_rewritten))
 																			(define us_part_stage (make_scalar_partition_stage
 																				us_part_order
 																				us_orig_limit
