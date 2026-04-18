@@ -496,6 +496,12 @@ restart:
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
+	case tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise:
+		// Optimizer-resolved native callables.
+		return expression
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny:
+		// Self-evaluating literals.
+		return expression
 	case tagNthLocalVar:
 		// Optimized lambda bodies resolve locals directly through numbered slots.
 		idx := int(expression.NthLocalVar())
@@ -505,9 +511,6 @@ restart:
 			panic(fmt.Sprintf("NthLocalVar(%d) out of range (len=%d)\n%s", idx, len(en.VarsNumbered), buf[:n]))
 		}
 		return en.VarsNumbered[idx]
-	case tagFunc, tagFuncEnv, tagProc, tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagJIT, tagClosure, tagPromise, tagAny:
-		// Self-evaluating literals and optimizer-resolved native callables.
-		return expression
 	case tagSymbol:
 		// Fallback for names not folded to numbered vars/native funcs by the optimizer.
 		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
