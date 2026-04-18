@@ -1055,6 +1055,24 @@ helpers instead of rebuilding alias/order logic inline inside untangle_query. */
 		false)))
 		true)
 ))
+/* Logical scalar-partition stage: encode partition-topk semantics on the
+stage itself and leave promise/runtime details to build_scan. The stage still
+records scalar cardinality via once-limit, but no once-limit contract or
+runtime promise name is created during unnesting anymore. */
+(define make_scalar_partition_stage (lambda (order_list limit_value offset_value partition_cols aliases outer_sources) (begin
+	(define stage_order (coalesceNil order_list '()))
+	(define stage_partition_cols (coalesceNil partition_cols 0))
+	(define stage_offset (coalesceNil offset_value 0))
+	(define stage_once_limit (if (and (not (nil? limit_value)) (<= limit_value 1))
+		1
+		2))
+	(define stage_limit (if (nil? limit_value)
+		stage_once_limit
+		(if (<= limit_value 1) limit_value 2)))
+	(stage_with_outer_sources
+		(make_stage '() nil stage_order stage_partition_cols stage_limit stage_offset false aliases nil nil stage_once_limit)
+		outer_sources)
+)))
 (define make_once_limit_scan_contract (lambda (limit_value offset_value partition_cols once_limit tblvar condition joinexpr tbl) (begin
 	(define contract_once_limit (if (nil? once_limit)
 		(if (and (not (nil? limit_value)) (<= limit_value 1))
@@ -3686,7 +3704,6 @@ seeing the correctly prefixed outer alias. */
 																(begin
 																	(define us_part_order (merge us_dom_order us_renamed_order))
 																	(define us_dom_count (count us_dom_order))
-																	(define us_once_contract (make_once_limit_scan_contract us_orig_limit us_orig_offset us_dom_count nil nil nil nil nil))
 																	(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
 																	(define _us_inner_stages_rewritten (map _us_inner_stages (lambda (s)
 																		(rewrite_stage_for_flattened_aliases s
@@ -3695,34 +3712,31 @@ seeing the correctly prefixed outer alias. */
 																	(define _us_nested_outer_sources (merge_unique
 																		(map _us_inner_stages_rewritten (lambda (s)
 																			(coalesceNil (stage_outer_sources s) '())))))
-																	(define us_part_stage (stage_with_outer_sources
-																		(make_stage '() nil us_part_order us_dom_count
-																			(once_limit_scan_contract_limit us_once_contract)
-																			(once_limit_scan_contract_offset us_once_contract)
-																			false
-																			(list us_sq_prefix)
-																			nil
-																			nil
-																			(once_limit_scan_contract_once_limit us_once_contract))
+																	(define us_part_stage (make_scalar_partition_stage
+																		us_part_order
+																		us_orig_limit
+																		us_orig_offset
+																		us_dom_count
+																		(list us_sq_prefix)
 																		(merge_unique (list us_outer_sources _us_nested_outer_sources))))
 																	(sq_cache "groups" (merge
 																		(list us_part_stage)
 																		_us_inner_stages_rewritten
 																		(coalesceNil (sq_cache "groups") '())))
-															(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
-															(define us_inner_lim (_us_ria us_inner_cond_raw))
-															(define us_full_lim (if (nil? us_inner_lim)
-																(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
-																(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
-															(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
-																'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
-																td))))
-															(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))))
-															(define _us_inner_schema (schemas2_us us_tblvar))
-															(define _us_passthrough_schemas (merge
-																(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
-																(merge (map (merge _us_inner_tbls _us_nested_direct_tbls) (lambda (td) (match td
-																	'(a _ _ _ _) (begin
+																	(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
+																	(define us_inner_lim (_us_ria us_inner_cond_raw))
+																	(define us_full_lim (if (nil? us_inner_lim)
+																		(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
+																		(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+																	(define _us_nested_direct_tbls_rewritten (map _us_nested_direct_tbls (lambda (td) (match td
+																		'(a s t io je) (list a s t io (if (nil? je) nil (_us_ria je)))
+																		td))))
+																	(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))))
+																	(define _us_inner_schema (schemas2_us us_tblvar))
+																	(define _us_passthrough_schemas (merge
+																		(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
+																		(merge (map (merge _us_inner_tbls _us_nested_direct_tbls) (lambda (td) (match td
+																			'(a _ _ _ _) (begin
 																				(define _isch (schemas2_us a))
 																				(if (nil? _isch) '() (list a _isch)))
 																			'()))))))
