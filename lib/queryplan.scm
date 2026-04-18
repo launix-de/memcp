@@ -1517,6 +1517,29 @@ helper filters can close over them at runtime. */
 				_ '()))))))))
 ))
 
+(define find_partition_stage_for_alias (lambda (stages tblvar)
+	(reduce (coalesceNil stages '()) (lambda (found stage)
+		(if (nil? found)
+			(if (has? (coalesceNil (stage_partition_aliases stage) '()) tblvar) stage nil)
+			found))
+		nil)
+))
+
+(define _extract_scan_order_terms_for_tblvar (lambda (order_items tblvar pick_col)
+	(merge (map (coalesceNil order_items '()) (lambda (order_item) (match order_item '(col dir) (match col
+		'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list (if pick_col col dir)) '())
+		'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list (if pick_col col dir)) '())
+		_ '()
+	)))))))
+
+(define extract_scan_order_cols_for_tblvar (lambda (order_items tblvar)
+	(_extract_scan_order_terms_for_tblvar order_items tblvar true)
+))
+
+(define extract_scan_order_dirs_for_tblvar (lambda (order_items tblvar)
+	(_extract_scan_order_terms_for_tblvar order_items tblvar false)
+))
+
 /* symbols that canonicalize_columns must NOT recurse into — they have their own scope */
 (define _is_opaque_scope_sym (lambda (sym) (match sym
 	/* inner_select markers are NOT opaque — they are logical markers that
@@ -1885,26 +1908,33 @@ condition leakage. Uses canonical column names for keytable cache reuse. */
 ))
 (define stage_get (lambda (stage key default)
 	(reduce stage (lambda (acc item)
-		(if (nil? acc) (match item
-			(cons k rest) (if (equal? k key)
-				(if (nil? rest) default (car rest))
+		(if (nil? acc)
+			(if (and (list? item) (> (count item) 0) (equal? (car item) key))
+				(if (> (count item) 1) (nth item 1) default)
 				nil)
-			_ nil
-		) acc)
-	) nil)
+			acc)
+		) nil)
+))
+(define stage_get_rest (lambda (stage key default)
+	(reduce stage (lambda (acc item)
+		(if (nil? acc)
+			(if (and (list? item) (> (count item) 0) (equal? (car item) key))
+				(cdr item)
+				nil)
+			acc)
+		) default)
 ))
 (define stage_without_key (lambda (stage key)
-	(filter stage (lambda (item) (match item
-		(cons k _) (not (equal? k key))
-		true))))
-)
+	(filter stage (lambda (item)
+		(not (and (list? item) (> (count item) 0) (equal? (car item) key)))))
+))
 (define stage_set (lambda (stage key value)
 	(if (nil? value)
 		(stage_without_key stage key)
-		(cons (list key value) (stage_without_key stage key))))
-)
+		(cons (list key value) (stage_without_key stage key)))
+))
 (define stage_group_cols (lambda (stage)
-	(coalesceNil (stage_get stage (quote group-cols) nil) nil)))
+	(coalesceNil (stage_get_rest stage (quote group-cols) nil) nil)))
 (define stage_having_expr (lambda (stage)
 	(stage_get stage (quote having) nil)))
 /* Compatibility alias: older unnesting logic still refers to the logical
@@ -1967,7 +1997,7 @@ companion anti-pass scan. */
 	(if (or (nil? sources) (equal? sources '()))
 		(stage_set stage (quote outer-sources) nil)
 		(stage_set stage (quote outer-sources) sources)
-))
+)))
 (define stage_preserve_cache_meta (lambda (old_stage new_stage)
 	(stage_with_outer_sources
 		(stage_with_cache_query
@@ -8339,25 +8369,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									/* check partition_stages for this table. Tagged scans still override the
 									local stage config, but scoped partition stages must now also work when
 									this helper is the driver after join_reorder. */
-									(define _ps_ord (if (not (nil? tbl_once_limit)) nil
-										(reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil)))
-									(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
+										(define _ps_ord (if (not (nil? tbl_once_limit)) nil
+											(find_partition_stage_for_alias partition_stages tblvar)))
+										(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
 									/* tagged helper scans override the local scan config; otherwise use
 									partition-stage order first and the outer ORDER only on the driver scan. */
 									(define _eff_order (if (not (nil? tbl_once_limit))
 										tbl_scan_order
 										(if (nil? _ps_ord) stage_order (coalesceNil (stage_order_list _ps_ord) '()))))
 									/* extract order cols for this tblvar */
-									(set ordercols (merge (map _eff_order (lambda (order_item) (match order_item '(col dir) (match col
-										'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-										'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-										_ '()
-									))))))
-									(set dirs (merge (map _eff_order (lambda (order_item) (match order_item '(col dir) (match col
-										'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-										'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-										_ '()
-									))))))
+										(set ordercols (extract_scan_order_cols_for_tblvar _eff_order tblvar))
+										(set dirs (extract_scan_order_dirs_for_tblvar _eff_order tblvar))
 
 									/* offset/limit: tagged helper scans carry their own local limits. */
 									(define ord_raw_scan_offset (if (not (nil? tbl_once_limit))
@@ -8512,9 +8534,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													(if (nil? bound_update_expr) child_scan
 														(list (list (symbol "lambda") (list (symbol "__dml_update_bound")) child_scan) bound_update_expr))))
 												/* check partition_stages: does this table have a per-table partition limit? */
-												(define _ps (if (not (nil? tbl_once_limit))
-													nil
-													(reduce partition_stages (lambda (a s) (if (nil? a) (if (has? (coalesceNil (stage_partition_aliases s) '()) tblvar) s nil) a)) nil)))
+													(define _ps (if (not (nil? tbl_once_limit))
+														nil
+														(find_partition_stage_for_alias partition_stages tblvar)))
 												(define _ps_once_limit (if (nil? _ps) nil (stage_once_limit _ps)))
 												(define _tagged_scan (scan_tagged_table_needs_scan_order tbl))
 												(define scan_raw_partcols (if _tagged_scan
@@ -8546,14 +8568,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														(define _ps_offset (if (nil? scan_once_contract)
 															(if _tagged_scan (coalesceNil tbl_scan_offset 0) (coalesceNil (stage_offset_val _ps) 0))
 															(once_limit_scan_contract_offset scan_once_contract)))
-														(define _ps_ordercols (merge (map _ps_order (lambda (oi) (match oi '(col dir) (match col
-															'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-															'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-															_ '()))))))
-														(define _ps_dirs (merge (map _ps_order (lambda (oi) (match oi '(col dir) (match col
-															'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-															'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-															_ '()))))))
+															(define _ps_ordercols (extract_scan_order_cols_for_tblvar _ps_order tblvar))
+															(define _ps_dirs (extract_scan_order_dirs_for_tblvar _ps_order tblvar))
 														/* emit init code from partition stage if present */
 														(define _ps_init2 (if _tagged_scan nil (stage_init_code _ps)))
 														(define _ps_scan_core (scan_wrapper 'scan_order schema base_tbl
