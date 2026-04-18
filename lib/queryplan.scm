@@ -1547,17 +1547,6 @@ helper filters can close over them at runtime. */
 	))
 ))
 
-(define scan_update_target_context (lambda (tblvar schema base_tbl update_target) (begin
-	(define is_update_target (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
-	(define visible_ut_cols (if is_update_target
-		(lower_materialized_emit_assoc schema base_tbl tblvar (nth update_target 1))
-		'()))
-	(define ut_extra_cols (if is_update_target
-		(merge_unique (extract_assoc visible_ut_cols (lambda (k v) (extract_columns_for_tblvar tblvar v))))
-		'()))
-	(list is_update_target visible_ut_cols ut_extra_cols)
-)))
-
 (define find_partition_stage_for_alias (lambda (stages tblvar)
 	(reduce (coalesceNil stages '()) (lambda (found stage)
 		(if (nil? found)
@@ -8365,20 +8354,26 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
 					(define build_scan (lambda (tables condition is_first last_scan_ctx)
 						(match tables
-								(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
-									(define base_tbl (scan_tagged_table_base tbl))
-									(define tbl_scan_order (scan_tagged_table_order tbl))
-									(define tbl_scan_limit (scan_tagged_table_limit tbl))
-									(define tbl_scan_offset (scan_tagged_table_offset tbl))
-									(define tbl_scan_partcols (scan_tagged_table_partition_cols tbl))
-									(define tbl_once_limit (scan_tagged_table_once_limit tbl))
-									(define scan_condition (lower_materialized_scan_condition schema base_tbl tblvar condition))
-									(define visible_fields (lower_materialized_emit_assoc schema base_tbl tblvar fields))
-									(match (scan_update_target_context tblvar schema base_tbl update_target) '(is_update_target_ord _visible_ut_cols_ord ut_extra_cols_ord) (begin
-										(set cols (collect_scan_base_cols tblvar scan_condition visible_fields tables partition_stages ut_extra_cols_ord))
-									(match (split_scan_condition isOuter (replace_find_column (coalesceNil joinexpr true)) scan_condition tables) '(now_condition later_condition) (begin
-										(define effective_later_condition (if (and isOuter (equal? now_condition later_condition)) true later_condition))
-										(set cols (extend_scan_cols_for_later_condition tblvar cols effective_later_condition))
+							(cons '(tblvar schema tbl isOuter joinexpr) tables) (begin /* outer scan */
+								(define base_tbl (scan_tagged_table_base tbl))
+								(define tbl_scan_order (scan_tagged_table_order tbl))
+								(define tbl_scan_limit (scan_tagged_table_limit tbl))
+								(define tbl_scan_offset (scan_tagged_table_offset tbl))
+								(define tbl_scan_partcols (scan_tagged_table_partition_cols tbl))
+								(define tbl_once_limit (scan_tagged_table_once_limit tbl))
+								(define scan_condition (lower_materialized_scan_condition schema base_tbl tblvar condition))
+								(define visible_fields (lower_materialized_emit_assoc schema base_tbl tblvar fields))
+								(define is_update_target_ord (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
+								(define visible_ut_cols_ord (if is_update_target_ord
+									(lower_materialized_emit_assoc schema base_tbl tblvar (nth update_target 1))
+									'()))
+								(define ut_extra_cols_ord (if is_update_target_ord
+									(merge_unique (extract_assoc visible_ut_cols_ord (lambda (k v) (extract_columns_for_tblvar tblvar v))))
+									'()))
+								(set cols (collect_scan_base_cols tblvar scan_condition visible_fields tables partition_stages ut_extra_cols_ord))
+								(match (split_scan_condition isOuter (replace_find_column (coalesceNil joinexpr true)) scan_condition tables) '(now_condition later_condition) (begin
+									(define effective_later_condition (if (and isOuter (equal? now_condition later_condition)) true later_condition))
+									(set cols (extend_scan_cols_for_later_condition tblvar cols effective_later_condition))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* check partition_stages for this table. Tagged scans still override the
 									local stage config, but scoped partition stages must now also work when
@@ -8443,11 +8438,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(if is_update_target_ord 0 nil)
 										isOuter
 									))
-										(define _ord_scan (wrap_once_limit_scan ord_once_name _ord_scan_core))
-										(if (nil? _ps_init) _ord_scan (list (quote begin) _ps_init _ord_scan))
-									))
-									))
-								)
+									(define _ord_scan (wrap_once_limit_scan ord_once_name _ord_scan_core))
+									(if (nil? _ps_init) _ord_scan (list (quote begin) _ps_init _ord_scan))
+								))
+							)
 							'() /* final inner */ (if (nil? update_target)
 								(begin
 									(define emit_fields (if (nil? last_scan_ctx) fields
@@ -8488,8 +8482,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define tbl_once_limit (scan_tagged_table_once_limit tbl))
 									(define scan_condition (lower_materialized_scan_condition schema base_tbl tblvar condition))
 									(define visible_fields (lower_materialized_emit_assoc schema base_tbl tblvar fields))
-									(match (scan_update_target_context tblvar schema base_tbl update_target) '(is_update_target visible_ut_cols ut_extra_cols) (begin
-										(set cols (collect_scan_base_cols tblvar scan_condition visible_fields tables partition_stages ut_extra_cols))
+									/* check if this table is the UPDATE target */
+									(define is_update_target (and (not (nil? update_target)) (equal?? tblvar (nth update_target 0))))
+									(define visible_ut_cols (if is_update_target
+										(lower_materialized_emit_assoc schema base_tbl tblvar (nth update_target 1))
+										'()))
+									/* also extract cols needed for SET expressions in update_target */
+									(define ut_extra_cols (if is_update_target
+										(merge_unique (extract_assoc visible_ut_cols (lambda (k v) (extract_columns_for_tblvar tblvar v))))
+										'()))
+									(set cols (collect_scan_base_cols tblvar scan_condition visible_fields tables partition_stages ut_extra_cols))
 									/* For UPDATE target: prepend $update to mapcols */
 									(define scan_mapcols (if is_update_target (cons list (cons "$update" cols)) (cons list cols)))
 									(define scan_mapfn_params (if is_update_target
@@ -8577,10 +8579,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														(list (symbol "lambda") scan_mapfn_params scan_body)
 														(if is_update_target (symbol "+") nil)
 														(if is_update_target 0 nil)
-															nil
-															isOuter
-											))))
-										))
+														nil
+														isOuter
+										))))
 									))
 								)
 								'() /* final inner (=scalar) */ (if (nil? update_target)
