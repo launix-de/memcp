@@ -147,7 +147,7 @@ func normalizePartitionDataset(arg scm.Scmer) dataset {
 	for _, item := range raw {
 		pair := mustScmerSlice(item, "partition column pair")
 		if len(pair) != 2 {
-			panic("invalid partition column pair")
+			panic(fmt.Sprintf("invalid partition column pair: expected (column value), got %s", describeScmerValue(item)))
 		}
 		normalized = append(normalized, pair[0], pair[1])
 	}
@@ -252,11 +252,25 @@ func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {
 	return nil, false
 }
 
+// describeScmerValue renders v for use in a panic message. Long values
+// (entire codegen'd expressions) are truncated so the panic stays readable.
+func describeScmerValue(v scm.Scmer) string {
+	const maxLen = 200
+	if v.IsNil() {
+		return "nil"
+	}
+	s := scm.String(v)
+	if len(s) > maxLen {
+		return s[:maxLen] + "…"
+	}
+	return s
+}
+
 func mustScmerSlice(v scm.Scmer, ctx string) []scm.Scmer {
 	if slice, ok := scmerSlice(v); ok {
 		return slice
 	}
-	panic(ctx + ": expected list")
+	panic(fmt.Sprintf("%s: expected list, got %s", ctx, describeScmerValue(v)))
 }
 
 func scmerSliceToStrings(list []scm.Scmer) []string {
@@ -279,7 +293,7 @@ func decodePerTableInts(v scm.Scmer, n int, ctx string) []int {
 	}
 	slice, ok := scmerSlice(v)
 	if !ok {
-		panic(ctx + ": expected list or nil")
+		panic(fmt.Sprintf("%s: expected list or nil, got %s", ctx, describeScmerValue(v)))
 	}
 	if len(slice) != n {
 		panic(fmt.Sprintf("%s: expected length %d, got %d", ctx, n, len(slice)))
