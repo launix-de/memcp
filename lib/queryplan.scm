@@ -4832,6 +4832,17 @@ seeing the correctly prefixed outer alias. */
 	Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
 	(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
 	(define _sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
+	/* Deduplication is only sound while the query still carries purely logical
+	scalar expressions. Legacy inline fallbacks embed physical runtime code
+	(scan, scan_order, !begin, promises) directly into field expressions; alias
+	rewrite across those opaque subplans is not semantics-preserving yet. Keep
+	those queries on the undeduped helper path until the fallback code is gone. */
+	(define scalar_query_has_opaque_runtime (or
+		(reduce_assoc fields (lambda (found _k v) (or found (expr_has_opaque_scope v))) false)
+		(expr_has_opaque_scope condition)
+		(reduce (coalesceNil group '()) (lambda (found expr) (or found (expr_has_opaque_scope expr))) false)
+		(expr_has_opaque_scope having)
+		(reduce (coalesceNil order '()) (lambda (found order_item) (or found (expr_has_opaque_scope order_item))) false)))
 	/* Deduplicate identical scalar projection LEFT JOIN helpers before they
 	enter the normal table pipeline. join_reorder can move helpers, but it cannot
 	recognize that two _unn_ aliases describe the same LEFT JOIN relation once
@@ -4848,25 +4859,27 @@ seeing the correctly prefixed outer alias. */
 				isOuter
 				(rewrite_source_aliases _dedup_alias_map (coalesceNil joinexpr true)))))
 		nil)))
-	(define _sq_scalar_dedup_state (reduce _sq_scalar_tbls (lambda (state td) (match state
-		'(kept key_map alias_map) (match td
-			'(tv _ _ _ _) (begin
-				(define _dedup_key (scalar_left_join_dedup_key td))
-				(define _canonical_alias (get_assoc key_map _dedup_key))
-				(if (nil? _canonical_alias)
-					(list
-						(merge kept (list td))
-						(set_assoc key_map _dedup_key tv)
-						alias_map)
-					(list
-						kept
-						key_map
-						(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
-							(set_assoc acc (string alias_v) _canonical_alias))
-							alias_map))))
-			_ td)
-		_ state))
-		(list '() '() '())))
+	(define _sq_scalar_dedup_state (if scalar_query_has_opaque_runtime
+		(list _sq_scalar_tbls '() '())
+		(reduce _sq_scalar_tbls (lambda (state td) (match state
+			'(kept key_map alias_map) (match td
+				'(tv _ _ _ _) (begin
+					(define _dedup_key (scalar_left_join_dedup_key td))
+					(define _canonical_alias (get_assoc key_map _dedup_key))
+					(if (nil? _canonical_alias)
+						(list
+							(merge kept (list td))
+							(set_assoc key_map _dedup_key tv)
+							alias_map)
+						(list
+							kept
+							key_map
+							(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+								(set_assoc acc (string alias_v) _canonical_alias))
+								alias_map))))
+				_ td)
+			_ state))
+			(list '() '() '()))))
 	(define _sq_scalar_tbls (nth _sq_scalar_dedup_state 0))
 	(define _sq_scalar_alias_map (nth _sq_scalar_dedup_state 2))
 	(define rewrite_scalar_left_join_alias (lambda (alias_)
