@@ -3948,11 +3948,17 @@ seeing the correctly prefixed outer alias. */
 	(define scalar_subselect_lowering_reason (lambda (subquery outer_schemas)
 		(match (scalar_subselect_shape_facts subquery outer_schemas)
 			'(_g h _o _l _off _value_expr _has_outer _outer_refs_are_direct_columns _contains_inner_select_marker _has_aggregate _uses_session_state _contains_skip_level_nested_outer_ref) (begin
-				(define _has_agg_or_stage (or
+				/* ORDER/LIMIT-only correlated scalars already lower through the
+				normal non-aggregate partition-topk path, but only for the direct
+				single-level shape. Nested inner-select markers still stay on the
+				old fallback path for now. */
+				(define _has_grouped_semantics (or
 					_has_aggregate
 					(not (nil? h))
 					(not (equal? (coalesceNil _g '()) '()))
-					(not (equal? (coalesceNil _o '()) '()))))
+					(and
+						(not (equal? (coalesceNil _o '()) '()))
+						_contains_inner_select_marker)))
 				(define _value_expr_is_direct_column (match _value_expr
 					'((symbol get_column) _ _ _ _) true
 					'((quote get_column) _ _ _ _) true
@@ -3967,7 +3973,7 @@ seeing the correctly prefixed outer alias. */
 						(_raw_subquery_has_non_equality_outer_condition subquery outer_schemas)))
 				(scalar_subselect_lowering_reason_from_facts
 					_has_outer
-					_has_agg_or_stage
+					_has_grouped_semantics
 					_outer_refs_are_direct_columns
 					_outer_has_group
 					_contains_inner_select_marker

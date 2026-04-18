@@ -177,9 +177,12 @@ test_cases:
       contains:
         - "scalar-events"
         - "prefer-unnest"
+        - "limit-partition-cols 1"
+        - "partition-aliases (\"_unn_t2_0\")"
       not_contains:
         - "__scalar_promise_"
         - "scan-tagged-table"
+        - "inline-grouped-non-domain-correlation"
 
   - name: "Derived table with scalar aggregate subselect"
     sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM t2 WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
