@@ -554,6 +554,29 @@ keep it in a local define instead of rebuilding it from scratch. */
 (define serialize_canonical_expr (lambda (expr)
 	(serialize (require_canonical_logical_expr "serialize_canonical_expr" expr))
 ))
+(define canonical_logical_expr_key (lambda (expr)
+	(serialize_canonical_expr (normalize_canonical_aliases expr))
+))
+(define keyed_dedup (lambda (items key_fn) (begin
+	(define state (reduce items (lambda (acc item) (begin
+		(define seen (nth acc 0))
+		(define rows_rev (nth acc 1))
+		(define item_key (key_fn item))
+		(if (nil? (get_assoc seen item_key))
+			(list (set_assoc seen item_key true) (cons item rows_rev))
+			acc)))
+		(list '() '())))
+	(reverse (nth state 1))
+)))
+(define merge_unique_by_key (lambda (lists key_fn)
+	(keyed_dedup (merge lists) key_fn)
+))
+(define unique_strings (lambda (items)
+	(keyed_dedup items (lambda (item) item))
+))
+(define raw_logical_expr_key (lambda (expr)
+	(serialize expr)
+))
 /* Explain helpers: keep planner debugging on a stable, compact serialization
 surface so tests can assert planner structure without depending on pretty-print
 layout. */
@@ -563,6 +586,26 @@ layout. */
 )
 (define planner_debug_settings (newsession))
 (define planner_debug_scalar_events (newsession))
+(define planner_extract_tblvars_cache (newcachemap))
+(define planner_extract_columns_cache (newcachemap))
+(define planner_extract_outer_columns_cache (newcachemap))
+(define planner_unnest_outer_refs_cache (newcachemap))
+(define planner_expr_cache_lookup (lambda (cache key build_fn)
+	(begin
+		(define cached (cache key))
+		(if (nil? cached)
+			(begin
+				(define value (build_fn))
+				(cache key (list value))
+				value)
+			(car cached))
+)))
+(define planner_tblvar_expr_cache_key (lambda (prefix tblvar expr)
+	(concat prefix "|" (string tblvar) "|" (raw_logical_expr_key expr))
+))
+(define planner_outer_refs_cache_key (lambda (expr inner_aliases)
+	(concat "outerrefs|" (serialize inner_aliases) "|" (raw_logical_expr_key expr))
+))
 (define planner_debug_scalar_trace_enabled (lambda ()
 	(equal? (planner_debug_settings "scalar-trace") true)))
 (define planner_debug_reset_scalar_events (lambda ()
@@ -869,22 +912,34 @@ while still recursing into deeper helper lineage when needed. */
 )))
 
 /* returns a list of all tblvar aliases referenced via get_column in expr */
-(define extract_tblvars (lambda (expr)
+(define extract_tblvars_raw (lambda (expr)
 	(match expr
 		'((symbol get_column) tblvar _ _ _) (if (nil? tblvar) '() '(tblvar))
 		'((quote get_column) tblvar _ _ _) (if (nil? tblvar) '() '(tblvar))
-		(cons sym args) (merge_unique (map args extract_tblvars))
+		(cons sym args) (merge_unique_by_key (map args extract_tblvars_raw) (lambda (tblvar) tblvar))
 		'()
+	)
+))
+(define extract_tblvars (lambda (expr)
+	(planner_expr_cache_lookup planner_extract_tblvars_cache
+		(concat "tblvars|" (raw_logical_expr_key expr))
+		(lambda () (extract_tblvars_raw expr))
 	)
 ))
 
 /* returns a list of '(string...) */
-(define extract_columns_for_tblvar (lambda (tblvar expr)
+(define extract_columns_for_tblvar_raw (lambda (tblvar expr)
 	(match expr
 		'((symbol get_column) (eval tblvar) _ col _) (if (equal? col "*") '() '(col)) /* TODO: case matching */
 		'((quote get_column) (eval tblvar) _ col _) (if (equal? col "*") '() '(col))
-		(cons sym args) /* function call */ (merge_unique (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg))))
+		(cons sym args) /* function call */ (merge_unique_by_key (map args (lambda (arg) (extract_columns_for_tblvar_raw tblvar arg))) (lambda (col) col))
 		'()
+	)
+))
+(define extract_columns_for_tblvar (lambda (tblvar expr)
+	(planner_expr_cache_lookup planner_extract_columns_cache
+		(planner_tblvar_expr_cache_key "cols" tblvar expr)
+		(lambda () (extract_columns_for_tblvar_raw tblvar expr))
 	)
 ))
 
@@ -895,7 +950,7 @@ still keep their projected field alive. */
 	(match expr
 		'((symbol get_column) nil _ col _) (if (equal? col "*") '() '(col))
 		'((quote get_column) nil _ col _) (if (equal? col "*") '() '(col))
-		(cons sym args) (merge_unique (map args extract_unqualified_columns))
+		(cons sym args) (merge_unique_by_key (map args extract_unqualified_columns) (lambda (col) col))
 		'()
 	)
 ))
@@ -1132,6 +1187,28 @@ runtime promise name is created during unnesting anymore. */
 	(merge_unique (map stages (lambda (stage)
 		(coalesceNil (stage_outer_sources stage) '()))))
 ))
+(define scalar_subselect_expr_refs (lambda (expr) (match expr
+	'((symbol get_column) tv _ _ _) (if (nil? tv) '() (list tv))
+	'((quote get_column) tv _ _ _) (if (nil? tv) '() (list tv))
+	(cons _ args) (reduce args (lambda (acc arg) (merge acc (scalar_subselect_expr_refs arg))) '())
+	'()
+)))
+(define scalar_subselect_last_alias (lambda (expr aliases) (begin
+	(define refs (scalar_subselect_expr_refs expr))
+	(reduce aliases (lambda (best alias_name)
+		(if (reduce refs (lambda (found ref_alias) (or found (equal?? ref_alias alias_name))) false)
+			alias_name
+			best))
+		nil)
+)))
+(define scalar_subselect_group_parts_by_alias (lambda (parts aliases)
+	(reduce parts (lambda (acc part) (begin
+		(define part_alias (scalar_subselect_last_alias part aliases))
+		(if (nil? part_alias)
+			acc
+			(set_assoc acc part_alias (merge (coalesceNil (get_assoc acc part_alias) '()) (list part))))))
+		'())
+))
 (define scalar_subselect_schema_entry (lambda (alias_name schemas2_fn) (begin
 	(define schema_cols (schemas2_fn alias_name))
 	(if (nil? schema_cols)
@@ -1159,14 +1236,20 @@ runtime promise name is created during unnesting anymore. */
 		'(alias_name _ _ _ _) alias_name
 		"")))
 ))
+(define scalar_subselect_domain_col_key (lambda (domain_col) (match domain_col
+	'(inner_expr outer_expr)
+	(concat (raw_logical_expr_key inner_expr) "|" (raw_logical_expr_key outer_expr))
+	(serialize domain_col)
+)))
 (define scalar_subselect_correlation_info (lambda (condition_expr inner_aliases rewrite_outer_expr) (begin
 	(define _ss_has_outer (lambda (expr) (unnest_expr_has_outer_ref expr inner_aliases)))
 	(define _ss_cond_parts (flatten_and_terms condition_expr))
 	(define _ss_inner_parts (filter _ss_cond_parts (lambda (part) (not (_ss_has_outer part)))))
 	(define _ss_outer_parts (filter _ss_cond_parts (lambda (part) (_ss_has_outer part))))
-	(define _ss_domain_cols (filter
+	(define _ss_domain_cols (keyed_dedup (filter
 		(map _ss_outer_parts (lambda (part) (unnest_correlated_domain_col part _ss_has_outer rewrite_outer_expr)))
-		(lambda (x) (not (nil? x)))))
+		(lambda (x) (not (nil? x))))
+		scalar_subselect_domain_col_key))
 	(define _ss_extra_inner_parts (filter _ss_outer_parts (lambda (part)
 		(unnest_correlated_residual_part? part _ss_has_outer))))
 	(define _ss_inner_parts_combined (merge _ss_inner_parts (map _ss_extra_inner_parts rewrite_outer_expr)))
@@ -1479,72 +1562,92 @@ reference OTHER tables too (not only tblvar). Complement of extract_pure_tblvar_
 	'()
 )))
 
-(define extract_outer_columns_for_tblvar (lambda (tblvar expr) (match expr
-	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
-		(match args
-			'(symname) (begin
-				(define parts (split (string symname) "."))
-				(match parts
-					(list tbl col) (if (equal?? tbl (string tblvar)) (list col) '())
-					_ '()
+(define extract_outer_columns_for_tblvar_raw (lambda (tblvar expr)
+	(match expr
+		(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+			(match args
+				'(symname) (begin
+					(define parts (split (string symname) "."))
+					(match parts
+						(list tbl col) (if (equal?? tbl (string tblvar)) (list col) '())
+						_ '()
+					)
 				)
+				_ '()
 			)
-			_ '()
+			(merge_unique_by_key (map args (lambda (arg) (extract_outer_columns_for_tblvar_raw tblvar arg))) (lambda (col) col))
 		)
-		(merge_unique (map args (lambda (arg) (extract_outer_columns_for_tblvar tblvar arg))))
+		'()
 	)
-	'()
-)))
+))
+(define extract_outer_columns_for_tblvar (lambda (tblvar expr)
+	(planner_expr_cache_lookup planner_extract_outer_columns_cache
+		(planner_tblvar_expr_cache_key "outer-cols" tblvar expr)
+		(lambda () (extract_outer_columns_for_tblvar_raw tblvar expr))
+	)
+))
 
 /* columns of tblvar that are needed only because later table-local joinexprs reference them.
 These columns must still be mapped by the current scan so nested join filters can see them. */
 (define extract_later_joinexpr_columns_for_tblvar (lambda (tblvar tables)
-	(merge_unique (map tables (lambda (td) (match td
-		'(_ _ _ _ je) (if (nil? je) '() (merge_unique (list
-			(extract_columns_for_tblvar tblvar je)
-			(extract_outer_columns_for_tblvar tblvar je))))
-		'()))))
+	(merge_unique_by_key
+		(map tables (lambda (td) (match td
+			'(_ _ _ _ je) (if (nil? je) '()
+				(merge_unique_by_key (list
+					(extract_columns_for_tblvar tblvar je)
+					(extract_outer_columns_for_tblvar tblvar je))
+					(lambda (col) col)))
+			'())))
+		(lambda (col) col)
+	)
 ))
 
 /* Some scalar helper stages carry outer correlation keys only in stage metadata
 (outer-sources). The enclosing scan still has to map those columns so nested
 helper filters can close over them at runtime. */
 (define extract_stage_outer_source_cols_for_tblvar (lambda (tblvar stages)
-	(merge_unique (map (coalesceNil stages '()) (lambda (stage)
-		(merge_unique (map (coalesceNil (stage_outer_sources stage) '()) (lambda (src)
-			(match src
-				'(outer_tv outer_col _inner_expr) (if (equal?? outer_tv tblvar) (list outer_col) '())
-				_ '()))))))))
+	(merge_unique_by_key
+		(map (coalesceNil stages '()) (lambda (stage)
+			(merge_unique_by_key
+				(map (coalesceNil (stage_outer_sources stage) '()) (lambda (src)
+					(match src
+						'(outer_tv outer_col _inner_expr) (if (equal?? outer_tv tblvar) (list outer_col) '())
+						_ '())))
+				(lambda (col) col))))
+		(lambda (col) col))
 ))
 
 (define collect_scan_base_cols (lambda (tblvar scan_condition visible_fields tables partition_stages extra_cols)
-	(merge_unique
+	(merge_unique_by_key
 		(list
-			(merge_unique
+			(merge_unique_by_key
 				(cons
 					(extract_columns_for_tblvar tblvar scan_condition)
 					(extract_assoc visible_fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))
 				)
+				(lambda (col) col)
 			)
-			(merge_unique
+			(merge_unique_by_key
 				(cons
 					(extract_outer_columns_for_tblvar tblvar scan_condition)
 					(extract_assoc visible_fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
 				)
+				(lambda (col) col)
 			)
 			(extract_later_joinexpr_columns_for_tblvar tblvar tables)
 			(extract_stage_outer_source_cols_for_tblvar tblvar partition_stages)
 			extra_cols
 		)
+		(lambda (col) col)
 	)
 ))
 
 (define extend_scan_cols_for_later_condition (lambda (tblvar cols effective_later_condition)
-	(merge_unique (list
+	(merge_unique_by_key (list
 		cols
 		(extract_columns_for_tblvar tblvar effective_later_condition)
 		(extract_outer_columns_for_tblvar tblvar effective_later_condition)
-	))
+	) (lambda (col) col))
 ))
 
 (define find_partition_stage_for_alias (lambda (stages tblvar)
@@ -2068,22 +2171,29 @@ carrier until session domains are modeled explicitly. */
 		nil)))
 		(lambda (src) (not (nil? src))))
 ))
-(define unnest_expr_outer_refs (lambda (expr inner_aliases) (match expr
-	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
-		(match args
-			(cons sym_arg '()) (list (string sym_arg))
-			'())
-		(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+(define unnest_expr_outer_refs_raw (lambda (expr inner_aliases)
+	(match expr
+		(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
 			(match args
-				'(alias_ _ col _) (if (and (not (nil? alias_))
-					(not (reduce inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false)))
-					(list (concat alias_ "." col))
-					'())
+				(cons sym_arg '()) (list (string sym_arg))
 				'())
-			(if (_is_opaque_scope_sym sym)
-				'()
-				(merge_unique (map args (lambda (arg) (unnest_expr_outer_refs arg inner_aliases)))))))
-	'())))
+			(if (or (equal? sym (quote get_column)) (equal? sym '(quote get_column)) (equal? sym '(symbol get_column)))
+				(match args
+					'(alias_ _ col _) (if (and (not (nil? alias_))
+						(not (reduce inner_aliases (lambda (a ia) (or a (equal?? ia alias_))) false)))
+						(list (concat alias_ "." col))
+						'())
+					'())
+				(if (_is_opaque_scope_sym sym)
+					'()
+					(merge_unique_by_key (map args (lambda (arg) (unnest_expr_outer_refs_raw arg inner_aliases))) (lambda (outer_ref) outer_ref)))))
+		'())))
+(define unnest_expr_outer_refs (lambda (expr inner_aliases)
+	(planner_expr_cache_lookup planner_unnest_outer_refs_cache
+		(planner_outer_refs_cache_key expr inner_aliases)
+		(lambda () (unnest_expr_outer_refs_raw expr inner_aliases))
+	)
+))
 (define unnest_expr_has_outer_ref (lambda (expr inner_aliases) (match expr
 	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
 		true
@@ -3538,9 +3648,9 @@ seeing the correctly prefixed outer alias. */
 								(set fields2_us (map_assoc fields2_us (lambda (k v) (_us_wrap v))))
 								(set condition2_us (_us_wrap condition2_us))
 								(define us_inner_aliases (map tables2_us (lambda (td) (match td '(a _ _ _ _) a ""))))
-								(define us_outer_refs (merge_unique
+								(define us_outer_refs (unique_strings (merge
 									(merge (extract_assoc fields2_us (lambda (k v) (unnest_expr_outer_refs v us_inner_aliases))))
-									(unnest_expr_outer_refs condition2_us us_inner_aliases)))
+									(unnest_expr_outer_refs condition2_us us_inner_aliases))))
 								/* feasibility checks */
 								(define us_has_outer (not (equal? us_outer_refs '())))
 								/* separate own stages from inner scoped stages (from nested decorrelation) —
@@ -3631,10 +3741,9 @@ seeing the correctly prefixed outer alias. */
 																	(list inner_expr (list (quote get_column) outer_tv false outer_col false))
 																	_ nil)))
 																(lambda (x) (not (nil? x)))))) '()))
-													(define us_domain_cols_all (reduce (merge us_domain_cols us_nested_domain_cols) (lambda (acc dc)
-														(if (reduce acc (lambda (found existing) (or found (equal? existing dc))) false)
-															acc
-															(merge acc (list dc)))) '()))
+													(define us_domain_cols_all (keyed_dedup
+														(merge us_domain_cols us_nested_domain_cols)
+														scalar_subselect_domain_col_key))
 													(define _us_dom_group_cols (map us_domain_cols_all (lambda (dc) (_us_prefix_ria (nth dc 0)))))
 													(define us_prefixed_aliases (scalar_subselect_table_aliases us_prefixed_tables))
 													(define us_new_group (merge _us_dom_group_cols
@@ -3671,18 +3780,9 @@ seeing the correctly prefixed outer alias. */
 															(cons (symbol and) parts) parts
 															(cons (quote and) parts) parts
 															(list us_inner_cond_prefixed))))
-													(define _us_expr_refs (lambda (expr) (match expr
-														'((symbol get_column) tv _ _ _) (if (nil? tv) '() (list tv))
-														'((quote get_column) tv _ _ _) (if (nil? tv) '() (list tv))
-														(cons _ args) (reduce args (lambda (acc a) (merge acc (_us_expr_refs a))) '())
-														'())))
-													(define _us_last_alias (lambda (part) (begin
-														(define _refs (_us_expr_refs part))
-														(reduce us_prefixed_aliases (lambda (best al)
-															(if (reduce _refs (lambda (found r) (or found (equal?? r al))) false)
-																al best)) nil))))
+													(define _us_parts_by_alias (scalar_subselect_group_parts_by_alias _us_inner_parts_list us_prefixed_aliases))
 													(define _us_parts_for (lambda (alias) (begin
-														(define _my (filter _us_inner_parts_list (lambda (p) (equal?? (_us_last_alias p) alias))))
+														(define _my (coalesceNil (get_assoc _us_parts_by_alias alias) '()))
 														(if (equal? (count _my) 0) nil
 															(if (equal? (count _my) 1) (car _my)
 																(cons (quote and) _my))))))
