@@ -101,25 +101,8 @@ func evalWithSourceInfo(si SourceInfo, en *Env) (value Scmer) {
 func Eval(expression Scmer, en *Env) (value Scmer) {
 restart:
 	switch expression.GetTag() {
-	case tagSourceInfo:
-		return evalWithSourceInfo(*expression.SourceInfo(), en)
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise:
-		// literals
-		return expression
-	case tagSymbol:
-		// get named variable
-		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
-	case tagNthLocalVar:
-		// get numbered variable
-		idx := int(expression.NthLocalVar())
-		if idx >= len(en.VarsNumbered) {
-			buf := make([]byte, 8192)
-			n := runtime.Stack(buf, false)
-			panic(fmt.Sprintf("NthLocalVar(%d) out of range (len=%d)\n%s", idx, len(en.VarsNumbered), buf[:n]))
-		}
-		return en.VarsNumbered[idx]
 	case tagSlice:
-		// slice -> function call
+		// Hot path: optimized queryplan/runtime code is dominated by call forms.
 		list := expression.Slice()
 		if len(list) == 0 {
 			return expression
@@ -416,6 +399,10 @@ restart:
 				args[i] = Eval(x, en)
 			}
 			return fn(args...)
+		case tagProc:
+			// Lambdas (procs)
+			en, expression = prepareProcCall(procedure.Proc(), operands, en)
+			goto restart
 		case tagFuncEnv:
 			// Native funcs with env
 			fn := procedure.FuncEnv()
@@ -431,10 +418,34 @@ restart:
 				args[i] = Eval(x, en)
 			}
 			return fn(en, args...)
-		case tagProc:
-			// Lambdas (procs)
-			en, expression = prepareProcCall(procedure.Proc(), operands, en)
-			goto restart
+		case tagClosure:
+			fn := *(*func(uint32, ...Scmer) Scmer)(unsafe.Pointer(procedure.ptr))
+			id := uint32(auxVal(procedure.aux))
+			if n := len(operands); n <= 4 {
+				var buf [4]Scmer
+				for i := 0; i < n; i++ {
+					buf[i] = Eval(operands[i], en)
+				}
+				return fn(id, buf[:n]...)
+			}
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return fn(id, args...)
+		case tagPromise:
+			if n := len(operands); n <= 4 {
+				var buf [4]Scmer
+				for i := 0; i < n; i++ {
+					buf[i] = Eval(operands[i], en)
+				}
+				return ApplyPromise(procedure, buf[:n])
+			}
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return ApplyPromise(procedure, args)
 		case tagSlice:
 			// Associative list
 			p := procedure.Slice()
@@ -482,37 +493,26 @@ restart:
 				args[i] = Eval(x, en)
 			}
 			return jep.Native(args...)
-		case tagClosure:
-			fn := *(*func(uint32, ...Scmer) Scmer)(unsafe.Pointer(procedure.ptr))
-			id := uint32(auxVal(procedure.aux))
-			if n := len(operands); n <= 4 {
-				var buf [4]Scmer
-				for i := 0; i < n; i++ {
-					buf[i] = Eval(operands[i], en)
-				}
-				return fn(id, buf[:n]...)
-			}
-			args := make([]Scmer, len(operands))
-			for i, x := range operands {
-				args[i] = Eval(x, en)
-			}
-			return fn(id, args...)
-		case tagPromise:
-			if n := len(operands); n <= 4 {
-				var buf [4]Scmer
-				for i := 0; i < n; i++ {
-					buf[i] = Eval(operands[i], en)
-				}
-				return ApplyPromise(procedure, buf[:n])
-			}
-			args := make([]Scmer, len(operands))
-			for i, x := range operands {
-				args[i] = Eval(x, en)
-			}
-			return ApplyPromise(procedure, args)
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
+	case tagNthLocalVar:
+		// Optimized lambda bodies resolve locals directly through numbered slots.
+		idx := int(expression.NthLocalVar())
+		if idx >= len(en.VarsNumbered) {
+			buf := make([]byte, 8192)
+			n := runtime.Stack(buf, false)
+			panic(fmt.Sprintf("NthLocalVar(%d) out of range (len=%d)\n%s", idx, len(en.VarsNumbered), buf[:n]))
+		}
+		return en.VarsNumbered[idx]
+	case tagFunc, tagFuncEnv, tagProc, tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagJIT, tagClosure, tagPromise, tagAny:
+		// Self-evaluating literals and optimizer-resolved native callables.
+		return expression
+	case tagSymbol:
+		// Fallback for names not folded to numbered vars/native funcs by the optimizer.
+		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
+	case tagSourceInfo:
+		return evalWithSourceInfo(*expression.SourceInfo(), en)
 	default:
 		if expression.GetTag() >= 100 {
 			// custom tags (e.g. TagTable) are opaque literals
