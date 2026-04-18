@@ -1454,7 +1454,7 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 
 // buildInvalidateScan builds a scan expression that walks the keytable, matches rows
 // by join key values from a trigger dict (OLD or NEW), and invokes $invalidate: closures.
-// Pattern: (scan targetSchema targetTable '("inputCol1" ...) (lambda (kt.col ...) (and (equal? kt.col (get_assoc dictSym "srcCol")) ...)) '("$invalidate:colName") (lambda ($inv) ($inv)) + 0 nil false)
+// Pattern: (scan nil (table targetSchema targetTable) '("inputCol1" ...) (lambda (kt.col ...) (and (equal? kt.col (get_assoc dictSym "srcCol")) ...)) '("$invalidate:colName") (lambda ($inv) ($inv)) + 0 nil false)
 func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string) scm.Scmer {
 	// Build filter column list: '("inputCol1" "inputCol2" ...)
 	filterColElems := make([]scm.Scmer, 1+len(inputCols))
