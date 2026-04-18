@@ -1151,6 +1151,11 @@ runtime promise name is created during unnesting anymore. */
 					(if (nil? schema_cols) '() (list alias_name schema_cols)))))
 		'()))))
 ))
+(define scalar_subselect_table_aliases (lambda (tables)
+	(map tables (lambda (td) (match td
+		'(alias_name _ _ _ _) alias_name
+		"")))
+))
 (define scalar_subselect_correlation_info (lambda (condition_expr inner_aliases rewrite_outer_expr) (begin
 	(define _ss_has_outer (lambda (expr) (unnest_expr_has_outer_ref expr inner_aliases)))
 	(define _ss_cond_parts (flatten_and_terms condition_expr))
@@ -3634,6 +3639,7 @@ seeing the correctly prefixed outer alias. */
 													(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
 													(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
 													(define us_orig_having (if us_has_stages (stage_having_expr (car _us_own_stages)) nil))
+													(define us_cache_policy (count_subquery_cache_policy subquery target_expr))
 													(define us_nested_domain_cols (reduce _us_inner_stages (lambda (acc s)
 														(merge acc
 															(filter (map (coalesceNil (stage_outer_sources s) '()) (lambda (src)
@@ -3647,12 +3653,12 @@ seeing the correctly prefixed outer alias. */
 															acc
 															(merge acc (list dc)))) '()))
 													(define _us_dom_group_cols (map us_domain_cols_all (lambda (dc) (_us_prefix_ria (nth dc 0)))))
+													(define us_prefixed_aliases (scalar_subselect_table_aliases us_prefixed_tables))
 													(define us_new_group (merge _us_dom_group_cols
 														(if (or (equal? us_orig_group '()) (equal? us_orig_group '(1)))
 															(if (equal? _us_dom_group_cols '()) us_orig_group '())
 															(map us_orig_group _us_prefix_ria))))
 													(define us_new_having (if (nil? us_orig_having) nil (_us_prefix_ria us_orig_having)))
-													(define us_prefixed_aliases (map us_prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
 													(define us_stage_aliases (if (equal? _us_dom_group_cols '()) nil us_prefixed_aliases))
 													(define us_orig_order_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
 													(define us_orig_limit_a (if (and us_has_grp us_has_stages) (stage_limit_val (car _us_own_stages)) nil))
@@ -3662,8 +3668,8 @@ seeing the correctly prefixed outer alias. */
 														(stage_with_cache_query
 															(stage_with_cache_policy
 																(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_stage_aliases nil)
-																(count_subquery_cache_policy subquery target_expr))
-															(if (nil? (count_subquery_cache_policy subquery target_expr)) nil subquery)))
+																us_cache_policy)
+															(if (nil? us_cache_policy) nil subquery)))
 													(define _us_prefixed_inner_stages (scalar_subselect_rewrite_stages_with_lookup
 														_us_inner_stages
 														_us_prefix_ria
@@ -3687,10 +3693,9 @@ seeing the correctly prefixed outer alias. */
 														'((quote get_column) tv _ _ _) (if (nil? tv) '() (list tv))
 														(cons _ args) (reduce args (lambda (acc a) (merge acc (_us_expr_refs a))) '())
 														'())))
-													(define _us_alias_list (map us_prefixed_tables (lambda (td) (match td '(a _ _ _ _) a ""))))
 													(define _us_last_alias (lambda (part) (begin
 														(define _refs (_us_expr_refs part))
-														(reduce _us_alias_list (lambda (best al)
+														(reduce us_prefixed_aliases (lambda (best al)
 															(if (reduce _refs (lambda (found r) (or found (equal?? r al))) false)
 																al best)) nil))))
 													(define _us_parts_for (lambda (alias) (begin
@@ -3703,7 +3708,7 @@ seeing the correctly prefixed outer alias. */
 															(define _all_tbls (sq_cache "tables"))
 															(define _first_alias (match (car us_prefixed_tables) '(a _ _ _ _) a ""))
 															(map _all_tbls (lambda (td) (match td
-																'(a s t io je) (if (not (reduce _us_alias_list (lambda (f al) (or f (equal?? al a))) false)) td
+																'(a s t io je) (if (not (reduce us_prefixed_aliases (lambda (f al) (or f (equal?? al a))) false)) td
 																	(begin
 																		(define _my_cond (_us_parts_for a))
 																		(if (equal? a _first_alias)
