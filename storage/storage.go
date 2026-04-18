@@ -26,6 +26,7 @@ import "time"
 import "strconv"
 import "reflect"
 import "strings"
+import "unicode/utf8"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
@@ -253,17 +254,32 @@ func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {
 }
 
 // describeScmerValue renders v for use in a panic message. Long values
-// (entire codegen'd expressions) are truncated so the panic stays readable.
+// (entire codegen'd expressions) are truncated at a UTF-8 rune boundary
+// so the panic stays readable and never leaves a half-encoded code point.
+//
+// Uses AppendString with a heap-backed 256-byte scratch buffer so primitive
+// values (string/symbol/int/float/bool/nil) render without an extra heap
+// allocation. Larger values (slices, dicts) still allocate inside
+// AppendString — panics are rare, so we accept that cost.
 func describeScmerValue(v scm.Scmer) string {
-	const maxLen = 200
+	const maxBytes = 200
 	if v.IsNil() {
 		return "nil"
 	}
-	s := scm.String(v)
-	if len(s) > maxLen {
-		return s[:maxLen] + "…"
+	// make'd slice is heap-allocated so the unsafe.String view returned by
+	// AppendString for tagInt / tagFloat stays live as long as the result.
+	buf := make([]byte, 0, 256)
+	s, _ := v.AppendString(buf)
+	if len(s) <= maxBytes {
+		return s
 	}
-	return s
+	// Back off from maxBytes to the previous rune boundary; max UTF-8 rune
+	// is 4 bytes so this costs at most 3 iterations.
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 func mustScmerSlice(v scm.Scmer, ctx string) []scm.Scmer {
