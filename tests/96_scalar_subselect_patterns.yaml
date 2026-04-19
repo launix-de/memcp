@@ -91,6 +91,209 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "Minimal derived table CASE scalar with outer star"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_doc.ID,
+          CASE
+            WHEN ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) = 'invoice')
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          color: green
+
+  - name: "Minimal derived table CASE scalar with outer projection"
+    sql: |
+      SELECT t.color FROM (
+        SELECT
+          CASE
+            WHEN ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) = 'invoice')
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - color: green
+
+  - name: "Direct CASE repeated scalar null-or-equals"
+    sql: |
+      SELECT
+        sq_doc.ID,
+        CASE
+          WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+            AND ((sq_doc.type) IS NULL))
+            OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+          THEN 'green'
+          ELSE 'gray'
+        END AS color
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          color: green
+
+  - name: "Derived table CASE repeated scalar with outer projection"
+    sql: |
+      SELECT t.color FROM (
+        SELECT
+          CASE
+            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+              AND ((sq_doc.type) IS NULL))
+              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - color: green
+
+  - name: "Derived table CASE repeated scalar with outer star"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_doc.ID,
+          CASE
+            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+              AND ((sq_doc.type) IS NULL))
+              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          color: green
+
+  - name: "Arithmetic expression wraps scalar subselect in direct projection"
+    sql: |
+      SELECT
+        sq_doc.ID,
+        (3 + 4 * (((SELECT ID FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) + 1)) AS score
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          score: 11
+
+  - name: "Derived table arithmetic wrapper around scalar projection"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_doc.ID,
+          (3 + 4 * (((SELECT ID FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) + 1)) AS score
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          score: 11
+
+  - name: "COALESCE with scalar subselect survives derived table projection"
+    sql: |
+      SELECT t.color FROM (
+        SELECT
+          COALESCE((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1), 'fallback') AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - color: invoice
+
+  - name: "NOT IS NULL wrapper around scalar subselect"
+    sql: |
+      SELECT
+        sq_doc.ID,
+        CASE
+          WHEN NOT (((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+          THEN 'present'
+          ELSE 'missing'
+        END AS status
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          status: present
+
+  - name: "Correlated repeated scalar in CASE null-or-equals"
+    sql: |
+      SELECT
+        sq_doc.ID,
+        CASE
+          WHEN ((((SELECT sq_prop.doc
+                    FROM sq_prop
+                    WHERE sq_prop.doc = sq_doc.ID
+                    ORDER BY sq_prop.ID
+                    LIMIT 1)) IS NULL)
+            AND ((sq_doc.ID) IS NULL))
+            OR ((sq_doc.ID) = ((SELECT sq_prop.doc
+                                 FROM sq_prop
+                                 WHERE sq_prop.doc = sq_doc.ID
+                                 ORDER BY sq_prop.ID
+                                 LIMIT 1)))
+          THEN 'hit'
+          ELSE 'miss'
+        END AS match_state
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          match_state: hit
+
+  - name: "Derived table keeps correlated repeated scalar inside arithmetic CASE"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_doc.ID,
+          CASE
+            WHEN (3 + 4 * COALESCE((SELECT sq_prop.doc
+                                     FROM sq_prop
+                                     WHERE sq_prop.doc = sq_doc.ID
+                                     ORDER BY sq_prop.ID
+                                     LIMIT 1), 0)) = 7
+            THEN 'scaled'
+            ELSE 'other'
+          END AS state
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          state: scaled
+
   - name: "Derived table pruning drops unused scalar projection for outer count"
     sql: |
       EXPLAIN IR
