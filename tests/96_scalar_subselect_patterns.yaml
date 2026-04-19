@@ -91,6 +91,101 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "Minimal derived table CASE scalar with outer star"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_doc.ID,
+          CASE
+            WHEN ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) = 'invoice')
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          color: green
+
+  - name: "Minimal derived table CASE scalar with outer projection"
+    sql: |
+      SELECT t.color FROM (
+        SELECT
+          CASE
+            WHEN ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) = 'invoice')
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - color: green
+
+  - name: "Direct CASE repeated scalar null-or-equals"
+    sql: |
+      SELECT
+        sq_doc.ID,
+        CASE
+          WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+            AND ((sq_doc.type) IS NULL))
+            OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+          THEN 'green'
+          ELSE 'gray'
+        END AS color
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          color: green
+
+  - name: "Derived table CASE repeated scalar with outer projection"
+    sql: |
+      SELECT t.color FROM (
+        SELECT
+          CASE
+            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+              AND ((sq_doc.type) IS NULL))
+              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - color: green
+
+  - name: "Derived table CASE repeated scalar with outer star"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          sq_doc.ID,
+          CASE
+            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+              AND ((sq_doc.type) IS NULL))
+              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            THEN 'green'
+            ELSE 'gray'
+          END AS color
+        FROM sq_doc
+        WHERE sq_doc.ID = 1
+      ) AS t
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          color: green
+
   - name: "Derived table pruning drops unused scalar projection for outer count"
     sql: |
       EXPLAIN IR

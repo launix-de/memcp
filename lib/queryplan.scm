@@ -4370,22 +4370,36 @@ seeing the correctly prefixed outer alias. */
 	lowering while the current scope is still being normalized. The marker never
 	escapes the compiler; it is resolved back into the normal logical plan before
 	_sq_* helper integration. */
+	(define nil_test_of_inner_select (lambda (expr) (match expr
+		(cons nil_sym (cons inner_expr '()))
+			(and
+				(or
+					(equal?? nil_sym (symbol nil?))
+					(equal?? nil_sym (quote nil?))
+					(equal?? nil_sym (quote (quote nil?))))
+				(match inner_expr
+					(cons inner_sym (cons _ '()))
+						(equal?? (inner_select_kind inner_sym) (quote inner_select))
+					_ false))
+		_ false)))
 	(define collect_dependent_scalar_compile_markers (lambda (expr outer_schemas)
-		(match expr
-			(cons sym args) (begin
-				(define kind (inner_select_kind sym))
-				(if (equal?? kind (quote inner_select))
-					(match args
-						(cons subquery '()) (begin
-							(define dep_id (coalesceNil (dep_scalar_cache "idx") 0))
-							(dep_scalar_cache "idx" (+ dep_id 1))
-							(dep_scalar_cache dep_id subquery)
-							(dependent_scalar_compile_marker dep_id))
-						_ (replace_inner_selects expr outer_schemas))
-					(if (nil? kind)
-						(cons sym (map args (lambda (arg) (collect_dependent_scalar_compile_markers arg outer_schemas))))
-						(replace_inner_selects expr outer_schemas))))
-			_ expr)))
+		(if (nil_test_of_inner_select expr)
+			(replace_inner_selects expr outer_schemas)
+			(match expr
+				(cons sym args) (begin
+					(define kind (inner_select_kind sym))
+					(if (equal?? kind (quote inner_select))
+						(match args
+							(cons subquery '()) (begin
+								(define dep_id (coalesceNil (dep_scalar_cache "idx") 1))
+								(dep_scalar_cache "idx" (+ dep_id 1))
+								(dep_scalar_cache dep_id subquery)
+								(dependent_scalar_compile_marker dep_id))
+							_ (replace_inner_selects expr outer_schemas))
+						(if (nil? kind)
+							(cons sym (map args (lambda (arg) (collect_dependent_scalar_compile_markers arg outer_schemas))))
+							(replace_inner_selects expr outer_schemas))))
+				_ expr))))
 	(define resolve_dependent_scalar_compile_markers (lambda (expr outer_schemas)
 		(match expr
 			(cons sym args) (begin
@@ -5180,7 +5194,9 @@ seeing the correctly prefixed outer alias. */
 
 	(define planner_visible_schemas (merge schemas outer_schemas_chain))
 	(define finalize_visible_expr (lambda (expr)
-		(finalize_logical_expr_scoped expr schemas planner_visible_schemas replace_rename enforce_planner_contract)))
+		(finalize_logical_expr_scoped
+			(resolve_dependent_scalar_compile_markers expr planner_visible_schemas)
+			schemas planner_visible_schemas replace_rename enforce_planner_contract)))
 	(define finalize_visible_table_ref (lambda (tbl)
 		(if (scan_tagged_table_needs_scan_order tbl)
 			(scan_tagged_table_with_outer_sources
