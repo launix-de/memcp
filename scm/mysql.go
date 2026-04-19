@@ -354,14 +354,15 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		}
 	}()
 	// max_allowed_packet: PHP PDO queries this to size buffers.
-	// Return 32MB (33554432) so large result sets work.
+	// Return 40MB so large result sets work without tripping client-side
+	// packet buffer limits on wide login/dashboard views.
 	if query == "select @@max_allowed_packet" || query == "SELECT @@max_allowed_packet" {
 		callback(&sqltypes.Result{
 			Fields: []*querypb.Field{
 				{Name: "@@max_allowed_packet", Type: querypb.Type_INT64},
 			},
 			Rows: [][]sqltypes.Value{
-				{sqltypes.MakeTrusted(querypb.Type_INT64, []byte("4194304"))},
+				{sqltypes.MakeTrusted(querypb.Type_INT64, []byte("41943040"))},
 			},
 		})
 		return nil
