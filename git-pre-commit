@@ -21,14 +21,22 @@
 
 echo "🔍 Running MemCP pre-commit tests..."
 
-fail_fast_mode=0
-if [ "$(basename "$0")" = "pre-commit" ]; then
-  fail_fast_mode=1
-fi
-if [ "${1:-}" = "--fail-fast" ]; then
-  fail_fast_mode=1
-  shift
-fi
+fail_fast_mode="${MEMCP_FAIL_FAST:-1}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fail-fast)
+      fail_fast_mode=1
+      shift
+      ;;
+    --no-fail-fast)
+      fail_fast_mode=0
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 # Global state for reliable cleanup
 did_cleanup=0
