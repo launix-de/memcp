@@ -4449,32 +4449,9 @@ seeing the correctly prefixed outer alias. */
 												dep_info dep_alias dep_result_col dep_domain_cols)
 											nil))
 									(if (and (nil? dep_simple_source_query) (nil? dep_materialized_source_query))
-										(begin
-											(define dep_legacy_expr
-												(build_scalar_subselect subquery outer_schemas))
-											(if (nil? dep_legacy_expr)
-												expr
-												(begin
-													(define dep_result_expr
-														(dependent_join_helper_rewrite_legacy_expr dep_legacy_expr dep_alias dep_domain_cols))
-													(define dep_source_result_expr
-														(dependent_join_helper_rewrite_expr_for_domain_source dep_legacy_expr dep_domain_cols))
-													(define dep_source_query
-														(dependent_join_helper_build_source_query dep_info dep_result_col dep_domain_cols dep_source_result_expr))
-													(sq_cache "tables" (merge
-														(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr dep_source_query dep_unnesting_info))
-														(coalesceNil (sq_cache "tables") '())))
-												(sq_cache "schemas" (merge
-													(list (list dep_alias
-														(merge
-															(list (list "Field" dep_result_col "Type" "any"
-																"Expr" (list (quote get_column) dep_alias false dep_result_col false)))
-															(map dep_domain_cols (lambda (dc) (match dc
-																'(dom_col _dom_expr) (list "Field" dom_col "Type" "any"
-																	"Expr" (list (quote get_column) dep_alias false dom_col false))
-																_ (list "Field" "__dep_d" "Type" "any")))))))
-													(coalesceNil (sq_cache "schemas") '())))
-													(list (quote get_column) dep_alias false dep_result_col false))))
+										(error (concat
+											"top-down scalar lowering missing helper path: "
+											(serialize subquery)))
 										(begin
 											(define dep_result_expr (list (quote get_column) dep_alias false dep_result_col false))
 											(sq_cache "tables" (merge
@@ -5620,30 +5597,30 @@ seeing the correctly prefixed outer alias. */
 															(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch branch)))
 															(list (quote inner_select_in) target_expr (normalize_union_in_branch branch))))))))
 										(replace_inner_selects rewritten_expr outer_schemas))))))))
-					(if (nil? dep_expr)
-						nil
-						(coalesce
-							(if (and (nil? dep_union_parts) (not dep_uses_session_state))
-								(begin
-									(define dep_alias (concat "_dep_expr_" dep_id))
-									(define dep_result_col "__result")
-									(define dep_simple_source_query
-										(if (equal?? dep_kind (quote inner_select_exists))
-											(dependent_join_helper_build_simple_exists_source_query dep_info dep_result_col dep_domain_cols)
-											(if (equal?? dep_kind (quote inner_select_in))
-												(dependent_join_helper_build_simple_in_source_query dep_info dep_result_col dep_domain_cols)
-												nil)))
-									(if (nil? dep_simple_source_query)
-										nil
-										(begin
-											(define dep_presence_expr (list (quote get_column) dep_alias false dep_result_col false))
-											(define dep_result_expr
-												(if dep_negated
-													(list (quote nil?) dep_presence_expr)
-													(list (quote not) (list (quote nil?) dep_presence_expr))))
-											(sq_cache "tables" (merge
-												(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr dep_simple_source_query dep_unnesting_info))
-												(coalesceNil (sq_cache "tables") '())))
+						(if (nil? dep_expr)
+							nil
+							(coalesce
+								(if (and (nil? dep_union_parts) (not dep_uses_session_state))
+									(begin
+										(define dep_alias (concat "_dep_expr_" dep_id))
+										(define dep_result_col "__result")
+										(define dep_simple_source_query
+											(if (equal?? dep_kind (quote inner_select_exists))
+												(dependent_join_helper_build_simple_exists_source_query dep_info dep_result_col dep_domain_cols)
+												(if (equal?? dep_kind (quote inner_select_in))
+													(dependent_join_helper_build_simple_in_source_query dep_info dep_result_col dep_domain_cols)
+													nil)))
+										(if (nil? dep_simple_source_query)
+											nil
+											(begin
+												(define dep_presence_expr (list (quote get_column) dep_alias false dep_result_col false))
+												(define dep_result_expr
+													(if dep_negated
+														(list (quote nil?) dep_presence_expr)
+														(list (quote not) (list (quote nil?) dep_presence_expr))))
+												(sq_cache "tables" (merge
+													(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr dep_simple_source_query dep_unnesting_info))
+													(coalesceNil (sq_cache "tables") '())))
 												(sq_cache "schemas" (merge
 													(list (list dep_alias
 														(merge
@@ -5654,37 +5631,19 @@ seeing the correctly prefixed outer alias. */
 																	"Expr" (list (quote get_column) dep_alias false dom_col false))
 																_ (list "Field" "__dep_d" "Type" "any")))))))
 													(coalesceNil (sq_cache "schemas") '())))
-											dep_result_expr)))
-								nil)
-							/* dedicated delayed EXISTS/IN lowering hook.
-							All correlated EXISTS/IN now come through this compile-time path
-							instead of splitting cases back to the old expr walker. */
-							(if (equal?? dep_kind (quote inner_select_exists))
-								(coalesce
+												dep_result_expr)))
+									nil)
+								(if (equal?? dep_kind (quote inner_select_exists))
 									(union_exists_expr dep_subquery dep_union_parts dep_negated)
-									(if dep_negated
-										(if dep_uses_session_state
-											(list (quote not) (build_exists_subselect dep_subquery outer_schemas))
-											(coalesce
-												(_unnest_count_subselect dep_subquery outer_schemas nil (quote equal?))
-												(list (quote not) (build_exists_subselect dep_subquery outer_schemas))))
-										(if dep_uses_session_state
-											(build_exists_subselect dep_subquery outer_schemas)
-											(coalesce
-												(_unnest_count_subselect dep_subquery outer_schemas nil (quote >))
-												(build_exists_subselect dep_subquery outer_schemas)))))
-								nil)
-							(if (equal?? dep_kind (quote inner_select_in))
-								(coalesce
+									nil)
+								(if (equal?? dep_kind (quote inner_select_in))
 									(union_in_expr dep_target_expr dep_subquery dep_union_parts dep_negated)
-									(if dep_negated
-										(_unnest_count_subselect dep_subquery outer_schemas dep_target_expr (quote equal?))
-										(_unnest_count_subselect dep_subquery outer_schemas dep_target_expr (quote >))))
-								nil)
-							(if (or (not (equal? dep_domain '())) (not (equal? dep_cclasses '())) (not (equal? dep_repr '())))
-								nil
-								nil)
-							(dependent_expr_compile_marker dep_id))))))
+									nil)
+								(error (concat
+									"top-down dependent expr lowering missing helper path: "
+									(serialize dep_subquery)
+									(if dep_uses_session_state " session-state" "")
+									(if (nil? dep_union_parts) "" " union")))))))
 					(define lower_dependent_expr_compile_info (lambda (dep_info dep_id) (begin
 						(define dep_kind (dependent_expr_compile_info_kind dep_info))
 						(define dep_negated (dependent_expr_compile_info_negated dep_info))
