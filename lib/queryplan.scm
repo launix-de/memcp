@@ -5516,6 +5516,32 @@ seeing the correctly prefixed outer alias. */
 									(collect_dependent_expr_compile_markers arg outer_schemas)))))
 							(replace_inner_selects expr outer_schemas))))
 				_ expr)))
+		(define collect_dependent_field_compile_markers (lambda (expr outer_schemas)
+			(match expr
+				(cons sym args) (begin
+					(define kind (inner_select_kind sym))
+					(define delayed_info (dependent_expr_compile_info expr outer_schemas))
+					(if (not (nil? delayed_info))
+						(begin
+							(define dep_id (coalesceNil (dep_expr_cache "idx") 1))
+							(dep_expr_cache "idx" (+ dep_id 1))
+							(dep_expr_cache dep_id delayed_info)
+							(dependent_expr_compile_marker dep_id))
+						(if (equal?? kind (quote inner_select))
+							(match args
+								(cons subquery '()) (begin
+									(define dep_id (coalesceNil (dep_scalar_cache "idx") 1))
+									(dep_scalar_cache "idx" (+ dep_id 1))
+									(dep_scalar_cache dep_id subquery)
+									(dependent_scalar_compile_marker dep_id))
+								_ (replace_inner_selects expr outer_schemas))
+							(if (nil? kind)
+								(if (_is_opaque_scope_sym sym)
+									expr
+									(cons sym (map args (lambda (arg)
+										(collect_dependent_field_compile_markers arg outer_schemas)))))
+								(replace_inner_selects expr outer_schemas)))))
+				_ expr)))
 		(define rewrite_dependent_expr_compile_marker (lambda (expr target_idx replacement)
 			(match expr
 				(cons sym args) (begin
@@ -5527,7 +5553,7 @@ seeing the correctly prefixed outer alias. */
 							(cons sym (map args (lambda (arg)
 								(rewrite_dependent_expr_compile_marker arg target_idx replacement)))))))
 				_ expr)))
-			(define resolve_dependent_expr_compile_scope (lambda (tables condition group order outer_schemas) (begin
+		(define resolve_dependent_expr_compile_scope (lambda (fields tables condition group order outer_schemas) (begin
 				(define dep_next_id (coalesceNil (dep_expr_cache "idx") 1))
 				(define legacy_lower_dependent_expr_compile_info (lambda (dep_info dep_id) (begin
 					(define dep_expr (dependent_expr_compile_info_expr dep_info))
@@ -5639,11 +5665,11 @@ seeing the correctly prefixed outer alias. */
 								(if (equal?? dep_kind (quote inner_select_in))
 									(union_in_expr dep_target_expr dep_subquery dep_union_parts dep_negated)
 									nil)
-								(error (concat
-									"top-down dependent expr lowering missing helper path: "
-									(serialize dep_subquery)
-									(if dep_uses_session_state " session-state" "")
-									(if (nil? dep_union_parts) "" " union")))))))
+									(error (concat
+										"top-down dependent expr lowering missing helper path: "
+										(serialize dep_subquery)
+										(if dep_uses_session_state " session-state" "")
+										(if (nil? dep_union_parts) "" " union"))))))))
 					(define lower_dependent_expr_compile_info (lambda (dep_info dep_id) (begin
 						(define dep_kind (dependent_expr_compile_info_kind dep_info))
 						(define dep_negated (dependent_expr_compile_info_negated dep_info))
@@ -5695,15 +5721,17 @@ seeing the correctly prefixed outer alias. */
 							(dependent_expr_compile_marker dep_id)))))
 			(define apply_expr_to_scope (lambda (dep_id scope_state)
 				(match scope_state
-					'(scope_tables scope_condition scope_group scope_order) (begin
+					'(scope_fields scope_tables scope_condition scope_group scope_order) (begin
 						(define dep_info (dep_expr_cache dep_id))
 						(define replacement (lower_dependent_expr_compile_info dep_info dep_id))
 						(list
+							(map_assoc scope_fields (lambda (field_name field_expr)
+								(rewrite_dependent_expr_compile_marker field_expr dep_id replacement)))
 							(map scope_tables (lambda (td) (match td
 								'(tv tschema ttbl toisOuter tje)
 									(list tv tschema ttbl toisOuter
 										(if (nil? tje) nil (rewrite_dependent_expr_compile_marker tje dep_id replacement)))
-								td)))
+									td)))
 							(rewrite_dependent_expr_compile_marker scope_condition dep_id replacement)
 							(map scope_group (lambda (g)
 								(rewrite_dependent_expr_compile_marker g dep_id replacement)))
@@ -5714,8 +5742,8 @@ seeing the correctly prefixed outer alias. */
 			(define resolve_expr_loop (lambda (dep_id scope_state)
 				(if (>= dep_id dep_next_id)
 					scope_state
-					(resolve_expr_loop (+ dep_id 1) (apply_expr_to_scope dep_id scope_state)))))
-			(resolve_expr_loop 1 (list tables condition group order)))))
+						(resolve_expr_loop (+ dep_id 1) (apply_expr_to_scope dep_id scope_state)))))
+				(resolve_expr_loop 1 (list fields tables condition group order)))))
 	/* no-FROM rewrite: inject virtual one-row table ".(1)" (like Oracle DUAL).
 	Dot prefix hides from SHOW TABLES. Eliminates the no-table special case.
 	set tables= must wrap the if (set is scope-local in this Scheme dialect). */
@@ -6297,7 +6325,7 @@ seeing the correctly prefixed outer alias. */
 			(list tv tschema ttbl toisOuter
 			(if (nil? tje) nil (collect_dependent_expr_compile_markers tje _ris_schemas)))
 		td))))
-	(set fields (map_assoc fields (lambda (k v) (collect_dependent_scalar_compile_markers v _ris_schemas))))
+		(set fields (map_assoc fields (lambda (k v) (collect_dependent_field_compile_markers v _ris_schemas))))
 	(set condition (collect_dependent_expr_compile_markers condition _ris_schemas))
 	(set group (map group (lambda (g) (collect_dependent_expr_compile_markers g _ris_schemas))))
 	(set having (begin
@@ -6327,11 +6355,12 @@ seeing the correctly prefixed outer alias. */
 		(set fields (map_assoc fields (lambda (k v) (freeze_visible_field_refs v))))
 		(set fields (map_assoc fields (lambda (k v)
 			(resolve_dependent_scalar_compile_markers v _ris_schemas))))
-		(match (resolve_dependent_expr_compile_scope tables condition group order _ris_schemas)
-			'(tables2 condition2 group2 order2) (begin
-				(set tables tables2)
-				(set condition condition2)
-				(set group group2)
+			(match (resolve_dependent_expr_compile_scope fields tables condition group order _ris_schemas)
+				'(fields2 tables2 condition2 group2 order2) (begin
+					(set fields fields2)
+					(set tables tables2)
+					(set condition condition2)
+					(set group group2)
 				(set order order2))
 			_ nil)
 		/* integrate unnested scalar subselects from Neumann unnesting.
