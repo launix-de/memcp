@@ -31,6 +31,7 @@ If missing, create a venv and install, e.g.:
 import sys
 import os
 import threading
+import fcntl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Dependency checks with clear install hints
@@ -118,6 +119,62 @@ PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
+RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
+FAILURE_COUNT_KEY = "failures"
+SUITE_FAILURE_PREFIX = "__suite__:"
+CASE_FAILURE_PREFIX = "__case__:"
+
+def _load_runner_config() -> Dict[str, Any]:
+    try:
+        with open(PERF_BASELINE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _normalize_runner_entry(entry: Any) -> Dict[str, Any]:
+    if isinstance(entry, dict):
+        return dict(entry)
+    if isinstance(entry, (int, float)):
+        return {"time_ms": entry}
+    return {}
+
+def _get_failure_count(config: Dict[str, Any], key: str) -> int:
+    entry = _normalize_runner_entry(config.get(key))
+    try:
+        return max(0, int(entry.get(FAILURE_COUNT_KEY, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+def _write_runner_config(config: Dict[str, Any]) -> None:
+    tmp_file = f"{PERF_BASELINE_FILE}.tmp"
+    with open(tmp_file, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_file, PERF_BASELINE_FILE)
+
+def _update_runner_config(mutator) -> Dict[str, Any]:
+    Path(RUNNER_CONFIG_LOCK_FILE).touch(exist_ok=True)
+    with open(RUNNER_CONFIG_LOCK_FILE, 'r+', encoding='utf-8') as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        config = _load_runner_config()
+        mutator(config)
+        _write_runner_config(config)
+        fcntl.flock(lockf, fcntl.LOCK_UN)
+        return config
+
+def _suite_failure_key(spec_file: str) -> str:
+    return f"{SUITE_FAILURE_PREFIX}{spec_file}"
+
+def _case_failure_key(spec_file: str, test_name: str) -> str:
+    return f"{CASE_FAILURE_PREFIX}{spec_file}::{test_name}"
+
+def prioritize_spec_files(spec_files: List[str]) -> List[str]:
+    config = _load_runner_config()
+    return sorted(
+        spec_files,
+        key=lambda spec_file: (-_get_failure_count(config, _suite_failure_key(spec_file)), spec_file),
+    )
 
 def read_meminfo_mb(key: str) -> int:
     """Read a /proc/meminfo value (in MB). Returns 0 if unreadable."""
@@ -188,7 +245,7 @@ def start_ram_monitor():
     return t
 
 class SQLTestRunner:
-    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False):
+    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False, fail_fast=False):
         self.base_url = base_url
         self.username = username
         self.password = password
@@ -210,18 +267,34 @@ class SQLTestRunner:
         self.perf_baselines = {}  # test_name -> {"time_ms": float, "rows": int}
         self.perf_results = {}  # test_name -> {"time_ms": float, "rows": int}
         self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
+        self.fail_fast = fail_fast
+        self.current_spec_file = None
+        self._config_loaded = False
 
     def set_restart_handler(self, fn):
         """Install a restart handler callable that restarts MemCP (returns True on success)."""
         self._restart_handler = fn
 
     def load_perf_baselines(self):
-        """Load performance baselines from config file."""
-        try:
-            with open(PERF_BASELINE_FILE, 'r') as f:
-                self.perf_baselines = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            self.perf_baselines = {}
+        """Load runner config from disk, including perf baselines and failure stats."""
+        self.perf_baselines = _load_runner_config()
+        self._config_loaded = True
+
+    def ensure_runner_config_loaded(self):
+        if not self._config_loaded:
+            self.load_perf_baselines()
+
+    def _bump_failure_counter(self, key: str):
+        if not key:
+            return
+
+        def mutate(config: Dict[str, Any]) -> None:
+            entry = _normalize_runner_entry(config.get(key))
+            entry[FAILURE_COUNT_KEY] = _get_failure_count(config, key) + 1
+            config[key] = entry
+
+        self.perf_baselines = _update_runner_config(mutate)
+        self._config_loaded = True
 
     def save_perf_baselines(self):
         """Save updated performance baselines to config file.
@@ -232,17 +305,20 @@ class SQLTestRunner:
         if not self.perf_results:
             return
 
+        self.ensure_runner_config_loaded()
         max_rows = max_rows_for_ram()
 
-        if PERF_NORECALIBRATE:
-            # Just update times, keep existing rows
-            for name, result in self.perf_results.items():
-                current_rows = result["rows"]
-                if name in self.perf_baselines:
-                    self.perf_baselines[name]["time_ms"] = round(result["time_ms"], 1)
-                else:
-                    self.perf_baselines[name] = {"time_ms": round(result["time_ms"], 1), "rows": current_rows}
-        else:
+        def mutate(config: Dict[str, Any]) -> None:
+            if PERF_NORECALIBRATE:
+                # Just update times, keep existing rows
+                for name, result in self.perf_results.items():
+                    current_rows = result["rows"]
+                    entry = _normalize_runner_entry(config.get(name))
+                    entry["time_ms"] = round(result["time_ms"], 1)
+                    entry.setdefault("rows", current_rows)
+                    config[name] = entry
+                return
+
             # Scale each test independently to target 10-20s
             for name, result in self.perf_results.items():
                 current_rows = result["rows"]
@@ -265,13 +341,13 @@ class SQLTestRunner:
                 # Apply RAM limit
                 new_rows = min(new_rows, max_rows)
 
-                self.perf_baselines[name] = {
-                    "time_ms": round(test_time, 1),
-                    "rows": new_rows
-                }
+                entry = _normalize_runner_entry(config.get(name))
+                entry["time_ms"] = round(test_time, 1)
+                entry["rows"] = new_rows
+                config[name] = entry
 
-        with open(PERF_BASELINE_FILE, 'w') as f:
-            json.dump(self.perf_baselines, f, indent=2)
+        self.perf_baselines = _update_runner_config(mutate)
+        self._config_loaded = True
         print(f"📏 Updated performance baselines in {PERF_BASELINE_FILE}")
 
     # ----------------------
@@ -314,6 +390,8 @@ class SQLTestRunner:
 
     def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False, elapsed_ms: float = None, threshold_ms: float = None, on_fail_diag: str = None):
         self.failed_tests.append((name, is_noncritical))
+        if self.current_spec_file:
+            self._bump_failure_counter(_case_failure_key(self.current_spec_file, name))
         if is_noncritical:
             self.failed_noncritical += 1
         else:
@@ -969,6 +1047,7 @@ class SQLTestRunner:
         with open(spec_file, 'r') as f:
             spec = yaml.safe_load(f)
 
+        self.current_spec_file = spec_file
         metadata = spec.get('metadata', {})
         self.suite_metadata = metadata or {}
         self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))
@@ -979,10 +1058,10 @@ class SQLTestRunner:
             return True
 
         suite_start = time.perf_counter()
+        self.ensure_runner_config_loaded()
 
         # Load performance baselines for this machine
         if PERF_TEST_ENABLED:
-            self.load_perf_baselines()
             start_ram_monitor()
             if PERF_CALIBRATE:
                 self.perf_baselines = {}  # reset rows to PERF_DEFAULT_ROWS
@@ -993,8 +1072,14 @@ class SQLTestRunner:
 
         self.ensure_database(database)
 
+        raw_cases = spec.get('test_cases', [])
+        total_declared_cases = sum(int(tc.get('repeat', 1)) * len(tc.get('tests', [])) if isinstance(tc, dict) and 'repeat' in tc else 1 for tc in raw_cases)
+
         if spec.get('setup') and not self.run_setup(spec['setup'], database):
             print("❌ Setup failed")
+            self._bump_failure_counter(_suite_failure_key(spec_file))
+            if self.fail_fast and total_declared_cases > 0:
+                print(f"⏭️  Fail-fast skipped {total_declared_cases} tests after setup failure")
             print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
             return False
 
@@ -1004,7 +1089,6 @@ class SQLTestRunner:
         # and parallel group keys to avoid collisions between iterations.
         # Optional delay_ms inserts a sleep between iterations to hit different
         # timing windows in race-condition tests.
-        raw_cases = spec.get('test_cases', [])
         test_cases = []
         for tc in raw_cases:
             if 'repeat' in tc:
@@ -1023,28 +1107,40 @@ class SQLTestRunner:
             else:
                 test_cases.append(tc)
 
-        # Group consecutive test cases by 'parallel' key and run groups concurrently
-        i = 0
-        while i < len(test_cases):
-            tc = test_cases[i]
-            if '_delay_ms' in tc:
-                time.sleep(tc['_delay_ms'] / 1000.0)
-                i += 1
-                continue
-            group = tc.get('parallel')
-            if group:
-                # Collect all consecutive tests with the same parallel group
-                group_tests = [tc]
-                j = i + 1
-                while j < len(test_cases) and test_cases[j].get('parallel') == group:
-                    group_tests.append(test_cases[j])
-                    j += 1
-                print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
-                self._run_parallel_group(group_tests, database)
-                i = j
-            else:
+        if self.fail_fast:
+            for i, tc in enumerate(test_cases):
+                if '_delay_ms' in tc:
+                    time.sleep(tc['_delay_ms'] / 1000.0)
+                    continue
                 self.run_test_case(tc, database)
-                i += 1
+                if self.failed_critical > 0:
+                    remaining_tests = sum(1 for pending in test_cases[i + 1:] if '_delay_ms' not in pending)
+                    if remaining_tests > 0:
+                        print(f"⏭️  Fail-fast skipped {remaining_tests} tests after the first failure")
+                    break
+        else:
+            # Group consecutive test cases by 'parallel' key and run groups concurrently
+            i = 0
+            while i < len(test_cases):
+                tc = test_cases[i]
+                if '_delay_ms' in tc:
+                    time.sleep(tc['_delay_ms'] / 1000.0)
+                    i += 1
+                    continue
+                group = tc.get('parallel')
+                if group:
+                    # Collect all consecutive tests with the same parallel group
+                    group_tests = [tc]
+                    j = i + 1
+                    while j < len(test_cases) and test_cases[j].get('parallel') == group:
+                        group_tests.append(test_cases[j])
+                        j += 1
+                    print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
+                    self._run_parallel_group(group_tests, database)
+                    i = j
+                else:
+                    self.run_test_case(tc, database)
+                    i += 1
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
@@ -1072,6 +1168,7 @@ class SQLTestRunner:
 
         # Print memcp log on critical failures to aid debugging
         if failed_crit > 0:
+            self._bump_failure_counter(_suite_failure_key(spec_file))
             print_memcp_log(tail=100)
 
         # Suite success is determined solely by critical tests
@@ -1237,12 +1334,14 @@ def normalize_jobs(jobs: Optional[int]) -> int:
     return jobs
 
 
-def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, connect_only: bool) -> Tuple[bool, str]:
+def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, connect_only: bool, fail_fast: bool) -> Tuple[bool, str]:
     cmd = [sys.executable, os.path.abspath(__file__), spec_file]
     if connect_only and port is not None:
         cmd.extend([str(port), "--connect-only"])
     if log_times:
         cmd.append("--log-times")
+    if fail_fast:
+        cmd.append("--fail-fast")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     output = proc.stdout
     if proc.stderr:
@@ -1251,12 +1350,50 @@ def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, co
 
 
 def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: bool, jobs: Optional[int],
-                   restart_handler=None, connect_only: bool = False) -> bool:
+                   restart_handler=None, connect_only: bool = False, fail_fast: bool = False) -> bool:
     if len(spec_files) == 1:
-        runner = SQLTestRunner(base_url, log_times=log_times)
+        runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=fail_fast)
         if restart_handler is not None:
             runner.set_restart_handler(restart_handler)
         return runner.run_test_spec(spec_files[0])
+
+    if fail_fast:
+        ordered_specs = prioritize_spec_files(spec_files)
+        print(f"🧪 Running {len(ordered_specs)} suites (fail-fast)")
+        for idx, spec_file in enumerate(ordered_specs):
+            metadata = load_suite_metadata(spec_file)
+            if suite_requires_managed_restart(spec_file):
+                if restart_handler is None and connect_only:
+                    print(f"❌ {spec_file}: suite requires restart handling and cannot run with --connect-only")
+                    remaining_specs = len(ordered_specs) - idx - 1
+                    if remaining_specs > 0:
+                        print(f"⏭️  Fail-fast skipped {remaining_specs} suite files after the first failure")
+                    return False
+                runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=True)
+                if restart_handler is not None:
+                    runner.set_restart_handler(restart_handler)
+                ok = runner.run_test_spec(spec_file)
+            elif metadata.get("isolated"):
+                ok, output = run_spec_subprocess(spec_file, port, log_times, True, True)
+                if output:
+                    print(output, end="" if output.endswith("\n") else "\n")
+            else:
+                ok, output = run_spec_subprocess(spec_file, port, log_times, True, True)
+                if output:
+                    print(output, end="" if output.endswith("\n") else "\n")
+
+            if not ok:
+                remaining_specs = len(ordered_specs) - idx - 1
+                if remaining_specs > 0:
+                    print(f"⏭️  Fail-fast skipped {remaining_specs} suite files after the first failure")
+                print("")
+                print("❌ Some test files failed:")
+                print(f"   ❌ {spec_file}")
+                return False
+
+        print("")
+        print("🎉 All test files passed!")
+        return True
 
     max_jobs = normalize_jobs(jobs)
     print(f"🧪 Running {len(spec_files)} suites (parallel where safe, jobs={max_jobs})")
@@ -1287,7 +1424,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
 
     with ThreadPoolExecutor(max_workers=max_jobs) as executor:
         futures = {
-            executor.submit(run_spec_subprocess, spec_file, port, log_times, True): spec_file
+            executor.submit(run_spec_subprocess, spec_file, port, log_times, True, False): spec_file
             for spec_file in parallel_specs
         }
         for future in as_completed(futures):
@@ -1308,7 +1445,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             ok = runner.run_test_spec(spec_file)
             suite_status[spec_file] = ok
         else:
-            ok, output = run_spec_subprocess(spec_file, port, log_times, True)
+            ok, output = run_spec_subprocess(spec_file, port, log_times, True, False)
             record_result(spec_file, ok, output)
 
     failed_files = [spec_file for spec_file in spec_files if not suite_status.get(spec_file, False)]
@@ -1325,21 +1462,24 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
 
 
 def print_usage() -> None:
-    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--port N] [--connect-only] [--jobs N]")
+    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--port N] [--connect-only] [--jobs N] [--fail-fast]")
 
 
-def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, bool, Optional[int]]:
+def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, bool, Optional[int], bool]:
     spec_files: List[str] = []
     port: Optional[int] = None
     connect_only = False
     log_times = False
     jobs: Optional[int] = None
+    fail_fast = False
 
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg == "--connect-only":
             connect_only = True
+        elif arg == "--fail-fast":
+            fail_fast = True
         elif arg == "--log-times":
             log_times = True
         elif arg in ("--jobs", "--port"):
@@ -1377,7 +1517,7 @@ def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, boo
             spec_files.append(arg)
         i += 1
 
-    return spec_files, port, connect_only, log_times, jobs
+    return spec_files, port, connect_only, log_times, jobs, fail_fast
 
 
 def main():
@@ -1385,7 +1525,7 @@ def main():
         print_usage()
         sys.exit(1)
 
-    spec_files, port, connect_only, log_times, jobs = parse_cli_args(sys.argv[1:])
+    spec_files, port, connect_only, log_times, jobs, fail_fast = parse_cli_args(sys.argv[1:])
 
     if not spec_files:
         print_usage()
@@ -1415,7 +1555,7 @@ def main():
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
 
-    runner = SQLTestRunner(base_url, log_times=log_times)
+    runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=fail_fast)
     if not connect_only:
         def restart_handler() -> bool:
             nonlocal memcp_process
@@ -1428,7 +1568,7 @@ def main():
     if len(spec_files) == 1:
         success = runner.run_test_spec(spec_files[0])
     else:
-        success = run_test_specs(spec_files, base_url, port, log_times, jobs, restart_handler if not connect_only else None, connect_only)
+        success = run_test_specs(spec_files, base_url, port, log_times, jobs, restart_handler if not connect_only else None, connect_only, fail_fast)
 
     if not connect_only and memcp_process:
         stop_memcp_process(memcp_process)
