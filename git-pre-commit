@@ -102,7 +102,6 @@ if [ "$fail_fast_mode" -eq 1 ]; then
 import json
 import sys
 
-prefix = "__suite__:"
 try:
     with open(".perf_baseline.json", "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -111,14 +110,14 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     config = {}
 
+runner = config.get("_runner", {})
+failure_map = runner.get("failures", {}) if isinstance(runner, dict) else {}
+
 def failures(spec_file: str) -> int:
-    entry = config.get(prefix + spec_file, {})
-    if isinstance(entry, dict):
-        try:
-            return max(0, int(entry.get("failures", 0) or 0))
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    try:
+        return max(0, int(failure_map.get(spec_file, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 ordered = sorted(sys.argv[1:], key=lambda spec_file: (-failures(spec_file), spec_file))
 for spec_file in ordered:

@@ -120,9 +120,8 @@ PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
-FAILURE_COUNT_KEY = "failures"
-SUITE_FAILURE_PREFIX = "__suite__:"
-CASE_FAILURE_PREFIX = "__case__:"
+RUNNER_META_KEY = "_runner"
+FAILURE_MAP_KEY = "failures"
 
 def _load_runner_config() -> Dict[str, Any]:
     try:
@@ -131,20 +130,6 @@ def _load_runner_config() -> Dict[str, Any]:
             return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
-
-def _normalize_runner_entry(entry: Any) -> Dict[str, Any]:
-    if isinstance(entry, dict):
-        return dict(entry)
-    if isinstance(entry, (int, float)):
-        return {"time_ms": entry}
-    return {}
-
-def _get_failure_count(config: Dict[str, Any], key: str) -> int:
-    entry = _normalize_runner_entry(config.get(key))
-    try:
-        return max(0, int(entry.get(FAILURE_COUNT_KEY, 0) or 0))
-    except (TypeError, ValueError):
-        return 0
 
 def _write_runner_config(config: Dict[str, Any]) -> None:
     tmp_file = f"{PERF_BASELINE_FILE}.tmp"
@@ -163,17 +148,24 @@ def _update_runner_config(mutator) -> Dict[str, Any]:
         fcntl.flock(lockf, fcntl.LOCK_UN)
         return config
 
+def _failure_counts(config: Dict[str, Any]) -> Dict[str, int]:
+    runner_meta = config.get(RUNNER_META_KEY)
+    if not isinstance(runner_meta, dict):
+        return {}
+    failures = runner_meta.get(FAILURE_MAP_KEY)
+    return failures if isinstance(failures, dict) else {}
+
 def _suite_failure_key(spec_file: str) -> str:
-    return f"{SUITE_FAILURE_PREFIX}{spec_file}"
+    return spec_file
 
 def _case_failure_key(spec_file: str, test_name: str) -> str:
-    return f"{CASE_FAILURE_PREFIX}{spec_file}::{test_name}"
+    return f"{spec_file}::{test_name}"
 
 def prioritize_spec_files(spec_files: List[str]) -> List[str]:
-    config = _load_runner_config()
+    failures = _failure_counts(_load_runner_config())
     return sorted(
         spec_files,
-        key=lambda spec_file: (-_get_failure_count(config, _suite_failure_key(spec_file)), spec_file),
+        key=lambda spec_file: (-int(failures.get(_suite_failure_key(spec_file), 0) or 0), spec_file),
     )
 
 def read_meminfo_mb(key: str) -> int:
@@ -289,9 +281,15 @@ class SQLTestRunner:
             return
 
         def mutate(config: Dict[str, Any]) -> None:
-            entry = _normalize_runner_entry(config.get(key))
-            entry[FAILURE_COUNT_KEY] = _get_failure_count(config, key) + 1
-            config[key] = entry
+            runner_meta = config.get(RUNNER_META_KEY)
+            if not isinstance(runner_meta, dict):
+                runner_meta = {}
+                config[RUNNER_META_KEY] = runner_meta
+            failures = runner_meta.get(FAILURE_MAP_KEY)
+            if not isinstance(failures, dict):
+                failures = {}
+                runner_meta[FAILURE_MAP_KEY] = failures
+            failures[key] = int(failures.get(key, 0) or 0) + 1
 
         self.perf_baselines = _update_runner_config(mutate)
         self._config_loaded = True
@@ -313,7 +311,9 @@ class SQLTestRunner:
                 # Just update times, keep existing rows
                 for name, result in self.perf_results.items():
                     current_rows = result["rows"]
-                    entry = _normalize_runner_entry(config.get(name))
+                    entry = config.get(name)
+                    if not isinstance(entry, dict):
+                        entry = {"time_ms": entry} if isinstance(entry, (int, float)) else {}
                     entry["time_ms"] = round(result["time_ms"], 1)
                     entry.setdefault("rows", current_rows)
                     config[name] = entry
@@ -341,7 +341,9 @@ class SQLTestRunner:
                 # Apply RAM limit
                 new_rows = min(new_rows, max_rows)
 
-                entry = _normalize_runner_entry(config.get(name))
+                entry = config.get(name)
+                if not isinstance(entry, dict):
+                    entry = {"time_ms": entry} if isinstance(entry, (int, float)) else {}
                 entry["time_ms"] = round(test_time, 1)
                 entry["rows"] = new_rows
                 config[name] = entry
