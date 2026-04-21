@@ -164,6 +164,57 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
 	)))
+	/* Shallow trigger transform for subqueries before they enter query planning. */
+	(define transform_new_old_shallow (lambda (e) (match e
+		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+		(cons h t) (cons (transform_new_old_shallow h) (map t transform_new_old_shallow))
+		e)))
+	(define trigger_semijoin_count_query (lambda (subquery target_expr) (begin
+		(define transformed_subquery (match subquery '(s tables fields condition group having order limit offset)
+			(list s tables
+				(map_assoc fields (lambda (k v) (transform_new_old_shallow v)))
+				(transform_new_old_shallow condition)
+				group having order limit offset)
+			(transform_new_old_shallow subquery)))
+		(define transformed_target_expr
+			(if (nil? target_expr) nil
+				(transform_new_old_shallow target_expr)))
+		(match transformed_subquery
+			'(s t f c _g _h _o _l _off) (begin
+				(define first_field_expr
+					(if (nil? transformed_target_expr)
+						nil
+						(match f
+							(cons _ (cons v _)) v
+							nil)))
+				(if (and (not (nil? transformed_target_expr)) (nil? first_field_expr))
+					(error (concat "trigger_semijoin_count_query requires a comparable first field: " (serialize transformed_subquery)))
+					(list
+						s
+						t
+						(list "__cnt"
+							(list
+								(quote aggregate)
+								1
+								(symbol "+")
+								0))
+						(if (nil? transformed_target_expr)
+							c
+							(if (or (nil? c) (equal? c true))
+								(list (quote equal??) first_field_expr transformed_target_expr)
+								(list (quote and) c (list (quote equal??) first_field_expr transformed_target_expr))))
+						nil
+						nil
+						nil
+						nil
+						nil)))
+			_ (error (concat "trigger_semijoin_count_query requires a select_core query: " (serialize transformed_subquery)))))))
+	(define trigger_semijoin_count_expr (lambda (subquery target_expr negated)
+		(list
+			(if negated (quote equal?) (quote >))
+			(list (quote inner_select) (trigger_semijoin_count_query subquery target_expr))
+			0)))
 
 	/* helper function for triggers: transform get_column to dict access */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
@@ -181,13 +232,6 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			/* scalar subselect in trigger: compile via build_queryplan_term.
 			Wrap result in a promise pattern to extract the scalar value. */
 			(match tail (cons subquery '()) (begin
-				/* Transform NEW/OLD refs in the subselect before passing to query planner.
-				Use a shallow transform that does NOT recurse into nested inner_selects. */
-				(define transform_new_old_shallow (lambda (e) (match e
-					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-					(cons h t) (cons (transform_new_old_shallow h) (map t transform_new_old_shallow))
-					e)))
 				(define transformed_subquery (match subquery '(s tables fields condition group having order limit offset)
 					(list s tables
 						(map_assoc fields (lambda (k v) (transform_new_old_shallow v)))
@@ -208,8 +252,20 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
 				(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
-				/* IN/EXISTS subselects: compile via build_queryplan_term */
-				expr /* TODO: implement IN/EXISTS in trigger context */
+				(match head
+					'inner_select_exists (match tail
+						(cons subquery '()) (transform_trigger_expr (trigger_semijoin_count_expr subquery nil false))
+						expr)
+					'(quote inner_select_exists) (match tail
+						(cons subquery '()) (transform_trigger_expr (trigger_semijoin_count_expr subquery nil false))
+						expr)
+					'inner_select_in (match tail
+						(cons target_expr (cons subquery '())) (transform_trigger_expr (trigger_semijoin_count_expr subquery target_expr false))
+						expr)
+					'(quote inner_select_in) (match tail
+						(cons target_expr (cons subquery '())) (transform_trigger_expr (trigger_semijoin_count_expr subquery target_expr false))
+						expr)
+					(cons (transform_trigger_expr head) (map tail transform_trigger_expr)))
 				(cons (transform_trigger_expr head) (map tail transform_trigger_expr))))
 		expr
 	)))
