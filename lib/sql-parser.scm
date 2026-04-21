@@ -598,8 +598,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 	(define sql_expression2 (parser (or
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
-		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
+		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub a false))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub a true))
 		/* Collation-aware comparisons (MySQL): enforce given collation on string comparisons */
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "=" (define b sql_expression2)) '('equal_collate a b collation))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "==" (define b sql_expression2)) '('equal_collate a b collation))
@@ -677,7 +677,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '("(" (define a sql_expression) ")") a)
 
 		/* EXISTS (SELECT ...) */
-		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") '('inner_select_exists sub))
+		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub nil false))
 		/* Searched CASE: CASE WHEN cond THEN result ... ELSE default END (must be before simple CASE so WHEN is consumed as keyword, not identifier) */
 		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 		/* Simple CASE: CASE expr WHEN val THEN result ... ELSE default END */
@@ -872,6 +872,45 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
 	)))
+	(define sql_semijoin_count_query (lambda (subquery target_expr) (begin
+		(define union_parts (sql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "sql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define first_field_expr
+						(if (nil? target_expr)
+							nil
+							(match f
+								(cons _ (cons v _)) v
+								nil)))
+					(if (and (not (nil? target_expr)) (nil? first_field_expr))
+						(error (concat "sql_semijoin_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (nil? target_expr)
+								c
+								(if (or (nil? c) (equal? c true))
+									(list (quote equal??) first_field_expr target_expr)
+									(list (quote and) c (list (quote equal??) first_field_expr target_expr))))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
+	(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
+		(list
+			(if negated (quote equal?) (quote >))
+			(list (quote inner_select) (sql_semijoin_count_query subquery target_expr))
+			0)))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
 			(quote inner_select)

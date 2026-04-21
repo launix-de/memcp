@@ -120,6 +120,45 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(cons col cols) (cons col (cons (car tuple) (zip_cols cols (cdr tuple))))
 		'()
 	)))
+	(define psql_semijoin_count_query (lambda (subquery target_expr) (begin
+		(define union_parts (sql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "psql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define first_field_expr
+						(if (nil? target_expr)
+							nil
+							(match f
+								(cons _ (cons v _)) v
+								nil)))
+					(if (and (not (nil? target_expr)) (nil? first_field_expr))
+						(error (concat "psql_semijoin_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (nil? target_expr)
+								c
+								(if (or (nil? c) (equal? c true))
+									(list (quote equal??) first_field_expr target_expr)
+									(list (quote and) c (list (quote equal??) first_field_expr target_expr))))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "psql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
+	(define psql_semijoin_count_expr (lambda (subquery target_expr negated)
+		(list
+			(if negated (quote equal?) (quote >))
+			(list (quote inner_select) (psql_semijoin_count_query subquery target_expr))
+			0)))
 
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
@@ -151,8 +190,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	(define psql_expression2 (parser (or
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
-		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") '('inner_select_in a sub))
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
+		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") (psql_semijoin_count_expr sub a false))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (psql_semijoin_count_expr sub a true))
 		(parser '((define a psql_expression3) "==" (define b psql_expression2)) '((quote equal??) a b))
 		(parser '((define a psql_expression3) "=" (define b psql_expression2)) '((quote equal??) a b))
 		(parser '((define a psql_expression3) "<>" (define b psql_expression2)) '((quote not) '((quote equal?) a b)))
@@ -212,7 +251,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '("(" (define a psql_expression) ")") a)
 
 		/* EXISTS (SELECT ...) */
-		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") '('inner_select_exists sub))
+		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") (psql_semijoin_count_expr sub nil false))
 		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
