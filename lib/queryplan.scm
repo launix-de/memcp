@@ -3212,35 +3212,63 @@ seeing the correctly prefixed outer alias. */
 			expr
 		)))
 		(define replace_get_column_subselect (lambda (alias_name table_insensitive column_name column_insensitive expr) (begin
-			(define inner_alias (column_exists_in_schema _s alias_name table_insensitive column_name column_insensitive))
-			(define inner_alias_exists (and (not (nil? alias_name)) (alias_exists_in_schema _s alias_name table_insensitive)))
-			(if (and inner_alias_exists (nil? inner_alias))
-				(error (concat "column " alias_name "." column_name " does not exist in subquery"))
-				(if (not (nil? inner_alias))
-					(if (or (nil? alias_name) table_insensitive column_insensitive)
+			(define semijoin_outer_alias "__semijoin_outer")
+			(define semijoin_outer_prefix "__semijoin_outer:")
+			(define semijoin_requested_alias
+				(if (and (string? alias_name)
+						(>= (strlen alias_name) (strlen semijoin_outer_prefix))
+						(equal? (substr alias_name 0 (strlen semijoin_outer_prefix)) semijoin_outer_prefix))
+					(substr alias_name (strlen semijoin_outer_prefix))
+					nil))
+			(if (or (equal?? alias_name semijoin_outer_alias) (not (nil? semijoin_requested_alias)))
+				(begin
+					(define requested_alias
+						(if (equal?? alias_name semijoin_outer_alias) nil semijoin_requested_alias))
+					(define outer_alias (column_exists_in_schema _o requested_alias table_insensitive column_name column_insensitive))
+					(if (nil? outer_alias)
+						(error (concat "column " column_name " does not exist in outer query"))
 						(begin
-							(define inner_column (coalesce (canonical_column_in_schema _s alias_name table_insensitive column_name column_insensitive) column_name))
-							'((quote get_column) inner_alias false inner_column false))
-						expr)
-					(begin
-						(define outer_alias (column_exists_in_schema _o alias_name table_insensitive column_name column_insensitive))
-						(if (nil? outer_alias)
-							(if (nil? alias_name)
-								(error (concat "column " column_name " does not exist in outer query"))
+							(define outer_column (coalesce (canonical_column_in_schema _o outer_alias table_insensitive column_name column_insensitive) column_name))
+							(define outer_cols (_o outer_alias))
+							(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") outer_column)) coldef a)) nil))
+							(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
+							(if (outer_alias_requires_domain_preservation outer_alias)
+								(list (quote outer) (symbol (concat outer_alias "." outer_column)))
+								(if (and (not (nil? outer_expr)) (outer_expr_is_domain_safe outer_expr))
+									(wrap_outer_leaves outer_expr)
+									(list (quote outer) (symbol (concat outer_alias "." outer_column))))))))
+				(begin
+					(define inner_alias (column_exists_in_schema _s alias_name table_insensitive column_name column_insensitive))
+					(define inner_alias_exists (and (not (nil? alias_name)) (alias_exists_in_schema _s alias_name table_insensitive)))
+					(if (and inner_alias_exists (nil? inner_alias))
+						(error (concat "column " alias_name "." column_name " does not exist in subquery"))
+						(if (not (nil? inner_alias))
+							(if (or (nil? alias_name) table_insensitive column_insensitive)
+								(begin
+									(define inner_column (coalesce (canonical_column_in_schema _s alias_name table_insensitive column_name column_insensitive) column_name))
+									'((quote get_column) inner_alias false inner_column false))
 								expr)
 							(begin
-								(define outer_column (coalesce (canonical_column_in_schema _o alias_name table_insensitive column_name column_insensitive) column_name))
-								(define outer_cols (_o outer_alias))
-								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") outer_column)) coldef a)) nil))
-								(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
-								(if (outer_alias_requires_domain_preservation outer_alias)
-									/* grouped/windowed outer aliases define the visible correlation
-									domain; do not collapse them back into base-table refs */
-									(list (quote outer) (symbol (concat outer_alias "." outer_column)))
-									(if (and (not (nil? outer_expr)) (outer_expr_is_domain_safe outer_expr))
-										/* simple pass-through/computed wrapper columns may still inline */
-										(wrap_outer_leaves outer_expr)
-										(list (quote outer) (symbol (concat outer_alias "." outer_column)))))))
+								(define outer_alias (column_exists_in_schema _o alias_name table_insensitive column_name column_insensitive))
+								(if (nil? outer_alias)
+									(if (nil? alias_name)
+										(error (concat "column " column_name " does not exist in outer query"))
+										expr)
+									(begin
+										(define outer_column (coalesce (canonical_column_in_schema _o alias_name table_insensitive column_name column_insensitive) column_name))
+										(define outer_cols (_o outer_alias))
+										(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") outer_column)) coldef a)) nil))
+										(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
+										(if (outer_alias_requires_domain_preservation outer_alias)
+											/* grouped/windowed outer aliases define the visible correlation
+											domain; do not collapse them back into base-table refs */
+											(list (quote outer) (symbol (concat outer_alias "." outer_column)))
+											(if (and (not (nil? outer_expr)) (outer_expr_is_domain_safe outer_expr))
+												/* simple pass-through/computed wrapper columns may still inline */
+												(wrap_outer_leaves outer_expr)
+												(list (quote outer) (symbol (concat outer_alias "." outer_column)))))))
+							)
+						)
 					)
 				)
 			)
