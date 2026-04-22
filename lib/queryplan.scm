@@ -2972,7 +2972,6 @@ seeing the correctly prefixed outer alias. */
 		(define sq_cache (newsession))
 		(sq_cache "init" '())
 		(define dep_scalar_cache (newsession))
-		(define dep_expr_cache (newsession))
 		(define resolve_outer_expr_for_semijoin_count (lambda (expr) (match expr
 			'((symbol get_column) nil ti col ci) (begin
 				(define resolved_alias (reduce_assoc outer_schemas_chain (lambda (found alias cols)
@@ -4638,6 +4637,19 @@ seeing the correctly prefixed outer alias. */
 							(cons sym (map args (lambda (arg) (collect_dependent_scalar_compile_markers arg outer_schemas))))
 							(replace_inner_selects expr outer_schemas))))
 				_ expr))))
+	(define collect_row_domain_subselects (lambda (expr outer_schemas)
+		(match expr
+			(cons sym args) (begin
+				(define kind (inner_select_kind sym))
+				(if (nil? kind)
+					(if (_is_opaque_scope_sym sym)
+						expr
+						(cons sym (map args (lambda (arg)
+							(collect_row_domain_subselects arg outer_schemas)))))
+					(replace_inner_selects expr outer_schemas)))
+			_ expr)))
+	(define collect_dependent_field_compile_markers (lambda (expr outer_schemas)
+		(collect_dependent_scalar_compile_markers expr outer_schemas)))
 		(define resolve_dependent_scalar_compile_markers (lambda (expr outer_schemas)
 			(match expr
 				(cons sym args) (begin
@@ -4711,18 +4723,6 @@ seeing the correctly prefixed outer alias. */
 											(coalesceNil (sq_cache "schemas") '())))
 											(list (quote get_column) dep_alias false dep_result_col false))))))))
 				_ expr)))
-		(define dependent_expr_compile_marker (lambda (idx)
-			(list (quote dependent_expr_compile) idx)))
-		(define dependent_expr_compile_marker_id (lambda (expr)
-			(match expr
-				(cons sym (cons idx '()))
-					(if (or
-							(equal?? sym (quote dependent_expr_compile))
-							(equal?? sym (quote (quote dependent_expr_compile)))
-							(equal?? sym (symbol dependent_expr_compile)))
-						idx
-						nil)
-				_ nil)))
 		(define make_dependent_expr_compile_info (lambda (expr subquery outer_refs kind negated target_expr simple_candidate union_parts uses_session_state)
 			(list expr subquery outer_refs kind negated target_expr simple_candidate union_parts uses_session_state)))
 		(define dependent_expr_compile_info_expr (lambda (info)
@@ -5720,322 +5720,7 @@ seeing the correctly prefixed outer alias. */
 				(list (quote dependent_join_helper) dep_info result_col domain_cols legacy_expr source_query unnesting_info)
 				false
 				nil)))
-		(define dependent_expr_accessing_details (lambda (expr outer_schemas)
-			(match expr
-					(cons sym args) (begin
-						(define kind (match sym
-							(symbol inner_select) (quote inner_select)
-							'inner_select (quote inner_select)
-							'(quote inner_select) (quote inner_select)
-							(symbol inner_select_in) (quote inner_select_in)
-							'inner_select_in (quote inner_select_in)
-							'(quote inner_select_in) (quote inner_select_in)
-							(symbol inner_select_exists) (quote inner_select_exists)
-							'inner_select_exists (quote inner_select_exists)
-							'(quote inner_select_exists) (quote inner_select_exists)
-							_ nil))
-					(if (equal?? kind (quote inner_select_exists))
-						(match args
-							(cons subquery '())
-								(if (_subquery_has_outer_refs subquery outer_schemas)
-									(list subquery (quote inner_select_exists) false nil)
-									nil)
-							_ nil)
-						(if (equal?? kind (quote inner_select_in))
-							(match args
-								(cons target_expr (cons subquery '()))
-									(if (_subquery_has_outer_refs subquery outer_schemas)
-										(list subquery (quote inner_select_in) false target_expr)
-										nil)
-								_ nil)
-								(if (or
-										(equal?? sym (symbol not))
-										(equal?? sym (quote not))
-										(equal?? sym (quote (quote not))))
-										(match args
-										(cons inner_expr '()) (match (dependent_expr_accessing_details inner_expr outer_schemas)
-											'(subquery inner_kind _negated target_expr)
-												(list subquery inner_kind true target_expr)
-											nil)
-										_ nil)
-								nil))))
-				_ nil)))
-		(define dependent_expr_compile_info (lambda (expr outer_schemas) (begin
-			(define details (dependent_expr_accessing_details expr outer_schemas))
-			(if (nil? details)
-				nil
-				(match details
-					'(subquery kind negated target_expr) (begin
-						(define simple_candidate (and
-							(_subquery_outer_refs_are_direct_columns subquery outer_schemas)
-							(not (_raw_subquery_has_non_equality_outer_condition subquery outer_schemas))))
-						(define union_parts (query_union_all_parts subquery))
-						(make_dependent_expr_compile_info
-							expr
-							subquery
-							(_subquery_outer_refs subquery outer_schemas)
-							kind
-							negated
-							target_expr
-							simple_candidate
-							union_parts
-							(exists_subquery_uses_session_state_for_row_existence subquery)))
-					nil)))))
-		(define collect_dependent_expr_compile_markers (lambda (expr outer_schemas)
-			(match expr
-					(cons sym args) (begin
-						(define kind (match sym
-							(symbol inner_select) (quote inner_select)
-							'inner_select (quote inner_select)
-							'(quote inner_select) (quote inner_select)
-							(symbol inner_select_in) (quote inner_select_in)
-							'inner_select_in (quote inner_select_in)
-							'(quote inner_select_in) (quote inner_select_in)
-							(symbol inner_select_exists) (quote inner_select_exists)
-							'inner_select_exists (quote inner_select_exists)
-							'(quote inner_select_exists) (quote inner_select_exists)
-							_ nil))
-					(define delayed_info (dependent_expr_compile_info expr outer_schemas))
-					(if (not (nil? delayed_info))
-						(begin
-							(define dep_id (coalesceNil (dep_expr_cache "idx") 1))
-							(dep_expr_cache "idx" (+ dep_id 1))
-							(dep_expr_cache dep_id delayed_info)
-							(dependent_expr_compile_marker dep_id))
-						(if (nil? kind)
-							(if (_is_opaque_scope_sym sym)
-								expr
-								(cons sym (map args (lambda (arg)
-									(collect_dependent_expr_compile_markers arg outer_schemas)))))
-							(replace_inner_selects expr outer_schemas))))
-				_ expr)))
-		(define collect_dependent_field_compile_markers (lambda (expr outer_schemas)
-			(match expr
-				(cons sym args) (begin
-					(define kind (inner_select_kind sym))
-					(define delayed_info (dependent_expr_compile_info expr outer_schemas))
-					(if (not (nil? delayed_info))
-						(begin
-							(define dep_id (coalesceNil (dep_expr_cache "idx") 1))
-							(dep_expr_cache "idx" (+ dep_id 1))
-							(dep_expr_cache dep_id delayed_info)
-							(dependent_expr_compile_marker dep_id))
-						(if (equal?? kind (quote inner_select))
-							(match args
-								(cons subquery '()) (begin
-									(define dep_id (coalesceNil (dep_scalar_cache "idx") 1))
-									(dep_scalar_cache "idx" (+ dep_id 1))
-									(dep_scalar_cache dep_id subquery)
-									(dependent_scalar_compile_marker dep_id))
-								_ (replace_inner_selects expr outer_schemas))
-							(if (nil? kind)
-								(if (_is_opaque_scope_sym sym)
-									expr
-									(cons sym (map args (lambda (arg)
-										(collect_dependent_field_compile_markers arg outer_schemas)))))
-								(replace_inner_selects expr outer_schemas)))))
-				_ expr)))
-		(define rewrite_dependent_expr_compile_marker (lambda (expr target_idx replacement)
-			(match expr
-				(cons sym args) (begin
-					(define dep_id (dependent_expr_compile_marker_id expr))
-					(if (and (not (nil? dep_id)) (equal? dep_id target_idx))
-						replacement
-						(if (_is_opaque_scope_sym sym)
-							expr
-							(cons sym (map args (lambda (arg)
-								(rewrite_dependent_expr_compile_marker arg target_idx replacement)))))))
-				_ expr)))
-		(define resolve_dependent_expr_compile_scope (lambda (fields tables condition group order outer_schemas) (begin
-			(define dep_next_id (coalesceNil (dep_expr_cache "idx") 1))
-			(define legacy_lower_dependent_expr_compile_info (lambda (dep_info dep_id) (begin
-				(define dep_expr (dependent_expr_compile_info_expr dep_info))
-				(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
-				(define dep_kind (dependent_expr_compile_info_kind dep_info))
-				(define dep_negated (dependent_expr_compile_info_negated dep_info))
-				(define dep_target_expr (dependent_expr_compile_info_target_expr dep_info))
-				(define dep_union_parts (dependent_expr_compile_info_union_parts dep_info))
-				(define dep_uses_session_state (dependent_expr_compile_info_uses_session_state dep_info))
-				(define dep_domain_cols (dependent_join_helper_normalize_domain_cols
-					(dependent_join_helper_domain_cols_from_info dep_info)))
-				(define dep_unnesting_info (make_dependent_expr_unnesting_info_with_domain_cols dep_info dep_domain_cols))
-				(define union_exists_expr (lambda (subquery union_parts negated) (begin
-					(if (nil? union_parts)
-						nil
-						(match union_parts '(branches union_order union_limit union_offset)
-							(if (or (not (nil? union_order)) (not (nil? union_limit)) (not (nil? union_offset)))
-								nil
-								(begin
-									(define branch_exprs (map branches (lambda (branch)
-										(replace_inner_selects
-											(if negated
-												(list (quote not) (list (quote inner_select_exists) branch))
-												(list (quote inner_select_exists) branch))
-											outer_schemas))))
-									(if (equal? branch_exprs '())
-										nil
-										(if (equal? (count branch_exprs) 1)
-											(car branch_exprs)
-											(cons (if negated (quote and) (quote or)) branch_exprs))))))))))
-				(define union_in_expr (lambda (target_expr subquery union_parts negated) (begin
-					(if (nil? union_parts)
-						nil
-						(match union_parts '(branches union_order union_limit union_offset)
-							(if (or (not (nil? union_order)) (not (nil? union_limit)) (not (nil? union_offset)))
-								nil
-								(begin
-									(if (not (reduce branches (lambda (ok branch)
-										(and ok (equal? 1 (count (query_branch_field_names branch)))))
-										true))
-										(error "UNION ALL subquery must project exactly one column for IN")
-										nil)
-									(define normalize_union_in_branch (lambda (branch)
-										(match branch
-											'(b_schema b_tables b_fields b_condition b_group b_having b_order b_limit b_offset) (begin
-												(define first_field_expr (match b_fields
-													(cons _ (cons v _)) v
-													nil))
-												(if (or (nil? first_field_expr) (not (or (nil? b_condition) (equal? b_condition true))))
-													branch
-													(list b_schema b_tables b_fields
-														(list (quote equal??) first_field_expr first_field_expr)
-														b_group b_having b_order b_limit b_offset)))
-											branch)))
-									(define rewritten_expr
-										(if (equal? (count branches) 1)
-											(if negated
-												(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
-												(list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
-											(cons (if negated (quote and) (quote or))
-												(map branches (lambda (branch)
-													(if negated
-														(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch branch)))
-														(list (quote inner_select_in) target_expr (normalize_union_in_branch branch))))))))
-									(replace_inner_selects rewritten_expr outer_schemas))))))))
-				(if (nil? dep_expr)
-					nil
-					(coalesce
-						(if (and (nil? dep_union_parts) (not dep_uses_session_state))
-							(begin
-								(define dep_alias (concat "_dep_expr_" dep_id))
-								(define dep_result_col "__result")
-								(define dep_simple_source_query
-									(if (equal?? dep_kind (quote inner_select_exists))
-										(dependent_join_helper_build_simple_exists_source_query dep_info dep_result_col dep_domain_cols)
-										(if (equal?? dep_kind (quote inner_select_in))
-											(dependent_join_helper_build_simple_in_source_query dep_info dep_result_col dep_domain_cols)
-											nil)))
-								(if (nil? dep_simple_source_query)
-									nil
-									(begin
-										(define dep_presence_expr (list (quote get_column) dep_alias false dep_result_col false))
-										(define dep_result_expr
-											(if dep_negated
-												(list (quote nil?) dep_presence_expr)
-												(list (quote not) (list (quote nil?) dep_presence_expr))))
-										(sq_cache "tables" (merge
-											(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr dep_simple_source_query dep_unnesting_info))
-											(coalesceNil (sq_cache "tables") '())))
-										(sq_cache "schemas" (merge
-											(list dep_alias
-												(merge
-													(list (list "Field" dep_result_col "Type" "any"
-														"Expr" (list (quote get_column) dep_alias false dep_result_col false)))
-													(map dep_domain_cols (lambda (dc) (match dc
-														'(dom_col _dom_expr) (list "Field" dom_col "Type" "any"
-															"Expr" (list (quote get_column) dep_alias false dom_col false))
-														_ (list "Field" "__dep_d" "Type" "any"))))))
-											(coalesceNil (sq_cache "schemas") '())))
-										dep_result_expr)))
-							nil)
-						(if (equal?? dep_kind (quote inner_select_exists))
-							(union_exists_expr dep_subquery dep_union_parts dep_negated)
-							nil)
-						(if (equal?? dep_kind (quote inner_select_in))
-							(union_in_expr dep_target_expr dep_subquery dep_union_parts dep_negated)
-							nil)
-						(error (concat
-							"top-down dependent expr lowering missing helper path: "
-							(serialize dep_subquery)
-							(if dep_uses_session_state " session-state" "")
-							(if (nil? dep_union_parts) "" " union"))))))))
-			(define lower_dependent_expr_compile_info (lambda (dep_info dep_id) (begin
-				(define dep_kind (dependent_expr_compile_info_kind dep_info))
-				(define dep_negated (dependent_expr_compile_info_negated dep_info))
-				(define dep_union_parts (dependent_expr_compile_info_union_parts dep_info))
-				(define dep_uses_session_state (dependent_expr_compile_info_uses_session_state dep_info))
-				(define dep_domain_cols (dependent_join_helper_normalize_domain_cols
-					(dependent_join_helper_domain_cols_from_info dep_info)))
-				(define dep_unnesting_info (make_dependent_expr_unnesting_info_with_domain_cols dep_info dep_domain_cols))
-				(define dep_alias (concat "_dep_expr_" dep_id))
-				(define dep_result_col "__result")
-				(define register_helper_result (lambda (source_query)
-					(if (nil? source_query)
-						nil
-						(begin
-							(define dep_presence_expr (list (quote get_column) dep_alias false dep_result_col false))
-							(define dep_result_expr
-								(if dep_negated
-									(list (quote nil?) dep_presence_expr)
-									(list (quote not) (list (quote nil?) dep_presence_expr))))
-							(sq_cache "tables" (merge
-								(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr source_query dep_unnesting_info))
-								(coalesceNil (sq_cache "tables") '())))
-							(sq_cache "schemas" (merge
-								(list dep_alias
-									(merge
-										(list (list "Field" dep_result_col "Type" "any"
-											"Expr" (list (quote get_column) dep_alias false dep_result_col false)))
-										(map dep_domain_cols (lambda (dc) (match dc
-											'(dom_col _dom_expr) (list "Field" dom_col "Type" "any"
-												"Expr" (list (quote get_column) dep_alias false dom_col false))
-											_ (list "Field" "__dep_d" "Type" "any"))))))
-								(coalesceNil (sq_cache "schemas") '())))
-							dep_result_expr))))
-				(coalesce
-					(if (and (nil? dep_union_parts) (not dep_uses_session_state))
-						(register_helper_result
-							(if (equal?? dep_kind (quote inner_select_exists))
-								(dependent_join_helper_build_simple_exists_source_query dep_info dep_result_col dep_domain_cols)
-								(if (equal?? dep_kind (quote inner_select_in))
-									(dependent_join_helper_build_simple_in_source_query dep_info dep_result_col dep_domain_cols)
-									nil)))
-						nil)
-					(if (or
-						(not (or (equal?? dep_kind (quote inner_select_exists))
-							(equal?? dep_kind (quote inner_select_in))))
-						(not (nil? dep_union_parts))
-						dep_uses_session_state)
-						(legacy_lower_dependent_expr_compile_info dep_info dep_id)
-						nil)
-					(dependent_expr_compile_marker dep_id)))))
-			(define apply_expr_to_scope (lambda (dep_id scope_state)
-				(match scope_state
-					'(scope_fields scope_tables scope_condition scope_group scope_order) (begin
-						(define dep_info (dep_expr_cache dep_id))
-						(define replacement (lower_dependent_expr_compile_info dep_info dep_id))
-						(list
-							(map_assoc scope_fields (lambda (field_name field_expr)
-								(rewrite_dependent_expr_compile_marker field_expr dep_id replacement)))
-							(map scope_tables (lambda (td) (match td
-								'(tv tschema ttbl toisOuter tje)
-									(list tv tschema ttbl toisOuter
-										(if (nil? tje) nil (rewrite_dependent_expr_compile_marker tje dep_id replacement)))
-									td)))
-							(rewrite_dependent_expr_compile_marker scope_condition dep_id replacement)
-							(map scope_group (lambda (g)
-								(rewrite_dependent_expr_compile_marker g dep_id replacement)))
-							(map scope_order (lambda (o) (match o
-								'(col dir) (list (rewrite_dependent_expr_compile_marker col dep_id replacement) dir)
-								o)))))
-					_ scope_state)))
-			(define resolve_expr_loop (lambda (dep_id scope_state)
-				(if (>= dep_id dep_next_id)
-					scope_state
-					(resolve_expr_loop (+ dep_id 1)
-						(apply_expr_to_scope dep_id scope_state)))))
-			(resolve_expr_loop 1 (list fields tables condition group order)))))
-	/* no-FROM rewrite: inject virtual one-row table ".(1)" (like Oracle DUAL).
+		/* no-FROM rewrite: inject virtual one-row table ".(1)" (like Oracle DUAL).
 	Dot prefix hides from SHOW TABLES. Eliminates the no-table special case.
 	set tables= must wrap the if (set is scope-local in this Scheme dialect). */
 	(set tables (if (or (nil? tables) (equal? tables '()))
@@ -6751,11 +6436,11 @@ seeing the correctly prefixed outer alias. */
 	(set tables (map tables (lambda (td) (match td
 		'(tv tschema ttbl toisOuter tje)
 			(list tv tschema ttbl toisOuter
-			(if (nil? tje) nil (collect_dependent_expr_compile_markers tje _ris_schemas)))
+			(if (nil? tje) nil (collect_row_domain_subselects tje _ris_schemas)))
 		td))))
 		(set fields (map_assoc fields (lambda (k v) (collect_dependent_field_compile_markers v _ris_schemas))))
-	(set condition (collect_dependent_expr_compile_markers condition _ris_schemas))
-	(set group (map group (lambda (g) (collect_dependent_expr_compile_markers g _ris_schemas))))
+	(set condition (collect_row_domain_subselects condition _ris_schemas))
+	(set group (map group (lambda (g) (collect_row_domain_subselects g _ris_schemas))))
 	(set having (begin
 		(define _hv_resolved (replace_inner_selects having _ris_schemas))
 		/* check if any inner_select nodes remain — HAVING with subqueries
@@ -6777,7 +6462,7 @@ seeing the correctly prefixed outer alias. */
 		(if (and (not (nil? _hv_resolved)) (_hv_check _hv_resolved))
 			(error "HAVING with subqueries not yet supported")
 			_hv_resolved)))
-	(set order (map order (lambda (o) (match o '(col dir) (list (collect_dependent_expr_compile_markers col _ris_schemas) dir)))))
+	(set order (map order (lambda (o) (match o '(col dir) (list (collect_row_domain_subselects col _ris_schemas) dir)))))
 	/* Freeze visible top-level field refs against the currently visible tables
 	before unnested helper tables are merged into schemas. This prevents later
 	helper/keytable columns from stealing unrelated outer output bindings. */
@@ -6793,18 +6478,7 @@ seeing the correctly prefixed outer alias. */
 		(set fields (map_assoc fields (lambda (k v) (freeze_visible_field_refs v))))
 		(set fields (map_assoc fields (lambda (k v)
 			(resolve_dependent_scalar_compile_markers v _ris_schemas))))
-			(define _dep_scope_result
-				(resolve_dependent_expr_compile_scope fields tables condition group order _ris_schemas))
-			(if (not (equal? (count _dep_scope_result) 5))
-				(error (concat "top-down dependent scope returned invalid state: "
-					(serialize _dep_scope_result)))
-				nil)
-				(set fields (nth _dep_scope_result 0))
-				(set tables (nth _dep_scope_result 1))
-				(set condition (nth _dep_scope_result 2))
-				(set group (nth _dep_scope_result 3))
-				(set order (nth _dep_scope_result 4))
-			/* integrate unnested scalar subselects from Neumann unnesting.
+		/* integrate unnested scalar subselects from Neumann unnesting.
 	Tables from non-aggregate path (direct LEFT JOIN) do NOT need schema updates.
 	Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
 	(define _sq_tbls (coalesceNil (sq_cache "tables") '()))
