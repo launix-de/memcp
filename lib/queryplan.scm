@@ -1402,6 +1402,20 @@ Enables index-based filtering in scan/scan_order by pushing predicates down. */
 		(cons _ tablesrest) (split_condition expr tablesrest) /* check next table in join plan */
 		(error "invalid tables list")
 	)
+	'((symbol outer) outer_sym) (match (split (string outer_sym) ".")
+		(list outer_tbl _outer_col) (match tables
+			'() '(expr true)
+			(cons (cons (eval outer_tbl) _) _) '(true expr)
+			(cons _ tablesrest) (split_condition expr tablesrest)
+			(error "invalid tables list"))
+		_ '(expr true))
+	'((quote outer) outer_sym) (match (split (string outer_sym) ".")
+		(list outer_tbl _outer_col) (match tables
+			'() '(expr true)
+			(cons (cons (eval outer_tbl) _) _) '(true expr)
+			(cons _ tablesrest) (split_condition expr tablesrest)
+			(error "invalid tables list"))
+		_ '(expr true))
 	'((symbol aggregate) _ _ _) (if (equal? tables '()) '(expr true) '(true expr))
 	'((quote aggregate) _ _ _) (if (equal? tables '()) '(expr true) '(true expr))
 	(cons (symbol and) conditions) /* splittable and */ (split_condition_and conditions tables)
@@ -1410,7 +1424,9 @@ Enables index-based filtering in scan/scan_order by pushing predicates down. */
 	get_column refs from correlated scalar subqueries get misclassified as later
 	join refs of the surrounding group stage and leak into keytable lowering. */
 	(cons sym args) /* non-splittable function call */ (if (_is_opaque_scope_sym sym)
-		'(expr true)
+		(if (expr_has_outer_ref_to_later_table expr tables)
+			'(true expr)
+			'(expr true))
 		(split_condition_combine sym args tables))
 	/* literal */ '(expr true)
 )))
@@ -1506,6 +1522,24 @@ reference OTHER tables too (not only tblvar). Complement of extract_pure_tblvar_
 	'((symbol get_column) tblvar _ col _) (list (list tblvar col))
 	(cons sym args) (merge_unique (map args collect_all_column_refs))
 	'()
+)))
+/* Runtime scan expressions stay opaque for alias-domain analysis, but outer
+refs to later-bound tables still must keep the whole expression deferred. */
+(define expr_has_outer_ref_to_later_table (lambda (expr tables) (match expr
+	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+		(match args
+			'(symname) (match (split (string symname) ".")
+				(list outer_tbl _outer_col) (reduce tables (lambda (found td)
+					(or found (match td
+						'(alias _ _ _ _) (equal?? alias outer_tbl)
+						_ false)))
+					false)
+				_ false)
+			_ false)
+		(reduce args (lambda (found arg)
+			(or found (expr_has_outer_ref_to_later_table arg tables)))
+			false))
+	false
 )))
 
 (define extract_outer_columns_for_tblvar (lambda (tblvar expr) (match expr
