@@ -211,10 +211,21 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 						nil)))
 			_ (error (concat "trigger_semijoin_count_query requires a select_core query: " (serialize transformed_subquery)))))))
 	(define trigger_semijoin_count_expr (lambda (subquery target_expr negated)
-		(list
-			(if negated (quote equal?) (quote >))
-			(list (quote inner_select) (trigger_semijoin_count_query subquery target_expr))
-			0)))
+		(begin
+			(define union_parts (sql_union_all_parts subquery))
+			(define count_expr
+				(if (nil? union_parts)
+					(list (quote inner_select) (trigger_semijoin_count_query subquery target_expr))
+					(match union_parts '(branches order limit offset)
+						(if (or (not (nil? limit)) (not (nil? offset)))
+							(error (concat "trigger_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
+							(reduce branches
+								(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (trigger_semijoin_count_query branch target_expr))))
+								0)))))
+			(list
+				(if negated (quote equal?) (quote >))
+				count_expr
+				0))))
 
 	/* helper function for triggers: transform get_column to dict access */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
@@ -928,12 +939,25 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
 	)))
+	(define sql_semijoin_mark_outer_expr (lambda (expr) (match expr
+		'((symbol get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((quote get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((symbol get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		'((quote get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		(cons sym args) (cons (sql_semijoin_mark_outer_expr sym) (map args sql_semijoin_mark_outer_expr))
+		expr)))
+	(define sql_semijoin_single_field_name (lambda (fields subquery)
+		(if (equal? (count fields) 2)
+			(car fields)
+			(error (concat "sql_semijoin_count_query requires exactly one output field: " (serialize subquery))))))
 	(define sql_semijoin_count_query (lambda (subquery target_expr) (begin
 		(define union_parts (sql_union_all_parts subquery))
 		(if (not (nil? union_parts))
 			(error (concat "sql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
 			(match subquery
 				'(s t f c _g _h _o _l _off) (begin
+					(define target_expr
+						(if (nil? target_expr) nil (sql_semijoin_mark_outer_expr target_expr)))
 					(define first_field_expr
 						(if (nil? target_expr)
 							nil
@@ -963,10 +987,27 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 							nil)))
 				_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
 	(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
-		(list
-			(if negated (quote equal?) (quote >))
-			(list (quote inner_select) (sql_semijoin_count_query subquery target_expr))
-			0)))
+		(begin
+			(define union_parts (sql_union_all_parts subquery))
+			(define count_expr
+				(if (nil? union_parts)
+					(list (quote inner_select) (sql_semijoin_count_query subquery target_expr))
+					(match union_parts '(branches order limit offset)
+						(if (or (not (nil? limit)) (not (nil? offset)))
+							(error (concat "sql_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
+							(begin
+								(if (not (nil? target_expr))
+									(map branches (lambda (branch) (match branch
+										'(_ _ f _ _ _ _ _ _) (sql_semijoin_single_field_name f branch)
+										_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize branch))))))
+									nil)
+								(reduce branches
+									(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (sql_semijoin_count_query branch target_expr))))
+									0))))))
+			(list
+				(if negated (quote equal?) (quote >))
+				count_expr
+				0))))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
 			(quote inner_select)

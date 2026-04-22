@@ -120,12 +120,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(cons col cols) (cons col (cons (car tuple) (zip_cols cols (cdr tuple))))
 		'()
 	)))
+	(define psql_semijoin_mark_outer_expr (lambda (expr) (match expr
+		'((symbol get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((quote get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((symbol get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		'((quote get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		(cons sym args) (cons (psql_semijoin_mark_outer_expr sym) (map args psql_semijoin_mark_outer_expr))
+		expr)))
+	(define psql_semijoin_single_field_name (lambda (fields subquery)
+		(if (equal? (count fields) 2)
+			(car fields)
+			(error (concat "psql_semijoin_count_query requires exactly one output field: " (serialize subquery))))))
 	(define psql_semijoin_count_query (lambda (subquery target_expr) (begin
 		(define union_parts (sql_union_all_parts subquery))
 		(if (not (nil? union_parts))
 			(error (concat "psql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
 			(match subquery
 				'(s t f c _g _h _o _l _off) (begin
+					(define target_expr
+						(if (nil? target_expr) nil (psql_semijoin_mark_outer_expr target_expr)))
 					(define first_field_expr
 						(if (nil? target_expr)
 							nil
@@ -155,10 +168,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							nil)))
 				_ (error (concat "psql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
 	(define psql_semijoin_count_expr (lambda (subquery target_expr negated)
-		(list
-			(if negated (quote equal?) (quote >))
-			(list (quote inner_select) (psql_semijoin_count_query subquery target_expr))
-			0)))
+		(begin
+			(define union_parts (sql_union_all_parts subquery))
+			(define count_expr
+				(if (nil? union_parts)
+					(list (quote inner_select) (psql_semijoin_count_query subquery target_expr))
+					(match union_parts '(branches order limit offset)
+						(if (or (not (nil? limit)) (not (nil? offset)))
+							(error (concat "psql_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
+							(begin
+								(if (not (nil? target_expr))
+									(map branches (lambda (branch) (match branch
+										'(_ _ f _ _ _ _ _ _) (psql_semijoin_single_field_name f branch)
+										_ (error (concat "psql_semijoin_count_query requires a select_core query: " (serialize branch))))))
+									nil)
+								(reduce branches
+									(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (psql_semijoin_count_query branch target_expr))))
+									0))))))
+			(list
+				(if negated (quote equal?) (quote >))
+				count_expr
+				0))))
 
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
