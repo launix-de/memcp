@@ -4646,6 +4646,9 @@ seeing the correctly prefixed outer alias. */
 			(match expr
 					(cons sym args) (begin
 						(define kind (match sym
+							(symbol inner_select) (quote inner_select)
+							'inner_select (quote inner_select)
+							'(quote inner_select) (quote inner_select)
 							(symbol inner_select_exists) (quote inner_select_exists)
 							'inner_select_exists (quote inner_select_exists)
 							'(quote inner_select_exists) (quote inner_select_exists)
@@ -4655,11 +4658,14 @@ seeing the correctly prefixed outer alias. */
 							_ nil))
 					(if (equal?? kind (quote inner_select))
 						(match args
-							(cons subquery '()) (begin
-								(define dep_id (coalesceNil (dep_scalar_cache "idx") 1))
-								(dep_scalar_cache "idx" (+ dep_id 1))
-								(dep_scalar_cache dep_id subquery)
-								(dependent_scalar_compile_marker dep_id))
+							(cons subquery '())
+								(if (_subquery_has_outer_refs subquery outer_schemas)
+									(begin
+										(define dep_id (coalesceNil (dep_scalar_cache "idx") 1))
+										(dep_scalar_cache "idx" (+ dep_id 1))
+										(dep_scalar_cache dep_id subquery)
+										(dependent_scalar_compile_marker dep_id))
+									(replace_inner_selects expr outer_schemas))
 							_ (replace_inner_selects expr outer_schemas))
 						(if (nil? kind)
 							(cons sym (map args (lambda (arg) (collect_dependent_scalar_compile_markers arg outer_schemas))))
@@ -4920,8 +4926,8 @@ seeing the correctly prefixed outer alias. */
 				'(dom_col _dom_expr)
 					(merge acc
 						(list
-							(list dom_col
-								(list (quote get_column) source_alias false dom_col false))))
+							dom_col
+							(list (quote get_column) source_alias false dom_col false)))
 				_ acc))
 				'())))
 		(define dependent_join_helper_domain_group_exprs (lambda (domain_cols source_alias)
@@ -5123,7 +5129,7 @@ seeing the correctly prefixed outer alias. */
 								_ td))))
 						(merge
 							(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
-							(list (list result_col source_result_expr)))
+							(list result_col source_result_expr))
 						(dependent_join_helper_rewrite_expr_for_domain_source dep_condition domain_cols)
 						(map (coalesceNil dep_group '()) (lambda (expr)
 							(dependent_join_helper_rewrite_expr_for_domain_source expr domain_cols)))
@@ -5159,7 +5165,7 @@ seeing the correctly prefixed outer alias. */
 									_ td))))
 							(merge
 								(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
-								(list (list result_col source_result_expr)))
+								(list result_col source_result_expr))
 							merged_condition
 							(map (coalesceNil dep_group '()) (lambda (expr)
 								(dependent_join_helper_rewrite_expr_for_domain_source expr domain_cols)))
@@ -5178,7 +5184,7 @@ seeing the correctly prefixed outer alias. */
 						(list (list source_alias src_schema source_query false nil))
 						(merge
 							(dependent_join_helper_domain_field_assoc norm_domain_cols source_alias)
-							(list (list result_col true)))
+							(list result_col true))
 						true
 						(dependent_join_helper_domain_group_exprs norm_domain_cols source_alias)
 						nil
@@ -5262,9 +5268,8 @@ seeing the correctly prefixed outer alias. */
 										(merge
 											(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
 											(list
-												(list
-													result_col
-													(dependent_join_helper_rewrite_expr_for_domain_source first_field_expr domain_cols))))
+												result_col
+												(dependent_join_helper_rewrite_expr_for_domain_source first_field_expr domain_cols)))
 										(dependent_join_helper_rewrite_expr_for_domain_source dep_condition domain_cols)
 										domain_group_exprs
 										nil
@@ -5311,11 +5316,15 @@ seeing the correctly prefixed outer alias. */
 												_ td))))
 										(merge
 											(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
-											(list (list result_col (dependent_join_helper_rewrite_expr_for_domain_source first_field_expr domain_cols)))
-											(filter (map dep_order_cols (lambda (oc) (match oc
+											(list result_col (dependent_join_helper_rewrite_expr_for_domain_source first_field_expr domain_cols))
+											(reduce (filter (map dep_order_cols (lambda (oc) (match oc
 												'(ord_col ord_expr _dir) (list ord_col ord_expr)
 												_ nil)))
-												(lambda (x) (not (nil? x)))))
+												(lambda (x) (not (nil? x))))
+												(lambda (acc oc) (match oc
+													'(ord_col ord_expr) (merge acc (list ord_col ord_expr))
+													_ acc))
+												'()))
 										(dependent_join_helper_rewrite_expr_for_domain_source dep_condition domain_cols)
 										(map (coalesceNil dep_group '()) (lambda (expr)
 											(dependent_join_helper_rewrite_expr_for_domain_source expr domain_cols)))
@@ -5361,10 +5370,11 @@ seeing the correctly prefixed outer alias. */
 											false
 											nil))
 									(merge
-										(map norm_domain_cols (lambda (dc) (match dc
-											'(dom_col _dom_expr) (list dom_col (list (quote get_column) dep_scan_alias false dom_col false))
-											_ nil)))
-										(list (list result_col (list (quote get_column) dep_scan_alias false result_col false))))
+										(reduce norm_domain_cols (lambda (acc dc) (match dc
+											'(dom_col _dom_expr) (merge acc (list dom_col (list (quote get_column) dep_scan_alias false dom_col false)))
+											_ acc))
+											'())
+										(list result_col (list (quote get_column) dep_scan_alias false result_col false)))
 									true
 									'()
 									nil
@@ -5374,10 +5384,10 @@ seeing the correctly prefixed outer alias. */
 				_ nil))))
 		(define dependent_join_helper_domain_query (lambda (domain_cols outer_tables outer_condition outer_group outer_having) (begin
 			(define domain_fields
-				(filter (map domain_cols (lambda (dc) (match dc
-					'(dom_col dom_expr) (list dom_col dom_expr)
-					_ nil)))
-					(lambda (x) (not (nil? x)))))
+				(reduce domain_cols (lambda (acc dc) (match dc
+					'(dom_col dom_expr) (merge acc (list dom_col dom_expr))
+					_ acc))
+					'()))
 			(define seed_aliases (merge_unique
 				(merge (map domain_fields (lambda (df) (match df
 					'(_ dom_expr) (extract_tblvars dom_expr)
@@ -5411,7 +5421,7 @@ seeing the correctly prefixed outer alias. */
 			(if (equal? domain_fields '())
 				(list schema
 					(list (list ".(1)" schema ".(1)" false nil))
-					(list (list "__dep_unit" 1))
+					(list "__dep_unit" 1)
 					true
 					'()
 					nil
@@ -5853,6 +5863,7 @@ seeing the correctly prefixed outer alias. */
 						(list id (map output_cols (lambda (col) (list "Field" col "Type" "any"))))
 					)
 				))
+				(begin
 				(if (or (nil? subquery) (< (count subquery) 9) (not (string? (nth subquery 0))))
 					(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA "
 						(serialize subquery)))
@@ -6266,7 +6277,7 @@ seeing the correctly prefixed outer alias. */
 						" => "
 						(serialize derived_zip_result)))
 					nil)
-				derived_zip_result
+				derived_zip_result)
 				)
 			)
 		(error (concat "unknown tabledesc: " tbldesc))
