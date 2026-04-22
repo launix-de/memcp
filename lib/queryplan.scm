@@ -1225,6 +1225,23 @@ runtime promise name is created during unnesting anymore. */
 			(list (quote set) (symbol promise_name) (list (quote newpromise)))
 			scan_expr))
 ))
+/* scalar_scan helpers are ordinary runtime wrappers over scan/scan_order.
+They remain part of emitted planner IR for anti-pass and ordered scalar paths. */
+(define scalar_scan (lambda (schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2) (begin
+	(define result (scan (session "__memcp_tx") (scan-runtime-table schema tbl) filtercols filterfn mapcols mapfn reduce neutral reduce2))
+	(if (equal? result neutral) nil result)
+)))
+(define scalar_scan_order (lambda (schema tbl filtercols filterfn sortcols sortdirs offset limit mapcols mapfn reduce neutral) (begin
+	(define result (scan_order (session "__memcp_tx") (scan-runtime-table schema tbl) filtercols filterfn sortcols sortdirs 0 offset limit mapcols mapfn reduce neutral))
+	(if (equal? result neutral) nil result)
+)))
+/* scan-runtime-table: resolves a table source at runtime (direct call context) */
+(define scan-runtime-table (lambda (schema tbl) (match (scan_tagged_table_base tbl)
+	'(materialized-subquery key) ((context "session") key)
+	'((symbol materialized-subquery) key) ((context "session") key)
+	'((quote materialized-subquery) key) ((context "session") key)
+	base_tbl (table schema base_tbl)
+)))
 /* scan-codegen-table: generates a table expression for codegen */
 (define scan-codegen-table (lambda (schema tbl) (match (scan_tagged_table_base tbl)
 	'(materialized-subquery key) (list (list (quote context) "session") key)
