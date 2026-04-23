@@ -3764,11 +3764,15 @@ seeing the correctly prefixed outer alias. */
 									stage2_group
 									tables2
 									scalar_has_outer_ref))
-								(planner_debug_record_scalar_event (quote inline-strategy) scalar_strategy)
-								(list scalar_strategy
-									(if (equal? scalar_strategy (quote inline-direct-agg-scan))
-										(build_scalar_subselect_via_direct_agg_scan)
-										(build_scalar_subselect_via_legacy_fallback)))
+								(define prepared_field_aggregates (merge (extract_assoc fields2 (lambda (_k v) (extract_aggregates v)))))
+								(if (not (equal? prepared_field_aggregates '()))
+									nil
+									(begin
+										(planner_debug_record_scalar_event (quote inline-strategy) scalar_strategy)
+										(list scalar_strategy
+											(if (equal? scalar_strategy (quote inline-direct-agg-scan))
+												(build_scalar_subselect_via_direct_agg_scan)
+												(build_scalar_subselect_via_legacy_fallback)))))
 							)
 						)
 				))
