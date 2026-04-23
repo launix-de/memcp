@@ -1144,25 +1144,35 @@ runtime promise name is created during unnesting anymore. */
 	(merge_unique (map stages (lambda (stage)
 		(coalesceNil (stage_outer_sources stage) '()))))
 ))
-(define scalar_subselect_schema_entry (lambda (alias_name schemas2_fn) (begin
-	(define schema_cols (schemas2_fn alias_name))
+(define scalar_subselect_physical_schema (lambda (tschema ttbl)
+	(if (and (string? tschema) (string? ttbl) (has? (show tschema) ttbl))
+		(show tschema ttbl)
+		nil)
+))
+(define scalar_subselect_resolved_schema (lambda (schema_cols tschema ttbl)
+	(if (or (nil? schema_cols) (equal? schema_cols '()))
+		(scalar_subselect_physical_schema tschema ttbl)
+		schema_cols)
+))
+(define scalar_subselect_schema_entry (lambda (alias_name tschema ttbl schemas2_fn) (begin
+	(define schema_cols (scalar_subselect_resolved_schema (schemas2_fn alias_name) tschema ttbl))
 	(if (nil? schema_cols)
 		'()
 		(list alias_name schema_cols))
 )))
 (define scalar_subselect_passthrough_schemas (lambda (tables schemas2_fn)
 	(merge (map tables (lambda (td) (match td
-		'(alias_name _ _ _ _) (scalar_subselect_schema_entry alias_name schemas2_fn)
+		'(alias_name tschema ttbl _ _) (scalar_subselect_schema_entry alias_name tschema ttbl schemas2_fn)
 		'()))))
 ))
 (define scalar_subselect_prefixed_schemas (lambda (prefixed_tables alias_map schemas2_fn)
 	(merge (map prefixed_tables (lambda (td) (match td
-		'(alias_name _ _ _ _) (begin
+		'(alias_name tschema ttbl _ _) (begin
 			(define original_alias (scalar_subselect_lookup_original_alias alias_map alias_name))
 			(if (nil? original_alias)
 				'()
 				(begin
-					(define schema_cols (schemas2_fn original_alias))
+					(define schema_cols (scalar_subselect_resolved_schema (schemas2_fn original_alias) tschema ttbl))
 					(if (nil? schema_cols) '() (list alias_name schema_cols)))))
 		'()))))
 ))
@@ -6801,7 +6811,11 @@ seeing the correctly prefixed outer alias. */
 		'(tv tschema ttbl _ _)
 		(begin
 			(define _existing (if (has_assoc? acc tv) (acc tv) nil))
-			(define _resolved (coalesce _existing (materialized_source_schema tschema ttbl tv acc)))
+			(define _resolved (scalar_subselect_resolved_schema
+				(if (or (nil? _existing) (equal? _existing '()))
+					(materialized_source_schema tschema ttbl tv acc)
+					_existing)
+				tschema ttbl))
 			(if (nil? _resolved) acc
 				(merge acc (list tv _resolved))))
 		acc)) schemas))
