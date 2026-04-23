@@ -4428,16 +4428,24 @@ seeing the correctly prefixed outer alias. */
 			(quote prefer-unnest)
 			(quote inline-only)))))
 	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
-		(match (scalar_subselect_lowering_policy subquery outer_schemas)
-			(quote prefer-unnest) (begin
+		(define try_unnest (lambda ()
+			(begin
 				(define lowered_expr (_unnest_scalar_subselect subquery outer_schemas))
-				/* The current master still permits an inline escape hatch while
-				the remaining Neumann-lowerable shapes are moved off fallback.
-				The policy is explicit now; later PRs can shrink or remove this path. */
+				(if (nil? lowered_expr) nil
+					(list (quote unnest) lowered_expr)))))
+		(define try_inline (lambda ()
+			(build_scalar_subselect_inline_with_strategy subquery outer_schemas)))
+		(if (equal? (scalar_subselect_lowering_policy subquery outer_schemas) (quote prefer-unnest))
+			(begin
+				(define lowered_expr (try_unnest))
 				(if (nil? lowered_expr)
-					(build_scalar_subselect_inline_with_strategy subquery outer_schemas)
-					(list (quote unnest) lowered_expr)))
-			(build_scalar_subselect_inline_with_strategy subquery outer_schemas))
+					(error (concat "prefer-unnest scalar subselect returned nil " (serialize subquery)))
+					lowered_expr))
+			(begin
+				(define lowered_expr (try_inline))
+				(if (nil? lowered_expr)
+					(try_unnest)
+					lowered_expr)))
 	)))
 	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(match (build_scalar_subselect_with_strategy subquery outer_schemas)
