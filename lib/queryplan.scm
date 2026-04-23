@@ -9444,20 +9444,24 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				build_scan stays the only place that finally substitutes onto the current
 				stage's physical scan symbols. */
 				(define lower_prejoin_group_expr (lambda (expr) (begin
-					(define lowered (lower_prejoin_lineage_expr expr))
-					(define projected_field
-						(reduce prejoin_columns (lambda (found mc)
-							(if (not (nil? found))
-								found
-								(if (equal? lowered (lower_prejoin_lineage_expr (cadr mc)))
-									(car mc)
-									nil)))
-							nil))
-					(if (not (nil? projected_field))
-						(list (quote get_column) prejoin_alias false projected_field false)
-						(match lowered
-							(cons sym args) (cons sym (map args lower_prejoin_group_expr))
-							lowered)))))
+					(match expr
+						(cons (symbol aggregate) _) (replace_group_key_or_fetch expr)
+						(cons '(quote aggregate) _) (replace_group_key_or_fetch expr)
+						_ (begin
+							(define lowered (lower_prejoin_lineage_expr expr))
+							(define projected_field
+								(reduce prejoin_columns (lambda (found mc)
+									(if (not (nil? found))
+										found
+										(if (equal? lowered (lower_prejoin_lineage_expr (cadr mc)))
+											(car mc)
+											nil)))
+									nil))
+							(if (not (nil? projected_field))
+								(list (quote get_column) prejoin_alias false projected_field false)
+								(match lowered
+									(cons sym args) (cons sym (map args lower_prejoin_group_expr))
+									lowered)))))))
 				(define grouped_fields (map_assoc raw_fields (lambda (k v)
 					(lower_prejoin_group_expr v))))
 				(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_group_expr))
@@ -9688,7 +9692,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* no outer-scope aliases remain here, so the recursive call is a
 						plain single-table GROUP BY over the materialized prejoin table.
 						Only aggregate-dependent terms survive into the grouped filter. */
-						(define no_outer_group_stage (if (group_stage_requested raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset)
+						(define _no_outer_group_stage_needed (or
+							(and (not (nil? raw_stage_group)) (not (equal? raw_stage_group '())))
+							(not (nil? raw_stage_having))
+							(and (not (nil? raw_stage_order)) (not (equal? raw_stage_order '())))
+							(not (nil? stage_limit))
+							(not (nil? stage_offset))))
+						(define no_outer_group_stage (if _no_outer_group_stage_needed
 							(if is_dedup
 								(make_dedup_stage raw_stage_group nil)
 								(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil))
@@ -9697,7 +9707,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list (list prejoin_alias schema prejointbl false nil))
 							raw_fields
 							no_outer_group_condition
-							(merge (list no_outer_group_stage) rest_groups remaining_partition_stages)
+							(merge (if (nil? no_outer_group_stage) '() (list no_outer_group_stage)) rest_groups remaining_partition_stages)
 							(merge schemas (list prejoin_alias prejoin_schema_def))
 							recursive_replace_find_column
 							update_target))
