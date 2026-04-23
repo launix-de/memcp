@@ -8588,7 +8588,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							keys/aggregates here. Outer-pass-through expressions stay logical
 							and are resolved later by the recursive grouped_plan build, not by
 							synthesizing ad-hoc keytable aggregates in this stage. */
-							(if (and (not (nil? _stage_scope)) (_refs_only_outer_stage expr))
+							(if (and (not (nil? _stage_scope)) (_refs_only_outer_stage expr) (not (_field_has_agg_expr expr)))
 								expr
 								(match expr
 									'((symbol get_column) _ _ _ _) (if (_field_needs_group_value_agg expr)
