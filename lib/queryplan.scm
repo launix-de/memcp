@@ -1993,6 +1993,16 @@ All stages have init: nil = no init code, or code to run before the scan. */
 (define make_group_stage (lambda (group having order limit offset aliases init)
 	(make_stage group having order 0 limit offset false aliases init nil nil)
 ))
+/* group_stage_requested: true iff a logical GROUP/ORDER/LIMIT stage carries
+meaningful work. Empty lists like () do not justify a standalone stage. */
+(define group_stage_requested (lambda (group having order limit offset)
+	(or
+		(and (not (nil? group)) (not (equal? group '())))
+		(not (nil? having))
+		(and (not (nil? order)) (not (equal? order '())))
+		(not (nil? limit))
+		(not (nil? offset))
+)))
 /* make_group_stage_with_condition: like make_group_stage but carries the inner
 subquery's WHERE condition scoped to this stage's tables. build_queryplan merges
 it into the local condition when the stage is processed, preventing cross-stage
@@ -3492,7 +3502,7 @@ seeing the correctly prefixed outer alias. */
 			(begin
 				(define groups2 (coalesceNil groups2 '()))
 				(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
-					(if (or raw_group raw_having raw_order raw_limit raw_offset)
+					(if (group_stage_requested raw_group raw_having raw_order raw_limit raw_offset)
 						(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset nil nil))
 						groups2)
 					groups2))
@@ -3832,7 +3842,7 @@ seeing the correctly prefixed outer alias. */
 										(set schemas2_us (list "(1)" (list (list "Field" "1" "Type" "any"))))))
 								(define groups2_us (coalesceNil groups2_us '()))
 								(define groups2_us (if (or (nil? groups2_us) (equal? groups2_us '()))
-									(if (or raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
+									(if (group_stage_requested raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
 										(list (make_group_stage raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us nil _nt_virtual_init))
 										groups2_us)
 									groups2_us))
@@ -3962,18 +3972,19 @@ seeing the correctly prefixed outer alias. */
 													(define us_orig_limit_a (if (and us_has_grp us_has_stages) (stage_limit_val (car _us_own_stages)) nil))
 													(define us_orig_offset_a (if (and us_has_grp us_has_stages) (stage_offset_val (car _us_own_stages)) nil))
 													(define us_new_order (map us_orig_order_a (lambda (oi) (match oi '(col dir) (list (_us_prefix_ria col) dir) oi))))
-													(define us_group_stage
+													(define us_group_stage (if (group_stage_requested us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a)
 														(stage_with_cache_query
 															(stage_with_cache_policy
 																(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_stage_aliases nil)
 																us_cache_policy)
-															(if (nil? us_cache_policy) nil subquery)))
+															(if (nil? us_cache_policy) nil subquery))
+														nil))
 													(define _us_prefixed_inner_stages (scalar_subselect_rewrite_stages_with_lookup
 														_us_inner_stages
 														_us_prefix_ria
 														_us_lookup))
 													(sq_cache "tables" (merge us_prefixed_tables (coalesceNil (sq_cache "tables") '())))
-													(sq_cache "groups" (merge (list us_group_stage) _us_prefixed_inner_stages (coalesceNil (sq_cache "groups") '())))
+													(sq_cache "groups" (merge (if (nil? us_group_stage) '() (list us_group_stage)) _us_prefixed_inner_stages (coalesceNil (sq_cache "groups") '())))
 													(define us_prefixed_schemas (scalar_subselect_prefixed_schemas us_prefixed_tables us_alias_map schemas2_us))
 													(sq_cache "schemas" (merge us_prefixed_schemas (coalesceNil (sq_cache "schemas") '())))
 													(define us_dom_je_parts (map us_domain_cols_all (lambda (dc)
@@ -6962,7 +6973,7 @@ seeing the correctly prefixed outer alias. */
 					(map (coalesce _cd_order '()) (lambda (o) (match o '(col dir) (list (_cd_replace (finalize_visible_expr col)) dir))))
 					_cd_limit _cd_offset nil nil))
 			/* normal: single group stage */
-			(if (or group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '()))))
+			(if (group_stage_requested group having order limit offset) (list (make_group_stage group having order limit offset nil nil)) '()))))
 	/* Contract boundary: untangle_query returns canonical logical IR.
 	All case-insensitive parser markers are resolved here, before build_queryplan
 	starts creating keytables/prejoins or serializing canonical expression names. */
@@ -8648,7 +8659,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 
 						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_group_key_or_fetch col) dir))))))
 						(define next_groups (merge
-							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset nil nil)) '())
+							(if (group_stage_requested nil nil grouped_order stage_limit stage_offset)
+								(list (make_group_stage nil nil grouped_order stage_limit stage_offset nil nil)) '())
 							(if _needs_synthetic_outer_group (list (make_group_stage '(1) nil nil nil nil nil nil)) '())
 							rest_groups
 						))
@@ -9657,9 +9669,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						/* no outer-scope aliases remain here, so the recursive call is a
 						plain single-table GROUP BY over the materialized prejoin table.
 						Only aggregate-dependent terms survive into the grouped filter. */
-						(define no_outer_group_stage (if is_dedup
-							(make_dedup_stage raw_stage_group nil)
-							(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil)))
+						(define no_outer_group_stage (if (group_stage_requested raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset)
+							(if is_dedup
+								(make_dedup_stage raw_stage_group nil)
+								(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil))
+							nil))
 						(build_queryplan schema
 							(list (list prejoin_alias schema prejointbl false nil))
 							raw_fields
