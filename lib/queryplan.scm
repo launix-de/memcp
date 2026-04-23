@@ -9427,6 +9427,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				code instead of logical planner markers. */
 				(define prejoin_materializable_projection? (lambda (field_expr)
 					(and
+						(not (equal? prejoin_source_tables '()))
 						(equal? (extract_aggregates field_expr) '())
 						(equal? (extract_window_funcs field_expr) '()))))
 				(define prejoin_columns_projected (reduce (extract_assoc resolved_fields (lambda (field_name field_expr)
