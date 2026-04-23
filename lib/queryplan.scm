@@ -3540,6 +3540,11 @@ seeing the correctly prefixed outer alias. */
 				)))
 				(set fields2 (map_assoc fields2 (lambda (k v) (wrap_unresolved_outer v))))
 				(set condition2 (wrap_unresolved_outer condition2))
+				/* The inline scalar path still routes through build_queryplan directly.
+				Resolve any nested scalar/EXISTS/IN markers here so raw aggregate
+				sentinels do not leak into the eventual __scalar_resultrow lambda. */
+				(set fields2 (map_assoc fields2 (lambda (k v) (replace_inner_selects v outer_schemas))))
+				(set condition2 (replace_inner_selects condition2 outer_schemas))
 				(list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2 value_expr))
 			nil))))
 	(define build_scalar_subselect_inline_with_strategy (lambda (subquery outer_schemas) (begin
