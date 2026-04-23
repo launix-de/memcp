@@ -601,7 +601,9 @@ layout. */
 (define scalar_subselect_inline_strategy scalar_subselect_inline_reason)
 (define scalar_subselect_lowering_reason_from_facts (lambda (_has_outer _has_agg_or_stage _outer_refs_are_direct_columns _outer_has_group _contains_inner_select_marker _value_expr _value_expr_is_direct_column _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer)
 	(if (not _has_outer)
-		(quote inline-uncorrelated)
+		(if _has_agg_or_stage
+			(quote prefer-unnest)
+			(quote inline-uncorrelated))
 		(if (nil? _value_expr)
 			(quote inline-missing-value-expr)
 			(if _has_agg_or_stage
