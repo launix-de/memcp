@@ -3834,11 +3834,18 @@ seeing the correctly prefixed outer alias. */
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us _init2_us) (begin
 						(if (and (not (nil? _init2_us)) (not (equal? _init2_us '())))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) _init2_us)))
-						/* no-table subselect without aggregates: return field expression directly */
-						(if (and (or (nil? tables2_us) (equal? tables2_us '()))
-							(not (reduce_assoc fields2_us (lambda (a k v) (or a
-								(begin (define _nta (lambda (e) (match e (cons (symbol aggregate) _) true (cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false) false))) (_nta v)))) false)))
-							(list (car (extract_assoc fields2_us (lambda (k v) v))) '())
+						/* BTW2025 §3.3 select-rule hook: pure scalar projections with no
+						inner tables still short-circuit here instead of entering the join /
+						groupby machinery below. */
+						(define unnest_operator_select_rule (lambda () (begin
+							(if (and (or (nil? tables2_us) (equal? tables2_us '()))
+								(not (reduce_assoc fields2_us (lambda (a k v) (or a
+									(begin (define _nta (lambda (e) (match e (cons (symbol aggregate) _) true (cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false) false))) (_nta v)))) false)))
+								(list (car (extract_assoc fields2_us (lambda (k v) v))) '())
+								nil))))
+						(define _us_select_rule_result (unnest_operator_select_rule))
+						(if (not (nil? _us_select_rule_result))
+							_us_select_rule_result
 							(begin
 								/* no-table with aggregates: inject virtual "(1)" one-row table.
 								Only mutate tables2_us and schemas2_us — groups2_us is set below. */
@@ -3945,7 +3952,9 @@ seeing the correctly prefixed outer alias. */
 										(define us_value_expr (car (extract_assoc fields2_us (lambda (k v) v))))
 										(define _us_ror unnest_runtime_outer_ref_expr)
 										(define _us_ria (lambda (expr) (unnest_rewrite_inner_aliases expr _us_lookup)))
-										(match (scalar_subselect_correlation_info condition2_us us_inner_aliases _us_ror)
+										(define unnest_operator_join_rule (lambda ()
+											(scalar_subselect_correlation_info condition2_us us_inner_aliases _us_ror)))
+										(match (unnest_operator_join_rule)
 											'(us_outer_parts us_domain_cols us_inner_cond_raw)
 											(begin
 												(define us_build_aggregate_path (lambda () (begin
@@ -4139,13 +4148,24 @@ seeing the correctly prefixed outer alias. */
 														nil
 													)
 												)))
+												(define unnest_operator_groupby_rule us_build_aggregate_path)
+												(define unnest_operator_map_rule us_build_scalar_scan_path)
+												(define unnest_operator_window_rule (lambda () nil))
+												(define us_has_window (or
+													(reduce_assoc fields2_us (lambda (found _k v)
+														(or found (not (equal? (extract_window_funcs v) '()))))
+														false)
+													(not (equal? (extract_window_funcs condition2_us) '()))))
 												/* === Three-way branch: aggregate / non-agg+LIMIT / non-agg-no-LIMIT === */
-												(if (or us_has_agg us_has_grp)
-													(if (not us_simple_agg_stages)
-														nil
-														(us_build_aggregate_path))
-													/* === B/C: Non-aggregate === */
-													(us_build_scalar_scan_path)
+												(if us_has_window
+													(unnest_operator_window_rule)
+													(if (or us_has_agg us_has_grp)
+														(if (not us_simple_agg_stages)
+															nil
+															(unnest_operator_groupby_rule))
+														/* === B/C: Non-aggregate === */
+														(unnest_operator_map_rule)
+													)
 												)
 											)
 										)
