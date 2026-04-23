@@ -9626,6 +9626,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(reduce (extract_tblvars expr) (lambda (acc tv)
 						(or acc (has? grouped_outer_condition_aliases tv)))
 						false)))
+				(define grouped_local_condition_term? (lambda (expr) (begin
+					(define refs (extract_tblvars expr))
+					(and
+						(not (equal? refs '()))
+						(reduce refs (lambda (acc tv)
+							(and acc (not (has? grouped_outer_condition_aliases tv))))
+							true)))))
 				(define countlike_prejoin_aggregate_expr? (lambda (expr) (match expr
 					1 true
 					'(if _ 1 0) true
@@ -9654,7 +9661,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(if (grouped_outer_condition_term? expr)
 						expr
 						(if (equal? (extract_aggregates expr) '())
-							nil
+							(if (grouped_local_condition_term? expr) expr nil)
 							(rewrite_local_prejoin_count_term expr)))))
 				(define grouped_having
 					(rewrite_group_key_to_group_alias (lower_prejoin_group_expr raw_stage_post_group_condition)))
