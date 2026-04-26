@@ -593,14 +593,8 @@ layout. */
 							(quote legacy-fallback-post-group-filter)
 							(if (not (or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1))))
 								(quote legacy-fallback-explicit-group-keys)
-								(if (not (or scalar_has_outer_ref scalar_uses_session_state))
-									(quote legacy-fallback-uncorrelated-aggregate)
-									(quote inline-direct-agg-scan)))))))))))
-(define scalar_subselect_inline_strategy (lambda (subquery _agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref) (begin
-	(define strategy (scalar_subselect_inline_reason _agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref))
-	(if (equal? strategy (quote legacy-fallback-uncorrelated-aggregate))
-		(error (concat "FORBIDDEN_INLINE_uncorrelated_aggregate subquery=" (serialize subquery)))
-		strategy))))
+								(quote inline-direct-agg-scan))))))))))
+(define scalar_subselect_inline_strategy scalar_subselect_inline_reason)
 (define scalar_subselect_lowering_reason_from_facts (lambda (_has_outer _has_agg_or_stage _outer_refs_are_direct_columns _outer_has_group _contains_inner_select_marker _value_expr _value_expr_is_direct_column _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer)
 	(if (not _has_outer)
 		(if _has_agg_or_stage
@@ -3758,7 +3752,6 @@ seeing the correctly prefixed outer alias. */
 										(cons (quote !begin) (merge init_stmts_agg (list (build_scalar_agg_scan tables2 condition2)))))
 								)))
 								(define scalar_strategy (scalar_subselect_inline_strategy
-									subquery
 									_agg_args
 									direct_agg_stages_simple
 									raw_contains_skip_level_nested_outer_ref
