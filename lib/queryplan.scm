@@ -714,6 +714,85 @@ ports the actual operator rules to the tree representation. */
 			(not (nil? (nth tree 1))))
 		nil
 		nil)))
+(define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl _us_nested_direct_tbls _us_base_aliases _us_base_tables us_has_stages _us_own_stages _us_inner_aliases tables2_us us_has_outer _us_inner_stages us_domain_cols _us_ria us_sq_prefix _us_lookup us_outer_parts _us_ror us_inner_cond_raw schemas2_us us_value_expr) (begin
+	(define _us_nested_direct_refs_base_aliases (reduce _us_nested_direct_tbls (lambda (acc td) (match td
+		'(_ _ _ _ je) (or acc
+			(and (not (nil? je))
+				(reduce (extract_tblvars je) (lambda (found tv)
+					(or found (has? _us_base_aliases tv))) false)))
+		_ acc))
+		false))
+	(if (and us_single_tbl (not _us_nested_direct_refs_base_aliases))
+		(begin
+			(define us_tdesc (car _us_base_tables))
+			(define us_tblvar (nth us_tdesc 0))
+			(define us_tbl_schema (nth us_tdesc 1))
+			(define us_tbl_name (nth us_tdesc 2))
+			(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
+			(define us_orig_limit (if us_has_stages (stage_limit_val (car _us_own_stages)) nil))
+			(define us_orig_offset (if us_has_stages (stage_offset_val (car _us_own_stages)) nil))
+			(define _us_inner_tbls (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (has? _us_inner_aliases a) false))))
+			(define _us_inner_tbls_rewritten (scalar_subselect_rewrite_tables _us_inner_tbls _us_ria))
+			(define us_simple_uncorrelated_cache_key (if (and
+				(not us_has_outer)
+				(equal? _us_inner_tbls '())
+				(equal? _us_inner_stages '()))
+				(serialize subquery)
+				nil))
+			(define us_cached_subst (if (nil? us_simple_uncorrelated_cache_key)
+				nil
+				(get_assoc (coalesceNil (sq_cache "scalar_helper_cache") '()) us_simple_uncorrelated_cache_key)))
+			(if (not (nil? us_cached_subst))
+				(list us_cached_subst '())
+				(begin
+					(if (not (equal? _us_inner_tbls_rewritten '()))
+						(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
+					(define us_dom_order (scalar_scan_domain_order us_domain_cols _us_ria us_sq_prefix))
+					(define us_renamed_order (scalar_scan_rewrite_order us_orig_order _us_ria))
+					(define us_order_supported (scalar_scan_order_supported us_renamed_order us_sq_prefix))
+					(if (not us_order_supported)
+						nil
+						(begin
+							(define us_part_order (merge us_dom_order us_renamed_order))
+							(define us_dom_count (count us_dom_order))
+							(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
+							(define _us_inner_stages_rewritten (scalar_subselect_rewrite_stages_with_lookup
+								_us_inner_stages
+								_us_ria
+								_us_lookup))
+							(define _us_nested_outer_sources (scalar_subselect_collect_stage_outer_sources _us_inner_stages_rewritten))
+							(define us_part_stage (make_scalar_partition_stage
+								us_part_order
+								us_orig_limit
+								us_orig_offset
+								us_dom_count
+								(list us_sq_prefix)
+								(merge_unique (list us_outer_sources _us_nested_outer_sources))))
+							(sq_cache "groups" (merge
+								(list us_part_stage)
+								_us_inner_stages_rewritten
+								(coalesceNil (sq_cache "groups") '())))
+							(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
+							(define us_inner_lim (_us_ria us_inner_cond_raw))
+							(define us_full_lim (if (nil? us_inner_lim)
+								(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
+								(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+							(define _us_nested_direct_tbls_rewritten (scalar_subselect_rewrite_tables _us_nested_direct_tbls _us_ria))
+							(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))))
+							(define _us_inner_schema (schemas2_us us_tblvar))
+							(define _us_passthrough_schemas (merge
+								(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
+								(scalar_subselect_passthrough_schemas (merge _us_inner_tbls _us_nested_direct_tbls) schemas2_us)))
+							(if (not (equal? _us_passthrough_schemas '()))
+								(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
+							(define us_subst (_us_ria us_value_expr))
+							(if (not (nil? us_simple_uncorrelated_cache_key))
+								(sq_cache "scalar_helper_cache"
+									(set_assoc (coalesceNil (sq_cache "scalar_helper_cache") '())
+										us_simple_uncorrelated_cache_key
+										us_subst)))
+							(list us_subst us_tbl_entries))))))
+		nil)))
 (define planner_flat_tables_to_tree_ir (lambda (schema tables)
 	(if (or (nil? tables) (equal? tables '()))
 		(planner_tree_ir_scan schema nil)
@@ -4308,84 +4387,31 @@ seeing the correctly prefixed outer alias. */
 													(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
 													(list us_subst '())
 												)))
-												(define us_build_scalar_scan_path (lambda () (begin
-													(define _us_nested_direct_refs_base_aliases (reduce _us_nested_direct_tbls (lambda (acc td) (match td
-														'(_ _ _ _ je) (or acc
-															(and (not (nil? je))
-																(reduce (extract_tblvars je) (lambda (found tv)
-																	(or found (has? _us_base_aliases tv))) false)))
-														_ acc))
-														false))
-													(if (and us_single_tbl (not _us_nested_direct_refs_base_aliases))
-														(begin
-															(define us_tdesc (car _us_base_tables))
-															(define us_tblvar (nth us_tdesc 0))
-															(define us_tbl_schema (nth us_tdesc 1))
-															(define us_tbl_name (nth us_tdesc 2))
-															(define us_orig_order (if us_has_stages (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
-															(define us_orig_limit (if us_has_stages (stage_limit_val (car _us_own_stages)) nil))
-															(define us_orig_offset (if us_has_stages (stage_offset_val (car _us_own_stages)) nil))
-															(define _us_inner_tbls (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (has? _us_inner_aliases a) false))))
-															(define _us_inner_tbls_rewritten (scalar_subselect_rewrite_tables _us_inner_tbls _us_ria))
-															(define us_simple_uncorrelated_cache_key (if (and
-																(not us_has_outer)
-																(equal? _us_inner_tbls '())
-																(equal? _us_inner_stages '()))
-																(serialize subquery)
-																nil))
-															(define us_cached_subst (if (nil? us_simple_uncorrelated_cache_key)
-																nil
-																(get_assoc (coalesceNil (sq_cache "scalar_helper_cache") '()) us_simple_uncorrelated_cache_key)))
-															(if (not (nil? us_cached_subst))
-																(list us_cached_subst '())
-																(begin
-																	(if (not (equal? _us_inner_tbls_rewritten '()))
-																		(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
-																	(define us_dom_order (scalar_scan_domain_order us_domain_cols _us_ria us_sq_prefix))
-																	(define us_renamed_order (scalar_scan_rewrite_order us_orig_order _us_ria))
-																	(define us_order_supported (scalar_scan_order_supported us_renamed_order us_sq_prefix))
-																	(if (not us_order_supported)
-																		nil
-																		(begin
-																			(define us_part_order (merge us_dom_order us_renamed_order))
-																			(define us_dom_count (count us_dom_order))
-																			(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
-																			(define _us_inner_stages_rewritten (scalar_subselect_rewrite_stages_with_lookup
-																				_us_inner_stages
-																				_us_ria
-																				_us_lookup))
-																			(define _us_nested_outer_sources (scalar_subselect_collect_stage_outer_sources _us_inner_stages_rewritten))
-																			(define us_part_stage (make_scalar_partition_stage
-																				us_part_order
-																				us_orig_limit
-																				us_orig_offset
-																				us_dom_count
-																				(list us_sq_prefix)
-																				(merge_unique (list us_outer_sources _us_nested_outer_sources))))
-																			(sq_cache "groups" (merge
-																				(list us_part_stage)
-																				_us_inner_stages_rewritten
-																				(coalesceNil (sq_cache "groups") '())))
-																			(define us_join_lim (map us_outer_parts (lambda (p) (_us_ria (_us_ror p)))))
-																			(define us_inner_lim (_us_ria us_inner_cond_raw))
-																			(define us_full_lim (if (nil? us_inner_lim)
-																				(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
-																				(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
-																			(define _us_nested_direct_tbls_rewritten (scalar_subselect_rewrite_tables _us_nested_direct_tbls _us_ria))
-																			(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))))
-																			(define _us_inner_schema (schemas2_us us_tblvar))
-																			(define _us_passthrough_schemas (merge
-																				(if (not (nil? _us_inner_schema)) (list us_sq_prefix _us_inner_schema) '())
-																				(scalar_subselect_passthrough_schemas (merge _us_inner_tbls _us_nested_direct_tbls) schemas2_us)))
-																			(if (not (equal? _us_passthrough_schemas '()))
-																				(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
-																			(define us_subst (_us_ria us_value_expr))
-																			(if (not (nil? us_simple_uncorrelated_cache_key))
-																				(sq_cache "scalar_helper_cache"
-																					(set_assoc (coalesceNil (sq_cache "scalar_helper_cache") '())
-																						us_simple_uncorrelated_cache_key
-																						us_subst)))
-																			(list us_subst us_tbl_entries))))))
+												(define us_build_scalar_scan_path (lambda ()
+													(unnest_map_rule
+														normalized_tree
+														subquery
+														sq_cache
+														target_expr
+														us_single_tbl
+														_us_nested_direct_tbls
+														_us_base_aliases
+														_us_base_tables
+														us_has_stages
+														_us_own_stages
+														_us_inner_aliases
+														tables2_us
+														us_has_outer
+														_us_inner_stages
+														us_domain_cols
+														_us_ria
+														us_sq_prefix
+														_us_lookup
+														us_outer_parts
+														_us_ror
+														us_inner_cond_raw
+														schemas2_us
+														us_value_expr)))
 														nil
 													)
 												)))
