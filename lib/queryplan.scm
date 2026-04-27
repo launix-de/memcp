@@ -4448,7 +4448,6 @@ seeing the correctly prefixed outer alias. */
 										_has_outer
 										_outer_refs_are_direct_columns
 										(not _contains_inner_select_marker)
-										_value_expr_is_direct_column
 										(equal? raw_limit 1)
 										(nil? raw_offset))))
 						false)
