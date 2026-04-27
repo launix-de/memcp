@@ -4443,7 +4443,7 @@ seeing the correctly prefixed outer alias. */
 										(not (equal? tables '()))
 										(not _contains_inner_select_marker)
 										_value_expr_is_direct_column
-										(equal? raw_limit 1)
+										(or (equal? raw_limit 1) (nil? raw_limit))
 										(nil? raw_offset))
 									(and
 										_outer_has_group
