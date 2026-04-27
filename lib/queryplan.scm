@@ -641,6 +641,79 @@ ports the actual operator rules to the tree representation. */
 				'(entry_key entry_value) (if (equal? entry_key key) entry_value nil)
 				nil)))
 		nil)))
+(define planner_tree_ir_window_order (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
+		(nth tree 2)
+		nil)))
+(define planner_tree_ir_window_limit (lambda (tree)
+		(planner_tree_ir_lookup_computation
+			(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
+				(nth tree 3)
+				'())
+			(quote limit))))
+(define planner_tree_ir_window_offset (lambda (tree)
+		(planner_tree_ir_lookup_computation
+			(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
+				(nth tree 3)
+				'())
+			(quote offset))))
+(define planner_tree_ir_window_child (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
+		(nth tree 4)
+		nil)))
+(define planner_tree_ir_map_projections (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-map))
+		(nth tree 1)
+		nil)))
+(define planner_tree_ir_groupby_aggs (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-groupby))
+		(nth tree 2)
+		nil)))
+(define planner_tree_ir_select_predicate (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-select))
+		(nth tree 1)
+		nil)))
+(define planner_tree_ir_select_child (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-select))
+		(nth tree 2)
+		nil)))
+(define unnest_select_rule (lambda (tree)
+	(begin
+		(define window_node (if (equal? (planner_tree_ir_node_kind tree) (quote op-window)) tree nil))
+		(define shape_node (if (nil? window_node) tree (planner_tree_ir_window_child window_node)))
+		(define fields_node (if (nil? shape_node) nil
+			(if (equal? (planner_tree_ir_node_kind shape_node) (quote op-map))
+				(planner_tree_ir_map_projections shape_node)
+				(if (equal? (planner_tree_ir_node_kind shape_node) (quote op-groupby))
+					(planner_tree_ir_groupby_aggs shape_node)
+					nil))))
+		(define select_node (if (nil? shape_node) nil
+			(if (equal? (planner_tree_ir_node_kind shape_node) (quote op-map))
+				(planner_tree_ir_select_child shape_node)
+				(if (equal? (planner_tree_ir_node_kind shape_node) (quote op-groupby))
+					(nth shape_node 4)
+					nil))))
+		(define join_tree (if (nil? select_node) nil (planner_tree_ir_select_child select_node)))
+		(if (and
+				(not (nil? join_tree))
+				(equal? (planner_tree_ir_extract_tables join_tree) '())
+				(not (reduce_assoc fields_node (lambda (a k v) (or a
+					(begin
+						(define _nta (lambda (e) (match e
+							(cons (symbol aggregate) _) true
+							(cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false)
+							false)))
+						(_nta v)))) false)))
+			(list (car (extract_assoc fields_node (lambda (k v) v))) '())
+			nil))))
+(define unnest_join_rule (lambda (condition_expr inner_aliases outer_ref_rewriter)
+	(scalar_subselect_correlation_info condition_expr inner_aliases outer_ref_rewriter)))
+(define unnest_window_rule (lambda (tree)
+	(if (and
+			(equal? (planner_tree_ir_node_kind tree) (quote op-window))
+			(not (nil? (nth tree 1))))
+		nil
+		nil)))
 (define planner_flat_tables_to_tree_ir (lambda (schema tables)
 	(if (or (nil? tables) (equal? tables '()))
 		(planner_tree_ir_scan schema nil)
@@ -3983,8 +4056,14 @@ seeing the correctly prefixed outer alias. */
 			nil /* UNION ALL not handled yet */
 			(begin
 				(define normalized_subquery (planner_flat_subquery_roundtrip_via_tree_ir subquery))
+				(define normalized_tree (planner_flat_subquery_to_tree_ir normalized_subquery))
 				(define raw_vals_us (if (and (list? subquery) (>= (count subquery) 9))
-					(list (nth normalized_subquery 4) (nth normalized_subquery 5) (nth normalized_subquery 6) (nth normalized_subquery 7) (nth normalized_subquery 8))
+					(list
+						(nth normalized_subquery 4)
+						(nth normalized_subquery 5)
+						(planner_tree_ir_window_order normalized_tree)
+						(planner_tree_ir_window_limit normalized_tree)
+						(planner_tree_ir_window_offset normalized_tree))
 					(list nil nil nil nil nil)))
 				(define raw_group_us (nth raw_vals_us 0))
 				(define raw_having_us (nth raw_vals_us 1))
@@ -4003,12 +4082,8 @@ seeing the correctly prefixed outer alias. */
 						/* BTW2025 §3.3 select-rule hook: pure scalar projections with no
 						inner tables still short-circuit here instead of entering the join /
 						groupby machinery below. */
-						(define unnest_operator_select_rule (lambda () (begin
-							(if (and (or (nil? tables2_us) (equal? tables2_us '()))
-								(not (reduce_assoc fields2_us (lambda (a k v) (or a
-									(begin (define _nta (lambda (e) (match e (cons (symbol aggregate) _) true (cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false) false))) (_nta v)))) false)))
-								(list (car (extract_assoc fields2_us (lambda (k v) v))) '())
-								nil))))
+						(define unnest_operator_select_rule (lambda ()
+							(unnest_select_rule normalized_tree)))
 						(define _us_select_rule_result (unnest_operator_select_rule))
 						(if (not (nil? _us_select_rule_result))
 							_us_select_rule_result
@@ -4119,7 +4194,7 @@ seeing the correctly prefixed outer alias. */
 										(define _us_ror unnest_runtime_outer_ref_expr)
 										(define _us_ria (lambda (expr) (unnest_rewrite_inner_aliases expr _us_lookup)))
 										(define unnest_operator_join_rule (lambda ()
-											(scalar_subselect_correlation_info condition2_us us_inner_aliases _us_ror)))
+											(unnest_join_rule condition2_us us_inner_aliases _us_ror)))
 										(match (unnest_operator_join_rule)
 											'(us_outer_parts us_domain_cols us_inner_cond_raw)
 											(begin
@@ -4316,7 +4391,8 @@ seeing the correctly prefixed outer alias. */
 												)))
 												(define unnest_operator_groupby_rule us_build_aggregate_path)
 												(define unnest_operator_map_rule us_build_scalar_scan_path)
-												(define unnest_operator_window_rule (lambda () nil))
+												(define unnest_operator_window_rule (lambda ()
+													(unnest_window_rule normalized_tree)))
 												(define us_has_window (or
 													(reduce_assoc fields2_us (lambda (found _k v)
 														(or found (not (equal? (extract_window_funcs v) '()))))
