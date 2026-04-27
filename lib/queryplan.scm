@@ -580,6 +580,166 @@ layout. */
 	(if (equal? scalar_events '())
 		(explain_plan_root plan)
 		(concat (explain_plan_root plan) " scalar-events=" (serialize scalar_events))))))
+/* Paper-aligned tree IR adapter for flat scalar-subquery tuples.
+Node forms:
+;; (op-select  predicate child)
+;; (op-map     projections child)
+;; (op-groupby keys aggs having child)
+;; (op-window  partition order computations child)
+;; (op-join    type predicate left right)
+;; (op-scan    schema table)
+;;
+`op-scan` keeps the current table descriptor payload in its `table` slot so the
+existing flat tuple can round-trip without semantic changes while later work
+ports the actual operator rules to the tree representation. */
+(define planner_tree_ir_node_kind (lambda (node) (match node
+	(cons sym _) (match sym
+		(symbol op-select) (quote op-select)
+		'op-select (quote op-select)
+		'(quote op-select) (quote op-select)
+		(symbol op-map) (quote op-map)
+		'op-map (quote op-map)
+		'(quote op-map) (quote op-map)
+		(symbol op-groupby) (quote op-groupby)
+		'op-groupby (quote op-groupby)
+		'(quote op-groupby) (quote op-groupby)
+		(symbol op-window) (quote op-window)
+		'op-window (quote op-window)
+		'(quote op-window) (quote op-window)
+		(symbol op-join) (quote op-join)
+		'op-join (quote op-join)
+		'(quote op-join) (quote op-join)
+		(symbol op-scan) (quote op-scan)
+		'op-scan (quote op-scan)
+		'(quote op-scan) (quote op-scan)
+		(symbol op-dep-join) (quote op-dep-join)
+		'op-dep-join (quote op-dep-join)
+		'(quote op-dep-join) (quote op-dep-join)
+		nil)
+	nil)))
+(define planner_tree_ir_scan (lambda (schema table)
+	(list (quote op-scan) schema table)))
+(define planner_tree_ir_join (lambda (join_type predicate left right)
+	(list (quote op-join) join_type predicate left right)))
+(define planner_tree_ir_select (lambda (predicate child)
+	(list (quote op-select) predicate child)))
+(define planner_tree_ir_map (lambda (projections child)
+	(list (quote op-map) projections child)))
+(define planner_tree_ir_groupby (lambda (keys aggs having child)
+	(list (quote op-groupby) keys aggs having child)))
+(define planner_tree_ir_window (lambda (partition order computations child)
+	(list (quote op-window) partition order computations child)))
+(define planner_tree_ir_window_computations (lambda (limit offset)
+	(list
+		(list (quote limit) limit)
+		(list (quote offset) offset))))
+(define planner_tree_ir_lookup_computation (lambda (computations key)
+	(reduce (coalesceNil computations '()) (lambda (found entry)
+		(if (not (nil? found))
+			found
+			(match entry
+				'(entry_key entry_value) (if (equal? entry_key key) entry_value nil)
+				nil)))
+		nil)))
+(define planner_flat_tables_to_tree_ir (lambda (schema tables)
+	(if (or (nil? tables) (equal? tables '()))
+		(planner_tree_ir_scan schema nil)
+		(reduce (cdr tables) (lambda (left td)
+			(planner_tree_ir_join
+				(match td
+					'(_ _ _ outer_flag _) (if outer_flag (quote left) (quote inner))
+					(quote inner))
+				(match td
+					'(_ _ _ _ joinexpr) joinexpr
+					nil)
+				left
+				(planner_tree_ir_scan schema td)))
+			(planner_tree_ir_scan schema (car tables))))))
+(define planner_tree_ir_extract_schema (lambda (node) (begin
+	(define node_kind (planner_tree_ir_node_kind node))
+	(if (equal? node_kind (quote op-scan))
+		(nth node 1)
+		(if (equal? node_kind (quote op-join))
+			(planner_tree_ir_extract_schema (nth node 3))
+			(error (concat "TREE_IR_SCHEMA_EXPECTED_SCAN " (serialize node))))))))
+(define planner_tree_ir_extract_tables (lambda (node) (begin
+	(define node_kind (planner_tree_ir_node_kind node))
+	(if (equal? node_kind (quote op-scan))
+		(begin
+			(define table_payload (nth node 2))
+			(if (nil? table_payload) '() (list table_payload)))
+		(if (equal? node_kind (quote op-join))
+			(merge
+				(planner_tree_ir_extract_tables (nth node 3))
+				(planner_tree_ir_extract_tables (nth node 4)))
+			(error (concat "TREE_IR_TABLES_EXPECTED_JOIN " (serialize node))))))))
+(define planner_flat_subquery_to_tree_ir (lambda (subquery) (match subquery
+	'(schema tables fields condition group having order limit offset) (begin
+		(define join_tree (planner_flat_tables_to_tree_ir schema tables))
+		(define selected_tree (planner_tree_ir_select condition join_tree))
+		(define shaped_tree (if (or
+				(not (or (nil? group) (equal? group '())))
+				(not (nil? having)))
+			(planner_tree_ir_groupby group fields having selected_tree)
+			(planner_tree_ir_map fields selected_tree)))
+		(planner_tree_ir_window nil order
+			(planner_tree_ir_window_computations limit offset)
+			shaped_tree))
+	_ (error (concat "TREE_IR_NON_FLAT_SUBQUERY " (serialize subquery))))))
+(define planner_tree_ir_to_flat_subquery (lambda (tree) (begin
+	(define tree_kind (planner_tree_ir_node_kind tree))
+	(if (not (equal? tree_kind (quote op-window)))
+		(error (concat "TREE_IR_EXPECTED_WINDOW_ROOT " (serialize tree)))
+		nil)
+	(define partition (nth tree 1))
+	(define order (nth tree 2))
+	(define computations (nth tree 3))
+	(define child (nth tree 4))
+	(define child_kind (planner_tree_ir_node_kind child))
+	(if (not (nil? partition))
+		(error (concat "TREE_IR_WINDOW_PARTITION_UNSUPPORTED " (serialize tree)))
+		nil)
+	(if (equal? child_kind (quote op-map))
+		(begin
+			(define fields (nth child 1))
+			(define select_node (nth child 2))
+			(if (not (equal? (planner_tree_ir_node_kind select_node) (quote op-select)))
+				(error (concat "TREE_IR_EXPECTED_SELECT_UNDER_MAP " (serialize tree)))
+				nil)
+			(define condition (nth select_node 1))
+			(define join_tree (nth select_node 2))
+			(list
+				(planner_tree_ir_extract_schema join_tree)
+				(planner_tree_ir_extract_tables join_tree)
+				fields
+				condition
+				nil
+				nil
+				order
+				(planner_tree_ir_lookup_computation computations (quote limit))
+				(planner_tree_ir_lookup_computation computations (quote offset))))
+		(if (equal? child_kind (quote op-groupby))
+			(begin
+				(define group (nth child 1))
+				(define fields (nth child 2))
+				(define having (nth child 3))
+				(define select_node (nth child 4))
+				(if (not (equal? (planner_tree_ir_node_kind select_node) (quote op-select)))
+					(error (concat "TREE_IR_EXPECTED_SELECT_UNDER_GROUPBY " (serialize tree)))
+					nil)
+				(define condition (nth select_node 1))
+				(define join_tree (nth select_node 2))
+				(list
+					(planner_tree_ir_extract_schema join_tree)
+					(planner_tree_ir_extract_tables join_tree)
+					fields
+					condition
+					group
+					having
+					order
+					(planner_tree_ir_lookup_computation computations (quote limit))
+					(planner_tree_ir_lookup_computation computations (quote offset))))
+			(error (concat "TREE_IR_EXPECTED_MAP_OR_GROUPBY " (serialize tree))))))))
 (define scalar_subselect_inline_reason (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
 	(if (nil? _agg_args)
 		(quote legacy-fallback-non-aggregate)

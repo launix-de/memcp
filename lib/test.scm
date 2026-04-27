@@ -217,6 +217,44 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'inline-grouped-non-domain-correlation) true "scalar_subselect_lowering_reason_from_facts names grouped non-domain fallback")
 	(assert (equal? (scalar_subselect_lowering_reason_from_facts true false true false false 1 true false false)
 		'prefer-unnest) true "scalar_subselect_lowering_reason_from_facts keeps prefer-unnest explicit")
+	(define tree_ir_flat_non_grouped (list
+		"memcp-tests"
+		(list
+			(list "a" "memcp-tests" "tree_ir_a" false nil)
+			(list "b" "memcp-tests" "tree_ir_b" true
+				(list 'equal??
+					(list 'get_column "a" false "ID" false)
+					(list 'get_column "b" false "a_id" false))))
+		(list
+			"value" (list 'get_column "a" false "value" false)
+			"flag" (list 'get_column "b" false "flag" false))
+		(list 'and
+			(list 'equal?? (list 'get_column "a" false "active" false) true)
+			(list 'equal?? (list 'get_column "b" false "kind" false) "x"))
+		nil
+		nil
+		(list (list (list 'get_column "a" false "value" false) '<))
+		2
+		1))
+	(define tree_ir_node_non_grouped (planner_flat_subquery_to_tree_ir tree_ir_flat_non_grouped))
+	(assert (equal? (planner_tree_ir_node_kind tree_ir_node_non_grouped) 'op-window) true "planner_flat_subquery_to_tree_ir wraps non-grouped scalar tuples in op-window root")
+	(assert (equal? (planner_tree_ir_to_flat_subquery tree_ir_node_non_grouped) tree_ir_flat_non_grouped) true "planner tree IR round-trips non-grouped flat tuples")
+	(define tree_ir_flat_grouped (list
+		"memcp-tests"
+		(list
+			(list "o" "memcp-tests" "tree_ir_orders" false nil))
+		(list
+			"owner_id" (list 'get_column "o" false "owner_id" false)
+			"cnt" (list 'aggregate 1 '+ 0))
+		true
+		(list (list 'get_column "o" false "owner_id" false))
+		(list '> (list 'aggregate 1 '+ 0) 0)
+		(list (list (list 'aggregate 1 '+ 0) '>))
+		5
+		0))
+	(define tree_ir_node_grouped (planner_flat_subquery_to_tree_ir tree_ir_flat_grouped))
+	(assert (equal? (planner_tree_ir_node_kind tree_ir_node_grouped) 'op-window) true "planner_flat_subquery_to_tree_ir wraps grouped scalar tuples in op-window root")
+	(assert (equal? (planner_tree_ir_to_flat_subquery tree_ir_node_grouped) tree_ir_flat_grouped) true "planner tree IR round-trips grouped flat tuples")
 	(define once_contract_implicit (make_once_limit_scan_contract nil nil 3 nil nil nil nil nil))
 	(assert (equal? (once_limit_scan_contract_limit once_contract_implicit) 2) true "make_once_limit_scan_contract defaults scalar scans to LIMIT 2")
 	(assert (equal? (once_limit_scan_contract_offset once_contract_implicit) 0) true "make_once_limit_scan_contract defaults offset to zero")
