@@ -7996,6 +7996,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define _must_prejoin_outer_group_tables (and
 			(not (equal? _grp_ps_tables_raw '()))
 			(or
+				(and (not (equal? ags '()))
+					(nil? _stage_scope)
+					(reduce_assoc fields (lambda (acc _k expr) (or acc (_resolved_expr_refs_grp_ps_table expr))) false))
 				(reduce stage_group (lambda (acc expr) (or acc (_resolved_expr_refs_grp_ps_table expr))) false)
 				(reduce ags (lambda (acc ag) (or acc (_resolved_expr_refs_grp_ps_table ag))) false)
 				(_resolved_expr_refs_grp_ps_table (coalesce stage_having true))
