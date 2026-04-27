@@ -4432,7 +4432,27 @@ seeing the correctly prefixed outer alias. */
 				select-rule in unnest_subselect; route them there instead of
 				letting inline-only legacy handling classify them as non-aggregate. */
 				(if (match subquery
-						'(_ tables _ _ _ _ _ _ _) (and (not _has_grouped_semantics) (or (nil? tables) (equal? tables '())))
+						'(_ tables _ _ _ _ _ raw_limit raw_offset)
+							(and
+								(not _has_grouped_semantics)
+								(or
+									(or (nil? tables) (equal? tables '()))
+									(and
+										(not _has_outer)
+										(not (nil? tables))
+										(not (equal? tables '()))
+										(not _contains_inner_select_marker)
+										_value_expr_is_direct_column
+										(equal? raw_limit 1)
+										(nil? raw_offset))
+									(and
+										_outer_has_group
+										_has_outer
+										_outer_refs_are_direct_columns
+										(not _contains_inner_select_marker)
+										_value_expr_is_direct_column
+										(equal? raw_limit 1)
+										(nil? raw_offset))))
 						false)
 					(quote prefer-unnest)
 					(scalar_subselect_lowering_reason_from_facts
