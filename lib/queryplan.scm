@@ -686,6 +686,9 @@ ports the actual operator rules to the tree representation. */
 			(planner_tree_ir_window_computations limit offset)
 			shaped_tree))
 	_ (error (concat "TREE_IR_NON_FLAT_SUBQUERY " (serialize subquery))))))
+(define planner_flat_subquery_roundtrip_via_tree_ir (lambda (subquery)
+	(planner_tree_ir_to_flat_subquery
+		(planner_flat_subquery_to_tree_ir subquery))))
 (define planner_tree_ir_to_flat_subquery (lambda (tree) (begin
 	(define tree_kind (planner_tree_ir_node_kind tree))
 	(if (not (equal? tree_kind (quote op-window)))
@@ -3674,7 +3677,8 @@ seeing the correctly prefixed outer alias. */
 		/* This is the logical scope-normalization boundary for scalar inline lowering.
 		It must stay free of runtime scan/promise construction so a future top-down
 		dependent-join pass can hook in here without re-walking the old fallback code. */
-		(match (untangle_scalar_subquery_scope subquery outer_schemas raw_group raw_having raw_order raw_limit raw_offset)
+		(define normalized_subquery (planner_flat_subquery_roundtrip_via_tree_ir subquery))
+		(match (untangle_scalar_subquery_scope normalized_subquery outer_schemas raw_group raw_having raw_order raw_limit raw_offset)
 			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
 			(begin
 				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas false))
@@ -3978,8 +3982,9 @@ seeing the correctly prefixed outer alias. */
 		(if (not (nil? union_parts_us))
 			nil /* UNION ALL not handled yet */
 			(begin
+				(define normalized_subquery (planner_flat_subquery_roundtrip_via_tree_ir subquery))
 				(define raw_vals_us (if (and (list? subquery) (>= (count subquery) 9))
-					(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
+					(list (nth normalized_subquery 4) (nth normalized_subquery 5) (nth normalized_subquery 6) (nth normalized_subquery 7) (nth normalized_subquery 8))
 					(list nil nil nil nil nil)))
 				(define raw_group_us (nth raw_vals_us 0))
 				(define raw_having_us (nth raw_vals_us 1))
@@ -3990,7 +3995,7 @@ seeing the correctly prefixed outer alias. */
 				Use the shared logical scope preparation so inline and unnest paths stay on
 				the same recursive normalization boundary. */
 				(match (untangle_scalar_subquery_scope
-						subquery outer_schemas
+						normalized_subquery outer_schemas
 						raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us _init2_us) (begin
 						(if (and (not (nil? _init2_us)) (not (equal? _init2_us '())))
