@@ -4428,16 +4428,23 @@ seeing the correctly prefixed outer alias. */
 						(not _outer_has_group)
 						_outer_refs_are_direct_columns
 						(_raw_subquery_has_non_equality_outer_condition subquery outer_schemas)))
-				(scalar_subselect_lowering_reason_from_facts
-					_has_outer
-					_has_grouped_semantics
-					_outer_refs_are_direct_columns
-					_outer_has_group
-					_contains_inner_select_marker
-					_value_expr
-					_value_expr_is_direct_column
-					(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
-					_allow_grouped_direct_non_equality_outer))
+				/* Pure scalar subqueries without FROM already have a helper-path
+				select-rule in unnest_subselect; route them there instead of
+				letting inline-only legacy handling classify them as non-aggregate. */
+				(if (match subquery
+						'(_ tables _ _ _ _ _ _ _) (and (not _has_grouped_semantics) (or (nil? tables) (equal? tables '())))
+						false)
+					(quote prefer-unnest)
+					(scalar_subselect_lowering_reason_from_facts
+						_has_outer
+						_has_grouped_semantics
+						_outer_refs_are_direct_columns
+						_outer_has_group
+						_contains_inner_select_marker
+						_value_expr
+						_value_expr_is_direct_column
+						(_subquery_outer_refs_need_domain_preservation subquery outer_schemas)
+						_allow_grouped_direct_non_equality_outer)))
 			nil)))
 	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
 		(equal? (scalar_subselect_lowering_reason subquery outer_schemas) (quote prefer-unnest))))
