@@ -1084,17 +1084,17 @@ ports the actual operator rules to the tree representation. */
 		(equal? orig_group '())
 		(equal? orig_group '(1)))))
 (define unnest_groupby_rule_static_group_keys (lambda (dom_group_cols accessing_tags)
-	(if (and
-			(unnest_groupby_rule_requires_domain_keys accessing_tags)
-			(not (equal? dom_group_cols '())))
+	(if (not (equal? dom_group_cols '()))
 		dom_group_cols
 		'(1))))
 (define unnest_groupby_rule_build_group_keys (lambda (orig_group dom_group_cols accessing_tags static_group)
 	(if static_group
 		(unnest_groupby_rule_static_group_keys dom_group_cols accessing_tags)
-		(if (unnest_groupby_rule_requires_domain_keys accessing_tags)
+		(if (not (equal? dom_group_cols '()))
 			(merge dom_group_cols orig_group)
-			orig_group))))
+			(if (unnest_groupby_rule_requires_domain_keys accessing_tags)
+				(merge dom_group_cols orig_group)
+				orig_group)))))
 (define exists_subquery_uses_session_state_for_row_existence (lambda (query)
 	(match query
 		'(schema2 tables2 _fields2 condition2 group2 having2 _order2 limit2 offset2)
