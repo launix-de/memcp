@@ -132,7 +132,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(car fields)
 			(error (concat "psql_semijoin_count_query requires exactly one output field: " (serialize subquery))))))
 	(define psql_semijoin_count_query (lambda (subquery target_expr) (begin
-		(define union_parts (sql_union_all_parts subquery))
+		(define union_parts (psql_union_all_parts subquery))
 		(if (not (nil? union_parts))
 			(error (concat "psql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
 			(match subquery
@@ -169,7 +169,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				_ (error (concat "psql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
 	(define psql_semijoin_count_expr (lambda (subquery target_expr negated)
 		(begin
-			(define union_parts (sql_union_all_parts subquery))
+			(define union_parts (psql_union_all_parts subquery))
 			(define count_expr
 				(if (nil? union_parts)
 					(list (quote inner_select) (psql_semijoin_count_query subquery target_expr))
