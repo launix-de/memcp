@@ -631,6 +631,14 @@ ports the actual operator rules to the tree representation. */
 	(list (quote op-groupby) keys aggs having child)))
 (define planner_tree_ir_window (lambda (partition order computations child)
 	(list (quote op-window) partition order computations child)))
+(define planner_tree_ir_window_with_partition (lambda (tree partition)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
+		(planner_tree_ir_window
+			partition
+			(planner_tree_ir_window_order tree)
+			(nth tree 3)
+			(planner_tree_ir_window_child tree))
+		tree)))
 (define planner_tree_ir_window_computations (lambda (limit offset)
 	(list
 		(list (quote limit) limit)
@@ -978,10 +986,17 @@ ports the actual operator rules to the tree representation. */
 	(match (scalar_subselect_correlation_info join_condition inner_aliases outer_ref_rewriter)
 		'(us_outer_parts us_domain_cols us_inner_cond_raw)
 			(list us_outer_parts us_domain_cols us_inner_cond_raw accessing_tags)))))
-(define unnest_window_rule_domain_partitions (lambda (us_domain_cols us_accessing_tags)
+(define unnest_window_rule_domain_partitions (lambda (tree us_domain_cols us_accessing_tags)
+	(define explicit_partition (coalesceNil (planner_tree_ir_window_partition tree) '()))
 	(if (unnest_groupby_rule_requires_domain_keys us_accessing_tags)
-		(map us_domain_cols (lambda (dc) (nth dc 0)))
-		'())))
+		(unnest_window_rule_merge_partitions
+			explicit_partition
+			(map us_domain_cols (lambda (dc) (nth dc 0))))
+		explicit_partition)))
+(define unnest_window_rule_bind_domain_partitions (lambda (tree us_domain_cols us_accessing_tags)
+	(planner_tree_ir_window_with_partition
+		tree
+		(unnest_window_rule_domain_partitions tree us_domain_cols us_accessing_tags))))
 (define unnest_window_rule_merge_partitions (lambda (base_partition domain_partition)
 	(reduce domain_partition (lambda (acc expr)
 		(append_unique acc expr))
@@ -1017,7 +1032,7 @@ ports the actual operator rules to the tree representation. */
 	(map_assoc fields (lambda (k v)
 		(unnest_window_rule_rewrite_expr v domain_partition)))))
 (define unnest_window_rule (lambda (tree fields_expr condition_expr us_domain_cols us_accessing_tags us_select_info build_groupby build_map us_has_agg us_has_grp) (begin
-	(define domain_partition (unnest_window_rule_domain_partitions us_domain_cols us_accessing_tags))
+	(define domain_partition (unnest_window_rule_domain_partitions tree us_domain_cols us_accessing_tags))
 	(define rewritten_fields (unnest_window_rule_rewrite_fields
 		(unnest_select_rule_apply_fields us_select_info fields_expr)
 		domain_partition))
@@ -4529,9 +4544,14 @@ seeing the correctly prefixed outer alias. */
 										(match (unnest_operator_join_rule)
 											'(us_outer_parts us_domain_cols us_inner_cond_raw us_accessing_tags)
 											(begin
+												(define us_partitioned_tree
+													(unnest_window_rule_bind_domain_partitions
+														annotated_tree
+														us_domain_cols
+														us_accessing_tags))
 												(define us_build_aggregate_path (lambda (window_value_expr)
 													(unnest_groupby_rule
-														annotated_tree
+														us_partitioned_tree
 														subquery
 														sq_cache
 														target_expr
@@ -4551,7 +4571,7 @@ seeing the correctly prefixed outer alias. */
 														us_select_info)))
 												(define us_build_scalar_scan_path (lambda (window_value_expr)
 													(unnest_map_rule
-														annotated_tree
+														us_partitioned_tree
 														subquery
 														sq_cache
 														target_expr
@@ -4582,7 +4602,7 @@ seeing the correctly prefixed outer alias. */
 													(us_build_scalar_scan_path us_value_expr)))
 												(define unnest_operator_window_rule (lambda ()
 													(unnest_window_rule
-														annotated_tree
+														us_partitioned_tree
 														fields2_us
 														condition2_us
 														us_domain_cols
