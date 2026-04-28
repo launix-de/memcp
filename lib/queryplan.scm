@@ -572,7 +572,7 @@ layout. */
 		(planner_debug_scalar_events "rows" (merge
 			(coalesceNil (planner_debug_scalar_events "rows") '())
 			(list (list kind reason))))
-		nil)))
+		nil))))
 (define planner_debug_get_scalar_events (lambda ()
 	(coalesceNil (planner_debug_scalar_events "rows") '())))
 (define explain_plan_root_with_scalar_debug (lambda (plan) (begin
@@ -727,47 +727,47 @@ ports the actual operator rules to the tree representation. */
 		nil)))
 (define planner_tree_ir_primary_join_node (lambda (tree)
 	(match (planner_tree_ir_node_kind tree)
-		(op-window) (planner_tree_ir_primary_join_node (planner_tree_ir_window_child tree))
-		(op-map) (planner_tree_ir_primary_join_node (planner_tree_ir_map_child tree))
-		(op-groupby) (planner_tree_ir_primary_join_node (planner_tree_ir_groupby_child tree))
-		(op-select) (planner_tree_ir_select_child tree)
+		'op-window (planner_tree_ir_primary_join_node (planner_tree_ir_window_child tree))
+		'op-map (planner_tree_ir_primary_join_node (planner_tree_ir_map_child tree))
+		'op-groupby (planner_tree_ir_primary_join_node (planner_tree_ir_groupby_child tree))
+		'op-select (planner_tree_ir_select_child tree)
 		tree)))
 (define planner_tree_ir_scan_aliases (lambda (tree)
 		(match (planner_tree_ir_node_kind tree)
-			(op-scan) (begin
+			'op-scan (begin
 				(define table_payload (nth tree 2))
 				(match table_payload
 					'(alias _ _ _ _) (if (nil? alias) '() (list alias))
 					'()))
-			(op-join) (merge
+			'op-join (merge
 				(planner_tree_ir_scan_aliases (planner_tree_ir_join_left tree))
 				(planner_tree_ir_scan_aliases (planner_tree_ir_join_right tree)))
-			(op-dep-join) (merge
+			'op-dep-join (merge
 				(planner_tree_ir_scan_aliases (planner_tree_ir_dep_join_left tree))
 				(planner_tree_ir_scan_aliases (planner_tree_ir_dep_join_right tree)))
-			(op-select) (planner_tree_ir_scan_aliases (planner_tree_ir_select_child tree))
-			(op-map) (planner_tree_ir_scan_aliases (planner_tree_ir_map_child tree))
-			(op-groupby) (planner_tree_ir_scan_aliases (planner_tree_ir_groupby_child tree))
-			(op-window) (planner_tree_ir_scan_aliases (planner_tree_ir_window_child tree))
+			'op-select (planner_tree_ir_scan_aliases (planner_tree_ir_select_child tree))
+			'op-map (planner_tree_ir_scan_aliases (planner_tree_ir_map_child tree))
+			'op-groupby (planner_tree_ir_scan_aliases (planner_tree_ir_groupby_child tree))
+			'op-window (planner_tree_ir_scan_aliases (planner_tree_ir_window_child tree))
 			'())))
 (define planner_tree_ir_expr_refs_aliases (lambda (expr aliases)
 	(reduce (extract_tblvars expr) (lambda (found tv)
 		(or found (has? aliases tv))) false)))
 (define planner_tree_ir_accessing_for_rhs (lambda (tree lhs_aliases)
 	(match (planner_tree_ir_node_kind tree)
-		(op-scan) '()
-		(op-select) (merge_unique
+		'op-scan '()
+		'op-select (merge_unique
 			(if (planner_tree_ir_expr_refs_aliases (planner_tree_ir_select_predicate tree) lhs_aliases)
 				(list (quote select))
 				'())
 			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_select_child tree) lhs_aliases))
-		(op-map) (merge_unique
+		'op-map (merge_unique
 			(if (reduce_assoc (planner_tree_ir_map_projections tree) (lambda (found _k v)
 					(or found (planner_tree_ir_expr_refs_aliases v lhs_aliases))) false)
 				(list (quote map))
 				'())
 			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_map_child tree) lhs_aliases))
-		(op-groupby) (merge_unique
+		'op-groupby (merge_unique
 			(if (or
 					(reduce (coalesceNil (planner_tree_ir_groupby_keys tree) '()) (lambda (found expr)
 						(or found (planner_tree_ir_expr_refs_aliases expr lhs_aliases))) false)
@@ -777,7 +777,7 @@ ports the actual operator rules to the tree representation. */
 				(list (quote group))
 				'())
 			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_groupby_child tree) lhs_aliases))
-		(op-window) (merge_unique
+		'op-window (merge_unique
 			(if (or
 					(reduce (coalesceNil (nth tree 1) '()) (lambda (found expr)
 						(or found (planner_tree_ir_expr_refs_aliases expr lhs_aliases))) false)
@@ -790,13 +790,13 @@ ports the actual operator rules to the tree representation. */
 				(list (quote window))
 				'())
 			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_window_child tree) lhs_aliases))
-		(op-join) (merge_unique
+		'op-join (merge_unique
 			(if (planner_tree_ir_expr_refs_aliases (planner_tree_ir_join_predicate tree) lhs_aliases)
 				(list (quote join))
 				'())
 			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_join_left tree) lhs_aliases)
 			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_join_right tree) lhs_aliases))
-		(op-dep-join) (merge_unique
+		'op-dep-join (merge_unique
 			(if (planner_tree_ir_expr_refs_aliases (planner_tree_ir_dep_join_predicate tree) lhs_aliases)
 				(list (quote join))
 				'())
@@ -805,29 +805,29 @@ ports the actual operator rules to the tree representation. */
 		'())))
 (define annotate_dependent_joins (lambda (tree)
 	(match (planner_tree_ir_node_kind tree)
-		(op-scan) tree
-		(op-select) (planner_tree_ir_select
+		'op-scan tree
+		'op-select (planner_tree_ir_select
 			(planner_tree_ir_select_predicate tree)
 			(annotate_dependent_joins (planner_tree_ir_select_child tree)))
-		(op-map) (planner_tree_ir_map
+		'op-map (planner_tree_ir_map
 			(planner_tree_ir_map_projections tree)
 			(annotate_dependent_joins (planner_tree_ir_map_child tree)))
-		(op-groupby) (planner_tree_ir_groupby
+		'op-groupby (planner_tree_ir_groupby
 			(planner_tree_ir_groupby_keys tree)
 			(planner_tree_ir_groupby_aggs tree)
 			(planner_tree_ir_groupby_having tree)
 			(annotate_dependent_joins (planner_tree_ir_groupby_child tree)))
-		(op-window) (planner_tree_ir_window
+		'op-window (planner_tree_ir_window
 			(nth tree 1)
 			(planner_tree_ir_window_order tree)
 			(nth tree 3)
 			(annotate_dependent_joins (planner_tree_ir_window_child tree)))
-		(op-join) (planner_tree_ir_join
+		'op-join (planner_tree_ir_join
 			(nth tree 1)
 			(planner_tree_ir_join_predicate tree)
 			(annotate_dependent_joins (planner_tree_ir_join_left tree))
 			(annotate_dependent_joins (planner_tree_ir_join_right tree)))
-		(op-dep-join) (begin
+		'op-dep-join (begin
 			(define annotated_left (annotate_dependent_joins (planner_tree_ir_dep_join_left tree)))
 			(define annotated_right (annotate_dependent_joins (planner_tree_ir_dep_join_right tree)))
 			(define lhs_aliases (planner_tree_ir_scan_aliases annotated_left))
@@ -867,6 +867,30 @@ ports the actual operator rules to the tree representation. */
 		(merge acc (list k
 			(planner_tree_ir_select_rewrite_expr v repr))))
 		'())))
+(define make_unnest_select_rule_info (lambda (cclasses repr)
+	(list cclasses repr)))
+(define unnest_select_rule_info_cclasses (lambda (info)
+	(match info
+		'(cclasses _repr) cclasses
+		_ '())))
+(define unnest_select_rule_info_repr (lambda (info)
+	(match info
+		'(_cclasses repr) repr
+		_ '())))
+(define unnest_select_rule_apply_expr (lambda (info expr)
+	(planner_tree_ir_select_rewrite_expr expr
+		(unnest_select_rule_info_repr info))))
+(define unnest_select_rule_apply_fields (lambda (info fields)
+	(planner_tree_ir_select_rewrite_fields fields
+		(unnest_select_rule_info_repr info))))
+(define unnest_select_rule_build_info (lambda (select_node) (begin
+	(define select_cclasses (if (nil? select_node)
+		'()
+		(planner_tree_ir_select_equivalence_classes
+			(planner_tree_ir_select_predicate select_node))))
+	(make_unnest_select_rule_info
+		select_cclasses
+		(planner_tree_ir_select_repr_from_cclasses select_cclasses)))))
 (define unnest_select_rule (lambda (tree)
 	(begin
 		(define window_node (if (equal? (planner_tree_ir_node_kind tree) (quote op-window)) tree nil))
@@ -884,14 +908,11 @@ ports the actual operator rules to the tree representation. */
 					(nth shape_node 4)
 					nil))))
 		(define join_tree (if (nil? select_node) nil (planner_tree_ir_select_child select_node)))
-		(define select_cclasses (if (nil? select_node)
-			'()
-			(planner_tree_ir_select_equivalence_classes
-				(planner_tree_ir_select_predicate select_node))))
-		(define select_repr (planner_tree_ir_select_repr_from_cclasses select_cclasses))
+		(define select_info (unnest_select_rule_build_info select_node))
 		(define rewritten_fields_node
-			(planner_tree_ir_select_rewrite_fields fields_node select_repr))
-		(if (and
+			(unnest_select_rule_apply_fields select_info fields_node))
+		(list
+			(if (and
 				(not (nil? join_tree))
 				(equal? (planner_tree_ir_extract_tables join_tree) '())
 					(not (reduce_assoc rewritten_fields_node (lambda (a k v) (or a
@@ -901,8 +922,9 @@ ports the actual operator rules to the tree representation. */
 								(cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false)
 								false)))
 							(_nta v)))) false)))
-			(list (car (extract_assoc rewritten_fields_node (lambda (k v) v))) '())
-			nil))))
+				(list (car (extract_assoc rewritten_fields_node (lambda (k v) v))) '())
+				nil)
+			select_info))))
 (define unnest_join_rule (lambda (tree condition_expr inner_aliases outer_ref_rewriter) (begin
 	(define join_node (planner_tree_ir_primary_join_node tree))
 	(define join_condition (if (equal? (planner_tree_ir_node_kind join_node) (quote op-dep-join))
@@ -922,55 +944,51 @@ ports the actual operator rules to the tree representation. */
 	(reduce domain_partition (lambda (acc expr)
 		(append_unique acc expr))
 		(coalesceNil base_partition '()))))
+(define unnest_window_rule_rewrite_over (lambda (over domain_partition) (begin
+	(define partition_cols (coalesceNil (car over) '()))
+	(define order_cols (coalesceNil (cadr over) '()))
+	(list
+		(unnest_window_rule_merge_partitions partition_cols domain_partition)
+		(map order_cols (lambda (oi) (match oi
+			'(col dir) (list
+				(unnest_window_rule_rewrite_expr col domain_partition)
+				dir)
+			oi)))))))
 (define unnest_window_rule_rewrite_expr (lambda (expr domain_partition)
 	(match expr
-		'((symbol window_func) fn args over) (begin
-			(define partition_cols (coalesceNil (car over) '()))
-			(define order_cols (coalesceNil (cadr over) '()))
-			(list
-				(symbol window_func)
-				fn
-				(map args (lambda (arg)
-					(unnest_window_rule_rewrite_expr arg domain_partition)))
-				(list
-					(unnest_window_rule_merge_partitions partition_cols domain_partition)
-					(map order_cols (lambda (oi) (match oi
-						'(col dir) (list
-							(unnest_window_rule_rewrite_expr col domain_partition)
-							dir)
-						oi))))))
-		'((quote window_func) fn args over) (begin
-			(define partition_cols (coalesceNil (car over) '()))
-			(define order_cols (coalesceNil (cadr over) '()))
-			(list
-				(quote window_func)
-				fn
-				(map args (lambda (arg)
-					(unnest_window_rule_rewrite_expr arg domain_partition)))
-				(list
-					(unnest_window_rule_merge_partitions partition_cols domain_partition)
-					(map order_cols (lambda (oi) (match oi
-						'(col dir) (list
-							(unnest_window_rule_rewrite_expr col domain_partition)
-							dir)
-						oi))))))
+		'((symbol window_func) fn args over) (list
+			(symbol window_func)
+			fn
+			(map args (lambda (arg)
+				(unnest_window_rule_rewrite_expr arg domain_partition)))
+			(unnest_window_rule_rewrite_over over domain_partition))
+		'((quote window_func) fn args over) (list
+			(quote window_func)
+			fn
+			(map args (lambda (arg)
+				(unnest_window_rule_rewrite_expr arg domain_partition)))
+			(unnest_window_rule_rewrite_over over domain_partition))
 		(cons sym args) (cons sym (map args (lambda (arg)
 			(unnest_window_rule_rewrite_expr arg domain_partition))))
 		expr)))
 (define unnest_window_rule_rewrite_fields (lambda (fields domain_partition)
 	(map_assoc fields (lambda (k v)
 		(unnest_window_rule_rewrite_expr v domain_partition)))))
-(define unnest_window_rule (lambda (tree fields_expr condition_expr us_domain_cols us_accessing_tags build_groupby build_map us_has_agg us_has_grp) (begin
+(define unnest_window_rule (lambda (tree fields_expr condition_expr us_domain_cols us_accessing_tags us_select_info build_groupby build_map us_has_agg us_has_grp) (begin
 	(define domain_partition (unnest_window_rule_domain_partitions us_domain_cols us_accessing_tags))
-	(define rewritten_fields (unnest_window_rule_rewrite_fields fields_expr domain_partition))
-	(define rewritten_condition (unnest_window_rule_rewrite_expr condition_expr domain_partition))
+	(define rewritten_fields (unnest_window_rule_rewrite_fields
+		(unnest_select_rule_apply_fields us_select_info fields_expr)
+		domain_partition))
+	(define rewritten_condition (unnest_window_rule_rewrite_expr
+		(unnest_select_rule_apply_expr us_select_info condition_expr)
+		domain_partition))
 	(if (not (equal? (extract_window_funcs (coalesceNil rewritten_condition true)) '()))
 		nil
-		(begin
-			(define rewritten_value_expr (car (extract_assoc rewritten_fields (lambda (k v) v))))
-			(if (or us_has_agg us_has_grp)
-				(build_groupby rewritten_value_expr)
-				(build_map rewritten_value_expr)))))))
+			(begin
+				(define rewritten_value_expr (car (extract_assoc rewritten_fields (lambda (k v) v))))
+				(if (or us_has_agg us_has_grp)
+					(build_groupby rewritten_value_expr)
+					(build_map rewritten_value_expr)))))))
 (define unnest_accessing_has_tag (lambda (accessing_tags tag)
 	(reduce (coalesceNil accessing_tags '()) (lambda (found entry)
 		(or found (equal? entry tag))) false)))
@@ -998,7 +1016,28 @@ ports the actual operator rules to the tree representation. */
 		(if (unnest_groupby_rule_requires_domain_keys accessing_tags)
 			(merge dom_group_cols orig_group)
 			orig_group))))
-(define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl _us_nested_direct_tbls _us_base_aliases _us_base_tables us_has_stages _us_own_stages _us_inner_aliases tables2_us us_has_outer _us_inner_stages us_domain_cols _us_ria us_sq_prefix _us_lookup us_outer_parts _us_ror us_inner_cond_raw schemas2_us us_value_expr us_accessing_tags) (begin
+(define exists_subquery_uses_session_state_for_row_existence (lambda (query)
+	(match query
+		'(schema2 tables2 _fields2 condition2 group2 having2 _order2 limit2 offset2)
+		(expr_uses_session_state
+			(list schema2 tables2 '() condition2 group2 having2 nil limit2 offset2))
+		(expr_uses_session_state query))))
+(define count_subquery_cache_policy (lambda (query target_expr)
+	(match query
+		'(s t f c g h o l off) (begin
+			(define only_count (match f
+				'("__cnt" ((quote aggregate) 1 op 0)) (equal?? op (quote +))
+				'("__cnt" ((symbol aggregate) 1 op 0)) (equal?? op (quote +))
+				false))
+			(define session_sensitive_count
+				(if (nil? target_expr)
+					(exists_subquery_uses_session_state_for_row_existence query)
+					(expr_uses_session_state query)))
+			(if (and only_count (equal? g '(1)) session_sensitive_count)
+				(quote uncached-count)
+				nil))
+		nil)))
+(define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl _us_nested_direct_tbls _us_base_aliases _us_base_tables us_has_stages _us_own_stages _us_inner_aliases tables2_us us_has_outer _us_inner_stages us_domain_cols _us_ria us_sq_prefix _us_lookup us_outer_parts _us_ror us_inner_cond_raw schemas2_us us_value_expr us_accessing_tags us_select_info) (begin
 	(define _us_nested_direct_refs_base_aliases (reduce _us_nested_direct_tbls (lambda (acc td) (match td
 		'(_ _ _ _ je) (or acc
 			(and (not (nil? je))
@@ -1069,20 +1108,22 @@ ports the actual operator rules to the tree representation. */
 								(scalar_subselect_passthrough_schemas (merge _us_inner_tbls _us_nested_direct_tbls) schemas2_us)))
 							(if (not (equal? _us_passthrough_schemas '()))
 								(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
-							(define us_subst (_us_ria us_value_expr))
+							(define us_subst (_us_ria (unnest_select_rule_apply_expr us_select_info us_value_expr)))
 							(if (not (nil? us_simple_uncorrelated_cache_key))
 								(sq_cache "scalar_helper_cache"
 									(set_assoc (coalesceNil (sq_cache "scalar_helper_cache") '())
 										us_simple_uncorrelated_cache_key
 										us_subst)))
 							(list us_subst us_tbl_entries))))))
-		nil)))
-(define unnest_groupby_rule (lambda (tree subquery sq_cache target_expr tables2_us _us_lookup us_alias_map _us_ria us_has_stages _us_own_stages _us_inner_stages us_domain_cols us_inner_cond_raw schemas2_us us_value_expr us_has_grp us_accessing_tags) (begin
+			nil))))
+(define unnest_groupby_rule (lambda (tree subquery sq_cache target_expr tables2_us _us_lookup us_alias_map _us_ria us_has_stages _us_own_stages _us_inner_stages us_domain_cols us_inner_cond_raw schemas2_us us_value_expr us_has_grp us_accessing_tags us_select_info) (begin
 	/* === A: Aggregate -> flatten inner tables + scoped GROUP stage ===
 	Neumann Γ_{A∪D;f}: add domain cols to GROUP BY, flatten inner tables
 	with prefix into outer table list. No materialization. */
 	(define _us_prefix_ria (lambda (expr)
-		(scalar_subselect_rewrite_prefixed_expr expr _us_lookup)))
+		(scalar_subselect_rewrite_prefixed_expr
+			(unnest_select_rule_apply_expr us_select_info expr)
+			_us_lookup)))
 	(define us_prefixed_tables (scalar_subselect_prefixed_tables tables2_us _us_lookup _us_prefix_ria))
 	(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
 	(define us_orig_group (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
@@ -1182,14 +1223,15 @@ ports the actual operator rules to the tree representation. */
 									(if (nil? je) _my_cond
 										(_us_merge_unique_and je _my_cond)))))))
 				td))))))
-	(define us_subst_raw (_us_prefix_ria us_value_expr))
+	(define us_subst_raw (_us_prefix_ria
+		(unnest_select_rule_apply_expr us_select_info us_value_expr)))
 	(define us_is_count (match us_value_expr
 		'((symbol aggregate) _ (symbol +) 0) true
 		'((quote aggregate) _ (symbol +) 0) true
 		'((quote aggregate) _ '(symbol +) 0) true
 		false))
 	(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
-	(list us_subst '())))
+	(list us_subst '()))))
 (define planner_flat_tables_to_tree_ir (lambda (schema tables)
 	(if (or (nil? tables) (equal? tables '()))
 		(planner_tree_ir_scan schema nil)
@@ -4565,7 +4607,8 @@ seeing the correctly prefixed outer alias. */
 						groupby machinery below. */
 						(define unnest_operator_select_rule (lambda ()
 							(unnest_select_rule annotated_tree)))
-						(define _us_select_rule_result (unnest_operator_select_rule))
+						(match (unnest_operator_select_rule)
+							'(_us_select_rule_result us_select_info)
 						(if (not (nil? _us_select_rule_result))
 							_us_select_rule_result
 							(begin
@@ -4697,7 +4740,8 @@ seeing the correctly prefixed outer alias. */
 														schemas2_us
 														window_value_expr
 														us_has_grp
-														us_accessing_tags)))
+														us_accessing_tags
+														us_select_info)))
 												(define us_build_scalar_scan_path (lambda (window_value_expr)
 													(unnest_map_rule
 														annotated_tree
@@ -4723,7 +4767,8 @@ seeing the correctly prefixed outer alias. */
 														us_inner_cond_raw
 														schemas2_us
 														window_value_expr
-														us_accessing_tags)))
+														us_accessing_tags
+														us_select_info)))
 												(define unnest_operator_groupby_rule (lambda ()
 													(us_build_aggregate_path us_value_expr)))
 												(define unnest_operator_map_rule (lambda ()
@@ -4735,6 +4780,7 @@ seeing the correctly prefixed outer alias. */
 														condition2_us
 														us_domain_cols
 														us_accessing_tags
+														us_select_info
 														us_build_aggregate_path
 														us_build_scalar_scan_path
 														us_has_agg
@@ -4758,7 +4804,7 @@ seeing the correctly prefixed outer alias. */
 											)
 										)
 									)
-								)
+								))
 					)))
 					nil /* untangle failed */
 				)
