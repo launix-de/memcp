@@ -725,6 +725,13 @@ ports the actual operator rules to the tree representation. */
 	(if (equal? (planner_tree_ir_node_kind tree) (quote op-map))
 		(nth tree 2)
 		nil)))
+(define planner_tree_ir_primary_join_node (lambda (tree)
+	(match (planner_tree_ir_node_kind tree)
+		(op-window) (planner_tree_ir_primary_join_node (planner_tree_ir_window_child tree))
+		(op-map) (planner_tree_ir_primary_join_node (planner_tree_ir_map_child tree))
+		(op-groupby) (planner_tree_ir_primary_join_node (planner_tree_ir_groupby_child tree))
+		(op-select) (planner_tree_ir_select_child tree)
+		tree)))
 (define planner_tree_ir_scan_aliases (lambda (tree)
 		(match (planner_tree_ir_node_kind tree)
 			(op-scan) (begin
@@ -851,24 +858,33 @@ ports the actual operator rules to the tree representation. */
 		(if (and
 				(not (nil? join_tree))
 				(equal? (planner_tree_ir_extract_tables join_tree) '())
-				(not (reduce_assoc fields_node (lambda (a k v) (or a
-					(begin
-						(define _nta (lambda (e) (match e
-							(cons (symbol aggregate) _) true
-							(cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false)
-							false)))
-						(_nta v)))) false)))
+					(not (reduce_assoc fields_node (lambda (a k v) (or a
+						(begin
+							(define _nta (lambda (e) (match e
+								(cons (symbol aggregate) _) true
+								(cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false)
+								false)))
+							(_nta v)))) false)))
 			(list (car (extract_assoc fields_node (lambda (k v) v))) '())
 			nil))))
-(define unnest_join_rule (lambda (condition_expr inner_aliases outer_ref_rewriter)
-	(scalar_subselect_correlation_info condition_expr inner_aliases outer_ref_rewriter)))
+(define unnest_join_rule (lambda (tree condition_expr inner_aliases outer_ref_rewriter) (begin
+	(define join_node (planner_tree_ir_primary_join_node tree))
+	(define join_condition (if (equal? (planner_tree_ir_node_kind join_node) (quote op-dep-join))
+		(planner_tree_ir_dep_join_predicate join_node)
+		condition_expr))
+	(define accessing_tags (if (equal? (planner_tree_ir_node_kind join_node) (quote op-dep-join))
+		(planner_tree_ir_dep_join_accessing join_node)
+		'()))
+	(match (scalar_subselect_correlation_info join_condition inner_aliases outer_ref_rewriter)
+		'(us_outer_parts us_domain_cols us_inner_cond_raw)
+		(list us_outer_parts us_domain_cols us_inner_cond_raw accessing_tags)))))
 (define unnest_window_rule (lambda (tree)
 	(if (and
 			(equal? (planner_tree_ir_node_kind tree) (quote op-window))
 			(not (nil? (nth tree 1))))
 		nil
 		nil)))
-(define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl _us_nested_direct_tbls _us_base_aliases _us_base_tables us_has_stages _us_own_stages _us_inner_aliases tables2_us us_has_outer _us_inner_stages us_domain_cols _us_ria us_sq_prefix _us_lookup us_outer_parts _us_ror us_inner_cond_raw schemas2_us us_value_expr) (begin
+(define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl _us_nested_direct_tbls _us_base_aliases _us_base_tables us_has_stages _us_own_stages _us_inner_aliases tables2_us us_has_outer _us_inner_stages us_domain_cols _us_ria us_sq_prefix _us_lookup us_outer_parts _us_ror us_inner_cond_raw schemas2_us us_value_expr us_accessing_tags) (begin
 	(define _us_nested_direct_refs_base_aliases (reduce _us_nested_direct_tbls (lambda (acc td) (match td
 		'(_ _ _ _ je) (or acc
 			(and (not (nil? je))
@@ -947,7 +963,7 @@ ports the actual operator rules to the tree representation. */
 										us_subst)))
 							(list us_subst us_tbl_entries))))))
 		nil)))
-(define unnest_groupby_rule (lambda (tree subquery sq_cache target_expr tables2_us _us_lookup us_alias_map _us_ria us_has_stages _us_own_stages _us_inner_stages us_domain_cols us_inner_cond_raw schemas2_us us_value_expr us_has_grp) (begin
+(define unnest_groupby_rule (lambda (tree subquery sq_cache target_expr tables2_us _us_lookup us_alias_map _us_ria us_has_stages _us_own_stages _us_inner_stages us_domain_cols us_inner_cond_raw schemas2_us us_value_expr us_has_grp us_accessing_tags) (begin
 	/* === A: Aggregate -> flatten inner tables + scoped GROUP stage ===
 	Neumann Γ_{A∪D;f}: add domain cols to GROUP BY, flatten inner tables
 	with prefix into outer table list. No materialization. */
@@ -4541,9 +4557,9 @@ seeing the correctly prefixed outer alias. */
 										(define _us_ror unnest_runtime_outer_ref_expr)
 										(define _us_ria (lambda (expr) (unnest_rewrite_inner_aliases expr _us_lookup)))
 										(define unnest_operator_join_rule (lambda ()
-											(unnest_join_rule condition2_us us_inner_aliases _us_ror)))
+											(unnest_join_rule annotated_tree condition2_us us_inner_aliases _us_ror)))
 										(match (unnest_operator_join_rule)
-											'(us_outer_parts us_domain_cols us_inner_cond_raw)
+											'(us_outer_parts us_domain_cols us_inner_cond_raw us_accessing_tags)
 											(begin
 												(define us_build_aggregate_path (lambda ()
 													(unnest_groupby_rule
@@ -4562,7 +4578,8 @@ seeing the correctly prefixed outer alias. */
 														us_inner_cond_raw
 														schemas2_us
 														us_value_expr
-														us_has_grp)))
+														us_has_grp
+														us_accessing_tags)))
 												(define us_build_scalar_scan_path (lambda ()
 													(unnest_map_rule
 														annotated_tree
@@ -4587,7 +4604,8 @@ seeing the correctly prefixed outer alias. */
 														_us_ror
 														us_inner_cond_raw
 														schemas2_us
-														us_value_expr)))
+														us_value_expr
+														us_accessing_tags)))
 														nil
 													)
 												)))
