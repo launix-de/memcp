@@ -765,6 +765,19 @@ ports the actual operator rules to the tree representation. */
 	(coalesceNil (planner_tree_ir_window_limit tree) fallback_limit)))
 (define planner_tree_ir_window_effective_offset (lambda (tree fallback_offset)
 	(coalesceNil (planner_tree_ir_window_offset tree) fallback_offset)))
+(define planner_tree_ir_window_rewrite_order (lambda (tree fallback_order rewrite_expr)
+	(map (planner_tree_ir_window_effective_order tree fallback_order) (lambda (oi) (match oi
+		'(col dir) (list (rewrite_expr col) dir)
+		oi)))))
+(define planner_tree_ir_window_make_group_stage (lambda (tree fallback_order fallback_limit fallback_offset group having rewrite_expr aliases init)
+	(make_group_stage
+		group
+		having
+		(planner_tree_ir_window_rewrite_order tree fallback_order rewrite_expr)
+		(planner_tree_ir_window_effective_limit tree fallback_limit)
+		(planner_tree_ir_window_effective_offset tree fallback_offset)
+		aliases
+		init)))
 (define planner_tree_ir_scan_aliases (lambda (tree)
 		(match (planner_tree_ir_node_kind tree)
 			'op-scan (begin
@@ -1250,14 +1263,22 @@ ports the actual operator rules to the tree representation. */
 	(define us_stage_order_fallback_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
 	(define us_stage_limit_fallback_a (if (and us_has_grp us_has_stages) (stage_limit_val (car _us_own_stages)) nil))
 	(define us_stage_offset_fallback_a (if (and us_has_grp us_has_stages) (stage_offset_val (car _us_own_stages)) nil))
-	(define us_orig_order_a (planner_tree_ir_window_effective_order tree us_stage_order_fallback_a))
-	(define us_orig_limit_a (planner_tree_ir_window_effective_limit tree us_stage_limit_fallback_a))
-	(define us_orig_offset_a (planner_tree_ir_window_effective_offset tree us_stage_offset_fallback_a))
-	(define us_new_order (map us_orig_order_a (lambda (oi) (match oi '(col dir) (list (_us_prefix_ria col) dir) oi))))
-	(define us_group_stage (if (group_stage_requested us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a)
+	(define us_new_order (planner_tree_ir_window_rewrite_order tree us_stage_order_fallback_a _us_prefix_ria))
+	(define us_new_limit (planner_tree_ir_window_effective_limit tree us_stage_limit_fallback_a))
+	(define us_new_offset (planner_tree_ir_window_effective_offset tree us_stage_offset_fallback_a))
+	(define us_group_stage (if (group_stage_requested us_new_group us_new_having us_new_order us_new_limit us_new_offset)
 		(stage_with_cache_query
 			(stage_with_cache_policy
-				(make_group_stage us_new_group us_new_having us_new_order us_orig_limit_a us_orig_offset_a us_stage_aliases nil)
+				(planner_tree_ir_window_make_group_stage
+					tree
+					us_stage_order_fallback_a
+					us_stage_limit_fallback_a
+					us_stage_offset_fallback_a
+					us_new_group
+					us_new_having
+					_us_prefix_ria
+					us_stage_aliases
+					nil)
 				us_cache_policy)
 			(if (nil? us_cache_policy) nil subquery))
 		nil))
