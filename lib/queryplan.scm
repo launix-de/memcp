@@ -621,6 +621,8 @@ ports the actual operator rules to the tree representation. */
 	(list (quote op-scan) schema table)))
 (define planner_tree_ir_join (lambda (join_type predicate left right)
 	(list (quote op-join) join_type predicate left right)))
+(define planner_tree_ir_dep_join (lambda (predicate left right accessing)
+	(list (quote op-dep-join) predicate left right accessing)))
 (define planner_tree_ir_select (lambda (predicate child)
 	(list (quote op-select) predicate child)))
 (define planner_tree_ir_map (lambda (projections child)
@@ -661,6 +663,24 @@ ports the actual operator rules to the tree representation. */
 	(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
 		(nth tree 4)
 		nil)))
+(define planner_tree_ir_dep_join_predicate (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-dep-join))
+		(nth tree 1)
+		nil)))
+(define planner_tree_ir_dep_join_left (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-dep-join))
+		(nth tree 2)
+		nil)))
+(define planner_tree_ir_dep_join_right (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-dep-join))
+		(nth tree 3)
+		nil)))
+(define planner_tree_ir_dep_join_accessing (lambda (tree)
+	(if (and
+				(equal? (planner_tree_ir_node_kind tree) (quote op-dep-join))
+				(>= (count tree) 5))
+		(nth tree 4)
+		'())))
 (define planner_tree_ir_map_projections (lambda (tree)
 	(if (equal? (planner_tree_ir_node_kind tree) (quote op-map))
 		(nth tree 1)
@@ -668,6 +688,18 @@ ports the actual operator rules to the tree representation. */
 (define planner_tree_ir_groupby_aggs (lambda (tree)
 	(if (equal? (planner_tree_ir_node_kind tree) (quote op-groupby))
 		(nth tree 2)
+		nil)))
+(define planner_tree_ir_groupby_keys (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-groupby))
+		(nth tree 1)
+		nil)))
+(define planner_tree_ir_groupby_having (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-groupby))
+		(nth tree 3)
+		nil)))
+(define planner_tree_ir_groupby_child (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-groupby))
+		(nth tree 4)
 		nil)))
 (define planner_tree_ir_select_predicate (lambda (tree)
 	(if (equal? (planner_tree_ir_node_kind tree) (quote op-select))
@@ -677,6 +709,128 @@ ports the actual operator rules to the tree representation. */
 	(if (equal? (planner_tree_ir_node_kind tree) (quote op-select))
 		(nth tree 2)
 		nil)))
+(define planner_tree_ir_join_predicate (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-join))
+		(nth tree 2)
+		nil)))
+(define planner_tree_ir_join_left (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-join))
+		(nth tree 3)
+		nil)))
+(define planner_tree_ir_join_right (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-join))
+		(nth tree 4)
+		nil)))
+(define planner_tree_ir_map_child (lambda (tree)
+	(if (equal? (planner_tree_ir_node_kind tree) (quote op-map))
+		(nth tree 2)
+		nil)))
+(define planner_tree_ir_scan_aliases (lambda (tree)
+		(match (planner_tree_ir_node_kind tree)
+			(op-scan) (begin
+				(define table_payload (nth tree 2))
+				(match table_payload
+					'(alias _ _ _ _) (if (nil? alias) '() (list alias))
+					'()))
+			(op-join) (merge
+				(planner_tree_ir_scan_aliases (planner_tree_ir_join_left tree))
+				(planner_tree_ir_scan_aliases (planner_tree_ir_join_right tree)))
+			(op-dep-join) (merge
+				(planner_tree_ir_scan_aliases (planner_tree_ir_dep_join_left tree))
+				(planner_tree_ir_scan_aliases (planner_tree_ir_dep_join_right tree)))
+			(op-select) (planner_tree_ir_scan_aliases (planner_tree_ir_select_child tree))
+			(op-map) (planner_tree_ir_scan_aliases (planner_tree_ir_map_child tree))
+			(op-groupby) (planner_tree_ir_scan_aliases (planner_tree_ir_groupby_child tree))
+			(op-window) (planner_tree_ir_scan_aliases (planner_tree_ir_window_child tree))
+			'())))
+(define planner_tree_ir_expr_refs_aliases (lambda (expr aliases)
+	(reduce (extract_tblvars expr) (lambda (found tv)
+		(or found (has? aliases tv))) false)))
+(define planner_tree_ir_accessing_for_rhs (lambda (tree lhs_aliases)
+	(match (planner_tree_ir_node_kind tree)
+		(op-scan) '()
+		(op-select) (merge_unique
+			(if (planner_tree_ir_expr_refs_aliases (planner_tree_ir_select_predicate tree) lhs_aliases)
+				(list (quote select))
+				'())
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_select_child tree) lhs_aliases))
+		(op-map) (merge_unique
+			(if (reduce_assoc (planner_tree_ir_map_projections tree) (lambda (found _k v)
+					(or found (planner_tree_ir_expr_refs_aliases v lhs_aliases))) false)
+				(list (quote map))
+				'())
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_map_child tree) lhs_aliases))
+		(op-groupby) (merge_unique
+			(if (or
+					(reduce (coalesceNil (planner_tree_ir_groupby_keys tree) '()) (lambda (found expr)
+						(or found (planner_tree_ir_expr_refs_aliases expr lhs_aliases))) false)
+					(reduce_assoc (planner_tree_ir_groupby_aggs tree) (lambda (found _k v)
+						(or found (planner_tree_ir_expr_refs_aliases v lhs_aliases))) false)
+					(planner_tree_ir_expr_refs_aliases (planner_tree_ir_groupby_having tree) lhs_aliases))
+				(list (quote group))
+				'())
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_groupby_child tree) lhs_aliases))
+		(op-window) (merge_unique
+			(if (or
+					(reduce (coalesceNil (nth tree 1) '()) (lambda (found expr)
+						(or found (planner_tree_ir_expr_refs_aliases expr lhs_aliases))) false)
+					(reduce (coalesceNil (planner_tree_ir_window_order tree) '()) (lambda (found oi) (match oi
+						'(col _dir) (or found (planner_tree_ir_expr_refs_aliases col lhs_aliases))
+						_ found)) false)
+					(reduce (coalesceNil (nth tree 3) '()) (lambda (found entry) (match entry
+						'(_ entry_value) (or found (planner_tree_ir_expr_refs_aliases entry_value lhs_aliases))
+						_ found)) false))
+				(list (quote window))
+				'())
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_window_child tree) lhs_aliases))
+		(op-join) (merge_unique
+			(if (planner_tree_ir_expr_refs_aliases (planner_tree_ir_join_predicate tree) lhs_aliases)
+				(list (quote join))
+				'())
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_join_left tree) lhs_aliases)
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_join_right tree) lhs_aliases))
+		(op-dep-join) (merge_unique
+			(if (planner_tree_ir_expr_refs_aliases (planner_tree_ir_dep_join_predicate tree) lhs_aliases)
+				(list (quote join))
+				'())
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_dep_join_left tree) lhs_aliases)
+			(planner_tree_ir_accessing_for_rhs (planner_tree_ir_dep_join_right tree) lhs_aliases))
+		'())))
+(define annotate_dependent_joins (lambda (tree)
+	(match (planner_tree_ir_node_kind tree)
+		(op-scan) tree
+		(op-select) (planner_tree_ir_select
+			(planner_tree_ir_select_predicate tree)
+			(annotate_dependent_joins (planner_tree_ir_select_child tree)))
+		(op-map) (planner_tree_ir_map
+			(planner_tree_ir_map_projections tree)
+			(annotate_dependent_joins (planner_tree_ir_map_child tree)))
+		(op-groupby) (planner_tree_ir_groupby
+			(planner_tree_ir_groupby_keys tree)
+			(planner_tree_ir_groupby_aggs tree)
+			(planner_tree_ir_groupby_having tree)
+			(annotate_dependent_joins (planner_tree_ir_groupby_child tree)))
+		(op-window) (planner_tree_ir_window
+			(nth tree 1)
+			(planner_tree_ir_window_order tree)
+			(nth tree 3)
+			(annotate_dependent_joins (planner_tree_ir_window_child tree)))
+		(op-join) (planner_tree_ir_join
+			(nth tree 1)
+			(planner_tree_ir_join_predicate tree)
+			(annotate_dependent_joins (planner_tree_ir_join_left tree))
+			(annotate_dependent_joins (planner_tree_ir_join_right tree)))
+		(op-dep-join) (begin
+			(define annotated_left (annotate_dependent_joins (planner_tree_ir_dep_join_left tree)))
+			(define annotated_right (annotate_dependent_joins (planner_tree_ir_dep_join_right tree)))
+			(define lhs_aliases (planner_tree_ir_scan_aliases annotated_left))
+			(define accessing (planner_tree_ir_accessing_for_rhs annotated_right lhs_aliases))
+			(planner_tree_ir_dep_join
+				(planner_tree_ir_dep_join_predicate tree)
+				annotated_left
+				annotated_right
+				accessing))
+		tree)))
 (define unnest_select_rule (lambda (tree)
 	(begin
 		(define window_node (if (equal? (planner_tree_ir_node_kind tree) (quote op-window)) tree nil))
@@ -920,7 +1074,9 @@ ports the actual operator rules to the tree representation. */
 	(define node_kind (planner_tree_ir_node_kind node))
 	(if (equal? node_kind (quote op-scan))
 		(nth node 1)
-		(if (equal? node_kind (quote op-join))
+		(if (or
+				(equal? node_kind (quote op-join))
+				(equal? node_kind (quote op-dep-join)))
 			(planner_tree_ir_extract_schema (nth node 3))
 			(error (concat "TREE_IR_SCHEMA_EXPECTED_SCAN " (serialize node))))))))
 (define planner_tree_ir_extract_tables (lambda (node) (begin
@@ -929,7 +1085,9 @@ ports the actual operator rules to the tree representation. */
 		(begin
 			(define table_payload (nth node 2))
 			(if (nil? table_payload) '() (list table_payload)))
-		(if (equal? node_kind (quote op-join))
+		(if (or
+				(equal? node_kind (quote op-join))
+				(equal? node_kind (quote op-dep-join)))
 			(merge
 				(planner_tree_ir_extract_tables (nth node 3))
 				(planner_tree_ir_extract_tables (nth node 4)))
@@ -4245,13 +4403,14 @@ seeing the correctly prefixed outer alias. */
 			(begin
 				(define normalized_subquery (planner_flat_subquery_roundtrip_via_tree_ir subquery))
 				(define normalized_tree (planner_flat_subquery_to_tree_ir normalized_subquery))
+				(define annotated_tree (annotate_dependent_joins normalized_tree))
 				(define raw_vals_us (if (and (list? subquery) (>= (count subquery) 9))
 					(list
 						(nth normalized_subquery 4)
 						(nth normalized_subquery 5)
-						(planner_tree_ir_window_order normalized_tree)
-						(planner_tree_ir_window_limit normalized_tree)
-						(planner_tree_ir_window_offset normalized_tree))
+						(planner_tree_ir_window_order annotated_tree)
+						(planner_tree_ir_window_limit annotated_tree)
+						(planner_tree_ir_window_offset annotated_tree))
 					(list nil nil nil nil nil)))
 				(define raw_group_us (nth raw_vals_us 0))
 				(define raw_having_us (nth raw_vals_us 1))
@@ -4271,7 +4430,7 @@ seeing the correctly prefixed outer alias. */
 						inner tables still short-circuit here instead of entering the join /
 						groupby machinery below. */
 						(define unnest_operator_select_rule (lambda ()
-							(unnest_select_rule normalized_tree)))
+							(unnest_select_rule annotated_tree)))
 						(define _us_select_rule_result (unnest_operator_select_rule))
 						(if (not (nil? _us_select_rule_result))
 							_us_select_rule_result
@@ -4388,7 +4547,7 @@ seeing the correctly prefixed outer alias. */
 											(begin
 												(define us_build_aggregate_path (lambda ()
 													(unnest_groupby_rule
-														normalized_tree
+														annotated_tree
 														subquery
 														sq_cache
 														target_expr
@@ -4406,7 +4565,7 @@ seeing the correctly prefixed outer alias. */
 														us_has_grp)))
 												(define us_build_scalar_scan_path (lambda ()
 													(unnest_map_rule
-														normalized_tree
+														annotated_tree
 														subquery
 														sq_cache
 														target_expr
@@ -4435,7 +4594,7 @@ seeing the correctly prefixed outer alias. */
 												(define unnest_operator_groupby_rule us_build_aggregate_path)
 												(define unnest_operator_map_rule us_build_scalar_scan_path)
 												(define unnest_operator_window_rule (lambda ()
-													(unnest_window_rule normalized_tree)))
+													(unnest_window_rule annotated_tree)))
 												(define us_has_window (or
 													(reduce_assoc fields2_us (lambda (found _k v)
 														(or found (not (equal? (extract_window_funcs v) '()))))
