@@ -2098,6 +2098,73 @@ runtime promise name is created during unnesting anymore. */
 (define once_limit_scan_contract_partition_cols (lambda (contract) (nth contract 2)))
 (define once_limit_scan_contract_once_limit (lambda (contract) (nth contract 3)))
 (define once_limit_scan_contract_promise_name (lambda (contract) (nth contract 4)))
+(define make_ordered_scan_stage_config (lambda (tbl partition_stage fallback_order fallback_limit fallback_offset fallback_partcols is_first) (begin
+	(define tbl_scan_order (scan_tagged_table_order tbl))
+	(define tbl_scan_limit (scan_tagged_table_limit tbl))
+	(define tbl_scan_offset (scan_tagged_table_offset tbl))
+	(define tbl_scan_partcols (scan_tagged_table_partition_cols tbl))
+	(define tbl_once_limit (scan_tagged_table_once_limit tbl))
+	(define stage_order_cfg (if (not (nil? tbl_once_limit))
+		tbl_scan_order
+		(if (nil? partition_stage)
+			(coalesceNil fallback_order '())
+			(coalesceNil (stage_order_list partition_stage) '()))))
+	(define stage_offset_cfg (if (not (nil? tbl_once_limit))
+		(coalesceNil tbl_scan_offset 0)
+		(if (not (nil? partition_stage))
+			(coalesceNil (stage_offset_val partition_stage) 0)
+			(if is_first (coalesceNil fallback_offset 0) 0))))
+	(define stage_limit_cfg (if (not (nil? tbl_once_limit))
+		(coalesceNil tbl_scan_limit -1)
+		(if (not (nil? partition_stage))
+			(coalesceNil (stage_limit_val partition_stage) -1)
+			(if is_first (coalesceNil fallback_limit -1) -1))))
+	(define stage_partcols_cfg (if (not (nil? tbl_once_limit))
+		tbl_scan_partcols
+		(if (not (nil? partition_stage))
+			(coalesceNil (stage_limit_partition_cols partition_stage) 0)
+			(if is_first (coalesceNil fallback_partcols 0) 0))))
+	(define stage_once_limit_cfg (coalesce tbl_once_limit
+		(if (nil? partition_stage) nil (stage_once_limit partition_stage))))
+	(define stage_init_cfg (if (nil? partition_stage) nil (stage_init_code partition_stage)))
+	(list stage_order_cfg stage_limit_cfg stage_offset_cfg stage_partcols_cfg stage_once_limit_cfg stage_init_cfg))))
+(define ordered_scan_stage_config_order (lambda (cfg) (nth cfg 0)))
+(define ordered_scan_stage_config_limit (lambda (cfg) (nth cfg 1)))
+(define ordered_scan_stage_config_offset (lambda (cfg) (nth cfg 2)))
+(define ordered_scan_stage_config_partcols (lambda (cfg) (nth cfg 3)))
+(define ordered_scan_stage_config_once_limit (lambda (cfg) (nth cfg 4)))
+(define ordered_scan_stage_config_init (lambda (cfg) (nth cfg 5)))
+(define make_local_scan_stage_config (lambda (tbl partition_stage) (begin
+	(define tagged_scan (scan_tagged_table_needs_scan_order tbl))
+	(define tbl_scan_order (scan_tagged_table_order tbl))
+	(define tbl_scan_limit (scan_tagged_table_limit tbl))
+	(define tbl_scan_offset (scan_tagged_table_offset tbl))
+	(define tbl_scan_partcols (scan_tagged_table_partition_cols tbl))
+	(define tbl_once_limit (scan_tagged_table_once_limit tbl))
+	(define stage_order_cfg (if tagged_scan
+		tbl_scan_order
+		(if (nil? partition_stage) '() (coalesceNil (stage_order_list partition_stage) '()))))
+	(define stage_partcols_cfg (if tagged_scan
+		tbl_scan_partcols
+		(if (nil? partition_stage) 0 (coalesceNil (stage_limit_partition_cols partition_stage) 0))))
+	(define stage_limit_cfg (if tagged_scan
+		(coalesceNil tbl_scan_limit -1)
+		(if (nil? partition_stage) -1 (coalesceNil (stage_limit_val partition_stage) -1))))
+	(define stage_offset_cfg (if tagged_scan
+		(coalesceNil tbl_scan_offset 0)
+		(if (nil? partition_stage) 0 (coalesceNil (stage_offset_val partition_stage) 0))))
+	(define stage_once_limit_cfg (coalesce tbl_once_limit
+		(if (nil? partition_stage) nil (stage_once_limit partition_stage))))
+	(define stage_init_cfg (if tagged_scan nil
+		(if (nil? partition_stage) nil (stage_init_code partition_stage))))
+	(list tagged_scan stage_order_cfg stage_limit_cfg stage_offset_cfg stage_partcols_cfg stage_once_limit_cfg stage_init_cfg))))
+(define local_scan_stage_config_tagged (lambda (cfg) (nth cfg 0)))
+(define local_scan_stage_config_order (lambda (cfg) (nth cfg 1)))
+(define local_scan_stage_config_limit (lambda (cfg) (nth cfg 2)))
+(define local_scan_stage_config_offset (lambda (cfg) (nth cfg 3)))
+(define local_scan_stage_config_partcols (lambda (cfg) (nth cfg 4)))
+(define local_scan_stage_config_once_limit (lambda (cfg) (nth cfg 5)))
+(define local_scan_stage_config_init (lambda (cfg) (nth cfg 6)))
 (define wrap_once_limit_body (lambda (promise_name body)
 	(if (nil? promise_name)
 		body
@@ -10864,30 +10931,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									this helper is the driver after join_reorder. */
 										(define _ps_ord (if (not (nil? tbl_once_limit)) nil
 											(find_partition_stage_for_alias partition_stages tblvar)))
-										(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
+										(define _ord_stage_cfg (make_ordered_scan_stage_config
+											tbl _ps_ord stage_order stage_limit stage_offset stage_partcols is_first))
 									/* tagged helper scans override the local scan config; otherwise use
 									partition-stage order first and the outer ORDER only on the driver scan. */
-									(define _eff_order (if (not (nil? tbl_once_limit))
-										tbl_scan_order
-										(if (nil? _ps_ord) stage_order (coalesceNil (stage_order_list _ps_ord) '()))))
+									(define _eff_order (ordered_scan_stage_config_order _ord_stage_cfg))
 									/* extract order cols for this tblvar */
 										(set ordercols (extract_scan_order_cols_for_tblvar _eff_order tblvar))
 										(set dirs (extract_scan_order_dirs_for_tblvar _eff_order tblvar))
 
 									/* offset/limit: tagged helper scans carry their own local limits. */
-									(define ord_raw_scan_offset (if (not (nil? tbl_once_limit))
-										(coalesceNil tbl_scan_offset 0)
-										(if (not (nil? _ps_ord)) (coalesceNil (stage_offset_val _ps_ord) 0)
-											(if is_first stage_offset 0))))
-									(define ord_raw_scan_limit (if (not (nil? tbl_once_limit))
-										(coalesceNil tbl_scan_limit -1)
-										(if (not (nil? _ps_ord)) (coalesceNil (stage_limit_val _ps_ord) -1)
-											(if is_first (coalesceNil stage_limit -1) -1))))
-									(define ord_raw_scan_partcols (if (not (nil? tbl_once_limit))
-										tbl_scan_partcols
-										(if (not (nil? _ps_ord)) (coalesceNil (stage_limit_partition_cols _ps_ord) 0)
-											(if is_first stage_partcols 0))))
-									(define ord_effective_once_limit (coalesce tbl_once_limit _ps_once_limit))
+									(define ord_raw_scan_offset (ordered_scan_stage_config_offset _ord_stage_cfg))
+									(define ord_raw_scan_limit (ordered_scan_stage_config_limit _ord_stage_cfg))
+									(define ord_raw_scan_partcols (ordered_scan_stage_config_partcols _ord_stage_cfg))
+									(define ord_effective_once_limit (ordered_scan_stage_config_once_limit _ord_stage_cfg))
 									(define ord_once_contract (if (nil? ord_effective_once_limit)
 										nil
 										(make_once_limit_scan_contract ord_raw_scan_limit ord_raw_scan_offset ord_raw_scan_partcols ord_effective_once_limit tblvar condition joinexpr tbl)))
@@ -10903,7 +10960,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ord_once_name (if (nil? ord_once_contract) nil (once_limit_scan_contract_promise_name ord_once_contract)))
 									(define ord_scan_body (wrap_once_limit_body ord_once_name ord_child_body))
 									/* emit init code from partition stage if present */
-									(define _ps_init (if (nil? _ps_ord) nil (stage_init_code _ps_ord)))
+									(define _ps_init (ordered_scan_stage_config_init _ord_stage_cfg))
 									(define _ord_scan_core (scan_wrapper 'scan_order schema base_tbl
 										/* condition */
 										(cons list filtercols)
@@ -11019,18 +11076,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													(define _ps (if (not (nil? tbl_once_limit))
 														nil
 														(find_partition_stage_for_alias partition_stages tblvar)))
-												(define _ps_once_limit (if (nil? _ps) nil (stage_once_limit _ps)))
-												(define _tagged_scan (scan_tagged_table_needs_scan_order tbl))
-												(define scan_raw_partcols (if _tagged_scan
-													tbl_scan_partcols
-													(if (nil? _ps) 0 (coalesceNil (stage_limit_partition_cols _ps) 0))))
-												(define scan_raw_limit (if _tagged_scan
-													(coalesceNil tbl_scan_limit -1)
-													(if (nil? _ps) -1 (coalesceNil (stage_limit_val _ps) -1))))
-												(define scan_raw_offset (if _tagged_scan
-													(coalesceNil tbl_scan_offset 0)
-													(if (nil? _ps) 0 (coalesceNil (stage_offset_val _ps) 0))))
-												(define scan_effective_once_limit (coalesce tbl_once_limit _ps_once_limit))
+												(define _scan_stage_cfg (make_local_scan_stage_config tbl _ps))
+												(define _tagged_scan (local_scan_stage_config_tagged _scan_stage_cfg))
+												(define scan_raw_partcols (local_scan_stage_config_partcols _scan_stage_cfg))
+												(define scan_raw_limit (local_scan_stage_config_limit _scan_stage_cfg))
+												(define scan_raw_offset (local_scan_stage_config_offset _scan_stage_cfg))
+												(define scan_effective_once_limit (local_scan_stage_config_once_limit _scan_stage_cfg))
 												(define scan_once_contract (if (nil? scan_effective_once_limit)
 													nil
 													(make_once_limit_scan_contract scan_raw_limit scan_raw_offset scan_raw_partcols scan_effective_once_limit tblvar condition joinexpr tbl)))
@@ -11040,20 +11091,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													/* === table-local scan_order === */
 													(begin
 														(define _ps_filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-														(define _ps_order (if _tagged_scan tbl_scan_order (coalesceNil (stage_order_list _ps) '())))
+														(define _ps_order (local_scan_stage_config_order _scan_stage_cfg))
 														(define _ps_partcols (if (nil? scan_once_contract)
-															(if _tagged_scan tbl_scan_partcols (coalesceNil (stage_limit_partition_cols _ps) 0))
+															(local_scan_stage_config_partcols _scan_stage_cfg)
 															(once_limit_scan_contract_partition_cols scan_once_contract)))
 														(define _ps_limit (if (nil? scan_once_contract)
-															(if _tagged_scan (coalesceNil tbl_scan_limit -1) (coalesceNil (stage_limit_val _ps) -1))
+															(local_scan_stage_config_limit _scan_stage_cfg)
 															(once_limit_scan_contract_limit scan_once_contract)))
 														(define _ps_offset (if (nil? scan_once_contract)
-															(if _tagged_scan (coalesceNil tbl_scan_offset 0) (coalesceNil (stage_offset_val _ps) 0))
+															(local_scan_stage_config_offset _scan_stage_cfg)
 															(once_limit_scan_contract_offset scan_once_contract)))
 															(define _ps_ordercols (extract_scan_order_cols_for_tblvar _ps_order tblvar))
 															(define _ps_dirs (extract_scan_order_dirs_for_tblvar _ps_order tblvar))
 														/* emit init code from partition stage if present */
-														(define _ps_init2 (if _tagged_scan nil (stage_init_code _ps)))
+														(define _ps_init2 (local_scan_stage_config_init _scan_stage_cfg))
 														(define _ps_scan_core (scan_wrapper 'scan_order schema base_tbl
 															(cons list (merge_unique _ps_filtercols cols))
 															'((quote lambda) (map (merge_unique _ps_filtercols cols) (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
