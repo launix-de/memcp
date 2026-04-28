@@ -115,6 +115,15 @@ if the user is not allowed to access this property, the function will throw an e
 		true)
 )) (lambda (e) true))
 
+/* migration: ensure root user exists even when a legacy shared ./data already has system.user */
+(try (lambda () (begin
+	(if (has? (show "system") "user")
+		(if (scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("username") (lambda (username) username) (lambda (a b) b) nil)
+			true
+			(insert (table "system" "user") '("username" "password" "admin") (list (list "root" (password (arg "root-password" "admin")) true))))
+		true)
+)) (lambda (e) true))
+
 /* ensure unique username constraint to avoid duplicates */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
