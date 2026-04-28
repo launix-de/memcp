@@ -981,13 +981,23 @@ ports the actual operator rules to the tree representation. */
 		(unnest_accessing_has_tag accessing_tags (quote group))
 		(unnest_accessing_has_tag accessing_tags (quote window))
 		(unnest_accessing_has_tag accessing_tags (quote join)))))
-(define unnest_groupby_rule_build_group_keys (lambda (orig_group dom_group_cols accessing_tags)
-	(if (unnest_groupby_rule_requires_domain_keys accessing_tags)
-		(merge dom_group_cols
-			(if (or (equal? orig_group '()) (equal? orig_group '(1)))
-				(if (equal? dom_group_cols '()) orig_group '())
-				orig_group))
-		orig_group)))
+(define unnest_groupby_rule_is_static_group (lambda (orig_group)
+	(or
+		(nil? orig_group)
+		(equal? orig_group '())
+		(equal? orig_group '(1)))))
+(define unnest_groupby_rule_static_group_keys (lambda (dom_group_cols accessing_tags)
+	(if (and
+			(unnest_groupby_rule_requires_domain_keys accessing_tags)
+			(not (equal? dom_group_cols '())))
+		dom_group_cols
+		'(1))))
+(define unnest_groupby_rule_build_group_keys (lambda (orig_group dom_group_cols accessing_tags static_group)
+	(if static_group
+		(unnest_groupby_rule_static_group_keys dom_group_cols accessing_tags)
+		(if (unnest_groupby_rule_requires_domain_keys accessing_tags)
+			(merge dom_group_cols orig_group)
+			orig_group))))
 (define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl _us_nested_direct_tbls _us_base_aliases _us_base_tables us_has_stages _us_own_stages _us_inner_aliases tables2_us us_has_outer _us_inner_stages us_domain_cols _us_ria us_sq_prefix _us_lookup us_outer_parts _us_ror us_inner_cond_raw schemas2_us us_value_expr us_accessing_tags) (begin
 	(define _us_nested_direct_refs_base_aliases (reduce _us_nested_direct_tbls (lambda (acc td) (match td
 		'(_ _ _ _ je) (or acc
@@ -1092,10 +1102,14 @@ ports the actual operator rules to the tree representation. */
 			(merge acc (list dc)))) '()))
 	(define _us_dom_group_cols (map us_domain_cols_all (lambda (dc) (_us_prefix_ria (nth dc 0)))))
 	(define us_prefixed_aliases (scalar_subselect_table_aliases us_prefixed_tables))
+	(define us_static_group (and
+		(not us_has_grp)
+		(unnest_groupby_rule_is_static_group us_orig_group)))
 	(define us_new_group (unnest_groupby_rule_build_group_keys
 		(map us_orig_group _us_prefix_ria)
 		_us_dom_group_cols
-		us_accessing_tags))
+		us_accessing_tags
+		us_static_group))
 	(define us_new_having (if (nil? us_orig_having) nil (_us_prefix_ria us_orig_having)))
 	(define us_stage_aliases (if (equal? _us_dom_group_cols '()) nil us_prefixed_aliases))
 	(define us_orig_order_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
