@@ -1153,29 +1153,29 @@ ports the actual operator rules to the tree representation. */
 				(begin
 					(if (not (equal? _us_inner_tbls_rewritten '()))
 						(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
-					(define us_window_partition (coalesceNil (planner_tree_ir_window_partition tree) '()))
-					(define us_partition_exprs (if (equal? us_window_partition '())
-						(map us_domain_cols (lambda (dc) (nth dc 0)))
-						us_window_partition))
-					(define us_dom_order (scalar_scan_partition_order us_partition_exprs _us_ria us_sq_prefix))
+					(define us_partition_exprs
+						(planner_tree_ir_window_partition_exprs
+							tree
+							(map us_domain_cols (lambda (dc) (nth dc 0)))))
 					(define us_renamed_order (scalar_scan_rewrite_order us_orig_order _us_ria))
 					(define us_order_supported (scalar_scan_order_supported us_renamed_order us_sq_prefix))
 					(if (not us_order_supported)
 						nil
 						(begin
-							(define us_part_order (merge us_dom_order us_renamed_order))
-							(define us_dom_count (count us_partition_exprs))
 							(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
 							(define _us_inner_stages_rewritten (scalar_subselect_rewrite_stages_with_lookup
 								_us_inner_stages
 								_us_ria
 								_us_lookup))
 							(define _us_nested_outer_sources (scalar_subselect_collect_stage_outer_sources _us_inner_stages_rewritten))
-							(define us_part_stage (make_scalar_partition_stage
-								us_part_order
+							(define us_part_stage (planner_tree_ir_window_make_scalar_partition_stage
+								tree
+								us_partition_exprs
+								_us_ria
+								us_sq_prefix
+								us_orig_order
 								us_orig_limit
 								us_orig_offset
-								us_dom_count
 								(list us_sq_prefix)
 								(merge_unique (list us_outer_sources _us_nested_outer_sources))))
 							(sq_cache "groups" (merge
@@ -1890,6 +1890,28 @@ helpers instead of rebuilding alias/order logic inline inside untangle_query. */
 				false)
 			false))
 )))
+(define planner_tree_ir_window_partition_exprs (lambda (tree fallback_partition_exprs)
+	(define tree_partition (coalesceNil (planner_tree_ir_window_partition tree) '()))
+	(if (equal? tree_partition '())
+		(coalesceNil fallback_partition_exprs '())
+		tree_partition)))
+(define planner_tree_ir_window_partition_order (lambda (tree fallback_partition_exprs rewrite_inner_expr sq_alias)
+	(scalar_scan_partition_order
+		(planner_tree_ir_window_partition_exprs tree fallback_partition_exprs)
+		rewrite_inner_expr
+		sq_alias)))
+(define planner_tree_ir_window_partition_count (lambda (tree fallback_partition_exprs)
+	(count (planner_tree_ir_window_partition_exprs tree fallback_partition_exprs))))
+(define planner_tree_ir_window_make_scalar_partition_stage (lambda (tree fallback_partition_exprs rewrite_inner_expr sq_alias order_list limit_value offset_value aliases outer_sources)
+	(make_scalar_partition_stage
+		(merge
+			(planner_tree_ir_window_partition_order tree fallback_partition_exprs rewrite_inner_expr sq_alias)
+			(scalar_scan_rewrite_order order_list rewrite_inner_expr))
+		limit_value
+		offset_value
+		(planner_tree_ir_window_partition_count tree fallback_partition_exprs)
+		aliases
+		outer_sources)))
 (define scalar_scan_rewrite_order (lambda (order_list rewrite_expr)
 	(map (coalesceNil order_list '()) (lambda (oi) (match oi
 		'(col dir) (list (rewrite_expr col) dir)
