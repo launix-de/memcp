@@ -1271,7 +1271,7 @@ ports the actual operator rules to the tree representation. */
 		us_accessing_tags
 		us_static_group))
 	(define us_new_having (if (nil? us_orig_having) nil (_us_prefix_ria us_orig_having)))
-	(define us_stage_aliases (if (equal? _us_dom_group_cols '()) nil us_prefixed_aliases))
+	(define us_stage_aliases (if (equal? us_prefixed_aliases '()) nil us_prefixed_aliases))
 	(define us_stage_order_fallback_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list (car _us_own_stages)) '()) '()))
 	(define us_stage_limit_fallback_a (if (and us_has_grp us_has_stages) (stage_limit_val (car _us_own_stages)) nil))
 	(define us_stage_offset_fallback_a (if (and us_has_grp us_has_stages) (stage_offset_val (car _us_own_stages)) nil))
@@ -5032,12 +5032,56 @@ seeing the correctly prefixed outer alias. */
 				subst)
 			nil)
 	)))
-		(define scalar_subselect_lowering_policy (lambda (subquery outer_schemas) (begin
+	(define scalar_subselect_lowering_policy (lambda (subquery outer_schemas) (begin
 			(define lowering_reason (scalar_subselect_lowering_reason subquery outer_schemas))
 			(planner_debug_record_scalar_event (quote lowering) lowering_reason)
 			(quote prefer-unnest))))
+		(define materialize_uncorrelated_scalar_subselect (lambda (subquery outer_schemas) (begin
+			(define shape_facts (scalar_subselect_shape_facts subquery outer_schemas))
+			(match shape_facts
+				'(g h _o _l _off _value_expr has_outer _outer_refs_are_direct _contains_inner_select has_value_agg _session_sensitive _skip_level)
+					(if (or has_outer (not has_value_agg))
+						nil
+						(match subquery
+							'(sub_schema _sub_tables sub_fields _sub_condition _sub_group _sub_having _sub_order _sub_limit _sub_offset) (begin
+								(define first_field_name (match sub_fields
+									(cons k (cons _ _)) k
+									nil))
+								(if (nil? first_field_name)
+									nil
+									(begin
+										(define scalar_idx (coalesceNil (sq_cache "idx") 0))
+										(sq_cache "idx" (+ scalar_idx 1))
+										(define scalar_alias (concat "_uncorr_scalar_" scalar_idx))
+										(define scalar_rows_sym (symbol (concat "__uncorr_scalar_rows:" scalar_idx)))
+										(define scalar_sink_sym (symbol (concat "__uncorr_scalar_sink:" scalar_idx)))
+										(define materialized_binding
+											(legacy_materialized_query_term_binding_ast
+												scalar_alias subquery scalar_rows_sym scalar_sink_sym nil nil))
+										(define mat_source (nth materialized_binding 0))
+										(define mat_init (nth materialized_binding 1))
+										(planned_materialized_fields mat_source
+											(reduce_assoc sub_fields (lambda (acc k _v)
+												(merge acc (list (list "Field" k "Type" "any"))))
+												'()))
+										(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
+											(list mat_init)))
+										(sq_cache "scalar_tables" (merge
+											(list (list scalar_alias sub_schema mat_source false nil))
+											(coalesceNil (sq_cache "scalar_tables") '())))
+										(sq_cache "schemas" (merge
+											(list scalar_alias
+												(reduce_assoc sub_fields (lambda (acc k _v)
+													(merge acc (list (list "Field" k "Type" "any"))))
+													'()))
+											(coalesceNil (sq_cache "schemas") '())))
+										(list (quote get_column) scalar_alias false first_field_name false))))
+							_ nil))
+				_ nil))))
 		(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
-			(define lowered_expr (_unnest_scalar_subselect subquery outer_schemas))
+			(define lowered_expr (coalesce
+				(materialize_uncorrelated_scalar_subselect subquery outer_schemas)
+				(_unnest_scalar_subselect subquery outer_schemas)))
 			(if (nil? lowered_expr)
 				(error (concat "prefer-unnest scalar subselect returned nil " (serialize subquery)))
 				(list (quote unnest) lowered_expr))
