@@ -2872,12 +2872,13 @@ get_column markers and may no longer run schema-based repair heuristics. */
 	(define canon (lambda (expr) (canonicalize_columns expr all_schemas)))
 	(define sg (coalesceNil (stage_group_cols stage) '()))
 	(define sh (stage_having_expr stage))
-	(define so (coalesceNil (stage_order_list stage) '()))
-	(define sl (stage_limit_val stage))
-	(define soff (stage_offset_val stage))
+	(define stage_cfg (stage_ordering_config stage))
+	(define so (coalesceNil (stage_ordering_config_order stage_cfg) '()))
+	(define sl (stage_ordering_config_limit stage_cfg))
+	(define soff (stage_ordering_config_offset stage_cfg))
 	(define spa (stage_partition_aliases stage))
 	(define sc (stage_condition stage))
-	(define sonce (stage_once_limit stage))
+	(define sonce (stage_ordering_config_once_limit stage_cfg))
 	(if (stage_is_dedup stage)
 		(stage_rebuild_with_meta stage (make_dedup_stage (map sg canon) spa) canon (lambda (a) a))
 		(if (and (not (nil? spa)) (or (nil? sg) (equal? sg '())))
@@ -2887,7 +2888,7 @@ get_column markers and may no longer run schema-based repair heuristics. */
 					'()
 					nil
 					(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-					(coalesceNil (stage_limit_partition_cols stage) 0)
+					(stage_ordering_config_partcols stage_cfg)
 					sl
 					soff
 					false
@@ -3014,6 +3015,20 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 	(stage_get stage (quote stage-condition) nil)))
 (define stage_once_limit (lambda (stage)
 	(stage_get stage (quote once-limit) nil)))
+(define make_stage_ordering_config (lambda (order partition_cols limit offset once_limit)
+	(list order partition_cols limit offset once_limit)))
+(define stage_ordering_config (lambda (stage)
+	(make_stage_ordering_config
+		(if (nil? stage) nil (stage_order_list stage))
+		(if (nil? stage) 0 (coalesceNil (stage_limit_partition_cols stage) 0))
+		(if (nil? stage) nil (stage_limit_val stage))
+		(if (nil? stage) nil (stage_offset_val stage))
+		(if (nil? stage) nil (stage_once_limit stage)))))
+(define stage_ordering_config_order (lambda (cfg) (nth cfg 0)))
+(define stage_ordering_config_partcols (lambda (cfg) (nth cfg 1)))
+(define stage_ordering_config_limit (lambda (cfg) (nth cfg 2)))
+(define stage_ordering_config_offset (lambda (cfg) (nth cfg 3)))
+(define stage_ordering_config_once_limit (lambda (cfg) (nth cfg 4)))
 (define stage_cache_policy (lambda (stage)
 	(stage_get stage (quote cache-policy) nil)))
 (define stage_cache_query (lambda (stage)
@@ -8299,10 +8314,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	(set rest_groups (coalesceNil rest_groups '()))
 	(define stage_group (if stage (stage_group_cols stage) nil))
 	(define stage_having (if stage (stage_having_expr stage) nil))
-	(define stage_order (if stage (stage_order_list stage) nil))
-	(define stage_partcols (if stage (coalesceNil (stage_limit_partition_cols stage) 0) 0))
-	(define stage_limit (if stage (stage_limit_val stage) nil))
-	(define stage_offset (if stage (stage_offset_val stage) nil))
+	(define stage_cfg (stage_ordering_config stage))
+	(define stage_order (stage_ordering_config_order stage_cfg))
+	(define stage_partcols (stage_ordering_config_partcols stage_cfg))
+	(define stage_limit (stage_ordering_config_limit stage_cfg))
+	(define stage_offset (stage_ordering_config_offset stage_cfg))
 
 	/* window function detection */
 	(define window_funcs_all (merge (extract_assoc fields (lambda (k v) (extract_window_funcs v)))))
@@ -10335,9 +10351,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define transform_recursive_stage (lambda (s)
 					(begin
 						(define _sg (coalesceNil (stage_group_cols s) '()))
-						(define _so (coalesceNil (stage_order_list s) '()))
+						(define _stage_cfg (stage_ordering_config s))
+						(define _so (coalesceNil (stage_ordering_config_order _stage_cfg) '()))
 						(define _spa (stage_partition_aliases s))
-						(define _sonce (stage_once_limit s))
+						(define _sonce (stage_ordering_config_once_limit _stage_cfg))
 						(define _sc (stage_condition s))
 						(if (stage_is_dedup s)
 							(stage_rebuild_with_meta s
@@ -10352,9 +10369,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										'()
 										nil
 										(map _so (lambda (o) (match o '(col dir) (list (recursive_replace_find_column col) dir))))
-										(coalesceNil (stage_limit_partition_cols s) 0)
-										(stage_limit_val s)
-										(stage_offset_val s)
+										(stage_ordering_config_partcols _stage_cfg)
+										(stage_ordering_config_limit _stage_cfg)
+										(stage_ordering_config_offset _stage_cfg)
 										false
 										_spa
 										(stage_init_code s)
@@ -10367,8 +10384,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(map _sg recursive_replace_find_column)
 										(recursive_replace_find_column (stage_having_expr s))
 										(map _so (lambda (o) (match o '(col dir) (list (recursive_replace_find_column col) dir))))
-										(stage_limit_val s)
-										(stage_offset_val s)
+										(stage_ordering_config_limit _stage_cfg)
+										(stage_ordering_config_offset _stage_cfg)
 										_spa
 										(stage_init_code s))
 									recursive_replace_find_column
