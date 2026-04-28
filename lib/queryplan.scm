@@ -838,6 +838,35 @@ ports the actual operator rules to the tree representation. */
 				annotated_right
 				accessing))
 		tree)))
+(define planner_tree_ir_select_equivalence_classes (lambda (predicate)
+	(filter (map (flatten_and_terms (coalesceNil predicate true)) (lambda (term) (match term
+			'((symbol equal??) lhs rhs) (list lhs rhs)
+			'((quote equal??) lhs rhs) (list lhs rhs)
+			nil)))
+		(lambda (entry) (not (nil? entry))))))
+(define planner_tree_ir_select_repr_from_cclasses (lambda (cclasses)
+	(reduce cclasses (lambda (acc cc) (match cc
+			'(lhs rhs) (merge acc
+				(list
+					(serialize lhs) rhs
+					(serialize rhs) lhs))
+			_ acc))
+		'())))
+(define planner_tree_ir_select_repr_lookup (lambda (repr expr)
+		(get_assoc repr (serialize expr))))
+(define planner_tree_ir_select_rewrite_expr (lambda (expr repr)
+	(coalesce
+		(planner_tree_ir_select_repr_lookup repr expr)
+		(match expr
+			(cons sym args) (cons sym
+				(map args (lambda (arg)
+					(planner_tree_ir_select_rewrite_expr arg repr))))
+			expr))))
+(define planner_tree_ir_select_rewrite_fields (lambda (fields repr)
+	(reduce_assoc fields (lambda (acc k v)
+		(merge acc (list k
+			(planner_tree_ir_select_rewrite_expr v repr))))
+		'())))
 (define unnest_select_rule (lambda (tree)
 	(begin
 		(define window_node (if (equal? (planner_tree_ir_node_kind tree) (quote op-window)) tree nil))
@@ -849,23 +878,30 @@ ports the actual operator rules to the tree representation. */
 					(planner_tree_ir_groupby_aggs shape_node)
 					nil))))
 		(define select_node (if (nil? shape_node) nil
-			(if (equal? (planner_tree_ir_node_kind shape_node) (quote op-map))
-				(planner_tree_ir_select_child shape_node)
+				(if (equal? (planner_tree_ir_node_kind shape_node) (quote op-map))
+					(planner_tree_ir_select_child shape_node)
 				(if (equal? (planner_tree_ir_node_kind shape_node) (quote op-groupby))
 					(nth shape_node 4)
 					nil))))
 		(define join_tree (if (nil? select_node) nil (planner_tree_ir_select_child select_node)))
+		(define select_cclasses (if (nil? select_node)
+			'()
+			(planner_tree_ir_select_equivalence_classes
+				(planner_tree_ir_select_predicate select_node))))
+		(define select_repr (planner_tree_ir_select_repr_from_cclasses select_cclasses))
+		(define rewritten_fields_node
+			(planner_tree_ir_select_rewrite_fields fields_node select_repr))
 		(if (and
 				(not (nil? join_tree))
 				(equal? (planner_tree_ir_extract_tables join_tree) '())
-					(not (reduce_assoc fields_node (lambda (a k v) (or a
+					(not (reduce_assoc rewritten_fields_node (lambda (a k v) (or a
 						(begin
 							(define _nta (lambda (e) (match e
 								(cons (symbol aggregate) _) true
 								(cons s args) (reduce args (lambda (a2 b) (or a2 (_nta b))) false)
 								false)))
 							(_nta v)))) false)))
-			(list (car (extract_assoc fields_node (lambda (k v) v))) '())
+			(list (car (extract_assoc rewritten_fields_node (lambda (k v) v))) '())
 			nil))))
 (define unnest_join_rule (lambda (tree condition_expr inner_aliases outer_ref_rewriter) (begin
 	(define join_node (planner_tree_ir_primary_join_node tree))
