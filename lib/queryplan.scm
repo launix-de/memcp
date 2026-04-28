@@ -1153,14 +1153,18 @@ ports the actual operator rules to the tree representation. */
 				(begin
 					(if (not (equal? _us_inner_tbls_rewritten '()))
 						(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
-					(define us_dom_order (scalar_scan_domain_order us_domain_cols _us_ria us_sq_prefix))
+					(define us_window_partition (coalesceNil (planner_tree_ir_window_partition tree) '()))
+					(define us_partition_exprs (if (equal? us_window_partition '())
+						(map us_domain_cols (lambda (dc) (nth dc 0)))
+						us_window_partition))
+					(define us_dom_order (scalar_scan_partition_order us_partition_exprs _us_ria us_sq_prefix))
 					(define us_renamed_order (scalar_scan_rewrite_order us_orig_order _us_ria))
 					(define us_order_supported (scalar_scan_order_supported us_renamed_order us_sq_prefix))
 					(if (not us_order_supported)
 						nil
 						(begin
 							(define us_part_order (merge us_dom_order us_renamed_order))
-							(define us_dom_count (count us_dom_order))
+							(define us_dom_count (count us_partition_exprs))
 							(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols _us_ria))
 							(define _us_inner_stages_rewritten (scalar_subselect_rewrite_stages_with_lookup
 								_us_inner_stages
@@ -1869,6 +1873,16 @@ helpers instead of rebuilding alias/order logic inline inside untangle_query. */
 (define scalar_scan_domain_order (lambda (domain_cols rewrite_inner_expr sq_alias)
 	(filter
 		(map domain_cols (lambda (dc) (list (rewrite_inner_expr (nth dc 0)) '<)))
+		(lambda (oi) (match oi '(col _)
+			(match col
+				'((symbol get_column) a _ _ _) (equal? a sq_alias)
+				'((quote get_column) a _ _ _) (equal? a sq_alias)
+				false)
+			false))
+)))
+(define scalar_scan_partition_order (lambda (partition_exprs rewrite_inner_expr sq_alias)
+	(filter
+		(map partition_exprs (lambda (expr) (list (rewrite_inner_expr expr) '<)))
 		(lambda (oi) (match oi '(col _)
 			(match col
 				'((symbol get_column) a _ _ _) (equal? a sq_alias)
