@@ -226,15 +226,16 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
 					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username") session))
-					(set resultrow_called false)
+					(define resultrow_state (newsession))
+					(resultrow_state "called" false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
+						(resultrow_state "called" true)
 						(original_resultrow row))))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
 					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
+					(if (and (not (resultrow_state "called")) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
@@ -263,10 +264,11 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					(define session (context "session"))
 					(session "username" (req "username"))
 					(session "schema" schema)
-					(set resultrow_called false)
+					(define resultrow_state (newsession))
+					(resultrow_state "called" false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
+						(resultrow_state "called" true)
 						(original_resultrow row))))
 					(define handled (match query
 						(regex "SELECT\\s+c\\.relname\\s+as\\s+tblname\\s+FROM\\s+pg_catalog\\.pg_class" _)
@@ -291,7 +293,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
+					(if (and (not (resultrow_state "called")) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
