@@ -4145,14 +4145,17 @@ seeing the correctly prefixed outer alias. */
 		_ false)))
 	(define _cd_find (lambda (expr) (match expr
 		'((symbol count_distinct) _) true
+		'((quote count_distinct) _) true
 		(cons sym args) (if (_cd_is_subquery sym) false (reduce args (lambda (a b) (or a (_cd_find b))) false))
 		false)))
 	(define _cd_extract (lambda (expr) (match expr
 		'((symbol count_distinct) e) (list e)
+		'((quote count_distinct) e) (list e)
 		(cons sym args) (if (_cd_is_subquery sym) '() (merge (map args _cd_extract)))
 		'())))
 	(define _cd_replace (lambda (expr) (match expr
 		'((symbol count_distinct) e) '((quote aggregate) 1 (quote +) 0)
+		'((quote count_distinct) e) '((quote aggregate) 1 (quote +) 0)
 		(cons sym args) (if (_cd_is_subquery sym) expr (cons sym (map args _cd_replace)))
 		expr)))
 		(define fields (map_assoc fields (lambda (k v) (rewrite_semijoin_expr_to_scalar_count v))))
@@ -7631,7 +7634,9 @@ seeing the correctly prefixed outer alias. */
 						(map _cd_distinct_exprs (lambda (e) (replace_find_column (finalize_visible_expr e)))))
 					nil)
 				(make_group_stage
-					(if (nil? _cd_user_group) '(1) (map _cd_user_group (lambda (e) (replace_find_column (finalize_visible_expr e)))))
+					(if (or (nil? _cd_user_group) (equal? _cd_user_group '()))
+						'(1)
+						(map _cd_user_group (lambda (e) (replace_find_column (finalize_visible_expr e)))))
 					(_cd_replace (finalize_visible_expr _cd_having))
 					(map (coalesce _cd_order '()) (lambda (o) (match o '(col dir) (list (_cd_replace (finalize_visible_expr col)) dir))))
 					_cd_limit _cd_offset nil nil))
@@ -10469,7 +10474,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(not (nil? stage_offset))))
 						(define no_outer_group_stage (if _no_outer_group_stage_needed
 							(if is_dedup
-								(make_dedup_stage raw_stage_group nil)
+								nil
 								(make_group_stage raw_stage_group raw_stage_having raw_stage_order stage_limit stage_offset nil nil))
 							nil))
 						(build_queryplan schema
