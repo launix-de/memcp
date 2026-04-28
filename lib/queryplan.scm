@@ -656,9 +656,9 @@ ports the actual operator rules to the tree representation. */
 		(nth tree 2)
 		nil)))
 (define planner_tree_ir_window_partition (lambda (tree)
-	(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
-		(nth tree 1)
-		nil)))
+	(match tree
+		'((quote op-window) partition _ _ _) partition
+		_ nil)))
 (define planner_tree_ir_window_limit (lambda (tree)
 		(planner_tree_ir_lookup_computation
 			(if (equal? (planner_tree_ir_node_kind tree) (quote op-window))
@@ -757,14 +757,23 @@ ports the actual operator rules to the tree representation. */
 		'op-groupby tree
 		nil)))
 (define planner_tree_ir_window_effective_order (lambda (tree fallback_order)
-	(define tree_order (planner_tree_ir_window_order tree))
-	(if (or (nil? tree_order) (equal? tree_order '()))
-		(coalesceNil fallback_order '())
-		tree_order)))
+	(match tree
+		'((quote op-window) _ order _ _) (if (or (nil? order) (equal? order '()))
+			(merge fallback_order '())
+			(merge order '()))
+		_ (merge fallback_order '()))))
 (define planner_tree_ir_window_effective_limit (lambda (tree fallback_limit)
-	(coalesceNil (planner_tree_ir_window_limit tree) fallback_limit)))
+	(match tree
+		'((quote op-window) _ _ computations _) (coalesceNil
+			(planner_tree_ir_lookup_computation computations (quote limit))
+			fallback_limit)
+		_ fallback_limit)))
 (define planner_tree_ir_window_effective_offset (lambda (tree fallback_offset)
-	(coalesceNil (planner_tree_ir_window_offset tree) fallback_offset)))
+	(match tree
+		'((quote op-window) _ _ computations _) (coalesceNil
+			(planner_tree_ir_lookup_computation computations (quote offset))
+			fallback_offset)
+		_ fallback_offset)))
 (define planner_tree_ir_window_rewrite_order (lambda (tree fallback_order rewrite_expr)
 	(map (planner_tree_ir_window_effective_order tree fallback_order) (lambda (oi) (match oi
 		'(col dir) (list (rewrite_expr col) dir)
@@ -1167,9 +1176,12 @@ ports the actual operator rules to the tree representation. */
 					(if (not (equal? _us_inner_tbls_rewritten '()))
 						(sq_cache "tables" (merge _us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
 					(define us_partition_exprs
-						(planner_tree_ir_window_partition_exprs
-							tree
-							(map us_domain_cols (lambda (dc) (nth dc 0)))))
+						(merge
+							(coalesce
+								(planner_tree_ir_window_partition tree)
+								(map us_domain_cols (lambda (dc) (nth dc 0)))
+								'())
+							'()))
 					(define us_renamed_order (scalar_scan_rewrite_order us_orig_order _us_ria))
 					(define us_order_supported (scalar_scan_order_supported us_renamed_order us_sq_prefix))
 					(if (not us_order_supported)
@@ -1911,18 +1923,13 @@ helpers instead of rebuilding alias/order logic inline inside untangle_query. */
 				false)
 			false))
 )))
-(define planner_tree_ir_window_partition_exprs (lambda (tree fallback_partition_exprs)
-	(define tree_partition (coalesceNil (planner_tree_ir_window_partition tree) '()))
-	(if (equal? tree_partition '())
-		(coalesceNil fallback_partition_exprs '())
-		tree_partition)))
 (define planner_tree_ir_window_partition_order (lambda (tree fallback_partition_exprs rewrite_inner_expr sq_alias)
 	(scalar_scan_partition_order
-		(planner_tree_ir_window_partition_exprs tree fallback_partition_exprs)
+		(merge (coalesce (planner_tree_ir_window_partition tree) fallback_partition_exprs '()) '())
 		rewrite_inner_expr
 		sq_alias)))
 (define planner_tree_ir_window_partition_count (lambda (tree fallback_partition_exprs)
-	(count (planner_tree_ir_window_partition_exprs tree fallback_partition_exprs))))
+	(count (merge (coalesce (planner_tree_ir_window_partition tree) fallback_partition_exprs '()) '()))))
 (define planner_tree_ir_window_make_scalar_partition_stage (lambda (tree fallback_partition_exprs rewrite_inner_expr sq_alias order_list limit_value offset_value aliases outer_sources)
 	(make_scalar_partition_stage
 		(merge
@@ -2107,8 +2114,8 @@ runtime promise name is created during unnesting anymore. */
 	(define stage_order_cfg (if (not (nil? tbl_once_limit))
 		tbl_scan_order
 		(if (nil? partition_stage)
-			(coalesceNil fallback_order '())
-			(coalesceNil (stage_order_list partition_stage) '()))))
+			(if (nil? fallback_order) '() (merge fallback_order '()))
+			(if (nil? (stage_order_list partition_stage)) '() (merge (stage_order_list partition_stage) '())))))
 	(define stage_offset_cfg (if (not (nil? tbl_once_limit))
 		(coalesceNil tbl_scan_offset 0)
 		(if (not (nil? partition_stage))
@@ -2143,7 +2150,8 @@ runtime promise name is created during unnesting anymore. */
 	(define tbl_once_limit (scan_tagged_table_once_limit tbl))
 	(define stage_order_cfg (if tagged_scan
 		tbl_scan_order
-		(if (nil? partition_stage) '() (coalesceNil (stage_order_list partition_stage) '()))))
+		(if (nil? partition_stage) '()
+			(if (nil? (stage_order_list partition_stage)) '() (merge (stage_order_list partition_stage) '())))))
 	(define stage_partcols_cfg (if tagged_scan
 		tbl_scan_partcols
 		(if (nil? partition_stage) 0 (coalesceNil (stage_limit_partition_cols partition_stage) 0))))
