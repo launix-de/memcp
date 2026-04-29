@@ -9303,6 +9303,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
 							(replace_agg_with_fetch expr)
 						)))
+						(define _stage_has_agg_descriptor (lambda (agg_desc)
+							(reduce ags (lambda (acc ag) (or acc (equal? ag agg_desc))) false)))
+						(define _stage_fetch_owned_agg (lambda (expr agg_desc)
+							(if (_stage_has_agg_descriptor agg_desc)
+								(replace_group_key_or_fetch expr)
+								nil)))
 						(define replace_group_agg_input_expr (lambda (expr)
 							(if (and (not (nil? _stage_scope)) (_refs_only_outer_stage expr) (not (_field_has_agg_expr expr)))
 								expr
@@ -9318,12 +9324,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(cons (symbol aggregate) agg_rest)
 									(match agg_rest
 										'(agg_expr agg_reduce agg_neutral)
-										(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
+										(coalesce
+											(_stage_fetch_owned_agg expr agg_rest)
+											(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral))
 										_ expr)
 									(cons '(quote aggregate) agg_rest)
 									(match agg_rest
 										'(agg_expr agg_reduce agg_neutral)
-										(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
+										(coalesce
+											(_stage_fetch_owned_agg expr agg_rest)
+											(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral))
 										_ expr)
 									(cons sym args)
 									(if (_is_opaque_scope_sym sym)
@@ -9612,35 +9622,41 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								nil)))
 						(define lower_runtime_materialized_aggs_single (lambda (expr) (match expr
 							(cons (symbol aggregate) agg_args) (begin
+								(define stage_fetch (_stage_fetch_owned_agg expr agg_args))
 								(define target_col (agg_col_name agg_args))
 								(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
 								(define visible_expr (if materialized_source
 									(lower_visible_materialized_aggs_single expr)
 									expr))
 								(define match_col (match_runtime_materialized_agg_col target_col agg_name))
-								(if (not (equal? visible_expr expr))
+								(if (not (nil? stage_fetch))
+									stage_fetch
+									(if (not (equal? visible_expr expr))
 									visible_expr
 									(if (nil? match_col)
 										(match agg_args
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (lower_runtime_materialized_aggs_single agg_expr) agg_reduce agg_neutral)
 											_ expr)
-										(list (quote get_column) tblvar false match_col false))))
+										(list (quote get_column) tblvar false match_col false)))))
 							(cons '(quote aggregate) agg_args) (begin
+								(define stage_fetch (_stage_fetch_owned_agg expr agg_args))
 								(define target_col (agg_col_name agg_args))
 								(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
 								(define visible_expr (if materialized_source
 									(lower_visible_materialized_aggs_single expr)
 									expr))
 								(define match_col (match_runtime_materialized_agg_col target_col agg_name))
-								(if (not (equal? visible_expr expr))
+								(if (not (nil? stage_fetch))
+									stage_fetch
+									(if (not (equal? visible_expr expr))
 									visible_expr
 									(if (nil? match_col)
 										(match agg_args
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (lower_runtime_materialized_aggs_single agg_expr) agg_reduce agg_neutral)
 											_ expr)
-										(list (quote get_column) tblvar false match_col false))))
+										(list (quote get_column) tblvar false match_col false)))))
 							(cons sym args) (cons sym (map args lower_runtime_materialized_aggs_single))
 							expr)))
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
