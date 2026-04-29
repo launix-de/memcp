@@ -1160,7 +1160,9 @@ ports the actual operator rules to the tree representation. */
 			(define us_orig_limit (planner_tree_ir_window_effective_limit tree us_stage_limit_fallback))
 			(define us_orig_offset (planner_tree_ir_window_effective_offset tree us_stage_offset_fallback))
 			(define _us_inner_tbls (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (has? _us_inner_aliases a) false))))
-			(define _us_inner_tbls_rewritten (scalar_subselect_rewrite_tables _us_inner_tbls _us_ria))
+			(define _us_rewrite_table_expr (lambda (expr)
+				(_us_ria (_us_ror expr))))
+			(define _us_inner_tbls_rewritten (scalar_subselect_rewrite_tables _us_inner_tbls _us_rewrite_table_expr))
 			(define us_simple_uncorrelated_cache_key (if (and
 				(not us_has_outer)
 				(equal? _us_inner_tbls '())
@@ -1212,7 +1214,7 @@ ports the actual operator rules to the tree representation. */
 							(define us_full_lim (if (nil? us_inner_lim)
 								(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
 								(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
-							(define _us_nested_direct_tbls_rewritten (scalar_subselect_rewrite_tables _us_nested_direct_tbls _us_ria))
+							(define _us_nested_direct_tbls_rewritten (scalar_subselect_rewrite_tables _us_nested_direct_tbls _us_rewrite_table_expr))
 							(define us_tbl_entries (merge _us_nested_direct_tbls_rewritten (list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))))
 							(define _us_inner_schema (schemas2_us us_tblvar))
 							(define _us_passthrough_schemas (merge
@@ -1236,7 +1238,10 @@ ports the actual operator rules to the tree representation. */
 		(scalar_subselect_rewrite_prefixed_expr
 			(unnest_select_rule_apply_expr us_select_info expr)
 			_us_lookup)))
-	(define us_prefixed_tables (scalar_subselect_prefixed_tables tables2_us _us_lookup _us_prefix_ria))
+	(define _us_prefix_table_expr (lambda (expr)
+		(_us_prefix_ria (unnest_runtime_outer_ref_expr expr))))
+	(define us_prefixed_tables (scalar_subselect_prefixed_tables tables2_us _us_lookup _us_prefix_table_expr))
+	(define us_local_aliases (scalar_subselect_table_aliases tables2_us))
 	(define us_inner_cond_prefixed (if (nil? us_inner_cond_raw) nil (_us_prefix_ria us_inner_cond_raw)))
 	(define us_groupby_node (planner_tree_ir_primary_groupby_node tree))
 	(define us_stage_group_fallback (if us_has_stages (coalesceNil (stage_group_cols (car _us_own_stages)) '()) '()))
@@ -1248,12 +1253,19 @@ ports the actual operator rules to the tree representation. */
 		us_stage_having_fallback
 		(planner_tree_ir_groupby_having us_groupby_node)))
 	(define us_cache_policy (count_subquery_cache_policy subquery target_expr))
+	(define _us_rewrite_domain_outer_expr (lambda (expr)
+		(_us_prefix_ria (unnest_runtime_outer_ref_expr expr))))
 	(define us_nested_domain_cols (reduce _us_inner_stages (lambda (acc s)
 		(merge acc
 			(filter (map (coalesceNil (stage_outer_sources s) '()) (lambda (src)
 				(match src
 					'(outer_tv outer_col inner_expr)
-						(list inner_expr (list (quote get_column) outer_tv false outer_col false))
+						(if (reduce us_local_aliases (lambda (found local_alias)
+								(or found (equal?? local_alias outer_tv))) false)
+							nil
+							(list inner_expr
+								(_us_rewrite_domain_outer_expr
+									(list (quote get_column) outer_tv false outer_col false))))
 					_ nil)))
 				(lambda (x) (not (nil? x)))))) '()))
 	(define us_domain_cols_all (reduce (merge us_domain_cols us_nested_domain_cols) (lambda (acc dc)
@@ -1303,7 +1315,9 @@ ports the actual operator rules to the tree representation. */
 	(define us_prefixed_schemas (scalar_subselect_prefixed_schemas us_prefixed_tables us_alias_map schemas2_us))
 	(sq_cache "schemas" (merge us_prefixed_schemas (coalesceNil (sq_cache "schemas") '())))
 	(define us_dom_je_parts (map us_domain_cols_all (lambda (dc)
-		(list (quote equal??) (_us_prefix_ria (nth dc 0)) (nth dc 1)))))
+		(list (quote equal??)
+			(_us_prefix_ria (nth dc 0))
+			(_us_rewrite_domain_outer_expr (nth dc 1))))))
 	(define us_dom_je (if (equal? (count us_dom_je_parts) 0) true
 		(if (equal? (count us_dom_je_parts) 1) (car us_dom_je_parts)
 			(cons (quote and) us_dom_je_parts))))
@@ -7216,7 +7230,12 @@ seeing the correctly prefixed outer alias. */
 			(if (nil? tje) nil (collect_row_domain_subselects tje _ris_schemas)))
 		td))))
 		(set fields (map_assoc fields (lambda (k v) (collect_dependent_field_compile_markers v _ris_schemas))))
-	(set condition (collect_row_domain_subselects condition _ris_schemas))
+	/* Correlated scalar subselects inside WHERE must survive until helper tables
+	are integrated into the visible schema. Lowering them eagerly to aggregate
+	sentinels drops the surrounding comparison (`= 0`, `> 0`, `IN`, `EXISTS`)
+	before the final join/filter stage. Use the same compile-marker pipeline as
+	field expressions so the comparison is rebuilt around the helper column. */
+	(set condition (collect_dependent_scalar_compile_markers condition _ris_schemas))
 	(set group (map group (lambda (g) (collect_row_domain_subselects g _ris_schemas))))
 	(set having (begin
 		(define _hv_resolved (replace_inner_selects having _ris_schemas))
@@ -7255,6 +7274,7 @@ seeing the correctly prefixed outer alias. */
 		(set fields (map_assoc fields (lambda (k v) (freeze_visible_field_refs v))))
 		(set fields (map_assoc fields (lambda (k v)
 			(resolve_dependent_scalar_compile_markers v _ris_schemas))))
+		(set condition (resolve_dependent_scalar_compile_markers condition _ris_schemas))
 		/* integrate unnested scalar subselects from Neumann unnesting.
 	Tables from non-aggregate path (direct LEFT JOIN) do NOT need schema updates.
 	Tables from aggregate path (materialized derived) DO need schemas for build_queryplan. */
@@ -7823,12 +7843,29 @@ second table carries strictly more local WHERE predicates than the first. */
 		'(out seg) (merge out (jqr_reorder_inner_segment seg condition schemas))
 		tables_))))
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column) (begin
+	(define jqr_stage_is_constant_scalar (lambda (stage_aliases) (begin
+		(define _alias_set (coalesceNil stage_aliases '()))
+			(reduce tables (lambda (ok td) (if (not ok)
+				false
+				(match td
+					'(alias _ _ _ je)
+						(if (has? _alias_set alias)
+							(reduce (extract_tblvars (coalesceNil je true)) (lambda (refs_ok ref_alias)
+								(and refs_ok (has? _alias_set ref_alias)))
+								true)
+							true)
+					_ true)))
+			true))))
 	(define jqr_constant_scalar_aliases (reduce (coalesceNil groups '()) (lambda (acc stage)
 		(begin
 			(define _spa (stage_partition_aliases stage))
 			(define _spc (coalesceNil (stage_limit_partition_cols stage) 0))
 			(define _sos (coalesceNil (stage_outer_sources stage) '()))
-			(if (or (nil? _spa) (not (equal? _spc 0)) (not (equal? _sos '())))
+			(if (or
+				(nil? _spa)
+				(not (equal? _spc 0))
+				(not (equal? _sos '()))
+				(not (jqr_stage_is_constant_scalar _spa)))
 				acc
 				(merge acc _spa))))
 		'()))
@@ -9313,7 +9350,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr)))
 									(cons (symbol aggregate) agg_rest)
 									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
-										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
+										(and (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
@@ -9321,7 +9358,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_group_key_or_fetch expr))
 									(cons '(quote aggregate) agg_rest)
 									(if (or (and (not (nil? _stage_scope)) _has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
-										(and (not materialized_source) (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
+										(and (_field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
 										(match agg_rest
 											'(agg_expr agg_reduce agg_neutral)
 											(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
@@ -9984,6 +10021,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(if (equal? raw_post_group_condition true)
 						(if (equal? 1 (count raw_aggregate_condition_parts)) (car raw_aggregate_condition_parts) (cons (quote and) raw_aggregate_condition_parts))
 						(cons (quote and) (cons raw_post_group_condition raw_aggregate_condition_parts)))))
+				/* Aggregate-bearing WHERE terms are logically post-group predicates.
+				Carry them on the stage itself as well, so recursive grouped plans do
+				not drop them when the outer condition is rebuilt around prejoin/keytable
+				helpers. This is the COUNT/EXISTS/IN bridge after the inline path died:
+				the comparison must survive as a HAVING-like filter on the grouped stage,
+				not just as a transient condition expression. */
+				(define stage_having (if (equal? 0 (count aggregate_condition_parts)) stage_having
+					(if (or (nil? stage_having) (equal? stage_having true))
+						(if (equal? 1 (count aggregate_condition_parts)) (car aggregate_condition_parts) (cons (quote and) aggregate_condition_parts))
+						(cons (quote and) (cons stage_having aggregate_condition_parts)))))
+				(define raw_stage_post_group_condition (if (equal? 0 (count raw_aggregate_condition_parts)) raw_stage_post_group_condition
+					(if (or (nil? raw_stage_post_group_condition) (equal? raw_stage_post_group_condition true))
+						(if (equal? 1 (count raw_aggregate_condition_parts)) (car raw_aggregate_condition_parts) (cons (quote and) raw_aggregate_condition_parts))
+						(cons (quote and) (cons raw_stage_post_group_condition raw_aggregate_condition_parts)))))
 				(define _outer_visible_aliases (if (nil? _grp_ps_tables) '()
 					(map _grp_ps_tables (lambda (td) (match td
 						'(tv _ ttbl _ _) (if (nil? tv) ttbl (visible_occurrence_alias tv))
@@ -10289,13 +10340,39 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(cons sym args) (cons sym (map args rewrite_local_prejoin_count_term))
 					expr)))
 				(define keep_grouped_post_group_term (lambda (expr)
-					(if (grouped_outer_condition_term? expr)
-						expr
-						(if (equal? (extract_aggregates expr) '())
-							(if (grouped_local_condition_term? expr) expr nil)
-							(rewrite_local_prejoin_count_term expr)))))
+					(match expr
+						(cons (symbol and) parts)
+						(begin
+							(define kept_parts (filter (map parts keep_grouped_post_group_term)
+								(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+							(if (equal? kept_parts '()) nil
+								(if (equal? 1 (count kept_parts))
+									(car kept_parts)
+									(cons (quote and) kept_parts))))
+						(cons '(quote and) parts)
+						(begin
+							(define kept_parts (filter (map parts keep_grouped_post_group_term)
+								(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+							(if (equal? kept_parts '()) nil
+								(if (equal? 1 (count kept_parts))
+									(car kept_parts)
+									(cons (quote and) kept_parts))))
+						_
+						(if (grouped_outer_condition_term? expr)
+							(if (equal? (extract_aggregates expr) '())
+								expr
+								(rewrite_local_prejoin_count_term expr))
+							(if (equal? (extract_aggregates expr) '())
+								nil
+								(rewrite_local_prejoin_count_term expr))))))
+				(define grouped_having_source_raw (combine_and_terms
+					(filter (map (flatten_and_terms (coalesceNil raw_stage_post_group_condition true))
+						keep_grouped_post_group_term)
+						(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
 				(define grouped_having
-					(rewrite_group_key_to_group_alias (lower_prejoin_group_expr raw_stage_post_group_condition)))
+					(if (or (nil? grouped_having_source_raw) (equal? grouped_having_source_raw true))
+						nil
+						(rewrite_group_key_to_group_alias (lower_prejoin_group_expr grouped_having_source_raw))))
 				(define grouped_order (if (nil? raw_stage_order) nil
 					(map raw_stage_order (lambda (o) (match o '(col dir)
 						(list (lower_prejoin_group_expr col) dir))))))
@@ -10405,6 +10482,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(map_assoc raw_fields (lambda (k v)
 						(recursive_replace_find_column v)))
 					grouped_fields))
+				(define grouped_expr_is_group_key (lambda (expr)
+					(reduce grouped_keys (lambda (found gexpr)
+						(or found (equal? expr gexpr)))
+						false)))
+				(define no_outer_group_fields_for_recursive (reduce_assoc grouped_fields_for_recursive (lambda (acc k v)
+					(if (or
+						(grouped_expr_is_group_key v)
+						(not (equal? (extract_aggregates v) '()))
+						(not (equal? (extract_window_funcs v) '())))
+						(set_assoc acc k v)
+						acc))
+					'()))
 				(define transform_recursive_stage (lambda (s)
 					(begin
 						(define _sg (coalesceNil (stage_group_cols s) '()))
@@ -10479,7 +10568,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							nil))
 						(build_queryplan schema
 							(list (list prejoin_alias schema prejointbl false nil))
-							raw_fields
+							no_outer_group_fields_for_recursive
 							no_outer_group_condition
 							(merge (if (nil? no_outer_group_stage) '() (list no_outer_group_stage)) rest_groups remaining_partition_stages)
 							(merge schemas (list prejoin_alias prejoin_schema_def))
