@@ -2466,13 +2466,6 @@ a scan AND does not reference outer-scope vars. */
 			acc))
 		'())))
 
-(define tables_include_alias? (lambda (tables alias_name)
-	(reduce tables (lambda (found td)
-		(or found (match td
-			'(tbl_alias _ _ _ _) (equal?? tbl_alias alias_name)
-			_ false)))
-		false)))
-
 /* parallelize_resultrows: post-processing pass over the finished query plan AST.
 Rewrites (resultrow (list k1 v1 k2 v2 ...)) nodes: if >=2 value expressions
 are parallelizable, wrap them in parallel_map for concurrent evaluation.
