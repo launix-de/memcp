@@ -481,8 +481,76 @@ source-expression namespace for this materialized source. */
 	(planned_materialized_fields prejointbl prejoin_schema_def)
 	true
 )))
+(define make_unnest_helper_table (lambda (schema_name base_table helper_kind)
+	(if (nil? base_table)
+		nil
+		(list (quote unnest_helper_table) schema_name base_table helper_kind))
+))
+(define planner_table_source_base (lambda (table_source)
+	(match table_source
+		'(unnest_helper_table _ base_table _) (planner_table_source_base base_table)
+		'((symbol unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
+		'((quote unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
+		'(scan-tagged-table base_table _ _ _ _ _) (planner_table_source_base base_table)
+		'(scan-tagged-table base_table _ _ _ _ _ _) (planner_table_source_base base_table)
+		'((symbol scan-tagged-table) base_table _ _ _ _ _) (planner_table_source_base base_table)
+		'((symbol scan-tagged-table) base_table _ _ _ _ _ _) (planner_table_source_base base_table)
+		'((quote scan-tagged-table) base_table _ _ _ _ _) (planner_table_source_base base_table)
+		'((quote scan-tagged-table) base_table _ _ _ _ _ _) (planner_table_source_base base_table)
+		table_source
+)))
+/* Planner-only wrapper: if it survives into emitted runtime code, it must stay
+semantically neutral and evaluate to the underlying source. */
+(define unnest_helper_table (lambda (schema_name base_table _helper_kind)
+	(begin
+		(define source_base (planner_table_source_base base_table))
+		(if (string? source_base)
+			(table schema_name source_base)
+			source_base))
+))
+(define unnest_helper_table? (lambda (table_source)
+	(match table_source
+		'(unnest_helper_table _ _ _) true
+		'((symbol unnest_helper_table) _ _ _) true
+		'((quote unnest_helper_table) _ _ _) true
+		false
+)))
+(define unnest_helper_table_base (lambda (table_source)
+	(match table_source
+		'(unnest_helper_table _ base_table _) (planner_table_source_base base_table)
+		'((symbol unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
+		'((quote unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
+		table_source
+)))
+(define unnest_helper_table_schema (lambda (table_source)
+	(match table_source
+		'(unnest_helper_table schema_name _ _) schema_name
+		'((symbol unnest_helper_table) schema_name _ _) schema_name
+		'((quote unnest_helper_table) schema_name _ _) schema_name
+		nil
+)))
+(define unnest_helper_table_runtime_source (lambda (table_source)
+	(match table_source
+		'(unnest_helper_table schema_name base_table _)
+		(unnest_helper_table schema_name base_table nil)
+		'((symbol unnest_helper_table) schema_name base_table _)
+		(unnest_helper_table schema_name base_table nil)
+		'((quote unnest_helper_table) schema_name base_table _)
+		(unnest_helper_table schema_name base_table nil)
+		table_source
+)))
+(define unnest_helper_table_kind (lambda (table_source)
+	(match table_source
+		'(unnest_helper_table _ _ helper_kind) helper_kind
+		'((symbol unnest_helper_table) _ _ helper_kind) helper_kind
+		'((quote unnest_helper_table) _ _ helper_kind) helper_kind
+		nil
+)))
 (define materialized-source? (lambda (table-source)
 	(or
+		(if (unnest_helper_table? table-source)
+			(materialized-source? (unnest_helper_table_base table-source))
+			false)
 		(and (string? table-source) (>= (strlen table-source) 1) (equal? (substr table-source 0 1) "."))
 		(match table-source
 			(cons (cons (symbol context) '("session")) _) true
@@ -491,10 +559,11 @@ source-expression namespace for this materialized source. */
 	))
 ))
 (define planner-temp-source-name (lambda (tbl tblvar)
-	(if (string? tbl)
-		tbl
-		(if (materialized-source? tbl)
-			(concat "mat_" (fnv_hash (string tbl)))
+	(define base_tbl (if (unnest_helper_table? tbl) (unnest_helper_table_base tbl) tbl))
+	(if (string? base_tbl)
+		base_tbl
+		(if (materialized-source? base_tbl)
+			(concat "mat_" (fnv_hash (string base_tbl)))
 			(string tblvar)))))
 /* rewrite_source_aliases: replace get_column table aliases according to alias_map.
 Used to store prejoin lineage in the same canonical source namespace that also
@@ -1216,7 +1285,7 @@ ports the actual operator rules to the tree representation. */
 								(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
 							(define _us_nested_direct_tbls_rewritten (scalar_subselect_rewrite_tables _us_nested_direct_tbls _us_rewrite_table_expr))
 							(define us_tbl_entries (merge
-								(list (list us_sq_prefix us_tbl_schema us_tbl_name true us_full_lim))
+								(list (list us_sq_prefix us_tbl_schema (make_unnest_helper_table us_tbl_schema us_tbl_name (quote scalar)) true us_full_lim))
 								_us_nested_direct_tbls_rewritten))
 							(define _us_inner_schema (schemas2_us us_tblvar))
 							(define _us_passthrough_schemas (merge
@@ -1855,6 +1924,12 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	(make_scan_tagged_table_parts base order limit offset partition_cols once_limit nil)
 ))
 (define scan_tagged_table_base (lambda (tbl) (match tbl
+	'(unnest_helper_table schema_name base helper_kind)
+	(make_unnest_helper_table schema_name (scan_tagged_table_base base) helper_kind)
+	'((symbol unnest_helper_table) schema_name base helper_kind)
+	(make_unnest_helper_table schema_name (scan_tagged_table_base base) helper_kind)
+	'((quote unnest_helper_table) schema_name base helper_kind)
+	(make_unnest_helper_table schema_name (scan_tagged_table_base base) helper_kind)
 	'(scan-tagged-table base _ _ _ _ _) base
 	'(scan-tagged-table base _ _ _ _ _ _) base
 	'((symbol scan-tagged-table) base _ _ _ _ _) base
@@ -1864,6 +1939,9 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	tbl
 )))
 (define scan_tagged_table_order (lambda (tbl) (match tbl
+	'(unnest_helper_table _ base _) (scan_tagged_table_order base)
+	'((symbol unnest_helper_table) _ base _) (scan_tagged_table_order base)
+	'((quote unnest_helper_table) _ base _) (scan_tagged_table_order base)
 	'(scan-tagged-table _ order _ _ _ _) (coalesceNil order '())
 	'(scan-tagged-table _ order _ _ _ _ _) (coalesceNil order '())
 	'((symbol scan-tagged-table) _ order _ _ _ _) (coalesceNil order '())
@@ -1873,6 +1951,9 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	'()
 )))
 (define scan_tagged_table_limit (lambda (tbl) (match tbl
+	'(unnest_helper_table _ base _) (scan_tagged_table_limit base)
+	'((symbol unnest_helper_table) _ base _) (scan_tagged_table_limit base)
+	'((quote unnest_helper_table) _ base _) (scan_tagged_table_limit base)
 	'(scan-tagged-table _ _ limit _ _ _) limit
 	'(scan-tagged-table _ _ limit _ _ _ _) limit
 	'((symbol scan-tagged-table) _ _ limit _ _ _) limit
@@ -1882,6 +1963,9 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	nil
 )))
 (define scan_tagged_table_offset (lambda (tbl) (match tbl
+	'(unnest_helper_table _ base _) (scan_tagged_table_offset base)
+	'((symbol unnest_helper_table) _ base _) (scan_tagged_table_offset base)
+	'((quote unnest_helper_table) _ base _) (scan_tagged_table_offset base)
 	'(scan-tagged-table _ _ _ offset _ _) offset
 	'(scan-tagged-table _ _ _ offset _ _ _) offset
 	'((symbol scan-tagged-table) _ _ _ offset _ _) offset
@@ -1891,6 +1975,9 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	nil
 )))
 (define scan_tagged_table_partition_cols (lambda (tbl) (match tbl
+	'(unnest_helper_table _ base _) (scan_tagged_table_partition_cols base)
+	'((symbol unnest_helper_table) _ base _) (scan_tagged_table_partition_cols base)
+	'((quote unnest_helper_table) _ base _) (scan_tagged_table_partition_cols base)
 	'(scan-tagged-table _ _ _ _ partition_cols _) (coalesceNil partition_cols 0)
 	'(scan-tagged-table _ _ _ _ partition_cols _ _) (coalesceNil partition_cols 0)
 	'((symbol scan-tagged-table) _ _ _ _ partition_cols _) (coalesceNil partition_cols 0)
@@ -1900,6 +1987,9 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	0
 )))
 (define scan_tagged_table_once_limit (lambda (tbl) (match tbl
+	'(unnest_helper_table _ base _) (scan_tagged_table_once_limit base)
+	'((symbol unnest_helper_table) _ base _) (scan_tagged_table_once_limit base)
+	'((quote unnest_helper_table) _ base _) (scan_tagged_table_once_limit base)
 	'(scan-tagged-table _ _ _ _ _ once_limit) once_limit
 	'(scan-tagged-table _ _ _ _ _ once_limit _) once_limit
 	'((symbol scan-tagged-table) _ _ _ _ _ once_limit) once_limit
@@ -1909,6 +1999,9 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	nil
 )))
 (define scan_tagged_table_outer_sources (lambda (tbl) (match tbl
+	'(unnest_helper_table _ base _) (scan_tagged_table_outer_sources base)
+	'((symbol unnest_helper_table) _ base _) (scan_tagged_table_outer_sources base)
+	'((quote unnest_helper_table) _ base _) (scan_tagged_table_outer_sources base)
 	'(scan-tagged-table _ _ _ _ _ _ outer_sources) (coalesceNil outer_sources '())
 	'((symbol scan-tagged-table) _ _ _ _ _ _ outer_sources) (coalesceNil outer_sources '())
 	'((quote scan-tagged-table) _ _ _ _ _ _ outer_sources) (coalesceNil outer_sources '())
@@ -1917,14 +2010,28 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 (define scan_tagged_table_with_outer_sources (lambda (tbl outer_sources)
 	(if (or (nil? outer_sources) (equal? outer_sources '()))
 		tbl
-		(make_scan_tagged_table_parts
-			(scan_tagged_table_base tbl)
-			(scan_tagged_table_order tbl)
-			(scan_tagged_table_limit tbl)
-			(scan_tagged_table_offset tbl)
-			(scan_tagged_table_partition_cols tbl)
-			(scan_tagged_table_once_limit tbl)
-			outer_sources)
+		(match tbl
+			'(unnest_helper_table schema_name base helper_kind)
+			(make_unnest_helper_table schema_name
+				(scan_tagged_table_with_outer_sources base outer_sources)
+				helper_kind)
+			'((symbol unnest_helper_table) schema_name base helper_kind)
+			(make_unnest_helper_table schema_name
+				(scan_tagged_table_with_outer_sources base outer_sources)
+				helper_kind)
+			'((quote unnest_helper_table) schema_name base helper_kind)
+			(make_unnest_helper_table schema_name
+				(scan_tagged_table_with_outer_sources base outer_sources)
+				helper_kind)
+			_
+			(make_scan_tagged_table_parts
+				(scan_tagged_table_base tbl)
+				(scan_tagged_table_order tbl)
+				(scan_tagged_table_limit tbl)
+				(scan_tagged_table_offset tbl)
+				(scan_tagged_table_partition_cols tbl)
+				(scan_tagged_table_once_limit tbl)
+				outer_sources))
 )))
 (define scan_tagged_table_needs_scan_order (lambda (tbl)
 	(or (not (equal? (scan_tagged_table_order tbl) '()))
@@ -2036,7 +2143,9 @@ runtime promise name is created during unnesting anymore. */
 )))
 (define scalar_subselect_prefixed_tables (lambda (tables lookup_alias rewrite_expr)
 	(map tables (lambda (td) (match td
-		'(a s t io je) (list (coalesceNil (lookup_alias a) a) s t io
+		'(a s t io je) (list (coalesceNil (lookup_alias a) a) s
+			(make_unnest_helper_table s t (quote scalar))
+			io
 			(if (nil? je) nil (rewrite_expr je)))
 		td)))
 ))
@@ -2061,8 +2170,9 @@ runtime promise name is created during unnesting anymore. */
 		(coalesceNil (stage_outer_sources stage) '()))))
 ))
 (define scalar_subselect_physical_schema (lambda (tschema ttbl)
-	(if (and (string? tschema) (string? ttbl) (has? (show tschema) ttbl))
-		(show tschema ttbl)
+	(define base_tbl (if (unnest_helper_table? ttbl) (unnest_helper_table_base ttbl) ttbl))
+	(if (and (string? tschema) (string? base_tbl) (has? (show tschema) base_tbl))
+		(show tschema base_tbl)
 		nil)
 ))
 (define scalar_subselect_resolved_schema (lambda (schema_cols tschema ttbl)
@@ -2230,17 +2340,20 @@ They remain part of emitted planner IR for anti-pass and ordered scalar paths. *
 	(if (equal? result neutral) nil result)
 )))
 /* scan-runtime-table: resolves a table source at runtime (direct call context) */
-(define scan-runtime-table (lambda (schema tbl) (match (scan_tagged_table_base tbl)
+(define scan-runtime-table (lambda (schema tbl) (match (unnest_helper_table_runtime_source (scan_tagged_table_base tbl))
 	'(materialized-subquery key) ((context "session") key)
 	'((symbol materialized-subquery) key) ((context "session") key)
 	'((quote materialized-subquery) key) ((context "session") key)
 	base_tbl (table schema base_tbl)
 )))
 /* scan-codegen-table: generates a table expression for codegen */
-(define scan-codegen-table (lambda (schema tbl) (match (scan_tagged_table_base tbl)
+(define scan-codegen-table (lambda (schema tbl) (match (unnest_helper_table_runtime_source (scan_tagged_table_base tbl))
 	'(materialized-subquery key) (list (list (quote context) "session") key)
 	'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
 	'((quote materialized-subquery) key) (list (list (quote context) "session") key)
+	'(table helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
+	'((symbol table) helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
+	'((quote table) helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
 	base_tbl (list (quote table) schema base_tbl)
 )))
 
@@ -2343,10 +2456,15 @@ a scan AND does not reference outer-scope vars. */
 (define expr_is_parallelizable (lambda (expr)
 	(and (expr_has_scan expr) (not (expr_refs_outer_var expr)))))
 
-(define generated_unnest_alias? (lambda (alias_name)
-	(and (string? alias_name)
-		(>= (strlen alias_name) 5)
-		(equal? (substr alias_name 0 5) "_unn_"))))
+(define unnest_helper_aliases (lambda (tables)
+	(reduce tables (lambda (acc td)
+		(match td
+			'(tbl_alias _ tbl_source _ _)
+			(if (unnest_helper_table? tbl_source)
+				(append_unique acc (string tbl_alias))
+				acc)
+			acc))
+		'())))
 
 (define tables_include_alias? (lambda (tables alias_name)
 	(reduce tables (lambda (found td)
@@ -2731,11 +2849,11 @@ field names and must not re-run schema repair
 resolve_schema_column_ref_scoped is the shared lookup primitive for that boundary:
 it canonicalizes alias/field casing from schema metadata and keeps the preferred
 search order for unqualified refs (main tables before helper/unnested aliases). */
-(define main_scope_alias? (lambda (alias)
+(define main_scope_alias? (lambda (helper_aliases alias)
 	(begin
 		(define s (string alias))
 		(and (equal? (replace s "\0" "") s)
-			(not (and (>= (strlen s) 5) (equal? (substr s 0 5) "_unn_")))))))
+			(not (has? helper_aliases s))))))
 /* Shared schema-resolution contract:
 - all alias/column lookups flow through these helpers
 - callers choose whether they want the first visible match or require uniqueness
@@ -2768,7 +2886,7 @@ schema-driven column casing inside queryplan.scm */
 		(define coldef (if (nil? cols) nil (schema_column_def cols col ci)))
 		(coalesce (if (nil? coldef) nil (coldef "Field")) col))
 ))
-(define collect_schema_column_matches_scoped (lambda (local_schemas visible_schemas alias_ ti col ci) (begin
+(define collect_schema_column_matches_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci) (begin
 	(define collect_matches (lambda (schemas alias_pred)
 		(reduce_assoc schemas (lambda (acc alias cols)
 			(if (and (alias_pred alias) (schema_has_column? cols col ci))
@@ -2777,39 +2895,39 @@ schema-driven column casing inside queryplan.scm */
 			'())))
 	(if (nil? alias_)
 		(begin
-			(define _main (collect_matches local_schemas main_scope_alias?))
+			(define _main (collect_matches local_schemas (lambda (alias) (main_scope_alias? helper_aliases alias))))
 			(if (equal? _main '())
 				(collect_matches local_schemas (lambda (alias) true))
 				_main))
 		(collect_matches visible_schemas (lambda (alias) (schema_alias_matches alias_ alias ti))))
 )))
-(define first_schema_column_match_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
-	(match (collect_schema_column_matches_scoped local_schemas visible_schemas alias_ ti col ci)
+(define first_schema_column_match_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
+	(match (collect_schema_column_matches_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci)
 		(cons head _) head
 		nil
 )))
-(define unique_schema_column_match_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
-	(match (collect_schema_column_matches_scoped local_schemas visible_schemas alias_ ti col ci)
+(define unique_schema_column_match_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
+	(match (collect_schema_column_matches_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci)
 		(cons head '()) head
 		nil
 )))
-(define resolve_schema_column_ref_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
+(define resolve_schema_column_ref_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
 	(begin
-		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci))
+		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
 		(if (nil? resolved) nil
 			(list (nth resolved 0) (nth resolved 1)))
 	)
 ))
-(define resolve_unique_schema_column_ref_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
+(define resolve_unique_schema_column_ref_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
 	(begin
-		(define resolved (unique_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci))
+		(define resolved (unique_schema_column_match_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
 		(if (nil? resolved) nil
 			(list (nth resolved 0) (nth resolved 1)))
 	)
 ))
-(define resolve_schema_column_expr_scoped (lambda (local_schemas visible_schemas alias_ ti col ci)
+(define resolve_schema_column_expr_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
 	(begin
-		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas alias_ ti col ci))
+		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
 		(if (nil? resolved)
 			nil
 			(list (quote get_column) (nth resolved 0) false (nth resolved 1) false))
@@ -2820,10 +2938,10 @@ local_schemas are the aliases visible in the current scope, while visible_schema
 also contains outer aliases needed for qualified outer refs like src.ID.
 Unqualified refs must only match local aliases so recursive untangling keeps
 free get_columns free instead of accidentally binding them to an outer table. */
-(define canonicalize_columns_scoped (lambda (expr local_schemas visible_schemas) (match expr
+(define canonicalize_columns_scoped (lambda (expr local_schemas visible_schemas helper_aliases) (match expr
 	'((symbol get_column) alias_ ti col ci) (if (or ti ci)
 		(begin
-			(define resolved (resolve_schema_column_expr_scoped local_schemas visible_schemas alias_ ti col ci))
+			(define resolved (resolve_schema_column_expr_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
 			(if (nil? resolved)
 				expr /* leave unresolved — replace_find_column will handle or error */
 				resolved))
@@ -2831,7 +2949,7 @@ free get_columns free instead of accidentally binding them to an outer table. */
 	)
 	'((quote get_column) alias_ ti col ci) (if (or ti ci)
 		(begin
-			(define resolved (resolve_schema_column_expr_scoped local_schemas visible_schemas alias_ ti col ci))
+			(define resolved (resolve_schema_column_expr_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
 			(if (nil? resolved)
 				expr /* leave unresolved — replace_find_column will handle or error */
 				resolved))
@@ -2839,14 +2957,14 @@ free get_columns free instead of accidentally binding them to an outer table. */
 	)
 	/* do not recurse into opaque scope nodes — inner_select, runtime code */
 	(cons sym args) (if (_is_opaque_scope_sym sym) expr
-		(cons (canonicalize_columns_scoped sym local_schemas visible_schemas)
-			(map args (lambda (a) (canonicalize_columns_scoped a local_schemas visible_schemas)))))
+		(cons (canonicalize_columns_scoped sym local_schemas visible_schemas helper_aliases)
+			(map args (lambda (a) (canonicalize_columns_scoped a local_schemas visible_schemas helper_aliases)))))
 	expr
 )))
 /* canonicalize_columns keeps the old single-schema API for callers that do not
 cross a scope boundary. */
 (define canonicalize_columns (lambda (expr all_schemas)
-	(canonicalize_columns_scoped expr all_schemas all_schemas)
+	(canonicalize_columns_scoped expr all_schemas all_schemas '())
 ))
 /* finalize_logical_expr is the only normalization gate from untangle_query into
 the downstream planner.
@@ -2857,21 +2975,22 @@ Order matters:
 also leave untangle_query in exact schema casing
 After this helper, later planner stages must only see exact/case-sensitive
 get_column markers and may no longer run schema-based repair heuristics. */
-(define finalize_logical_expr_scoped (lambda (expr local_schemas visible_schemas rewrite_expr enforce_contract) (begin
+(define finalize_logical_expr_scoped (lambda (expr local_schemas visible_schemas helper_aliases rewrite_expr enforce_contract) (begin
 	(define finalized
 		(canonicalize_columns_scoped
-			(rewrite_expr (canonicalize_columns_scoped expr local_schemas visible_schemas))
+			(rewrite_expr (canonicalize_columns_scoped expr local_schemas visible_schemas helper_aliases))
 			local_schemas
-			visible_schemas))
+			visible_schemas
+			helper_aliases))
 	(if enforce_contract
 		(require_canonical_logical_expr "untangle_query output" finalized)
 		finalized))
 ))
 (define finalize_logical_expr (lambda (expr all_schemas rewrite_expr enforce_contract)
-	(finalize_logical_expr_scoped expr all_schemas all_schemas rewrite_expr enforce_contract)
+	(finalize_logical_expr_scoped expr all_schemas all_schemas '() rewrite_expr enforce_contract)
 ))
-(define finalize_logical_stage_scoped (lambda (stage local_schemas visible_schemas rewrite_expr enforce_contract) (begin
-	(define fin (lambda (expr) (finalize_logical_expr_scoped expr local_schemas visible_schemas rewrite_expr enforce_contract)))
+(define finalize_logical_stage_scoped (lambda (stage local_schemas visible_schemas helper_aliases rewrite_expr enforce_contract) (begin
+	(define fin (lambda (expr) (finalize_logical_expr_scoped expr local_schemas visible_schemas helper_aliases rewrite_expr enforce_contract)))
 	(define sg (coalesceNil (stage_group_cols stage) '()))
 	(define sh (stage_post_group_condition_expr stage))
 	(define so (coalesceNil (stage_order_list stage) '()))
@@ -2917,7 +3036,7 @@ get_column markers and may no longer run schema-based repair heuristics. */
 				(lambda (a) a))))))
 )
 (define finalize_logical_stage (lambda (stage all_schemas rewrite_expr enforce_contract)
-	(finalize_logical_stage_scoped stage all_schemas all_schemas rewrite_expr enforce_contract)
+	(finalize_logical_stage_scoped stage all_schemas all_schemas '() rewrite_expr enforce_contract)
 ))
 /* canonicalize all get_column markers in a group stage */
 (define canonicalize_stage (lambda (stage all_schemas) (begin
@@ -4693,15 +4812,11 @@ seeing the correctly prefixed outer alias. */
 								/* count only OWN tables (not inner scoped ones from nested decorrelation) */
 								(define _us_inner_aliases (merge (map _us_inner_stages (lambda (s) (coalesceNil (stage_partition_aliases s) '())))))
 								(define _us_own_tables (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (not (has? _us_inner_aliases a)) true))))
-								(define _us_generated_unnest_alias (lambda (alias_name)
-									(and (string? alias_name)
-										(>= (strlen alias_name) 5)
-										(equal? (substr alias_name 0 5) "_unn_"))))
 								(define _us_base_tables (filter _us_own_tables (lambda (t) (match t
-									'(a _ _ _ _) (not (_us_generated_unnest_alias a))
+									'(_ _ ttbl _ _) (not (unnest_helper_table? ttbl))
 									true))))
 								(define _us_nested_direct_tbls (filter _us_own_tables (lambda (t) (match t
-									'(a _ _ _ _) (_us_generated_unnest_alias a)
+									'(_ _ ttbl _ _) (unnest_helper_table? ttbl)
 									false))))
 								(define _us_base_aliases (map _us_base_tables (lambda (td) (match td '(a _ _ _ _) a nil))))
 								(define us_single_tbl (and (list? _us_base_tables) (equal? (count _us_base_tables) 1)))
@@ -7213,6 +7328,7 @@ seeing the correctly prefixed outer alias. */
 	(set renamelist (merge renameList))
 	(set tables (merge tablesList))
 	(set schemas (merge schemasList))
+	(define planner_helper_aliases (unnest_helper_aliases tables))
 	/* global WHERE stays separate from per-table joinexpr (ON). */
 	(set condition (coalesceNil condition true))
 
@@ -7301,19 +7417,18 @@ seeing the correctly prefixed outer alias. */
 					(cons (replace_find_column a) (cons (replace_find_column b) (cons c '()))))
 			)
 		)
-		/* Unqualified column: prefer main tables over unnested/subquery tables.
-		Main tables have no ':' prefix and no '_unn_' prefix in their alias. */
+		/* Unqualified column: prefer main tables over unnested/subquery tables. */
 		'((symbol get_column) nil _ "*" _) expr
 		'((quote get_column) nil _ "*" _) expr
 		'((symbol get_column) _ _ "*" _) expr
 		'((quote get_column) _ _ "*" _) expr
 		'((symbol get_column) nil _ col ci) (begin
-			/* First try main tables (aliases without ':' or '_unn_' prefix) */
+			/* First try main tables (aliases without nested scope marker and not structurally tagged helpers) */
 			(define _is_main_alias (lambda (alias) (begin
 				(define s (string alias))
 				(and (not (strlike s "%:%"))
 					(not (strlike s "%\0%"))
-					(not (and (>= (strlen s) 5) (equal? (substr s 0 5) "_unn_")))))))
+					(not (has? planner_helper_aliases s))))))
 			(define main_match (reduce_assoc schemas (lambda (a alias cols)
 				(if (and (_is_main_alias alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 					alias a)) nil))
@@ -7773,10 +7888,12 @@ seeing the correctly prefixed outer alias. */
 
 
 	(define planner_visible_schemas (merge schemas outer_schemas_chain))
+	(define planner_local_helper_aliases (filter planner_helper_aliases (lambda (alias)
+		(has_assoc? schemas alias))))
 	(define finalize_visible_expr (lambda (expr)
 		(finalize_logical_expr_scoped
 			(resolve_dependent_scalar_compile_markers expr planner_visible_schemas)
-			schemas planner_visible_schemas replace_rename enforce_planner_contract)))
+			schemas planner_visible_schemas planner_local_helper_aliases replace_rename enforce_planner_contract)))
 	(define finalize_visible_table_ref (lambda (tbl)
 		(if (scan_tagged_table_needs_scan_order tbl)
 			(scan_tagged_table_with_outer_sources
@@ -7855,7 +7972,7 @@ seeing the correctly prefixed outer alias. */
 	(define _canon_fields fields)
 	(define _canon_condition conditionAll)
 	(define _canon_groups (map (coalesceNil groups '()) (lambda (stage)
-		(finalize_logical_stage_scoped stage schemas planner_visible_schemas replace_rename enforce_planner_contract))))
+		(finalize_logical_stage_scoped stage schemas planner_visible_schemas planner_local_helper_aliases replace_rename enforce_planner_contract))))
 	/* eliminate unused LEFT JOINs: a LEFT JOIN is unused when none of its
 	columns appear in fields or group stages. Join predicates reference the
 	JOIN alias by construction and must not keep it alive. Only unnested
@@ -8901,9 +9018,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* prepare preaggregate */
 				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
 				(define materialized_source (materialized-source? tbl))
-				(define tbl_source_expr (if (string? tbl)
-					(list (quote table) schema tbl)
-					tbl))
+				(define tbl_source_expr (scan-codegen-table schema tbl))
 				(define group_value_local_materializable (and materialized_source (string? tbl)))
 				(define expr_name (lambda (expr)
 					(sanitize_temp_name

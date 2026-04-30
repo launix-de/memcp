@@ -204,9 +204,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		see them. Do not stringify this source and do not add table-name
 		fallbacks in Go for it. */
 		(define scan-table-source (lambda (table_source) (match table_source
+			'(unnest_helper_table helper_schema base _)
+			(scan-table-source (if (string? base) (list 'table helper_schema base) base))
+			'((symbol unnest_helper_table) helper_schema base _)
+			(scan-table-source (if (string? base) (list 'table helper_schema base) base))
+			'((quote unnest_helper_table) helper_schema base _)
+			(scan-table-source (if (string? base) (list 'table helper_schema base) base))
 			'(scan-tagged-table base _ _ _ _ _) (scan-table-source base)
+			'(scan-tagged-table base _ _ _ _ _ _) (scan-table-source base)
 			'((symbol scan-tagged-table) base _ _ _ _ _) (scan-table-source base)
+			'((symbol scan-tagged-table) base _ _ _ _ _ _) (scan-table-source base)
 			'((quote scan-tagged-table) base _ _ _ _ _) (scan-table-source base)
+			'((quote scan-tagged-table) base _ _ _ _ _ _) (scan-table-source base)
 			'(materialized-subquery key) (list (list (quote context) "session") key)
 			'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
 			'((quote materialized-subquery) key) (list (list (quote context) "session") key)
