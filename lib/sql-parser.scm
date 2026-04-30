@@ -1115,11 +1115,19 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			))
 		)
 		(?
-			(atom "LIMIT" true)
 			(or
-				'((define offset sql_expression) (atom "," true) (define limit sql_expression))
-				'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
-				'((define limit sql_expression))
+				'(
+					(atom "LIMIT" true)
+					(or
+						'((define offset sql_expression) (atom "," true) (define limit sql_expression))
+						'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
+						'((define limit sql_expression))
+					)
+				)
+				'(
+					(atom "OFFSET" true)
+					(define offset sql_expression)
+				)
 			)
 		)
 	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))

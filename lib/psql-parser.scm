@@ -503,11 +503,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			))
 		)
 		(?
-			(atom "LIMIT" true)
 			(or
-				'((define offset psql_expression) (atom "," true) (define limit psql_expression))
-				'((define limit psql_expression) (atom "OFFSET" true) (define offset psql_expression))
-				'((define limit psql_expression))
+				'(
+					(atom "LIMIT" true)
+					(or
+						'((define offset psql_expression) (atom "," true) (define limit psql_expression))
+						'((define limit psql_expression) (atom "OFFSET" true) (define offset psql_expression))
+						'((define limit psql_expression))
+					)
+				)
+				'(
+					(atom "OFFSET" true)
+					(define offset psql_expression)
+				)
 			)
 		)
 	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
