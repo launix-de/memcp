@@ -2340,14 +2340,17 @@ They remain part of emitted planner IR for anti-pass and ordered scalar paths. *
 	(if (equal? result neutral) nil result)
 )))
 /* scan-runtime-table: resolves a table source at runtime (direct call context) */
-(define scan-runtime-table (lambda (schema tbl) (match (unnest_helper_table_runtime_source (scan_tagged_table_base tbl))
+(define scan-runtime-table (lambda (schema tbl) (match (planner_table_source_base (scan_tagged_table_base tbl))
 	'(materialized-subquery key) ((context "session") key)
 	'((symbol materialized-subquery) key) ((context "session") key)
 	'((quote materialized-subquery) key) ((context "session") key)
+	'(table helper_schema helper_tbl) (table helper_schema helper_tbl)
+	'((symbol table) helper_schema helper_tbl) (table helper_schema helper_tbl)
+	'((quote table) helper_schema helper_tbl) (table helper_schema helper_tbl)
 	base_tbl (table schema base_tbl)
 )))
 /* scan-codegen-table: generates a table expression for codegen */
-(define scan-codegen-table (lambda (schema tbl) (match (unnest_helper_table_runtime_source (scan_tagged_table_base tbl))
+(define scan-codegen-table (lambda (schema tbl) (match (planner_table_source_base (scan_tagged_table_base tbl))
 	'(materialized-subquery key) (list (list (quote context) "session") key)
 	'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
 	'((quote materialized-subquery) key) (list (list (quote context) "session") key)
@@ -3957,7 +3960,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW session) ...) and
 					(set filtercols (merge_unique (list
 						(extract_columns_for_tblvar tblvar now_condition)
 						(extract_outer_columns_for_tblvar tblvar now_condition))))
-					(list 'scan '(session "__memcp_tx") (list 'table schema tbl)
+					(list 'scan '(session "__memcp_tx") (scan-codegen-table schema tbl)
 						(cons 'list filtercols)
 						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
 						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
@@ -4675,6 +4678,7 @@ seeing the correctly prefixed outer alias. */
 	(define scalar_subselect_needs_limit_k_rewrite (lambda (subquery outer_schemas) (match subquery
 		'(_ _ _ _ _ _ order limit offset)
 		(and
+			(not (_subquery_has_outer_refs subquery outer_schemas))
 			(not (or (nil? order) (equal? order '())))
 			(not (or
 				(and (nil? offset) (or (nil? limit) (equal? limit 1)))
@@ -11199,7 +11203,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													true
 													(list raw_update_fn 'OLD 'NEW 'session)))))
 										/* emit the register call as an S-expression to be executed at query time */
-										(list 'register_prejoin_incremental src_schema src_tbl prejoin_schema prejoin_table_name
+										(list 'register_prejoin_incremental src_schema (planner_table_source_base src_tbl) prejoin_schema prejoin_table_name
 											delete_fn insert_fn update_fn))))))) (lambda (x) (not (nil? x)))))
 				/* assemble: createtable returns true on first creation -> materialize + deploy triggers.
 				Subsequent calls: table exists, triggers active, incremental maintenance. */
