@@ -23,11 +23,15 @@ per outer binding, not by a global LIMIT. */
 	"DROP TABLE IF EXISTS lko_emp"
 	"DROP TABLE IF EXISTS lko_dept"
 	"CREATE TABLE lko_dept (did INT PRIMARY KEY, dname TEXT)"
-	"CREATE TABLE lko_emp (eid INT PRIMARY KEY, did INT, name TEXT, salary INT)"
+	"CREATE TABLE lko_emp (eid INT PRIMARY KEY, did INT, name TEXT, band TEXT, salary INT)"
 	"INSERT INTO lko_dept VALUES (1, 'Engineering'), (2, 'Sales')"
-	"INSERT INTO lko_emp VALUES (1, 1, 'Alice', 90000), (2, 1, 'Bob', 80000), (3, 1, 'Cara', 70000), (4, 2, 'Dave', 95000), (5, 2, 'Eve', 85000), (6, 2, 'Frank', 75000)"
+	"INSERT INTO lko_emp VALUES (1, 1, 'Alice', 'A', 90000), (2, 1, 'Bob', 'B', 80000), (3, 1, 'Cara', 'A', 70000), (4, 1, 'Dana', 'C', 65000), (5, 2, 'Eve', 'A', 95000), (6, 2, 'Frank', 'B', 85000), (7, 2, 'Gina', 'A', 75000), (8, 2, 'Hank', 'C', 55000)"
 ))
 
 (define repro_limit_k_offset_queries (list
-	"SELECT d.did, (SELECT e.name FROM lko_emp e WHERE e.did = d.did ORDER BY e.salary DESC LIMIT 1 OFFSET 1) AS second_earner FROM lko_dept d ORDER BY d.did"
+	"SELECT d.did, (SELECT e.name FROM lko_emp e WHERE e.did = d.did ORDER BY e.salary DESC LIMIT 3 OFFSET 1) AS shifted_earner FROM lko_dept d ORDER BY d.did"
+	"SELECT d.did, (SELECT e.name FROM lko_emp e WHERE e.did = d.did ORDER BY e.salary DESC OFFSET 2) AS offset_only_earner FROM lko_dept d ORDER BY d.did"
+	"SELECT d.did, (SELECT e.name FROM lko_emp e WHERE e.did = d.did ORDER BY e.salary DESC LIMIT 2) AS topk_earner FROM lko_dept d ORDER BY d.did"
+	"SELECT d.did, (SELECT e.band FROM lko_emp e WHERE e.did = d.did GROUP BY e.band ORDER BY MAX(e.salary) DESC LIMIT 3 OFFSET 1) AS grouped_band FROM lko_dept d ORDER BY d.did"
+	"SELECT d.did, (SELECT e.name FROM lko_emp e WHERE e.did = d.did LIMIT 3) AS synthesized_order_earner FROM lko_dept d ORDER BY d.did"
 ))
