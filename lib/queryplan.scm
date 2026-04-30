@@ -1224,7 +1224,23 @@ ports the actual operator rules to the tree representation. */
 								(scalar_subselect_passthrough_schemas (merge _us_inner_tbls _us_nested_direct_tbls) schemas2_us)))
 							(if (not (equal? _us_passthrough_schemas '()))
 								(sq_cache "schemas" (merge _us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
-							(define us_subst (_us_ria (us_rewrite_map_expr us_value_expr)))
+							(define _us_presence_col (if (nil? _us_inner_schema)
+								nil
+								(coalesce
+									(reduce _us_inner_schema (lambda (found coldef)
+										(if (not (nil? found)) found
+											(if (equal? (coldef "Key") "PRI") (coldef "Field") nil)))
+										nil)
+									(match _us_inner_schema
+										(cons first_col _) (first_col "Field")
+										nil))))
+							(define us_subst_raw (_us_ria (us_rewrite_map_expr us_value_expr)))
+							(define us_subst (if (nil? _us_presence_col)
+								us_subst_raw
+								(list (quote if)
+									(list (quote nil?) (list (quote get_column) us_sq_prefix false _us_presence_col false))
+									nil
+									us_subst_raw)))
 							(if (not (nil? us_simple_uncorrelated_cache_key))
 								(sq_cache "scalar_helper_cache"
 									(set_assoc (coalesceNil (sq_cache "scalar_helper_cache") '())
@@ -2380,22 +2396,18 @@ Splits an AND-condition into (now, later): predicates evaluatable with currently
 bound tables vs predicates that must wait for inner tables to be scanned.
 Enables index-based filtering in scan/scan_order by pushing predicates down. */
 (define split_condition (lambda (expr tables) (match expr
-	'((symbol get_column) tblvar _ col _) /* a column */ (if (and (generated_unnest_alias? tblvar) (not (tables_include_alias? tables tblvar)))
-		'(true expr)
-		(match tables
-			'() '(expr true) /* last condition: compute now */
-			(cons (cons (eval tblvar) _) _) '(true expr) /* col depends on tblvar */
-			(cons _ tablesrest) (split_condition expr tablesrest) /* check next table in join plan */
-			(error "invalid tables list")
-		))
-	'((quote get_column) tblvar _ col _) /* a column */ (if (and (generated_unnest_alias? tblvar) (not (tables_include_alias? tables tblvar)))
-		'(true expr)
-		(match tables
-			'() '(expr true) /* last condition: compute now */
-			(cons (cons (eval tblvar) _) _) '(true expr) /* col depends on tblvar */
-			(cons _ tablesrest) (split_condition expr tablesrest) /* check next table in join plan */
-			(error "invalid tables list")
-		))
+	'((symbol get_column) tblvar _ col _) /* a column */ (match tables
+		'() '(expr true) /* last condition: compute now */
+		(cons (cons (eval tblvar) _) _) '(true expr) /* col depends on tblvar */
+		(cons _ tablesrest) (split_condition expr tablesrest) /* check next table in join plan */
+		(error "invalid tables list")
+	)
+	'((quote get_column) tblvar _ col _) /* a column */ (match tables
+		'() '(expr true) /* last condition: compute now */
+		(cons (cons (eval tblvar) _) _) '(true expr) /* col depends on tblvar */
+		(cons _ tablesrest) (split_condition expr tablesrest) /* check next table in join plan */
+		(error "invalid tables list")
+	)
 	'((symbol outer) outer_sym) (match (split (string outer_sym) ".")
 		(list outer_tbl _outer_col) (match tables
 			'() '(expr true)
@@ -7478,6 +7490,30 @@ seeing the correctly prefixed outer alias. */
 							dep_domain_joinexpr)))
 				td)
 		_ td))))
+	(define _sq_tbl_alias (lambda (td) (match td
+		'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)
+		nil)))
+	(define _sq_tbl_dependency_order (lambda (helper_tables) (begin
+		(define helper_aliases (map helper_tables _sq_tbl_alias))
+		(define helper_deps (lambda (td) (match td
+			'(_ _ _ _ je) (if (nil? je)
+				'()
+				(filter (extract_tblvars je) (lambda (alias_name)
+					(has? helper_aliases alias_name))))
+			'())))
+		(define order_step (lambda (ordered remaining) (begin
+			(define ordered_aliases (map ordered _sq_tbl_alias))
+			(define ready (filter remaining (lambda (td)
+				(equal? (filter (helper_deps td) (lambda (alias_name)
+					(not (has? ordered_aliases alias_name)))) '()))))
+			(if (equal? ready '())
+				(merge ordered remaining)
+				(order_step
+					(merge ordered ready)
+					(filter remaining (lambda (td)
+						(not (has? (map ready _sq_tbl_alias) (_sq_tbl_alias td))))))))))
+		(order_step '() helper_tables))))
+	(define _sq_tbls (_sq_tbl_dependency_order _sq_tbls))
 	(define _sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
 	/* Deduplication is only sound while the query still carries purely logical
 	scalar expressions. Legacy inline fallbacks embed physical runtime code
@@ -7658,10 +7694,22 @@ seeing the correctly prefixed outer alias. */
 	/* Design contract: logical get_column/aggregate/window sentinels should stay
 	as long as possible and join semantics must stay attached to their stage.
 	COUNT/IN/EXISTS helper tables still expose their correlation predicates here
-	as global condition terms. Scalar projection helpers only stay local while
-	they are projection-only; once WHERE references them, they join the normal
-	row-domain and their joinexpr must participate in global filtering. */
-	(define _sq_jes (filter (map (merge _sq_tbls sq_scalar_condition_tbls) (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
+	as global condition terms. Scalar LEFT JOIN helpers keep their joinexpr local
+	even when their projected value participates in WHERE; otherwise NULL-
+	preserving COALESCE / boolean wrappers collapse into eager row-domain
+	filtering before the helper value can be evaluated. */
+	(define _sq_local_scalar_stage_aliases (merge_unique (map (coalesceNil groups '()) (lambda (stage)
+		(if (and
+				(not (nil? (stage_partition_aliases stage)))
+				(not (nil? (stage_limit_val stage)))
+				(equal? (coalesceNil (stage_group_cols stage) '()) '())
+				(nil? (stage_having_expr stage)))
+			(coalesceNil (stage_partition_aliases stage) '())
+			'())))))
+	(define _sq_global_joinexpr_tbls (filter _sq_tbls (lambda (t) (match t
+		'(tv _ _ _ _) (not (has? _sq_local_scalar_stage_aliases tv))
+		true))))
+	(define _sq_jes (filter (map _sq_global_joinexpr_tbls (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 	(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
 		(define _sq_prop_groups (dedupe_logical_stages
 			(if (equal? _sq_scalar_alias_map '())
@@ -7981,6 +8029,25 @@ second table carries strictly more local WHERE predicates than the first. */
 		(list '() '()))
 		'(out seg) (merge out (jqr_reorder_inner_segment seg condition schemas))
 		tables_))))
+(define jqr_order_by_joinexpr_dependencies (lambda (tables_) (begin
+	(define jqr_aliases (map tables_ jqr_td_alias))
+	(define jqr_deps (lambda (td)
+		(filter
+			(filter (extract_tblvars (coalesceNil (jqr_td_joinexpr td) true)) (lambda (alias_name)
+				(not (equal?? alias_name (jqr_td_alias td)))))
+			(lambda (alias_name) (has? jqr_aliases alias_name)))))
+	(define jqr_step (lambda (ordered remaining) (begin
+		(define ordered_aliases (map ordered jqr_td_alias))
+		(define ready (filter remaining (lambda (td)
+			(equal? (filter (jqr_deps td) (lambda (alias_name)
+				(not (has? ordered_aliases alias_name)))) '()))))
+		(if (equal? ready '())
+			(merge ordered remaining)
+			(jqr_step
+				(merge ordered ready)
+				(filter remaining (lambda (td)
+					(not (has? (map ready jqr_td_alias) (jqr_td_alias td))))))))))
+	(jqr_step '() tables_))))
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column) (begin
 	(define jqr_stage_is_constant_scalar (lambda (stage_aliases) (begin
 		(define _alias_set (coalesceNil stage_aliases '()))
@@ -8014,11 +8081,11 @@ second table carries strictly more local WHERE predicates than the first. */
 	(define jqr_regular_tables (filter tables (lambda (td) (match td
 		'(alias _ _ _ _) (not (has? jqr_constant_scalar_aliases alias))
 		true))))
-	(define jqr_final_tables (merge
+	(define jqr_final_tables (jqr_order_by_joinexpr_dependencies (merge
 		jqr_constant_scalar_tables
 		(if (jqr_has_order_sensitive_stage groups)
 			jqr_regular_tables
-			(jqr_reorder_segments jqr_regular_tables condition schemas))))
+			(jqr_reorder_segments jqr_regular_tables condition schemas)))))
 	/* FAQ-unnesting point 35: after the physical reorder decision is made,
 	hand the 7-tuple to inject_anti_passes so stages whose helper alias was
 	lifted above its correlation source (helper_pos < outer_pos) pick up an
@@ -8758,10 +8825,31 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(filter tables (lambda (t) (match t '(tv _ _ _ _) (has? _stage_scope tv) false)))
 			/* global GROUP: all tables except partition-staged */
 			(filter tables (lambda (t) (match t '(tv _ _ _ _) (not (has? _grp_ps_aliases tv)) true)))))
-		(define _grp_ps_tables_raw (filter tables (lambda (t) (match t '(tv _ _ _ _)
+		(define _grp_ps_tables_seed (filter tables (lambda (t) (match t '(tv _ _ _ _)
 			(and (not (has? (coalesceNil _stage_scope '()) tv))
 				(or (has? _grp_ps_aliases tv) (not (nil? _stage_scope))))
 			false))))
+		(define _grp_table_alias (lambda (td) (match td
+			'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)
+			nil)))
+		(define _grp_table_depends_on_alias (lambda (td alias_name) (match td
+			'(_ _ _ _ je) (and
+				(not (nil? je))
+				(has? (extract_tblvars je) alias_name))
+			false)))
+		(define _grp_expand_ps_tables (lambda (cur) (begin
+			(define cur_aliases (map cur _grp_table_alias))
+			(define next (merge cur (filter tables (lambda (td) (begin
+				(define td_alias (_grp_table_alias td))
+				(and
+					(not (has? cur_aliases td_alias))
+					(reduce cur_aliases (lambda (found alias_name)
+						(or found (_grp_table_depends_on_alias td alias_name)))
+						false)))))))
+			(if (equal? (count next) (count cur))
+				cur
+				(_grp_expand_ps_tables next)))))
+		(define _grp_ps_tables_raw (_grp_expand_ps_tables _grp_ps_tables_seed))
 		(define _grp_ps_visible_aliases (merge_unique (map _grp_ps_tables_raw (lambda (td) (match td
 			'(tv tschema ttbl _ _)
 			(filter (list
