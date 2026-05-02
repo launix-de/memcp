@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-parser.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
+(import "queryplan-tree-ir.scm")
 (import "queryplan.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
