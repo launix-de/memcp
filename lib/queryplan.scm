@@ -941,6 +941,27 @@ planner starts splitting aggregate conditions apart. */
 	)
 ))
 
+(define session_read_expr (lambda (expr)
+	(match expr
+		(cons sym (cons _ '()))
+		(if (or
+			(equal?? sym (symbol session))
+			(equal?? sym (quote session))
+			(equal?? sym (quote (quote session))))
+			expr
+			nil)
+		_ nil)))
+
+(define extract_session_read_refs (lambda (expr)
+		(match expr
+			_ (if (not (nil? (session_read_expr expr)))
+				(list expr)
+				(match expr
+					(cons sym args) (if (_is_opaque_scope_sym sym)
+						'()
+						(merge_unique (map args extract_session_read_refs)))
+					'())))))
+
 /* returns a list of all window function nodes (fn args over) in this expr */
 (define extract_window_funcs (lambda (expr)
 	(match expr
@@ -4268,10 +4289,17 @@ seeing the correctly prefixed outer alias. */
 													(cons subquery '())
 													(if (dependent_marker_required_subquery subquery outer_schemas)
 														(begin
-															(define dep_id (coalesceNil (dep_scalar_cache "idx") 1))
-															(dep_scalar_cache "idx" (+ dep_id 1))
-															(dep_scalar_cache dep_id (list (quote inner_select_exists) subquery nil true))
-															(dependent_scalar_compile_marker dep_id))
+															(define dep_expr
+																(build_dependent_scalar_via_marker
+																	(quote inner_select_exists)
+																	subquery
+																	nil
+																	outer_schemas))
+															(list
+																(quote if)
+																(list (quote nil?) dep_expr)
+																true
+																(list (quote not) dep_expr)))
 														nil)
 													_ nil)
 												nil)))
@@ -4614,11 +4642,15 @@ seeing the correctly prefixed outer alias. */
 			'((quote dependent_domain) _) true
 			_ false)))
 	(define dependent_join_helper_domain_ref_to_expr (lambda (ref)
-		(match (split ref ".")
-			(list alias col) (list (quote get_column) alias false col false)
-			_ nil)))
+		(if (not (nil? (session_read_expr ref)))
+			ref
+			(match (split ref ".")
+				(list alias col) (list (quote get_column) alias false col false)
+				_ nil))))
 	(define dependent_join_helper_domain_cols_from_info (lambda (dep_info) (begin
-		(define dep_outer_refs (dependent_expr_compile_info_outer_refs dep_info))
+		(define dep_outer_refs (merge_unique
+			(dependent_expr_compile_info_outer_refs dep_info)
+			(extract_session_read_refs (dependent_expr_compile_info_expr dep_info))))
 		(match (reduce dep_outer_refs (lambda (state ref) (match state
 			'(idx acc)
 			(list
@@ -4800,37 +4832,54 @@ seeing the correctly prefixed outer alias. */
 				(cons (quote and) join_parts))))))
 	(define dependent_join_helper_rewrite_expr_for_domain_source (lambda (expr domain_cols) (begin
 		(define domain_alias (dependent_join_helper_domain_source_alias))
-		(define ref_to_domain_col (lambda (ref_string)
+		(define ref_to_domain_col (lambda (ref_expr)
 			(reduce domain_cols (lambda (found dc) (match dc
 				'(dom_col dom_expr) (if (not (nil? found))
 					found
-					(match dom_expr
-						'((quote get_column) alias_ _ col _) (if (equal? ref_string (concat alias_ "." col)) dom_col nil)
-						'((symbol get_column) alias_ _ col _) (if (equal? ref_string (concat alias_ "." col)) dom_col nil)
-						_ nil))
+					(if (equal? dom_expr ref_expr)
+						dom_col
+						(match dom_expr
+							'((quote get_column) alias_ _ col _) (match ref_expr
+								'((quote get_column) ref_alias _ ref_col _) (if (and (equal? alias_ ref_alias) (equal? col ref_col)) dom_col nil)
+								'((symbol get_column) ref_alias _ ref_col _) (if (and (equal? alias_ ref_alias) (equal? col ref_col)) dom_col nil)
+								_ nil)
+							'((symbol get_column) alias_ _ col _) (match ref_expr
+								'((quote get_column) ref_alias _ ref_col _) (if (and (equal? alias_ ref_alias) (equal? col ref_col)) dom_col nil)
+								'((symbol get_column) ref_alias _ ref_col _) (if (and (equal? alias_ ref_alias) (equal? col ref_col)) dom_col nil)
+								_ nil)
+							_ nil)))
 				_ found))
 				nil)))
 		(define rewrite_expr (lambda (e) (match e
 			'((quote get_column) alias_ ti col ci) (begin
-				(define mapped_col (if (nil? alias_) nil (ref_to_domain_col (concat alias_ "." col))))
+				(define mapped_col (if (nil? alias_) nil (ref_to_domain_col e)))
 				(if (nil? mapped_col)
 					e
 					(list (quote get_column) domain_alias false mapped_col false)))
 			'((symbol get_column) alias_ ti col ci) (begin
-				(define mapped_col (if (nil? alias_) nil (ref_to_domain_col (concat alias_ "." col))))
+				(define mapped_col (if (nil? alias_) nil (ref_to_domain_col e)))
 				(if (nil? mapped_col)
 					e
 					(list (quote get_column) domain_alias false mapped_col false)))
 			'((quote outer) outer_sym) (begin
-				(define mapped_col (ref_to_domain_col (string outer_sym)))
+				(define mapped_col (ref_to_domain_col e))
 				(if (nil? mapped_col)
 					e
 					(list (quote get_column) domain_alias false mapped_col false)))
 			'((symbol outer) outer_sym) (begin
-				(define mapped_col (ref_to_domain_col (string outer_sym)))
+				(define mapped_col (ref_to_domain_col e))
 				(if (nil? mapped_col)
 					e
 					(list (quote get_column) domain_alias false mapped_col false)))
+			(cons sym (cons _ '())) (if (not (nil? (session_read_expr e)))
+				(begin
+					(define mapped_col (ref_to_domain_col e))
+					(if (nil? mapped_col)
+						e
+						(list (quote get_column) domain_alias false mapped_col false)))
+				(if (_is_opaque_scope_sym sym)
+					e
+					(cons (rewrite_expr sym) (map (cdr e) rewrite_expr))))
 			(cons sym args) (if (_is_opaque_scope_sym sym)
 				e
 				(cons (rewrite_expr sym) (map args rewrite_expr)))
@@ -6292,6 +6341,9 @@ seeing the correctly prefixed outer alias. */
 	(define _sq_helper_specs (filter _sq_tbls (lambda (td) (match td
 		'(_ _ ttbl _ _) (is_dependent_join_helper_spec ttbl)
 		_ false))))
+	(define _sq_helper_aliases (map _sq_helper_specs (lambda (td) (match td
+		'(tv _ _ _ _) tv
+		_ nil))))
 	(define rewrite_helper_logical_expr (lambda (expr) (begin
 		(define rewritten
 			(reduce _sq_helper_specs (lambda (current td) (match td
@@ -6655,10 +6707,18 @@ seeing the correctly prefixed outer alias. */
 			(coalesceNil (stage_partition_aliases stage) '())
 			'())))))
 	(define _sq_global_joinexpr_tbls (filter _sq_tbls (lambda (t) (match t
-		'(tv _ _ _ _) (not (has? _sq_local_scalar_stage_aliases tv))
+		'(tv _ _ _ _) (and
+			(not (has? _sq_local_scalar_stage_aliases tv))
+			(not (has? _sq_helper_aliases tv)))
 		true))))
 	(define _sq_jes (filter (map _sq_global_joinexpr_tbls (lambda (t) (match t '(_ _ _ _ je) je nil))) (lambda (x) (not (nil? x)))))
 	(set condition (if (equal? _sq_jes '()) condition (cons (quote and) (cons condition _sq_jes))))
+	(define _sq_local_helper_joinexprs (filter (map tables (lambda (t) (match t
+		'(_ _ _ isOuter je) (if isOuter je nil)
+		nil))) (lambda (x) (not (nil? x)))))
+	(set conditionList (filter conditionList (lambda (part)
+		(not (reduce _sq_local_helper_joinexprs (lambda (found helper_joinexpr)
+			(or found (equal? helper_joinexpr part))) false)))))
 	(define _sq_prop_groups (dedupe_logical_stages
 		(if (equal? _sq_scalar_alias_map '())
 			(coalesceNil (sq_cache "groups") '())
