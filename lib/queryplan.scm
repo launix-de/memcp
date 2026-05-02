@@ -4372,9 +4372,13 @@ seeing the correctly prefixed outer alias. */
 													(define dep_result_expr
 														(if (or (equal?? dep_kind (quote inner_select_exists))
 															(equal?? dep_kind (quote inner_select_in)))
-															(list (quote coalesceNil)
-																(list (quote get_column) dep_alias false dep_result_col false)
-																false)
+															(list
+																(quote if)
+																(list
+																	(quote nil?)
+																	(list (quote get_column) dep_alias false dep_result_col false))
+																false
+																(list (quote get_column) dep_alias false dep_result_col false))
 															(list (quote get_column) dep_alias false dep_result_col false)))
 													(sq_cache "tables" (merge
 														(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr (coalesce dep_simple_source_query dep_materialized_source_query) dep_unnesting_info))
@@ -4827,10 +4831,20 @@ seeing the correctly prefixed outer alias. */
 				nil)
 			_ source_query))))
 	(define dependent_join_helper_build_simple_exists_source_query (lambda (dep_info result_col domain_cols)
-		(dependent_join_helper_wrap_grouped_presence_source_query
-			(dependent_join_helper_build_source_query dep_info "__dep_match_result" domain_cols true)
-			result_col
-			domain_cols)))
+		(begin
+			(define exists_source_query
+				(dependent_join_helper_build_source_query dep_info "__dep_match_result" domain_cols true))
+			(dependent_join_helper_wrap_grouped_presence_source_query
+				(match exists_source_query
+					'(src_schema src_tables src_fields src_condition src_group src_having src_order src_limit src_offset)
+					(if (and
+						(or (nil? src_offset) (equal? src_offset 0))
+						(or (nil? src_limit) (equal? src_limit 1)))
+						(list src_schema src_tables src_fields src_condition src_group src_having '() nil nil)
+						exists_source_query)
+					_ exists_source_query)
+				result_col
+				domain_cols))))
 	(define dependent_join_helper_build_simple_in_source_query (lambda (dep_info result_col domain_cols) (begin
 		(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
 		(define target_expr (dependent_expr_compile_info_target_expr dep_info))
@@ -5037,7 +5051,7 @@ seeing the correctly prefixed outer alias. */
 				_ acc))
 				'()))
 		(define seed_aliases (merge_unique
-			(merge (map domain_fields (lambda (df) (match df
+			(merge (map domain_cols (lambda (dc) (match dc
 				'(_ dom_expr) (extract_tblvars dom_expr)
 				_ '()))))
 			(extract_tblvars (coalesceNil outer_condition true))
@@ -6208,12 +6222,17 @@ seeing the correctly prefixed outer alias. */
 		'(tv tschema ttbl toisOuter tje)
 		(if (is_dependent_join_helper_spec ttbl)
 			(begin
+				(define dep_outer_condition
+					(match (filter (flatten_and_terms (coalesceNil condition true)) (lambda (term)
+						(not (has? (extract_tblvars term) tv))))
+						'() true
+						terms (cons (quote and) terms)))
 				(define dep_source_query
 					(dependent_join_helper_finalize_source_query
 						(dependent_join_helper_spec_source_query ttbl)
 						(dependent_join_helper_spec_domain_cols ttbl)
 						tables
-						condition
+						dep_outer_condition
 						group
 						having
 						(dependent_join_helper_spec_unnesting_info ttbl)))
@@ -6531,8 +6550,6 @@ seeing the correctly prefixed outer alias. */
 			(cons sym (map args replace_rename)))
 		expr
 	)))
-
-
 	(define planner_visible_schemas (merge schemas outer_schemas_chain))
 	(define planner_local_helper_aliases (filter planner_helper_aliases (lambda (alias)
 		(has_assoc? schemas alias))))

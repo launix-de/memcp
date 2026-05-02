@@ -988,6 +988,33 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
 	(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
 		(begin
+			(define contains_inner_select_expr (lambda (expr) (match expr
+				(cons sym args) (or
+					(not (nil? (sql_inner_select_kind sym)))
+					(reduce args (lambda (a b) (or a (contains_inner_select_expr b))) false))
+				_ false)))
+			(define contains_inner_select_order_item (lambda (order_item) (match order_item
+				'(col _dir) (contains_inner_select_expr col)
+				_ false)))
+			(define count_rewrite_safe (match subquery
+				'(_ _ fields condition group having order _ _)
+				(not
+					(or
+						(reduce_assoc fields (lambda (a _k v) (or a (contains_inner_select_expr v))) false)
+						(contains_inner_select_expr condition)
+						(reduce (coalesceNil group '()) (lambda (a b) (or a (contains_inner_select_expr b))) false)
+						(contains_inner_select_expr having)
+						(reduce (coalesceNil order '()) (lambda (a b) (or a (contains_inner_select_order_item b))) false)))
+				_ true))
+			(if (not count_rewrite_safe)
+				(if (nil? target_expr)
+					(if negated
+						(list (quote not) (list (quote inner_select_exists) subquery))
+						(list (quote inner_select_exists) subquery))
+					(if negated
+						(list (quote not) (list (quote inner_select_in) target_expr subquery))
+						(list (quote inner_select_in) target_expr subquery)))
+				(begin
 			(define union_parts (sql_union_all_parts subquery))
 			(define count_expr
 				(if (nil? union_parts)
@@ -1007,7 +1034,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(list
 				(if negated (quote equal?) (quote >))
 				count_expr
-				0))))
+				0))))))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
 			(quote inner_select)
