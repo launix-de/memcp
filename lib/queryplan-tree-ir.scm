@@ -620,7 +620,10 @@ ports the actual operator rules to the tree representation. */
 								(map us_domain_cols (lambda (dc) (nth dc 0)))
 								'())
 							'()))
-					(define us_renamed_order (scalar_scan_rewrite_order us_orig_order _us_ria))
+								(define us_renamed_order
+									(scalar_scan_bind_unqualified_order_alias
+										(scalar_scan_rewrite_order us_orig_order _us_ria)
+										us_sq_prefix))
 					(define us_order_supported (scalar_scan_order_supported us_renamed_order us_sq_prefix))
 					(if (not us_order_supported)
 						nil
@@ -948,7 +951,9 @@ ports the actual operator rules to the tree representation. */
 	(make_scalar_partition_stage
 		(merge
 			(planner_tree_ir_window_partition_order tree fallback_partition_exprs rewrite_inner_expr sq_alias)
-			(scalar_scan_rewrite_order order_list rewrite_inner_expr))
+			(scalar_scan_bind_unqualified_order_alias
+				(scalar_scan_rewrite_order order_list rewrite_inner_expr)
+				sq_alias))
 		limit_value
 		offset_value
 		(planner_tree_ir_window_partition_count tree fallback_partition_exprs)

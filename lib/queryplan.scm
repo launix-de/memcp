@@ -646,6 +646,16 @@ helpers instead of rebuilding alias/order logic inline inside untangle_query. */
 		'(col dir) (list (rewrite_expr col) dir)
 		oi)))
 ))
+(define scalar_scan_bind_unqualified_order_alias (lambda (order_list sq_alias)
+	(map (coalesceNil order_list '()) (lambda (oi) (match oi
+		'(col dir) (match col
+			'((symbol get_column) nil ti colname ci)
+			(list (list (quote get_column) sq_alias ti colname ci) dir)
+			'((quote get_column) nil ti colname ci)
+			(list (list (quote get_column) sq_alias ti colname ci) dir)
+			oi)
+		oi)))
+))
 (define scalar_scan_order_supported (lambda (order_list sq_alias)
 	(reduce order_list (lambda (acc oi) (and acc (match oi
 		'(col _dir) (match col
