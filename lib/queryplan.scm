@@ -106,6 +106,17 @@ they must not guess/fix alias or column casing anymore. */
 		(error (concat "planner contract violated: " context " still contains case-insensitive get_column markers in " (serialize expr)))
 		expr)
 ))
+(define strip_logical_case_flags (lambda (expr) (match expr
+	'((symbol get_column) alias_ _ col _)
+	(list (quote get_column) alias_ false col false)
+	'((quote get_column) alias_ _ col _)
+	(list (quote get_column) alias_ false col false)
+	(cons sym args) (if (_is_opaque_scope_sym sym)
+		expr
+		(cons (strip_logical_case_flags sym)
+			(map args strip_logical_case_flags)))
+	expr
+)))
 /* Naming contract:
 - canonicalize_expr rewrites planner-local aliases into the stable canonical
 source namespace, but only for already-canonical logical expressions
@@ -258,7 +269,7 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 /* Compatibility wrapper for older call sites. New planner code should keep the
 canonical expression in a local define and only serialize it at the edge. */
 (define canonical_expr_name (lambda (expr columns params alias_map)
-	(serialize_canonical_expr (canonicalize_expr expr alias_map))
+	(serialize_canonical_expr (canonicalize_expr (strip_logical_case_flags expr) alias_map))
 ))
 /* build_occurrence_alias_map: assign a stable canonical source namespace to query
 aliases. Single occurrences keep the physical table name for maximal reuse.
@@ -3198,9 +3209,12 @@ seeing the correctly prefixed outer alias. */
 								(define outer_cols (schema_assoc_cols _o outer_alias))
 								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") outer_column)) coldef a)) nil))
 								(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
-								(if (outer_alias_requires_domain_preservation outer_alias)
+								(if (or
+										(nil? alias_name)
+										(outer_alias_requires_domain_preservation outer_alias))
 									/* grouped/windowed outer aliases define the visible correlation
-									domain; do not collapse them back into base-table refs */
+									domain; unqualified visible fields must also stay on the visible
+									outer binding instead of collapsing to base-table refs */
 									(list (quote outer) (symbol (concat outer_alias "." outer_column)))
 									(if (and (not (nil? outer_expr)) (outer_expr_is_domain_safe outer_expr))
 										/* simple pass-through/computed wrapper columns may still inline */
@@ -3330,13 +3344,6 @@ seeing the correctly prefixed outer alias. */
 				(expr_uses_session_state subquery)
 				(_raw_query_contains_skip_level_nested_outer_ref subquery (_raw_query_local_aliases subquery))))
 		nil)))
-	(define scalar_subselect_inline_raw_flags (lambda (subquery) (match subquery
-		'(_ _ _ _ g h o l off)
-		(list
-			g h o l off
-			(expr_uses_session_state subquery)
-			(_raw_query_contains_skip_level_nested_outer_ref subquery (_raw_query_local_aliases subquery)))
-		nil)))
 	(define scalar_subselect_lowering_facts (lambda (subquery outer_schemas) (match subquery
 		'(_ _ flds _ g h o _ _) (begin
 			(define value_expr (match flds
@@ -3396,101 +3403,16 @@ seeing the correctly prefixed outer alias. */
 					groups2))
 				(list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2))
 			nil))))
-	(define prepare_scalar_subselect_inline_scope (lambda (subquery outer_schemas raw_group raw_having raw_order raw_limit raw_offset) (begin
-		/* This is the logical scope-normalization boundary for scalar inline lowering.
-		It must stay free of runtime scan/promise construction so a future top-down
-		dependent-join pass can hook in here without re-walking the old fallback code. */
-		(define normalized_subquery (planner_flat_subquery_roundtrip_via_tree_ir subquery))
-		(match (untangle_scalar_subquery_scope normalized_subquery outer_schemas raw_group raw_having raw_order raw_limit raw_offset)
-			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2)
-			(begin
-				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas false))
-				(define field_exprs (extract_assoc fields2 (lambda (k v) v)))
-				(define value_expr (match field_exprs
-					(cons only '()) only
-					_ (error "scalar subselect must return single column")
-				))
-				(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
-				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
-				/* wrap remaining unresolved qualified get_column refs as (outer tbl.col).
-				These are outer-outer refs that weren't in _s or _o — wrapping them
-				preserves them through replace_columns_from_expr and allows
-				replace_column_alias to prefix them during derived-table flattening. */
-				(define wrap_unresolved_outer (lambda (e) (match e
-					'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci)
-						/* only wrap as (outer) if the alias is actually in outer_schemas;
-						if not in outer_schemas either, leave as-is for scan-context resolution
-						(e.g. joinexpr refs to sibling tables like v.ID) */
-						(not (nil? (reduce_assoc outer_schemas (lambda (a k v) (or a (equal?? k alias_))) false))))
-						(list (quote outer) (symbol (concat alias_ "." col)))
-						e)
-					(cons sym args) (cons (wrap_unresolved_outer sym) (map args wrap_unresolved_outer))
-					e
-				)))
-				(set fields2 (map_assoc fields2 (lambda (k v) (wrap_unresolved_outer v))))
-				(set condition2 (wrap_unresolved_outer condition2))
-				/* The inline scalar path still routes through build_queryplan directly.
-				Resolve any nested scalar/EXISTS/IN markers here so raw aggregate
-				sentinels do not leak into the eventual __scalar_resultrow lambda. */
-					(set fields2 (map_assoc fields2 (lambda (k v) (replace_inner_selects v outer_schemas))))
-					(set condition2 (replace_inner_selects condition2 outer_schemas))
-					(list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2 value_expr))
-				nil))))
-		(define build_uncorrelated_scalar_subselect_fallback (lambda (subquery outer_schemas) (begin
-			(define generated_count_subquery (match subquery
-				'(_ _ sub_fields _ _ _ _ _ _)
-				(match sub_fields
-					'("__cnt" _) true
-					false)
-				false))
-			(match (scalar_subselect_shape_facts subquery outer_schemas)
-				'(_g _h _o _l _off _value_expr has_outer _outer_refs_are_direct _contains_inner_select has_value_agg _session_sensitive _skip_level)
-				(if (or
-						has_outer
-						generated_count_subquery
-						_contains_inner_select
-						(scalar_inner_select_is_presence_query subquery))
-					nil
-					(match (scalar_subselect_inline_raw_flags subquery)
-						'(raw_group raw_having raw_order raw_limit raw_offset _scalar_uses_session_state _raw_contains_skip_level_nested_outer_ref)
-						(match (prepare_scalar_subselect_inline_scope
-							subquery outer_schemas
-							raw_group raw_having raw_order raw_limit raw_offset)
-							'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2 _value_expr2) (begin
-								(define sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
-								(define sq_promise_name (concat "__scalar_promise_" sq_hash))
-								(define sq_resultrow_name (concat "__scalar_resultrow_" sq_hash))
-								(define replace_resultrow (lambda (expr) (match expr
-									(cons sym args) (if (equal? sym (quote resultrow))
-										(cons (symbol sq_resultrow_name) (map args replace_resultrow))
-										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-											(list (quote symbol) sq_resultrow_name)
-											(cons (replace_resultrow sym) (map args replace_resultrow))))
-									expr)))
-								(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
-								(define init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
-								(planner_debug_record_scalar_event (quote lowering) (quote inline-uncorrelated))
-								(planner_debug_record_scalar_event
-									(quote inline-strategy)
-									(if has_value_agg
-										(quote inline-direct-agg-scan)
-										(quote legacy-fallback-non-aggregate)))
-								(cons (quote !begin) (merge init_stmts (list
-									(list (quote set) (symbol sq_promise_name) (list (quote newpromise)))
-									(list (quote set) (symbol sq_resultrow_name)
-										(list (quote lambda) (list (symbol "row"))
-											(list (symbol sq_promise_name) "once"
-												(list (quote nth) (symbol "row") 1)
-												"scalar subselect returned more than one row")))
-									subplan
-									(list (symbol sq_promise_name) "value"))))
-							)
-							nil)
-						nil))
-				nil))))
-		(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
-			'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
-			(match (build_scalar_subselect_with_strategy
+	(define scalar_subselect_guaranteed_max_one (lambda (subquery outer_schemas) (match
+		(scalar_subselect_shape_facts subquery outer_schemas)
+		'(g _h _o l _off _value_expr _has_outer _outer_refs_are_direct _contains_inner_select has_value_agg _session_sensitive _skip_level)
+		(or
+			(and (not (nil? l)) (<= l 1))
+			(and has_value_agg (or (nil? g) (equal? g '()))))
+		false)))
+	(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
+		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
+		(match (build_scalar_subselect_with_strategy
 				(list schema2 tables2
 					(list "__exists" true)
 					condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
@@ -4026,10 +3948,20 @@ seeing the correctly prefixed outer alias. */
 		(planner_debug_record_scalar_event (quote lowering) lowering_reason)
 		(quote prefer-unnest))))
 	(define materialize_uncorrelated_scalar_subselect (lambda (subquery outer_schemas) (begin
+		(define generated_count_subquery (match subquery
+			'(_ _ sub_fields _ _ _ _ _ _)
+			(match sub_fields
+				'("__cnt" _) true
+				false)
+			false))
 		(define shape_facts (scalar_subselect_shape_facts subquery outer_schemas))
 		(match shape_facts
-			'(g h _o _l _off _value_expr has_outer _outer_refs_are_direct _contains_inner_select has_value_agg _session_sensitive _skip_level)
-			(if (or has_outer (not has_value_agg))
+			'(g h _o _l _off _value_expr has_outer _outer_refs_are_direct contains_inner_select has_value_agg _session_sensitive _skip_level)
+			(if (or
+					has_outer
+					generated_count_subquery
+					contains_inner_select
+					(scalar_inner_select_is_presence_query subquery))
 				nil
 				(match subquery
 					'(sub_schema _sub_tables sub_fields _sub_condition _sub_group _sub_having _sub_order _sub_limit _sub_offset) (begin
@@ -4039,37 +3971,54 @@ seeing the correctly prefixed outer alias. */
 						(if (nil? first_field_name)
 							nil
 							(begin
-								(define scalar_idx (coalesceNil (sq_cache "idx") 0))
-								(sq_cache "idx" (+ scalar_idx 1))
-								(define scalar_alias (concat "_uncorr_scalar_" scalar_idx))
-								(define scalar_rows_sym (symbol (concat "__uncorr_scalar_rows:" scalar_idx)))
-								(define scalar_sink_sym (symbol (concat "__uncorr_scalar_sink:" scalar_idx)))
-								(define materialized_binding
-									(legacy_materialized_query_term_binding_ast
-										scalar_alias subquery scalar_rows_sym scalar_sink_sym nil nil))
-								(define mat_source (nth materialized_binding 0))
-								(define mat_init (nth materialized_binding 1))
-								(planned_materialized_fields mat_source
-									(reduce_assoc sub_fields (lambda (acc k _v)
-										(merge acc (list (list "Field" k "Type" "any"))))
-										'()))
-								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-									(list mat_init)))
-								(sq_cache "scalar_tables" (merge
-									(list (list scalar_alias sub_schema mat_source false nil))
-									(coalesceNil (sq_cache "scalar_tables") '())))
-								(sq_cache "schemas" (merge
-									(list scalar_alias
-										(reduce_assoc sub_fields (lambda (acc k _v)
-											(merge acc (list (list "Field" k "Type" "any"))))
-											'()))
-									(coalesceNil (sq_cache "schemas") '())))
-								(list (quote get_column) scalar_alias false first_field_name false))))
+								(define uncorr_scalar_cache (coalesceNil (sq_cache "uncorr_scalar_bindings") '()))
+								(define uncorr_scalar_key (serialize subquery))
+								(define cached_alias (coalesce (uncorr_scalar_cache uncorr_scalar_key) nil))
+								(if (not (nil? cached_alias))
+									(list (quote get_column) cached_alias false first_field_name false)
+									(begin
+										(define scalar_idx (coalesceNil (sq_cache "idx") 0))
+										(sq_cache "idx" (+ scalar_idx 1))
+										(define scalar_alias (concat "_uncorr_scalar_" scalar_idx))
+										(define scalar_rows_sym (symbol (concat "__uncorr_scalar_rows:" scalar_idx)))
+										(define scalar_sink_sym (symbol (concat "__uncorr_scalar_sink:" scalar_idx)))
+										(define materialized_binding
+											(legacy_materialized_query_term_binding_ast
+												scalar_alias subquery scalar_rows_sym scalar_sink_sym nil nil))
+										(define mat_source (nth materialized_binding 0))
+										(define mat_init (nth materialized_binding 1))
+										(define scalar_tbl_source
+											(if (scalar_subselect_guaranteed_max_one subquery outer_schemas)
+												mat_source
+												(make_scan_tagged_table_parts mat_source '() 2 0 0 2 nil)))
+										(define scalar_tbl_is_outer
+											(or
+												has_value_agg
+												(not (scalar_subselect_guaranteed_max_one subquery outer_schemas))))
+										(define scalar_tbl_joinexpr
+											(if scalar_tbl_is_outer true nil))
+										(planned_materialized_fields mat_source
+											(reduce_assoc sub_fields (lambda (acc k _v)
+												(merge acc (list (list "Field" k "Type" "any"))))
+												'()))
+										(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
+											(list mat_init)))
+										(sq_cache "scalar_tables" (merge
+											(list (list scalar_alias sub_schema scalar_tbl_source scalar_tbl_is_outer scalar_tbl_joinexpr))
+											(coalesceNil (sq_cache "scalar_tables") '())))
+										(sq_cache "schemas" (merge
+											(list scalar_alias
+												(reduce_assoc sub_fields (lambda (acc k _v)
+													(merge acc (list (list "Field" k "Type" "any"))))
+													'()))
+											(coalesceNil (sq_cache "schemas") '())))
+										(sq_cache "uncorr_scalar_bindings"
+											(set_assoc uncorr_scalar_cache uncorr_scalar_key scalar_alias))
+										(list (quote get_column) scalar_alias false first_field_name false))))))
 					_ nil))
 			_ nil))))
 	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
 		(define lowered_expr (coalesce
-			(build_uncorrelated_scalar_subselect_fallback subquery outer_schemas)
 			(materialize_uncorrelated_scalar_subselect subquery outer_schemas)
 			(_unnest_scalar_subselect subquery outer_schemas)))
 		(if (nil? lowered_expr)
@@ -4519,7 +4468,8 @@ seeing the correctly prefixed outer alias. */
 									(if (or
 										(not (equal?? dep_kind (quote inner_select)))
 										(equal? dep_outer_refs '())
-										dep_has_value_agg)
+										dep_has_value_agg
+										(not (dependent_expr_compile_info_simple_candidate dep_info)))
 										nil
 										(unnest_subselect normalized_subquery outer_schemas)))
 								(define dep_effective_unnest_result (match dep_unnest_result

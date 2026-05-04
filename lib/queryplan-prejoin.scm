@@ -244,9 +244,9 @@ canonical source side must be used so equivalent queries share the same temp col
 (define normalize_visible_aliases (lambda (expr)
 	(match expr
 		'((symbol get_column) alias_ ti col ci)
-		(list (quote get_column) (visible_occurrence_alias alias_) ti col ci)
+		(list (quote get_column) (visible_occurrence_alias alias_) false col false)
 		'((quote get_column) alias_ ti col ci)
-		(list (quote get_column) (visible_occurrence_alias alias_) ti col ci)
+		(list (quote get_column) (visible_occurrence_alias alias_) false col false)
 		(cons sym args)
 		(cons sym (map args normalize_visible_aliases))
 		expr
@@ -256,12 +256,12 @@ canonical source side must be used so equivalent queries share the same temp col
 	(match expr
 		'((symbol get_column) alias_ ti col ci)
 		(match alias_
-			'(_ canonical_alias) (list (quote get_column) canonical_alias ti col ci)
-			_ expr)
+			'(_ canonical_alias) (list (quote get_column) canonical_alias false col false)
+			_ (list (quote get_column) alias_ false col false))
 		'((quote get_column) alias_ ti col ci)
 		(match alias_
-			'(_ canonical_alias) (list (quote get_column) canonical_alias ti col ci)
-			_ expr)
+			'(_ canonical_alias) (list (quote get_column) canonical_alias false col false)
+			_ (list (quote get_column) alias_ false col false))
 		(cons sym args)
 		(cons sym (map args normalize_canonical_aliases))
 		expr
