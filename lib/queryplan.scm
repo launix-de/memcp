@@ -3422,23 +3422,74 @@ seeing the correctly prefixed outer alias. */
 				/* The inline scalar path still routes through build_queryplan directly.
 				Resolve any nested scalar/EXISTS/IN markers here so raw aggregate
 				sentinels do not leak into the eventual __scalar_resultrow lambda. */
-				(set fields2 (map_assoc fields2 (lambda (k v) (replace_inner_selects v outer_schemas))))
-				(set condition2 (replace_inner_selects condition2 outer_schemas))
-				(list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2 value_expr))
-			nil))))
-	(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
-		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
-		(match (build_scalar_subselect_with_strategy
-			(list schema2 tables2
-				(list "__exists" true)
-				condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
-			outer_schemas)
-			'(_ lowered_expr) (list (quote coalesceNil) lowered_expr false)
-			false)
-		false
-	)))
-
-	/* unnest_subselect: core Neumann decorrelation for a single subquery.
+					(set fields2 (map_assoc fields2 (lambda (k v) (replace_inner_selects v outer_schemas))))
+					(set condition2 (replace_inner_selects condition2 outer_schemas))
+					(list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2 value_expr))
+				nil))))
+		(define build_uncorrelated_scalar_subselect_fallback (lambda (subquery outer_schemas) (begin
+			(define generated_count_subquery (match subquery
+				'(_ _ sub_fields _ _ _ _ _ _)
+				(match sub_fields
+					'("__cnt" _) true
+					false)
+				false))
+			(match (scalar_subselect_shape_facts subquery outer_schemas)
+				'(_g _h _o _l _off _value_expr has_outer _outer_refs_are_direct _contains_inner_select has_value_agg _session_sensitive _skip_level)
+				(if (or
+						has_outer
+						generated_count_subquery
+						_contains_inner_select
+						(scalar_inner_select_is_presence_query subquery))
+					nil
+					(match (scalar_subselect_inline_raw_flags subquery)
+						'(raw_group raw_having raw_order raw_limit raw_offset _scalar_uses_session_state _raw_contains_skip_level_nested_outer_ref)
+						(match (prepare_scalar_subselect_inline_scope
+							subquery outer_schemas
+							raw_group raw_having raw_order raw_limit raw_offset)
+							'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect _init2 _value_expr2) (begin
+								(define sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
+								(define sq_promise_name (concat "__scalar_promise_" sq_hash))
+								(define sq_resultrow_name (concat "__scalar_resultrow_" sq_hash))
+								(define replace_resultrow (lambda (expr) (match expr
+									(cons sym args) (if (equal? sym (quote resultrow))
+										(cons (symbol sq_resultrow_name) (map args replace_resultrow))
+										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+											(list (quote symbol) sq_resultrow_name)
+											(cons (replace_resultrow sym) (map args replace_resultrow))))
+									expr)))
+								(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect nil)))
+								(define init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
+								(planner_debug_record_scalar_event (quote lowering) (quote inline-uncorrelated))
+								(planner_debug_record_scalar_event
+									(quote inline-strategy)
+									(if has_value_agg
+										(quote inline-direct-agg-scan)
+										(quote legacy-fallback-non-aggregate)))
+								(cons (quote !begin) (merge init_stmts (list
+									(list (quote set) (symbol sq_promise_name) (list (quote newpromise)))
+									(list (quote set) (symbol sq_resultrow_name)
+										(list (quote lambda) (list (symbol "row"))
+											(list (symbol sq_promise_name) "once"
+												(list (quote nth) (symbol "row") 1)
+												"scalar subselect returned more than one row")))
+									subplan
+									(list (symbol sq_promise_name) "value"))))
+							)
+							nil)
+						nil))
+				nil))))
+		(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
+			'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
+			(match (build_scalar_subselect_with_strategy
+				(list schema2 tables2
+					(list "__exists" true)
+					condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
+				outer_schemas)
+				'(_ lowered_expr) (list (quote coalesceNil) lowered_expr false)
+				false)
+			false
+		)))
+		/* unnest_subselect: core Neumann decorrelation for a single subquery.
 	Transforms a correlated scalar subquery into a LEFT JOIN table entry,
 	eliminating the dependent join. Returns (substitution tables) or nil.
 
@@ -4008,6 +4059,7 @@ seeing the correctly prefixed outer alias. */
 			_ nil))))
 	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
 		(define lowered_expr (coalesce
+			(build_uncorrelated_scalar_subselect_fallback subquery outer_schemas)
 			(materialize_uncorrelated_scalar_subselect subquery outer_schemas)
 			(_unnest_scalar_subselect subquery outer_schemas)))
 		(if (nil? lowered_expr)
@@ -4638,6 +4690,13 @@ seeing the correctly prefixed outer alias. */
 			'(dependent_join_helper _dep_info _result_col _domain_cols _legacy_expr _source_query unnesting_info) unnesting_info
 			'((quote dependent_join_helper) _dep_info _result_col _domain_cols _legacy_expr _source_query unnesting_info) unnesting_info
 			_ nil)))
+	(define dependent_join_helper_spec_schema (lambda (spec)
+		(match (dependent_join_helper_spec_source_query spec)
+			'(_ _ dep_fields _ _ _ _ _ _)
+			(reduce_assoc dep_fields (lambda (acc k _v)
+				(merge acc (list (list "Field" k "Type" "any" "Expr" _v))))
+				'())
+			_ (list (list "Field" (dependent_join_helper_spec_result_col spec) "Type" "any")))))
 	(define dependent_join_helper_domain_col_name (lambda (idx)
 		(concat "__dep_d" idx)))
 	(define dependent_join_helper_domain_source_alias (lambda ()
@@ -5623,17 +5682,26 @@ seeing the correctly prefixed outer alias. */
 			(define norm_tbl (make_materialized-subquery-source key))
 			(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
 				(list alias (materialized_source_schema schema norm_tbl alias schemas))))
-		'(alias schema '(((quote context) "session") key) isOuter joinexpr) (begin
-			(define norm_tbl (make_materialized-subquery-source key))
-			(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
-				(list alias (materialized_source_schema schema norm_tbl alias schemas))))
-		'(alias schema '(((symbol context) "session") key) isOuter joinexpr) (begin
-			(define norm_tbl (make_materialized-subquery-source key))
-			(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
-				(list alias (materialized_source_schema schema norm_tbl alias schemas))))
-		'(alias schema '(dependent_domain domain_cols) _ _) (begin
-			(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-				(list (list (quote begin)
+			'(alias schema '(((quote context) "session") key) isOuter joinexpr) (begin
+				(define norm_tbl (make_materialized-subquery-source key))
+				(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
+					(list alias (materialized_source_schema schema norm_tbl alias schemas))))
+			'(alias schema '(((symbol context) "session") key) isOuter joinexpr) (begin
+				(define norm_tbl (make_materialized-subquery-source key))
+				(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
+					(list alias (materialized_source_schema schema norm_tbl alias schemas))))
+			'(alias schema '(dependent_join_helper _ _ _ _ _ _) isOuter joinexpr)
+			(list (list tbldesc) '() true
+				(list alias (dependent_join_helper_spec_schema (nth tbldesc 2))))
+			'(alias schema '((quote dependent_join_helper) _ _ _ _ _ _) isOuter joinexpr)
+			(list (list tbldesc) '() true
+				(list alias (dependent_join_helper_spec_schema (nth tbldesc 2))))
+			'(alias schema '((symbol dependent_join_helper) _ _ _ _ _ _) isOuter joinexpr)
+			(list (list tbldesc) '() true
+				(list alias (dependent_join_helper_spec_schema (nth tbldesc 2))))
+			'(alias schema '(dependent_domain domain_cols) _ _) (begin
+				(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
+					(list (list (quote begin)
 					(list (quote createtable) schema ".(1)"
 						(list (quote quote) (list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '())))
 						(list (quote quote) (list "engine" "sloppy")) true)
@@ -5755,16 +5823,33 @@ seeing the correctly prefixed outer alias. */
 											(cons alias acc)
 											acc))) '()))
 								(define matches (reduce matches (lambda (acc alias) (append_unique acc alias)) '()))
-								(match matches
-									(cons only '()) '('get_column (concat id "\0" only) ti col ci)
-									'() (begin
-										/* column not in schemas2 - check if it's a SELECT alias in fields2 */
-										(if (nil? (fields2 col))
-											expr /* leave unresolved — inner subselect scope will handle it */
-											/* found in fields2 - resolve to the underlying expression */
-											(replace_column_alias (fields2 col))
+									(match matches
+										(cons only '()) '('get_column (concat id "\0" only) ti col ci)
+										'() (begin
+											/* column not in schemas2 - check if it's a SELECT alias in fields2 */
+											(if (nil? (fields2 col))
+												(begin
+													(define outer_matches
+														(reduce_assoc outer_schemas_chain (lambda (acc outer_alias outer_cols)
+															(begin
+																(define norm_outer_cols (schema_assoc_cols outer_schemas_chain outer_alias))
+																(if (reduce norm_outer_cols (lambda (a coldef)
+																	(or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+																	(cons outer_alias acc)
+																	acc)))
+															'()))
+													(define outer_matches
+														(reduce outer_matches (lambda (acc outer_alias)
+															(append_unique acc outer_alias))
+															'()))
+													(match outer_matches
+														(cons outer_only '()) (list (quote get_column) outer_only false col false)
+														'() expr
+														(cons _ _) (error (concat "ambiguous outer column " col " in subquery"))))
+												/* found in fields2 - resolve to the underlying expression */
+												(replace_column_alias (fields2 col))
+											)
 										)
-									)
 									(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 								)
 							)
