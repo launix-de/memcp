@@ -113,6 +113,37 @@ builds, because their truth value depends on current session state. */
 	)
 ))
 (define planned_materialized_fields (newsession))
+(define materialized_source_dependency_tables (newsession))
+(define append_dependency_table_unique (lambda (acc dep_entry)
+	(if (or (nil? dep_entry)
+		(reduce acc (lambda (found existing)
+			(or found (and
+				(equal?? (nth existing 0) (nth dep_entry 0))
+				(equal?? (nth existing 1) (nth dep_entry 1)))))
+			false))
+		acc
+		(merge acc (list dep_entry)))
+))
+(define collect_materialized_query_dependency_tables (lambda (query)
+	(match query
+		'(_ dep_tables _ _ _ _ _ _ _)
+		(reduce dep_tables (lambda (acc td) (match td
+			'(_ tschema ttbl _ _)
+			(begin
+				(define normalized_tbl (normalize-materialized-subquery-source ttbl))
+				(if (materialized-subquery-source? normalized_tbl)
+					(reduce (coalesceNil (materialized_source_dependency_tables normalized_tbl) '())
+						append_dependency_table_unique
+						acc)
+					(begin
+						(define base_tbl (planner_table_source_base normalized_tbl))
+						(if (or (nil? base_tbl) (not (string? base_tbl)) (strlike base_tbl ".%"))
+							acc
+							(append_dependency_table_unique acc (list tschema base_tbl))))))
+			_ acc))
+			'())
+		_ '())
+))
 (define merge_schema_fields_unique (lambda (field_lists)
 	(reduce (merge field_lists) (lambda (acc coldef)
 		(if (reduce acc (lambda (found existing)
@@ -156,12 +187,15 @@ builds, because their truth value depends on current session state. */
 keytables/prejoins may not exist at compile time (runtime-only creation). */
 (define materialized_source_schema (lambda (tschema ttbl alias schemas)
 	(begin
-		(define alias_cols (if (or (nil? alias) (not (has_assoc? schemas alias))) '() (coalesceNil (schemas alias) '())))
-		(define planned_cols (coalesceNil (planned_materialized_fields ttbl) '()))
+		(define normalized_ttbl (normalize-materialized-subquery-source ttbl))
+		(define alias_cols_raw (if (or (nil? alias) (not (has_assoc? schemas alias))) nil (schemas alias)))
+		(define alias_cols (if (list? alias_cols_raw) alias_cols_raw '()))
+		(define planned_cols (coalesceNil (planned_materialized_fields normalized_ttbl) '()))
 		(merge_schema_fields_unique (list alias_cols planned_cols)))))
 (define materialized_source_physical_schema (lambda (tschema ttbl alias schemas)
 	(begin
-		(define planned_cols (coalesceNil (planned_materialized_fields ttbl) '()))
+		(define normalized_ttbl (normalize-materialized-subquery-source ttbl))
+		(define planned_cols (coalesceNil (planned_materialized_fields normalized_ttbl) '()))
 		/* Design contract: only columns that are part of the explicit materialized
 		stage schema count as physical planner inputs. Dynamic show()/compute-column
 		metadata may expose virtual cache columns that are not safe scan inputs for
@@ -252,8 +286,51 @@ so stored compute lambdas can still resolve them after the surrounding lexical
 scope is gone. */
 (define materialized-subquery-key (lambda (id subquery)
 	(concat "__mat:" id ":" (sha1 (string (normalize_canonical_aliases subquery))))))
+(define make_materialized-subquery-source (lambda (session_key)
+	(list (quote materialized-subquery-source) session_key)))
+(define legacy-materialized-subquery-source-key (lambda (table-source)
+	(match table-source
+		(cons (cons (symbol context) '("session")) (cons key '())) key
+		(cons (cons '(quote context) '("session")) (cons key '())) key
+		nil
+)))
+(define materialized-subquery-source? (lambda (table-source)
+	(match table-source
+		'(materialized-subquery-source _) true
+		'((symbol materialized-subquery-source) _) true
+		'((quote materialized-subquery-source) _) true
+		false
+)))
+(define normalize-materialized-subquery-source (lambda (table-source)
+	(match table-source
+		'(materialized-subquery-source key) (make_materialized-subquery-source key)
+		'((symbol materialized-subquery-source) key) (make_materialized-subquery-source key)
+		'((quote materialized-subquery-source) key) (make_materialized-subquery-source key)
+		'(materialized-subquery key) (make_materialized-subquery-source key)
+		'((symbol materialized-subquery) key) (make_materialized-subquery-source key)
+		'((quote materialized-subquery) key) (make_materialized-subquery-source key)
+		_ (begin
+			(define legacy_key (legacy-materialized-subquery-source-key table-source))
+			(if (nil? legacy_key)
+				table-source
+				(make_materialized-subquery-source legacy_key)))
+)))
+(define materialized-subquery-source-key (lambda (table-source)
+	(match (normalize-materialized-subquery-source table-source)
+		'(materialized-subquery-source key) key
+		'((symbol materialized-subquery-source) key) key
+		'((quote materialized-subquery-source) key) key
+		nil
+)))
+(define materialized-subquery-source-runtime (lambda (table-source)
+	(begin
+		(define key (materialized-subquery-source-key table-source))
+		(if (nil? key)
+			nil
+			(list (list (quote context) "session") key))
+)))
 (define materialized-subquery-source (lambda (id subquery)
-	(list (list (quote context) "session") (materialized-subquery-key id subquery))))
+	(make_materialized-subquery-source (materialized-subquery-key id subquery))))
 (define materialized-subquery-init (lambda (id subquery rows_expr)
 	(list (list (quote context) "session") (materialized-subquery-key id subquery) rows_expr)))
 /* planner_collect_rows_ast: execute inner_plan through a sink callback and
@@ -291,6 +368,8 @@ primitive: callers stay responsible for registering visible schema metadata. */
 			(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))
 			limit_val
 			cnt_sym))
+	(materialized_source_dependency_tables mat_source
+		(collect_materialized_query_dependency_tables subquery))
 	(list
 		mat_source
 		(materialized-subquery-init id subquery materialized_rows))
@@ -495,7 +574,7 @@ semantically neutral and evaluate to the underlying source. */
 		table_source
 )))
 (define planner_runtime_table_source (lambda (schema table_source)
-	(match table_source
+	(match (normalize-materialized-subquery-source table_source)
 		'(unnest_helper_table _ base_table _)
 		(planner_runtime_table_source schema base_table)
 		'((symbol unnest_helper_table) _ base_table _)
@@ -514,16 +593,16 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_runtime_table_source schema base_table)
 		'((quote scan-tagged-table) base_table _ _ _ _ _ _)
 		(planner_runtime_table_source schema base_table)
-		'(materialized-subquery key) ((context "session") key)
-		'((symbol materialized-subquery) key) ((context "session") key)
-		'((quote materialized-subquery) key) ((context "session") key)
+		'(materialized-subquery-source key) ((context "session") key)
+		'((symbol materialized-subquery-source) key) ((context "session") key)
+		'((quote materialized-subquery-source) key) ((context "session") key)
 		'(table helper_schema helper_tbl) (table helper_schema helper_tbl)
 		'((symbol table) helper_schema helper_tbl) (table helper_schema helper_tbl)
 		'((quote table) helper_schema helper_tbl) (table helper_schema helper_tbl)
 		(string? base_tbl) (table schema base_tbl)
 		base_tbl base_tbl)))
 (define planner_codegen_table_source (lambda (schema table_source)
-	(match table_source
+	(match (normalize-materialized-subquery-source table_source)
 		'(unnest_helper_table _ base_table _)
 		(planner_codegen_table_source schema base_table)
 		'((symbol unnest_helper_table) _ base_table _)
@@ -542,9 +621,9 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_codegen_table_source schema base_table)
 		'((quote scan-tagged-table) base_table _ _ _ _ _ _)
 		(planner_codegen_table_source schema base_table)
-		'(materialized-subquery key) (list (list (quote context) "session") key)
-		'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
-		'((quote materialized-subquery) key) (list (list (quote context) "session") key)
+		'(materialized-subquery-source key) (list (list (quote context) "session") key)
+		'((symbol materialized-subquery-source) key) (list (list (quote context) "session") key)
+		'((quote materialized-subquery-source) key) (list (list (quote context) "session") key)
 		'(table helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
 		'((symbol table) helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
 		'((quote table) helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
@@ -562,15 +641,20 @@ semantically neutral and evaluate to the underlying source. */
 		(if (unnest_helper_table? table-source)
 			(materialized-source? (unnest_helper_table_base table-source))
 			false)
-		(and (string? table-source) (>= (strlen table-source) 1) (equal? (substr table-source 0 1) "."))
-		(match table-source
-			(cons (cons (symbol context) '("session")) _) true
-			(cons (cons '(quote context) '("session")) _) true
-			false
-	))
+		(begin
+			(define normalized_source (normalize-materialized-subquery-source table-source))
+			(or
+				(and (string? normalized_source) (>= (strlen normalized_source) 1) (equal? (substr normalized_source 0 1) "."))
+				(materialized-subquery-source? normalized_source)
+				(match normalized_source
+					(cons (cons (symbol context) '("session")) _) true
+					(cons (cons '(quote context) '("session")) _) true
+					false
+	)))))
 ))
 (define planner-temp-source-name (lambda (tbl tblvar)
-	(define base_tbl (if (unnest_helper_table? tbl) (unnest_helper_table_base tbl) tbl))
+	(define base_tbl (normalize-materialized-subquery-source
+		(if (unnest_helper_table? tbl) (unnest_helper_table_base tbl) tbl)))
 	(if (string? base_tbl)
 		base_tbl
 		(if (materialized-source? base_tbl)
