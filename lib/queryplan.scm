@@ -4499,6 +4499,22 @@ seeing the correctly prefixed outer alias. */
 								(define dep_has_value_agg (match dep_shape_facts
 									'(_ _ _ _ _ _ _ _ _ has_value_agg _ _) has_value_agg
 									_ false))
+								(define dep_unnest_retains_outer_scope (lambda (tbls) (begin
+									(define helper_aliases (filter (map tbls (lambda (td) (match td
+										'(tv _ _ _ _) tv
+										_ nil))) (lambda (alias) (not (nil? alias)))))
+									(reduce tbls (lambda (needs_outer td) (or needs_outer (match td
+										'(tv _ ttbl _ tje) (begin
+											(define join_aliases (extract_tblvars (coalesceNil tje true)))
+											(define outer_join_aliases (filter join_aliases (lambda (alias_)
+												(not (reduce helper_aliases (lambda (found helper_alias)
+													(or found (equal?? alias_ helper_alias)))
+													false)))))
+											(or
+												(not (equal? outer_join_aliases '()))
+												(not (equal? (scan_tagged_table_outer_sources ttbl) '()))))
+										_ false)))
+										false))))
 								(define dep_unnest_result
 									(if (or
 										(not (equal?? dep_kind (quote inner_select)))
@@ -4506,7 +4522,13 @@ seeing the correctly prefixed outer alias. */
 										dep_has_value_agg)
 										nil
 										(unnest_subselect normalized_subquery outer_schemas)))
-								(match dep_unnest_result
+								(define dep_effective_unnest_result (match dep_unnest_result
+									'(subst tbls)
+									(if (dep_unnest_retains_outer_scope tbls)
+										dep_unnest_result
+										nil)
+									_ dep_unnest_result))
+								(match dep_effective_unnest_result
 									'(subst tbls)
 									(begin
 										(if (not (equal? tbls '()))
