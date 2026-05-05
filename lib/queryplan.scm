@@ -3829,56 +3829,139 @@ seeing the correctly prefixed outer alias. */
 					(merge (extract_assoc fields2 (lambda (_k v) (_eor v))))
 					(_eor (coalesceNil condition2 true))))
 			'()))))
+	(define make_visible_outer_binding (lambda (ref source_expr direct domain_safe)
+		(list ref source_expr direct domain_safe)))
+	(define visible_outer_binding_ref (lambda (binding) (match binding
+		'(ref _source_expr _direct _domain_safe) ref
+		_ nil)))
+	(define visible_outer_binding_source_expr (lambda (binding) (match binding
+		'(_ref source_expr _direct _domain_safe) source_expr
+		_ nil)))
+	(define visible_outer_binding_direct (lambda (binding) (match binding
+		'(_ref _source_expr direct _domain_safe) direct
+		_ false)))
+	(define visible_outer_binding_domain_safe (lambda (binding) (match binding
+		'(_ref _source_expr _direct domain_safe) domain_safe
+		_ false)))
+	(define outer_ref_visible_binding (lambda (outer_schemas ref) (match (split ref ".")
+		(list alias col) (begin
+			(define cols (schema_assoc_cols outer_schemas alias))
+			(define coldef (if (nil? cols)
+				nil
+				(reduce cols (lambda (found cd)
+					(if (or (not (nil? found)) (not (equal?? (cd "Field") col)))
+						found
+						cd))
+					nil)))
+			(if (nil? coldef)
+				nil
+				(begin
+					(define expr (coalesceNil (coldef "Expr") nil))
+					(define source_expr (match expr
+						nil (list (quote get_column) alias false col false)
+						'((quote get_column) _ _ _ _) expr
+						'((symbol get_column) _ _ _ _) expr
+						_ (list (quote get_column) alias false col false)))
+					(make_visible_outer_binding
+						ref
+						source_expr
+						(match expr
+							nil true
+							'((quote get_column) _ _ _ _) true
+							'((symbol get_column) _ _ _ _) true
+							_ false)
+						(match expr
+							nil true
+							'((quote get_column) _ _ _ _) true
+							'((symbol get_column) _ _ _ _) true
+							_ (not (expr_has_opaque_scope expr)))))))
+		_ nil)))
+	(define _subquery_outer_bindings (lambda (query outer_schemas)
+		(filter
+			(map (_subquery_outer_refs query outer_schemas) (lambda (ref)
+				(outer_ref_visible_binding outer_schemas ref)))
+			(lambda (binding) (not (nil? binding))))))
+	(define rewrite_dependent_scalar_visible_outer_refs (lambda (query outer_schemas) (match query
+		'(q_schema q_tables q_fields q_condition q_group q_having q_order q_limit q_offset)
+		(begin
+			(define bindings (_subquery_outer_bindings query outer_schemas))
+			(define local_schemas (match (apply untangle_query (merge query (list outer_schemas)))
+				'(_ _ _ _ _ resolved_schemas _ _) resolved_schemas
+				_ nil))
+			(define visible_outer_match_for_column (lambda (col ci)
+				(if (not (nil? (resolve_schema_column_ref_scoped local_schemas local_schemas '() nil false col ci)))
+					nil
+					(match (filter
+						(map bindings (lambda (binding)
+							(match (split (visible_outer_binding_ref binding) ".")
+								(list visible_alias visible_col)
+								(if ((if ci equal?? equal?) visible_col col)
+									(list visible_alias visible_col)
+									nil)
+								_ nil)))
+						(lambda (x) (not (nil? x))))
+						(cons only '()) only
+						_ nil))))
+			(define rewrite_expr (lambda (expr) (match expr
+				'((quote get_column) nil _ col ci)
+				(match (visible_outer_match_for_column col ci)
+					'(visible_alias visible_col)
+					(list (quote get_column) visible_alias false visible_col false)
+					_ expr)
+				'((symbol get_column) nil _ col ci)
+				(match (visible_outer_match_for_column col ci)
+					'(visible_alias visible_col)
+					(list (quote get_column) visible_alias false visible_col false)
+					_ expr)
+				(cons sym args) (if (_is_opaque_scope_sym sym)
+					expr
+					(cons (rewrite_expr sym) (map args rewrite_expr)))
+				_ expr)))
+			(list
+				q_schema
+				q_tables
+				(map_assoc q_fields (lambda (k v) (rewrite_expr v)))
+				(rewrite_expr q_condition)
+				(map (coalesceNil q_group '()) rewrite_expr)
+				(rewrite_expr q_having)
+				(map (coalesceNil q_order '()) (lambda (oi) (match oi
+					'(col dir) (list (rewrite_expr col) dir)
+					_ oi)))
+				q_limit
+				q_offset))
+		_ query)))
 	(define _subquery_has_outer_refs (lambda (query outer_schemas)
 		(not (equal? (_subquery_outer_refs query outer_schemas) '()))))
 	(define _outer_ref_is_domain_column (lambda (outer_schemas ref) (match (split ref ".")
-		(list alias col) (begin
-			(define cols (schema_assoc_cols outer_schemas alias))
-			(define coldef (if (nil? cols)
-				nil
-				(reduce cols (lambda (found cd)
-					(if (or (not (nil? found)) (not (equal?? (cd "Field") col)))
-						found
-						cd))
-					nil)))
-			(if (nil? coldef)
-				false
-				(begin
-					(define expr (coalesceNil (coldef "Expr") nil))
-					(match expr
-						nil true
-						'((quote get_column) _ _ _ _) true
-						'((symbol get_column) _ _ _ _) true
-						_ (not (expr_has_opaque_scope expr))))))
+		(list _alias _col) (begin
+			(define binding (outer_ref_visible_binding outer_schemas ref))
+			(and (not (nil? binding))
+				(visible_outer_binding_domain_safe binding)))
 		_ false)))
 	(define _outer_ref_is_direct_column (lambda (outer_schemas ref) (match (split ref ".")
-		(list alias col) (begin
-			(define cols (schema_assoc_cols outer_schemas alias))
-			(define coldef (if (nil? cols)
-				nil
-				(reduce cols (lambda (found cd)
-					(if (or (not (nil? found)) (not (equal?? (cd "Field") col)))
-						found
-						cd))
-					nil)))
-			(if (nil? coldef)
-				false
-				(begin
-					(define expr (coalesceNil (coldef "Expr") nil))
-					(match expr
-						nil true
-						'((quote get_column) _ _ _ _) true
-						'((symbol get_column) _ _ _ _) true
-						_ false))))
+		(list _alias _col) (begin
+			(define binding (outer_ref_visible_binding outer_schemas ref))
+			(and (not (nil? binding))
+				(visible_outer_binding_direct binding)))
 		_ false)))
 	(define _subquery_outer_refs_are_direct_columns (lambda (query outer_schemas)
-		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
-			(and all_ok (_outer_ref_is_direct_column outer_schemas ref)))
-			true)))
+		(begin
+			(define refs (_subquery_outer_refs query outer_schemas))
+			(define bindings (_subquery_outer_bindings query outer_schemas))
+			(and
+				(equal? (count refs) (count bindings))
+				(reduce bindings (lambda (all_ok binding)
+					(and all_ok (visible_outer_binding_direct binding)))
+					true)))))
 	(define _subquery_outer_refs_are_domain_columns (lambda (query outer_schemas)
-		(reduce (_subquery_outer_refs query outer_schemas) (lambda (all_ok ref)
-			(and all_ok (_outer_ref_is_domain_column outer_schemas ref)))
-			true)))
+		(begin
+			(define refs (_subquery_outer_refs query outer_schemas))
+			(define bindings (_subquery_outer_bindings query outer_schemas))
+			(and
+				(equal? (count refs) (count bindings))
+				(reduce bindings (lambda (all_ok binding)
+					(and all_ok (visible_outer_binding_domain_safe binding)))
+					true)))))
 	(define _subquery_outer_refs_need_domain_preservation (lambda (query outer_schemas)
 		(and
 			(not (_subquery_outer_refs_are_direct_columns query outer_schemas))
@@ -4414,10 +4497,15 @@ seeing the correctly prefixed outer alias. */
 							nil)
 						(define normalized_subquery
 							(rewrite_semijoin_outer_markers_scoped subquery outer_schemas '()))
+						(define dep_outer_refs (_subquery_outer_refs normalized_subquery outer_schemas))
+						(define dep_outer_bindings (_subquery_outer_bindings normalized_subquery outer_schemas))
+						(define bound_subquery
+						(rewrite_dependent_scalar_visible_outer_refs normalized_subquery outer_schemas))
 						(define dep_info (make_dependent_expr_compile_info
 							expr
-							normalized_subquery
-							(_subquery_outer_refs normalized_subquery outer_schemas)
+							bound_subquery
+							dep_outer_refs
+							dep_outer_bindings
 							dep_kind
 							dep_negated
 							dep_target_expr
@@ -4432,7 +4520,6 @@ seeing the correctly prefixed outer alias. */
 						(define dep_domain_cols (dependent_join_helper_normalize_domain_cols
 							(dependent_join_helper_domain_cols_from_info dep_info)))
 						(define dep_unnesting_info (make_dependent_expr_unnesting_info_with_domain_cols dep_info dep_domain_cols))
-						(define dep_outer_refs (dependent_expr_compile_info_outer_refs dep_info))
 						(if (and
 							(equal?? dep_kind (quote inner_select))
 							(equal? dep_outer_refs '()))
@@ -4541,43 +4628,47 @@ seeing the correctly prefixed outer alias. */
 													(coalesceNil (sq_cache "schemas") '())))
 												(list (quote get_column) dep_alias false dep_result_col false))))))))))
 			_ expr)))
-	(define make_dependent_expr_compile_info (lambda (expr subquery outer_refs kind negated target_expr simple_candidate union_parts uses_session_state)
-		(list expr subquery outer_refs kind negated target_expr simple_candidate union_parts uses_session_state)))
+	(define make_dependent_expr_compile_info (lambda (expr subquery outer_refs outer_bindings kind negated target_expr simple_candidate union_parts uses_session_state)
+		(list expr subquery outer_refs outer_bindings kind negated target_expr simple_candidate union_parts uses_session_state)))
 	(define dependent_expr_compile_info_expr (lambda (info)
 		(match info
-			'(expr _subquery _outer_refs _kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) expr
+			'(expr _subquery _outer_refs _outer_bindings _kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) expr
 			_ nil)))
 	(define dependent_expr_compile_info_subquery (lambda (info)
 		(match info
-			'(_expr subquery _outer_refs _kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) subquery
+			'(_expr subquery _outer_refs _outer_bindings _kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) subquery
 			_ nil)))
 	(define dependent_expr_compile_info_outer_refs (lambda (info)
 		(match info
-			'(_expr _subquery outer_refs _kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) outer_refs
+			'(_expr _subquery outer_refs _outer_bindings _kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) outer_refs
+			_ '())))
+	(define dependent_expr_compile_info_outer_bindings (lambda (info)
+		(match info
+			'(_expr _subquery _outer_refs outer_bindings _kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) outer_bindings
 			_ '())))
 	(define dependent_expr_compile_info_kind (lambda (info)
 		(match info
-			'(_expr _subquery _outer_refs kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) kind
+			'(_expr _subquery _outer_refs _outer_bindings kind _negated _target_expr _simple_candidate _union_parts _uses_session_state) kind
 			_ nil)))
 	(define dependent_expr_compile_info_negated (lambda (info)
 		(match info
-			'(_expr _subquery _outer_refs _kind negated _target_expr _simple_candidate _union_parts _uses_session_state) negated
+			'(_expr _subquery _outer_refs _outer_bindings _kind negated _target_expr _simple_candidate _union_parts _uses_session_state) negated
 			_ false)))
 	(define dependent_expr_compile_info_target_expr (lambda (info)
 		(match info
-			'(_expr _subquery _outer_refs _kind _negated target_expr _simple_candidate _union_parts _uses_session_state) target_expr
+			'(_expr _subquery _outer_refs _outer_bindings _kind _negated target_expr _simple_candidate _union_parts _uses_session_state) target_expr
 			_ '())))
 	(define dependent_expr_compile_info_simple_candidate (lambda (info)
 		(match info
-			'(_expr _subquery _outer_refs _kind _negated _target_expr simple_candidate _union_parts _uses_session_state) simple_candidate
+			'(_expr _subquery _outer_refs _outer_bindings _kind _negated _target_expr simple_candidate _union_parts _uses_session_state) simple_candidate
 			_ false)))
 	(define dependent_expr_compile_info_union_parts (lambda (info)
 		(match info
-			'(_expr _subquery _outer_refs _kind _negated _target_expr _simple_candidate union_parts _uses_session_state) union_parts
+			'(_expr _subquery _outer_refs _outer_bindings _kind _negated _target_expr _simple_candidate union_parts _uses_session_state) union_parts
 			_ nil)))
 	(define dependent_expr_compile_info_uses_session_state (lambda (info)
 		(match info
-			'(_expr _subquery _outer_refs _kind _negated _target_expr _simple_candidate _union_parts uses_session_state) uses_session_state
+			'(_expr _subquery _outer_refs _outer_bindings _kind _negated _target_expr _simple_candidate _union_parts uses_session_state) uses_session_state
 			_ false)))
 	(define make_dependent_expr_unnesting_info (lambda (dep_info)
 		(list
@@ -4700,7 +4791,7 @@ seeing the correctly prefixed outer alias. */
 				_ nil))))
 	(define dependent_join_helper_domain_cols_from_info (lambda (dep_info) (begin
 		(define dep_domain_exprs (merge_unique
-			(map (dependent_expr_compile_info_outer_refs dep_info) dependent_join_helper_domain_ref_to_expr)
+			(map (dependent_expr_compile_info_outer_bindings dep_info) visible_outer_binding_source_expr)
 			(extract_session_read_refs (dependent_expr_compile_info_expr dep_info))
 			(extract_semijoin_outer_target_exprs (dependent_expr_compile_info_subquery dep_info))))
 		(match (reduce dep_domain_exprs (lambda (state ref_expr) (match state
@@ -4882,7 +4973,7 @@ seeing the correctly prefixed outer alias. */
 			(if (equal? (count join_parts) 1)
 				(car join_parts)
 				(cons (quote and) join_parts))))))
-	(define dependent_join_helper_rewrite_expr_for_domain_source (lambda (expr domain_cols) (begin
+	(define dependent_join_helper_rewrite_expr_for_domain_source (lambda (dep_info expr domain_cols) (begin
 		(define domain_alias (dependent_join_helper_domain_source_alias))
 		(define ref_to_domain_col (lambda (ref_expr)
 			(reduce domain_cols (lambda (found dc) (match dc
@@ -4902,14 +4993,33 @@ seeing the correctly prefixed outer alias. */
 							_ nil)))
 				_ found))
 				nil)))
+		(define visible_ref_to_domain_col (lambda (alias col)
+			(reduce (dependent_expr_compile_info_outer_bindings dep_info) (lambda (found binding)
+				(if (not (nil? found))
+					found
+					(match (split (visible_outer_binding_ref binding) ".")
+						(list visible_alias visible_col)
+						(if (and (equal?? visible_alias alias) (equal?? visible_col col))
+							(ref_to_domain_col (visible_outer_binding_source_expr binding))
+							nil)
+						_ nil)))
+				nil)))
 		(define rewrite_expr (lambda (e) (match e
 			'((quote get_column) alias_ ti col ci) (begin
-				(define mapped_col (if (nil? alias_) nil (ref_to_domain_col e)))
+				(define mapped_col (if (nil? alias_)
+					nil
+					(coalesce
+						(ref_to_domain_col e)
+						(visible_ref_to_domain_col alias_ col))))
 				(if (nil? mapped_col)
 					e
 					(list (quote get_column) domain_alias false mapped_col false)))
 			'((symbol get_column) alias_ ti col ci) (begin
-				(define mapped_col (if (nil? alias_) nil (ref_to_domain_col e)))
+				(define mapped_col (if (nil? alias_)
+					nil
+					(coalesce
+						(ref_to_domain_col e)
+						(visible_ref_to_domain_col alias_ col))))
 				(if (nil? mapped_col)
 					e
 					(list (quote get_column) domain_alias false mapped_col false)))
@@ -4950,17 +5060,17 @@ seeing the correctly prefixed outer alias. */
 						'(tv tschema ttbl toisOuter tje)
 						(list tv tschema ttbl toisOuter
 							(if (nil? tje) nil
-								(dependent_join_helper_rewrite_expr_for_domain_source tje domain_cols)))
+								(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
 						_ td))))
 				(merge
 					(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
 					(list result_col source_result_expr))
-				(dependent_join_helper_rewrite_expr_for_domain_source dep_condition domain_cols)
+				(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols)
 				(map (coalesceNil dep_group '()) (lambda (expr)
-					(dependent_join_helper_rewrite_expr_for_domain_source expr domain_cols)))
-				(dependent_join_helper_rewrite_expr_for_domain_source dep_having domain_cols)
+					(dependent_join_helper_rewrite_expr_for_domain_source dep_info expr domain_cols)))
+				(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_having domain_cols)
 				(map (coalesceNil dep_order '()) (lambda (oi) (match oi
-					'(col dir) (list (dependent_join_helper_rewrite_expr_for_domain_source col domain_cols) dir)
+					'(col dir) (list (dependent_join_helper_rewrite_expr_for_domain_source dep_info col domain_cols) dir)
 					_ oi)))
 				dep_limit dep_offset)
 			_ nil))))
@@ -4972,7 +5082,7 @@ seeing the correctly prefixed outer alias. */
 			'(dep_schema dep_tables dep_fields dep_condition dep_group dep_having dep_order dep_limit dep_offset)
 			(begin
 				(define rewritten_condition
-					(dependent_join_helper_rewrite_expr_for_domain_source dep_condition domain_cols))
+					(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols))
 				(define merged_condition
 					(if (or (nil? extra_condition) (equal? extra_condition true))
 						rewritten_condition
@@ -4986,17 +5096,17 @@ seeing the correctly prefixed outer alias. */
 							'(tv tschema ttbl toisOuter tje)
 							(list tv tschema ttbl toisOuter
 								(if (nil? tje) nil
-									(dependent_join_helper_rewrite_expr_for_domain_source tje domain_cols)))
+									(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
 							_ td))))
 					(merge
 						(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
 						(list result_col source_result_expr))
 					merged_condition
 					(map (coalesceNil dep_group '()) (lambda (expr)
-						(dependent_join_helper_rewrite_expr_for_domain_source expr domain_cols)))
-					(dependent_join_helper_rewrite_expr_for_domain_source dep_having domain_cols)
+						(dependent_join_helper_rewrite_expr_for_domain_source dep_info expr domain_cols)))
+					(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_having domain_cols)
 					(map (coalesceNil dep_order '()) (lambda (oi) (match oi
-						'(col dir) (list (dependent_join_helper_rewrite_expr_for_domain_source col domain_cols) dir)
+						'(col dir) (list (dependent_join_helper_rewrite_expr_for_domain_source dep_info col domain_cols) dir)
 						_ oi)))
 					dep_limit dep_offset))
 			_ nil))))
@@ -5042,7 +5152,7 @@ seeing the correctly prefixed outer alias. */
 		(define target_expr (dependent_expr_compile_info_target_expr dep_info))
 		(define source_alias (dependent_join_helper_match_source_alias dep_info))
 		(define rewritten_target_expr
-			(dependent_join_helper_rewrite_expr_for_domain_source target_expr domain_cols))
+			(dependent_join_helper_rewrite_expr_for_domain_source dep_info target_expr domain_cols))
 		(match dep_subquery
 			'(_ _ dep_fields _ _ _ _ _ _)
 			(begin
@@ -5053,11 +5163,11 @@ seeing the correctly prefixed outer alias. */
 					nil
 					(dependent_join_helper_wrap_grouped_presence_source_query
 						source_alias
-						(dependent_join_helper_build_source_query_with_extra_condition
-							dep_info "__dep_match_result" domain_cols true
-							(list (quote equal??)
-								(dependent_join_helper_rewrite_expr_for_domain_source first_field_expr domain_cols)
-								rewritten_target_expr))
+							(dependent_join_helper_build_source_query_with_extra_condition
+								dep_info "__dep_match_result" domain_cols true
+								(list (quote equal??)
+									(dependent_join_helper_rewrite_expr_for_domain_source dep_info first_field_expr domain_cols)
+									rewritten_target_expr))
 						result_col
 						domain_cols)))
 			_ nil))))
@@ -5125,8 +5235,8 @@ seeing the correctly prefixed outer alias. */
 									(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
 									(list
 										result_col
-										(dependent_join_helper_rewrite_expr_for_domain_source scalar_agg_field_expr domain_cols)))
-								(dependent_join_helper_rewrite_expr_for_domain_source dep_condition domain_cols)
+										(dependent_join_helper_rewrite_expr_for_domain_source dep_info scalar_agg_field_expr domain_cols)))
+								(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols)
 								domain_group_exprs
 								nil
 								'()
@@ -5153,7 +5263,7 @@ seeing the correctly prefixed outer alias. */
 							(cons
 								(match oi
 									'(col dir) (list (concat "__dep_o" idx)
-										(dependent_join_helper_rewrite_expr_for_domain_source col domain_cols)
+										(dependent_join_helper_rewrite_expr_for_domain_source dep_info col domain_cols)
 										dir)
 									_ nil)
 								(build_dep_order_cols rest (+ idx 1))))))
@@ -5168,11 +5278,11 @@ seeing the correctly prefixed outer alias. */
 										'(tv tschema ttbl toisOuter tje)
 										(list tv tschema ttbl toisOuter
 											(if (nil? tje) nil
-												(dependent_join_helper_rewrite_expr_for_domain_source tje domain_cols)))
+												(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
 										_ td))))
 								(merge
 									(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
-									(list result_col (dependent_join_helper_rewrite_expr_for_domain_source first_field_expr domain_cols))
+									(list result_col (dependent_join_helper_rewrite_expr_for_domain_source dep_info first_field_expr domain_cols))
 									(reduce (filter (map dep_order_cols (lambda (oc) (match oc
 										'(ord_col ord_expr _dir) (list ord_col ord_expr)
 										_ nil)))
@@ -5181,10 +5291,10 @@ seeing the correctly prefixed outer alias. */
 											'(ord_col ord_expr) (merge acc (list ord_col ord_expr))
 											_ acc))
 										'()))
-								(dependent_join_helper_rewrite_expr_for_domain_source dep_condition domain_cols)
+								(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols)
 								(map (coalesceNil dep_group '()) (lambda (expr)
-									(dependent_join_helper_rewrite_expr_for_domain_source expr domain_cols)))
-								(dependent_join_helper_rewrite_expr_for_domain_source dep_having domain_cols)
+									(dependent_join_helper_rewrite_expr_for_domain_source dep_info expr domain_cols)))
+								(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_having domain_cols)
 								'()
 								nil
 								nil))
@@ -6351,8 +6461,29 @@ seeing the correctly prefixed outer alias. */
 							alias a))) nil)
 				main_match))
 			(begin
-				(define resolved_alias (coalesce any_match (error (concat "column " col " does not exist in tables"))))
-				(define canonical_col (if ci (coalesce (reduce (schema_assoc_cols schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
+				(define outer_matches (if (nil? any_match)
+					(reduce_assoc outer_schemas_chain (lambda (acc outer_alias outer_cols)
+						(begin
+							(define norm_outer_cols (schema_assoc_cols outer_schemas_chain outer_alias))
+							(if (reduce norm_outer_cols (lambda (a coldef)
+								(or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+								(cons outer_alias acc)
+								acc)))
+						'())
+					'()))
+				(define outer_matches (if (nil? any_match)
+					(reduce outer_matches (lambda (acc outer_alias)
+						(append_unique acc outer_alias))
+						'())
+					'()))
+				(define resolved_alias (if (nil? any_match)
+					(match outer_matches
+						(cons outer_only '()) outer_only
+						'() (error (concat "column " col " does not exist in tables"))
+						(cons _ _) (error (concat "ambiguous outer column " col)))
+					any_match))
+				(define resolved_schema_space (if (has_assoc? schemas resolved_alias) schemas outer_schemas_chain))
+				(define canonical_col (if ci (coalesce (reduce (schema_assoc_cols resolved_schema_space resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
 				'((quote get_column) resolved_alias false canonical_col false))
 		)
 		'((symbol get_column) alias_ ti col ci) (begin
