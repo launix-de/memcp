@@ -1257,6 +1257,21 @@ Enables index-based filtering in scan/scan_order by pushing predicates down. */
 	(filter parts (lambda (part)
 		(not (has? duplicate_keys
 			(serialize (normalize_canonical_aliases part)))))))))
+(define dedupe_canonical_exprs (lambda (exprs)
+	(match (reduce exprs (lambda (state expr)
+		(match state
+			'(seen acc) (begin
+				(define expr_key (serialize (normalize_canonical_aliases expr)))
+				(if (reduce seen (lambda (found seen_key)
+						(or found (equal? seen_key expr_key)))
+						false)
+					state
+					(list (merge seen (list expr_key))
+						(merge acc (list expr)))))
+			_ state))
+		(list '() '()))
+		'(_ acc) acc
+		_ exprs)))
 
 /* split_scan_condition: keep joinexpr separate from global WHERE.
 Returns (now later) for one scan level:
@@ -4510,7 +4525,19 @@ seeing the correctly prefixed outer alias. */
 						(define normalized_subquery
 							(rewrite_semijoin_outer_markers_scoped subquery outer_schemas '()))
 						(define dep_outer_refs (_subquery_outer_refs normalized_subquery outer_schemas))
-						(define dep_outer_bindings (_subquery_outer_bindings normalized_subquery outer_schemas))
+						(define dep_outer_binding_refs (merge_unique
+							dep_outer_refs
+							(filter (map (collect_all_column_refs normalized_subquery) (lambda (ref_pair) (match ref_pair
+								'(alias col)
+								(if (or (nil? alias) (nil? (schema_assoc_cols outer_schemas alias)))
+									nil
+									(concat alias "." col))
+								_ nil)))
+								(lambda (ref) (not (nil? ref))))))
+						(define dep_outer_bindings (filter
+							(map dep_outer_binding_refs (lambda (ref)
+								(outer_ref_visible_binding outer_schemas ref)))
+							(lambda (binding) (not (nil? binding)))))
 						(define bound_subquery
 						(rewrite_dependent_scalar_visible_outer_refs normalized_subquery outer_schemas))
 						(define dep_info (make_dependent_expr_compile_info
@@ -5410,7 +5437,7 @@ seeing the correctly prefixed outer alias. */
 				pruned_outer_tables
 				domain_fields
 				(coalesceNil outer_condition true)
-				(merge_unique (coalesceNil outer_group '()) domain_group_exprs)
+				(dedupe_canonical_exprs (merge (coalesceNil outer_group '()) domain_group_exprs))
 				outer_having
 				'()
 				nil
