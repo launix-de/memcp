@@ -5210,6 +5210,28 @@ seeing the correctly prefixed outer alias. */
 						result_col
 						domain_cols)))
 			_ nil))))
+	(define dependent_join_helper_scalar_aggregate_expr
+		(lambda (dep_info)
+			(match (dependent_expr_compile_info_subquery dep_info)
+				'(_ _ dep_fields _ _ _ _ _ _)
+				(begin
+					(define first_field_expr (match dep_fields
+						(cons _ (cons v _)) v
+						nil))
+					(match first_field_expr
+						'((symbol coalesceNil) inner 0) inner
+						'((quote coalesceNil) inner 0) inner
+						first_field_expr))
+				_ nil)))
+	(define dependent_join_helper_scalar_count_aggregate?
+		(lambda (dep_info)
+			(match (normalize_count_literal_aggregates
+				(dependent_join_helper_scalar_aggregate_expr dep_info))
+				'((quote aggregate) agg_expr agg_reduce agg_neutral)
+				(equal? (list agg_expr agg_reduce agg_neutral) aggregate_count_descriptor)
+				'((symbol aggregate) agg_expr agg_reduce agg_neutral)
+				(equal? (list agg_expr agg_reduce agg_neutral) aggregate_count_descriptor)
+				_ false)))
 	(define dependent_join_helper_build_simple_scalar_aggregate_source_query
 		(lambda (dep_info result_col domain_cols)
 			(begin
@@ -5219,19 +5241,8 @@ seeing the correctly prefixed outer alias. */
 					'(dep_schema dep_tables dep_fields dep_condition dep_group dep_having dep_order dep_limit dep_offset)
 					(begin
 						(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
-						(define first_field_expr (match dep_fields
-							(cons _ (cons v _)) v
-							nil))
-						(define scalar_agg_field_expr (match first_field_expr
-							'((symbol coalesceNil) inner 0) (match inner
-								'((symbol aggregate) _ _ _) inner
-								'((quote aggregate) _ _ _) inner
-								_ first_field_expr)
-							'((quote coalesceNil) inner 0) (match inner
-								'((symbol aggregate) _ _ _) inner
-								'((quote aggregate) _ _ _) inner
-								_ first_field_expr)
-							first_field_expr))
+						(define scalar_agg_field_expr
+							(dependent_join_helper_scalar_aggregate_expr dep_info))
 						(define raw_group_simple
 							(or (nil? dep_group)
 								(equal? dep_group '())
@@ -6700,15 +6711,27 @@ seeing the correctly prefixed outer alias. */
 					(dependent_join_helper_spec_result_col ttbl))
 				(define dep_info
 					(dependent_join_helper_spec_dep_info ttbl))
+				(define dep_preserve_full_domain
+					(or
+						(and
+							(dependent_expr_compile_info_negated dep_info)
+							(or
+								(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select_exists))
+								(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select_in))))
+						(and
+							(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
+							(dependent_join_helper_scalar_count_aggregate? dep_info))))
 				(define dep_materialize_source_query
-					(if (and
-						(dependent_expr_compile_info_negated dep_info)
-						(or
-							(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select_exists))
-							(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select_in))))
+					(if dep_preserve_full_domain
 						(begin
 							(define dep_domain_alias "__dep_full_domain")
 							(define dep_match_alias "__dep_full_match")
+							(define dep_empty_result
+								(if (and
+									(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
+									(dependent_join_helper_scalar_count_aggregate? dep_info))
+									0
+									false))
 							(define dep_full_domain_cols
 								(map dep_active_domain_cols (lambda (dc) (match dc
 									'(dom_col _dom_expr)
@@ -6737,7 +6760,7 @@ seeing the correctly prefixed outer alias. */
 												(list
 													(quote nil?)
 													(list (quote get_column) dep_match_alias false dep_result_col false))
-												false
+												dep_empty_result
 												(list (quote get_column) dep_match_alias false dep_result_col false))))
 									true
 									'()
