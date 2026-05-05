@@ -22,6 +22,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "queryplan-prejoin.scm")
 (import "queryplan.scm")
 
+(define sql_statement_starts_with (lambda (query keyword) (begin
+	(define trimmed (toUpper (strltrim query)))
+	(define kw_len (strlen keyword))
+	(and
+		(>= (strlen trimmed) kw_len)
+		(equal? (substr trimmed 0 kw_len) keyword)
+		(or
+			(equal? (strlen trimmed) kw_len)
+			(equal? (substr trimmed kw_len 1) " ")
+			(equal? (substr trimmed kw_len 1) "\n")
+			(equal? (substr trimmed kw_len 1) "\t")
+			(equal? (substr trimmed kw_len 1) "\r"))))))
+(define sql_statement_returns_rows (lambda (query)
+	(or
+		(sql_statement_starts_with query "SELECT")
+		(sql_statement_starts_with query "WITH")
+		(sql_statement_starts_with query "EXPLAIN")
+		(sql_statement_starts_with query "SHOW")
+		(sql_statement_starts_with query "DESCRIBE"))))
+
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
@@ -236,8 +256,10 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(original_resultrow row))))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
 					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
-					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not (resultrow_state "called")) (number? query_result)) (begin
+					/* If no resultrow was called and we got a number, return it as affected_rows
+					for write-like statements only. Empty SELECT-style result sets must stay empty. */
+					(if (and (not (resultrow_state "called")) (number? query_result)
+						(not (sql_statement_returns_rows query))) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
@@ -294,8 +316,10 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username") session))
 						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
-					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not (resultrow_state "called")) (number? query_result)) (begin
+					/* If no resultrow was called and we got a number, return it as affected_rows
+					for write-like statements only. Empty SELECT-style result sets must stay empty. */
+					(if (and (not (resultrow_state "called")) (number? query_result)
+						(not (sql_statement_returns_rows query))) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
