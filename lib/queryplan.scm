@@ -1250,6 +1250,13 @@ Enables index-based filtering in scan/scan_order by pushing predicates down. */
 		(if (equal? 1 (count _parts)) (car _parts)
 			(cons (quote and) _parts)))
 )))
+(define remove_duplicate_and_terms (lambda (parts duplicates) (begin
+	(define duplicate_keys
+		(map duplicates (lambda (part)
+			(serialize (normalize_canonical_aliases part)))))
+	(filter parts (lambda (part)
+		(not (has? duplicate_keys
+			(serialize (normalize_canonical_aliases part)))))))))
 
 /* split_scan_condition: keep joinexpr separate from global WHERE.
 Returns (now later) for one scan level:
@@ -1262,12 +1269,17 @@ Returns (now later) for one scan level:
 				(list
 					(combine_and_terms (merge (flatten_and_terms raw_now_condition) (flatten_and_terms join_now_condition)))
 					(combine_and_terms (merge (flatten_and_terms raw_later_condition) (flatten_and_terms join_later_condition))))
+				(begin
+					(define join_now_terms (flatten_and_terms join_now_condition))
+					(define deferred_terms (remove_duplicate_and_terms
+						(merge
+							(flatten_and_terms raw_now_condition)
+							(flatten_and_terms raw_later_condition)
+							(flatten_and_terms join_later_condition))
+						join_now_terms))
 				(list
-					(combine_and_terms (flatten_and_terms join_now_condition))
-					(combine_and_terms (merge
-						(flatten_and_terms raw_now_condition)
-						(flatten_and_terms raw_later_condition)
-						(flatten_and_terms join_later_condition))))))))))
+					(combine_and_terms join_now_terms)
+					(combine_and_terms deferred_terms)))))))))
 
 /* helper to check list membership */
 (define list_contains (lambda (lst item) (reduce lst (lambda (acc x) (or acc (equal? x item))) false)))
