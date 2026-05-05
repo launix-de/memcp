@@ -10860,7 +10860,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									'()))
 								(set cols (collect_scan_base_cols tblvar scan_condition visible_fields tables partition_stages ut_extra_cols_ord))
 								(match (split_scan_condition isOuter (replace_find_column (coalesceNil joinexpr true)) scan_condition tables) '(now_condition later_condition) (begin
-									(define effective_later_condition (if (and isOuter (equal? now_condition later_condition)) true later_condition))
+									(define effective_later_condition later_condition)
 									(set cols (extend_scan_cols_for_later_condition tblvar cols effective_later_condition))
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 									/* check partition_stages for this table. Tagged scans still override the
@@ -10920,16 +10920,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(if (nil? _ps_init) _ord_scan (list (quote begin) _ps_init _ord_scan))
 								))
 							)
-							'() /* final inner */ (if (nil? update_target)
-								(begin
-									(define emit_condition (if (nil? last_scan_ctx) condition
-										(match last_scan_ctx
-											'(scan_schema scan_tbl scan_tblvar) (lower_materialized_scan_condition scan_schema scan_tbl scan_tblvar condition)
-											condition)))
-									(define emit_fields (if (nil? last_scan_ctx) fields
-										(match last_scan_ctx
-											'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar fields)
-											fields)))
+								'() /* final inner */ (if (nil? update_target)
+									(begin
+										(define emit_condition (if (nil? last_scan_ctx) condition
+											(match last_scan_ctx
+												'(scan_schema scan_tbl scan_tblvar) (lower_materialized_scan_condition scan_schema scan_tbl scan_tblvar condition)
+												condition)))
+										(define emit_fields (if (nil? last_scan_ctx) fields
+											(match last_scan_ctx
+												'(scan_schema scan_tbl scan_tblvar) (lower_materialized_emit_assoc scan_schema scan_tbl scan_tblvar fields)
+												fields)))
 									(list
 										(quote if)
 										(list (quote optimize) (replace_columns_from_expr emit_condition))
@@ -10995,7 +10995,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(map cols (lambda(col) (symbol (concat tblvar "." col))))))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_scan_condition isOuter (replace_find_column (coalesceNil joinexpr true)) scan_condition tables) '(now_condition later_condition) (begin
-										(define effective_later_condition (if (and isOuter (equal? now_condition later_condition)) true later_condition))
+										(define effective_later_condition later_condition)
 										(set cols (extend_scan_cols_for_later_condition tblvar cols effective_later_condition))
 										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 										/* optimize: skip .(1) DUAL scan when no columns needed (1 row, no data) */
