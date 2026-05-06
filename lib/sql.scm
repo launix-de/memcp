@@ -20,6 +20,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-builtins.scm")
 (import "queryplan-tree-ir.scm")
 (import "queryplan-prejoin.scm")
+(import "queryplan-legacy-bridges.scm")
 (import "queryplan.scm")
 (import "queryplan-debug.scm")
 
