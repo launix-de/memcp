@@ -3437,17 +3437,11 @@ seeing the correctly prefixed outer alias. */
 			(and (not (nil? l)) (<= l 1))
 			(and has_value_agg (or (nil? g) (equal? g '()))))
 		false)))
-	(define build_exists_subselect (lambda (subquery outer_schemas) (match subquery
-		'(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2)
-		(match (build_scalar_subselect_with_strategy
-				(list schema2 tables2
-					(list "__exists" true)
-					condition2 group2 having2 order2 (coalesceNil limit2 1) offset2)
-				outer_schemas)
-				'(_ lowered_expr) (list (quote coalesceNil) lowered_expr false)
-				false)
-			false
-		)))
+	/* FAQ / NK15 contract: EXISTS lowers through the same COUNT/domain path as
+	IN / NOT IN / NOT EXISTS. Keep a single logical route here instead of a
+	separate scalar-true helper shape. */
+	(define build_exists_subselect (lambda (subquery outer_schemas)
+		(_unnest_count_subselect subquery outer_schemas nil (quote >))))
 		/* unnest_subselect: core Neumann decorrelation for a single subquery.
 	Transforms a correlated scalar subquery into a LEFT JOIN table entry,
 	eliminating the dependent join. Returns (substitution tables) or nil.
@@ -4383,7 +4377,7 @@ seeing the correctly prefixed outer alias. */
 													nil
 													outer_schemas)
 												nil)
-											(list (quote not) (build_exists_subselect subquery outer_schemas)))
+											(_unnest_count_subselect subquery outer_schemas nil (quote equal?)))
 										_ nil)
 									nil)))
 						_ nil)
