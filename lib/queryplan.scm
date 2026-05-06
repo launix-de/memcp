@@ -4051,20 +4051,36 @@ seeing the correctly prefixed outer alias. */
 		(define lowering_reason (scalar_subselect_lowering_reason subquery outer_schemas))
 		(planner_debug_record_scalar_event (quote lowering) lowering_reason)
 		(quote prefer-unnest))))
+	(define materialize_uncorrelated_promise_value (lambda (cache_prefix subquery value_expr error_message) (begin
+		(define uncorr_promise_cache (coalesceNil (sq_cache "uncorr_promise_bindings") '()))
+		(define uncorr_promise_key (concat cache_prefix ":" (serialize subquery)))
+		(define cached_promise_name (coalesce (uncorr_promise_cache uncorr_promise_key) nil))
+		(if (not (nil? cached_promise_name))
+			(list (symbol cached_promise_name) "value")
+			(begin
+				(define promise_idx (coalesceNil (sq_cache "idx") 0))
+				(sq_cache "idx" (+ promise_idx 1))
+				(define promise_name (concat "__uncorr_promise_" promise_idx))
+				(define promise_sym (symbol promise_name))
+				(define promise_sink_sym (symbol (concat "__uncorr_promise_sink:" promise_idx)))
+				(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
+					(list
+						(list (quote set) promise_sym (list (quote newpromise)))
+						(list (quote set) promise_sink_sym
+							(list (quote lambda) (list (symbol "row"))
+								(list promise_sym "once" value_expr error_message)))
+						(build_queryplan_term_with_sink subquery
+							(list (quote callback) promise_sink_sym)))))
+				(sq_cache "uncorr_promise_bindings"
+					(set_assoc uncorr_promise_cache uncorr_promise_key promise_name))
+				(list promise_sym "value"))))))
 	(define materialize_uncorrelated_scalar_subselect (lambda (subquery outer_schemas) (begin
-		(define generated_count_subquery (match subquery
-			'(_ _ sub_fields _ _ _ _ _ _)
-			(match sub_fields
-				'("__cnt" _) true
-				false)
-			false))
 		(define shape_facts (scalar_subselect_shape_facts subquery outer_schemas))
 		(match shape_facts
-			'(g h _o _l _off _value_expr has_outer _outer_refs_are_direct contains_inner_select has_value_agg _session_sensitive _skip_level)
+			'(g h _o _l _off _value_expr has_outer _outer_refs_are_direct contains_inner_select has_value_agg _session_sensitive skip_level)
 			(if (or
 					has_outer
-					generated_count_subquery
-					contains_inner_select
+					(and contains_inner_select skip_level)
 					(scalar_inner_select_is_presence_query subquery))
 				nil
 				(match subquery
@@ -4074,51 +4090,11 @@ seeing the correctly prefixed outer alias. */
 							nil))
 						(if (nil? first_field_name)
 							nil
-							(begin
-								(define uncorr_scalar_cache (coalesceNil (sq_cache "uncorr_scalar_bindings") '()))
-								(define uncorr_scalar_key (serialize subquery))
-								(define cached_alias (coalesce (uncorr_scalar_cache uncorr_scalar_key) nil))
-								(if (not (nil? cached_alias))
-									(list (quote get_column) cached_alias false first_field_name false)
-									(begin
-										(define scalar_idx (coalesceNil (sq_cache "idx") 0))
-										(sq_cache "idx" (+ scalar_idx 1))
-										(define scalar_alias (concat "_uncorr_scalar_" scalar_idx))
-										(define scalar_rows_sym (symbol (concat "__uncorr_scalar_rows:" scalar_idx)))
-										(define scalar_sink_sym (symbol (concat "__uncorr_scalar_sink:" scalar_idx)))
-										(define materialized_binding
-											(legacy_materialized_query_term_binding_ast
-												scalar_alias subquery scalar_rows_sym scalar_sink_sym nil nil))
-										(define mat_source (nth materialized_binding 0))
-										(define mat_init (nth materialized_binding 1))
-										(define scalar_tbl_source
-											(if (scalar_subselect_guaranteed_max_one subquery outer_schemas)
-												mat_source
-												(make_scan_tagged_table_parts mat_source '() 2 0 0 2 nil)))
-										(define scalar_tbl_is_outer
-											(or
-												has_value_agg
-												(not (scalar_subselect_guaranteed_max_one subquery outer_schemas))))
-										(define scalar_tbl_joinexpr
-											(if scalar_tbl_is_outer true nil))
-										(planned_materialized_fields mat_source
-											(reduce_assoc sub_fields (lambda (acc k _v)
-												(merge acc (list (list "Field" k "Type" "any"))))
-												'()))
-										(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-											(list mat_init)))
-										(sq_cache "scalar_tables" (merge
-											(list (list scalar_alias sub_schema scalar_tbl_source scalar_tbl_is_outer scalar_tbl_joinexpr))
-											(coalesceNil (sq_cache "scalar_tables") '())))
-										(sq_cache "schemas" (merge
-											(list scalar_alias
-												(reduce_assoc sub_fields (lambda (acc k _v)
-													(merge acc (list (list "Field" k "Type" "any"))))
-													'()))
-											(coalesceNil (sq_cache "schemas") '())))
-										(sq_cache "uncorr_scalar_bindings"
-											(set_assoc uncorr_scalar_cache uncorr_scalar_key scalar_alias))
-										(list (quote get_column) scalar_alias false first_field_name false))))))
+							(materialize_uncorrelated_promise_value
+								"scalar"
+								subquery
+								(list (quote nth) (symbol "row") 1)
+								"scalar subselect returned more than one row")))
 					_ nil))
 			_ nil))))
 	(define build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
@@ -4203,33 +4179,15 @@ seeing the correctly prefixed outer alias. */
 							nil))
 						(if (nil? _count_sq)
 							nil
-							(begin
-								(define _count_idx (coalesceNil (sq_cache "idx") 0))
-								(sq_cache "idx" (+ _count_idx 1))
-								(define _count_alias (concat "_uncorr_cnt_" _count_idx))
-								(define _count_rows_sym (symbol (concat "__uncorr_count_rows:" _count_idx)))
-								(define _count_sink_sym (symbol (concat "__uncorr_count_sink:" _count_idx)))
-								(define _count_materialized
-									(legacy_materialized_query_term_binding_ast
-										_count_alias _count_sq _count_rows_sym _count_sink_sym nil nil))
-								(define mat_source (nth _count_materialized 0))
-								(define mat_init (nth _count_materialized 1))
-								/* D = ∅: materialize the helper once and expose it as a normal
-								one-row relation with visible column __cnt. The outer query still
-								sees a regular table input, not a nested runtime subquery. */
-								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-									(list mat_init)))
-								(sq_cache "tables" (merge
-									(list (list _count_alias schema mat_source false nil))
-									(coalesceNil (sq_cache "tables") '())))
-								(sq_cache "schemas" (merge
-									(list _count_alias (list (list "Field" "__cnt" "Type" "any")))
-									(coalesceNil (sq_cache "schemas") '())))
-								(list comparison
-									(list (quote coalesceNil)
-										(list (quote get_column) _count_alias false "__cnt" false)
-										0)
-									0))))
+							(list comparison
+								(list (quote coalesceNil)
+									(materialize_uncorrelated_promise_value
+										"count"
+										_count_sq
+										(list (quote nth) (symbol "row") 1)
+										"uncorrelated count subselect returned more than one row")
+									0)
+								0)))
 					(if (and (not (nil? target_expr)) (nil? _first_field))
 						nil
 						(begin
