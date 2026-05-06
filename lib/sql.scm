@@ -21,6 +21,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "queryplan-tree-ir.scm")
 (import "queryplan-prejoin.scm")
 (import "queryplan.scm")
+(import "queryplan-debug.scm")
 
 (define sql_statement_starts_with (lambda (query keyword) (begin
 	(define trimmed (toUpper (strltrim query)))
