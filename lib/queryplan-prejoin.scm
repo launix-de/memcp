@@ -153,33 +153,33 @@ builds, because their truth value depends on current session state. */
 			(merge acc (list coldef))))
 		'())))
 (define expand_star_fields_with_schemas (lambda (fields schemas) (begin
-	(define _expand_alias_cols (lambda (alias def)
+	(define expand_alias_cols (lambda (alias def)
 		/* Visible schema exports may merge alias/planned/shown column descriptors.
 		Star expansion must dedupe by field name here so wrappers over materialized
 		subqueries do not emit the same visible field twice. */
 		(merge (map (merge_schema_fields_unique (list def)) (lambda (coldesc)
 			'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
 	)))))
-	(define _schema_matches_alias (lambda (candidate target ignorecase)
+	(define schema_matches_alias (lambda (candidate target ignorecase)
 		(or ((if ignorecase equal?? equal?) candidate target)
 			((if ignorecase equal?? equal?) (visible_occurrence_alias candidate) target))))
-	(define _latest_schema_for_alias (lambda (target ignorecase)
+	(define latest_schema_for_alias (lambda (target ignorecase)
 		(begin
 			(define latest (newsession))
 			(extract_assoc schemas (lambda (alias def)
-				(if (_schema_matches_alias alias target ignorecase)
+				(if (schema_matches_alias alias target ignorecase)
 					(latest "v" def)
 					nil)))
 			(coalesceNil (latest "v") nil))))
 	(merge (extract_assoc fields (lambda (col expr) (match expr
-		'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas _expand_alias_cols))
-		'((quote get_column) nil _ "*" _) (merge (extract_assoc schemas _expand_alias_cols))
+		'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas expand_alias_cols))
+		'((quote get_column) nil _ "*" _) (merge (extract_assoc schemas expand_alias_cols))
 		'((symbol get_column) tblvar ignorecase "*" _) (begin
-			(define latest_def (_latest_schema_for_alias tblvar ignorecase))
-			(if (nil? latest_def) '() (_expand_alias_cols tblvar latest_def)))
+			(define latest_def (latest_schema_for_alias tblvar ignorecase))
+			(if (nil? latest_def) '() (expand_alias_cols tblvar latest_def)))
 		'((quote get_column) tblvar ignorecase "*" _) (begin
-			(define latest_def (_latest_schema_for_alias tblvar ignorecase))
-			(if (nil? latest_def) '() (_expand_alias_cols tblvar latest_def)))
+			(define latest_def (latest_schema_for_alias tblvar ignorecase))
+			(if (nil? latest_def) '() (expand_alias_cols tblvar latest_def)))
 		(list col expr)
 )))))))
 /* materialized_source_schema: resolve schema for a materialized temp source
@@ -238,8 +238,8 @@ canonical source side must be used so equivalent queries share the same temp col
 		'(visible_alias _) visible_alias
 		_ (if (string? alias_)
 			(begin
-				(define _parts (split alias_ "\0"))
-				(if (> (count _parts) 1) (nth _parts (- (count _parts) 1)) alias_))
+				(define parts (split alias_ "\0"))
+				(if (> (count parts) 1) (nth parts (- (count parts) 1)) alias_))
 			alias_))))
 (define normalize_visible_aliases (lambda (expr)
 	(match expr
@@ -346,16 +346,16 @@ on plan wiring while preserving the existing materialized-source contracts. The
 caller still owns the prejoin-local canonicalizer that defines the visible
 source-expression namespace for this materialized source. */
 (define register_prejoin_materialized_metadata (lambda (canonicalize_prejoin_source_expr prejointbl prejoin_columns prejoin_alias_map prejoin_source_tables prejoin_schema_def) (begin
-	(define _td_alias_variants (lambda (tv tschema ttbl) (begin
-		(define _raw_aliases (filter (list
+	(define td_alias_variants (lambda (tv tschema ttbl) (begin
+		(define raw_aliases (filter (list
 			tv
 			(match tv '(visible _) visible nil)
 			(visible_occurrence_alias tv)
 			(coalesce (resolve_source_alias prejoin_alias_map tv) nil)
 			(if (equal? (visible_occurrence_alias tv) ttbl) (concat tschema "." ttbl) nil))
 			(lambda (x) (not (nil? x)))))
-		(reduce (merge _raw_aliases
-			(merge (map _raw_aliases (lambda (alias_v)
+		(reduce (merge raw_aliases
+			(merge (map raw_aliases (lambda (alias_v)
 				(if (string? alias_v) (list (sanitize_temp_name alias_v)) '())))))
 			(lambda (acc alias_v)
 				(if (or (nil? alias_v) (has? acc alias_v))
@@ -368,8 +368,8 @@ source-expression namespace for this materialized source. */
 				(canonicalize_prejoin_source_expr expr)
 				(rewrite_source_aliases prejoin_alias_map expr))
 			(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
-				(if (has? (_td_alias_variants tv tschema ttbl) alias_)
-					(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
+				(if (has? (td_alias_variants tv tschema ttbl) alias_)
+					(map (td_alias_variants tv tschema ttbl) (lambda (alias_v)
 						(list (quote get_column) alias_v ti col ci)))
 					'())
 				'())))))
@@ -378,8 +378,8 @@ source-expression namespace for this materialized source. */
 				(canonicalize_prejoin_source_expr expr)
 				(rewrite_source_aliases prejoin_alias_map expr))
 			(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
-				(if (has? (_td_alias_variants tv tschema ttbl) alias_)
-					(map (_td_alias_variants tv tschema ttbl) (lambda (alias_v)
+				(if (has? (td_alias_variants tv tschema ttbl) alias_)
+					(map (td_alias_variants tv tschema ttbl) (lambda (alias_v)
 						(list (quote get_column) alias_v ti col ci)))
 					'())
 				'())))))
@@ -432,7 +432,7 @@ source-expression namespace for this materialized source. */
 )))
 /* Planner-only wrapper: if it survives into emitted runtime code, it must stay
 semantically neutral and evaluate to the underlying source. */
-(define unnest_helper_table (lambda (schema_name base_table _helper_kind)
+(define unnest_helper_table (lambda (schema_name base_table helper_kind)
 	(begin
 		(define source_base (planner_table_source_base base_table))
 		(if (string? source_base)

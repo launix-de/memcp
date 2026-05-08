@@ -129,21 +129,21 @@ stream — this bridge only exists for the trigger-side backfill path. */
 		schemas
 		replace_find_column
 		nil))
-	(define _pj_prev_rr (symbol "__pj_prev_resultrow"))
-	(define _pj_row_sym (symbol "__pj_row"))
+	(define pj_prev_rr (symbol "__pj_prev_resultrow"))
+	(define pj_row_sym (symbol "__pj_row"))
 	(list 'begin
-		(list 'set _pj_prev_rr (symbol "resultrow"))
+		(list 'set pj_prev_rr (symbol "resultrow"))
 		(list 'set (symbol "resultrow")
-			(list 'lambda (list _pj_row_sym)
+			(list 'lambda (list pj_row_sym)
 				(list 'insert (list 'table prejoin_schema prejointbl)
 					(cons 'list prejoin_column_names)
 					(list 'list
 						(cons 'list (map prejoin_column_names (lambda (col)
-							(list 'get_assoc _pj_row_sym col)))))
+							(list 'get_assoc pj_row_sym col)))))
 					(list)
 					(list 'lambda (list) true)
 					true)))
 		prejoin_materialize_rowplan
-		(list 'set (symbol "resultrow") _pj_prev_rr)
+		(list 'set (symbol "resultrow") pj_prev_rr)
 	)
 )))
