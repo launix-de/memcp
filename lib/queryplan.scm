@@ -5108,7 +5108,7 @@ seeing the correctly prefixed outer alias. */
 											toisOuter
 											(if (nil? tje)
 												nil
-												(dependent_join_helper_rewrite_expr_for_domain_source tje domain_cols)))
+												(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
 										_ td))))
 								(merge
 									(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
