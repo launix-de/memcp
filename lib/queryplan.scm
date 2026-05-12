@@ -3524,6 +3524,7 @@ seeing the correctly prefixed outer alias. */
 															us_ria
 															us_sq_prefix
 															us_lookup
+															us_alias_map
 															us_outer_parts
 															us_ror
 															us_inner_cond_raw

@@ -571,7 +571,7 @@ ports the actual operator rules to the tree representation. */
 		(cons sym args) (cons (unnest_map_rule_rewrite_expr map_node sym) (map args (lambda (arg)
 			(unnest_map_rule_rewrite_expr map_node arg))))
 		expr)))
-(define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl us_nested_direct_tbls us_base_aliases us_base_tables us_has_stages us_own_stages us_inner_aliases tables2_us us_has_outer us_inner_stages us_domain_cols us_ria us_sq_prefix us_lookup us_outer_parts us_ror us_inner_cond_raw schemas2_us us_value_expr us_accessing_tags us_select_info) (begin
+(define unnest_map_rule (lambda (tree subquery sq_cache target_expr us_single_tbl us_nested_direct_tbls us_base_aliases us_base_tables us_has_stages us_own_stages us_inner_aliases tables2_us us_has_outer us_inner_stages us_domain_cols us_ria us_sq_prefix us_lookup us_alias_map us_outer_parts us_ror us_inner_cond_raw schemas2_us us_value_expr us_accessing_tags us_select_info) (begin
 	(define map_node (planner_tree_ir_primary_map_node tree))
 	(define us_rewrite_map_expr (lambda (expr)
 		(unnest_map_rule_rewrite_expr map_node
@@ -686,7 +686,93 @@ ports the actual operator rules to the tree representation. */
 										us_simple_uncorrelated_cache_key
 										us_subst)))
 							(list us_subst us_tbl_entries))))))
-		nil))))
+		/* === Multi-table scalar subselect (BTW2025 §3.2 + cclass elim per FAQ §40) ===
+		Inner has 2+ base tables (joined via ON or comma). After simpleDJoinElimination
+		(pulling outer-correlation σ up into the dep-join), the right side is a regular
+		multi-table join. We emit the inner tables prefix-renamed into the outer's
+		tables list, with the first base table carrying isOuter=true and the combined
+		outer-correlation + inner-condition as its join expression. The value
+		expression substitutes via us_ria (renames inner aliases to prefixed names).
+		Limit/ORDER per outer key are not handled in this branch — those still fall
+		through to nil and need the deferred-mat or partition-stage path. */
+		(if us_nested_direct_refs_base_aliases
+			nil /* nested direct table refs base aliases: not handled */
+			(begin
+				(define us_stage_order_fallback (if us_has_stages (coalesceNil (stage_order_list (car us_own_stages)) '()) '()))
+				(define us_stage_limit_fallback (if us_has_stages (stage_limit_val (car us_own_stages)) nil))
+				(define us_stage_offset_fallback (if us_has_stages (stage_offset_val (car us_own_stages)) nil))
+				(define us_orig_order (planner_tree_ir_window_effective_order tree us_stage_order_fallback))
+				(define us_orig_limit (planner_tree_ir_window_effective_limit tree us_stage_limit_fallback))
+				(define us_orig_offset (planner_tree_ir_window_effective_offset tree us_stage_offset_fallback))
+				(if (or
+					(not (nil? us_orig_limit))
+					(not (nil? us_orig_offset))
+					(and (not (nil? us_orig_order)) (not (equal? us_orig_order '()))))
+					nil /* inner LIMIT/ORDER on multi-table: not yet supported */
+					(begin
+						(define us_inner_tbls (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (has? us_inner_aliases a) false))))
+						(define us_rewrite_table_expr (lambda (expr)
+							(us_ria (us_ror expr))))
+						(define us_inner_tbls_rewritten (scalar_subselect_rewrite_tables us_inner_tbls us_rewrite_table_expr))
+						(if (not (equal? us_inner_tbls_rewritten '()))
+							(sq_cache "tables" (merge us_inner_tbls_rewritten (coalesceNil (sq_cache "tables") '()))))
+						(define us_partition_exprs
+							(merge
+								(coalesce
+									(planner_tree_ir_window_partition tree)
+									(map us_domain_cols (lambda (dc) (nth dc 0)))
+									'())
+								'()))
+						(define us_outer_sources (domain_outer_sources_from_correlation_cols us_domain_cols us_ria))
+						(define us_inner_stages_rewritten (scalar_subselect_rewrite_stages_with_lookup
+							us_inner_stages
+							us_ria
+							us_lookup))
+						(define us_nested_outer_sources (scalar_subselect_collect_stage_outer_sources us_inner_stages_rewritten))
+						/* Partition stage keyed on every prefixed inner alias enforces
+						scalar (once_limit=2) semantics across the multi-table join. */
+						(define us_prefixed_aliases (map us_base_aliases (lambda (a)
+							(coalesceNil (us_lookup a) a))))
+						(define us_part_stage (planner_tree_ir_window_make_scalar_partition_stage
+							tree
+							us_partition_exprs
+							us_ria
+							us_sq_prefix
+							us_orig_order
+							us_orig_limit
+							us_orig_offset
+							us_prefixed_aliases
+							(merge_unique (list us_outer_sources us_nested_outer_sources))))
+						(sq_cache "groups" (merge
+							(list us_part_stage)
+							us_inner_stages_rewritten
+							(coalesceNil (sq_cache "groups") '())))
+						(define us_join_lim (map us_outer_parts (lambda (p) (us_ria (us_ror p)))))
+						(define us_inner_lim (us_ria us_inner_cond_raw))
+						(define us_full_lim (if (nil? us_inner_lim)
+							(if (equal? (count us_join_lim) 0) true (if (equal? (count us_join_lim) 1) (car us_join_lim) (cons (quote and) us_join_lim)))
+							(cons (quote and) (merge us_join_lim (list us_inner_lim)))))
+						(define us_nested_direct_tbls_rewritten (scalar_subselect_rewrite_tables us_nested_direct_tbls us_rewrite_table_expr))
+						/* Prefix-wrap all base tables. The first base table carries
+						isOuter=true plus the combined correlation+inner-condition
+						(us_full_lim). The remaining base tables keep their original
+						join expression, rewritten for the new prefixed aliases. */
+						(define us_prefixed_base_tables (scalar_subselect_prefixed_tables us_base_tables us_lookup us_rewrite_table_expr))
+						(define us_first_base (car us_prefixed_base_tables))
+						(define us_rest_base (cdr us_prefixed_base_tables))
+						(define us_first_patched (match us_first_base
+							'(a s t _io _je) (list a s t true us_full_lim)
+							us_first_base))
+						(define us_tbl_entries (merge
+							(list us_first_patched)
+							us_rest_base
+							us_nested_direct_tbls_rewritten))
+						/* Passthrough schemas for the prefix-renamed base aliases. */
+						(define us_passthrough_schemas (scalar_subselect_prefixed_schemas us_prefixed_base_tables us_alias_map schemas2_us))
+						(if (not (equal? us_passthrough_schemas '()))
+							(sq_cache "schemas" (merge us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
+						(define us_subst (us_ria (us_rewrite_map_expr us_value_expr)))
+						(list us_subst us_tbl_entries))))))))))
 (define unnest_groupby_rule (lambda (tree subquery sq_cache target_expr tables2_us us_lookup us_alias_map us_ria us_has_stages us_own_stages us_inner_stages us_domain_cols us_inner_cond_raw schemas2_us us_value_expr us_has_grp us_accessing_tags us_select_info) (begin
 	/* === A: Aggregate -> flatten inner tables + scoped GROUP stage ===
 	Neumann Γ_{A∪D;f}: add domain cols to GROUP BY, flatten inner tables
