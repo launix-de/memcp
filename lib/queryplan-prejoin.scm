@@ -75,30 +75,19 @@ builds, because their truth value depends on current session state. */
 (define materialized_expr_alias_variants alias_lookup_variants)
 (define materialized_source_expr_keys (lambda (expr)
 	(match expr
+		/* Note: '((quote get_column) ...) and '((symbol get_column) ...) match
+		identical IR values, and (list (quote get_column) ...) /
+		(list (symbol get_column) ...) construct identical bare-symbol-headed
+		lists. The historical 6-way variant expansion was pure cargo-cult --
+		a single expr-variant per alias suffices since the merge above only
+		uses (string variant) / (sanitize_temp_name (string variant)) which
+		serialise to the same key regardless of construction form. */
 		'((symbol get_column) alias_ ti col ci) (reduce
 			(reduce (materialized_expr_alias_variants alias_) (lambda (variants alias_v)
 				(merge variants (list
-					(list (symbol get_column) alias_v ti col ci)
-					(normalize_visible_aliases (list (symbol get_column) alias_v ti col ci))
-					(normalize_canonical_aliases (list (symbol get_column) alias_v ti col ci))
 					(list (quote get_column) alias_v ti col ci)
 					(normalize_visible_aliases (list (quote get_column) alias_v ti col ci))
 					(normalize_canonical_aliases (list (quote get_column) alias_v ti col ci)))))
-				'())
-			(lambda (acc expr_variant)
-				(merge acc (list
-					(string expr_variant)
-					(sanitize_temp_name (string expr_variant)))))
-			'())
-		'((quote get_column) alias_ ti col ci) (reduce
-			(reduce (materialized_expr_alias_variants alias_) (lambda (variants alias_v)
-				(merge variants (list
-					(list (quote get_column) alias_v ti col ci)
-					(normalize_visible_aliases (list (quote get_column) alias_v ti col ci))
-					(normalize_canonical_aliases (list (quote get_column) alias_v ti col ci))
-					(list (symbol get_column) alias_v ti col ci)
-					(normalize_visible_aliases (list (symbol get_column) alias_v ti col ci))
-					(normalize_canonical_aliases (list (symbol get_column) alias_v ti col ci)))))
 				'())
 			(lambda (acc expr_variant)
 				(merge acc (list
@@ -173,11 +162,7 @@ builds, because their truth value depends on current session state. */
 			(coalesceNil (latest "v") nil))))
 	(merge (extract_assoc fields (lambda (col expr) (match expr
 		'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas expand_alias_cols))
-		'((quote get_column) nil _ "*" _) (merge (extract_assoc schemas expand_alias_cols))
 		'((symbol get_column) tblvar ignorecase "*" _) (begin
-			(define latest_def (latest_schema_for_alias tblvar ignorecase))
-			(if (nil? latest_def) '() (expand_alias_cols tblvar latest_def)))
-		'((quote get_column) tblvar ignorecase "*" _) (begin
 			(define latest_def (latest_schema_for_alias tblvar ignorecase))
 			(if (nil? latest_def) '() (expand_alias_cols tblvar latest_def)))
 		(list col expr)
@@ -206,7 +191,6 @@ keytables/prejoins may not exist at compile time (runtime-only creation). */
 (define materialized_field_from_get_column_name (lambda (materialized_cols expr)
 	(match expr
 		'((symbol get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
-		'((quote get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
 		nil
 	)
 ))
@@ -241,11 +225,18 @@ canonical source side must be used so equivalent queries share the same temp col
 				(define parts (split alias_ "\0"))
 				(if (> (count parts) 1) (nth parts (- (count parts) 1)) alias_))
 			alias_))))
+/* Pattern duplication note (verified 2026-05-18 against scm/match.go):
+both '((quote get_column) ...) and '((symbol get_column) ...) match only
+lists whose first element is the bare symbol get_column (see match.go
+case "quote"/case "symbol" -> symbolName(val), and the structural list
+match at "Support nested head wrappers like ((symbol get_column) ...)").
+The bare-symbol head is the only get_column IR shape that flows through
+runtime; (list (quote get_column) ...) constructors evaluate (quote
+get_column) to that bare symbol. Below we keep a single (symbol X)
+variant per case instead of duplicating both wrapped forms. */
 (define normalize_visible_aliases (lambda (expr)
 	(match expr
 		'((symbol get_column) alias_ ti col ci)
-		(list (quote get_column) (visible_occurrence_alias alias_) false col false)
-		'((quote get_column) alias_ ti col ci)
 		(list (quote get_column) (visible_occurrence_alias alias_) false col false)
 		(cons sym args)
 		(cons sym (map args normalize_visible_aliases))
@@ -255,10 +246,6 @@ canonical source side must be used so equivalent queries share the same temp col
 (define normalize_canonical_aliases (lambda (expr)
 	(match expr
 		'((symbol get_column) alias_ ti col ci)
-		(match alias_
-			'(_ canonical_alias) (list (quote get_column) canonical_alias false col false)
-			_ (list (quote get_column) alias_ false col false))
-		'((quote get_column) alias_ ti col ci)
 		(match alias_
 			'(_ canonical_alias) (list (quote get_column) canonical_alias false col false)
 			_ (list (quote get_column) alias_ false col false))
@@ -298,17 +285,14 @@ scope is gone. */
 	(match table-source
 		'(materialized-subquery-source _) true
 		'((symbol materialized-subquery-source) _) true
-		'((quote materialized-subquery-source) _) true
 		false
 )))
 (define normalize-materialized-subquery-source (lambda (table-source)
 	(match table-source
 		'(materialized-subquery-source key) (make_materialized-subquery-source key)
 		'((symbol materialized-subquery-source) key) (make_materialized-subquery-source key)
-		'((quote materialized-subquery-source) key) (make_materialized-subquery-source key)
 		'(materialized-subquery key) (make_materialized-subquery-source key)
 		'((symbol materialized-subquery) key) (make_materialized-subquery-source key)
-		'((quote materialized-subquery) key) (make_materialized-subquery-source key)
 		_ (begin
 			(define legacy_key (legacy-materialized-subquery-source-key table-source))
 			(if (nil? legacy_key)
@@ -319,7 +303,6 @@ scope is gone. */
 	(match (normalize-materialized-subquery-source table-source)
 		'(materialized-subquery-source key) key
 		'((symbol materialized-subquery-source) key) key
-		'((quote materialized-subquery-source) key) key
 		nil
 )))
 (define materialized-subquery-source-runtime (lambda (table-source)
@@ -373,16 +356,6 @@ source-expression namespace for this materialized source. */
 						(list (quote get_column) alias_v ti col ci)))
 					'())
 				'())))))
-		'((quote get_column) alias_ ti col ci) (merge
-			(list expr
-				(canonicalize_prejoin_source_expr expr)
-				(rewrite_source_aliases prejoin_alias_map expr))
-			(merge (map prejoin_source_tables (lambda (td) (match td '(tv tschema ttbl _ _)
-				(if (has? (td_alias_variants tv tschema ttbl) alias_)
-					(map (td_alias_variants tv tschema ttbl) (lambda (alias_v)
-						(list (quote get_column) alias_v ti col ci)))
-					'())
-				'())))))
 		_ (list expr
 			(canonicalize_prejoin_source_expr expr)
 			(rewrite_source_aliases prejoin_alias_map expr)))))
@@ -421,13 +394,10 @@ source-expression namespace for this materialized source. */
 	(match table_source
 		'(unnest_helper_table _ base_table _) (planner_table_source_base base_table)
 		'((symbol unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
-		'((quote unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
 		'(scan-tagged-table base_table _ _ _ _ _) (planner_table_source_base base_table)
 		'(scan-tagged-table base_table _ _ _ _ _ _) (planner_table_source_base base_table)
 		'((symbol scan-tagged-table) base_table _ _ _ _ _) (planner_table_source_base base_table)
 		'((symbol scan-tagged-table) base_table _ _ _ _ _ _) (planner_table_source_base base_table)
-		'((quote scan-tagged-table) base_table _ _ _ _ _) (planner_table_source_base base_table)
-		'((quote scan-tagged-table) base_table _ _ _ _ _ _) (planner_table_source_base base_table)
 		table_source
 )))
 /* Planner-only wrapper: if it survives into emitted runtime code, it must stay
@@ -443,21 +413,18 @@ semantically neutral and evaluate to the underlying source. */
 	(match table_source
 		'(unnest_helper_table _ _ _) true
 		'((symbol unnest_helper_table) _ _ _) true
-		'((quote unnest_helper_table) _ _ _) true
 		false
 )))
 (define unnest_helper_table_base (lambda (table_source)
 	(match table_source
 		'(unnest_helper_table _ base_table _) (planner_table_source_base base_table)
 		'((symbol unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
-		'((quote unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
 		table_source
 )))
 (define unnest_helper_table_schema (lambda (table_source)
 	(match table_source
 		'(unnest_helper_table schema_name _ _) schema_name
 		'((symbol unnest_helper_table) schema_name _ _) schema_name
-		'((quote unnest_helper_table) schema_name _ _) schema_name
 		nil
 )))
 (define unnest_helper_table_runtime_source (lambda (table_source)
@@ -465,8 +432,6 @@ semantically neutral and evaluate to the underlying source. */
 		'(unnest_helper_table schema_name base_table _)
 		(unnest_helper_table schema_name base_table nil)
 		'((symbol unnest_helper_table) schema_name base_table _)
-		(unnest_helper_table schema_name base_table nil)
-		'((quote unnest_helper_table) schema_name base_table _)
 		(unnest_helper_table schema_name base_table nil)
 		table_source
 )))
@@ -476,8 +441,6 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_runtime_table_source schema base_table)
 		'((symbol unnest_helper_table) _ base_table _)
 		(planner_runtime_table_source schema base_table)
-		'((quote unnest_helper_table) _ base_table _)
-		(planner_runtime_table_source schema base_table)
 		'(scan-tagged-table base_table _ _ _ _ _)
 		(planner_runtime_table_source schema base_table)
 		'(scan-tagged-table base_table _ _ _ _ _ _)
@@ -486,19 +449,12 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_runtime_table_source schema base_table)
 		'((symbol scan-tagged-table) base_table _ _ _ _ _ _)
 		(planner_runtime_table_source schema base_table)
-		'((quote scan-tagged-table) base_table _ _ _ _ _)
-		(planner_runtime_table_source schema base_table)
-		'((quote scan-tagged-table) base_table _ _ _ _ _ _)
-		(planner_runtime_table_source schema base_table)
 		'(materialized-subquery-source key) ((context "session") key)
 		'((symbol materialized-subquery-source) key) ((context "session") key)
-		'((quote materialized-subquery-source) key) ((context "session") key)
 		'((context "session") key) ((context "session") key)
 		'(((symbol context) "session") key) (((symbol context) "session") key)
-		'(((quote context) "session") key) (((quote context) "session") key)
 		'(table helper_schema helper_tbl) (table helper_schema helper_tbl)
 		'((symbol table) helper_schema helper_tbl) (table helper_schema helper_tbl)
-		'((quote table) helper_schema helper_tbl) (table helper_schema helper_tbl)
 		(string? base_tbl) (table schema base_tbl)
 		base_tbl base_tbl)))
 (define planner_codegen_table_source (lambda (schema table_source)
@@ -507,8 +463,6 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_codegen_table_source schema base_table)
 		'((symbol unnest_helper_table) _ base_table _)
 		(planner_codegen_table_source schema base_table)
-		'((quote unnest_helper_table) _ base_table _)
-		(planner_codegen_table_source schema base_table)
 		'(scan-tagged-table base_table _ _ _ _ _)
 		(planner_codegen_table_source schema base_table)
 		'(scan-tagged-table base_table _ _ _ _ _ _)
@@ -517,32 +471,22 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_codegen_table_source schema base_table)
 		'((symbol scan-tagged-table) base_table _ _ _ _ _ _)
 		(planner_codegen_table_source schema base_table)
-		'((quote scan-tagged-table) base_table _ _ _ _ _)
-		(planner_codegen_table_source schema base_table)
-		'((quote scan-tagged-table) base_table _ _ _ _ _ _)
-		(planner_codegen_table_source schema base_table)
 		'(materialized-subquery-source key) (list (list (quote context) "session")
 			(if (string? key) key (list (quote quote) key)))
 		'((symbol materialized-subquery-source) key) (list (list (quote context) "session")
-			(if (string? key) key (list (quote quote) key)))
-		'((quote materialized-subquery-source) key) (list (list (quote context) "session")
 			(if (string? key) key (list (quote quote) key)))
 		'((context "session") key) (list (list (quote context) "session")
 			(if (string? key) key (list (quote quote) key)))
 		'(((symbol context) "session") key) (list (list (quote context) "session")
 			(if (string? key) key (list (quote quote) key)))
-		'(((quote context) "session") key) (list (list (quote context) "session")
-			(if (string? key) key (list (quote quote) key)))
 		'(table helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
 		'((symbol table) helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
-		'((quote table) helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
 		(string? base_tbl) (list (quote table) schema base_tbl)
 		base_tbl base_tbl)))
 (define unnest_helper_table_kind (lambda (table_source)
 	(match table_source
 		'(unnest_helper_table _ _ helper_kind) helper_kind
 		'((symbol unnest_helper_table) _ _ helper_kind) helper_kind
-		'((quote unnest_helper_table) _ _ helper_kind) helper_kind
 		nil
 )))
 (define materialized-source? (lambda (table-source)
@@ -557,9 +501,8 @@ semantically neutral and evaluate to the underlying source. */
 				(materialized-subquery-source? normalized_source)
 				(match normalized_source
 					(cons (cons (symbol context) '("session")) _) true
-					(cons (cons '(quote context) '("session")) _) true
 					false
-	)))))
+)))))
 ))
 (define planner-temp-source-name (lambda (tbl tblvar)
 	(define base_tbl (normalize-materialized-subquery-source
