@@ -315,6 +315,23 @@ while still recursing into deeper helper lineage when needed. */
 	)
 ))
 
+/* extract aliases captured through explicit outer markers like
+(outer alias.col). join_reorder must respect those dependencies just like
+regular get_column references, otherwise a materialized helper can be lifted
+above the table that still supplies its correlation key. */
+(define extract_outer_tblvars (lambda (expr)
+	(match expr
+		'((symbol outer) outer_sym) (match (split (string outer_sym) ".")
+			(list outer_tbl _outer_col) '(outer_tbl)
+			'())
+		'((quote outer) outer_sym) (match (split (string outer_sym) ".")
+			(list outer_tbl _outer_col) '(outer_tbl)
+			'())
+		(cons sym args) (merge_unique (map args extract_outer_tblvars))
+		'()
+	)
+))
+
 /* returns a list of '(string...) */
 (define extract_columns_for_tblvar (lambda (tblvar expr)
 	(match expr
@@ -7209,8 +7226,13 @@ second table carries strictly more local WHERE predicates than the first. */
 	(define jqr_aliases (map tables_ jqr_td_alias))
 	(define jqr_deps (lambda (td)
 		(filter
-			(filter (extract_tblvars (coalesceNil (jqr_td_joinexpr td) true)) (lambda (alias_name)
-				(not (equal?? alias_name (jqr_td_alias td)))))
+			(filter
+				(merge_unique
+					(list
+						(extract_tblvars (coalesceNil (jqr_td_joinexpr td) true))
+						(extract_outer_tblvars (coalesceNil (jqr_td_joinexpr td) true))))
+				(lambda (alias_name)
+					(not (equal?? alias_name (jqr_td_alias td)))))
 			(lambda (alias_name) (has? jqr_aliases alias_name)))))
 	(define jqr_step (lambda (ordered remaining) (begin
 		(define ordered_aliases (map ordered jqr_td_alias))
