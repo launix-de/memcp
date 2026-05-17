@@ -71,7 +71,11 @@ func HTTPStaticGetter(wd string) func(...Scmer) Scmer {
 	mime.AddExtensionType(".svg", "image/svg+xml")
 
 	return func(a ...Scmer) Scmer {
-		fs := http.FileServer(http.Dir(filepath.Join(wd, a[0].String())))
+		dir := a[0].String()
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(wd, dir)
+		}
+		fs := http.FileServer(http.Dir(dir))
 		return NewFunc(func(a ...Scmer) Scmer { // req res
 			resList := mustSliceNet("static response", a[1])
 			reqList := mustSliceNet("static request", a[0])
