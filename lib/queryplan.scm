@@ -7792,6 +7792,37 @@ Key helpers:
 - replace_columns_from_expr: rewrites get_column markers to runtime variable references
 - scan_wrapper: generates scan/scan_order calls with filter/map/reduce structure
 */
+/* walk_subst_aggregates: central recursive walker for (aggregate ...) marker
+substitution across every IR slot of a stage. Walks `expr` top-down; whenever
+it sees an `(aggregate <inner> <reduce> <neutral>)` marker (in either symbol
+or quoted form) it delegates the decision to `handle_agg`, which gets:
+- the original marker expression (`marker_expr`)
+- the agg argument list `(inner reduce neutral)` (`agg_args`)
+- a `recurse_fn` that walks any sub-expression with the same handler
+`handle_agg` either returns the substituted expression (e.g. a `(get_column ...)`
+read) or `nil`. On `nil` the walker keeps the original marker but recurses into
+its inner expression so nested aggregates can still be lowered by the same
+handler. Opaque scopes (`scan`, `!begin`, `newpromise`, `newsession`, ...) are
+left untouched as already established for the planner walkers. */
+(define walk_subst_aggregates (lambda (expr handle_agg) (begin
+	(define recurse_fn (lambda (sub) (walk_subst_aggregates sub handle_agg)))
+	(define try_substitute (lambda (marker_expr agg_args)
+		(begin
+			(define substituted (handle_agg marker_expr agg_args recurse_fn))
+			(if (nil? substituted)
+				(match agg_args
+					'(agg_expr agg_reduce agg_neutral)
+					(list (quote aggregate) (recurse_fn agg_expr) agg_reduce agg_neutral)
+					_ marker_expr)
+				substituted))))
+	(match expr
+		(cons (symbol aggregate) agg_args) (try_substitute expr agg_args)
+		(cons '(quote aggregate) agg_args) (try_substitute expr agg_args)
+		(cons sym args) (if (is_opaque_scope_sym sym)
+			expr
+			(cons sym (map args recurse_fn)))
+		expr))))
+
 /* update_target: nil for SELECT, or (tblalias (col1 expr1 col2 expr2 ...)) for multi-table UPDATE.
 When set, the scan on tblalias includes $update in mapcols and the mapfn applies the SET expressions. */
 (define build_queryplan_inner (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin
@@ -7936,20 +7967,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											nil)
 										nil))))
 							nil)))))
-				(define lower_aggs (lambda (expr) (match expr
-					(cons (symbol aggregate) agg_args) (begin
-						(define match_col (current_scan_agg_field expr agg_args))
-						(if (nil? match_col)
-							expr
-							(list (quote get_column) scan_tblvar false match_col false)))
-					(cons '(quote aggregate) agg_args) (begin
-						(define match_col (current_scan_agg_field expr agg_args))
-						(if (nil? match_col)
-							expr
-							(list (quote get_column) scan_tblvar false match_col false)))
-					(cons sym args) (cons sym (map args lower_aggs))
-					expr)))
-				(lower_aggs scan_expr))))))
+				/* scan-table-local handler: on miss keep the marker untouched (do not
+				recurse into the inner aggregate expression) — this matches the
+				original `lower_aggs` semantics that left non-matching markers in
+				place for a later stage to resolve. */
+				(define handle_agg (lambda (marker_expr agg_args recurse_fn) (begin
+					(define match_col (current_scan_agg_field marker_expr agg_args))
+					(if (nil? match_col)
+						marker_expr
+						(list (quote get_column) scan_tblvar false match_col false)))))
+				(walk_subst_aggregates scan_expr handle_agg))))))
 	(define lower_materialized_scan_condition (lambda (scan_schema scan_tbl scan_tblvar scan_condition)
 		(lower_materialized_scan_expr scan_schema scan_tbl scan_tblvar scan_condition scan_condition)))
 	(define lower_materialized_emit_expr (lambda (scan_schema scan_tbl scan_tblvar scan_expr)
@@ -8144,23 +8171,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(sanitize_temp_name
 						(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar expr)) '(list) '(list) canon_alias_map))))
 				(define agg_col_name (make_aggregate_cache_col_name expr_name condition nil))
-				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
-					(cons (symbol aggregate) agg_args) (begin
+				(define rewrite_materialized_source_aggs_single (lambda (expr)
+					(walk_subst_aggregates expr (lambda (marker_expr agg_args recurse_fn) (begin
 						(define target_col (agg_col_name agg_args))
 						(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
 						(define match_col (find_materialized_field_by_name materialized_cols target_col))
 						(if (nil? match_col)
-							expr
-							(list (quote get_column) tblvar false match_col false)))
-					(cons '(quote aggregate) agg_args) (begin
-						(define target_col (agg_col_name agg_args))
-						(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
-						(define match_col (find_materialized_field_by_name materialized_cols target_col))
-						(if (nil? match_col)
-							expr
-							(list (quote get_column) tblvar false match_col false)))
-					(cons sym args) (cons sym (map args rewrite_materialized_source_aggs_single))
-					expr)))
+							marker_expr
+							(list (quote get_column) tblvar false match_col false)))))))
 				(define rewrite_materialized_source_cols_single (lambda (expr) (match expr
 					'((symbol get_column) _ _ _ _) (begin
 						(define expr_lookup (materialized_source_expr_lookup tbl))
@@ -9152,45 +9170,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														nil))))
 											nil)))
 								nil)))
-						(define lower_runtime_materialized_aggs_single (lambda (expr) (match expr
-							(cons (symbol aggregate) agg_args) (begin
-								(define stage_fetch (stage_fetch_owned_agg expr agg_args))
-								(define target_col (agg_col_name agg_args))
-								(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
-								(define visible_expr (if materialized_source
-									(lower_visible_materialized_aggs_single expr)
-									expr))
-								(define match_col (match_runtime_materialized_agg_col target_col agg_name))
+						/* Runtime-stage handler: first try stage-owned keytable fetch, then the
+						source-visible lower, finally the runtime materialized column lookup.
+						On a complete miss return nil so the walker recurses into the inner
+						aggregate expression (nested aggs may still resolve there). */
+						(define lower_runtime_materialized_aggs_single (lambda (expr)
+							(walk_subst_aggregates expr (lambda (marker_expr agg_args recurse_fn) (begin
+								(define stage_fetch (stage_fetch_owned_agg marker_expr agg_args))
 								(if (not (nil? stage_fetch))
 									stage_fetch
-									(if (not (equal? visible_expr expr))
-										visible_expr
-										(if (nil? match_col)
-											(match agg_args
-												'(agg_expr agg_reduce agg_neutral)
-												(list (quote aggregate) (lower_runtime_materialized_aggs_single agg_expr) agg_reduce agg_neutral)
-												_ expr)
-											(list (quote get_column) tblvar false match_col false)))))
-							(cons '(quote aggregate) agg_args) (begin
-								(define stage_fetch (stage_fetch_owned_agg expr agg_args))
-								(define target_col (agg_col_name agg_args))
-								(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
-								(define visible_expr (if materialized_source
-									(lower_visible_materialized_aggs_single expr)
-									expr))
-								(define match_col (match_runtime_materialized_agg_col target_col agg_name))
-								(if (not (nil? stage_fetch))
-									stage_fetch
-									(if (not (equal? visible_expr expr))
-										visible_expr
-										(if (nil? match_col)
-											(match agg_args
-												'(agg_expr agg_reduce agg_neutral)
-												(list (quote aggregate) (lower_runtime_materialized_aggs_single agg_expr) agg_reduce agg_neutral)
-												_ expr)
-											(list (quote get_column) tblvar false match_col false)))))
-							(cons sym args) (cons sym (map args lower_runtime_materialized_aggs_single))
-							expr)))
+									(begin
+										(define visible_expr (if materialized_source
+											(lower_visible_materialized_aggs_single marker_expr)
+											marker_expr))
+										(if (not (equal? visible_expr marker_expr))
+											visible_expr
+											(begin
+												(define target_col (agg_col_name agg_args))
+												(define agg_name (canonical_expr_name (normalize_canonical_aliases agg_args) '(list) '(list) canon_alias_map))
+												(define match_col (match_runtime_materialized_agg_col target_col agg_name))
+												(if (nil? match_col)
+													nil /* let walker recurse into inner aggregate expression */
+													(list (quote get_column) tblvar false match_col false)))))))))))
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 							(define runtime_expr
 								(rewrite_materialized_source_cols_single
@@ -9441,73 +9442,55 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(if (equal? filtered_terms '()) true
 						(if (equal? 1 (count filtered_terms)) (car filtered_terms)
 							(cons (quote and) filtered_terms))))))
-				(define rewrite_materialized_source_aggs (lambda (expr nested_agg) (match expr
-					(cons (symbol aggregate) agg_args)
+				/* Nested-only handler: looks up agg-markers in the prejoin source-tables
+				physical schema; on miss returns nil so the walker recurses into the
+				inner aggregate expression. */
+				(define rewrite_prejoin_nested_agg_handler (lambda (marker_expr agg_args recurse_fn) (begin
+					(define canonical_agg_args (canonicalize_expr agg_args prejoin_alias_map))
+					(define agg_name (serialize_canonical_expr canonical_agg_args))
+					(define match_col (reduce prejoin_source_tables (lambda (acc td)
+						(if (not (nil? acc))
+							acc
+							(match td '(tv tschema ttbl _ _)
+								(begin
+									(define source_cols (materialized_source_physical_schema tschema ttbl tv schemas))
+									(reduce source_cols (lambda (found coldef)
+										(if (not (nil? found)) found
+											(begin
+												(define field_name (coldef "Field"))
+												(if (and (>= (strlen field_name) (+ (strlen agg_name) 1))
+													(equal? (substr field_name 0 (strlen agg_name)) agg_name)
+													(equal? (substr field_name (strlen agg_name) 1) "|"))
+													(list tv field_name)
+													nil))))
+										nil)))))
+						nil))
+					(if (nil? match_col)
+						nil /* let walker recurse into inner aggregate expression */
+						(list (quote get_column) (car match_col) false (cadr match_col) false)))))
+				/* `rewrite_materialized_source_aggs`: the original `nested_agg` flag
+				distinguished the very outer aggregate (left as-is) from inner aggregates
+				(matched against prejoin source columns). The walker handles this by
+				peeling one layer at the top level and then routing the inner expression
+				through `walk_subst_aggregates` with the nested handler. */
+				(define rewrite_materialized_source_aggs (lambda (expr nested_agg)
 					(if nested_agg
-						(begin
-							(define canonical_agg_args (canonicalize_expr agg_args prejoin_alias_map))
-							(define agg_name (serialize_canonical_expr canonical_agg_args))
-							(define match_col (reduce prejoin_source_tables (lambda (acc td)
-								(if (not (nil? acc))
-									acc
-									(match td '(tv tschema ttbl _ _)
-										(begin
-											(define source_cols (materialized_source_physical_schema tschema ttbl tv schemas))
-											(reduce source_cols (lambda (found coldef)
-												(if (not (nil? found)) found
-													(begin
-														(define field_name (coldef "Field"))
-														(if (and (>= (strlen field_name) (+ (strlen agg_name) 1))
-															(equal? (substr field_name 0 (strlen agg_name)) agg_name)
-															(equal? (substr field_name (strlen agg_name) 1) "|"))
-															(list tv field_name)
-															nil))))
-												nil)))))
-								nil))
-							(if (nil? match_col)
-								(match agg_args
-									'(agg_expr agg_reduce agg_neutral)
-									(list (quote aggregate) (rewrite_materialized_source_aggs agg_expr true) agg_reduce agg_neutral)
-									_ expr)
-								(list (quote get_column) (car match_col) false (cadr match_col) false)))
-						(match agg_args
-							'(agg_expr agg_reduce agg_neutral)
-							(list (quote aggregate) (rewrite_materialized_source_aggs agg_expr true) agg_reduce agg_neutral)
-							_ expr))
-					(cons '(quote aggregate) agg_args)
-					(if nested_agg
-						(begin
-							(define canonical_agg_args (canonicalize_expr agg_args prejoin_alias_map))
-							(define agg_name (serialize_canonical_expr canonical_agg_args))
-							(define match_col (reduce prejoin_source_tables (lambda (acc td)
-								(if (not (nil? acc))
-									acc
-									(match td '(tv tschema ttbl _ _)
-										(begin
-											(define source_cols (materialized_source_physical_schema tschema ttbl tv schemas))
-											(reduce source_cols (lambda (found coldef)
-												(if (not (nil? found)) found
-													(begin
-														(define field_name (coldef "Field"))
-														(if (and (>= (strlen field_name) (+ (strlen agg_name) 1))
-															(equal? (substr field_name 0 (strlen agg_name)) agg_name)
-															(equal? (substr field_name (strlen agg_name) 1) "|"))
-															(list tv field_name)
-															nil))))
-												nil)))))
-								nil))
-							(if (nil? match_col)
-								(match agg_args
-									'(agg_expr agg_reduce agg_neutral)
-									(list (quote aggregate) (rewrite_materialized_source_aggs agg_expr true) agg_reduce agg_neutral)
-									_ expr)
-								(list (quote get_column) (car match_col) false (cadr match_col) false)))
-						(match agg_args
-							'(agg_expr agg_reduce agg_neutral)
-							(list (quote aggregate) (rewrite_materialized_source_aggs agg_expr true) agg_reduce agg_neutral)
-							_ expr))
-					(cons sym args) (cons sym (map args (lambda (arg) (rewrite_materialized_source_aggs arg nested_agg))))
-					expr)))
+						(walk_subst_aggregates expr rewrite_prejoin_nested_agg_handler)
+						(match expr
+							(cons (symbol aggregate) agg_args)
+							(match agg_args
+								'(agg_expr agg_reduce agg_neutral)
+								(list (quote aggregate) (walk_subst_aggregates agg_expr rewrite_prejoin_nested_agg_handler) agg_reduce agg_neutral)
+								_ expr)
+							(cons '(quote aggregate) agg_args)
+							(match agg_args
+								'(agg_expr agg_reduce agg_neutral)
+								(list (quote aggregate) (walk_subst_aggregates agg_expr rewrite_prejoin_nested_agg_handler) agg_reduce agg_neutral)
+								_ expr)
+							(cons sym args) (if (is_opaque_scope_sym sym)
+								expr
+								(cons sym (map args (lambda (arg) (rewrite_materialized_source_aggs arg false)))))
+							expr))))
 				(define rewrite_materialized_source_runtime_markers (lambda (expr) (begin
 					(define match_materialized_runtime_agg (lambda (agg_args)
 						(begin
