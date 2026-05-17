@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024, 2026  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -137,6 +137,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
 	)))
+	(define psql_setval_command (lambda (seq_name val is_called)
+		(match (replace seq_name "\"" "")
+			(regex "^[^.]+\\.(.*)_(.*?)_seq\\z" _ tbl col)
+			'((quote altercolumn) '((quote table) schema tbl) col "auto_increment"
+				'((quote if) is_called
+					val
+					'((quote if) '((quote >) val 1) '((quote -) val 1) 1)))
+			(error "unknown pg_catalog key: " seq_name))
+	))
 
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define psql_expression (parser (or
@@ -275,7 +284,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" psql_expression "," psql_expression "," psql_expression ")") nil) /* ignore */
-		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" psql_identifier "." (define key psql_identifier) "'" "," (define val psql_expression) "," psql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn '('table schema tbl) col "auto_increment" val) (error "unknown pg_catalog key: " key)))
+		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
+			(psql_setval_command seq_name val is_called))
 
 		(parser (atom "NULL" true) 'nil)
 		(parser (atom "TRUE" true) true)
@@ -694,7 +704,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				))
 				(define typeparams psql_column_attributes)
 			) (lambda (id) '((quote createcolumn) '('table schema id) col type dimensions (cons 'list typeparams))))
-			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) '((quote altertable) '('table schema id) "owner" owner)))
+			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) '('table schema id) "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "memory")))
@@ -707,14 +717,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '('table schema id) "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '('table schema id) "auto_increment" ai)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier) (define body (or /* ALTER COLUMN */
-				(parser '((atom "ADD" true) (atom "GENERATED" true) (or '((atom "BY" true) (atom "DEFAULT" true)) (atom "ALWAYS" true)) (atom "AS" true) (atom "IDENTITY") "("
-					(atom "SEQUENCE" true) (atom "NAME" true) psql_identifier "." psql_identifier
-					(? (atom "START" true) (atom "WITH" true) psql_expression)
-					(? (atom "INCREMENT" true) (atom "BY" true) psql_expression)
-					(? (atom "NO" true) (atom "MINVALUE" true))
-					(? (atom "NO" true) (atom "MAXVALUE" true))
-					(? (atom "CACHE" true) psql_expression)
-					")") (lambda (col) (lambda (id) '((quote altercolumn) '('table schema id) col "auto_increment" true))))
 				/* Type and default changes */
 				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema id) col "type" type) '((quote altercolumn) '('table schema id) col "dimensions" dimensions)))))
 				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema id) col "default" def))))
@@ -727,6 +729,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
+		/* Bare `SELECT pg_catalog.setval(...)` from pg_dump must execute as DDL
+		   (alter auto_increment), not be wrapped as a SELECT projection. */
+		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
+			(psql_setval_command seq_name val is_called))
 		(parser (define query psql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder query))
@@ -734,12 +740,52 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_insert_into
 		psql_insert_select
 		psql_create_table
+		(parser '((atom "ALTER" true) (atom "TABLE" true) (? (atom "ONLY" true))
+			(define target (or
+				(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
+				(parser (define id psql_identifier) '(nil id))
+			))
+			(atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier)
+			(atom "ADD" true) (atom "GENERATED" true) (or '((atom "BY" true) (atom "DEFAULT" true)) (atom "ALWAYS" true))
+			(atom "AS" true) (atom "IDENTITY") "("
+			(atom "SEQUENCE" true) (atom "NAME" true) psql_identifier "." psql_identifier
+			(? (atom "START" true) (atom "WITH" true) psql_expression)
+			(? (atom "INCREMENT" true) (atom "BY" true) psql_expression)
+			(? (atom "NO" true) (atom "MINVALUE" true))
+			(? (atom "NO" true) (atom "MAXVALUE" true))
+			(? (atom "CACHE" true) psql_expression)
+			")")
+			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) id) col "auto_increment" true)))
+		(parser '((atom "ALTER" true) (atom "TABLE" true) (? (atom "ONLY" true))
+			(define target (or
+				(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
+				(parser (define id psql_identifier) '(nil id))
+			))
+			(atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier)
+			(atom "SET" true) (atom "DEFAULT" true) (atom "nextval" true) "(" psql_string "::" (atom "regclass" true) ")")
+			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) id) col "auto_increment" true)))
 		psql_alter_table
 		psql_update
 		psql_delete
 		psql_truncate
 
-		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
+		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)
+			(? (atom "WITH" true) (* (or psql_identifier "=" psql_expression))))
+			(begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
+		(parser '((atom "CREATE" true) (atom "SCHEMA" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier))
+			(begin (if policy (policy "system" true true) true) '((quote createdatabase) id true)) )
+		(parser (regex "^[\\r\\n\\t ]*ALTER DATABASE (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER SCHEMA (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER FUNCTION (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE EXTENSION (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*COMMENT ON EXTENSION (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE SEQUENCE (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER SEQUENCE (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE UNIQUE INDEX (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE STATISTICS (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE TRIGGER (?s:.*)\\z") true)
+
 		/* CREATE USER/ROLE: support both MySQL (IDENTIFIED BY) and PostgreSQL (WITH PASSWORD / PASSWORD) syntax */
 		(parser '((atom "CREATE" true) (or (atom "USER" true) (atom "ROLE" true)) (define username psql_identifier)
 			(? (or
@@ -929,7 +975,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "SET" true) (atom "timezone" true) (or "=" (atom "TO" true)) (define tz psql_expression)) '((quote session) "time_zone" tz))
 
 
-		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id)))
+		(parser '((atom "DROP" true) (atom "DATABASE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id (if if_exists true false))))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname))
