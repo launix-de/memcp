@@ -1,0 +1,55 @@
+# Minimal PostgreSQL pg_dump archive import coverage.
+
+metadata:
+  version: "1.0"
+  description: "Imports a small pg_dump-style tar.gz archive into memcp-tests"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS pgdump_people"
+
+test_cases:
+  - name: "Import minimal pg_dump archive into target schema"
+    scm: |
+      (load_psql "memcp-tests" (concat __DIR__ "/../tests/fixtures/mini_pgdump.pg_dump.gz") (sql_policy "root"))
+
+  - name: "Imported rows are visible in target schema"
+    sql: "SELECT COUNT(*) AS cnt FROM pgdump_people"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "Imported data preserves text and null decoding"
+    sql: "SELECT id, name, active, note FROM pgdump_people ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          name: "Alice"
+          active: true
+          note: "hello"
+        - id: 2
+          name: "Bob"
+          active: false
+          note: null
+
+  - name: "Imported sequence state drives auto increment"
+    sql: "INSERT INTO pgdump_people (name, active, note) VALUES ('Cara', true, 'auto')"
+    expect:
+      rows: 1
+      data:
+        - affected_rows: 1
+
+  - name: "Auto increment resumes from pg_catalog.setval"
+    sql: "SELECT id, name FROM pgdump_people WHERE name = 'Cara'"
+    expect:
+      rows: 1
+      data:
+        - id: 3
+          name: "Cara"
+
+  - name: "Imported primary key rejects duplicate rows"
+    sql: "INSERT INTO pgdump_people VALUES (1, 'Dupe', 'x')"
+    expect:
+      error: true

@@ -1013,41 +1013,189 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (define psql_copy_def (parser '(psql_identifier /* ignore */ "." (define tbl psql_identifier) "(" (define columns (+ psql_identifier ",")) ")") '(tbl columns)))
 
-(define load_psql (lambda (schema stream policy) (begin
+(define psql_path_dir (lambda (source)
+	(if (string? source)
+		(match source
+			(regex "^(.*)/[^/]+$" _ dir) (if (equal? dir "") "/" dir)
+			".")
+		nil)
+))
+
+(define psql_dump_sql_source (lambda (source)
+	(if (string? source)
+		(match source
+			(regex ".*\\.sql(?:\\.gz)?$" _) source
+			(concat source "/restore.sql"))
+		source)
+))
+
+(define psql_copy_unescape (lambda (s)
+	(replace
+		(replace
+			(replace
+				(replace
+					(replace s "\\n" "\n")
+					"\\t" "\t")
+				"\\r" "\r")
+			"\\b" "\b")
+		"\\\\" "\\")
+))
+
+(define psql_copy_decode_field (lambda (field raw_type)
+	(if (equal? field "\\N")
+		nil
+		(begin
+			(define unescaped (psql_copy_unescape field))
+			(match (toLower (coalesce raw_type ""))
+				"boolean" (match unescaped
+					"t" true
+					"f" false
+					unescaped)
+				unescaped)
+		)
+)))
+
+(define psql_copy_column_types (lambda (schema tbl columns) (begin
+	(define table_info (show schema tbl))
+	(map columns (lambda (col) (begin
+		(define col_info (find table_info (lambda (info) (equal?? (info "Field") col)) nil))
+		(toLower (coalesce (if col_info (col_info "RawType") nil) (if col_info (col_info "Type") nil) ""))
+	)))
+)))
+
+(define psql_copy_decode_row (lambda (fields column_types)
+	(map (produceN (count fields)) (lambda (i)
+		(psql_copy_decode_field (nth fields i) (nth column_types i))
+	))
+))
+
+(define psql_copy_insert_stream (lambda (schema tbl columns source) (begin
+	(define column_types (psql_copy_column_types schema tbl columns))
+	(insert (table schema tbl) columns
+		(map
+			(filter (split (readfile source) "\n") (lambda (line)
+				(and (not (equal? line "")) (not (equal? line "\\."))))
+			)
+			(lambda (line) (psql_copy_decode_row (split line "\t") column_types))))
+)))
+
+(define psql_skip_function_line (lambda (state psql_line line)
+	(match line
+		(concat b "$$;\n") (state "line" psql_line)
+		true
+)))
+
+(define psql_normalize_command (lambda (command)
+	(replace command "::character varying" "")
+))
+
+/* Best-effort schema retargeting for pg_dump output. Uses regex word
+boundaries so that schema names embedded inside larger identifiers are not
+accidentally rewritten. Only simple identifier characters are recognised
+for the source schema; quoted or unusual identifiers fall back to a plain
+substring replace (which is the historical behaviour). */
+(define psql_retarget_command (lambda (command source_schema target_schema)
+	(if (or (nil? source_schema) (equal? source_schema target_schema))
+		command
+		(begin
+			(define target_ref (match target_schema
+				(regex "^[a-zA-Z_][a-zA-Z0-9_]*$" _) target_schema
+				(concat "\"" target_schema "\"")))
+			(if (match source_schema (regex "^[a-zA-Z_][a-zA-Z0-9_]*$" _) true false)
+				(regexp_replace
+					(regexp_replace
+						(regexp_replace command
+							(concat "\\b" source_schema "\\.") (concat target_ref "."))
+						(concat "\\bDATABASE\\s+" source_schema "\\b") (concat "DATABASE " target_ref))
+					(concat "\\bSCHEMA\\s+" source_schema "\\b") (concat "SCHEMA " target_ref))
+				(replace
+					(replace
+						(replace command (concat source_schema ".") (concat target_ref "."))
+						(concat "DATABASE " source_schema) (concat "DATABASE " target_ref))
+					(concat "SCHEMA " source_schema) (concat "SCHEMA " target_ref)))))
+))
+
+(define psql_handle_copy_path (lambda (schema source_dir def path) (begin
+	(match (psql_copy_def def) '(tbl columns) (begin
+		(if source_dir
+			(psql_copy_insert_stream schema tbl columns (replace path "$$PATH$$" source_dir))
+			(error "load_psql: COPY FROM path requires a path source"))
+	))
+)))
+
+(define psql_import_createdatabase_name (lambda (plan)
+	(match plan
+		(cons op (cons id tail)) (if (equal? op (quote createdatabase)) id nil)
+		nil)
+))
+
+(define psql_import_dropdatabase (lambda (plan)
+	(match plan
+		(cons op tail) (equal? op (quote dropdatabase))
+		false)
+))
+
+(define psql_import_plan (lambda (schema dump_schema command policy) (begin
+	(define raw_plan (parse_psql schema command policy))
+	(define created_schema (psql_import_createdatabase_name raw_plan))
+	(if created_schema
+		(list (coalesce dump_schema created_schema) '((quote createdatabase) schema true))
+		(if (psql_import_dropdatabase raw_plan)
+			(list dump_schema true)
+			(list dump_schema
+				(if dump_schema
+					(parse_psql schema (psql_retarget_command command dump_schema schema) policy)
+					raw_plan))))
+)))
+
+(define psql_eval_import_command (lambda (schema source_dir dump_schema command policy) (begin
+	(match command
+		(regex "^[\\r\\n\\t ]*COPY (.*) FROM '([^']+)'\\z" _ def path)
+		(begin
+			(psql_handle_copy_path schema source_dir def path)
+			dump_schema)
+		(match (psql_import_plan schema dump_schema command policy) '(next_dump_schema plan) (begin
+			(eval plan)
+			next_dump_schema)))
+)))
+
+(define load_psql (lambda (schema source policy) (begin
 	(set state (newsession))
 	(set resultrow print)
 	(set session (newsession))
+	(set source_sql (psql_dump_sql_source source))
+	(set source_dir (psql_path_dir source_sql))
+	(state "dump_schema" nil)
 	(define psql_line (lambda (line) (begin
 		(match line
-			(concat "--" b) /* comment */ false
-			(concat "COPY " def " FROM stdin;\n") (begin
-				/* public.cron (name, lastrun, medianruntime, id) */
-				(match (psql_copy_def def) '(tbl columns) (begin
-					/* (print "TODO: insert into " tbl columns) */
-					/* TODO: escape b 8 f 12 n 10 r 13 t 9 v 11 \324 octal \xFF hex */
-					(state "line" (lambda (line) (begin
-						(match line
-							"\\.\n" /* end of input */ (state "line" psql_line)
-							(concat x "\n") (insert (table schema tbl) columns '((split x "\t")))
-						)
-					)))
-				))
-			)
+			(concat "--" b) false
+			(concat "\\" b "\n") false
+			(concat "CREATE FUNCTION " b "\n")
+			(state "line" (lambda (line)
+				(psql_skip_function_line state psql_line line)))
+			(concat "COPY " def " FROM stdin;\n")
+			(match (psql_copy_def def) '(tbl columns) (begin
+				(define column_types (psql_copy_column_types schema tbl columns))
+				(state "line" (lambda (line) (begin
+					(match line
+						"\\.\n" (state "line" psql_line)
+						(concat x "\n") (insert (table schema tbl) columns (list (psql_copy_decode_row (split x "\t") column_types))))
+				)))
+			))
+			(concat "COPY " def " FROM '" path "';\n") (psql_handle_copy_path schema source_dir def path)
 			(concat start ";" rest) (begin
-				/* command ended -> execute (at max one command per line) */
-				(print (concat (state "sql") start))
-				(set plan (parse_psql schema (concat (state "sql") start) policy))
-				(print "SQL execute" plan)
-				(eval plan)
-				(state "sql" rest)
-			)
-			/* otherwise: append to cache */
-			(state "sql" (concat (state "sql") line))
-		)
+				(state "dump_schema" (psql_eval_import_command
+					schema
+					source_dir
+					(state "dump_schema")
+					(psql_normalize_command (concat (state "sql") start))
+					policy))
+				(state "sql" rest))
+			(state "sql" (concat (state "sql") line)))
 	)))
 	(state "line" psql_line)
 	(state "sql" "")
-	(load stream (lambda (line) (begin
+	(load source_sql (lambda (line) (begin
 		((state "line") line)
 	)) "\n")
 )))
