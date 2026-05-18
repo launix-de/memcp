@@ -5655,19 +5655,17 @@ seeing the correctly prefixed outer alias. */
 		'(alias schema '(scan-tagged-table (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
 		'(alias schema '((quote scan-tagged-table) (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
 		'(alias schema '((symbol scan-tagged-table) (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
-		'(alias schema '(materialized-subquery-source key) isOuter joinexpr) (begin
-			(define norm_tbl (make_materialized-subquery-source key))
-			(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
-				(list alias (materialized_source_schema schema norm_tbl alias schemas))))
+		/* Pattern heads (quote X) / (symbol X) literally match a bare-symbol head.
+		Bare '(X ...) variants would bind X as a variable and match ANY list of
+		the same arity (parser emits '(X ...) as (list X ...); match.go case
+		"list" treats the first element as a binding when it is not a
+		quote/symbol wrapper). The bare variants were dead-but-harmful and are
+		omitted to avoid catching unrelated values. */
 		'(alias schema '((quote materialized-subquery-source) key) isOuter joinexpr) (begin
 			(define norm_tbl (make_materialized-subquery-source key))
 			(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
 				(list alias (materialized_source_schema schema norm_tbl alias schemas))))
 		'(alias schema '((symbol materialized-subquery-source) key) isOuter joinexpr) (begin
-			(define norm_tbl (make_materialized-subquery-source key))
-			(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
-				(list alias (materialized_source_schema schema norm_tbl alias schemas))))
-		'(alias schema '((context "session") key) isOuter joinexpr) (begin
 			(define norm_tbl (make_materialized-subquery-source key))
 			(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
 				(list alias (materialized_source_schema schema norm_tbl alias schemas))))
@@ -5679,9 +5677,6 @@ seeing the correctly prefixed outer alias. */
 				(define norm_tbl (make_materialized-subquery-source key))
 				(list (list (list alias schema norm_tbl isOuter joinexpr)) '() true
 					(list alias (materialized_source_schema schema norm_tbl alias schemas))))
-			'(alias schema '(dependent_join_helper _ _ _ _ _ _) isOuter joinexpr)
-			(list (list tbldesc) '() true
-				(list alias (dependent_join_helper_spec_schema (nth tbldesc 2))))
 			'(alias schema '((quote dependent_join_helper) _ _ _ _ _ _) isOuter joinexpr)
 			(list (list tbldesc) '() true
 				(list alias (dependent_join_helper_spec_schema (nth tbldesc 2))))
