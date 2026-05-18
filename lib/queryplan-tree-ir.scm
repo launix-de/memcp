@@ -374,10 +374,6 @@ ports the actual operator rules to the tree representation. */
 		'())))
 (define make_unnest_select_rule_info (lambda (cclasses repr)
 	(list cclasses repr)))
-(define unnest_select_rule_info_cclasses (lambda (info)
-	(match info
-		'(cclasses cclass_repr) cclasses
-		_ '())))
 (define unnest_select_rule_info_repr (lambda (info)
 	(match info
 		'(cclass_set repr) repr
