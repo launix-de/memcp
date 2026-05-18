@@ -6017,12 +6017,6 @@ seeing the correctly prefixed outer alias. */
 								(or acc (stage_has_group_boundary stage))
 							) false)
 							false))
-						/* Nested derived-table flattening must not descend into precomputed runtime blocks
-						from scalar subselects when they appear in JOIN conditions; those scopes carry lowered
-						scan structures that break under alias-renaming. */
-						(define subquery_has_runtime_joinexpr (reduce tables2 (lambda (acc tbl_desc) (or acc (match tbl_desc
-							'(_ _ _ _ inner_joinexpr) (if (nil? inner_joinexpr) false (expr_has_opaque_scope (replace_column_alias inner_joinexpr)))
-							_ false))) false))
 						(define outer_has_non_group_stage (or
 							(not (equal? (coalesceNil order '()) '()))
 							(not (nil? limit))
@@ -6035,7 +6029,6 @@ seeing the correctly prefixed outer alias. */
 							subquery_has_window
 							unsupported_groups
 							flatten_has_dangling_output_ref
-							subquery_has_runtime_joinexpr
 							(and (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
 							(and (not (equal? flatten_groups2 '())) outer_has_group_stage)
 							(and (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))
