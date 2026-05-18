@@ -40,9 +40,6 @@ string -> physical field name. Later GROUP stages can then rewrite both original
 _unn_* get_column terms and their canonicalized forms onto the prejoin's actual
 physical columns without guessing from aliases or suffixes. */
 (define materialized_source_expr_lookup (newsession))
-/* session-sensitive runtime predicate columns must not be reused across plan
-builds, because their truth value depends on current session state. */
-(define session_runtime_plan_counter (newsession))
 (define alias_lookup_variants (lambda (alias_)
 	(reduce (filter (list
 		alias_
@@ -63,14 +60,6 @@ builds, because their truth value depends on current session state. */
 			found
 			(if (nil? assoc) nil (get_assoc assoc key_v))))
 		nil)
-))
-(define alias_variants_match (lambda (left right insensitive)
-	(reduce (alias_lookup_variants left) (lambda (matched left_v)
-		(or matched
-			(reduce (alias_lookup_variants right) (lambda (matched2 right_v)
-				(or matched2 ((if insensitive equal?? equal?) left_v right_v)))
-				false)))
-		false)
 ))
 (define materialized_expr_alias_variants alias_lookup_variants)
 (define materialized_source_expr_keys (lambda (expr)
@@ -302,16 +291,6 @@ scope is gone. */
 		'((symbol materialized-subquery-source) key) key
 		nil
 )))
-(define materialized-subquery-source-runtime (lambda (table-source)
-	(begin
-		(define key (materialized-subquery-source-key table-source))
-		(if (nil? key)
-			nil
-			(list (list (quote context) "session")
-				(if (string? key)
-					key
-					(list (quote quote) key))))
-)))
 (define materialized-subquery-source (lambda (id subquery)
 	(make_materialized-subquery-source (materialized-subquery-key id subquery))))
 (define materialized-subquery-init (lambda (id subquery rows_expr)
@@ -418,20 +397,6 @@ semantically neutral and evaluate to the underlying source. */
 		'((symbol unnest_helper_table) _ base_table _) (planner_table_source_base base_table)
 		table_source
 )))
-(define unnest_helper_table_schema (lambda (table_source)
-	(match table_source
-		'(unnest_helper_table schema_name _ _) schema_name
-		'((symbol unnest_helper_table) schema_name _ _) schema_name
-		nil
-)))
-(define unnest_helper_table_runtime_source (lambda (table_source)
-	(match table_source
-		'(unnest_helper_table schema_name base_table _)
-		(unnest_helper_table schema_name base_table nil)
-		'((symbol unnest_helper_table) schema_name base_table _)
-		(unnest_helper_table schema_name base_table nil)
-		table_source
-)))
 (define planner_runtime_table_source (lambda (schema table_source)
 	(match (normalize-materialized-subquery-source table_source)
 		'(unnest_helper_table _ base_table _)
@@ -477,12 +442,6 @@ semantically neutral and evaluate to the underlying source. */
 		'((symbol table) helper_schema helper_tbl) (list (quote table) helper_schema helper_tbl)
 		(string? base_tbl) (list (quote table) schema base_tbl)
 		base_tbl base_tbl)))
-(define unnest_helper_table_kind (lambda (table_source)
-	(match table_source
-		'(unnest_helper_table _ _ helper_kind) helper_kind
-		'((symbol unnest_helper_table) _ _ helper_kind) helper_kind
-		nil
-)))
 (define materialized-source? (lambda (table-source)
 	(or
 		(if (unnest_helper_table? table-source)
