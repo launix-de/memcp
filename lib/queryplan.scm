@@ -9100,13 +9100,39 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define grouped_visible_schema
 							(extract_assoc grouped_output_fields (lambda (k v)
 								(list "Field" k "Type" "any" "Expr" v))))
+						/* Bug A fix: aggregate markers can also live inside joinexpr of
+						outer/helper tables (`grp_ps_tables`) and inside `stage_init_code`
+						of later stages. Substitute markers owned by THIS stage via a
+						narrow walker that touches only `(aggregate ...)` markers — leave
+						`get_column` references and everything else untouched (a full
+						`replace_group_field_expr` would also rewrite group-key columns,
+						which is wrong outside the immediate group output). */
+						(define narrow_agg_handler (lambda (marker_expr agg_args recurse_fn)
+							(stage_fetch_owned_agg marker_expr agg_args)))
+						(define narrow_rewrite_aggs (lambda (expr)
+							(walk_subst_aggregates expr narrow_agg_handler)))
+						(define rewrite_table_joinexpr_aggs (lambda (td) (match td
+							'(tv tschema ttbl tisOuter tje)
+							(list tv tschema ttbl tisOuter
+								(if (nil? tje) nil (narrow_rewrite_aggs tje)))
+							_ td)))
+						(define rewrite_stage_init_aggs (lambda (s)
+							(begin
+								(define s_init (stage_init_code s))
+								(if (or (nil? s_init) (equal? s_init '()))
+									s
+									(stage_set s (quote init)
+										(map s_init (lambda (init_stmt)
+											(narrow_rewrite_aggs init_stmt))))))))
+						(define rewritten_grp_ps_tables (map grp_ps_tables rewrite_table_joinexpr_aggs))
+						(define rewritten_next_groups (map next_groups rewrite_stage_init_aggs))
 						(define grouped_plan (build_queryplan schema
 							(if kt_is_outer
-								(merge grp_ps_tables (list (list grouptbl schema grouptbl true kt_je)))
+								(merge rewritten_grp_ps_tables (list (list grouptbl schema grouptbl true kt_je)))
 								(list (list grouptbl schema grouptbl false nil)))
 							grouped_output_fields
 							gp_condition
-							(merge next_groups remaining_pstages)
+							(merge rewritten_next_groups remaining_pstages)
 							(merge schemas (list grouptbl grouped_visible_schema))
 							replace_find_column
 							update_target))
