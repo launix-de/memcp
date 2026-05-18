@@ -5886,35 +5886,6 @@ seeing the correctly prefixed outer alias. */
 								(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
 								(cdr tablesPrefixed)))
 						)
-						(define flattened_table_aliases (map tablesPrefixed (lambda (td) (match td '(alias _ _ _ _) alias ""))))
-						/* check for dangling get_column refs that point to a
-						flattened alias prefix but not an actual flattened table.
-						Skip opaque scopes — their inner get_column refs belong
-						to the lowered scan, not the relational alias domain. */
-						(define extract_visible_get_columns (lambda (expr)
-							(match expr
-								'((symbol get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
-								'((quote get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
-								(cons sym args) (if (is_opaque_scope_sym sym) '()
-									(merge (map args extract_visible_get_columns)))
-								'()
-							)
-						))
-						(define has_dangling_flatten_ref (lambda (expr)
-							(reduce (extract_visible_get_columns expr) (lambda (acc mc)
-								(or acc (match mc
-									'(name '((symbol get_column) alias_ _ _ _))
-									(begin
-										(define alias_str (string alias_))
-										(and (strlike alias_str (concat id "\0%"))
-											(not (has? flattened_table_aliases alias_str))))
-									'(name '((quote get_column) alias_ _ _ _))
-									(begin
-										(define alias_str (string alias_))
-										(and (strlike alias_str (concat id "\0%"))
-											(not (has? flattened_table_aliases alias_str))))
-									false)))
-								false)))
 						(define flatten_referenced_cols (merge_unique (list
 							(extract_columns_for_tblvar id fields)
 							(extract_columns_for_tblvar id condition)
@@ -5943,10 +5914,6 @@ seeing the correctly prefixed outer alias. */
 								(reduce flatten_referenced_cols (lambda (keep refcol)
 									(or keep (equal?? refcol k)))
 									false)))))
-						(define flatten_has_dangling_output_ref
-							(reduce_assoc pruned_fields2 (lambda (acc _k v)
-								(or acc (has_dangling_flatten_ref (replace_column_alias v))))
-								false))
 						(define expr_contains_materialized_helper (lambda (expr) (match expr
 							_ (if (materialized-source? expr)
 								true
@@ -6028,7 +5995,6 @@ seeing the correctly prefixed outer alias. */
 						(define use_materialize (or
 							subquery_has_window
 							unsupported_groups
-							flatten_has_dangling_output_ref
 							(and (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
 							(and (not (equal? flatten_groups2 '())) outer_has_group_stage)
 							(and (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))
