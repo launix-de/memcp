@@ -517,16 +517,6 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 /* Ordered scalar scans currently lower physically via partitioned scan_order.
 The later logical ORDER/LIMIT normalization should keep targeting these small
 helpers instead of rebuilding alias/order logic inline inside untangle_query. */
-(define scalar_scan_domain_order (lambda (domain_cols rewrite_inner_expr sq_alias)
-	(filter
-		(map domain_cols (lambda (dc) (list (rewrite_inner_expr (nth dc 0)) '<)))
-		(lambda (oi) (match oi '(col _)
-			(match col
-				'((symbol get_column) a _ _ _) (equal? a sq_alias)
-				'((quote get_column) a _ _ _) (equal? a sq_alias)
-				false)
-			false))
-)))
 (define scalar_scan_partition_order (lambda (partition_exprs rewrite_inner_expr sq_alias)
 	(filter
 		(map partition_exprs (lambda (expr) (list (rewrite_inner_expr expr) '<)))
@@ -720,7 +710,6 @@ runtime promise name is created during unnesting anymore. */
 (define once_limit_scan_contract_limit (lambda (contract) (nth contract 0)))
 (define once_limit_scan_contract_offset (lambda (contract) (nth contract 1)))
 (define once_limit_scan_contract_partition_cols (lambda (contract) (nth contract 2)))
-(define once_limit_scan_contract_once_limit (lambda (contract) (nth contract 3)))
 (define once_limit_scan_contract_promise_name (lambda (contract) (nth contract 4)))
 (define make_ordered_scan_stage_config (lambda (tbl partition_stage fallback_order fallback_limit fallback_offset fallback_partcols is_first) (begin
 	(define tbl_scan_order (scan_tagged_table_order tbl))
@@ -1182,7 +1171,6 @@ Returns (now later) for one scan level:
 					(combine_and_terms deferred_terms)))))))))
 
 /* helper to check list membership */
-(define list_contains (lambda (lst item) (reduce lst (lambda (acc x) (or acc (equal? x item))) false)))
 
 /* has_only_tblvar_refs: returns true if expr contains get_column refs and ALL of them
 reference only the given tblvar. Returns false if any get_column references another alias,
@@ -1474,15 +1462,6 @@ schema-driven column casing inside queryplan.scm */
 (define schema_alias_matches (lambda (query_alias schema_alias ti)
 	((if ti equal?? equal?) query_alias schema_alias)
 ))
-(define resolve_schema_alias_scoped (lambda (schemas alias_ ti)
-	(if (nil? alias_) nil
-		(reduce_assoc schemas (lambda (found alias cols)
-			(if (and (nil? found) (schema_alias_matches alias_ alias ti))
-				alias
-				found))
-			nil)
-	)
-))
 (define schema_assoc_cols (lambda (schemas alias)
 	(begin
 		(define cols_raw (if (or (nil? schemas) (nil? alias) (not (has_assoc? schemas alias)))
@@ -1536,13 +1515,6 @@ schema-driven column casing inside queryplan.scm */
 (define resolve_schema_column_ref_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
 	(begin
 		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
-		(if (nil? resolved) nil
-			(list (nth resolved 0) (nth resolved 1)))
-	)
-))
-(define resolve_unique_schema_column_ref_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
-	(begin
-		(define resolved (unique_schema_column_match_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
 		(if (nil? resolved) nil
 			(list (nth resolved 0) (nth resolved 1)))
 	)
@@ -1827,46 +1799,6 @@ get_column markers and may no longer run schema-based repair heuristics. */
 	(finalize_logical_stage_scoped stage all_schemas all_schemas '() rewrite_expr enforce_contract)
 ))
 /* canonicalize all get_column markers in a group stage */
-(define canonicalize_stage (lambda (stage all_schemas) (begin
-	(define canon (lambda (expr) (canonicalize_columns expr all_schemas)))
-	(define sg (coalesceNil (stage_group_cols stage) '()))
-	(define sh (stage_having_expr stage))
-	(define stage_cfg (stage_ordering_config stage))
-	(define so (coalesceNil (stage_ordering_config_order stage_cfg) '()))
-	(define sl (stage_ordering_config_limit stage_cfg))
-	(define soff (stage_ordering_config_offset stage_cfg))
-	(define spa (stage_partition_aliases stage))
-	(define sc (stage_condition stage))
-	(define sonce (stage_ordering_config_once_limit stage_cfg))
-	(if (stage_is_dedup stage)
-		(stage_rebuild_with_meta stage (make_dedup_stage (map sg canon) spa) canon (lambda (a) a))
-		(if (and (not (nil? spa)) (or (nil? sg) (equal? sg '())))
-			/* partition stage (aliases but no group): preserve partition-aliases and limit-partition-cols */
-			(stage_rebuild_with_meta stage
-				(make_stage
-					'()
-					nil
-					(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-					(stage_ordering_config_partcols stage_cfg)
-					sl
-					soff
-					false
-					spa
-					(stage_init_code stage)
-					(if (nil? sc) nil (canon sc))
-					sonce)
-				canon
-				(lambda (a) a))
-			/* group stage (possibly scoped with aliases) */
-			(stage_rebuild_with_meta stage
-				(make_group_stage
-					(map sg canon)
-					(canon sh)
-					(map so (lambda (o) (match o '(c d) (list (canon c) d))))
-					sl soff spa (stage_init_code stage))
-				canon
-				(lambda (a) a)))))
-))
 
 (import "sql-metadata.scm")
 
@@ -1913,12 +1845,6 @@ it into the local condition when the stage is processed, preventing cross-stage
 condition leakage. Uses canonical column names for keytable cache reuse. */
 (define make_group_stage_with_condition (lambda (group having order limit offset aliases init cond)
 	(make_stage group having order 0 limit offset false aliases init cond nil)
-))
-(define make_once_per_partition_stage (lambda (group having order once_limit aliases init cond)
-	(make_stage group having order 0 nil nil false aliases init cond once_limit)
-))
-(define make_partition_stage (lambda (aliases order partition_cols limit offset init)
-	(make_stage '() nil order partition_cols limit offset false aliases init nil nil)
 ))
 (define make_dedup_stage (lambda (group aliases)
 	(make_stage group nil '() 0 nil nil true aliases nil nil nil)
@@ -1994,18 +1920,6 @@ post-group predicate under this name. On current master it is the HAVING expr. *
 	(stage_get stage (quote cache-query) nil)))
 (define stage_is_dedup (lambda (stage)
 	(equal? (stage_get stage (quote dedup) false) true)))
-(define stage_kind (lambda (stage) (begin
-	(define sk_aliases (stage_partition_aliases stage))
-	(define sk_group (coalesceNil (stage_group_cols stage) '()))
-	(if (stage_is_dedup stage) (quote dedup)
-		(if (not (nil? (stage_once_limit stage))) (quote once-per-partition)
-			(if (and (not (nil? sk_aliases)) (equal? sk_group '())) (quote partition)
-				(if (not (nil? sk_aliases)) (quote scoped-group)
-					(if (nil? sk_aliases) (quote global-group)
-						nil)))))
-)))
-(define stage_is_scoped? (lambda (stage)
-	(not (nil? (stage_partition_aliases stage)))))
 (define stage_with_cache_policy (lambda (stage policy)
 	(stage_set stage (quote cache-policy) policy)
 ))
@@ -2360,14 +2274,6 @@ carrier until session domains are modeled explicitly. */
 				(map branches (lambda (branch) (untangle_query_term branch outer_schemas)))
 				order limit offset)
 ))))
-)))
-(define query_has_from_subquery (lambda (query) (match query
-	'(schema tables fields condition group having order limit offset)
-	(reduce tables (lambda (acc td) (or acc (match td
-		'(_ _ (string? _tbl) _ _) false
-		'(_ _ _ _ _) true
-		false))) false)
-	false
 )))
 
 /* make_keytable_schema: compute keytable name and schema without creating the table.
@@ -7647,8 +7553,6 @@ same boundary where SELECT would emit result rows. */
 )))
 
 /* Convenience wrapper for multi-table UPDATE (called from sql_update) */
-(define build_multi_table_update (lambda (schema tbl tblalias all_defs cols condition)
-	(build_dml_plan schema tbl tblalias all_defs cols condition nil nil nil)))
 
 /*
 === CONTRACT: build_queryplan ===
