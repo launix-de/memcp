@@ -134,15 +134,6 @@ keep it in a local define instead of rebuilding it from scratch. */
 (extracted per Reflection 2026-05-04 finding F.2). queryplan.scm only uses
 planner_debug_record_scalar_event through lazy lambda-body name resolution,
 so the loader can place queryplan-debug.scm after queryplan.scm. */
-(define scalar_subselect_inline_reason (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
-	(quote prefer-unnest)))
-(define scalar_subselect_inline_strategy (lambda (subquery _agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
-	(quote prefer-unnest)))
-(define scalar_subselect_lowering_reason_from_facts (lambda (_has_outer has_agg_or_stage outer_refs_are_direct_columns outer_has_group contains_inner_select_marker _value_expr value_expr_is_direct_column domain_preserving_outer_refs allow_grouped_direct_non_equality_outer)
-	(quote prefer-unnest)))
-(define planner_scalar_subselect_inline_reason scalar_subselect_inline_reason)
-(define planner_scalar_subselect_inline_strategy scalar_subselect_inline_strategy)
-(define planner_scalar_subselect_lowering_reason_from_facts scalar_subselect_lowering_reason_from_facts)
 /* Compatibility wrapper for older call sites. New planner code should keep the
 canonical expression in a local define and only serialize it at the edge. */
 (define canonical_expr_name (lambda (expr columns params alias_map)
@@ -3265,25 +3256,6 @@ seeing the correctly prefixed outer alias. */
 				(expr_uses_session_state subquery)
 				(raw_query_contains_skip_level_nested_outer_ref subquery (raw_query_local_aliases subquery))))
 		nil)))
-	(define scalar_subselect_lowering_facts (lambda (subquery outer_schemas) (match subquery
-		'(_ _ flds _ g h o _ _) (begin
-			(define value_expr (match flds
-				(cons _ (cons v _)) v
-				nil))
-			(define has_outer (subquery_has_outer_refs subquery outer_schemas))
-			(list
-				g h o
-				value_expr
-				has_outer
-				(if has_outer
-					(subquery_outer_refs_are_direct_columns subquery outer_schemas)
-					true)
-				(contains_inner_select_marker subquery)
-				(not (equal? (if (nil? value_expr) '() (extract_aggregates value_expr)) '()))))
-		nil)))
-	(define scalar_subselect_inline_reason planner_scalar_subselect_inline_reason)
-	(define scalar_subselect_inline_strategy planner_scalar_subselect_inline_strategy)
-	(define scalar_subselect_lowering_reason_from_facts planner_scalar_subselect_lowering_reason_from_facts)
 	(define scalar_subselect_limitk_trigger (lambda (subquery outer_schemas) (match subquery
 		'(_ _ _ _ _ _ _order limit offset) (and
 			(subquery_has_outer_refs subquery outer_schemas)
@@ -3324,13 +3296,6 @@ seeing the correctly prefixed outer alias. */
 					groups2))
 				(list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 _init2))
 			nil))))
-	(define scalar_subselect_guaranteed_max_one (lambda (subquery outer_schemas) (match
-		(scalar_subselect_shape_facts subquery outer_schemas)
-		'(g _h _o l _off _value_expr _has_outer outer_refs_are_direct _contains_inner_select has_value_agg session_sensitive _skip_level)
-		(or
-			(and (not (nil? l)) (<= l 1))
-			(and has_value_agg (or (nil? g) (equal? g '()))))
-		false)))
 	/* FAQ / NK15 contract: EXISTS lowers through the same COUNT/domain path as
 	IN / NOT IN / NOT EXISTS. Keep a single logical route here instead of a
 	separate scalar-true helper shape. */
@@ -3919,10 +3884,6 @@ seeing the correctly prefixed outer alias. */
 							true))))
 				false))
 		false)))
-	(define scalar_subselect_lowering_reason (lambda (subquery outer_schemas)
-		(quote prefer-unnest)))
-	(define scalar_subselect_unnest_applicable (lambda (subquery outer_schemas)
-		(equal? (scalar_subselect_lowering_reason subquery outer_schemas) (quote prefer-unnest))))
 	(define unnest_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(define sq_tables_before (coalesceNil (sq_cache "tables") '()))
 		(match (unnest_subselect subquery outer_schemas)
@@ -3942,10 +3903,6 @@ seeing the correctly prefixed outer alias. */
 				subst)
 			nil)
 	)))
-	(define scalar_subselect_lowering_policy (lambda (subquery outer_schemas) (begin
-		(define lowering_reason (scalar_subselect_lowering_reason subquery outer_schemas))
-		(planner_debug_record_scalar_event (quote lowering) lowering_reason)
-		(quote prefer-unnest))))
 	(define materialize_uncorrelated_promise_value (lambda (cache_prefix subquery value_expr error_message) (begin
 		(define uncorr_promise_cache (coalesceNil (sq_cache "uncorr_promise_bindings") '()))
 		(define uncorr_promise_key (concat cache_prefix ":" (serialize subquery)))
