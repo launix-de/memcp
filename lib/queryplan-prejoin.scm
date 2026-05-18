@@ -289,9 +289,7 @@ scope is gone. */
 )))
 (define normalize-materialized-subquery-source (lambda (table-source)
 	(match table-source
-		'(materialized-subquery-source key) (make_materialized-subquery-source key)
 		'((symbol materialized-subquery-source) key) (make_materialized-subquery-source key)
-		'(materialized-subquery key) (make_materialized-subquery-source key)
 		'((symbol materialized-subquery) key) (make_materialized-subquery-source key)
 		_ (begin
 			(define legacy_key (legacy-materialized-subquery-source-key table-source))
@@ -301,7 +299,6 @@ scope is gone. */
 )))
 (define materialized-subquery-source-key (lambda (table-source)
 	(match (normalize-materialized-subquery-source table-source)
-		'(materialized-subquery-source key) key
 		'((symbol materialized-subquery-source) key) key
 		nil
 )))
@@ -449,7 +446,6 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_runtime_table_source schema base_table)
 		'((symbol scan-tagged-table) base_table _ _ _ _ _ _)
 		(planner_runtime_table_source schema base_table)
-		'(materialized-subquery-source key) ((context "session") key)
 		'((symbol materialized-subquery-source) key) ((context "session") key)
 		'((context "session") key) ((context "session") key)
 		'(((symbol context) "session") key) (((symbol context) "session") key)
@@ -471,8 +467,6 @@ semantically neutral and evaluate to the underlying source. */
 		(planner_codegen_table_source schema base_table)
 		'((symbol scan-tagged-table) base_table _ _ _ _ _ _)
 		(planner_codegen_table_source schema base_table)
-		'(materialized-subquery-source key) (list (list (quote context) "session")
-			(if (string? key) key (list (quote quote) key)))
 		'((symbol materialized-subquery-source) key) (list (list (quote context) "session")
 			(if (string? key) key (list (quote quote) key)))
 		'((context "session") key) (list (list (quote context) "session")
