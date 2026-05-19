@@ -486,17 +486,42 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		return newAcc
 	})
 
-	t.scan_order(
-		CurrentTx(),
-		condCols, condFn,
-		sortcolsScmer, sortdirsFns,
-		0, 0, -1,
-		scanCallbackCols,
-		scanMapFn,
-		scanReduceFn,
-		col.OrcReduceInit,
-		false,
-	)
+	// Install a GLS marker so worker goroutines spawned by scan_order can detect
+	// that they are participating in this table's recompute. Other goroutines
+	// reading the same ORC column concurrently must wait on orcMu instead of
+	// observing the transient nil-for-invalid-row sentinel that the reducer needs.
+	scm.SetValues(map[string]any{orcRecomputeMarkerKey: t}, func() {
+		t.scan_order(
+			CurrentTx(),
+			condCols, condFn,
+			sortcolsScmer, sortdirsFns,
+			0, 0, -1,
+			scanCallbackCols,
+			scanMapFn,
+			scanReduceFn,
+			col.OrcReduceInit,
+			false,
+		)
+	})
+}
+
+// orcRecomputeMarkerKey is the GLS key set by incrementalRecomputeORC so that
+// re-entrant GetValue calls (made by the reducer itself) can distinguish the
+// recompute scan from concurrent reader goroutines on the same table.
+const orcRecomputeMarkerKey = "orcRecomputingTable"
+
+// isCurrentORCRecompute reports whether the current goroutine is participating
+// in an in-progress ORC recompute for the given table.
+func isCurrentORCRecompute(t *table) bool {
+	v, ok := scm.GetGLSValue(orcRecomputeMarkerKey)
+	if !ok {
+		return false
+	}
+	other, ok := v.(*table)
+	if !ok {
+		return false
+	}
+	return other == t
 }
 
 // invalidateORCFromSortKey clears validMask bits for rows affected by a mutation.
