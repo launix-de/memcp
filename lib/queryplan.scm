@@ -4334,7 +4334,7 @@ seeing the correctly prefixed outer alias. */
 										(define dep_materialized_source_query
 											(if (and (nil? dep_simple_source_query) (equal?? dep_kind (quote inner_select)))
 												(dependent_join_helper_build_materialized_scalar_source_query
-													dep_info dep_alias dep_result_col dep_domain_cols dep_unnesting_info)
+													dep_info dep_alias dep_result_col dep_domain_cols)
 												nil))
 										(if (and (nil? dep_simple_source_query) (nil? dep_materialized_source_query))
 											(error (concat
@@ -5003,7 +5003,7 @@ seeing the correctly prefixed outer alias. */
 								nil
 								nil)))
 					_ nil))))
-	(define dependent_join_helper_build_materialized_scalar_source_query (lambda (dep_info helper_alias result_col domain_cols unnesting_info) (begin
+	(define dependent_join_helper_build_materialized_scalar_source_query (lambda (dep_info helper_alias result_col domain_cols) (begin
 		(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
 		(define domain_alias (dependent_join_helper_domain_source_alias))
 		(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
@@ -5058,29 +5058,6 @@ seeing the correctly prefixed outer alias. */
 								'()
 								nil
 								nil))
-						/* Replace the logical (dependent_domain domain_cols) table inside
-						dep_inner_query with the actual outer-scope domain subquery. Without
-						this finalize step, the inner materialization runs untangle_query on
-						dep_inner_query in isolation, where the dependent_domain table spec
-						falls back to the physical DUAL `.(1)` table and the domain columns
-						(__dep_d0, __dep_d1, ...) cannot be resolved at scan time. Done here
-						with closed-over outer tables/condition/group/having from the calling
-						untangle_query, analogous to the dep_helper finalize at the outer's
-						sq_tbls processing site. */
-						(define dep_outer_condition
-							(match (filter (flatten_and_terms (coalesceNil condition true)) (lambda (term)
-								(not (has? (extract_tblvars term) helper_alias))))
-								'() true
-								terms (cons (quote and) terms)))
-						(define dep_inner_query
-							(dependent_join_helper_finalize_source_query
-								dep_inner_query
-								norm_domain_cols
-								tables
-								dep_outer_condition
-								group
-								having
-								unnesting_info))
 						(define dep_rows_sym (symbol (concat "__dep_scalar_rows:" helper_alias)))
 						(define dep_sink_sym (symbol (concat "__dep_scalar_sink:" helper_alias)))
 						(define dep_mat_binding
