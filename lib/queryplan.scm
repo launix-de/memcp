@@ -8165,26 +8165,6 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		(define grp_ps_tables (if must_prejoin_outer_group_tables
 			'()
 			grp_ps_outer_tables_raw))
-		/* Aggregates owned by THIS stage may also live inside joinexpr of
-		outer/helper tables (grp_ps_tables). Without extracting them here the
-		current stage would never materialize the corresponding keytable column
-		and the (aggregate ...) marker would survive into runtime code as
-		"Unknown function: aggregate". An aggregate is owned by this stage when
-		its input expression only references tables that are in `grp_tables`. */
-		(define grp_table_aliases_for_owned_agg (map grp_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
-		(define agg_input_owned_by_current_stage (lambda (agg_args) (match agg_args
-			'(agg_expr _ _)
-			(begin
-				(define refs (extract_tblvars agg_expr))
-				(or (equal? refs '())
-					(reduce refs (lambda (acc tv) (and acc (has? grp_table_aliases_for_owned_agg tv))) true)))
-			false)))
-		(define joinexpr_owned_aggs (merge (map grp_ps_tables (lambda (td) (match td
-			'(_ _ _ _ tje)
-			(if (nil? tje) '()
-				(filter (extract_aggregates tje) agg_input_owned_by_current_stage))
-			'())))))
-		(define ags (if is_dedup ags (merge_unique ags joinexpr_owned_aggs)))
 		(match grp_tables
 			/* TODO: allow for more than just group by single table */
 			/* TODO: outer tables that only join on group */
@@ -9740,24 +9720,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				later group/window stage; otherwise raw `(aggregate ...)` / `(window_func ...)`
 				nodes leak into the prejoin row materializer and become executable runtime
 				code instead of logical planner markers. */
-				/* Field expressions whose get_column refs reach OUTSIDE the
-				prejoin source aliases cannot be precomputed in the prejoin: at
-				materialize/insert time the outer-alias columns are not in scope.
-				Such fields must be deferred to the recursive grouped plan, where
-				the prejoin is joined back to the outer row stream and the outer
-				columns become available again. */
-				(define field_refs_only_prejoin_sources? (lambda (field_expr)
-					(reduce (extract_all_get_columns field_expr) (lambda (ok mc) (and ok (match mc
-						'(_ '((symbol get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
-						'(_ '((quote get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
-						true)))
-						true)))
 				(define prejoin_materializable_projection? (lambda (field_expr)
 					(and
 						(not (equal? prejoin_source_tables '()))
 						(equal? (extract_aggregates field_expr) '())
-						(equal? (extract_window_funcs field_expr) '())
-						(field_refs_only_prejoin_sources? field_expr))))
+						(equal? (extract_window_funcs field_expr) '()))))
 				(define prejoin_columns_projected (reduce (extract_assoc resolved_fields (lambda (field_name field_expr)
 					(match field_expr
 						'((symbol get_column) _ _ _ _) nil
@@ -10030,29 +9997,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(lower_prejoin_group_expr
 								(rewrite_materialized_source_runtime_markers col))
 							dir))))))
-				/* Aggregates living inside grp_ps_tables joinexprs reference the
-				prejoin-materialized helper tables. Rewrite their inputs to the
-				physical `.pj` columns so the recursive single-table emitter can
-				detect them via grp_table_aliases and materialize them on the
-				keytable. The marker itself stays an `(aggregate ...)` node; only
-				its column inputs are rewritten. */
-				(define lower_prejoin_agg_inputs (lambda (expr) (match expr
-					(cons (symbol aggregate) agg_args)
-					(match agg_args
-						'(agg_expr agg_reduce agg_neutral)
-						(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral)
-						_ expr)
-					(cons '(quote aggregate) agg_args)
-					(match agg_args
-						'(agg_expr agg_reduce agg_neutral)
-						(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral)
-						_ expr)
-					(cons sym args) (cons sym (map args lower_prejoin_agg_inputs))
-					expr)))
 				(define grouped_outer_tables (map grp_ps_tables (lambda (td) (match td
 					'(tv tschema ttbl toisOuter je)
-					(list (if (nil? tv) ttbl tv) tschema (normalize-materialized-subquery-source ttbl) toisOuter
-						(if (nil? je) nil (lower_prejoin_agg_inputs je)))
+					(list (if (nil? tv) ttbl tv) tschema (normalize-materialized-subquery-source ttbl) toisOuter je)
 					td))))
 				(define grouped_outer_aliases (map grouped_outer_tables (lambda (td) (match td '(tv _ _ _ _) tv ""))))
 				(define grouped_outer_schema_bindings (merge (map grouped_outer_tables (lambda (td) (match td
@@ -10326,32 +10273,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										reliable bootstrap signal and later GROUP queries will skip the required
 										full rebuild. Therefore all incremental maintenance is gated on the helper
 										already containing a materialized baseline. */
-										/* Aggregate-bearing joinexpr / condition terms cannot run inside
-										the trigger row-insert scan: they are logical markers owned by
-										a later group/keytable stage. Strip top-level AND-terms whose
-										predicate carries an aggregate marker before handing tables and
-										condition to build_pj_insert_scan. LEFT JOIN semantics are
-										preserved: the per-row aggregate predicate only filters which
-										secondary-table rows enter the prejoin row domain at row-level;
-										the trigger materializes the row-domain itself, and the dropped
-										term is restored downstream through the recursive grouped plan's
-										keytable. */
-										(define strip_agg_and_terms (lambda (expr)
-											(if (or (nil? expr) (equal? expr true)) expr
-												(begin
-													(define parts (flatten_and_terms expr))
-													(define kept (filter parts (lambda (p) (equal? (extract_aggregates p) '()))))
-													(if (equal? kept '()) true
-														(if (equal? 1 (count kept)) (car kept)
-															(cons (quote and) kept)))))))
-										(define tables_for_insert_scan (map tables (lambda (td) (match td
-											'(tv tschema ttbl tisOuter tje)
-											(list tv tschema ttbl tisOuter (if (nil? tje) nil (strip_agg_and_terms tje)))
-											td))))
-										(define condition_for_insert_scan (if (nil? condition) nil (strip_agg_and_terms condition)))
 										(define raw_insert_fn
 											(eval (list 'lambda (list 'OLD 'NEW 'session)
-												(build_pj_insert_scan tables_for_insert_scan condition_for_insert_scan trigger_tv true prejoin_schema prejoin_table_name prejoin_columns prejoin_column_names))))
+												(build_pj_insert_scan tables condition trigger_tv true prejoin_schema prejoin_table_name prejoin_columns prejoin_column_names))))
 										(define insert_fn
 											(eval (list 'lambda (list 'OLD 'NEW 'session)
 												(list 'if prejoin_incremental_guard_expr
