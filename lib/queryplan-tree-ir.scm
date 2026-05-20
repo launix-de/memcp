@@ -826,20 +826,35 @@ ports the actual operator rules to the tree representation. */
 	(define us_stage_order_fallback_a (if (and us_has_grp us_has_stages) (coalesceNil (stage_order_list (car us_own_stages)) '()) '()))
 	(define us_stage_limit_fallback_a (if (and us_has_grp us_has_stages) (stage_limit_val (car us_own_stages)) nil))
 	(define us_stage_offset_fallback_a (if (and us_has_grp us_has_stages) (stage_offset_val (car us_own_stages)) nil))
-	(define us_new_order (planner_tree_ir_window_rewrite_order tree us_stage_order_fallback_a us_prefix_ria))
-	(define us_new_limit (planner_tree_ir_window_effective_limit tree us_stage_limit_fallback_a))
-	(define us_new_offset (planner_tree_ir_window_effective_offset tree us_stage_offset_fallback_a))
+	/* FAQ static-group rule: when the inner subquery has no explicit GROUP BY
+	but the value is an aggregate (NK15 §3.2 Γ_{A∪D;f}), the aggregate produces
+	exactly one row per domain binding. Inner ORDER/LIMIT/OFFSET on top of a
+	single row are no-ops (LIMIT≥1, OFFSET=0/nil) and must not leak into the
+	scoped GROUP stage's stage_limit — that would erroneously cap the outer
+	stream at one global row. The raw subquery shape still carries
+	`(op-window nil order (limit offset) shaped_tree)`, so explicitly drop the
+	window-level limit/offset/order for the static-group path. */
+	(define us_static_group_drop_window_limit (and us_static_group
+		(or (nil? us_stage_limit_fallback_a) (>= us_stage_limit_fallback_a 1))
+		(or (nil? us_stage_offset_fallback_a) (equal? us_stage_offset_fallback_a 0))))
+	(define us_new_order (if us_static_group_drop_window_limit
+		'()
+		(planner_tree_ir_window_rewrite_order tree us_stage_order_fallback_a us_prefix_ria)))
+	(define us_new_limit (if us_static_group_drop_window_limit
+		us_stage_limit_fallback_a
+		(planner_tree_ir_window_effective_limit tree us_stage_limit_fallback_a)))
+	(define us_new_offset (if us_static_group_drop_window_limit
+		us_stage_offset_fallback_a
+		(planner_tree_ir_window_effective_offset tree us_stage_offset_fallback_a)))
 	(define us_group_stage (if (group_stage_requested us_new_group us_new_having us_new_order us_new_limit us_new_offset)
 		(stage_with_cache_query
 			(stage_with_cache_policy
-				(planner_tree_ir_window_make_group_stage
-					tree
-					us_stage_order_fallback_a
-					us_stage_limit_fallback_a
-					us_stage_offset_fallback_a
+				(make_group_stage
 					us_new_group
 					us_new_having
-					us_prefix_ria
+					us_new_order
+					us_new_limit
+					us_new_offset
 					us_stage_aliases
 					nil)
 				us_cache_policy)
