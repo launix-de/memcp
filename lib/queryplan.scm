@@ -1507,11 +1507,6 @@ schema-driven column casing inside queryplan.scm */
 		(cons head _) head
 		nil
 )))
-(define unique_schema_column_match_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
-	(match (collect_schema_column_matches_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci)
-		(cons head '()) head
-		nil
-)))
 (define resolve_schema_column_ref_scoped (lambda (local_schemas visible_schemas helper_aliases alias_ ti col ci)
 	(begin
 		(define resolved (first_schema_column_match_scoped local_schemas visible_schemas helper_aliases alias_ ti col ci))
