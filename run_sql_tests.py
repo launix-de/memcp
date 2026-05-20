@@ -119,6 +119,11 @@ PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
+# Hard wall-clock limit per query. Every test case must finish within this many
+# seconds unless it declares its own `max_time` (case level) or the suite sets
+# `metadata.max_time`. Catches performance regressions that the calibrated
+# perf-baseline mechanism (threshold_ms) does not cover.
+DEFAULT_MAX_TIME_SEC = float(os.environ.get("MEMCP_MAX_TIME", "0.1"))
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
 FAILURE_MAP_KEY = "failures"
@@ -581,6 +586,16 @@ class SQLTestRunner:
         # Performance test handling
         yaml_threshold_ms = test_case.get("threshold_ms")
         is_perf_test = yaml_threshold_ms is not None
+
+        # Hard wall-clock limit (seconds). Resolution: test_case > suite metadata
+        # > DEFAULT_MAX_TIME_SEC. Perf tests use their own calibrated threshold_ms
+        # and are exempt from the hard limit.
+        if "max_time" in test_case:
+            hard_limit_sec = float(test_case["max_time"])
+        elif "max_time" in self.suite_metadata:
+            hard_limit_sec = float(self.suite_metadata["max_time"])
+        else:
+            hard_limit_sec = DEFAULT_MAX_TIME_SEC
         perf_rows = PERF_DEFAULT_ROWS  # default row count
         if is_perf_test:
             # Get baseline data if available
@@ -893,6 +908,17 @@ class SQLTestRunner:
             diag = self._run_on_fail(test_case, database)
             return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
                                      test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
+
+        # Hard wall-clock limit — applies to every non-perf test case. A query
+        # without an explicit `max_time` annotation must finish within
+        # DEFAULT_MAX_TIME_SEC; slower queries must declare a higher limit so the
+        # time budget stays explicit and visible in the test spec.
+        if not is_perf_test and response.status_code == 200:
+            hard_limit_ms = hard_limit_sec * 1000.0
+            if elapsed_ms > hard_limit_ms:
+                diag = self._run_on_fail(test_case, database)
+                return self._record_fail(name, f"Too slow (hard limit): {elapsed_ms:.1f}ms > {hard_limit_ms:.0f}ms", query, response,
+                                         test_case.get("expect"), is_noncritical, elapsed_ms, hard_limit_ms, diag)
 
         if self.validate_expectation(test_case, response, results):
             if is_perf_test:
