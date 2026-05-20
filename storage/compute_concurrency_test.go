@@ -73,8 +73,8 @@ func countCollapsedComputor() scm.Scmer {
 		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("group")}),
 		Body: scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("scan"),
-			scm.NewString("compconc"),
-			scm.NewString("feature"),
+			scm.NewNil(),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("compconc"), scm.NewString("feature")}),
 			scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("list"),
 				scm.NewString("uid"),

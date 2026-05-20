@@ -26,6 +26,7 @@ import "time"
 import "strconv"
 import "reflect"
 import "strings"
+import "unicode/utf8"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
@@ -147,7 +148,7 @@ func normalizePartitionDataset(arg scm.Scmer) dataset {
 	for _, item := range raw {
 		pair := mustScmerSlice(item, "partition column pair")
 		if len(pair) != 2 {
-			panic("invalid partition column pair")
+			panic(fmt.Sprintf("invalid partition column pair: expected (column value), got %s", describeScmerValue(item)))
 		}
 		normalized = append(normalized, pair[0], pair[1])
 	}
@@ -252,11 +253,40 @@ func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {
 	return nil, false
 }
 
+// describeScmerValue renders v for use in a panic message. Long values
+// (entire codegen'd expressions) are truncated at a UTF-8 rune boundary
+// so the panic stays readable and never leaves a half-encoded code point.
+//
+// Uses AppendString with a heap-backed 256-byte scratch buffer so primitive
+// values (string/symbol/int/float/bool/nil) render without an extra heap
+// allocation. Larger values (slices, dicts) still allocate inside
+// AppendString — panics are rare, so we accept that cost.
+func describeScmerValue(v scm.Scmer) string {
+	const maxBytes = 200
+	if v.IsNil() {
+		return "nil"
+	}
+	// make'd slice is heap-allocated so the unsafe.String view returned by
+	// AppendString for tagInt / tagFloat stays live as long as the result.
+	buf := make([]byte, 0, 256)
+	s, _ := v.AppendString(buf)
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Back off from maxBytes to the previous rune boundary; max UTF-8 rune
+	// is 4 bytes so this costs at most 3 iterations.
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
 func mustScmerSlice(v scm.Scmer, ctx string) []scm.Scmer {
 	if slice, ok := scmerSlice(v); ok {
 		return slice
 	}
-	panic(ctx + ": expected list")
+	panic(fmt.Sprintf("%s: expected list, got %s", ctx, describeScmerValue(v)))
 }
 
 func scmerSliceToStrings(list []scm.Scmer) []string {
@@ -279,7 +309,7 @@ func decodePerTableInts(v scm.Scmer, n int, ctx string) []int {
 	}
 	slice, ok := scmerSlice(v)
 	if !ok {
-		panic(ctx + ": expected list or nil")
+		panic(fmt.Sprintf("%s: expected list or nil, got %s", ctx, describeScmerValue(v)))
 	}
 	if len(slice) != n {
 		panic(fmt.Sprintf("%s: expected length %d, got %d", ctx, n, len(slice)))
@@ -1629,7 +1659,7 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			// Build count-scan: (scan base_schema base_table (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
+			// Build count-scan: (scan (session) (table base_schema base_table) (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
 			buildCountScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
@@ -1644,7 +1674,7 @@ func Init(en scm.Env) {
 				})
 			}
 
-			// Build delete-scan: (scan kt_schema kt_name (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
+			// Build delete-scan: (scan (session) (table kt_schema kt_name) (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
 			buildDeleteScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),

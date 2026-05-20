@@ -24,7 +24,7 @@ import "github.com/launix-de/memcp/scm"
 //
 // Currently recognizes the prejoin DELETE pattern:
 //
-//	(lambda (OLD NEW) (scan schema tbl condCols
+//	(lambda (OLD NEW) (scan nil (table schema tbl) condCols
 //	    (lambda (cols...) (equal? col (get_assoc OLD key)))
 //	    (list "$update") (lambda ($update) ($update)) + 0 nil false))
 //
@@ -32,7 +32,7 @@ import "github.com/launix-de/memcp/scm"
 //
 //	(lambda (OLD_batch NEW_batch)
 //	    (define vals (map OLD_batch (lambda (OLD) (get_assoc OLD key))))
-//	    (scan schema tbl condCols
+//	    (scan nil (table schema tbl) condCols
 //	        (lambda (cols...) (has? vals col))
 //	        (list "$update") (lambda ($update) ($update)) + 0 nil false))
 func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
@@ -56,7 +56,7 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	if len(items) < 5 {
 		return scm.NewNil()
 	}
-	// Check for (scan schema tbl condCols filterFn ...)
+	// Check for (scan tx table condCols filterFn ...)
 	// Handle both symbol "scan" and resolved tagFunc references.
 	headName := ""
 	if items[0].IsSymbol() {

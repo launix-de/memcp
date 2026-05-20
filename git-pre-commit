@@ -21,6 +21,23 @@
 
 echo "🔍 Running MemCP pre-commit tests..."
 
+fail_fast_mode="${MEMCP_FAIL_FAST:-1}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fail-fast)
+      fail_fast_mode=1
+      shift
+      ;;
+    --no-fail-fast)
+      fail_fast_mode=0
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 # Global state for reliable cleanup
 did_cleanup=0
 active_pids=()
@@ -78,6 +95,36 @@ mapfile -t test_files_arr <<< "$test_files"
 if [ -z "$test_files" ]; then
     echo "❌ No test files found in tests/ directory"
     exit 1
+fi
+
+if [ "$fail_fast_mode" -eq 1 ]; then
+  mapfile -t test_files_arr < <(python3 - "${test_files_arr[@]}" <<'PY'
+import json
+import sys
+
+try:
+    with open(".perf_baseline.json", "r", encoding="utf-8") as f:
+        config = json.load(f)
+        if not isinstance(config, dict):
+            config = {}
+except (FileNotFoundError, json.JSONDecodeError):
+    config = {}
+
+runner = config.get("_runner", {})
+failure_map = runner.get("failures", {}) if isinstance(runner, dict) else {}
+
+def failures(spec_file: str) -> int:
+    try:
+        return max(0, int(failure_map.get(spec_file, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+ordered = sorted(sys.argv[1:], key=lambda spec_file: (-failures(spec_file), spec_file))
+for spec_file in ordered:
+    print(spec_file)
+PY
+  )
+  test_files=$(printf '%s\n' "${test_files_arr[@]}")
 fi
 
 echo "Found test files:"
@@ -179,7 +226,11 @@ trap 'echo; echo "✋ Interrupted"; cleanup; exit 130' INT
 trap 'echo; echo "✋ Terminated"; cleanup; exit 143' TERM
 trap 'cleanup; exit 129' HUP
 
-echo "🧪 Running SQL tests using single MemCP instance (parallel where safe)..."
+if [ "$fail_fast_mode" -eq 1 ]; then
+  echo "🧪 Running SQL tests using single MemCP instance (fail-fast)..."
+else
+  echo "🧪 Running SQL tests using single MemCP instance (parallel where safe)..."
+fi
 
 all_passed=true
 failed_files=""
@@ -235,6 +286,10 @@ run_one() {
   local tf="$1"
   local out="$2"
   local statusf="$3"
+  local -a runner_args=()
+  if [ "$fail_fast_mode" -eq 1 ]; then
+    runner_args+=("--fail-fast")
+  fi
   if ! wait_for_sql_ready 60 1; then
     echo "FAIL" > "$statusf"
     {
@@ -244,7 +299,7 @@ run_one() {
     } 9>>"$lockfile"
     return
   fi
-  python3 -u run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
+  python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}" > "$out" 2>&1
   rc=$?
   if [ $rc -eq 0 ]; then
     echo OK > "$statusf"
@@ -258,33 +313,55 @@ run_one() {
   } 9>>"$lockfile"
 }
 
-for tf in "${parallel_tests[@]}"; do
-  out="$tmpdir/$(basename "$tf").out"
-  statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf" &
-  active_pids+=("$!")
-  while [ ${#active_pids[@]} -ge $max_jobs ]; do
-    wait "${active_pids[0]}"
-    active_pids=("${active_pids[@]:1}")
+if [ "$fail_fast_mode" -eq 1 ]; then
+  for idx in "${!test_files_arr[@]}"; do
+    tf="${test_files_arr[$idx]}"
+    out="$tmpdir/$(basename "$tf").out"
+    statusf="$tmpdir/$(basename "$tf").status"
+    run_one "$tf" "$out" "$statusf"
+    if [ ! -f "$statusf" ] || ! grep -q OK "$statusf"; then
+      all_passed=false
+      remaining_files=$(( ${#test_files_arr[@]} - idx - 1 ))
+      if [ "$remaining_files" -gt 0 ]; then
+        for skipped_tf in "${test_files_arr[@]:$((idx + 1))}"; do
+          echo SKIP > "$tmpdir/$(basename "$skipped_tf").status"
+        done
+        echo "⏭️  Fail-fast skipped $remaining_files suite files after the first failure"
+      fi
+      break
+    fi
   done
-done
+else
+  for tf in "${parallel_tests[@]}"; do
+    out="$tmpdir/$(basename "$tf").out"
+    statusf="$tmpdir/$(basename "$tf").status"
+    run_one "$tf" "$out" "$statusf" &
+    active_pids+=("$!")
+    while [ ${#active_pids[@]} -ge $max_jobs ]; do
+      wait "${active_pids[0]}"
+      active_pids=("${active_pids[@]:1}")
+    done
+  done
 
-for pid in "${active_pids[@]}"; do
-  wait "$pid"
-done
-active_pids=()
+  for pid in "${active_pids[@]}"; do
+    wait "$pid"
+  done
+  active_pids=()
 
-for tf in "${sequential_tests[@]}"; do
-  out="$tmpdir/$(basename "$tf").out"
-  statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf"
-done
+  for tf in "${sequential_tests[@]}"; do
+    out="$tmpdir/$(basename "$tf").out"
+    statusf="$tmpdir/$(basename "$tf").status"
+    run_one "$tf" "$out" "$statusf"
+  done
+fi
 
 stop_supervisor
 
 for tf in "${test_files_arr[@]}"; do
   statusf="$tmpdir/$(basename "$tf").status"
   if [ -f "$statusf" ] && grep -q OK "$statusf"; then
+    :
+  elif [ -f "$statusf" ] && grep -q SKIP "$statusf"; then
     :
   else
     all_passed=false
@@ -298,6 +375,9 @@ if [ "$all_passed" != true ]; then
   for tf in "${test_files_arr[@]}"; do
     statusf="$tmpdir/$(basename "$tf").status"
     if [ -f "$statusf" ] && grep -q OK "$statusf"; then
+      continue
+    fi
+    if [ -f "$statusf" ] && grep -q SKIP "$statusf"; then
       continue
     fi
     echo ""
