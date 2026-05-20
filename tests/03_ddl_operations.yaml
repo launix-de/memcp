@@ -2,6 +2,7 @@
 # Data Definition Language: CREATE, DROP, ALTER operations with affected_rows
 
 metadata:
+  max_time: 0.3
   version: "1.0"
   description: "DDL operations (CREATE, DROP, ALTER) with affected_rows validation"
 
