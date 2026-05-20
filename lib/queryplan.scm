@@ -4324,8 +4324,11 @@ seeing the correctly prefixed outer alias. */
 												(if (equal?? dep_kind (quote inner_select_in))
 													(dependent_join_helper_build_simple_in_source_query
 														dep_info dep_result_col dep_domain_cols)
-													(dependent_join_helper_build_simple_scalar_aggregate_source_query
-														dep_info dep_result_col dep_domain_cols))))
+													(coalesce
+														(dependent_join_helper_build_simple_scalar_aggregate_source_query
+															dep_info dep_result_col dep_domain_cols)
+														(dependent_join_helper_build_simple_scalar_source_query
+															dep_info dep_result_col dep_domain_cols)))))
 										(define dep_materialized_source_query
 											(if (and (nil? dep_simple_source_query) (equal?? dep_kind (quote inner_select)))
 												(dependent_join_helper_build_materialized_scalar_source_query
@@ -4993,6 +4996,81 @@ seeing the correctly prefixed outer alias. */
 										(dependent_join_helper_rewrite_expr_for_domain_source dep_info scalar_agg_field_expr domain_cols)))
 								(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols)
 								domain_group_exprs
+								nil
+								'()
+								nil
+								nil)))
+					_ nil))))
+	/* dependent_join_helper_build_simple_scalar_source_query: FAQ-conform replacement
+	for the legacy materialized scalar builder. Returns a logical 9-tuple source
+	query analogous to dependent_join_helper_build_simple_scalar_aggregate_source_query
+	but for NON-aggregate scalar correlated subselects.
+
+	The returned 9-tuple uses __dep_domain as its first table so that the deferred
+	pipeline at the outer sq_tbls processing site finalizes (substitutes the
+	dependent_domain placeholder with the real outer-scope domain query) and then
+	materializes via legacy_materialized_query_term_binding_ast. No materialization
+	happens inside the builder, which is what the old materialized builder used to
+	do — that prematurely materialized a query whose __dep_domain placeholder had
+	not yet been substituted, causing "Column does not exist: .(1).__dep_d0".
+
+	Per FAQ §10 once_limit semantics, the outer 9-tuple does NOT carry the user's
+	LIMIT/OFFSET/ORDER directly: those are GLOBAL when applied at materialize time
+	but SQL scalar semantics demand they hold per outer binding. The helper
+	materializes ALL matching inner rows per partition; the consumer at the outer
+	sq_tbls site wraps the materialized source in a scan-tagged-table with
+	partition_cols=count(active_domain_cols) and once_limit ∈ {1, 2} so the scan
+	emits at most one row per partition (and errors on the second when no explicit
+	LIMIT was given). This realizes FAQ §10's "scan_order with limitPartitionCols"
+	contract without inventing a new physical operator.
+
+	Returns nil when the case is outside the simple scalar contract (aggregates in
+	the value expression, non-trivial GROUP BY/HAVING). The caller then falls back
+	to the legacy materialized scalar builder. */
+	(define dependent_join_helper_build_simple_scalar_source_query
+		(lambda (dep_info result_col domain_cols)
+			(begin
+				(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
+				(define domain_alias (dependent_join_helper_domain_source_alias))
+				(match dep_subquery
+					'(dep_schema dep_tables dep_fields dep_condition dep_group dep_having dep_order dep_limit dep_offset)
+					(begin
+						(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
+						(define first_field_expr (match dep_fields
+							(cons _ (cons v _)) v
+							nil))
+						(define first_field_has_aggregate
+							(and (not (nil? first_field_expr))
+								(not (equal? (extract_aggregates first_field_expr) '()))))
+						(define raw_group_simple
+							(or (nil? dep_group)
+								(equal? dep_group '())
+								(equal? dep_group '(1))))
+						(define raw_having_trivial
+							(or (nil? dep_having) (equal? dep_having true)))
+						(if (or
+							(nil? first_field_expr)
+							first_field_has_aggregate
+							(not raw_group_simple)
+							(not raw_having_trivial))
+							nil
+							(list dep_schema
+								(merge
+									(list (list domain_alias dep_schema (make_dependent_domain_table_spec norm_domain_cols) false nil))
+									(map dep_tables (lambda (td) (match td
+										'(tv tschema ttbl toisOuter tje)
+										(list tv tschema ttbl toisOuter
+											(if (nil? tje)
+												nil
+												(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
+										_ td))))
+								(merge
+									(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
+									(list
+										result_col
+										(dependent_join_helper_rewrite_expr_for_domain_source dep_info first_field_expr domain_cols)))
+								(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols)
+								'()
 								nil
 								'()
 								nil
@@ -6451,7 +6529,63 @@ seeing the correctly prefixed outer alias. */
 							'()))
 					_ nil)
 				(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) (list dep_mat_init)))
-				(list tv tschema dep_mat_source true
+				/* FAQ §10 once_limit lowering for non-aggregate scalar correlated
+				subselects: the materialized helper contains ALL matching inner rows
+				per partition. Wrap the consumer in a scan-tagged-table with
+				partition_cols=count(active_domain) and once_limit ∈ {1, 2} so that
+				scan_order emits at most one row per outer binding (and throws
+				"scalar subselect returned more than one row" when no explicit LIMIT
+				was given). The aggregate scalar path always yields exactly one row
+				per partition and therefore never needs this wrap; EXISTS/IN go
+				through wrap_grouped_presence which collapses to one row per
+				partition by construction. */
+				(define dep_scalar_first_field_is_aggregate
+					(begin
+						(define dep_first_expr (dependent_join_helper_scalar_aggregate_expr dep_info))
+						(and (not (nil? dep_first_expr))
+							(not (equal? (extract_aggregates dep_first_expr) '())))))
+				(define dep_subquery_for_contract
+					(dependent_expr_compile_info_subquery dep_info))
+				(define dep_user_limit
+					(match dep_subquery_for_contract
+						'(_ _ _ _ _ _ _ user_limit _) user_limit
+						_ nil))
+				(define dep_user_offset
+					(match dep_subquery_for_contract
+						'(_ _ _ _ _ _ _ _ user_offset) user_offset
+						_ nil))
+				(define dep_apply_once_limit_wrap
+					(and
+						(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
+						(not dep_scalar_first_field_is_aggregate)
+						(not dep_preserve_full_domain)))
+				(define dep_helper_source
+					(if dep_apply_once_limit_wrap
+						(begin
+							(define dep_once_limit
+								(if (and (not (nil? dep_user_limit)) (<= dep_user_limit 1))
+									1
+									2))
+							(define dep_norm_domain_cols
+								(dependent_join_helper_normalize_domain_cols dep_active_domain_cols))
+							(define dep_partition_count (count dep_norm_domain_cols))
+							(define dep_partition_order
+								(map dep_norm_domain_cols
+									(lambda (dc) (match dc
+										'(dom_col _dom_expr)
+										(list (list (quote get_column) tv false dom_col false) (quote asc))
+										_ nil))))
+							(define dep_scan_order
+								(filter dep_partition_order (lambda (oi) (not (nil? oi)))))
+							(make_scan_tagged_table
+								dep_mat_source
+								dep_scan_order
+								dep_user_limit
+								dep_user_offset
+								dep_partition_count
+								dep_once_limit))
+						dep_mat_source))
+				(list tv tschema dep_helper_source true
 					(if (or (nil? dep_domain_joinexpr) (equal? dep_domain_joinexpr true))
 						nil
 						dep_domain_joinexpr)))
