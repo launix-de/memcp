@@ -6422,6 +6422,73 @@ seeing the correctly prefixed outer alias. */
 			acc
 			acc)
 		_ acc)) '()))
+	/* FAQ §40 cclasses substitution helper (defined before sq_tbls processing).
+	When a domain column expression references a derived-table alias that has
+	been elided to a no-FROM constant (its renamelist entry resolves a column
+	to a closed expression), substitute the column expression with the renamed
+	form so the deferred __dep_domain materialization sees the constant value
+	instead of an unresolvable column reference. Without this rewrite, the
+	domain query builds `SELECT t1.id FROM .(1)` where t1.id never binds —
+	__dep_domain materializes empty and the LEFT-JOIN attaches a single NULL
+	row. The rewrite also collapses the LEFT-JOIN joinexpr to a literal-vs-
+	helper comparison, which combines with FAQ §10 once_limit=2 to surface
+	"Subquery returns more than 1 row" correctly. Safety (FAQ §41): only
+	applies when the renamelist binding rewrites the column to a closed
+	expression that contains no remaining `(get_column alias_)` references
+	to live outer tables — otherwise we'd lose the per-row outer correlation. */
+	(define dep_outer_visible_aliases
+		(merge_unique (map tables (lambda (td) (match td
+			'(alias _ _ _ _) (if (nil? alias)
+				'()
+				(merge_unique
+					(list (string alias))
+					(list (string (visible_occurrence_alias alias)))))
+			_ '())))))
+	(define dep_expr_only_visible_outer_refs (lambda (expr)
+		(reduce (extract_tblvars expr) (lambda (acc alias_)
+			(and acc (has? dep_outer_visible_aliases (string alias_))))
+			true)))
+	(define dep_lookup_renamed_column (lambda (alias_ col)
+		(begin
+			(define alias_str (string alias_))
+			(define alias_sym (symbol alias_str))
+			(if (has? dep_outer_visible_aliases alias_str)
+				nil
+				(begin
+					(define rename_fn
+						(if (has_assoc? renamelist alias_)
+							(renamelist alias_)
+							(if (has_assoc? renamelist alias_str)
+								(renamelist alias_str)
+								(if (has_assoc? renamelist alias_sym)
+									(renamelist alias_sym)
+									nil))))
+					(if (nil? rename_fn) nil (rename_fn col)))))))
+	(define dep_rewrite_domain_expr (lambda (expr) (match expr
+		'((quote get_column) alias_ _ col _)
+		(if (nil? alias_)
+			expr
+			(coalesce (dep_lookup_renamed_column alias_ col) expr))
+		'((symbol get_column) alias_ _ col _)
+		(if (nil? alias_)
+			expr
+			(coalesce (dep_lookup_renamed_column alias_ col) expr))
+		expr)))
+	(define dep_rewrite_domain_cols (lambda (domain_cols)
+		(map domain_cols (lambda (dc) (match dc
+			'(dom_col dom_expr)
+			(begin
+				(define rewritten (dep_rewrite_domain_expr dom_expr))
+				/* Adopt the rewrite when its remaining alias references all
+				point at live outer tables (or it became fully closed). Otherwise
+				the rewrite would expose another elided alias and we'd just shift
+				the problem. */
+				(if (and
+					(not (equal? rewritten dom_expr))
+					(dep_expr_only_visible_outer_refs rewritten))
+					(list dom_col rewritten)
+					dc))
+			_ dc)))))
 	(define sq_tbls (map sq_tbls (lambda (td) (match td
 		'(tv tschema ttbl toisOuter tje)
 		(if (is_dependent_join_helper_spec ttbl)
@@ -6431,10 +6498,13 @@ seeing the correctly prefixed outer alias. */
 						(not (has? (extract_tblvars term) tv))))
 						'() true
 						terms (cons (quote and) terms)))
+				(define dep_spec_domain_cols
+					(dep_rewrite_domain_cols
+						(dependent_join_helper_spec_domain_cols ttbl)))
 				(define dep_source_query
 					(dependent_join_helper_finalize_source_query
 						(dependent_join_helper_spec_source_query ttbl)
-						(dependent_join_helper_spec_domain_cols ttbl)
+						dep_spec_domain_cols
 						tables
 						dep_outer_condition
 						group
@@ -6443,7 +6513,7 @@ seeing the correctly prefixed outer alias. */
 				(define dep_active_domain_cols
 					(dependent_join_helper_active_domain_cols
 						dep_source_query
-						(dependent_join_helper_spec_domain_cols ttbl)))
+						dep_spec_domain_cols))
 				(define dep_result_col
 					(dependent_join_helper_spec_result_col ttbl))
 				(define dep_info
