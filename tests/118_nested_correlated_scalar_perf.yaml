@@ -10,7 +10,6 @@
 metadata:
   version: "1.0"
   description: "Nested correlated scalar-in-aggregate-in-scalar must stay fast"
-  max_time: 2.0
 
 setup:
   - sql: "DROP TABLE IF EXISTS ncs_acc"
@@ -33,8 +32,12 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ncs_drv"
 
 test_cases:
+  # The deterministic gate is max_plan_size, not wall-clock time: a correct
+  # plan for this query serializes to ~8 KB; the cubic prejoin blow-up
+  # observed on this branch is ~362 KB. Plan size is hardware-independent, so
+  # this trips identically on a fast x86 box and on a Raspberry Pi.
   - name: "nested correlated scalar-in-aggregate-in-scalar stays near-linear"
-    max_time: 0.5
+    max_plan_size: 40000
     sql: |
       SELECT
         (SELECT SUM(1) FROM ncs_acc OBJ WHERE OBJ.typ IN (4, 5) AND (

@@ -2,7 +2,6 @@
 # Built-in functions: math, string, time, and other utility functions
 
 metadata:
-  max_time: 0.3
   version: "1.0"
   description: "SQL built-in functions and expressions"
 

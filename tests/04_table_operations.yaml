@@ -2,7 +2,6 @@
 # Testing just the most basic operations to isolate database corruption issue
 
 metadata:
-  max_time: 0.3
   version: "1.0"
   description: "Minimal table operations test for debugging"
 
