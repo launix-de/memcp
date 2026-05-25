@@ -1670,6 +1670,9 @@ func init_list() {
 			result := a[2]
 			reduce := OptimizeProcToSerialFunction(a[1])
 			if slice, fd := asAssoc(a[0], "reduce_assoc"); fd == nil {
+				if len(slice)%2 != 0 {
+					panic(fmt.Sprintf("reduce_assoc received odd-length dict (%d): %s", len(slice), SerializeToString(a[0], &Globalenv)))
+				}
 				for i := 0; i < len(slice); i += 2 {
 					result = reduce(result, slice[i], slice[i+1])
 				}

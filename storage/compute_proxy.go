@@ -375,9 +375,11 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	if p.isOrdered {
 		if !p.validMask.Get(uint(idx)) {
 			// During an active recompute (scan_order reading ORC values):
-			// Return nil for invalid rows (reducer uses nil to detect "needs compute").
-			// Return cached value for valid rows (enables Phase 1 skip + Phase 3 convergence).
-			if atomic.LoadInt32(&p.shard.t.orcRecomputing) > 0 {
+			// Only the goroutine(s) participating in this table's recompute may
+			// observe the transient nil-for-invalid-row sentinel that the reducer
+			// uses to detect "needs compute". Other concurrent readers must block
+			// on orcMu and re-read after the recompute publishes the values.
+			if atomic.LoadInt32(&p.shard.t.orcRecomputing) > 0 && isCurrentORCRecompute(p.shard.t) {
 				if p.validMask.Get(uint(idx)) {
 					// Valid row: return cached value for convergence check
 					p.mu.RLock()
@@ -390,9 +392,10 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 						return p.main.GetValue(idx)
 					}
 				}
-				return scm.NewNil() // invalid row
+				return scm.NewNil() // invalid row, observed from inside the recompute
 			}
-			// Invalid row → on-demand incremental recompute
+			// Invalid row → on-demand incremental recompute (or wait for the
+			// ongoing one to complete).
 			p.shard.t.orcMu.Lock()
 			if !p.validMask.Get(uint(idx)) {
 				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
