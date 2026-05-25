@@ -119,6 +119,20 @@ PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
+# Hard wall-clock limit per query — a GENEROUS backstop, not a precise gate.
+# Wall-clock is hardware-dependent (a Raspberry Pi is ~10x slower), so this is
+# only meant to catch gross runaways. The default gives a fast query (<100ms
+# here, <1s on a Pi) ample room while still tripping on multi-second runaways.
+# Per-case `max_time` / suite `metadata.max_time` override it.
+DEFAULT_MAX_TIME_SEC = float(os.environ.get("MEMCP_MAX_TIME", "5.0"))
+# Hard limit on the serialized query-plan size (characters of the EXPLAIN
+# output). THIS is the hardware-independent detector for compile-time
+# blow-ups: a cubic/exponential planner regression produces a cubic/exponential
+# plan-node count regardless of CPU speed. A correct plan for a nested query is
+# a few KB; the observed nested-correlated-subselect blow-up was 342 KB / 1578
+# helper nodes. Per-case `max_plan_size` / suite `metadata.max_plan_size`
+# override it; set to 0 to disable the check for a case/suite.
+DEFAULT_MAX_PLAN_SIZE = int(os.environ.get("MEMCP_MAX_PLAN_SIZE", "200000"))
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
 FAILURE_MAP_KEY = "failures"
@@ -581,6 +595,26 @@ class SQLTestRunner:
         # Performance test handling
         yaml_threshold_ms = test_case.get("threshold_ms")
         is_perf_test = yaml_threshold_ms is not None
+
+        # Hard wall-clock limit (seconds). Resolution: test_case > suite metadata
+        # > DEFAULT_MAX_TIME_SEC. Perf tests use their own calibrated threshold_ms
+        # and are exempt from the hard limit.
+        if "max_time" in test_case:
+            hard_limit_sec = float(test_case["max_time"])
+        elif "max_time" in self.suite_metadata:
+            hard_limit_sec = float(self.suite_metadata["max_time"])
+        else:
+            hard_limit_sec = DEFAULT_MAX_TIME_SEC
+
+        # Hard plan-size limit (characters of EXPLAIN output). Same resolution
+        # order. This is the hardware-independent compile-time-blowup detector.
+        # 0 disables the check.
+        if "max_plan_size" in test_case:
+            plan_size_limit = int(test_case["max_plan_size"])
+        elif "max_plan_size" in self.suite_metadata:
+            plan_size_limit = int(self.suite_metadata["max_plan_size"])
+        else:
+            plan_size_limit = DEFAULT_MAX_PLAN_SIZE
         perf_rows = PERF_DEFAULT_ROWS  # default row count
         if is_perf_test:
             # Get baseline data if available
@@ -842,6 +876,31 @@ class SQLTestRunner:
                     for line in explain_resp.text.strip().split('\n')[:10]:
                         print(f"       {line[:120]}")
 
+            # Hard plan-size limit — the hardware-independent compile-time-blowup
+            # detector. Runs BEFORE the timed query so it is not preempted by
+            # the (hardware-dependent) wall-clock check. EXPLAIN the query and
+            # measure the serialized plan length: a cubic/exponential planner
+            # regression produces a cubic/exponential plan regardless of CPU
+            # speed, so this trips identically on a fast x86 box and a slow
+            # Raspberry Pi. The EXPLAIN also warms the plan cache for the
+            # subsequent timed run.
+            if (plan_size_limit > 0 and not is_perf_test and not is_sparql
+                    and not test_case.get("expect", {}).get("error")):
+                qhead = query.lstrip().upper()
+                if (qhead.startswith("SELECT") or qhead.startswith("WITH")) and not qhead.startswith("EXPLAIN"):
+                    try:
+                        explain_resp = self.execute_sql(database, "EXPLAIN " + query, auth_header,
+                                                        active_syntax, session_id=session_id, timeout=sql_timeout)
+                    except Exception:
+                        explain_resp = None
+                    if explain_resp is not None and explain_resp.status_code == 200 and "Error" not in explain_resp.text[:64]:
+                        plan_size = len(explain_resp.text)
+                        if plan_size > plan_size_limit:
+                            diag = self._run_on_fail(test_case, database)
+                            return self._record_fail(name,
+                                                     f"Query plan too large (compile-time blowup): {plan_size} chars > {plan_size_limit}",
+                                                     query, explain_resp, test_case.get("expect"), is_noncritical, on_fail_diag=diag)
+
             # Warmup runs for performance tests (2 unmeasured runs before the measured one)
             if is_perf_test and test_case.get("warmup", True):
                 for _ in range(2):
@@ -893,6 +952,17 @@ class SQLTestRunner:
             diag = self._run_on_fail(test_case, database)
             return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
                                      test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
+
+        # Hard wall-clock limit — applies to every non-perf test case. A query
+        # without an explicit `max_time` annotation must finish within
+        # DEFAULT_MAX_TIME_SEC; slower queries must declare a higher limit so the
+        # time budget stays explicit and visible in the test spec.
+        if not is_perf_test and response.status_code == 200:
+            hard_limit_ms = hard_limit_sec * 1000.0
+            if elapsed_ms > hard_limit_ms:
+                diag = self._run_on_fail(test_case, database)
+                return self._record_fail(name, f"Too slow (hard limit): {elapsed_ms:.1f}ms > {hard_limit_ms:.0f}ms", query, response,
+                                         test_case.get("expect"), is_noncritical, elapsed_ms, hard_limit_ms, diag)
 
         if self.validate_expectation(test_case, response, results):
             if is_perf_test:
