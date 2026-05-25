@@ -335,6 +335,16 @@ func SetValues(vals map[string]any, fn func()) {
 	mgr.SetValues(glsVals, fn)
 }
 
+// GetGLSValue returns the GLS value for a given key, or nil if no GLS context
+// is installed. Used by packages outside scm to read goroutine-local markers
+// that propagate across gls.Go-spawned worker goroutines.
+func GetGLSValue(key string) (any, bool) {
+	if mgr == nil {
+		return nil, false
+	}
+	return mgr.GetValue(key)
+}
+
 // WithSession executes fn with the given session installed in GLS,
 // so that GetCurrentTx() and other GLS-based lookups use this session.
 func WithSession(session Scmer, fn Scmer) Scmer {
