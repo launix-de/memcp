@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dc0d/onexit"
@@ -50,9 +51,70 @@ type SettingsT struct {
 	MaxErrorQueryLog       int   // max rows in error log (0 = unlimited)
 	PrintLog               bool  // when true, log (print) output to system_statistic.logs
 	MaxPrintLog            int   // max rows in print log (0 = unlimited); trimmed in 15min cron
+	CreateTableTriggers    []CreateTableTriggerRegistration
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, false, 0, false, 0}
+type CreateTableTriggerRegistration struct {
+	Schema    string    `json:"schema"`
+	Table     string    `json:"table"`
+	Name      string    `json:"name"`
+	SourceSQL string    `json:"source_sql,omitempty"`
+	Hidden    bool      `json:"hidden,omitempty"`
+	Priority  int       `json:"priority,omitempty"`
+	Async     bool      `json:"async,omitempty"`
+	Func      scm.Scmer `json:"func"`
+}
+
+func (r CreateTableTriggerRegistration) triggerDescription() TriggerDescription {
+	return TriggerDescription{
+		Name:      r.Name,
+		Timing:    AfterCreateTable,
+		Func:      r.Func,
+		SourceSQL: r.SourceSQL,
+		Hidden:    r.Hidden,
+		Priority:  r.Priority,
+		Async:     r.Async,
+	}
+}
+
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, false, 0, false, 0, nil}
+var createTableTriggerMu sync.Mutex
+
+func registerCreateTableTrigger(reg CreateTableTriggerRegistration) {
+	createTableTriggerMu.Lock()
+	defer createTableTriggerMu.Unlock()
+	for i, existing := range Settings.CreateTableTriggers {
+		if existing.Schema == reg.Schema && existing.Table == reg.Table && existing.Name == reg.Name {
+			Settings.CreateTableTriggers[i] = reg
+			return
+		}
+	}
+	Settings.CreateTableTriggers = append(Settings.CreateTableTriggers, reg)
+}
+
+func dropCreateTableTrigger(schema, table, name string) bool {
+	createTableTriggerMu.Lock()
+	defer createTableTriggerMu.Unlock()
+	for i, existing := range Settings.CreateTableTriggers {
+		if existing.Schema == schema && existing.Table == table && existing.Name == name {
+			Settings.CreateTableTriggers = append(Settings.CreateTableTriggers[:i], Settings.CreateTableTriggers[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func getCreateTableTriggers(schema, table string) []CreateTableTriggerRegistration {
+	createTableTriggerMu.Lock()
+	defer createTableTriggerMu.Unlock()
+	result := make([]CreateTableTriggerRegistration, 0, len(Settings.CreateTableTriggers))
+	for _, existing := range Settings.CreateTableTriggers {
+		if existing.Schema == schema && existing.Table == table {
+			result = append(result, existing)
+		}
+	}
+	return result
+}
 
 // call this after you filled Settings
 func InitSettings() {

@@ -939,15 +939,6 @@ func Init(en scm.Env) {
 		Desc: "creates a new database",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
-			// oninit (optional 6th parameter): a thunk run ONCE, synchronously,
-			// after the new table is fully created and before createtable returns
-			// true. Used by planner-generated keytable/virtual-source initializers
-			// so the caller never observes a created-but-empty table (FAQ §32).
-			// Skipped when the ifnotexists fast-path hits an existing table.
-			var oninit scm.Scmer
-			if len(a) > 5 {
-				oninit = a[5]
-			}
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -1100,11 +1091,7 @@ func Init(en scm.Env) {
 			}
 			db.saveLockedWithDurabilityAndUnlock(newTable.PersistencyMode == Safe)
 			registerCreatedTable(newTable)
-			// Run the optional initializer thunk synchronously so the caller never
-			// observes a created-but-empty table — FAQ §32.
-			if len(a) > 5 && !oninit.IsNil() {
-				scm.Apply(oninit)
-			}
+			executeRegisteredCreateTableTriggers(newTable)
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
@@ -1114,7 +1101,6 @@ func Init(en scm.Env) {
 				{Kind: "list", ParamName: "cols", ParamDesc: "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2 updatemode deletemode of 'restrict'|'cascade'|'set null')"},
 				{Kind: "list", ParamName: "options", ParamDesc: "further options like engine=safe|sloppy|memory"},
 				{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "don't throw an error if table already exists", Optional: true},
-				{Kind: "func", ParamName: "oninit", ParamDesc: "optional 0-arg thunk run synchronously on first creation, before the call returns true. Lets callers attach the initial fill atomically so the table never becomes visible empty (FAQ §32).", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2436,6 +2422,74 @@ func Init(en scm.Env) {
 	})
 
 	// Trigger management
+	scm.Declare(&en, &scm.Declaration{
+		Name: "createcreatetabletrigger",
+		Desc: "registers a lifecycle trigger that fires synchronously after a future createtable for the given schema/table succeeds",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			body, deferredPlan := unwrapDeferredTriggerBody(a[4])
+			if triggerScmerMissing(body) && !triggerScmerMissing(deferredPlan) {
+				body = scm.Eval(deferredPlan, &scm.Globalenv)
+			}
+			if triggerScmerMissing(body) {
+				panic("create-table trigger body must not be empty")
+			}
+			trigger := TriggerDescription{
+				Name:      scm.String(a[2]),
+				Timing:    AfterCreateTable,
+				Func:      body,
+				SourceSQL: scm.String(a[3]),
+				Hidden:    !scm.ToBool(a[5]),
+			}
+			finalizeTriggerCompilation(&trigger)
+			registerCreateTableTrigger(CreateTableTriggerRegistration{
+				Schema:    scm.String(a[0]),
+				Table:     scm.String(a[1]),
+				Name:      trigger.Name,
+				SourceSQL: trigger.SourceSQL,
+				Hidden:    trigger.Hidden,
+				Priority:  trigger.Priority,
+				Async:     trigger.Async,
+				Func:      trigger.Func,
+			})
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
+				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to watch for creation"},
+				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
+				{Kind: "string", ParamName: "source_sql", ParamDesc: "original SQL body text (for diagnostics)"},
+				{Kind: "any", ParamName: "body", ParamDesc: "trigger body (Scheme procedure or deferred trigger expression)"},
+				{Kind: "bool", ParamName: "visible", ParamDesc: "true = user trigger, false = internal trigger"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "dropcreatetabletrigger",
+		Desc: "removes a registered create-table lifecycle trigger",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			table := scm.String(a[1])
+			name := scm.String(a[2])
+			if dropCreateTableTrigger(schema, table, name) {
+				return scm.NewBool(true)
+			}
+			if scm.ToBool(a[3]) {
+				return scm.NewBool(false)
+			}
+			panic("create-table trigger " + schema + "." + table + ":" + name + " does not exist")
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
+				{Kind: "string", ParamName: "table", ParamDesc: "name of the table watched for creation"},
+				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
+				{Kind: "bool", ParamName: "ifexists", ParamDesc: "don't throw error if trigger doesn't exist"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createtrigger",
 		Desc: "creates a new trigger on a table",

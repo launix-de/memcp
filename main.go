@@ -24,6 +24,7 @@ package main
 
 import "archive/tar"
 import "archive/zip"
+import "bytes"
 import "compress/gzip"
 import "os"
 import "io"
@@ -38,6 +39,7 @@ import "io/ioutil"
 import "strings"
 import "os/signal"
 import "crypto/rand"
+import "path"
 import "path/filepath"
 import "runtime/pprof"
 import "runtime/debug"
@@ -52,14 +54,184 @@ var IOEnv scm.Env
 // printLogFunc is set after lib load to route (print) output to storage.
 var printLogFunc func(string)
 
-type virtualPathCacheEntry struct {
-	once     sync.Once
-	hostPath string
-	err      error
+type virtualFile interface {
+	Name() string
+	Open() (io.ReadCloser, error)
 }
 
-var virtualDirCache sync.Map
-var virtualFileCache sync.Map
+type virtualDir interface {
+	Lookup([]string) (virtualFile, error)
+}
+
+type hostVirtualFile string
+
+func (f hostVirtualFile) Name() string {
+	return string(f)
+}
+
+func (f hostVirtualFile) Open() (io.ReadCloser, error) {
+	return os.Open(string(f))
+}
+
+type gzipVirtualFile struct {
+	base virtualFile
+	name string
+}
+
+func (f gzipVirtualFile) Name() string {
+	if f.name != "" {
+		return f.name
+	}
+	base := f.base.Name()
+	if strings.HasSuffix(strings.ToLower(base), ".gz") {
+		return strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	return base
+}
+
+func (f gzipVirtualFile) Open() (io.ReadCloser, error) {
+	baseReader, err := f.base.Open()
+	if err != nil {
+		return nil, err
+	}
+	reader, err := gzip.NewReader(baseReader)
+	if err != nil {
+		baseReader.Close()
+		return nil, err
+	}
+	return &compositeReadCloser{
+		Reader: reader,
+		closeFunc: func() error {
+			err1 := reader.Close()
+			err2 := baseReader.Close()
+			if err1 != nil {
+				return err1
+			}
+			return err2
+		},
+	}, nil
+}
+
+type tarVirtualFile struct {
+	archive virtualFile
+	member  string
+}
+
+func (f tarVirtualFile) Name() string {
+	return f.member
+}
+
+// Open scans the tar archive header by header to locate the requested member.
+// Resolving N members costs O(N*entries); acceptable for small pg_dump archives
+// but would need an index for large archives.
+func (f tarVirtualFile) Open() (io.ReadCloser, error) {
+	source, err := f.archive.Open()
+	if err != nil {
+		return nil, err
+	}
+	reader := tar.NewReader(source)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			source.Close()
+			return nil, os.ErrNotExist
+		}
+		if err != nil {
+			source.Close()
+			return nil, err
+		}
+		memberPath, err := sanitizeArchiveMemberPath(header.Name)
+		if err != nil {
+			source.Close()
+			return nil, err
+		}
+		if memberPath != f.member {
+			continue
+		}
+		if header.FileInfo().IsDir() {
+			source.Close()
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", f.member)
+		}
+		return &compositeReadCloser{
+			Reader: reader,
+			closeFunc: func() error {
+				return source.Close()
+			},
+		}, nil
+	}
+}
+
+type zipVirtualFile struct {
+	archive virtualFile
+	member  string
+}
+
+func (f zipVirtualFile) Name() string {
+	return f.member
+}
+
+func (f zipVirtualFile) Open() (io.ReadCloser, error) {
+	archive, err := openZipArchive(f.archive)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range archive.files {
+		memberPath, err := sanitizeArchiveMemberPath(file.Name)
+		if err != nil {
+			archive.close()
+			return nil, err
+		}
+		if memberPath != f.member {
+			continue
+		}
+		stream, err := file.Open()
+		if err != nil {
+			archive.close()
+			return nil, err
+		}
+		return &compositeReadCloser{
+			Reader: stream,
+			closeFunc: func() error {
+				err1 := stream.Close()
+				err2 := archive.close()
+				if err1 != nil {
+					return err1
+				}
+				return err2
+			},
+		}, nil
+	}
+	archive.close()
+	return nil, os.ErrNotExist
+}
+
+type hostVirtualDir struct {
+	root string
+}
+
+type tarVirtualDir struct {
+	archive virtualFile
+	prefix  string
+}
+
+type zipVirtualDir struct {
+	archive virtualFile
+	prefix  string
+}
+
+type compositeReadCloser struct {
+	io.Reader
+	closeFunc func() error
+}
+
+func (c *compositeReadCloser) Close() error {
+	return c.closeFunc()
+}
+
+type zipArchive struct {
+	files []*zip.File
+	close func() error
+}
 
 func resolveIOPath(path string, name string) string {
 	if filepath.IsAbs(name) {
@@ -69,18 +241,11 @@ func resolveIOPath(path string, name string) string {
 }
 
 func openStream(path string) (io.ReadCloser, error) {
-	hostPath, err := materializeVirtualPath(path, true)
+	file, err := resolveVirtualFile(path, true)
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(hostPath)
-	if err != nil {
-		return nil, err
-	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("open stream: %s resolves to a directory", path)
-	}
-	return os.Open(hostPath)
+	return file.Open()
 }
 
 func readVirtualFile(path string) ([]byte, error) {
@@ -92,16 +257,13 @@ func readVirtualFile(path string) ([]byte, error) {
 	return io.ReadAll(stream)
 }
 
-func materializeVirtualPath(path string, decompressFinalGzip bool) (string, error) {
-	cleanPath := filepath.Clean(path)
-	volume := filepath.VolumeName(cleanPath)
-	rest := strings.TrimPrefix(cleanPath, volume)
-	currentHost := volume
-	currentVirtual := volume
-	if strings.HasPrefix(rest, string(os.PathSeparator)) {
-		currentHost += string(os.PathSeparator)
-		currentVirtual += string(os.PathSeparator)
-		rest = strings.TrimPrefix(rest, string(os.PathSeparator))
+func splitVirtualPath(pathname string) (string, []string) {
+	cleanPath := filepath.Clean(pathname)
+	root := "."
+	rest := cleanPath
+	if filepath.IsAbs(cleanPath) {
+		root = filepath.VolumeName(cleanPath) + string(os.PathSeparator)
+		rest = strings.TrimPrefix(cleanPath, root)
 	}
 	segments := make([]string, 0)
 	for _, segment := range strings.Split(rest, string(os.PathSeparator)) {
@@ -109,248 +271,280 @@ func materializeVirtualPath(path string, decompressFinalGzip bool) (string, erro
 			segments = append(segments, segment)
 		}
 	}
+	return root, segments
+}
+
+func resolveVirtualFile(pathname string, decompressFinalGzip bool) (virtualFile, error) {
+	root, segments := splitVirtualPath(pathname)
 	if len(segments) == 0 {
-		if currentHost == "" {
-			return ".", nil
-		}
-		return currentHost, nil
+		return nil, fmt.Errorf("open stream: %s resolves to a directory", pathname)
 	}
+	file, err := hostVirtualDir{root: root}.Lookup(segments)
+	if err != nil {
+		return nil, err
+	}
+	if !decompressFinalGzip {
+		return file, nil
+	}
+	kind, err := detectArchiveKind(file)
+	if err != nil {
+		return nil, err
+	}
+	if kind == "gz" {
+		return gzipVirtualFile{base: file}, nil
+	}
+	return file, nil
+}
+
+func resolveWatchPath(pathname string) (string, bool) {
+	root, segments := splitVirtualPath(pathname)
+	current := root
 	for i, segment := range segments {
-		candidateHost := filepath.Join(currentHost, segment)
-		candidateVirtual := filepath.Join(currentVirtual, segment)
-		last := i == len(segments)-1
-		info, err := os.Stat(candidateHost)
+		candidate := filepath.Join(current, segment)
+		info, err := os.Stat(candidate)
 		if err != nil {
-			return "", err
+			return "", false
 		}
-		if !last {
-			if info.IsDir() {
-				currentHost = candidateHost
-				currentVirtual = candidateVirtual
-				continue
-			}
-			dir, err := materializeArchiveAsDir(candidateVirtual, candidateHost)
-			if err != nil {
-				return "", err
-			}
-			currentHost = dir
-			currentVirtual = candidateVirtual
-			continue
+		current = candidate
+		if i < len(segments)-1 && !info.IsDir() {
+			return "", false
 		}
-		if info.IsDir() {
-			return candidateHost, nil
-		}
-		if decompressFinalGzip && detectArchiveKind(candidateHost) == "gz" {
-			return materializeGzipFile(candidateVirtual, candidateHost)
-		}
-		return candidateHost, nil
 	}
-	return "", fmt.Errorf("could not resolve virtual path %s", path)
+	return current, true
 }
 
-func materializeArchiveAsDir(virtualPath string, hostPath string) (string, error) {
-	entryAny, _ := virtualDirCache.LoadOrStore(virtualPath, &virtualPathCacheEntry{})
-	entry := entryAny.(*virtualPathCacheEntry)
-	entry.once.Do(func() {
-		entry.hostPath, entry.err = extractArchiveAsDir(virtualPath, hostPath)
-	})
-	return entry.hostPath, entry.err
-}
-
-func materializeGzipFile(virtualPath string, hostPath string) (string, error) {
-	entryAny, _ := virtualFileCache.LoadOrStore(virtualPath, &virtualPathCacheEntry{})
-	entry := entryAny.(*virtualPathCacheEntry)
-	entry.once.Do(func() {
-		entry.hostPath, entry.err = extractGzipFile(hostPath)
-	})
-	return entry.hostPath, entry.err
-}
-
-func detectArchiveKind(path string) string {
-	lower := strings.ToLower(path)
-	switch {
-	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"), strings.HasSuffix(lower, ".gz"):
-		return "gz"
-	case strings.HasSuffix(lower, ".zip"):
-		return "zip"
-	case strings.HasSuffix(lower, ".tar"):
-		return "tar"
-	default:
-		f, err := os.Open(path)
-		if err != nil {
-			return ""
-		}
-		defer f.Close()
-		header := make([]byte, 512)
-		n, err := io.ReadFull(f, header)
-		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-			return ""
-		}
-		header = header[:n]
-		if len(header) >= 2 && header[0] == 0x1f && header[1] == 0x8b {
-			return "gz"
-		}
-		if len(header) >= 4 && string(header[:4]) == "PK\x03\x04" {
-			return "zip"
-		}
-		if len(header) >= 262 && string(header[257:262]) == "ustar" {
-			return "tar"
-		}
-		return ""
-	}
-}
-
-func extractArchiveAsDir(virtualPath string, hostPath string) (string, error) {
-	switch detectArchiveKind(hostPath) {
-	case "zip":
-		return extractZipToDir(virtualPath, hostPath)
-	case "tar":
-		return extractTarToDir(virtualPath, hostPath)
-	case "gz":
-		decompressedPath, err := extractGzipFile(hostPath)
-		if err != nil {
-			return "", err
-		}
-		switch detectArchiveKind(decompressedPath) {
-		case "zip":
-			return extractZipToDir(virtualPath+"#", decompressedPath)
-		case "tar":
-			return extractTarToDir(virtualPath+"#", decompressedPath)
-		default:
-			return "", fmt.Errorf("open archive dir: %s decompresses to a plain file", virtualPath)
-		}
-	default:
-		return "", fmt.Errorf("open archive dir: %s is not a supported archive", virtualPath)
-	}
-}
-
-func extractGzipFile(hostPath string) (string, error) {
-	source, err := os.Open(hostPath)
+func (d hostVirtualDir) Lookup(segments []string) (virtualFile, error) {
+	candidate := filepath.Join(d.root, segments[0])
+	info, err := os.Stat(candidate)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	defer source.Close()
-	reader, err := gzip.NewReader(source)
+	if info.IsDir() {
+		if len(segments) == 1 {
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", candidate)
+		}
+		return hostVirtualDir{root: candidate}.Lookup(segments[1:])
+	}
+	file := hostVirtualFile(candidate)
+	if len(segments) == 1 {
+		return file, nil
+	}
+	dir, err := openArchiveDir(file)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	defer reader.Close()
-	base := strings.TrimSuffix(filepath.Base(hostPath), ".gz")
-	if base == filepath.Base(hostPath) {
-		base = base + ".decompressed"
-	}
-	target, err := os.CreateTemp("", "memcp-vfs-"+base+"-*")
-	if err != nil {
-		return "", err
-	}
-	defer target.Close()
-	if _, err := io.Copy(target, reader); err != nil {
-		return "", err
-	}
-	return target.Name(), nil
+	return dir.Lookup(segments[1:])
 }
 
-func extractZipToDir(virtualPath string, hostPath string) (string, error) {
-	reader, err := zip.OpenReader(hostPath)
+// Lookup rescans the tar headers each time it descends into a directory; for
+// deeply nested paths this becomes O(depth*entries). Fine for small pg_dump
+// archives (tens of entries); revisit if larger archives become a hot path.
+func (d tarVirtualDir) Lookup(segments []string) (virtualFile, error) {
+	target := joinArchivePath(d.prefix, segments[0])
+	source, err := d.archive.Open()
 	if err != nil {
-		return "", err
-	}
-	defer reader.Close()
-	targetDir, err := os.MkdirTemp("", "memcp-vfs-zip-*")
-	if err != nil {
-		return "", err
-	}
-	for _, file := range reader.File {
-		relPath, err := sanitizeArchiveMemberPath(file.Name)
-		if err != nil {
-			return "", fmt.Errorf("zip %s: %w", virtualPath, err)
-		}
-		targetPath := filepath.Join(targetDir, relPath)
-		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return "", err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-			return "", err
-		}
-		in, err := file.Open()
-		if err != nil {
-			return "", err
-		}
-		if err := writeStreamToFile(targetPath, in, file.Mode()); err != nil {
-			in.Close()
-			return "", err
-		}
-		in.Close()
-	}
-	return targetDir, nil
-}
-
-func extractTarToDir(virtualPath string, hostPath string) (string, error) {
-	source, err := os.Open(hostPath)
-	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer source.Close()
 	reader := tar.NewReader(source)
-	targetDir, err := os.MkdirTemp("", "memcp-vfs-tar-*")
-	if err != nil {
-		return "", err
-	}
+	hasChildren := false
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		relPath, err := sanitizeArchiveMemberPath(header.Name)
+		memberPath, err := sanitizeArchiveMemberPath(header.Name)
 		if err != nil {
-			return "", fmt.Errorf("tar %s: %w", virtualPath, err)
+			return nil, err
 		}
-		targetPath := filepath.Join(targetDir, relPath)
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return "", err
+		if memberPath == target {
+			if header.FileInfo().IsDir() {
+				if len(segments) == 1 {
+					return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+				}
+				return tarVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
 			}
-		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-				return "", err
+			file := tarVirtualFile{archive: d.archive, member: target}
+			if len(segments) == 1 {
+				return file, nil
 			}
-			if err := writeStreamToFile(targetPath, reader, os.FileMode(header.Mode)); err != nil {
-				return "", err
+			dir, err := openArchiveDir(file)
+			if err != nil {
+				return nil, err
 			}
+			return dir.Lookup(segments[1:])
+		}
+		if strings.HasPrefix(memberPath, target+"/") {
+			hasChildren = true
 		}
 	}
-	return targetDir, nil
+	if hasChildren {
+		if len(segments) == 1 {
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+		}
+		return tarVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
+	}
+	return nil, os.ErrNotExist
+}
+
+func (d zipVirtualDir) Lookup(segments []string) (virtualFile, error) {
+	target := joinArchivePath(d.prefix, segments[0])
+	archive, err := openZipArchive(d.archive)
+	if err != nil {
+		return nil, err
+	}
+	defer archive.close()
+	hasChildren := false
+	for _, file := range archive.files {
+		memberPath, err := sanitizeArchiveMemberPath(file.Name)
+		if err != nil {
+			return nil, err
+		}
+		if memberPath == target {
+			if file.FileInfo().IsDir() {
+				if len(segments) == 1 {
+					return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+				}
+				return zipVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
+			}
+			child := zipVirtualFile{archive: d.archive, member: target}
+			if len(segments) == 1 {
+				return child, nil
+			}
+			dir, err := openArchiveDir(child)
+			if err != nil {
+				return nil, err
+			}
+			return dir.Lookup(segments[1:])
+		}
+		if strings.HasPrefix(memberPath, target+"/") {
+			hasChildren = true
+		}
+	}
+	if hasChildren {
+		if len(segments) == 1 {
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+		}
+		return zipVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
+	}
+	return nil, os.ErrNotExist
+}
+
+func detectArchiveKind(file virtualFile) (string, error) {
+	lower := strings.ToLower(file.Name())
+	switch {
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"), strings.HasSuffix(lower, ".gz"):
+		return "gz", nil
+	case strings.HasSuffix(lower, ".zip"):
+		return "zip", nil
+	case strings.HasSuffix(lower, ".tar"):
+		return "tar", nil
+	default:
+		stream, err := file.Open()
+		if err != nil {
+			return "", err
+		}
+		defer stream.Close()
+		header := make([]byte, 512)
+		n, err := io.ReadFull(stream, header)
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			return "", err
+		}
+		header = header[:n]
+		if len(header) >= 2 && header[0] == 0x1f && header[1] == 0x8b {
+			return "gz", nil
+		}
+		if len(header) >= 4 && string(header[:4]) == "PK\x03\x04" {
+			return "zip", nil
+		}
+		if len(header) >= 262 && string(header[257:262]) == "ustar" {
+			return "tar", nil
+		}
+		return "", nil
+	}
+}
+
+func openArchiveDir(file virtualFile) (virtualDir, error) {
+	kind, err := detectArchiveKind(file)
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case "zip":
+		return zipVirtualDir{archive: file, prefix: ""}, nil
+	case "tar":
+		return tarVirtualDir{archive: file, prefix: ""}, nil
+	case "gz":
+		decompressed := gzipVirtualFile{base: file}
+		innerKind, err := detectArchiveKind(decompressed)
+		if err != nil {
+			return nil, err
+		}
+		switch innerKind {
+		case "zip":
+			return zipVirtualDir{archive: decompressed, prefix: ""}, nil
+		case "tar":
+			return tarVirtualDir{archive: decompressed, prefix: ""}, nil
+		default:
+			return nil, fmt.Errorf("open archive dir: %s decompresses to a plain file", file.Name())
+		}
+	default:
+		return nil, fmt.Errorf("open archive dir: %s is not a supported archive", file.Name())
+	}
+}
+
+func openZipArchive(file virtualFile) (*zipArchive, error) {
+	if host, ok := file.(hostVirtualFile); ok {
+		reader, err := zip.OpenReader(string(host))
+		if err != nil {
+			return nil, err
+		}
+		return &zipArchive{
+			files: reader.File,
+			close: reader.Close,
+		}, nil
+	}
+	stream, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	return &zipArchive{
+		files: reader.File,
+		close: func() error { return nil },
+	}, nil
 }
 
 func sanitizeArchiveMemberPath(name string) (string, error) {
-	clean := filepath.Clean(name)
+	clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
 	if clean == "." || clean == "" {
 		return "", nil
 	}
-	if filepath.IsAbs(clean) {
+	if strings.HasPrefix(clean, "/") {
 		return "", fmt.Errorf("absolute archive member path %s is not allowed", name)
 	}
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+	if clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("archive member path %s escapes extraction root", name)
 	}
 	return clean, nil
 }
 
-func writeStreamToFile(targetPath string, source io.Reader, mode os.FileMode) error {
-	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode|0o600)
-	if err != nil {
-		return err
+func joinArchivePath(prefix string, name string) string {
+	if prefix == "" {
+		return name
 	}
-	defer target.Close()
-	_, err = io.Copy(target, source)
-	return err
+	return prefix + "/" + name
 }
 
 func getReadfile(path string) func(a ...scm.Scmer) scm.Scmer {
@@ -446,11 +640,8 @@ func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
 		filename := resolveIOPath(path, scm.String(a[0]))
-		hostPath, err := materializeVirtualPath(filename, false)
-		if err != nil {
-			panic(err)
-		}
-		if hostPath != filename {
+		hostPath, ok := resolveWatchPath(filename)
+		if !ok {
 			panic("watch does not support archive-backed virtual paths")
 		}
 		reread := func() {

@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -81,6 +82,101 @@ func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
 	)
 	if scm.ToBool(second) {
 		t.Fatal("second createtable should report created=false")
+	}
+}
+
+func TestRegisteredCreateTableTriggerRunsOnCreate(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-createtable-trigger-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	oldRegs := Settings.CreateTableTriggers
+	Settings.CreateTableTriggers = nil
+	defer func() { Settings.CreateTableTriggers = oldRegs }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tcreatetabletrigger")
+
+	CreateDatabase("tcreatetabletrigger", false)
+	body := buildFKProc(scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("insert"),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("table"),
+			scm.NewString("tcreatetabletrigger"),
+			scm.NewString(".hook"),
+		}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("list"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewInt(1)}),
+		}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
+		scm.NewProcStruct(scm.Proc{
+			Params: scm.NewSlice([]scm.Scmer{}),
+			Body:   scm.NewBool(true),
+			En:     &scm.Globalenv,
+		}),
+		scm.NewBool(true),
+	}))
+	callBuiltin(t, "createcreatetabletrigger",
+		scm.NewString("tcreatetabletrigger"),
+		scm.NewString(".hook"),
+		scm.NewString("seed"),
+		scm.NewString(""),
+		body,
+		scm.NewBool(false),
+	)
+	if _, err := json.Marshal(Settings); err != nil {
+		t.Fatalf("settings with registered create-table trigger must stay serializable: %v", err)
+	}
+
+	cols := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{
+			scm.NewString("column"),
+			scm.NewString("id"),
+			scm.NewString("int"),
+			scm.NewSlice(nil),
+			scm.NewSlice(nil),
+		}),
+	})
+	options := scm.NewSlice([]scm.Scmer{scm.NewString("engine"), scm.NewString("sloppy")})
+	created := callBuiltin(t, "createtable",
+		scm.NewString("tcreatetabletrigger"),
+		scm.NewString(".hook"),
+		cols,
+		options,
+		scm.NewBool(true),
+	)
+	if !scm.ToBool(created) {
+		t.Fatal("createtable should report created=true")
+	}
+
+	tbl := GetDatabase("tcreatetabletrigger").GetTable(".hook")
+	if tbl == nil {
+		t.Fatal("expected created table")
+	}
+	if got := tbl.Count(); got != 1 {
+		t.Fatalf("create-table trigger should have inserted one row, got %d", got)
+	}
+
+	created = callBuiltin(t, "createtable",
+		scm.NewString("tcreatetabletrigger"),
+		scm.NewString(".hook"),
+		cols,
+		options,
+		scm.NewBool(true),
+	)
+	if scm.ToBool(created) {
+		t.Fatal("second createtable should report created=false")
+	}
+	if got := tbl.Count(); got != 1 {
+		t.Fatalf("existing table must not re-fire create-table trigger, got %d rows", got)
 	}
 }
 
