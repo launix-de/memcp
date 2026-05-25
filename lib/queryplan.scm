@@ -2389,6 +2389,17 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 			(list keytable_name kt_schema_def init_code nil)))
 )))
 
+/* keytable_inject_oninit: walk a keytable init-code expression and append
+oninit_thunk as the 6th argument to its (createtable ...) call. createtable
+then runs the thunk synchronously on first creation, so the caller never
+observes the keytable as created-but-empty (FAQ §32). Caller still keeps the
+surrounding (if keytable_init <fill>) guard so restart-recovery (existing but
+empty table) re-fills via the normal path. */
+(define keytable_inject_oninit (lambda (expr oninit_thunk) (match expr
+	(cons (quote createtable) rest) (cons (quote createtable) (merge rest (list oninit_thunk)))
+	(cons sym args) (cons (keytable_inject_oninit sym oninit_thunk) (map args (lambda (a) (keytable_inject_oninit a oninit_thunk))))
+	expr)))
+
 /* build_agg_window_plan: generates the full plan for aggregate window functions (SUM/COUNT/MIN/MAX OVER).
 Uses keytable infrastructure (same as GROUP BY): make_keytable + collect + createcolumn + scalar fetch.
 Result query runs on the BASE table; window_func expressions are replaced with scalar keytable scans. */
@@ -3258,11 +3269,14 @@ seeing the correctly prefixed outer alias. */
 								(begin
 									/* no-table with aggregates: inject virtual "(1)" one-row table.
 									Only mutate tables2_us and schemas2_us — groups2_us is set below. */
-									(define nt_virtual_init (list (quote begin)
+									/* createtable now runs the row insert synchronously via its oninit thunk
+									(6th arg) so the .(1) virtual table never becomes visible empty — FAQ §32. */
+									(define nt_virtual_init
 										(list (quote createtable) schema2_us "(1)"
 											(list (list "unique" "group" (list "1")) (list "column" "1" "any" '() '()))
-											(list "engine" "sloppy") true)
-										(list (quote insert) (list (quote table) schema2_us "(1)") (list "1") (list (list 1)) '() (list (quote lambda) '() true) true)))
+											(list "engine" "sloppy") true
+											(list (quote lambda) '()
+												(list (quote insert) (list (quote table) schema2_us "(1)") (list "1") (list (list 1)) '() (list (quote lambda) '() true) true))))
 									(if (or (nil? tables2_us) (equal? tables2_us '()))
 										(begin
 											(set tables2_us (list (list "(1)" schema2_us "(1)" false nil)))
