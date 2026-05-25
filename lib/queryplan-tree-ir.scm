@@ -700,12 +700,12 @@ ports the actual operator rules to the tree representation. */
 				(define us_orig_order (planner_tree_ir_window_effective_order tree us_stage_order_fallback))
 				(define us_orig_limit (planner_tree_ir_window_effective_limit tree us_stage_limit_fallback))
 				(define us_orig_offset (planner_tree_ir_window_effective_offset tree us_stage_offset_fallback))
-				(if (or
-					(not (nil? us_orig_limit))
-					(not (nil? us_orig_offset))
-					(and (not (nil? us_orig_order)) (not (equal? us_orig_order '()))))
-					nil /* inner LIMIT/ORDER on multi-table: not yet supported */
-					(begin
+				/* FAQ §43: ORDER BY / LIMIT / OFFSET per outer binding is realised by
+				planner_tree_ir_window_make_scalar_partition_stage below, which already
+				receives us_orig_order / us_orig_limit / us_orig_offset. The previous
+				nil-bailout for the multi-table case was a conservative guard from before
+				the partition-stage path covered multi-table inputs. */
+				(begin
 						(define us_inner_tbls (filter tables2_us (lambda (t) (match t '(a _ _ _ _) (has? us_inner_aliases a) false))))
 						(define us_rewrite_table_expr (lambda (expr)
 							(us_ria (us_ror expr))))
@@ -768,7 +768,7 @@ ports the actual operator rules to the tree representation. */
 						(if (not (equal? us_passthrough_schemas '()))
 							(sq_cache "schemas" (merge us_passthrough_schemas (coalesceNil (sq_cache "schemas") '()))))
 						(define us_subst (us_ria (us_rewrite_map_expr us_value_expr)))
-						(list us_subst us_tbl_entries))))))))))
+						(list us_subst us_tbl_entries)))))))))
 (define unnest_groupby_rule (lambda (tree subquery sq_cache target_expr tables2_us us_lookup us_alias_map us_ria us_has_stages us_own_stages us_inner_stages us_domain_cols us_inner_cond_raw schemas2_us us_value_expr us_has_grp us_accessing_tags us_select_info) (begin
 	/* === A: Aggregate -> flatten inner tables + scoped GROUP stage ===
 	Neumann Γ_{A∪D;f}: add domain cols to GROUP BY, flatten inner tables
