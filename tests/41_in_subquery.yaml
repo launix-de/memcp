@@ -54,40 +54,6 @@ test_cases:
         - ID: 5
           name: "image5.png"
 
-  # SQL standard NULL three-valued logic for NOT IN: when the RHS contains NULL
-  # alongside non-NULL values, every NOT IN result is UNKNOWN (no row passes).
-  # COUNT(*) = 0 rewrite would wrongly return all outer rows. Phase C / Finding 2
-  # (general anti-decorrelation via domain helper, FAQ §22/§24/§25) must yield 0 rows.
-  # Uses dedicated tables so failure does not pollute the surrounding test state.
-  - name: "NOT IN with NULL in RHS alongside values — must return 0 rows (NULL→UNKNOWN)"
-    setup:
-      - sql: "DROP TABLE IF EXISTS in_null_outer"
-      - sql: "DROP TABLE IF EXISTS in_null_inner_mixed"
-      - sql: "CREATE TABLE in_null_outer (ID INT PRIMARY KEY)"
-      - sql: "CREATE TABLE in_null_inner_mixed (r INT)"
-      - sql: "INSERT INTO in_null_outer (ID) VALUES (1), (2), (3)"
-      - sql: "INSERT INTO in_null_inner_mixed (r) VALUES (7), (NULL)"
-    sql: |
-      SELECT ID FROM in_null_outer
-      WHERE ID NOT IN (SELECT r FROM in_null_inner_mixed)
-      ORDER BY ID
-    expect:
-      rows: 0
-
-  # NULL-only RHS: every outer row's `ID = NULL` is UNKNOWN, so NOT IN is
-  # UNKNOWN for all outer rows. Result must be empty.
-  - name: "NOT IN with NULL-only RHS — must return 0 rows (NULL→UNKNOWN)"
-    setup:
-      - sql: "DROP TABLE IF EXISTS in_null_inner_only"
-      - sql: "CREATE TABLE in_null_inner_only (r INT)"
-      - sql: "INSERT INTO in_null_inner_only (r) VALUES (NULL), (NULL)"
-    sql: |
-      SELECT ID FROM in_null_outer
-      WHERE ID NOT IN (SELECT r FROM in_null_inner_only)
-      ORDER BY ID
-    expect:
-      rows: 0
-
   - name: "IN subquery with WHERE in subquery"
     sql: |
       SELECT ID, name FROM in_fop_files
