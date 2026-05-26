@@ -6,6 +6,8 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS in_renderjob"
+  - sql: "DROP TABLE IF EXISTS in_renderjob_n"
+  - sql: "DROP TABLE IF EXISTS in_renderjob_null_only"
   - sql: "DROP TABLE IF EXISTS in_fop_files"
   - sql: |
       CREATE TABLE in_fop_files (
@@ -18,12 +20,28 @@ setup:
         result INT
       )
   - sql: |
+      CREATE TABLE in_renderjob_n (
+        ID INT PRIMARY KEY,
+        result INT
+      )
+  - sql: |
+      CREATE TABLE in_renderjob_null_only (
+        ID INT PRIMARY KEY,
+        result INT
+      )
+  - sql: |
       INSERT INTO in_fop_files (ID, name) VALUES
       (1, 'image1.png'), (2, 'image2.png'), (3, 'image3.png'),
       (4, 'image4.png'), (5, 'image5.png')
   - sql: |
       INSERT INTO in_renderjob (ID, result) VALUES
       (101, 1), (102, 3), (103, 3)
+  - sql: |
+      INSERT INTO in_renderjob_n (ID, result) VALUES
+      (201, 1), (202, NULL)
+  - sql: |
+      INSERT INTO in_renderjob_null_only (ID, result) VALUES
+      (301, NULL), (302, NULL)
 
 test_cases:
   - name: "IN subquery - files with render results"
@@ -53,6 +71,48 @@ test_cases:
           name: "image4.png"
         - ID: 5
           name: "image5.png"
+
+  # === SQL three-valued NOT IN / IN with NULL in RHS ===
+  # SQL standard: `x NOT IN (..., NULL)` is UNKNOWN whenever no equality match
+  # found; UNKNOWN drops the row in a WHERE filter. `x IN (..., NULL)` is TRUE
+  # if any value matches, otherwise UNKNOWN (drops row).
+  # FAQ §22/§24: anti-semantics are per-domain-key absence; with NULL on the
+  # RHS that "absence" itself is UNKNOWN, not TRUE.
+
+  - name: "NOT IN with mixed NULL in RHS - all rows dropped (UNKNOWN)"
+    sql: |
+      SELECT ID, name FROM in_fop_files
+      WHERE ID NOT IN (SELECT result FROM in_renderjob_n)
+      ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "NOT IN with NULL-only RHS - all rows dropped (UNKNOWN)"
+    sql: |
+      SELECT ID, name FROM in_fop_files
+      WHERE ID NOT IN (SELECT result FROM in_renderjob_null_only)
+      ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "IN with mixed NULL in RHS - matching rows survive, others dropped"
+    sql: |
+      SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob_n)
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "image1.png"
+
+  - name: "IN with NULL-only RHS - all rows dropped (UNKNOWN)"
+    sql: |
+      SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob_null_only)
+      ORDER BY ID
+    expect:
+      rows: 0
 
   - name: "IN subquery with WHERE in subquery"
     sql: |
@@ -291,4 +351,6 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS in_renderjob"
+  - sql: "DROP TABLE IF EXISTS in_renderjob_n"
+  - sql: "DROP TABLE IF EXISTS in_renderjob_null_only"
   - sql: "DROP TABLE IF EXISTS in_fop_files"

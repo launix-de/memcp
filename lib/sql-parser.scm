@@ -999,6 +999,42 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 							nil
 							nil)))
 				_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
+	/* sql_semijoin_null_count_query: build COUNT(*) WHERE first_field IS NULL
+	for the same FROM/WHERE shape. Used by NOT IN / IN tri-valued semantics:
+	if the RHS has any NULL row that did not equal LHS, the result is UNKNOWN
+	(SQL NULL). Without this count we wrongly answer TRUE for `x NOT IN (..,NULL)`
+	when in fact the answer is UNKNOWN and the row must be dropped.
+	FAQ §22/§24: anti is per-domain-key absence; with NULLs in RHS,
+	"absence" is itself UNKNOWN. */
+	(define sql_semijoin_null_count_query (lambda (subquery) (begin
+		(define union_parts (sql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "sql_semijoin_null_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define first_field_expr (match f
+						(cons _ (cons v _)) v
+						nil))
+					(if (nil? first_field_expr)
+						(error (concat "sql_semijoin_null_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__null_cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (or (nil? c) (equal? c true))
+								(list (quote nil?) first_field_expr)
+								(list (quote and) c (list (quote nil?) first_field_expr)))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "sql_semijoin_null_count_query requires a select_core query: " (serialize subquery))))))))
 	(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
 		(begin
 			(define contains_inner_select_expr (lambda (expr) (match expr
@@ -1050,10 +1086,40 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 						(list (quote inner_select_in) target_expr subquery)))
 				(if (and (not (nil? union_parts)) (nil? target_expr))
 					count_expr
-					(list
-						(if negated (quote equal?) (quote >))
-						count_expr
-						0))))))
+					(if (nil? target_expr)
+						/* EXISTS / NOT EXISTS: no LHS, no NULL semantics needed */
+						(list
+							(if negated (quote equal?) (quote >))
+							count_expr
+							0)
+						/* IN / NOT IN: SQL tri-valued — match wins TRUE for IN /
+						FALSE for NOT IN; otherwise if any RHS row is NULL the
+						answer is UNKNOWN (NULL); otherwise NOT-match.
+						LHS itself NULL also yields UNKNOWN. */
+						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
+							/* UNION ALL IN/NOT IN with target_expr: leave for
+							finding-2 work; until then fall back to plain count
+							comparison (incorrect for NULL-in-branch). */
+							(list (if negated (quote equal?) (quote >)) count_expr 0)
+							(begin
+								(define null_count_expr
+									(list (quote inner_select)
+										(sql_semijoin_null_count_query subquery)))
+								(if negated
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											false
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												true)))
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											true
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												false))))))))))))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
 			(quote inner_select)

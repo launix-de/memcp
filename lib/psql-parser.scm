@@ -167,6 +167,38 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							nil
 							nil)))
 				_ (error (concat "psql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
+	/* psql_semijoin_null_count_query: COUNT(*) WHERE first_field IS NULL.
+	Mirrors sql_semijoin_null_count_query for the PostgreSQL parser. See
+	the SQL counterpart for the NOT IN / IN tri-valued rationale. */
+	(define psql_semijoin_null_count_query (lambda (subquery) (begin
+		(define union_parts (psql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "psql_semijoin_null_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define first_field_expr (match f
+						(cons _ (cons v _)) v
+						nil))
+					(if (nil? first_field_expr)
+						(error (concat "psql_semijoin_null_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__null_cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (or (nil? c) (equal? c true))
+								(list (quote nil?) first_field_expr)
+								(list (quote and) c (list (quote nil?) first_field_expr)))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "psql_semijoin_null_count_query requires a select_core query: " (serialize subquery))))))))
 	(define psql_semijoin_count_expr (lambda (subquery target_expr negated)
 		(begin
 			(define contains_inner_select_expr (lambda (expr) (match expr
@@ -218,10 +250,35 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(list (quote inner_select_in) target_expr subquery)))
 				(if (and (not (nil? union_parts)) (nil? target_expr))
 					count_expr
-					(list
-						(if negated (quote equal?) (quote >))
-						count_expr
-						0))))))
+					(if (nil? target_expr)
+						/* EXISTS / NOT EXISTS: no LHS, no NULL tri-valued shape */
+						(list
+							(if negated (quote equal?) (quote >))
+							count_expr
+							0)
+						/* IN / NOT IN: SQL tri-valued NULL handling. See
+						sql_semijoin_count_expr in sql-parser.scm for full rationale. */
+						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
+							(list (if negated (quote equal?) (quote >)) count_expr 0)
+							(begin
+								(define null_count_expr
+									(list (quote inner_select)
+										(psql_semijoin_null_count_query subquery)))
+								(if negated
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											false
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												true)))
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											true
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												false))))))))))))
 
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
