@@ -22,6 +22,10 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package main
 
+import "archive/tar"
+import "archive/zip"
+import "bytes"
+import "compress/gzip"
 import "os"
 import "io"
 import "fmt"
@@ -35,6 +39,7 @@ import "io/ioutil"
 import "strings"
 import "os/signal"
 import "crypto/rand"
+import "path"
 import "path/filepath"
 import "runtime/pprof"
 import "runtime/debug"
@@ -49,10 +54,503 @@ var IOEnv scm.Env
 // printLogFunc is set after lib load to route (print) output to storage.
 var printLogFunc func(string)
 
+type virtualFile interface {
+	Name() string
+	Open() (io.ReadCloser, error)
+}
+
+type virtualDir interface {
+	Lookup([]string) (virtualFile, error)
+}
+
+type hostVirtualFile string
+
+func (f hostVirtualFile) Name() string {
+	return string(f)
+}
+
+func (f hostVirtualFile) Open() (io.ReadCloser, error) {
+	return os.Open(string(f))
+}
+
+type gzipVirtualFile struct {
+	base virtualFile
+	name string
+}
+
+func (f gzipVirtualFile) Name() string {
+	if f.name != "" {
+		return f.name
+	}
+	base := f.base.Name()
+	if strings.HasSuffix(strings.ToLower(base), ".gz") {
+		return strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	return base
+}
+
+func (f gzipVirtualFile) Open() (io.ReadCloser, error) {
+	baseReader, err := f.base.Open()
+	if err != nil {
+		return nil, err
+	}
+	reader, err := gzip.NewReader(baseReader)
+	if err != nil {
+		baseReader.Close()
+		return nil, err
+	}
+	return &compositeReadCloser{
+		Reader: reader,
+		closeFunc: func() error {
+			err1 := reader.Close()
+			err2 := baseReader.Close()
+			if err1 != nil {
+				return err1
+			}
+			return err2
+		},
+	}, nil
+}
+
+type tarVirtualFile struct {
+	archive virtualFile
+	member  string
+}
+
+func (f tarVirtualFile) Name() string {
+	return f.member
+}
+
+// Open scans the tar archive header by header to locate the requested member.
+// Resolving N members costs O(N*entries); acceptable for small pg_dump archives
+// but would need an index for large archives.
+func (f tarVirtualFile) Open() (io.ReadCloser, error) {
+	source, err := f.archive.Open()
+	if err != nil {
+		return nil, err
+	}
+	reader := tar.NewReader(source)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			source.Close()
+			return nil, os.ErrNotExist
+		}
+		if err != nil {
+			source.Close()
+			return nil, err
+		}
+		memberPath, err := sanitizeArchiveMemberPath(header.Name)
+		if err != nil {
+			source.Close()
+			return nil, err
+		}
+		if memberPath != f.member {
+			continue
+		}
+		if header.FileInfo().IsDir() {
+			source.Close()
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", f.member)
+		}
+		return &compositeReadCloser{
+			Reader: reader,
+			closeFunc: func() error {
+				return source.Close()
+			},
+		}, nil
+	}
+}
+
+type zipVirtualFile struct {
+	archive virtualFile
+	member  string
+}
+
+func (f zipVirtualFile) Name() string {
+	return f.member
+}
+
+func (f zipVirtualFile) Open() (io.ReadCloser, error) {
+	archive, err := openZipArchive(f.archive)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range archive.files {
+		memberPath, err := sanitizeArchiveMemberPath(file.Name)
+		if err != nil {
+			archive.close()
+			return nil, err
+		}
+		if memberPath != f.member {
+			continue
+		}
+		stream, err := file.Open()
+		if err != nil {
+			archive.close()
+			return nil, err
+		}
+		return &compositeReadCloser{
+			Reader: stream,
+			closeFunc: func() error {
+				err1 := stream.Close()
+				err2 := archive.close()
+				if err1 != nil {
+					return err1
+				}
+				return err2
+			},
+		}, nil
+	}
+	archive.close()
+	return nil, os.ErrNotExist
+}
+
+type hostVirtualDir struct {
+	root string
+}
+
+type tarVirtualDir struct {
+	archive virtualFile
+	prefix  string
+}
+
+type zipVirtualDir struct {
+	archive virtualFile
+	prefix  string
+}
+
+type compositeReadCloser struct {
+	io.Reader
+	closeFunc func() error
+}
+
+func (c *compositeReadCloser) Close() error {
+	return c.closeFunc()
+}
+
+type zipArchive struct {
+	files []*zip.File
+	close func() error
+}
+
+func resolveIOPath(path string, name string) string {
+	if filepath.IsAbs(name) {
+		return filepath.Clean(name)
+	}
+	return filepath.Join(path, name)
+}
+
+func openStream(path string) (io.ReadCloser, error) {
+	file, err := resolveVirtualFile(path, true)
+	if err != nil {
+		return nil, err
+	}
+	return file.Open()
+}
+
+func readVirtualFile(path string) ([]byte, error) {
+	stream, err := openStream(path)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	return io.ReadAll(stream)
+}
+
+func splitVirtualPath(pathname string) (string, []string) {
+	cleanPath := filepath.Clean(pathname)
+	root := "."
+	rest := cleanPath
+	if filepath.IsAbs(cleanPath) {
+		root = filepath.VolumeName(cleanPath) + string(os.PathSeparator)
+		rest = strings.TrimPrefix(cleanPath, root)
+	}
+	segments := make([]string, 0)
+	for _, segment := range strings.Split(rest, string(os.PathSeparator)) {
+		if segment != "" && segment != "." {
+			segments = append(segments, segment)
+		}
+	}
+	return root, segments
+}
+
+func resolveVirtualFile(pathname string, decompressFinalGzip bool) (virtualFile, error) {
+	root, segments := splitVirtualPath(pathname)
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("open stream: %s resolves to a directory", pathname)
+	}
+	file, err := hostVirtualDir{root: root}.Lookup(segments)
+	if err != nil {
+		return nil, err
+	}
+	if !decompressFinalGzip {
+		return file, nil
+	}
+	kind, err := detectArchiveKind(file)
+	if err != nil {
+		return nil, err
+	}
+	if kind == "gz" {
+		return gzipVirtualFile{base: file}, nil
+	}
+	return file, nil
+}
+
+func resolveWatchPath(pathname string) (string, bool) {
+	root, segments := splitVirtualPath(pathname)
+	current := root
+	for i, segment := range segments {
+		candidate := filepath.Join(current, segment)
+		info, err := os.Stat(candidate)
+		if err != nil {
+			return "", false
+		}
+		current = candidate
+		if i < len(segments)-1 && !info.IsDir() {
+			return "", false
+		}
+	}
+	return current, true
+}
+
+func (d hostVirtualDir) Lookup(segments []string) (virtualFile, error) {
+	candidate := filepath.Join(d.root, segments[0])
+	info, err := os.Stat(candidate)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		if len(segments) == 1 {
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", candidate)
+		}
+		return hostVirtualDir{root: candidate}.Lookup(segments[1:])
+	}
+	file := hostVirtualFile(candidate)
+	if len(segments) == 1 {
+		return file, nil
+	}
+	dir, err := openArchiveDir(file)
+	if err != nil {
+		return nil, err
+	}
+	return dir.Lookup(segments[1:])
+}
+
+// Lookup rescans the tar headers each time it descends into a directory; for
+// deeply nested paths this becomes O(depth*entries). Fine for small pg_dump
+// archives (tens of entries); revisit if larger archives become a hot path.
+func (d tarVirtualDir) Lookup(segments []string) (virtualFile, error) {
+	target := joinArchivePath(d.prefix, segments[0])
+	source, err := d.archive.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close()
+	reader := tar.NewReader(source)
+	hasChildren := false
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		memberPath, err := sanitizeArchiveMemberPath(header.Name)
+		if err != nil {
+			return nil, err
+		}
+		if memberPath == target {
+			if header.FileInfo().IsDir() {
+				if len(segments) == 1 {
+					return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+				}
+				return tarVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
+			}
+			file := tarVirtualFile{archive: d.archive, member: target}
+			if len(segments) == 1 {
+				return file, nil
+			}
+			dir, err := openArchiveDir(file)
+			if err != nil {
+				return nil, err
+			}
+			return dir.Lookup(segments[1:])
+		}
+		if strings.HasPrefix(memberPath, target+"/") {
+			hasChildren = true
+		}
+	}
+	if hasChildren {
+		if len(segments) == 1 {
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+		}
+		return tarVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
+	}
+	return nil, os.ErrNotExist
+}
+
+func (d zipVirtualDir) Lookup(segments []string) (virtualFile, error) {
+	target := joinArchivePath(d.prefix, segments[0])
+	archive, err := openZipArchive(d.archive)
+	if err != nil {
+		return nil, err
+	}
+	defer archive.close()
+	hasChildren := false
+	for _, file := range archive.files {
+		memberPath, err := sanitizeArchiveMemberPath(file.Name)
+		if err != nil {
+			return nil, err
+		}
+		if memberPath == target {
+			if file.FileInfo().IsDir() {
+				if len(segments) == 1 {
+					return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+				}
+				return zipVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
+			}
+			child := zipVirtualFile{archive: d.archive, member: target}
+			if len(segments) == 1 {
+				return child, nil
+			}
+			dir, err := openArchiveDir(child)
+			if err != nil {
+				return nil, err
+			}
+			return dir.Lookup(segments[1:])
+		}
+		if strings.HasPrefix(memberPath, target+"/") {
+			hasChildren = true
+		}
+	}
+	if hasChildren {
+		if len(segments) == 1 {
+			return nil, fmt.Errorf("open stream: %s resolves to a directory", target)
+		}
+		return zipVirtualDir{archive: d.archive, prefix: target}.Lookup(segments[1:])
+	}
+	return nil, os.ErrNotExist
+}
+
+func detectArchiveKind(file virtualFile) (string, error) {
+	lower := strings.ToLower(file.Name())
+	switch {
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"), strings.HasSuffix(lower, ".gz"):
+		return "gz", nil
+	case strings.HasSuffix(lower, ".zip"):
+		return "zip", nil
+	case strings.HasSuffix(lower, ".tar"):
+		return "tar", nil
+	default:
+		stream, err := file.Open()
+		if err != nil {
+			return "", err
+		}
+		defer stream.Close()
+		header := make([]byte, 512)
+		n, err := io.ReadFull(stream, header)
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			return "", err
+		}
+		header = header[:n]
+		if len(header) >= 2 && header[0] == 0x1f && header[1] == 0x8b {
+			return "gz", nil
+		}
+		if len(header) >= 4 && string(header[:4]) == "PK\x03\x04" {
+			return "zip", nil
+		}
+		if len(header) >= 262 && string(header[257:262]) == "ustar" {
+			return "tar", nil
+		}
+		return "", nil
+	}
+}
+
+func openArchiveDir(file virtualFile) (virtualDir, error) {
+	kind, err := detectArchiveKind(file)
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case "zip":
+		return zipVirtualDir{archive: file, prefix: ""}, nil
+	case "tar":
+		return tarVirtualDir{archive: file, prefix: ""}, nil
+	case "gz":
+		decompressed := gzipVirtualFile{base: file}
+		innerKind, err := detectArchiveKind(decompressed)
+		if err != nil {
+			return nil, err
+		}
+		switch innerKind {
+		case "zip":
+			return zipVirtualDir{archive: decompressed, prefix: ""}, nil
+		case "tar":
+			return tarVirtualDir{archive: decompressed, prefix: ""}, nil
+		default:
+			return nil, fmt.Errorf("open archive dir: %s decompresses to a plain file", file.Name())
+		}
+	default:
+		return nil, fmt.Errorf("open archive dir: %s is not a supported archive", file.Name())
+	}
+}
+
+func openZipArchive(file virtualFile) (*zipArchive, error) {
+	if host, ok := file.(hostVirtualFile); ok {
+		reader, err := zip.OpenReader(string(host))
+		if err != nil {
+			return nil, err
+		}
+		return &zipArchive{
+			files: reader.File,
+			close: reader.Close,
+		}, nil
+	}
+	stream, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	return &zipArchive{
+		files: reader.File,
+		close: func() error { return nil },
+	}, nil
+}
+
+func sanitizeArchiveMemberPath(name string) (string, error) {
+	clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
+	if clean == "." || clean == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(clean, "/") {
+		return "", fmt.Errorf("absolute archive member path %s is not allowed", name)
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("archive member path %s escapes extraction root", name)
+	}
+	return clean, nil
+}
+
+func joinArchivePath(prefix string, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + "/" + name
+}
+
 func getReadfile(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		filename := filepath.Join(path, scm.String(a[0]))
-		data, err := os.ReadFile(filename)
+		filename := resolveIOPath(path, scm.String(a[0]))
+		data, err := readVirtualFile(filename)
 		if err != nil {
 			panic("readfile: " + err.Error())
 		}
@@ -62,12 +560,12 @@ func getReadfile(path string) func(a ...scm.Scmer) scm.Scmer {
 
 func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		filename := filepath.Join(path, scm.String(a[0]))
+		filename := resolveIOPath(path, scm.String(a[0]))
 		// TODO: filepath.Walk for wildcards
 		wd := filepath.Dir(filename)
 		otherPath := scm.Env{
 			Vars: scm.Vars{
-				"__DIR__":     scm.NewString(path),
+				"__DIR__":     scm.NewString(wd),
 				"__FILE__":    scm.NewString(filename),
 				"import":      scm.NewFunc(getImport(wd)),
 				"load":        scm.NewFunc(getLoad(wd)),
@@ -80,7 +578,7 @@ func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 			Outer:        &IOEnv,
 			Nodefine:     true,
 		}
-		bytes, err := ioutil.ReadFile(filename)
+		bytes, err := readVirtualFile(filename)
 		if err != nil {
 			panic(err)
 		}
@@ -90,8 +588,8 @@ func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 
 func getStream(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		filename := filepath.Join(path, scm.String(a[0]))
-		stream, err := os.Open(filename)
+		filename := resolveIOPath(path, scm.String(a[0]))
+		stream, err := openStream(filename)
 		if err != nil {
 			panic(err)
 		}
@@ -141,10 +639,13 @@ func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 
 func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		filename := filepath.Join(path, scm.String(a[0]))
+		filename := resolveIOPath(path, scm.String(a[0]))
+		hostPath, ok := resolveWatchPath(filename)
+		if !ok {
+			panic("watch does not support archive-backed virtual paths")
+		}
 		reread := func() {
-			// read in whole
-			bytes, err := ioutil.ReadFile(filename)
+			bytes, err := readVirtualFile(filename)
 			if err != nil {
 				panic(err)
 			}
@@ -181,11 +682,11 @@ func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 						}()
 						reread()
 					}()
-					watcher.Add(filename) // text editors rename, so we have to rewatch
+					watcher.Add(hostPath) // text editors rename, so we have to rewatch
 				}
 			}
 		}()
-		err = watcher.Add(filename)
+		err = watcher.Add(hostPath)
 		if err != nil {
 			panic(err)
 		}
@@ -275,10 +776,10 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "import",
 		Desc: "Imports a file .scm file into current namespace",
-		Fn: (func(...scm.Scmer) scm.Scmer)(getImport(wd)),
+		Fn:   (func(...scm.Scmer) scm.Scmer)(getImport(wd)),
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file"},
+				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file or absolute path"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -286,10 +787,10 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "load",
 		Desc: "Loads a file or stream and returns the string or iterates line-wise",
-		Fn: (func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
+		Fn:   (func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string|stream", ParamName: "filenameOrStream", ParamDesc: "filename relative to folder of source file or stream to read from"},
+				{Kind: "string|stream", ParamName: "filenameOrStream", ParamDesc: "filename relative to folder of source file, absolute path, or stream to read from"},
 				{Kind: "func", ParamName: "linehandler", ParamDesc: "handler that reads each line; each line may end with delimiter", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "line"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "string", ParamName: "delimiter", ParamDesc: "delimiter to extract; if no delimiter is given, the file is read as whole and returned or passed to linehandler", Optional: true},
 			},
@@ -299,10 +800,10 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "stream",
 		Desc: "Opens a file readonly as stream",
-		Fn: (func(...scm.Scmer) scm.Scmer)(getStream(wd)),
+		Fn:   (func(...scm.Scmer) scm.Scmer)(getStream(wd)),
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file"},
+				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file or absolute path"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "stream"},
 		},
@@ -310,10 +811,10 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "watch",
 		Desc: "Loads a file and calls the callback. Whenever the file changes on disk, the file is load again.",
-		Fn: (func(...scm.Scmer) scm.Scmer)(getWatch(wd)),
+		Fn:   (func(...scm.Scmer) scm.Scmer)(getWatch(wd)),
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file"},
+				{Kind: "string", ParamName: "filename", ParamDesc: "filename relative to folder of source file or absolute path"},
 				{Kind: "func", ParamName: "updatehandler", ParamDesc: "handler that receives the file content func(content)", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "content"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
@@ -322,7 +823,7 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "serve",
 		Desc: "Opens a HTTP server at a given port",
-		Fn: scm.HTTPServe,
+		Fn:   scm.HTTPServe,
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", ParamName: "port", ParamDesc: "port number for HTTP server"},
@@ -334,7 +835,7 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "serveStatic",
 		Desc: "creates a static handler for use as a callback in (serve) - returns a handler lambda(req res)",
-		Fn: (func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),
+		Fn:   (func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "directory", ParamDesc: "folder with the files to serve"},
@@ -351,7 +852,7 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "mysql",
 		Desc: "Imports a file .scm file into current namespace",
-		Fn: scm.MySQLServe,
+		Fn:   scm.MySQLServe,
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", ParamName: "port", ParamDesc: "port number for MySQL server"},
@@ -365,7 +866,7 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "mysql_socket",
 		Desc: "Listen on a Unix domain socket for MySQL protocol",
-		Fn: scm.MySQLServeSocket,
+		Fn:   scm.MySQLServeSocket,
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "socketpath", ParamDesc: "path to the Unix domain socket"},
@@ -379,13 +880,13 @@ func setupIO(wd string) {
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "password",
 		Desc: "Hashes a password with sha1 (for mysql user authentication)",
-		Fn: scm.MySQLPassword,
+		Fn:   scm.MySQLPassword,
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "password", ParamDesc: "plain text password to hash"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
@@ -412,7 +913,7 @@ func setupIO(wd string) {
 		Name: "crash",
 		Desc: "Hard process exit with no cleanup (kill -9 equivalent) for crash testing. SCM only, not exposed to SQL.",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			os.Exit(137) // 128 + SIGKILL(9)
+			os.Exit(137)              // 128 + SIGKILL(9)
 			return scm.NewBool(false) // unreachable
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,

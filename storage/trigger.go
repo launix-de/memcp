@@ -34,6 +34,7 @@ const (
 	AfterDropTable
 	AfterDropColumn
 	AfterInvalidate // fired when a computed column is invalidated; propagates cache invalidation
+	AfterCreateTable
 )
 
 func (tt TriggerTiming) String() string {
@@ -56,6 +57,8 @@ func (tt TriggerTiming) String() string {
 		return "AFTER DROP COLUMN"
 	case AfterInvalidate:
 		return "AFTER INVALIDATE"
+	case AfterCreateTable:
+		return "AFTER CREATE TABLE"
 	default:
 		return "UNKNOWN"
 	}
@@ -82,6 +85,8 @@ func (tt TriggerTiming) MarshalJSON() ([]byte, error) {
 		s = "after_drop_column"
 	case AfterInvalidate:
 		s = "after_invalidate"
+	case AfterCreateTable:
+		s = "after_create_table"
 	default:
 		return nil, errors.New("unknown trigger timing")
 	}
@@ -111,6 +116,8 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 			*tt = AfterDropColumn
 		case "after_invalidate":
 			*tt = AfterInvalidate
+		case "after_create_table":
+			*tt = AfterCreateTable
 		default:
 			return errors.New("unknown trigger timing: " + s)
 		}
@@ -121,7 +128,7 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &n); err != nil {
 		return errors.New("trigger timing must be string or number")
 	}
-	if n > uint8(AfterInvalidate) {
+	if n > uint8(AfterCreateTable) {
 		return fmt.Errorf("unknown trigger timing number: %d", n)
 	}
 	*tt = TriggerTiming(n)
@@ -592,7 +599,7 @@ func (t *table) rowToDictWithColumns(row dataset, columns []string) scm.Scmer {
 	return scm.NewFastDict(fd)
 }
 
-// ExecuteTableLifecycleTriggers executes AfterDropTable or AfterDropColumn triggers.
+// ExecuteTableLifecycleTriggers executes non-row-level table lifecycle triggers.
 // These are non-row-level triggers: OLD and NEW are both nil.
 func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming) {
 	triggers := t.GetTriggers(timing)
@@ -609,6 +616,22 @@ func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming) {
 			}()
 			scm.Apply(tr.Func, scm.NewNil(), scm.NewNil(), session)
 		}()
+	}
+}
+
+func executeRegisteredCreateTableTriggers(t *table) {
+	registrations := getCreateTableTriggers(t.schema.Name, t.Name)
+	if len(registrations) == 0 {
+		return
+	}
+	session := txSessionScmer(CurrentTx())
+	for _, reg := range registrations {
+		trigger := reg.triggerDescription()
+		finalizeTriggerCompilation(&trigger)
+		if triggerScmerMissing(trigger.Func) {
+			continue
+		}
+		scm.Apply(trigger.Func, scm.NewNil(), scm.NewNil(), session)
 	}
 }
 

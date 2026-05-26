@@ -411,6 +411,8 @@ func triggerTimingSQL(timing TriggerTiming) string {
 		return "AFTER DROP COLUMN"
 	case AfterInvalidate:
 		return "AFTER INVALIDATE"
+	case AfterCreateTable:
+		return "AFTER CREATE TABLE"
 	default:
 		panic("unknown trigger timing")
 	}

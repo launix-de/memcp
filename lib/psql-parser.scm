@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024, 2026  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -296,6 +296,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
 	)))
+	(define psql_setval_command (lambda (seq_name val is_called)
+		(match (replace seq_name "\"" "")
+			(regex "^[^.]+\\.(.*)_(.*?)_seq\\z" _ tbl col)
+			'((quote altercolumn) '((quote table) schema tbl) col "auto_increment"
+				'((quote if) is_called
+					val
+					'((quote if) '((quote >) val 1) '((quote -) val 1) 1)))
+			(error "unknown pg_catalog key: " seq_name))
+	))
 
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define psql_expression (parser (or
@@ -434,7 +443,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" psql_expression "," psql_expression "," psql_expression ")") nil) /* ignore */
-		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" psql_identifier "." (define key psql_identifier) "'" "," (define val psql_expression) "," psql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn '('table schema tbl) col "auto_increment" val) (error "unknown pg_catalog key: " key)))
+		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
+			(psql_setval_command seq_name val is_called))
 
 		(parser (atom "NULL" true) 'nil)
 		(parser (atom "TRUE" true) true)
@@ -861,7 +871,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				))
 				(define typeparams psql_column_attributes)
 			) (lambda (id) '((quote createcolumn) '('table schema id) col type dimensions (cons 'list typeparams))))
-			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) '((quote altertable) '('table schema id) "owner" owner)))
+			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) '('table schema id) "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '('table schema id) "engine" "memory")))
@@ -874,14 +884,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '('table schema id) "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '('table schema id) "auto_increment" ai)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier) (define body (or /* ALTER COLUMN */
-				(parser '((atom "ADD" true) (atom "GENERATED" true) (or '((atom "BY" true) (atom "DEFAULT" true)) (atom "ALWAYS" true)) (atom "AS" true) (atom "IDENTITY") "("
-					(atom "SEQUENCE" true) (atom "NAME" true) psql_identifier "." psql_identifier
-					(? (atom "START" true) (atom "WITH" true) psql_expression)
-					(? (atom "INCREMENT" true) (atom "BY" true) psql_expression)
-					(? (atom "NO" true) (atom "MINVALUE" true))
-					(? (atom "NO" true) (atom "MAXVALUE" true))
-					(? (atom "CACHE" true) psql_expression)
-					")") (lambda (col) (lambda (id) '((quote altercolumn) '('table schema id) col "auto_increment" true))))
 				/* Type and default changes */
 				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema id) col "type" type) '((quote altercolumn) '('table schema id) col "dimensions" dimensions)))))
 				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema id) col "default" def))))
@@ -894,6 +896,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
+		/* Bare `SELECT pg_catalog.setval(...)` from pg_dump must execute as DDL
+		   (alter auto_increment), not be wrapped as a SELECT projection. */
+		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
+			(psql_setval_command seq_name val is_called))
 		(parser (define query psql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder query))
@@ -901,12 +907,52 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_insert_into
 		psql_insert_select
 		psql_create_table
+		(parser '((atom "ALTER" true) (atom "TABLE" true) (? (atom "ONLY" true))
+			(define target (or
+				(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
+				(parser (define id psql_identifier) '(nil id))
+			))
+			(atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier)
+			(atom "ADD" true) (atom "GENERATED" true) (or '((atom "BY" true) (atom "DEFAULT" true)) (atom "ALWAYS" true))
+			(atom "AS" true) (atom "IDENTITY") "("
+			(atom "SEQUENCE" true) (atom "NAME" true) psql_identifier "." psql_identifier
+			(? (atom "START" true) (atom "WITH" true) psql_expression)
+			(? (atom "INCREMENT" true) (atom "BY" true) psql_expression)
+			(? (atom "NO" true) (atom "MINVALUE" true))
+			(? (atom "NO" true) (atom "MAXVALUE" true))
+			(? (atom "CACHE" true) psql_expression)
+			")")
+			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) id) col "auto_increment" true)))
+		(parser '((atom "ALTER" true) (atom "TABLE" true) (? (atom "ONLY" true))
+			(define target (or
+				(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
+				(parser (define id psql_identifier) '(nil id))
+			))
+			(atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier)
+			(atom "SET" true) (atom "DEFAULT" true) (atom "nextval" true) "(" psql_string "::" (atom "regclass" true) ")")
+			(match target '(schema2 id) '((quote altercolumn) '((quote table) (coalesce schema2 schema) id) col "auto_increment" true)))
 		psql_alter_table
 		psql_update
 		psql_delete
 		psql_truncate
 
-		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
+		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)
+			(? (atom "WITH" true) (* (or psql_identifier "=" psql_expression))))
+			(begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
+		(parser '((atom "CREATE" true) (atom "SCHEMA" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier))
+			(begin (if policy (policy "system" true true) true) '((quote createdatabase) id true)) )
+		(parser (regex "^[\\r\\n\\t ]*ALTER DATABASE (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER SCHEMA (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER FUNCTION (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE EXTENSION (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*COMMENT ON EXTENSION (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE SEQUENCE (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER SEQUENCE (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE UNIQUE INDEX (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE STATISTICS (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*CREATE TRIGGER (?s:.*)\\z") true)
+
 		/* CREATE USER/ROLE: support both MySQL (IDENTIFIED BY) and PostgreSQL (WITH PASSWORD / PASSWORD) syntax */
 		(parser '((atom "CREATE" true) (or (atom "USER" true) (atom "ROLE" true)) (define username psql_identifier)
 			(? (or
@@ -1096,7 +1142,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "SET" true) (atom "timezone" true) (or "=" (atom "TO" true)) (define tz psql_expression)) '((quote session) "time_zone" tz))
 
 
-		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id)))
+		(parser '((atom "DROP" true) (atom "DATABASE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id (if if_exists true false))))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname))
@@ -1134,41 +1180,189 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (define psql_copy_def (parser '(psql_identifier /* ignore */ "." (define tbl psql_identifier) "(" (define columns (+ psql_identifier ",")) ")") '(tbl columns)))
 
-(define load_psql (lambda (schema stream policy) (begin
+(define psql_path_dir (lambda (source)
+	(if (string? source)
+		(match source
+			(regex "^(.*)/[^/]+$" _ dir) (if (equal? dir "") "/" dir)
+			".")
+		nil)
+))
+
+(define psql_dump_sql_source (lambda (source)
+	(if (string? source)
+		(match source
+			(regex ".*\\.sql(?:\\.gz)?$" _) source
+			(concat source "/restore.sql"))
+		source)
+))
+
+(define psql_copy_unescape (lambda (s)
+	(replace
+		(replace
+			(replace
+				(replace
+					(replace s "\\n" "\n")
+					"\\t" "\t")
+				"\\r" "\r")
+			"\\b" "\b")
+		"\\\\" "\\")
+))
+
+(define psql_copy_decode_field (lambda (field raw_type)
+	(if (equal? field "\\N")
+		nil
+		(begin
+			(define unescaped (psql_copy_unescape field))
+			(match (toLower (coalesce raw_type ""))
+				"boolean" (match unescaped
+					"t" true
+					"f" false
+					unescaped)
+				unescaped)
+		)
+)))
+
+(define psql_copy_column_types (lambda (schema tbl columns) (begin
+	(define table_info (show schema tbl))
+	(map columns (lambda (col) (begin
+		(define col_info (find table_info (lambda (info) (equal?? (info "Field") col)) nil))
+		(toLower (coalesce (if col_info (col_info "RawType") nil) (if col_info (col_info "Type") nil) ""))
+	)))
+)))
+
+(define psql_copy_decode_row (lambda (fields column_types)
+	(map (produceN (count fields)) (lambda (i)
+		(psql_copy_decode_field (nth fields i) (nth column_types i))
+	))
+))
+
+(define psql_copy_insert_stream (lambda (schema tbl columns source) (begin
+	(define column_types (psql_copy_column_types schema tbl columns))
+	(insert (table schema tbl) columns
+		(map
+			(filter (split (readfile source) "\n") (lambda (line)
+				(and (not (equal? line "")) (not (equal? line "\\."))))
+			)
+			(lambda (line) (psql_copy_decode_row (split line "\t") column_types))))
+)))
+
+(define psql_skip_function_line (lambda (state psql_line line)
+	(match line
+		(concat b "$$;\n") (state "line" psql_line)
+		true
+)))
+
+(define psql_normalize_command (lambda (command)
+	(replace command "::character varying" "")
+))
+
+/* Best-effort schema retargeting for pg_dump output. Uses regex word
+boundaries so that schema names embedded inside larger identifiers are not
+accidentally rewritten. Only simple identifier characters are recognised
+for the source schema; quoted or unusual identifiers fall back to a plain
+substring replace (which is the historical behaviour). */
+(define psql_retarget_command (lambda (command source_schema target_schema)
+	(if (or (nil? source_schema) (equal? source_schema target_schema))
+		command
+		(begin
+			(define target_ref (match target_schema
+				(regex "^[a-zA-Z_][a-zA-Z0-9_]*$" _) target_schema
+				(concat "\"" target_schema "\"")))
+			(if (match source_schema (regex "^[a-zA-Z_][a-zA-Z0-9_]*$" _) true false)
+				(regexp_replace
+					(regexp_replace
+						(regexp_replace command
+							(concat "\\b" source_schema "\\.") (concat target_ref "."))
+						(concat "\\bDATABASE\\s+" source_schema "\\b") (concat "DATABASE " target_ref))
+					(concat "\\bSCHEMA\\s+" source_schema "\\b") (concat "SCHEMA " target_ref))
+				(replace
+					(replace
+						(replace command (concat source_schema ".") (concat target_ref "."))
+						(concat "DATABASE " source_schema) (concat "DATABASE " target_ref))
+					(concat "SCHEMA " source_schema) (concat "SCHEMA " target_ref)))))
+))
+
+(define psql_handle_copy_path (lambda (schema source_dir def path) (begin
+	(match (psql_copy_def def) '(tbl columns) (begin
+		(if source_dir
+			(psql_copy_insert_stream schema tbl columns (replace path "$$PATH$$" source_dir))
+			(error "load_psql: COPY FROM path requires a path source"))
+	))
+)))
+
+(define psql_import_createdatabase_name (lambda (plan)
+	(match plan
+		(cons op (cons id tail)) (if (equal? op (quote createdatabase)) id nil)
+		nil)
+))
+
+(define psql_import_dropdatabase (lambda (plan)
+	(match plan
+		(cons op tail) (equal? op (quote dropdatabase))
+		false)
+))
+
+(define psql_import_plan (lambda (schema dump_schema command policy) (begin
+	(define raw_plan (parse_psql schema command policy))
+	(define created_schema (psql_import_createdatabase_name raw_plan))
+	(if created_schema
+		(list (coalesce dump_schema created_schema) '((quote createdatabase) schema true))
+		(if (psql_import_dropdatabase raw_plan)
+			(list dump_schema true)
+			(list dump_schema
+				(if dump_schema
+					(parse_psql schema (psql_retarget_command command dump_schema schema) policy)
+					raw_plan))))
+)))
+
+(define psql_eval_import_command (lambda (schema source_dir dump_schema command policy) (begin
+	(match command
+		(regex "^[\\r\\n\\t ]*COPY (.*) FROM '([^']+)'\\z" _ def path)
+		(begin
+			(psql_handle_copy_path schema source_dir def path)
+			dump_schema)
+		(match (psql_import_plan schema dump_schema command policy) '(next_dump_schema plan) (begin
+			(eval plan)
+			next_dump_schema)))
+)))
+
+(define load_psql (lambda (schema source policy) (begin
 	(set state (newsession))
 	(set resultrow print)
 	(set session (newsession))
+	(set source_sql (psql_dump_sql_source source))
+	(set source_dir (psql_path_dir source_sql))
+	(state "dump_schema" nil)
 	(define psql_line (lambda (line) (begin
 		(match line
-			(concat "--" b) /* comment */ false
-			(concat "COPY " def " FROM stdin;\n") (begin
-				/* public.cron (name, lastrun, medianruntime, id) */
-				(match (psql_copy_def def) '(tbl columns) (begin
-					/* (print "TODO: insert into " tbl columns) */
-					/* TODO: escape b 8 f 12 n 10 r 13 t 9 v 11 \324 octal \xFF hex */
-					(state "line" (lambda (line) (begin
-						(match line
-							"\\.\n" /* end of input */ (state "line" psql_line)
-							(concat x "\n") (insert (table schema tbl) columns '((split x "\t")))
-						)
-					)))
-				))
-			)
+			(concat "--" b) false
+			(concat "\\" b "\n") false
+			(concat "CREATE FUNCTION " b "\n")
+			(state "line" (lambda (line)
+				(psql_skip_function_line state psql_line line)))
+			(concat "COPY " def " FROM stdin;\n")
+			(match (psql_copy_def def) '(tbl columns) (begin
+				(define column_types (psql_copy_column_types schema tbl columns))
+				(state "line" (lambda (line) (begin
+					(match line
+						"\\.\n" (state "line" psql_line)
+						(concat x "\n") (insert (table schema tbl) columns (list (psql_copy_decode_row (split x "\t") column_types))))
+				)))
+			))
+			(concat "COPY " def " FROM '" path "';\n") (psql_handle_copy_path schema source_dir def path)
 			(concat start ";" rest) (begin
-				/* command ended -> execute (at max one command per line) */
-				(print (concat (state "sql") start))
-				(set plan (parse_psql schema (concat (state "sql") start) policy))
-				(print "SQL execute" plan)
-				(eval plan)
-				(state "sql" rest)
-			)
-			/* otherwise: append to cache */
-			(state "sql" (concat (state "sql") line))
-		)
+				(state "dump_schema" (psql_eval_import_command
+					schema
+					source_dir
+					(state "dump_schema")
+					(psql_normalize_command (concat (state "sql") start))
+					policy))
+				(state "sql" rest))
+			(state "sql" (concat (state "sql") line)))
 	)))
 	(state "line" psql_line)
 	(state "sql" "")
-	(load stream (lambda (line) (begin
+	(load source_sql (lambda (line) (begin
 		((state "line") line)
 	)) "\n")
 )))

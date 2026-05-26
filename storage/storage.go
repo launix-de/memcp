@@ -1100,8 +1100,10 @@ func Init(en scm.Env) {
 			}
 			db.saveLockedWithDurabilityAndUnlock(newTable.PersistencyMode == Safe)
 			registerCreatedTable(newTable)
+			executeRegisteredCreateTableTriggers(newTable)
 			// Run the optional initializer thunk synchronously so the caller never
-			// observes a created-but-empty table — FAQ §32.
+			// observes a created-but-empty table — FAQ §32. Runs AFTER the
+			// registered create-table triggers from master so global hooks fire first.
 			if len(a) > 5 && !oninit.IsNil() {
 				scm.Apply(oninit)
 			}
@@ -2436,6 +2438,74 @@ func Init(en scm.Env) {
 	})
 
 	// Trigger management
+	scm.Declare(&en, &scm.Declaration{
+		Name: "createcreatetabletrigger",
+		Desc: "registers a lifecycle trigger that fires synchronously after a future createtable for the given schema/table succeeds",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			body, deferredPlan := unwrapDeferredTriggerBody(a[4])
+			if triggerScmerMissing(body) && !triggerScmerMissing(deferredPlan) {
+				body = scm.Eval(deferredPlan, &scm.Globalenv)
+			}
+			if triggerScmerMissing(body) {
+				panic("create-table trigger body must not be empty")
+			}
+			trigger := TriggerDescription{
+				Name:      scm.String(a[2]),
+				Timing:    AfterCreateTable,
+				Func:      body,
+				SourceSQL: scm.String(a[3]),
+				Hidden:    !scm.ToBool(a[5]),
+			}
+			finalizeTriggerCompilation(&trigger)
+			registerCreateTableTrigger(CreateTableTriggerRegistration{
+				Schema:    scm.String(a[0]),
+				Table:     scm.String(a[1]),
+				Name:      trigger.Name,
+				SourceSQL: trigger.SourceSQL,
+				Hidden:    trigger.Hidden,
+				Priority:  trigger.Priority,
+				Async:     trigger.Async,
+				Func:      trigger.Func,
+			})
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
+				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to watch for creation"},
+				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
+				{Kind: "string", ParamName: "source_sql", ParamDesc: "original SQL body text (for diagnostics)"},
+				{Kind: "any", ParamName: "body", ParamDesc: "trigger body (Scheme procedure or deferred trigger expression)"},
+				{Kind: "bool", ParamName: "visible", ParamDesc: "true = user trigger, false = internal trigger"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "dropcreatetabletrigger",
+		Desc: "removes a registered create-table lifecycle trigger",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			table := scm.String(a[1])
+			name := scm.String(a[2])
+			if dropCreateTableTrigger(schema, table, name) {
+				return scm.NewBool(true)
+			}
+			if scm.ToBool(a[3]) {
+				return scm.NewBool(false)
+			}
+			panic("create-table trigger " + schema + "." + table + ":" + name + " does not exist")
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
+				{Kind: "string", ParamName: "table", ParamDesc: "name of the table watched for creation"},
+				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
+				{Kind: "bool", ParamName: "ifexists", ParamDesc: "don't throw error if trigger doesn't exist"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createtrigger",
 		Desc: "creates a new trigger on a table",
