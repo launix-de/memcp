@@ -9713,11 +9713,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(coalesce (keep_outer_field_early v) (replace_find_column v))
 						false))))
 				/* extract all get_column refs from group, fields, having, order, AND condition
-				(condition may reference unn_ tables whose columns must be in the prejoin) */
+				(condition may reference unn_ tables whose columns must be in the prejoin)
+				BUGFIX: `stage_post_group_condition` was an undefined symbol — fall-through
+				to nil meant HAVING column refs (e.g., `unn_*.budget` from a HAVING
+				correlated scalar subselect) were never collected into the prejoin,
+				causing "Column does not exist" runtime errors on tests like
+				106 HAVING. Use the in-scope `stage_having` (already replace_find_column
+				resolved) instead. */
 				(define all_referenced_columns (merge
 					(merge (map stage_group extract_all_get_columns))
 					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
-					(if (nil? stage_post_group_condition) '() (extract_all_get_columns stage_post_group_condition))
+					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
 					(extract_all_get_columns (coalesceNil raw_condition true))
 					(extract_all_get_columns (coalesceNil raw_post_group_condition true))
