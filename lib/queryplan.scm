@@ -5819,9 +5819,27 @@ lambda params, other refs become (outer alias.col) closure captures. */
 (define build_queryplan_term_from_logical (lambda (logical_term)
 	(build_queryplan_term_from_logical_with_sink logical_term '(resultrow))
 ))
-(define build_queryplan_term (lambda (query)
-	(build_queryplan_term_with_sink query '(resultrow))
-))
+(define build_queryplan_term (lambda (query) (begin
+	/* Opt-in gate for the BTW2025 neumann pipeline. When the flag is on
+	   AND the query is a SELECT 7-tuple AND the new pipeline supports its
+	   shape, route through neumann_compile_select first. The result is a
+	   clean 7-tuple with no inner_select markers — the subsequent legacy
+	   call to build_queryplan_term_with_sink sees no subquery work to do
+	   and just emits the standard physical plan.
+
+	   Per FAQ §1: when the flag is on and the shape is supported, the
+	   query is FULLY on the new path. There is no mixed execution. When
+	   the flag is on but the shape is NOT supported, the query stays on
+	   the legacy path (transitional architecture; once the pipeline is
+	   feature-complete this branch is removed). */
+	(define routed-query
+		(if (and neumann_pipeline_enabled
+				(qpp-tuple? query)
+				(neumann_pipeline_supports? query))
+			(neumann_compile_select query)
+			query))
+	(build_queryplan_term_with_sink routed-query '(resultrow))
+)))
 
 /* build_dml_plan: route UPDATE/DELETE through the full query planner pipeline.
 schema: target schema
