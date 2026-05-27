@@ -41,6 +41,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
    §3.3 rules. After this pass F(root) = ∅ and no qpir-dep-join remains. */
 (import "queryplan-unnest.scm")
 (import "queryplan-unnest-test.scm")
+/* Integration tests for the full L1→L2→L3 pipeline composition.
+   Until lower_to_scans + parser-wiring land, these snapshot tests are the
+   proof that the architecture works end-to-end on parser-shaped inputs. */
+(import "queryplan-pipeline-test.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
