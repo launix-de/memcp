@@ -24,6 +24,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "queryplan-ir.scm")
 (import "queryplan-ir-test.scm")
 (import "queryplan.scm")
+/* Layer 2 of the BTW2025 top-down compiler — 7-tuple normalization passes.
+   Loaded AFTER queryplan.scm because the passes delegate to existing helpers
+   (normalize_visible_aliases, canonicalize_columns_scoped). Once the legacy
+   untangle_query is deleted, those helpers move into queryplan-passes.scm. */
+(import "queryplan-passes.scm")
+(import "queryplan-passes-test.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
