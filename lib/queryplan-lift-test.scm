@@ -133,12 +133,22 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (count (qpir-groupby-aggs inner-gb)) 1 "inner groupby: one aggregate")
 	(qpl-assert (nth (nth (qpir-groupby-aggs inner-gb) 0) 0) "value" "inner groupby agg name = value")
 	(qpl-assert (qpir-groupby-having inner-gb) nil "inner groupby: no HAVING")
-	(qpl-assert (qpir-kind (qpir-groupby-child inner-gb)) (quote qpir-leaf)
-		"inner groupby child is qpir-leaf")
-	(define inner-leaf-tuple (qpir-leaf-7tuple (qpir-groupby-child inner-gb)))
+	/* Phase 5 hoists the inner WHERE to a qpir-select between groupby and leaf
+	   (the WHERE in sub-pi references po.k — must be operator-level so the
+	   §3.3 select rule can fire during unnest). */
+	(qpl-assert (qpir-kind (qpir-groupby-child inner-gb)) (quote qpir-select)
+		"inner groupby child is qpir-select (WHERE hoisted)")
+	(define inner-select-pred (qpir-select-predicate (qpir-groupby-child inner-gb)))
+	(qpl-assert (nth inner-select-pred 0) (quote equal??)
+		"inner select predicate is the original equal?? from sub-pi's WHERE")
+	(define inner-bottom-leaf (qpir-select-child (qpir-groupby-child inner-gb)))
+	(qpl-assert (qpir-kind inner-bottom-leaf) (quote qpir-leaf) "inner bottom is qpir-leaf")
+	(define inner-leaf-tuple (qpir-leaf-7tuple inner-bottom-leaf))
 	(qpl-assert (count (qpp-tuple-fields inner-leaf-tuple)) 1 "inner leaf projects 1 column")
 	(qpl-assert (nth (nth (qpp-tuple-fields inner-leaf-tuple) 0) 0) "value"
 		"inner leaf's projected column named value (was agg's inner expr)")
+	(qpl-assert (qpp-tuple-condition inner-leaf-tuple) true
+		"inner leaf's WHERE is true (real WHERE was hoisted to qpir-select)")
 	(qpl-assert (count (qpp-tuple-group inner-leaf-tuple)) 0 "inner leaf has no GROUP BY (moved up)")
 
 	/* ==== Path (c): scalar WHERE marker → qpir-select(qpir-dep-join …) ==== */
@@ -217,7 +227,8 @@ Runs at server startup after queryplan-lift.scm loads.
 
 	/* ==== Decomposition verification for FAQ §11 COUNT subqueries ==== */
 	/* IN rewrite produces an inner COUNT(*) subquery — phase 4 decomposes it
-	   into qpir-groupby (empty keys, one COUNT agg) wrapping a qpir-leaf. */
+	   into qpir-groupby (empty keys, one COUNT agg). Since sub-pi has a
+	   correlated WHERE, phase 5 also wraps the inner leaf with qpir-select. */
 	(define ex-dj (qpir-select-child lifted-exists))
 	(define ex-right (qpir-dep-join-right ex-dj))
 	(qpl-assert (qpir-kind ex-right) (quote qpir-groupby)
@@ -226,8 +237,10 @@ Runs at server startup after queryplan-lift.scm loads.
 		"EXISTS rewrite groupby: empty keys (static group)")
 	(qpl-assert (count (qpir-groupby-aggs ex-right)) 1
 		"EXISTS rewrite groupby: exactly one aggregate")
-	(qpl-assert (qpir-kind (qpir-groupby-child ex-right)) (quote qpir-leaf)
-		"EXISTS rewrite groupby child is qpir-leaf")
+	(qpl-assert (qpir-kind (qpir-groupby-child ex-right)) (quote qpir-select)
+		"EXISTS rewrite groupby child is qpir-select (correlated WHERE hoisted)")
+	(qpl-assert (qpir-kind (qpir-select-child (qpir-groupby-child ex-right))) (quote qpir-leaf)
+		"EXISTS rewrite bottom is qpir-leaf")
 
 	/* ==== Errors-loudly ==== */
 

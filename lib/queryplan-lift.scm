@@ -410,21 +410,40 @@ Cases:
 						(qpl-build-groupby-wrapped-inner sub)
 						(qpl-build-simple-leaf-inner sub))))))))
 
+/* qpl-condition-is-trivial? — true when a WHERE condition is `true` (or
+the literal true symbol); such conditions don't need to be hoisted. */
+(define qpl-condition-is-trivial? (lambda (cond)
+	(or (nil? cond) (equal? cond true) (equal? cond (quote true)))))
+
+/* qpl-wrap-with-select-if-needed — if cond is non-trivial, return
+(qpir-select cond inner); else return inner unchanged. Used to hoist the
+inner-subquery's WHERE into operator-level so the BTW2025 §3.3 select rule
+can apply during unnest_pass. */
+(define qpl-wrap-with-select-if-needed (lambda (cond inner)
+	(if (qpl-condition-is-trivial? cond)
+		inner
+		(qpir-select cond inner))))
+
 (define qpl-build-simple-leaf-inner (lambda (sub) (begin
 	(define field-pair (nth (qpp-tuple-fields sub) 0))
 	(define field-expr (nth field-pair 1))
 	(if (qpl-expr-has-aggregate? field-expr)
 		(error "qpl-build-simple-leaf-inner: field has nested aggregate; should have decomposed")
-		(qpir-leaf (qpp-rebuild-tuple
-			(qpp-tuple-schema sub)
-			(qpp-tuple-tables sub)
-			(list (list "value" field-expr))
+		/* Hoist WHERE to qpir-select wrapper (architectural — gives the
+		   unnest §3.3 select rule a place to fire). The leaf below keeps
+		   only the table scan + projection. */
+		(qpl-wrap-with-select-if-needed
 			(qpp-tuple-condition sub)
-			(qpp-tuple-group sub)
-			nil
-			(qpp-tuple-order sub)
-			(qpp-tuple-limit sub)
-			(qpp-tuple-offset sub)))))))
+			(qpir-leaf (qpp-rebuild-tuple
+				(qpp-tuple-schema sub)
+				(qpp-tuple-tables sub)
+				(list (list "value" field-expr))
+				true
+				(qpp-tuple-group sub)
+				nil
+				(qpp-tuple-order sub)
+				(qpp-tuple-limit sub)
+				(qpp-tuple-offset sub))))))))
 
 (define qpl-build-groupby-wrapped-inner (lambda (sub) (begin
 	(define agg-fields (qpl-collect-aggregates-in-fields (qpp-tuple-fields sub)))
@@ -445,17 +464,22 @@ Cases:
 	(define agg-init (nth agg-args 2))
 	/* Rename the visible field to "value" so callers reference sq.value uniformly.
 	   The leaf projects the aggregate's inner expression as "value"; the
-	   groupby aggregates that into the same "value" name. */
-	(define leaf-inner (qpir-leaf (qpp-rebuild-tuple
+	   groupby aggregates that into the same "value" name. The WHERE clause
+	   is hoisted to a qpir-select between groupby and leaf so the unnest
+	   §3.3 select rule has a place to fire. */
+	(define leaf-bare (qpir-leaf (qpp-rebuild-tuple
 		(qpp-tuple-schema sub)
 		(qpp-tuple-tables sub)
 		(list (list "value" agg-inner))
-		(qpp-tuple-condition sub)
+		true
 		'()  /* GROUP BY moves up to qpir-groupby */
 		nil
 		'()  /* ORDER BY irrelevant for an aggregate scalar */
 		nil  /* LIMIT same */
 		nil)))
+	(define leaf-with-select (qpl-wrap-with-select-if-needed
+		(qpp-tuple-condition sub)
+		leaf-bare))
 	(define group-keys (coalesceNil (qpp-tuple-group sub) '()))
 	(qpir-groupby
 		group-keys
@@ -464,7 +488,7 @@ Cases:
 				(list (quote get_column) "" false "value" false)
 				agg-reducer agg-init)))
 		nil
-		leaf-inner))))
+		leaf-with-select))))
 
 /* ==================== Lift driver ==================== */
 
