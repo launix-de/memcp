@@ -219,13 +219,13 @@ the free-variable set F(N) of operators. */
 /* qpir-assoc-list-refs: extract column refs from an assoc list of (name expr) pairs. */
 (define qpir-assoc-list-refs (lambda (assoc)
 	(reduce (coalesceNil assoc '()) (lambda (acc pair) (match pair
-		'(_name expr) (merge acc (qpir-expr-column-refs expr))
+		'(name expr) (merge acc (qpir-expr-column-refs expr))
 		acc)) '())))
 
 /* qpir-order-list-refs: extract column refs from order items '((expr dir) ...). */
 (define qpir-order-list-refs (lambda (order)
 	(reduce (coalesceNil order '()) (lambda (acc item) (match item
-		'(expr _dir) (merge acc (qpir-expr-column-refs expr))
+		'(expr dir) (merge acc (qpir-expr-column-refs expr))
 		acc)) '())))
 
 /* ==================== Provided columns (A) and free variables (F) ==================== */
@@ -237,9 +237,9 @@ bound vs free. */
 	(match (qpir-kind node)
 		(quote qpir-scan) (list (qpir-scan-table node))
 		(quote qpir-leaf) (match (qpir-leaf-7tuple node)
-			'(_schema tables _fields _cond _group _having _order _limit _offset)
+			'(schema tables fields cond group having order limit offset)
 			(map (coalesceNil tables '()) (lambda (td) (match td
-				'(alias _s _t _io _je) (if (nil? alias) (nth td 2) alias)
+				'(alias schemaname tname io je) (if (nil? alias) (nth td 2) alias)
 				_ nil)))
 			'())
 		(quote qpir-select)  (qpir-provided-aliases (qpir-select-child node))
@@ -267,7 +267,7 @@ Per operator: select uses predicate; map uses projections; etc. */
 	(match (qpir-kind node)
 		(quote qpir-scan)     '()
 		(quote qpir-leaf)     (match (qpir-leaf-7tuple node)
-			'(_schema _tables fields cond _group _having order _limit _offset)
+			'(schema tables fields cond group having order limit offset)
 			(merge
 				(qpir-assoc-list-refs fields)
 				(qpir-expr-column-refs (coalesceNil cond true))
@@ -299,7 +299,7 @@ After [unnest_pass], the root's F must be empty. */
 		(reduce (qpir-children node) (lambda (acc c)
 			(merge acc (qpir-free-vars c))) '())))
 	(filter all-refs (lambda (ref) (match ref
-		'(tv _col) (not (has? provided tv))
+		'(tv col) (not (has? provided tv))
 		false))))))
 
 /* ==================== Pretty printer ==================== */

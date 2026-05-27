@@ -92,7 +92,7 @@ subexpression, depth-first left-to-right. */
 	(if (qpl-marker? expr)
 		(list expr)
 		(match expr
-			(cons _sym args) (reduce (coalesceNil args '()) (lambda (acc a)
+			(cons head args) (reduce (coalesceNil args '()) (lambda (acc a)
 				(merge acc (qpl-collect-markers a))) '())
 			'()))))
 
@@ -334,7 +334,7 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			(+ acc (count (qpl-collect-markers e)))) 0) 0)
 		(error "lift_dep_joins_pass: GROUP-BY-level marker not yet supported (Phase 3+)") nil)
 	(if (> (reduce (coalesceNil (qpp-tuple-order t) '()) (lambda (acc item) (match item
-			'(expr _dir) (+ acc (count (qpl-collect-markers expr)))
+			'(expr dir) (+ acc (count (qpl-collect-markers expr)))
 			acc)) 0) 0)
 		(error "lift_dep_joins_pass: ORDER-BY-level marker not yet supported (Phase 3+)") nil)
 
@@ -372,7 +372,7 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			   on the left; each subsequent dep-join's left is the previous chain
 			   so each sq alias becomes visible above its point of introduction. */
 			(define chained (reduce markers (lambda (left-acc pair) (match pair
-				'(_sq-alias sub)
+				'(sq-alias sub)
 				(qpir-dep-join true left-acc (qpl-wrap-inner-subquery-as-leaf sub) '())
 				left-acc))
 				outer-leaf))
