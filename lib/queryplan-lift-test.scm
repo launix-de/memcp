@@ -110,13 +110,14 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (qpir-kind lifted-pure) (quote qpir-leaf) "lift: pure tuple → qpir-leaf")
 	(qpl-assert (qpir-leaf-7tuple lifted-pure) t-pure "lift: leaf preserves tuple")
 
-	/* ==== Path (b): scalar SELECT-list marker → qpir-dep-join (WHERE=true case) ==== */
+	/* ==== Path (b): scalar SELECT-list marker → qpir-dep-join with qpir-groupby-decomposed inner ==== */
 	(define lifted-scalar (lift_dep_joins_pass t-scalar))
 	(qpl-assert (qpir-kind lifted-scalar) (quote qpir-dep-join)
 		"lift: scalar field marker (WHERE=true) → qpir-dep-join at root")
 	(qpl-assert (qpir-dep-join-predicate lifted-scalar) true "lift: dep-join predicate = true")
 	(qpl-assert (qpir-kind (qpir-dep-join-left lifted-scalar)) (quote qpir-leaf) "lift: left is qpir-leaf")
-	(qpl-assert (qpir-kind (qpir-dep-join-right lifted-scalar)) (quote qpir-leaf) "lift: right is qpir-leaf")
+	(qpl-assert (qpir-kind (qpir-dep-join-right lifted-scalar)) (quote qpir-groupby)
+		"lift: right of dep-join is qpir-groupby (inner SUM decomposed per FAQ §33)")
 
 	(define outer-tuple (qpir-leaf-7tuple (qpir-dep-join-left lifted-scalar)))
 	(define outer-total-pair (nth (qpp-tuple-fields outer-tuple) 1))
@@ -125,9 +126,20 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (nth (nth outer-total-pair 1) 3) "value" "outer: get_column refers to value column")
 	(qpl-assert (qpp-tuple-condition outer-tuple) true "outer: WHERE is true")
 
-	(define inner-tuple (qpir-leaf-7tuple (qpir-dep-join-right lifted-scalar)))
-	(qpl-assert (count (qpp-tuple-fields inner-tuple)) 1 "inner subquery has 1 field")
-	(qpl-assert (nth (nth (qpp-tuple-fields inner-tuple) 0) 0) "value" "inner field renamed to value")
+	/* The qpir-groupby on the right has empty keys (static-group), one agg named "value",
+	   and a qpir-leaf below that projects the agg's inner expression as "value". */
+	(define inner-gb (qpir-dep-join-right lifted-scalar))
+	(qpl-assert (count (qpir-groupby-keys inner-gb)) 0 "inner groupby: empty keys (static group)")
+	(qpl-assert (count (qpir-groupby-aggs inner-gb)) 1 "inner groupby: one aggregate")
+	(qpl-assert (nth (nth (qpir-groupby-aggs inner-gb) 0) 0) "value" "inner groupby agg name = value")
+	(qpl-assert (qpir-groupby-having inner-gb) nil "inner groupby: no HAVING")
+	(qpl-assert (qpir-kind (qpir-groupby-child inner-gb)) (quote qpir-leaf)
+		"inner groupby child is qpir-leaf")
+	(define inner-leaf-tuple (qpir-leaf-7tuple (qpir-groupby-child inner-gb)))
+	(qpl-assert (count (qpp-tuple-fields inner-leaf-tuple)) 1 "inner leaf projects 1 column")
+	(qpl-assert (nth (nth (qpp-tuple-fields inner-leaf-tuple) 0) 0) "value"
+		"inner leaf's projected column named value (was agg's inner expr)")
+	(qpl-assert (count (qpp-tuple-group inner-leaf-tuple)) 0 "inner leaf has no GROUP BY (moved up)")
 
 	/* ==== Path (c): scalar WHERE marker → qpir-select(qpir-dep-join …) ==== */
 	(define lifted-where (lift_dep_joins_pass t-where-scalar))
@@ -202,6 +214,20 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (nth (nth ex-pred 1) 0) (quote coalesce) "lift: EXISTS rewrite uses coalesce")
 	(qpl-assert (qpir-kind (qpir-select-child lifted-exists)) (quote qpir-dep-join)
 		"lift: EXISTS-rewrite chain has qpir-dep-join under select")
+
+	/* ==== Decomposition verification for FAQ §11 COUNT subqueries ==== */
+	/* IN rewrite produces an inner COUNT(*) subquery — phase 4 decomposes it
+	   into qpir-groupby (empty keys, one COUNT agg) wrapping a qpir-leaf. */
+	(define ex-dj (qpir-select-child lifted-exists))
+	(define ex-right (qpir-dep-join-right ex-dj))
+	(qpl-assert (qpir-kind ex-right) (quote qpir-groupby)
+		"EXISTS rewrite: right of dep-join is qpir-groupby (COUNT decomposed)")
+	(qpl-assert (count (qpir-groupby-keys ex-right)) 0
+		"EXISTS rewrite groupby: empty keys (static group)")
+	(qpl-assert (count (qpir-groupby-aggs ex-right)) 1
+		"EXISTS rewrite groupby: exactly one aggregate")
+	(qpl-assert (qpir-kind (qpir-groupby-child ex-right)) (quote qpir-leaf)
+		"EXISTS rewrite groupby child is qpir-leaf")
 
 	/* ==== Errors-loudly ==== */
 

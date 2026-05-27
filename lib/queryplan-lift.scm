@@ -282,33 +282,189 @@ expression in a fields list, accumulating subqueries into acc. */
 (define qpl-fields-touched? (lambda (orig sub)
 	(not (equal? orig sub))))
 
-/* ==================== Inner subquery wrapping ==================== */
+/* ==================== Inner subquery decomposition ==================== */
 
-/* qpl-wrap-inner-subquery-as-leaf — convert a parser-emitted inner subquery
-7-tuple into a (qpir-leaf …) with its single output field renamed to "value"
-so callers can reference it as (get_column sq_N false "value" false).
+/* qpl-is-aggregate-expr? — true when expr is a bare `(aggregate inner reducer init)`
+form as emitted by the parser for SUM/COUNT (and the wrapped inner of AVG). */
+(define qpl-is-aggregate-expr? (lambda (expr) (match expr
+	(cons head rest) (match head
+		(symbol aggregate)         true
+		(quote aggregate)          true
+		'(quote aggregate)         true
+		'aggregate                 true
+		false)
+	false)))
 
-Currently requires a single-field inner subquery. Multi-field shapes (used by
-IN/EXISTS in Phase 3+) get a different wrapping. */
-(define qpl-wrap-inner-subquery-as-leaf (lambda (sub)
+/* qpl-expr-has-aggregate? — true if expr is or contains an aggregate
+subexpression anywhere. Used to detect "complex aggregate expressions"
+(e.g. AVG = SUM/COUNT, or SUM(x)+1) which Phase 4 does not yet decompose. */
+(define qpl-expr-has-aggregate? (lambda (expr)
+	(if (qpl-is-aggregate-expr? expr)
+		true
+		(match expr
+			(cons head args) (reduce (coalesceNil args '()) (lambda (acc a)
+				(or acc (qpl-expr-has-aggregate? a))) false)
+			false))))
+
+/* qpl-collect-aggregates-in-fields — return the list of aggregate fields
+(those whose expression is a bare aggregate). Each entry: (field-name agg-expr). */
+(define qpl-collect-aggregates-in-fields (lambda (fields)
+	(reduce (coalesceNil fields '()) (lambda (acc pair) (match pair
+		'(name expr) (if (qpl-is-aggregate-expr? expr)
+			(merge acc (list (list name expr)))
+			acc)
+		acc)) '())))
+
+/* qpl-collect-non-aggregate-fields — return the list of non-aggregate fields
+in the same order they appear. Errors loudly if a field contains an aggregate
+nested inside a non-bare expression (e.g. AVG = (SUM/COUNT)) — phase 5 will
+handle those. */
+(define qpl-collect-non-aggregate-fields (lambda (fields)
+	(reduce (coalesceNil fields '()) (lambda (acc pair) (match pair
+		'(name expr) (begin
+			(if (qpl-is-aggregate-expr? expr)
+				acc
+				(begin
+					(if (qpl-expr-has-aggregate? expr)
+						(error (concat "lift_dep_joins_pass: field '" name
+							"' contains a nested aggregate inside a compound expression. "
+							"Phase 4 only decomposes BARE aggregate fields; mixed "
+							"shapes like AVG, SUM(x)+1 are Phase 5+."))
+						nil)
+					(merge acc (list pair)))))
+		acc)) '())))
+
+/* qpl-leaf-input-fields-for-aggs — produce the projection list the underlying
+qpir-leaf must expose so the qpir-groupby above can compute its aggregates.
+
+For an aggregate (aggregate inner reducer init):
+  - The leaf must project the `inner` expression so the agg reads it.
+  - We synthesize a name `agg-in-N` per aggregate and the qpir-groupby's aggs
+    list references that name via get_column.
+
+For Phase 4 we use a simpler convention: each aggregate's `inner` expression
+is projected under its FIELD NAME — so for `(total SUM(amount))` the leaf
+projects `(total amount)` and the qpir-groupby's agg is `(total (aggregate
+(get_column leaf-alias false "total" false) + 0))`.
+
+That keeps the lowering trivial: the leaf is a scan that exposes columns
+named by their visible alias, the groupby reduces them into the same names.
+
+Returns: (list-of-leaf-fields  list-of-rewritten-groupby-aggs). */
+(define qpl-leaf-and-agg-projections (lambda (agg-fields)
+	(reduce agg-fields (lambda (acc pair) (match pair
+		'(name (cons head rest))
+		(begin
+			(define agg-args rest)
+			(define agg-inner (nth agg-args 0))
+			(define agg-reducer (nth agg-args 1))
+			(define agg-init (nth agg-args 2))
+			/* The leaf projects the aggregate's inner expression under `name`. */
+			(define leaf-field (list name agg-inner))
+			/* The groupby reads back `name` from its child via a get_column ref;
+			   the synthesised alias "" stays empty — the lowering will resolve
+			   it against the leaf's projected columns. */
+			(define agg-after (list name
+				(list (quote aggregate)
+					(list (quote get_column) "" false name false)
+					agg-reducer agg-init)))
+			(list
+				(merge (nth acc 0) (list leaf-field))
+				(merge (nth acc 1) (list agg-after))))
+		acc))
+		(list '() '()))))
+
+/* qpl-needs-decompose? — true if the subquery has aggregates in its fields
+or a non-empty GROUP BY. Phase 4 also rejects HAVING/ORDER/LIMIT inner
+subqueries because they need additional wrappers (phase 5+).
+NOTE: (nil? '()) is FALSE in this dialect — use (> (count ...) 0) instead. */
+(define qpl-needs-decompose? (lambda (sub)
+	(or
+		(> (count (qpl-collect-aggregates-in-fields (qpp-tuple-fields sub))) 0)
+		(> (count (coalesceNil (qpp-tuple-group sub) '())) 0))))
+
+/* qpl-wrap-inner-subquery — convert a parser-emitted inner subquery 7-tuple
+into a Layer-1 IR subtree exposing one column named "value".
+
+Cases:
+  (1) No aggregates, no GROUP BY → single qpir-leaf with the field renamed
+      to "value". (Already what phase 1-3 did.)
+  (2) Single bare-aggregate field, no GROUP BY (static-group case) →
+      (qpir-groupby '() ((value <agg>)) nil (qpir-leaf {…}))
+      The leaf projects the aggregate's inner expression as "value", the
+      groupby aggregates it.
+  (3) Multiple fields, GROUP BY, HAVING, complex agg expressions → not yet
+      supported, errors loudly per FAQ §1. */
+(define qpl-wrap-inner-subquery (lambda (sub)
 	(if (not (qpp-tuple? sub))
-		(error "qpl-wrap-inner-subquery-as-leaf: sub is not a 7-tuple")
+		(error "qpl-wrap-inner-subquery: sub is not a 7-tuple")
 		(begin
 			(define fields (qpp-tuple-fields sub))
-			(if (equal? (count fields) 1)
-				(qpir-leaf (qpp-rebuild-tuple
-					(qpp-tuple-schema sub)
-					(qpp-tuple-tables sub)
-					(list (list "value" (nth (nth fields 0) 1)))
-					(qpp-tuple-condition sub)
-					(qpp-tuple-group sub)
-					(qpp-tuple-having sub)
-					(qpp-tuple-order sub)
-					(qpp-tuple-limit sub)
-					(qpp-tuple-offset sub)))
-				(error (concat "qpl-wrap-inner-subquery-as-leaf: inner subquery has "
-					(string (count fields)) " fields; Phase 2 expects 1. "
-					"Multi-field inner subqueries are Phase 3+ (IN/EXISTS).")))))))
+			(if (not (equal? (count fields) 1))
+				(error (concat "qpl-wrap-inner-subquery: inner subquery has "
+					(string (count fields)) " fields; expected exactly 1. "
+					"Multi-field inner subqueries are phase 5+."))
+				(if (not (nil? (qpp-tuple-having sub)))
+					(error "qpl-wrap-inner-subquery: inner subquery with HAVING not yet supported (phase 5+)")
+					(if (qpl-needs-decompose? sub)
+						(qpl-build-groupby-wrapped-inner sub)
+						(qpl-build-simple-leaf-inner sub))))))))
+
+(define qpl-build-simple-leaf-inner (lambda (sub) (begin
+	(define field-pair (nth (qpp-tuple-fields sub) 0))
+	(define field-expr (nth field-pair 1))
+	(if (qpl-expr-has-aggregate? field-expr)
+		(error "qpl-build-simple-leaf-inner: field has nested aggregate; should have decomposed")
+		(qpir-leaf (qpp-rebuild-tuple
+			(qpp-tuple-schema sub)
+			(qpp-tuple-tables sub)
+			(list (list "value" field-expr))
+			(qpp-tuple-condition sub)
+			(qpp-tuple-group sub)
+			nil
+			(qpp-tuple-order sub)
+			(qpp-tuple-limit sub)
+			(qpp-tuple-offset sub)))))))
+
+(define qpl-build-groupby-wrapped-inner (lambda (sub) (begin
+	(define agg-fields (qpl-collect-aggregates-in-fields (qpp-tuple-fields sub)))
+	(define non-agg-fields (qpl-collect-non-aggregate-fields (qpp-tuple-fields sub)))
+	/* Phase 4 only supports the single-bare-aggregate case (the most common
+	   shape for scalar correlated subqueries and the FAQ §11 COUNT rewrite). */
+	(if (not (equal? (count agg-fields) 1))
+		(error (concat "qpl-build-groupby-wrapped-inner: expected 1 aggregate field, found "
+			(string (count agg-fields)) " — multiple aggregates per inner subquery is phase 5+")) nil)
+	(if (> (count non-agg-fields) 0)
+		(error "qpl-build-groupby-wrapped-inner: mixed agg + non-agg fields not supported in phase 4") nil)
+	(define agg-pair (nth agg-fields 0))
+	(define agg-name (nth agg-pair 0))
+	(define agg-expr (nth agg-pair 1))
+	(define agg-args (cdr agg-expr))
+	(define agg-inner (nth agg-args 0))
+	(define agg-reducer (nth agg-args 1))
+	(define agg-init (nth agg-args 2))
+	/* Rename the visible field to "value" so callers reference sq.value uniformly.
+	   The leaf projects the aggregate's inner expression as "value"; the
+	   groupby aggregates that into the same "value" name. */
+	(define leaf-inner (qpir-leaf (qpp-rebuild-tuple
+		(qpp-tuple-schema sub)
+		(qpp-tuple-tables sub)
+		(list (list "value" agg-inner))
+		(qpp-tuple-condition sub)
+		'()  /* GROUP BY moves up to qpir-groupby */
+		nil
+		'()  /* ORDER BY irrelevant for an aggregate scalar */
+		nil  /* LIMIT same */
+		nil)))
+	(define group-keys (coalesceNil (qpp-tuple-group sub) '()))
+	(qpir-groupby
+		group-keys
+		(list (list "value"
+			(list (quote aggregate)
+				(list (quote get_column) "" false "value" false)
+				agg-reducer agg-init)))
+		nil
+		leaf-inner))))
 
 /* ==================== Lift driver ==================== */
 
@@ -373,7 +529,7 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			   so each sq alias becomes visible above its point of introduction. */
 			(define chained (reduce markers (lambda (left-acc pair) (match pair
 				'(sq-alias sub)
-				(qpir-dep-join true left-acc (qpl-wrap-inner-subquery-as-leaf sub) '())
+				(qpir-dep-join true left-acc (qpl-wrap-inner-subquery sub) '())
 				left-acc))
 				outer-leaf))
 
