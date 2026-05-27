@@ -103,7 +103,7 @@ unique nodes. */
 /* qpu-lca-path — longest common prefix of two paths.
 Returns the shared prefix list (may be empty). */
 (define qpu-lca-path (lambda (p1 p2)
-	(qpu-lca-helper p1 p2 '())))
+	(qpu-lca-helper p1 p2 (list))))
 
 (define qpu-lca-helper (lambda (p1 p2 acc)
 	(if (or (equal? (count p1) 0) (equal? (count p2) 0))
@@ -124,7 +124,7 @@ operator provides each column reference. */
 (define qpu-collect-providers (lambda (tree)
 	(begin
 		(define acc (newsession))
-		(acc "list" '())
+		(acc "list" (list))
 		(qpu-walk-with-path tree (lambda (node path) (begin
 			(define provided (qpir-provided-aliases node))
 			(if (> (count provided) 0)
@@ -138,7 +138,7 @@ Used by annotate_dep_joins. */
 (define qpu-collect-accessors (lambda (tree)
 	(begin
 		(define acc (newsession))
-		(acc "list" '())
+		(acc "list" (list))
 		(qpu-walk-with-path tree (lambda (node path)
 			(reduce (qpir-own-refs node) (lambda (a ref) (begin
 				(acc "list" (merge (acc "list") (list (list path ref))))
@@ -196,7 +196,7 @@ dep-join.) */
 	(define providers (qpu-collect-providers tree))
 	(define accessors (qpu-collect-accessors tree))
 	(define out (newsession))
-	(out "list" '())
+	(out "list" (list))
 	(reduce accessors (lambda (acc pair) (match pair
 		'(accessor-path ref) (begin
 			(define provider-pair (qpu-find-provider-path ref providers))
@@ -310,7 +310,7 @@ and a dep-join node, return the list of accessor paths recorded against it. */
 		'(dj accessor-path) (if (equal? dj dep-join-node)
 			(merge acc (list accessor-path))
 			acc)
-		acc)) '()))))
+		acc)) (list)))))
 
 /* ==================== BTW2025 §3.3 groupby rule ==================== */
 
@@ -357,26 +357,32 @@ A non-AND expression yields a single-element list. Constant `true` yields
 the empty list (no constraint). */
 (define qpu-and-conjuncts (lambda (expr)
 	(if (or (nil? expr) (equal? expr true) (equal? expr (quote true)))
-		'()
-		(match expr
-			(cons head args) (match head
-				(symbol and)        (qpu-flatten-and-args args)
-				(quote and)         (qpu-flatten-and-args args)
-				'(quote and)        (qpu-flatten-and-args args)
-				'and                (qpu-flatten-and-args args)
-				(list expr))
+		(list)
+		(if (qpu-expr-is-and? expr)
+			(qpu-flatten-and-args (cdr expr))
 			(list expr)))))
 
+/* qpu-expr-is-and? — true if expr is a list whose head is the `and` symbol. */
+(define qpu-expr-is-and? (lambda (expr) (match expr
+	(cons head args) (match head
+		(symbol and)        true
+		(quote and)         true
+		false)
+	false)))
+
 (define qpu-flatten-and-args (lambda (args)
-	(reduce (coalesceNil args '()) (lambda (acc a)
-		(merge acc (qpu-and-conjuncts a))) '())))
+	(reduce (coalesceNil args (list)) (lambda (acc a)
+		(merge acc (qpu-and-conjuncts a))) (list))))
 
 /* qpu-and-from-conjuncts — rebuild an AND expression from a conjunct list.
-Empty → true; one element → bare; >1 → (and a b c …). */
-(define qpu-and-from-conjuncts (lambda (cs)
-	(if (equal? (count cs) 0) true
-		(if (equal? (count cs) 1) (nth cs 0)
-			(cons (quote and) cs)))))
+Empty → true; one element → bare; >1 → (and a b c …).
+Defensive against nil input (in this dialect (list) can evaluate to nil and
+count panics on nil). */
+(define qpu-and-from-conjuncts (lambda (cs) (begin
+	(define csl (coalesceNil cs (list)))
+	(if (or (nil? csl) (equal? (count csl) 0)) true
+		(if (equal? (count csl) 1) (nth csl 0)
+			(cons (quote and) csl))))))
 
 /* qpu-expr-references-aliases? — true if expr contains any (get_column tv …)
 whose tv is in `aliases`. Used to identify outer-correlation conjuncts. */
@@ -399,6 +405,159 @@ expressions ready for use as dep-join condition and remaining select. */
 		(not (qpu-expr-references-aliases? c outer-aliases)))))
 	(list (qpu-and-from-conjuncts outer-cs) (qpu-and-from-conjuncts pure-cs)))))
 
+/* ==================== cclasses + repr (BTW2025 §3.2, FAQ §40-§41) ==================== */
+
+/* cclasses are equivalence classes over column references (tv col). Built up
+as the unnest walker observes equality predicates `a = b` in qpir-select.
+repr maps an OUTER reference to its EQUIVALENT INNER reference (when one
+exists in the same class). The right-side walker uses repr to substitute
+outer-refs in groupby keys and other operator slots so the unnested tree
+no longer references outer columns from inside the right subtree.
+
+Representation: a session whose "classes" key holds a list of class-lists,
+each class being a list of `(tv col)` references. Singleton classes are
+implied (any ref not appearing in any class is in its own singleton). */
+
+(define qpu-make-cclasses (lambda () (begin
+	(define cc (newsession))
+	(cc "classes" (list))
+	cc)))
+
+/* qpu-cc-find-class — return the class (list of refs) containing the given
+ref, or nil if the ref is not yet in any non-singleton class. */
+(define qpu-cc-find-class (lambda (cc ref) (begin
+	(define classes (cc "classes"))
+	(reduce classes (lambda (found c)
+		(if (and (nil? found) (has? c ref)) c found))
+		nil))))
+
+/* qpu-cc-union — add the equivalence ref-a ~ ref-b to cclasses. If either
+ref is already in a class, merge into a single class. */
+(define qpu-cc-union (lambda (cc ref-a ref-b) (begin
+	(define classes (cc "classes"))
+	(define class-a (qpu-cc-find-class cc ref-a))
+	(define class-b (qpu-cc-find-class cc ref-b))
+	(define merged-class
+		(if (nil? class-a)
+			(if (nil? class-b) (list ref-a ref-b) (merge class-b (list ref-a)))
+			(if (nil? class-b) (merge class-a (list ref-b))
+				(merge class-a class-b))))
+	(define remaining (filter classes (lambda (c)
+		(and (not (equal? c class-a)) (not (equal? c class-b))))))
+	(cc "classes" (merge remaining (list (qpu-dedupe-list merged-class)))))))
+
+/* qpu-dedupe-list — remove duplicate elements (using equal?). */
+(define qpu-dedupe-list (lambda (xs)
+	(reduce xs (lambda (acc x)
+		(if (has? acc x) acc (merge acc (list x))))
+		(list))))
+
+/* qpu-cc-add-from-predicate — for every equality conjunct `(equal?? a b)` in
+predicate with BOTH a and b being column references, add the cclass. Ignores
+non-equality predicates and equalities with non-column operands. */
+(define qpu-cc-add-from-predicate (lambda (cc predicate)
+	(reduce (qpu-and-conjuncts predicate) (lambda (acc conj) (begin
+		(define refs (qpu-cc-equality-refs conj))
+		(if (nil? refs) acc
+			(begin
+				(qpu-cc-union cc (nth refs 0) (nth refs 1))
+				acc)))) nil)))
+
+(define qpu-cc-equality-refs (lambda (expr) (match expr
+	(cons head args) (begin
+		(define is-eq (match head
+			(symbol equal??)   true
+			(quote equal??)    true
+			'(quote equal??)   true
+			'equal??           true
+			(symbol equal?)    true
+			(quote equal?)     true
+			'(quote equal?)    true
+			'equal?            true
+			false))
+		(if (and is-eq (equal? (count args) 2))
+			(begin
+				(define a (nth args 0))
+				(define b (nth args 1))
+				(define refs-a (qpir-expr-column-refs a))
+				(define refs-b (qpir-expr-column-refs b))
+				(if (and (equal? (count refs-a) 1) (equal? (count refs-b) 1)
+						(equal? (qpu-strip-expr-to-col-ref? a) true)
+						(equal? (qpu-strip-expr-to-col-ref? b) true))
+					(list (nth refs-a 0) (nth refs-b 0))
+					nil))
+			nil))
+	nil)))
+
+/* qpu-strip-expr-to-col-ref? — true when expr is a bare (get_column …) form
+with no extra wrapping. Equalities between non-column expressions don't
+contribute to cclasses (the equivalence wouldn't necessarily preserve under
+substitution). */
+(define qpu-strip-expr-to-col-ref? (lambda (expr) (match expr
+	(cons head args) (match head
+		(symbol get_column)     true
+		(quote get_column)      true
+		'(quote get_column)     true
+		'get_column             true
+		false)
+	false)))
+
+/* qpu-cc-build-repr — given cclasses and a list of outer-aliases, build a
+repr map mapping outer-refs to their inner equivalents. An outer ref
+`(tv col)` (where tv ∈ outer-aliases) maps to the first ref in its class
+whose tv is NOT in outer-aliases — i.e. an inner column we can substitute to.
+
+Returns a session whose "map" key holds an assoc list of (outer-ref . inner-ref). */
+(define qpu-cc-build-repr (lambda (cc outer-aliases) (begin
+	(define repr (newsession))
+	(repr "map" (list))
+	(define classes (cc "classes"))
+	(reduce classes (lambda (acc c) (begin
+		/* For each class, find outer refs and the first inner ref */
+		(define outers (filter c (lambda (ref) (match ref
+			'(tv col) (has? outer-aliases tv)
+			false))))
+		(define inners (filter c (lambda (ref) (match ref
+			'(tv col) (not (has? outer-aliases tv))
+			false))))
+		(if (and (> (count outers) 0) (> (count inners) 0))
+			(begin
+				(define inner-ref (nth inners 0))
+				(reduce outers (lambda (a outer-ref) (begin
+					(repr "map" (merge (repr "map") (list (list outer-ref inner-ref))))
+					a)) nil)) nil)
+		acc)) nil)
+	repr)))
+
+(define qpu-repr-lookup (lambda (repr ref) (begin
+	(define entries (repr "map"))
+	(reduce entries (lambda (found entry)
+		(if (and (nil? found) (equal? (nth entry 0) ref))
+			(nth entry 1)
+			found))
+		nil))))
+
+/* qpu-substitute-expr — walk expr, replacing every (get_column tv ti col ci)
+whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
+(define qpu-substitute-expr (lambda (expr repr) (match expr
+	'((symbol get_column) tv ti col ci)
+	(qpu-substitute-col-ref expr (list tv col) repr)
+	'((quote get_column)  tv ti col ci)
+	(qpu-substitute-col-ref expr (list tv col) repr)
+	(cons head args) (cons head (map (coalesceNil args (list))
+		(lambda (a) (qpu-substitute-expr a repr))))
+	expr)))
+
+(define qpu-substitute-col-ref (lambda (expr ref repr) (begin
+	(define replacement (qpu-repr-lookup repr ref))
+	(if (nil? replacement)
+		expr
+		(list (quote get_column)
+			(nth replacement 0) false (nth replacement 1) false)))))
+
+(define qpu-substitute-exprs (lambda (exprs repr)
+	(map (coalesceNil exprs (list)) (lambda (e) (qpu-substitute-expr e repr)))))
+
 /* ==================== Right-side walker (§3.3 rules) ==================== */
 
 /* qpu-unnest-right — walk a dep-join's RIGHT subtree top-down applying the
@@ -413,14 +572,32 @@ correlation conjuncts that get extracted to the join condition are kept
 as-is (e.g. `(equal?? pi.k po.k)`) rather than substituted via repr. The
 groupby rule adds the outer-ref expressions to keys directly so each outer
 combo gets its own group. */
-(define qpu-unnest-right (lambda (node outer-aliases outer-ref-exprs)
+/* qpu-collect-cclasses — first pass: walk the right subtree and accumulate
+all column-equality predicates from qpir-select operators into cclasses. */
+(define qpu-collect-cclasses (lambda (node cc)
+	(match (qpir-kind node)
+		(quote qpir-leaf)    nil
+		(quote qpir-scan)    nil
+		(quote qpir-select)  (begin
+			(qpu-cc-add-from-predicate cc (qpir-select-predicate node))
+			(qpu-collect-cclasses (qpir-select-child node) cc))
+		(quote qpir-map)     (qpu-collect-cclasses (qpir-map-child node) cc)
+		(quote qpir-groupby) (qpu-collect-cclasses (qpir-groupby-child node) cc)
+		(quote qpir-window)  (qpu-collect-cclasses (qpir-window-child node) cc)
+		(quote qpir-join)    (begin
+			(qpu-cc-add-from-predicate cc (qpir-join-predicate node))
+			(qpu-collect-cclasses (qpir-join-left node) cc)
+			(qpu-collect-cclasses (qpir-join-right node) cc))
+		nil)))
+
+/* qpu-unnest-right — walks the right subtree TOP-DOWN applying §3.3 rules
+with cclasses substitution. Returns (new-node join-pred) where new-node has
+NO references to outer-aliases (all substituted to inner equivalents) and
+join-pred contains the IS NOT DISTINCT FROM conjuncts that go on the
+converted dep-join. */
+(define qpu-unnest-right (lambda (node outer-aliases outer-ref-exprs repr)
 	(match (qpir-kind node)
 		(quote qpir-leaf) (begin
-			/* The leaf MUST NOT have its own WHERE referencing outer columns.
-			   lift_dep_joins_pass phase 5 hoists such WHERE conjuncts to a
-			   qpir-select wrapper precisely so this walker can extract them.
-			   If we hit a leaf whose WHERE still has outer refs, lift didn't
-			   fire as expected — error loudly per FAQ §1. */
 			(define leaf-tuple (qpir-leaf-7tuple node))
 			(define cond (qpp-tuple-condition leaf-tuple))
 			(if (qpu-expr-references-aliases? cond outer-aliases)
@@ -429,41 +606,100 @@ combo gets its own group. */
 		(quote qpir-scan) (list node true)
 
 		(quote qpir-select) (begin
+			(define raw-pred (qpir-select-predicate node))
+			(define sub-pred (qpu-substitute-expr raw-pred repr))
 			(define child-result (qpu-unnest-right (qpir-select-child node)
-				outer-aliases outer-ref-exprs))
+				outer-aliases outer-ref-exprs repr))
 			(define child-new (nth child-result 0))
 			(define child-join (nth child-result 1))
-			(define split (qpu-split-predicate (qpir-select-predicate node) outer-aliases))
+			(define split (qpu-split-predicate sub-pred outer-aliases))
 			(define outer-pred (nth split 0))
 			(define pure-pred (nth split 1))
+			/* outer-pred should be empty/true after substitution — the
+			   equalities that put refs in cclasses get replaced by tautologies.
+			   Any residual outer-pred is a non-equality correlation; those
+			   need the IS NOT DISTINCT FROM treatment per FAQ §41. */
 			(define combined-join (qpu-and-from-conjuncts
 				(merge (qpu-and-conjuncts child-join) (qpu-and-conjuncts outer-pred))))
+			/* pure-pred may contain trivial tautologies like (equal?? x x) after
+			   substitution — strip them. */
+			(define simplified-pure (qpu-simplify-predicate pure-pred))
 			(define new-node
-				(if (or (nil? pure-pred) (equal? pure-pred true))
-					child-new   /* select fully consumed → drop */
-					(qpir-select pure-pred child-new)))
+				(if (or (nil? simplified-pure) (equal? simplified-pure true))
+					child-new
+					(qpir-select simplified-pure child-new)))
 			(list new-node combined-join))
 
 		(quote qpir-map) (begin
+			(define new-projs (qpu-substitute-map-projections
+				(qpir-map-projections node) repr))
 			(define child-result (qpu-unnest-right (qpir-map-child node)
-				outer-aliases outer-ref-exprs))
+				outer-aliases outer-ref-exprs repr))
 			(define child-new (nth child-result 0))
 			(define child-join (nth child-result 1))
-			(list (qpir-map (qpir-map-projections node) child-new) child-join))
+			(list (qpir-map new-projs child-new) child-join))
 
 		(quote qpir-groupby) (begin
 			(define child-result (qpu-unnest-right (qpir-groupby-child node)
-				outer-aliases outer-ref-exprs))
+				outer-aliases outer-ref-exprs repr))
 			(define child-new (nth child-result 0))
 			(define child-join (nth child-result 1))
-			/* §3.3 / FAQ §33: push outer refs into keys so each outer
-			   combination becomes its own group. */
-			(define new-keys (merge (qpir-groupby-keys node) outer-ref-exprs))
-			(list (qpir-groupby new-keys (qpir-groupby-aggs node)
-				(qpir-groupby-having node) child-new) child-join))
+			/* §3.3 / FAQ §33: push outer refs into keys. With cclasses, push
+			   the SUBSTITUTED outer-ref-exprs so the keys reference inner
+			   columns the child actually provides. */
+			(define sub-outer-refs (qpu-substitute-exprs outer-ref-exprs repr))
+			(define sub-aggs (qpu-substitute-map-projections
+				(qpir-groupby-aggs node) repr))
+			(define sub-having (qpu-substitute-expr
+				(coalesceNil (qpir-groupby-having node) true) repr))
+			(define new-keys (merge (qpir-groupby-keys node) sub-outer-refs))
+			(define final-having (if (equal? sub-having true) nil sub-having))
+			(list (qpir-groupby new-keys sub-aggs final-having child-new) child-join))
 
 		(error (concat "qpu-unnest-right: operator " (string (qpir-kind node))
-			" not yet supported in right-side walker (phase 2)")))))
+			" not yet supported in right-side walker (phase 3)")))))
+
+/* qpu-substitute-map-projections — apply repr substitution to every expression
+in an assoc list of (name expr) projections. */
+(define qpu-substitute-map-projections (lambda (projections repr)
+	(map (coalesceNil projections (list)) (lambda (pair) (match pair
+		'(name expr) (list name (qpu-substitute-expr expr repr))
+		pair)))))
+
+/* qpu-simplify-predicate — drop conjuncts that are trivially true, such as
+(equal?? x x) after substitution. */
+(define qpu-simplify-predicate (lambda (pred)
+	(qpu-and-from-conjuncts
+		(filter (qpu-and-conjuncts pred) (lambda (c)
+			(not (qpu-is-tautology? c)))))))
+
+(define qpu-is-tautology? (lambda (expr) (match expr
+	(cons head args) (begin
+		(define is-eq (match head
+			(symbol equal??)   true
+			(quote equal??)    true
+			'(quote equal??)   true
+			'equal??           true
+			false))
+		(if (and is-eq (equal? (count args) 2))
+			(equal? (nth args 0) (nth args 1))
+			false))
+	false)))
+
+/* qpu-build-join-condition-from-cclasses — for each outer-ref, generate an
+IS-NOT-DISTINCT-FROM conjunct that links it to its inner equivalent (per repr).
+Per FAQ §41 we always use IS NOT DISTINCT FROM (which is `equal??` here —
+the NULL-safe equality) since we can't statically prove NOT-NULL on most
+paths. Outer refs without a repr entry stay as raw equality predicates from
+the original conjuncts (handled by combined-join). */
+(define qpu-build-join-condition-from-cclasses (lambda (outer-refs repr)
+	(qpu-and-from-conjuncts (reduce outer-refs (lambda (acc ref) (begin
+		(define replacement (qpu-repr-lookup repr ref))
+		(if (nil? replacement) acc
+			(merge acc (list (list (quote equal??)
+				(list (quote get_column) (nth ref 0) false (nth ref 1) false)
+				(list (quote get_column) (nth replacement 0) false (nth replacement 1) false)))))))
+		(list)))))
 
 /* qpu-equate-conjuncts — for each (get_column tv col) in outer-ref-exprs,
 produce a tautology-free predicate that asserts the outer ref equals its
@@ -472,7 +708,7 @@ substitute, so the join's predicate IS the outer-correlation predicate that
 the right's select(s) carried — which is what qpu-unnest-right returns as
 join-predicate. This helper exists so a future cclasses-aware variant can
 build the IS-NOT-DISTINCT-FROM bindings directly. */
-(define qpu-equate-conjuncts (lambda (outer-refs binding-map) '()))
+(define qpu-equate-conjuncts (lambda (outer-refs binding-map) (list)))
 
 /* qpu-unnest-dep-join — the main per-dep-join transformer. Combines:
    - Right-side walker (qpu-unnest-right)
@@ -488,17 +724,36 @@ Pre-condition: dj is a qpir-dep-join. */
 			(define right (qpir-dep-join-right dj))
 			(define outer-aliases (qpir-provided-aliases left))
 			(define outer-ref-exprs (qpu-collect-outer-refs dj))
-			/* Trivial case — no outer refs in right: convert to inner join directly. */
+			/* Trivial case — no outer refs in right: convert directly. */
 			(if (equal? (count outer-ref-exprs) 0)
 				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
 					(qpir-dep-join-rhs-alias dj))
 				(begin
-					(define right-result (qpu-unnest-right right outer-aliases outer-ref-exprs))
+					/* Pass 1: collect cclasses from select equalities in the right. */
+					(define cc (qpu-make-cclasses))
+					(qpu-collect-cclasses right cc)
+					/* Build the repr substitution map: outer-ref → inner-equivalent. */
+					(define repr (qpu-cc-build-repr cc outer-aliases))
+					/* Pass 2: walk right with substitution applied. */
+					(define outer-refs-as-pairs (map outer-ref-exprs (lambda (e) (match e
+						'((symbol get_column) tv ti col ci) (list tv col)
+						'((quote get_column)  tv ti col ci) (list tv col)
+						nil))))
+					(define right-result (qpu-unnest-right right outer-aliases
+						outer-ref-exprs repr))
 					(define new-right (nth right-result 0))
 					(define extracted-join-pred (nth right-result 1))
+					/* Join condition: combine the dep-join's own predicate, any residual
+					   extracted outer-correlation (for non-equality correlations not in
+					   cclasses), and IS-NOT-DISTINCT-FROM conjuncts for the cclass-bound
+					   outer refs (FAQ §41 — NULL-safe equality). */
+					(define cc-join-cond (qpu-build-join-condition-from-cclasses
+						outer-refs-as-pairs repr))
 					(define combined-pred (qpu-and-from-conjuncts
-						(merge (qpu-and-conjuncts (qpir-dep-join-predicate dj))
-							(qpu-and-conjuncts extracted-join-pred))))
+						(merge
+							(merge (qpu-and-conjuncts (qpir-dep-join-predicate dj))
+								(qpu-and-conjuncts extracted-join-pred))
+							(qpu-and-conjuncts cc-join-cond))))
 					(qpir-join (quote inner) combined-pred left new-right
 						(qpir-dep-join-rhs-alias dj))))))))
 

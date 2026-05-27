@@ -42,7 +42,7 @@ Covers:
 
 	(define mk-col (lambda (tv col) (list (quote get_column) tv false col false)))
 	(define mk-tuple (lambda (schema tables fields cond)
-		(list schema tables fields cond '() nil '() nil nil)))
+		(list schema tables fields cond (list) nil (list) nil nil)))
 
 	/* ==== qpu-walk-with-path ==== */
 	(define t-po (qpir-leaf (mk-tuple "memcp-tests"
@@ -61,7 +61,7 @@ Covers:
 	(qpu-assert (visited "n") 2 "walker visits 2 nodes for select(leaf)")
 
 	/* ==== qpu-lca-path ==== */
-	(qpu-assert (count (qpu-lca-path '() '())) 0 "LCA of empty paths is empty")
+	(qpu-assert (count (qpu-lca-path (list) (list))) 0 "LCA of empty paths is empty")
 	(qpu-assert (count (qpu-lca-path (list 1 2 3) (list 1 2 3))) 3 "LCA of equal paths is the full path")
 	(qpu-assert (count (qpu-lca-path (list 1 2 3) (list 1 2 4))) 2 "LCA of diverging paths after 2 elements")
 	(qpu-assert (count (qpu-lca-path (list 1 2) (list 1 2 3))) 2 "LCA when one is prefix of other")
@@ -88,7 +88,7 @@ Covers:
 	(define t-pi-uncorr (qpir-leaf (mk-tuple "memcp-tests"
 		(list (list "pi" "memcp-tests" "pi" false nil))
 		(list (list "value" (mk-col "pi" "amount"))) true)))
-	(define dj-trivial (qpir-dep-join true t-po t-pi-uncorr '() nil))
+	(define dj-trivial (qpir-dep-join true t-po t-pi-uncorr (list) nil))
 	(define trivial-elim (qpu-trivial-eliminate dj-trivial))
 	(qpu-assert (qpir-kind trivial-elim) (quote qpir-join)
 		"trivial dep-join (uncorrelated right) → qpir-join")
@@ -100,7 +100,7 @@ Covers:
 		(list (list "pi" "memcp-tests" "pi" false nil))
 		(list (list "value" (mk-col "pi" "amount")))
 		(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k")))))
-	(define dj-nontrivial (qpir-dep-join true t-po t-pi-corr '() nil))
+	(define dj-nontrivial (qpir-dep-join true t-po t-pi-corr (list) nil))
 	(define nontrivial-elim (qpu-trivial-eliminate dj-nontrivial))
 	(qpu-assert (qpir-kind nontrivial-elim) (quote qpir-dep-join)
 		"non-trivial dep-join stays as qpir-dep-join after trivial sub-pass")
@@ -164,7 +164,7 @@ Covers:
 		"collect-outer-refs: outer ref col is k")
 
 	/* ==== qpu-push-outer-refs-into-groupby ==== */
-	(define gb-bare (qpir-groupby '()
+	(define gb-bare (qpir-groupby (list)
 		(list (list "value" (list (quote aggregate) (mk-col "pi" "amount") (quote +) 0)))
 		nil (qpir-leaf (mk-tuple "memcp-tests"
 			(list (list "pi" "memcp-tests" "pi" false nil))
@@ -191,7 +191,7 @@ Covers:
 	(qpu-assert (count (qpu-and-conjuncts
 		(list (quote and) (list (quote equal??) 1 2) (list (quote >) 3 4)))) 2
 		"and-conjuncts splits (and a b) into 2")
-	(qpu-assert (qpu-and-from-conjuncts '()) true
+	(qpu-assert (qpu-and-from-conjuncts (list)) true
 		"and-from-conjuncts of empty is true")
 	(qpu-assert (qpu-and-from-conjuncts (list (list (quote >) 1 2))) (list (quote >) 1 2)
 		"and-from-conjuncts of 1 returns bare predicate")
@@ -228,7 +228,7 @@ Covers:
 	(define inner-select (qpir-select
 		(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
 		inner-leaf))
-	(define inner-gb (qpir-groupby '()
+	(define inner-gb (qpir-groupby (list)
 		(list (list "value"
 			(list (quote aggregate) (mk-col "pi" "amount") (quote +) 0)))
 		nil inner-select))
@@ -237,7 +237,7 @@ Covers:
 		(list (list "id" (mk-col "po" "id"))
 			(list "total" (list (quote get_column) "sq_1" false "value" false)))
 		true)))
-	(define dj-su (qpir-dep-join true outer-leaf-su inner-gb '() "sq_1"))
+	(define dj-su (qpir-dep-join true outer-leaf-su inner-gb (list) "sq_1"))
 	(qpu-assert (count (qpir-free-vars dj-su)) 0
 		"input dj-su has F = ∅ (rhs-alias makes sq_1 bound)")
 	(qpu-assert (count (qpu-collect-outer-refs dj-su)) 1
@@ -259,17 +259,23 @@ Covers:
 		"unnested right is qpir-groupby")
 	(qpu-assert (count (qpir-groupby-keys unnested-right)) 1
 		"groupby has 1 key after outer-refs push (was 0)")
-	(qpu-assert (nth (nth (qpir-groupby-keys unnested-right) 0) 1) "po"
-		"groupby key references po (the outer alias — substitution is phase 3)")
+	/* After phase 3 cclasses substitution: po.k gets substituted to pi.k since
+	   the inner WHERE pi.k=po.k put them in the same equivalence class. So the
+	   pushed groupby key references pi.k (the inner-side equivalent), not po.k.
+	   This is the architecturally correct behavior — the groupby's child (the
+	   leaf) provides pi but NOT po, so a key referencing po would be unbound. */
+	(qpu-assert (nth (nth (qpir-groupby-keys unnested-right) 0) 1) "pi"
+		"groupby key references pi (cclasses substituted po → pi per FAQ §41)")
 	(qpu-assert (count (qpir-groupby-aggs unnested-right)) 1
 		"groupby aggs preserved")
 	(qpu-assert (qpir-kind (qpir-groupby-child unnested-right)) (quote qpir-leaf)
 		"select was extracted (groupby child is now the inner leaf)")
 
-	/* Join's predicate is the extracted correlation predicate */
+	/* Join's predicate: cclasses build IS NOT DISTINCT FROM conjunct linking
+	   po.k to pi.k (per FAQ §41 — NULL-safe equality). */
 	(define unnested-pred (qpir-join-predicate unnested-su))
 	(qpu-assert (nth unnested-pred 0) (quote equal??)
-		"join predicate is equal?? (extracted from inner select)")
+		"join predicate is equal?? (IS NOT DISTINCT FROM from cclasses)")
 
 	/* F(root) of the unnested tree must be ∅ */
 	(qpu-assert (count (qpir-free-vars unnested-su)) 0

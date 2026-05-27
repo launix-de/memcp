@@ -58,18 +58,18 @@ then, these snapshot tests are the proof that the architecture works.
 		(list (list "total"
 			(list (quote aggregate) (mk-col "pi" "amount") (quote +) 0)))
 		(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
-		'() nil '() nil nil))
+		(list) nil (list) nil nil))
 	(define outer-tuple (list "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))
 		(list (list "id" (mk-col "po" "id"))
 			(list "total" (list (quote inner_select) inner-sum-tuple)))
-		true '() nil '() nil nil))
+		true (list) nil (list) nil nil))
 
 	/* Run the full pipeline: */
 	(define after-alias (alias_normalize_pass outer-tuple))
 	(qpipe-assert (qpp-tuple? after-alias) true "alias_normalize_pass returns tuple")
 
-	(define after-column (column_resolve_pass after-alias '()))
+	(define after-column (column_resolve_pass after-alias (list)))
 	(qpipe-assert (qpp-tuple? after-column) true "column_resolve_pass returns tuple")
 
 	(define after-lift (lift_dep_joins_pass after-column))
@@ -115,12 +115,12 @@ then, these snapshot tests are the proof that the architecture works.
 		(list (list "pi" "memcp-tests" "pi" false nil))
 		(list (list "x" 1))   /* SELECT * → simplified to SELECT 1 for the test */
 		(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
-		'() nil '() nil nil))
+		(list) nil (list) nil nil))
 	(define exists-outer (list "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))
 		(list (list "id" (mk-col "po" "id")))
 		(list (quote inner_select_exists) exists-inner-tuple)
-		'() nil '() nil nil))
+		(list) nil (list) nil nil))
 
 	(define ex-after-lift (lift_dep_joins_pass exists-outer))
 	(qpipe-assert (qpir-kind ex-after-lift) (quote qpir-select)
@@ -140,12 +140,12 @@ then, these snapshot tests are the proof that the architecture works.
 		(list (list "pi" "memcp-tests" "pi" false nil))
 		(list (list "total"
 			(list (quote aggregate) (mk-col "pi" "amount") (quote +) 0)))
-		true '() nil '() nil nil))
+		true (list) nil (list) nil nil))
 	(define uncorr-outer (list "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))
 		(list (list "id" (mk-col "po" "id"))
 			(list "total" (list (quote inner_select) uncorr-inner-tuple)))
-		true '() nil '() nil nil))
+		true (list) nil (list) nil nil))
 
 	(define uc-after-lift (lift_dep_joins_pass uncorr-outer))
 	(define uc-after-unnest (unnest_pass uc-after-lift))
