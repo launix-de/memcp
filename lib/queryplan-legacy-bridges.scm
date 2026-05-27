@@ -78,6 +78,35 @@ for registering visible schema metadata. */
 		(materialized-subquery-init id subquery materialized_rows))
 )))
 
+/* dep_helper_keytable_binding: FAQ §32-compliant replacement for
+legacy_materialized_query_term_binding_ast in the dep_helper code paths.
+
+Produces a (kt_table_spec init_code) binding where:
+- kt_table_spec: the keytable name (string) — usable as a regular table in scans
+- init_code: createtable + createcolumn-per-aggregate, FAQ §31 canonical naming
+
+Returns nil if the subquery shape is not yet supported by the keytable
+backend; caller falls back to legacy_materialized_query_term_binding_ast.
+
+Multi-session implementation plan (see memory: keytable_refactoring_spec.md (via Claude memory)):
+- Step 1 (this commit): skeleton returns nil unconditionally (pure addition,
+  no behavior change). Ensures the function exists for the call sites to
+  feature-flag against without breakage.
+- Step 2: implement simple-value-aggregate case (SUM/COUNT/MAX/MIN with
+  single-column domain D). Behind MEMCP_KEYTABLE_DEP_HELPER env flag.
+- Step 3+: extend coverage, then enable by default, then remove legacy.
+
+This is FAQ §32-compliant because the keytable IS a group cache (the
+permitted form of materialization); cache columns are canonical
+make_aggregate_cache_col_name (FAQ §31) which already disambiguates by
+filter condition — solving the multi-scalar contamination case
+(66_neumann_domain_col "multiple SUM with different domain joins") by
+construction. */
+(define dep_helper_keytable_binding (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
+	/* Step 1: skeleton — always return nil so caller falls back to legacy. */
+	nil
+)))
+
 /* build_legacy_prejoin_materialize_plan: isolate the remaining
 session/resultrow-backed prejoin filler used by trigger backfill paths.
 Query-time prejoin filling stays on the canonical build_queryplan row

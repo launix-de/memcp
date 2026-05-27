@@ -6595,14 +6595,27 @@ seeing the correctly prefixed outer alias. */
 					(dependent_join_helper_domain_joinexpr tv dep_active_domain_cols))
 				(define dep_rows_sym (symbol (concat "__dep_helper_rows:" tv)))
 				(define dep_sink_sym (symbol (concat "__dep_helper_sink:" tv)))
+				/* Phase B Schritt 1 — try keytable backend first (FAQ §32 compliant).
+				When implemented for the input subquery shape, returns a binding that
+				avoids the legacy session-backed materialization and its plan inflation.
+				Returns nil for unsupported shapes; caller falls through to legacy.
+				See memory: keytable_refactoring_spec.md (via Claude memory) for migration plan. */
 				(define dep_mat_binding
-					(legacy_materialized_query_term_binding_ast
-						(concat tv ":dep_helper")
-						dep_materialize_source_query
-						dep_rows_sym
-						dep_sink_sym
-						nil
-						nil))
+					(coalesce
+						(dep_helper_keytable_binding
+							(concat tv ":dep_helper")
+							dep_materialize_source_query
+							dep_rows_sym
+							dep_sink_sym
+							nil
+							nil)
+						(legacy_materialized_query_term_binding_ast
+							(concat tv ":dep_helper")
+							dep_materialize_source_query
+							dep_rows_sym
+							dep_sink_sym
+							nil
+							nil)))
 				(define dep_mat_source (nth dep_mat_binding 0))
 				(define dep_mat_init (nth dep_mat_binding 1))
 				(match dep_materialize_source_query
