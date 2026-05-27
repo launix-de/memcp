@@ -170,11 +170,40 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (qpir-kind (qpir-dep-join-left dj1-left)) (quote qpir-leaf)
 		"lift: chain's bottom-left is the outer qpir-leaf")
 
+	/* ==== Path (e): IN-marker in WHERE rewrites via FAQ §11 COUNT, then lifts ==== */
+	/* t-in-where = SELECT po.id FROM po WHERE po.k IN (SELECT pi.amount sum FROM pi WHERE pi.k=po.k)
+	   After phase 3 rewrite: WHERE becomes (> (coalesce <count-subquery> 0) 0).
+	   The count-subquery is a scalar inner_select; phase 2 then lifts it as a dep-join. */
+	(define lifted-in (lift_dep_joins_pass t-in-where))
+	(qpl-assert (qpir-kind lifted-in) (quote qpir-select)
+		"lift: IN-in-WHERE → qpir-select at root (COUNT scalar pulled up)")
+	(define in-pred (qpir-select-predicate lifted-in))
+	(qpl-assert (nth in-pred 0) (quote >) "lift: IN rewrite uses > comparison")
+	(qpl-assert (nth in-pred 2) 0 "lift: IN rewrite compares to 0")
+	/* The (coalesce sq.value 0) shape */
+	(qpl-assert (nth (nth in-pred 1) 0) (quote coalesce) "lift: IN rewrite wraps with coalesce")
+	(qpl-assert (nth (nth in-pred 1) 2) 0 "lift: IN rewrite coalesce default = 0")
+	(define in-sq-ref (nth (nth in-pred 1) 1))
+	(qpl-assert (nth in-sq-ref 0) (quote get_column) "lift: IN rewrite coalesce arg = get_column on sq alias")
+	(qpl-assert (nth in-sq-ref 3) "value" "lift: IN rewrite coalesce arg points to value column")
+	(qpl-assert (qpir-kind (qpir-select-child lifted-in)) (quote qpir-dep-join)
+		"lift: IN-rewrite chain has qpir-dep-join under select")
+
+	/* ==== Path (f): EXISTS-marker in WHERE rewrites the same way ==== */
+	(define t-exists (mk-tuple "memcp-tests"
+		(list (list "po" "memcp-tests" "po" false nil))
+		(list (list "id" (mk-col "po" "id")))
+		marker-exists))
+	(define lifted-exists (lift_dep_joins_pass t-exists))
+	(qpl-assert (qpir-kind lifted-exists) (quote qpir-select)
+		"lift: EXISTS-in-WHERE → qpir-select at root")
+	(define ex-pred (qpir-select-predicate lifted-exists))
+	(qpl-assert (nth ex-pred 0) (quote >) "lift: EXISTS rewrite uses > comparison")
+	(qpl-assert (nth (nth ex-pred 1) 0) (quote coalesce) "lift: EXISTS rewrite uses coalesce")
+	(qpl-assert (qpir-kind (qpir-select-child lifted-exists)) (quote qpir-dep-join)
+		"lift: EXISTS-rewrite chain has qpir-dep-join under select")
+
 	/* ==== Errors-loudly ==== */
-	(qpl-assert (try
-		(lambda () (begin (lift_dep_joins_pass t-in-where) "no-error"))
-		(lambda (e) "errored")) "errored"
-		"lift: IN-marker (any slot) triggers error in Phase 2")
 
 	(define t-having-marker (list "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))

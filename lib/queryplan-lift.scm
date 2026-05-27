@@ -116,6 +116,117 @@ subexpression, depth-first left-to-right. */
 		e)))
 	(> (collected "n") 0))))
 
+/* ==================== IN / EXISTS rewrite (FAQ §11) ==================== */
+
+/* Per FAQ §11: EXISTS/IN compile via COALESCE((SELECT COUNT(*) FROM …), 0) > 0.
+The rewrite turns the non-scalar markers into a synthesized scalar inner_select
+wrapping a COUNT subquery, so the substitution walker (which already handles
+scalar markers) processes them uniformly.
+
+   EXISTS (sub) →
+     (> (coalesce (inner_select count-sub) 0) 0)
+       where count-sub keeps sub's schema, tables, WHERE, GROUP BY but
+       projects a single COUNT(*) named "value".
+
+   a IN (sub) →
+     (> (coalesce (inner_select count-sub) 0) 0)
+       where count-sub keeps sub's schema, tables, GROUP BY but adds
+       (equal?? a sub-first-field-expr) to WHERE and projects COUNT(*).
+
+NULL semantics: tri-valued IN/NOT IN (FAQ §22, §24) is a phase 4 concern
+when we add the match_count + null_count parallel COUNTs. For now this is
+the strict (two-valued) rewrite. */
+
+(define qpl-count-star-aggregate '((quote aggregate) 1 (quote +) 0))
+
+(define qpl-and-cond (lambda (a b)
+	(if (or (nil? a) (equal? a true)) b
+		(if (or (nil? b) (equal? b true)) a
+			(list (quote and) a b)))))
+
+(define qpl-make-count-subquery-for-exists (lambda (sub)
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema sub)
+		(qpp-tuple-tables sub)
+		(list (list "value" qpl-count-star-aggregate))
+		(qpp-tuple-condition sub)
+		(qpp-tuple-group sub)
+		nil   /* HAVING dropped: the count above the group reduces to 0/n */
+		'()   /* ORDER BY irrelevant for a scalar count */
+		nil   /* LIMIT dropped */
+		nil)))
+
+(define qpl-make-count-subquery-for-in (lambda (a sub)
+	(begin
+		(define sub-fields (qpp-tuple-fields sub))
+		(if (not (equal? (count sub-fields) 1))
+			(error (concat "lift_dep_joins_pass: IN-subquery has " (string (count sub-fields))
+				" projected fields; expected exactly 1. Multi-row IN is FAQ §22 territory and not yet implemented."))
+			(begin
+				(define sub-expr (nth (nth sub-fields 0) 1))
+				(qpp-rebuild-tuple
+					(qpp-tuple-schema sub)
+					(qpp-tuple-tables sub)
+					(list (list "value" qpl-count-star-aggregate))
+					(qpl-and-cond
+						(list (quote equal??) a sub-expr)
+						(qpp-tuple-condition sub))
+					(qpp-tuple-group sub)
+					nil   /* HAVING dropped — see EXISTS comment */
+					'() nil nil))))))
+
+/* qpl-wrap-as-count-gt-zero — wrap a synthesized scalar inner_select in the
+COALESCE-COUNT > 0 boolean shape per FAQ §11. */
+(define qpl-wrap-as-count-gt-zero (lambda (count-sub)
+	(list (quote >)
+		(list (quote coalesce) (list (quote inner_select) count-sub) 0)
+		0)))
+
+/* qpl-rewrite-in-exists — walk an expression tree, rewrite every
+inner_select_in / inner_select_exists into the COALESCE-COUNT > 0 form.
+Leaves scalar inner_select untouched (it's already in the form the
+substitution walker expects). */
+(define qpl-rewrite-in-exists (lambda (expr) (begin
+	(define k (qpl-marker-kind expr))
+	(if (equal? k (quote inner_select_in))
+		(qpl-wrap-as-count-gt-zero
+			(qpl-make-count-subquery-for-in
+				(qpl-rewrite-in-exists (qpl-marker-lhs expr))
+				(qpl-marker-subquery expr)))
+		(if (equal? k (quote inner_select_exists))
+			(qpl-wrap-as-count-gt-zero
+				(qpl-make-count-subquery-for-exists (qpl-marker-subquery expr)))
+			(match expr
+				(cons sym args) (cons sym (map (coalesceNil args '()) qpl-rewrite-in-exists))
+				expr))))))
+
+/* qpl-rewrite-in-exists-fields — apply the rewrite to each projection. */
+(define qpl-rewrite-in-exists-fields (lambda (fields)
+	(map (coalesceNil fields '()) (lambda (pair) (match pair
+		'(name expr) (list name (qpl-rewrite-in-exists expr))
+		pair)))))
+
+(define qpl-rewrite-in-exists-group (lambda (group)
+	(map (coalesceNil group '()) qpl-rewrite-in-exists)))
+
+(define qpl-rewrite-in-exists-order (lambda (order)
+	(map (coalesceNil order '()) (lambda (item) (match item
+		'(expr dir) (list (qpl-rewrite-in-exists expr) dir)
+		item)))))
+
+/* qpl-rewrite-in-exists-tuple — apply qpl-rewrite-in-exists to every
+expression slot of a 7-tuple. */
+(define qpl-rewrite-in-exists-tuple (lambda (t) (qpp-rebuild-tuple
+	(qpp-tuple-schema t)
+	(qpp-tuple-tables t)
+	(qpl-rewrite-in-exists-fields (qpp-tuple-fields t))
+	(qpl-rewrite-in-exists (qpp-tuple-condition t))
+	(qpl-rewrite-in-exists-group (qpp-tuple-group t))
+	(qpl-rewrite-in-exists (qpp-tuple-having t))
+	(qpl-rewrite-in-exists-order (qpp-tuple-order t))
+	(qpp-tuple-limit t)
+	(qpp-tuple-offset t))))
+
 /* ==================== Substitution + collection ==================== */
 
 (define qpl-sq-counter (newsession))
@@ -201,13 +312,18 @@ IN/EXISTS in Phase 3+) get a different wrapping. */
 
 /* ==================== Lift driver ==================== */
 
-/* lift_dep_joins_pass — the L2 → L1 transformation. */
+/* lift_dep_joins_pass — the L2 → L1 transformation.
+Step 1 — pre-rewrite IN/EXISTS markers into the FAQ §11 COALESCE-COUNT > 0
+shape; this turns them into scalar inner_selects so step 2 (substitution)
+handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers. */
 (define lift_dep_joins_pass (lambda (t)
 	(if (not (qpp-tuple? t))
 		(error "lift_dep_joins_pass: input is not a 7-tuple")
-		(if (not (qpl-tuple-has-markers? t))
-			(qpir-leaf t)
-			(qpl-lift-with-markers t)))))
+		(begin
+			(define t-prime (qpl-rewrite-in-exists-tuple t))
+			(if (not (qpl-tuple-has-markers? t-prime))
+				(qpir-leaf t-prime)
+				(qpl-lift-with-markers t-prime))))))
 
 (define qpl-lift-with-markers (lambda (t) (begin
 	/* Reject shapes Phase 2 does not yet handle: HAVING markers, group-by markers,
