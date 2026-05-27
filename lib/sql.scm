@@ -35,6 +35,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
    unnesting pass (Day 4-5) can eliminate correlations top-down per BTW2025. */
 (import "queryplan-lift.scm")
 (import "queryplan-lift-test.scm")
+/* Layer 3 — unnest_pass: BTW2025 §3 holistic decorrelation. Consumes the
+   qpir-dep-join nodes produced by lift_dep_joins_pass and rewrites them
+   away top-down with parent-chained UnnestingInfo, cclasses, and per-op
+   §3.3 rules. After this pass F(root) = ∅ and no qpir-dep-join remains. */
+(import "queryplan-unnest.scm")
+(import "queryplan-unnest-test.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
