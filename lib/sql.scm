@@ -18,7 +18,31 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-parser.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
+(import "queryplan-tree-ir.scm")
+(import "queryplan-prejoin.scm")
+(import "queryplan-legacy-bridges.scm")
 (import "queryplan.scm")
+(import "queryplan-debug.scm")
+
+(define sql_statement_starts_with (lambda (query keyword) (begin
+	(define trimmed (toUpper (strltrim query)))
+	(define kw_len (strlen keyword))
+	(and
+		(>= (strlen trimmed) kw_len)
+		(equal? (substr trimmed 0 kw_len) keyword)
+		(or
+			(equal? (strlen trimmed) kw_len)
+			(equal? (substr trimmed kw_len 1) " ")
+			(equal? (substr trimmed kw_len 1) "\n")
+			(equal? (substr trimmed kw_len 1) "\t")
+			(equal? (substr trimmed kw_len 1) "\r"))))))
+(define sql_statement_returns_rows (lambda (query)
+	(or
+		(sql_statement_starts_with query "SELECT")
+		(sql_statement_starts_with query "WITH")
+		(sql_statement_starts_with query "EXPLAIN")
+		(sql_statement_starts_with query "SHOW")
+		(sql_statement_starts_with query "DESCRIBE"))))
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
@@ -112,6 +136,15 @@ if the user is not allowed to access this property, the function will throw an e
 (try (lambda () (begin
 	(if (has? (show "system") "user")
 		(scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("$update") (lambda ($update) ($update '("admin" true))))
+		true)
+)) (lambda (e) true))
+
+/* migration: ensure root user exists even when a legacy shared ./data already has system.user */
+(try (lambda () (begin
+	(if (has? (show "system") "user")
+		(if (scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("username") (lambda (username) username) (lambda (a b) b) nil)
+			true
+			(insert (table "system" "user") '("username" "password" "admin") (list (list "root" (password (arg "root-password" "admin")) true))))
 		true)
 )) (lambda (e) true))
 
@@ -217,15 +250,18 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
 					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username") session))
-					(set resultrow_called false)
+					(define resultrow_state (newsession))
+					(resultrow_state "called" false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
+						(resultrow_state "called" true)
 						(original_resultrow row))))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
 					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
-					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
+					/* If no resultrow was called and we got a number, return it as affected_rows
+					for write-like statements only. Empty SELECT-style result sets must stay empty. */
+					(if (and (not (resultrow_state "called")) (number? query_result)
+						(not (sql_statement_returns_rows query))) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
@@ -254,10 +290,11 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					(define session (context "session"))
 					(session "username" (req "username"))
 					(session "schema" schema)
-					(set resultrow_called false)
+					(define resultrow_state (newsession))
+					(resultrow_state "called" false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
-						(set resultrow_called true)
+						(resultrow_state "called" true)
 						(original_resultrow row))))
 					(define handled (match query
 						(regex "SELECT\\s+c\\.relname\\s+as\\s+tblname\\s+FROM\\s+pg_catalog\\.pg_class" _)
@@ -281,8 +318,10 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username") session))
 						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
-					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
+					/* If no resultrow was called and we got a number, return it as affected_rows
+					for write-like statements only. Empty SELECT-style result sets must stay empty. */
+					(if (and (not (resultrow_state "called")) (number? query_result)
+						(not (sql_statement_returns_rows query))) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin

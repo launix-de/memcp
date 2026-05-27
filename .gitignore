@@ -15,3 +15,5 @@ todos/
 .gocache/
 .gomodcache/
 __pycache__/
+
+docs/

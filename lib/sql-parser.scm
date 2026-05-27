@@ -164,6 +164,81 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
 	)))
+	/* Shallow trigger transform for subqueries before they enter query planning. */
+	(define transform_new_old_shallow (lambda (e) (match e
+		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+		(cons h t) (cons (transform_new_old_shallow h) (map t transform_new_old_shallow))
+		e)))
+	(define trigger_semijoin_count_query (lambda (subquery target_expr) (begin
+		(define transformed_subquery (match subquery '(s tables fields condition group having order limit offset)
+			(list s tables
+				(map_assoc fields (lambda (k v) (transform_new_old_shallow v)))
+				(transform_new_old_shallow condition)
+				group having order limit offset)
+			(transform_new_old_shallow subquery)))
+		(define transformed_target_expr
+			(if (nil? target_expr) nil
+				(transform_new_old_shallow target_expr)))
+		(match transformed_subquery
+			'(s t f c _g _h _o _l _off) (begin
+				(define first_field_expr
+					(if (nil? transformed_target_expr)
+						nil
+						(match f
+							(cons _ (cons v _)) v
+							nil)))
+				(if (and (not (nil? transformed_target_expr)) (nil? first_field_expr))
+					(error (concat "trigger_semijoin_count_query requires a comparable first field: " (serialize transformed_subquery)))
+					(list
+						s
+						t
+						(list "__cnt"
+							(list
+								(quote aggregate)
+								1
+								(symbol "+")
+								0))
+						(if (nil? transformed_target_expr)
+							c
+							(if (or (nil? c) (equal? c true))
+								(list (quote equal??) first_field_expr transformed_target_expr)
+								(list (quote and) c (list (quote equal??) first_field_expr transformed_target_expr))))
+						nil
+						nil
+						nil
+						nil
+						nil)))
+			_ (error (concat "trigger_semijoin_count_query requires a select_core query: " (serialize transformed_subquery)))))))
+	(define trigger_semijoin_count_expr (lambda (subquery target_expr negated)
+		(begin
+			(define union_parts (sql_union_all_parts subquery))
+			(define count_expr
+				(if (nil? union_parts)
+					(list (quote inner_select) (trigger_semijoin_count_query subquery target_expr))
+					(match union_parts '(branches order limit offset)
+						(if (or (not (nil? limit)) (not (nil? offset)))
+							(error (concat "trigger_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
+							(if (nil? target_expr)
+								(cons
+									(if negated (quote and) (quote or))
+									(map branches (lambda (branch)
+										(if negated
+											(list (quote not) (list (quote inner_select_exists) branch))
+											(list (quote inner_select_exists) branch)))))
+								(begin
+									(map branches (lambda (branch) (match branch
+										'(_ _ f _ _ _ _ _ _) (sql_semijoin_single_field_name f branch)
+										_ (error (concat "trigger_semijoin_count_query requires a select_core query: " (serialize branch))))))
+									(reduce branches
+										(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (trigger_semijoin_count_query branch target_expr))))
+										0)))))))
+			(if (and (not (nil? union_parts)) (nil? target_expr))
+				count_expr
+				(list
+					(if negated (quote equal?) (quote >))
+					count_expr
+					0)))))
 
 	/* helper function for triggers: transform get_column to dict access */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
@@ -181,13 +256,6 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			/* scalar subselect in trigger: compile via build_queryplan_term.
 			Wrap result in a promise pattern to extract the scalar value. */
 			(match tail (cons subquery '()) (begin
-				/* Transform NEW/OLD refs in the subselect before passing to query planner.
-				Use a shallow transform that does NOT recurse into nested inner_selects. */
-				(define transform_new_old_shallow (lambda (e) (match e
-					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-					(cons h t) (cons (transform_new_old_shallow h) (map t transform_new_old_shallow))
-					e)))
 				(define transformed_subquery (match subquery '(s tables fields condition group having order limit offset)
 					(list s tables
 						(map_assoc fields (lambda (k v) (transform_new_old_shallow v)))
@@ -208,8 +276,20 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
 				(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
-				/* IN/EXISTS subselects: compile via build_queryplan_term */
-				expr /* TODO: implement IN/EXISTS in trigger context */
+				(match head
+					'inner_select_exists (match tail
+						(cons subquery '()) (transform_trigger_expr (trigger_semijoin_count_expr subquery nil false))
+						expr)
+					'(quote inner_select_exists) (match tail
+						(cons subquery '()) (transform_trigger_expr (trigger_semijoin_count_expr subquery nil false))
+						expr)
+					'inner_select_in (match tail
+						(cons target_expr (cons subquery '())) (transform_trigger_expr (trigger_semijoin_count_expr subquery target_expr false))
+						expr)
+					'(quote inner_select_in) (match tail
+						(cons target_expr (cons subquery '())) (transform_trigger_expr (trigger_semijoin_count_expr subquery target_expr false))
+						expr)
+					(cons (transform_trigger_expr head) (map tail transform_trigger_expr)))
 				(cons (transform_trigger_expr head) (map tail transform_trigger_expr))))
 		expr
 	)))
@@ -598,8 +678,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 	(define sql_expression2 (parser (or
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
-		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
+		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub a false))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub a true))
 		/* Collation-aware comparisons (MySQL): enforce given collation on string comparisons */
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "=" (define b sql_expression2)) '('equal_collate a b collation))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "==" (define b sql_expression2)) '('equal_collate a b collation))
@@ -677,7 +757,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '("(" (define a sql_expression) ")") a)
 
 		/* EXISTS (SELECT ...) */
-		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") '('inner_select_exists sub))
+		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub nil false))
 		/* Searched CASE: CASE WHEN cond THEN result ... ELSE default END (must be before simple CASE so WHEN is consumed as keyword, not identifier) */
 		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 		/* Simple CASE: CASE expr WHEN val THEN result ... ELSE default END */
@@ -872,6 +952,174 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
 	)))
+	(define sql_semijoin_mark_outer_expr (lambda (expr) (match expr
+		'((symbol get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((quote get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((symbol get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		'((quote get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		(cons sym args) (cons (sql_semijoin_mark_outer_expr sym) (map args sql_semijoin_mark_outer_expr))
+		expr)))
+	(define sql_semijoin_single_field_name (lambda (fields subquery)
+		(if (equal? (count fields) 2)
+			(car fields)
+			(error (concat "sql_semijoin_count_query requires exactly one output field: " (serialize subquery))))))
+	(define sql_semijoin_count_query (lambda (subquery target_expr) (begin
+		(define union_parts (sql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "sql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define target_expr
+						(if (nil? target_expr) nil (sql_semijoin_mark_outer_expr target_expr)))
+					(define first_field_expr
+						(if (nil? target_expr)
+							nil
+							(match f
+								(cons _ (cons v _)) v
+								nil)))
+					(if (and (not (nil? target_expr)) (nil? first_field_expr))
+						(error (concat "sql_semijoin_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (nil? target_expr)
+								c
+								(if (or (nil? c) (equal? c true))
+									(list (quote equal??) first_field_expr target_expr)
+									(list (quote and) c (list (quote equal??) first_field_expr target_expr))))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
+	/* sql_semijoin_null_count_query: build COUNT(*) WHERE first_field IS NULL
+	for the same FROM/WHERE shape. Used by NOT IN / IN tri-valued semantics:
+	if the RHS has any NULL row that did not equal LHS, the result is UNKNOWN
+	(SQL NULL). Without this count we wrongly answer TRUE for `x NOT IN (..,NULL)`
+	when in fact the answer is UNKNOWN and the row must be dropped.
+	FAQ §22/§24: anti is per-domain-key absence; with NULLs in RHS,
+	"absence" is itself UNKNOWN. */
+	(define sql_semijoin_null_count_query (lambda (subquery) (begin
+		(define union_parts (sql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "sql_semijoin_null_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define first_field_expr (match f
+						(cons _ (cons v _)) v
+						nil))
+					(if (nil? first_field_expr)
+						(error (concat "sql_semijoin_null_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__null_cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (or (nil? c) (equal? c true))
+								(list (quote nil?) first_field_expr)
+								(list (quote and) c (list (quote nil?) first_field_expr)))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "sql_semijoin_null_count_query requires a select_core query: " (serialize subquery))))))))
+	(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
+		(begin
+			(define contains_inner_select_expr (lambda (expr) (match expr
+				(cons sym args) (or
+					(not (nil? (sql_inner_select_kind sym)))
+					(reduce args (lambda (a b) (or a (contains_inner_select_expr b))) false))
+				_ false)))
+			(define contains_inner_select_order_item (lambda (order_item) (match order_item
+				'(col _dir) (contains_inner_select_expr col)
+				_ false)))
+			(define count_rewrite_safe (match subquery
+				'(_ _ fields condition group having order _ _)
+				(not
+					(or
+						(reduce_assoc fields (lambda (a _k v) (or a (contains_inner_select_expr v))) false)
+						(contains_inner_select_expr condition)
+						(reduce (coalesceNil group '()) (lambda (a b) (or a (contains_inner_select_expr b))) false)
+						(contains_inner_select_expr having)
+						(reduce (coalesceNil order '()) (lambda (a b) (or a (contains_inner_select_order_item b))) false)))
+				_ true))
+			(define union_parts (sql_union_all_parts subquery))
+			(define count_expr
+				(if (nil? union_parts)
+					(list (quote inner_select) (sql_semijoin_count_query subquery target_expr))
+					(match union_parts '(branches order limit offset)
+						(if (or (not (nil? limit)) (not (nil? offset)))
+							(error (concat "sql_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
+							(if (nil? target_expr)
+								(cons
+									(if negated (quote and) (quote or))
+									(map branches (lambda (branch)
+										(if negated
+											(list (quote not) (list (quote inner_select_exists) branch))
+											(list (quote inner_select_exists) branch)))))
+								(begin
+									(map branches (lambda (branch) (match branch
+										'(_ _ f _ _ _ _ _ _) (sql_semijoin_single_field_name f branch)
+										_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize branch))))))
+									(reduce branches
+										(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (sql_semijoin_count_query branch target_expr))))
+										0)))))))
+			(if (not count_rewrite_safe)
+				(if (nil? target_expr)
+					(if negated
+						(list (quote not) (list (quote inner_select_exists) subquery))
+						(list (quote inner_select_exists) subquery))
+					(if negated
+						(list (quote not) (list (quote inner_select_in) target_expr subquery))
+						(list (quote inner_select_in) target_expr subquery)))
+				(if (and (not (nil? union_parts)) (nil? target_expr))
+					count_expr
+					(if (nil? target_expr)
+						/* EXISTS / NOT EXISTS: no LHS, no NULL semantics needed */
+						(list
+							(if negated (quote equal?) (quote >))
+							count_expr
+							0)
+						/* IN / NOT IN: SQL tri-valued — match wins TRUE for IN /
+						FALSE for NOT IN; otherwise if any RHS row is NULL the
+						answer is UNKNOWN (NULL); otherwise NOT-match.
+						LHS itself NULL also yields UNKNOWN. */
+						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
+							/* UNION ALL IN/NOT IN with target_expr: leave for
+							finding-2 work; until then fall back to plain count
+							comparison (incorrect for NULL-in-branch). */
+							(list (if negated (quote equal?) (quote >)) count_expr 0)
+							(begin
+								(define null_count_expr
+									(list (quote inner_select)
+										(sql_semijoin_null_count_query subquery)))
+								(if negated
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											false
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												true)))
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											true
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												false))))))))))))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
 			(quote inner_select)
@@ -918,14 +1166,43 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		)
 	))
 	(define sql_insert_select_plan (lambda (schema2 tbl coldesc inner ignoreexists updaterows updaterows2 updatecols) (begin
-		'('begin
-			'('set 'resultrow '('lambda '('item) '('insert '('table schema2 tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
-				(if (and ignoreexists (nil? updaterows))
-					'((quote lambda) '() 0)
-					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-				'('lambda '('id) '('session "last_insert_id" 'id)))))
+		(define insert_prev_rr (symbol "__insert_prev_resultrow"))
+		(define insert_rc_state (symbol "__insert_result_count"))
+		(define insert_applied (symbol "__insert_applied"))
+		(define insert_expr (list
+			(quote insert)
+			(list (quote table) schema2 tbl)
+			(cons (quote list) coldesc)
+			(cons (quote list) (list (cons (quote list) (map (produceN (count coldesc)) (lambda (i)
+				(list (quote nth) (symbol "item") (+ (* i 2) 1))))))
+			)
+			(cons (quote list) updatecols)
+			(if (and ignoreexists (nil? updaterows))
+				(list (quote lambda) (list) 0)
+				(if ignoreexists
+					(list (quote lambda) (list) true)
+					(if (nil? updaterows)
+						nil
+						(list (quote lambda)
+							(map updatecols (lambda (c) (symbol c)))
+							(list (symbol "$update") (cons (quote list) (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+			(list (quote lambda) (list (symbol "id"))
+				(list (quote session) "last_insert_id" (symbol "id")))))
+		(list (quote begin)
+			(list (quote set) insert_prev_rr (symbol "resultrow"))
+			(list (quote define) insert_rc_state (list (quote newsession)))
+			(list insert_rc_state "v" 0)
+			(list (quote set) (symbol "resultrow")
+				(list (quote lambda) (list (symbol "item"))
+					(list (quote begin)
+						(list (quote define) insert_applied insert_expr)
+						(list (quote if) (list (quote nil?) insert_applied)
+							0
+							(list insert_rc_state "v" (list (quote +) (list insert_rc_state "v") 1)))
+						insert_applied)))
 			(build_queryplan_term inner)
-		)
+			(list (quote set) (symbol "resultrow") insert_prev_rr)
+			(list insert_rc_state "v"))
 	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
@@ -979,11 +1256,19 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			))
 		)
 		(?
-			(atom "LIMIT" true)
 			(or
-				'((define offset sql_expression) (atom "," true) (define limit sql_expression))
-				'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
-				'((define limit sql_expression))
+				'(
+					(atom "LIMIT" true)
+					(or
+						'((define offset sql_expression) (atom "," true) (define limit sql_expression))
+						'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
+						'((define limit sql_expression))
+					)
+				)
+				'(
+					(atom "OFFSET" true)
+					(define offset sql_expression)
+				)
 			)
 		)
 	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))

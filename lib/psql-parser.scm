@@ -120,6 +120,165 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(cons col cols) (cons col (cons (car tuple) (zip_cols cols (cdr tuple))))
 		'()
 	)))
+	(define psql_semijoin_mark_outer_expr (lambda (expr) (match expr
+		'((symbol get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((quote get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
+		'((symbol get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		'((quote get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
+		(cons sym args) (cons (psql_semijoin_mark_outer_expr sym) (map args psql_semijoin_mark_outer_expr))
+		expr)))
+	(define psql_semijoin_single_field_name (lambda (fields subquery)
+		(if (equal? (count fields) 2)
+			(car fields)
+			(error (concat "psql_semijoin_count_query requires exactly one output field: " (serialize subquery))))))
+	(define psql_semijoin_count_query (lambda (subquery target_expr) (begin
+		(define union_parts (psql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "psql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define target_expr
+						(if (nil? target_expr) nil (psql_semijoin_mark_outer_expr target_expr)))
+					(define first_field_expr
+						(if (nil? target_expr)
+							nil
+							(match f
+								(cons _ (cons v _)) v
+								nil)))
+					(if (and (not (nil? target_expr)) (nil? first_field_expr))
+						(error (concat "psql_semijoin_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (nil? target_expr)
+								c
+								(if (or (nil? c) (equal? c true))
+									(list (quote equal??) first_field_expr target_expr)
+									(list (quote and) c (list (quote equal??) first_field_expr target_expr))))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "psql_semijoin_count_query requires a select_core query: " (serialize subquery))))))))
+	/* psql_semijoin_null_count_query: COUNT(*) WHERE first_field IS NULL.
+	Mirrors sql_semijoin_null_count_query for the PostgreSQL parser. See
+	the SQL counterpart for the NOT IN / IN tri-valued rationale. */
+	(define psql_semijoin_null_count_query (lambda (subquery) (begin
+		(define union_parts (psql_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error (concat "psql_semijoin_null_count_query does not yet support UNION ALL: " (serialize subquery)))
+			(match subquery
+				'(s t f c _g _h _o _l _off) (begin
+					(define first_field_expr (match f
+						(cons _ (cons v _)) v
+						nil))
+					(if (nil? first_field_expr)
+						(error (concat "psql_semijoin_null_count_query requires a comparable first field: " (serialize subquery)))
+						(list
+							s
+							t
+							(list "__null_cnt"
+								(list
+									(quote aggregate)
+									1
+									(symbol "+")
+									0))
+							(if (or (nil? c) (equal? c true))
+								(list (quote nil?) first_field_expr)
+								(list (quote and) c (list (quote nil?) first_field_expr)))
+							nil
+							nil
+							nil
+							nil
+							nil)))
+				_ (error (concat "psql_semijoin_null_count_query requires a select_core query: " (serialize subquery))))))))
+	(define psql_semijoin_count_expr (lambda (subquery target_expr negated)
+		(begin
+			(define contains_inner_select_expr (lambda (expr) (match expr
+				(cons sym args) (or
+					(not (nil? (sql_inner_select_kind sym)))
+					(reduce args (lambda (a b) (or a (contains_inner_select_expr b))) false))
+				_ false)))
+			(define contains_inner_select_order_item (lambda (order_item) (match order_item
+				'(col _dir) (contains_inner_select_expr col)
+				_ false)))
+			(define count_rewrite_safe (match subquery
+				'(_ _ fields condition group having order _ _)
+				(not
+					(or
+						(reduce_assoc fields (lambda (a _k v) (or a (contains_inner_select_expr v))) false)
+						(contains_inner_select_expr condition)
+						(reduce (coalesceNil group '()) (lambda (a b) (or a (contains_inner_select_expr b))) false)
+						(contains_inner_select_expr having)
+						(reduce (coalesceNil order '()) (lambda (a b) (or a (contains_inner_select_order_item b))) false)))
+				_ true))
+			(define union_parts (psql_union_all_parts subquery))
+			(define count_expr
+				(if (nil? union_parts)
+					(list (quote inner_select) (psql_semijoin_count_query subquery target_expr))
+					(match union_parts '(branches order limit offset)
+						(if (or (not (nil? limit)) (not (nil? offset)))
+							(error (concat "psql_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
+							(if (nil? target_expr)
+								(cons
+									(if negated (quote and) (quote or))
+									(map branches (lambda (branch)
+										(if negated
+											(list (quote not) (list (quote inner_select_exists) branch))
+											(list (quote inner_select_exists) branch)))))
+								(begin
+									(map branches (lambda (branch) (match branch
+										'(_ _ f _ _ _ _ _ _) (psql_semijoin_single_field_name f branch)
+										_ (error (concat "psql_semijoin_count_query requires a select_core query: " (serialize branch))))))
+									(reduce branches
+										(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (psql_semijoin_count_query branch target_expr))))
+										0)))))))
+			(if (not count_rewrite_safe)
+				(if (nil? target_expr)
+					(if negated
+						(list (quote not) (list (quote inner_select_exists) subquery))
+						(list (quote inner_select_exists) subquery))
+					(if negated
+						(list (quote not) (list (quote inner_select_in) target_expr subquery))
+						(list (quote inner_select_in) target_expr subquery)))
+				(if (and (not (nil? union_parts)) (nil? target_expr))
+					count_expr
+					(if (nil? target_expr)
+						/* EXISTS / NOT EXISTS: no LHS, no NULL tri-valued shape */
+						(list
+							(if negated (quote equal?) (quote >))
+							count_expr
+							0)
+						/* IN / NOT IN: SQL tri-valued NULL handling. See
+						sql_semijoin_count_expr in sql-parser.scm for full rationale. */
+						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
+							(list (if negated (quote equal?) (quote >)) count_expr 0)
+							(begin
+								(define null_count_expr
+									(list (quote inner_select)
+										(psql_semijoin_null_count_query subquery)))
+								(if negated
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											false
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												true)))
+									(list (quote if) (list (quote nil?) target_expr)
+										nil
+										(list (quote if) (list (quote >) count_expr 0)
+											true
+											(list (quote if) (list (quote >) null_count_expr 0)
+												nil
+												false))))))))))))
 
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
@@ -160,8 +319,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	(define psql_expression2 (parser (or
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
-		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") '('inner_select_in a sub))
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
+		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") (psql_semijoin_count_expr sub a false))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (psql_semijoin_count_expr sub a true))
 		(parser '((define a psql_expression3) "==" (define b psql_expression2)) '((quote equal??) a b))
 		(parser '((define a psql_expression3) "=" (define b psql_expression2)) '((quote equal??) a b))
 		(parser '((define a psql_expression3) "<>" (define b psql_expression2)) '((quote not) '((quote equal?) a b)))
@@ -221,7 +380,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '("(" (define a psql_expression) ")") a)
 
 		/* EXISTS (SELECT ...) */
-		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") '('inner_select_exists sub))
+		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") (psql_semijoin_count_expr sub nil false))
 		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
@@ -444,11 +603,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			))
 		)
 		(?
-			(atom "LIMIT" true)
 			(or
-				'((define offset psql_expression) (atom "," true) (define limit psql_expression))
-				'((define limit psql_expression) (atom "OFFSET" true) (define offset psql_expression))
-				'((define limit psql_expression))
+				'(
+					(atom "LIMIT" true)
+					(or
+						'((define offset psql_expression) (atom "," true) (define limit psql_expression))
+						'((define limit psql_expression) (atom "OFFSET" true) (define offset psql_expression))
+						'((define limit psql_expression))
+					)
+				)
+				'(
+					(atom "OFFSET" true)
+					(define offset psql_expression)
+				)
 			)
 		)
 	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))

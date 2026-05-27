@@ -939,6 +939,15 @@ func Init(en scm.Env) {
 		Desc: "creates a new database",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
+			// oninit (optional 6th parameter): a thunk run ONCE, synchronously,
+			// after the new table is fully created and before createtable returns
+			// true. Used by planner-generated keytable/virtual-source initializers
+			// so the caller never observes a created-but-empty table (FAQ §32).
+			// Skipped when the ifnotexists fast-path hits an existing table.
+			var oninit scm.Scmer
+			if len(a) > 5 {
+				oninit = a[5]
+			}
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -1092,6 +1101,12 @@ func Init(en scm.Env) {
 			db.saveLockedWithDurabilityAndUnlock(newTable.PersistencyMode == Safe)
 			registerCreatedTable(newTable)
 			executeRegisteredCreateTableTriggers(newTable)
+			// Run the optional initializer thunk synchronously so the caller never
+			// observes a created-but-empty table — FAQ §32. Runs AFTER the
+			// registered create-table triggers from master so global hooks fire first.
+			if len(a) > 5 && !oninit.IsNil() {
+				scm.Apply(oninit)
+			}
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
@@ -1101,6 +1116,7 @@ func Init(en scm.Env) {
 				{Kind: "list", ParamName: "cols", ParamDesc: "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2 updatemode deletemode of 'restrict'|'cascade'|'set null')"},
 				{Kind: "list", ParamName: "options", ParamDesc: "further options like engine=safe|sloppy|memory"},
 				{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "don't throw an error if table already exists", Optional: true},
+				{Kind: "func", ParamName: "oninit", ParamDesc: "optional 0-arg thunk run synchronously on first creation, before the call returns true. Lets callers attach the initial fill atomically so the table never becomes visible empty (FAQ §32).", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
