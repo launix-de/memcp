@@ -138,6 +138,52 @@ Covers:
 	(qpu-assert caught "errored"
 		"unnest_pass errors loudly on residual non-trivial dep-joins (FAQ §1)")
 
+	/* ==== annotate_dep_joins public API ==== */
+	(define ann-trivial (annotate_dep_joins dj-trivial))
+	(qpu-assert (count (ann-trivial "map")) 0
+		"annotate: trivial dep-join has 0 accessor entries")
+	(define ann-nontrivial (annotate_dep_joins dj-nontrivial))
+	(qpu-assert (> (count (ann-nontrivial "map")) 0) true
+		"annotate: non-trivial dep-join has at least 1 accessor entry")
+
+	/* ==== qpu-accessing-of ==== */
+	(define ann-acc-list (qpu-accessing-of ann-nontrivial dj-nontrivial))
+	(qpu-assert (> (count ann-acc-list) 0) true
+		"qpu-accessing-of returns at least one accessor path for the dep-join")
+
+	/* ==== qpu-collect-outer-refs ==== */
+	(define outer-refs-trivial (qpu-collect-outer-refs dj-trivial))
+	(qpu-assert (count outer-refs-trivial) 0
+		"collect-outer-refs: trivial dep-join has 0 outer refs")
+	(define outer-refs-nontrivial (qpu-collect-outer-refs dj-nontrivial))
+	(qpu-assert (count outer-refs-nontrivial) 1
+		"collect-outer-refs: non-trivial dep-join (with WHERE pi.k=po.k) has 1 outer ref")
+	(qpu-assert (nth (nth outer-refs-nontrivial 0) 1) "po"
+		"collect-outer-refs: outer ref tblvar is po")
+	(qpu-assert (nth (nth outer-refs-nontrivial 0) 3) "k"
+		"collect-outer-refs: outer ref col is k")
+
+	/* ==== qpu-push-outer-refs-into-groupby ==== */
+	(define gb-bare (qpir-groupby '()
+		(list (list "value" (list (quote aggregate) (mk-col "pi" "amount") (quote +) 0)))
+		nil (qpir-leaf (mk-tuple "memcp-tests"
+			(list (list "pi" "memcp-tests" "pi" false nil))
+			(list (list "amount" (mk-col "pi" "amount")))
+			true))))
+	(qpu-assert (count (qpir-groupby-keys gb-bare)) 0 "fresh groupby: 0 keys")
+	(define gb-pushed (qpu-push-outer-refs-into-groupby gb-bare
+		(list (mk-col "po" "k"))))
+	(qpu-assert (count (qpir-groupby-keys gb-pushed)) 1
+		"after push-outer-refs: groupby has 1 key")
+	(qpu-assert (nth (nth (qpir-groupby-keys gb-pushed) 0) 1) "po"
+		"pushed key's tblvar is po")
+	(qpu-assert (nth (nth (qpir-groupby-keys gb-pushed) 0) 3) "k"
+		"pushed key's col is k")
+	(qpu-assert (count (qpir-groupby-aggs gb-pushed)) 1
+		"after push: aggs preserved (1 entry)")
+	(qpu-assert (qpir-groupby-having gb-pushed) nil
+		"after push: having preserved (nil)")
+
 	(print "  qpu tests: " (- (qpu-tests "count") (qpu-tests "fail")) "/" (qpu-tests "count") " passed")
 	(if (> (qpu-tests "fail") 0) (begin
 		(print "")

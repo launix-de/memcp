@@ -285,6 +285,69 @@ self-contained right sides (e.g. uncorrelated subqueries that snuck through). */
 (define qpu-trivial-eliminate-tree (lambda (tree)
 	(qpu-map-tree tree qpu-trivial-eliminate)))
 
+/* ==================== Annotate (public API) ==================== */
+
+/* annotate_dep_joins — public name for the §3.1 annotation pass.
+Returns a session whose "map" key holds a list of
+(dep-join-node accessor-path) pairs. Multiple entries may share a dep-join.
+
+Per BTW2025 §3.1: dep-joins with empty accessing are trivial and can be
+converted directly via qpu-trivial-eliminate. Dep-joins with non-empty
+accessing need the general §3.2 elimination algorithm. */
+(define annotate_dep_joins (lambda (tree) (begin
+	(define pairs (qpu-build-accessing-map tree))
+	(define session (newsession))
+	(session "map" pairs)
+	session)))
+
+/* qpu-accessing-of — given the annotation session from annotate_dep_joins
+and a dep-join node, return the list of accessor paths recorded against it. */
+(define qpu-accessing-of (lambda (annotation dep-join-node) (begin
+	(define pairs (annotation "map"))
+	(reduce pairs (lambda (acc pair) (match pair
+		'(dj accessor-path) (if (equal? dj dep-join-node)
+			(merge acc (list accessor-path))
+			acc)
+		acc)) '()))))
+
+/* ==================== BTW2025 §3.3 groupby rule ==================== */
+
+/* qpu-push-outer-refs-into-groupby — the FAQ §33 / BTW2025 §3.3 rule:
+   D ⋈ᵈ Γ_A;agg(T) → Γ_{A∪A(D);agg}(D ⋈ T)
+
+   Adds outer-ref expressions to the groupby's keys list so each combination
+   of outer values becomes its own group. Returns a new groupby node;
+   does NOT mutate the input.
+
+   outer-ref-exprs is the list of (get_column tv col) expressions that
+   correspond to the outer refs the dep-join needs to bind. They become
+   new GROUP BY keys.
+
+   Used by the unnest_pass when traversing a dep-join whose right subtree
+   contains a qpir-groupby. */
+(define qpu-push-outer-refs-into-groupby (lambda (gb outer-ref-exprs)
+	(if (not (equal? (qpir-kind gb) (quote qpir-groupby)))
+		(error "qpu-push-outer-refs-into-groupby: input is not qpir-groupby")
+		(qpir-groupby
+			(merge (qpir-groupby-keys gb) outer-ref-exprs)
+			(qpir-groupby-aggs gb)
+			(qpir-groupby-having gb)
+			(qpir-groupby-child gb)))))
+
+/* qpu-collect-outer-refs — for a dep-join, return the list of get_column
+expressions in the RIGHT subtree that reference columns from the LEFT
+subtree's provided aliases. These are the outer references that need to
+be bound by the dep-join. */
+(define qpu-collect-outer-refs (lambda (dj) (begin
+	(define left-aliases (qpir-provided-aliases (qpir-dep-join-left dj)))
+	(define right-free (qpir-free-vars (qpir-dep-join-right dj)))
+	(define outer-refs (filter right-free (lambda (ref) (match ref
+		'(tv col) (has? left-aliases tv)
+		false))))
+	(map outer-refs (lambda (ref) (match ref
+		'(tv col) (list (quote get_column) tv false col false)
+		ref))))))
+
 /* ==================== Public driver (Phase 1: trivial only) ==================== */
 
 /* unnest_pass — the L3 transformation.
