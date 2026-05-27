@@ -90,10 +90,15 @@ The right side may reference columns from the left side (correlation).
 predicate — boolean expression
 left, right — child operators
 accessing — list of operator references in right that read columns from left
-(set by [annotate_dep_joins], used by [unnest_pass]).
+(set by [annotate_dep_joins], used by [unnest_pass])
+rhs-alias — the (synthesized) alias under which the right's single output
+column is exposed to operators ABOVE the dep-join (e.g. "sq_1"). nil if
+the right's natural alias is used. This makes qpir-provided-aliases
+report the synthesized alias so outer references like (get_column sq_1
+value …) resolve as bound, not free.
 This node MUST NOT appear in the tree after the unnesting pass. */
-(define qpir-dep-join (lambda (predicate left right accessing)
-	(list (quote qpir-dep-join) predicate left right accessing)))
+(define qpir-dep-join (lambda (predicate left right accessing rhs-alias)
+	(list (quote qpir-dep-join) predicate left right accessing rhs-alias)))
 
 /* qpir-union: UNION ALL across branches (FAQ §14).
 order — list of (expr direction) order items, or nil
@@ -168,6 +173,7 @@ Compiled to nested scans by Layer 4 (build_queryplan_inner). */
 (define qpir-dep-join-left      (lambda (n) (nth n 2)))
 (define qpir-dep-join-right     (lambda (n) (nth n 3)))
 (define qpir-dep-join-accessing (lambda (n) (nth n 4)))
+(define qpir-dep-join-rhs-alias (lambda (n) (nth n 5)))
 
 (define qpir-union-order    (lambda (n) (nth n 1)))
 (define qpir-union-limit    (lambda (n) (nth n 2)))
@@ -251,9 +257,12 @@ bound vs free. */
 		(quote qpir-join)    (merge_unique (list
 			(qpir-provided-aliases (qpir-join-left node))
 			(qpir-provided-aliases (qpir-join-right node))))
-		(quote qpir-dep-join) (merge_unique (list
-			(qpir-provided-aliases (qpir-dep-join-left node))
-			(qpir-provided-aliases (qpir-dep-join-right node))))
+		(quote qpir-dep-join) (begin
+			(define base (merge_unique (list
+				(qpir-provided-aliases (qpir-dep-join-left node))
+				(qpir-provided-aliases (qpir-dep-join-right node)))))
+			(define rhs-alias (qpir-dep-join-rhs-alias node))
+			(if (nil? rhs-alias) base (merge_unique (list base (list rhs-alias)))))
 		(quote qpir-union)   (if (or (nil? (qpir-union-branches node))
 			(equal? (qpir-union-branches node) '()))
 			'()

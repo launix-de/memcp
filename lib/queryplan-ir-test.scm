@@ -87,7 +87,7 @@ pass/fail summary and a loud warning if any assertion fails.
 
 	(define n-dep (qpir-dep-join
 		(qpir-mk-eq (qpir-mk-col "po" "k") (qpir-mk-col "pi" "k"))
-		n-scan n-rhs '()))
+		n-scan n-rhs '() nil))
 	(qpir-assert (qpir-kind n-dep) (quote qpir-dep-join) "qpir-dep-join kind")
 
 	(define n-union (qpir-union nil nil nil (list n-scan n-rhs)))
@@ -154,7 +154,7 @@ pass/fail summary and a loud warning if any assertion fails.
 	(define n-pi-correlated-select (qpir-select
 		(qpir-mk-eq (qpir-mk-col "po" "k") (qpir-mk-col "pi" "k"))
 		(qpir-scan "memcp-tests" "pi")))
-	(define n-dep-correlated (qpir-dep-join true n-scan n-pi-correlated-select '()))
+	(define n-dep-correlated (qpir-dep-join true n-scan n-pi-correlated-select '() nil))
 	(qpir-assert (count (qpir-free-vars n-dep-correlated)) 0
 		"F(dep-join with correlation po.k inside right) = empty (both aliases provided)")
 

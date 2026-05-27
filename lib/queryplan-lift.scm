@@ -462,15 +462,35 @@ can apply during unnest_pass. */
 	(define agg-inner (nth agg-args 0))
 	(define agg-reducer (nth agg-args 1))
 	(define agg-init (nth agg-args 2))
-	/* Rename the visible field to "value" so callers reference sq.value uniformly.
-	   The leaf projects the aggregate's inner expression as "value"; the
-	   groupby aggregates that into the same "value" name. The WHERE clause
-	   is hoisted to a qpir-select between groupby and leaf so the unnest
-	   §3.3 select rule has a place to fire. */
+	/* Per FAQ "canonical names / helper identities derived from physical source
+	   columns": don't synthesize placeholder aliases. The aggregate keeps its
+	   original column refs (e.g. (get_column pi amount)); the leaf below must
+	   project every column referenced by the aggregate's inner expression AND
+	   the WHERE predicate so the runtime can read them at scan time.
+
+	   The qpir-groupby outputs its aggregate under the name "value" so callers
+	   uniformly reference sq.value. The WHERE clause is hoisted to a qpir-select
+	   between groupby and leaf so the unnest §3.3 select rule can fire. */
+	(define leaf-cols-from-agg (qpir-expr-column-refs agg-inner))
+	(define leaf-cols-from-where
+		(qpir-expr-column-refs (coalesceNil (qpp-tuple-condition sub) true)))
+	(define leaf-cols (qpl-dedupe-col-refs (merge leaf-cols-from-agg leaf-cols-from-where)))
+	/* Materialize the leaf's projections. Only project columns that the leaf
+	   can actually provide — i.e. those whose tblvar matches one of sub's tables.
+	   Outer-ref columns stay as free vars and are resolved by the dep-join. */
+	(define leaf-aliases (map (coalesceNil (qpp-tuple-tables sub) '()) (lambda (td)
+		(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+	(define leaf-fields (map
+		(filter leaf-cols (lambda (ref) (match ref
+			'(tv col) (has? leaf-aliases tv)
+			false)))
+		(lambda (ref) (match ref
+			'(tv col) (list col (list (quote get_column) tv false col false))
+			ref))))
 	(define leaf-bare (qpir-leaf (qpp-rebuild-tuple
 		(qpp-tuple-schema sub)
 		(qpp-tuple-tables sub)
-		(list (list "value" agg-inner))
+		leaf-fields
 		true
 		'()  /* GROUP BY moves up to qpir-groupby */
 		nil
@@ -484,11 +504,15 @@ can apply during unnest_pass. */
 	(qpir-groupby
 		group-keys
 		(list (list "value"
-			(list (quote aggregate)
-				(list (quote get_column) "" false "value" false)
-				agg-reducer agg-init)))
+			(list (quote aggregate) agg-inner agg-reducer agg-init)))
 		nil
 		leaf-with-select))))
+
+/* qpl-dedupe-col-refs — remove duplicate (tv col) pairs from a list. */
+(define qpl-dedupe-col-refs (lambda (refs)
+	(reduce refs (lambda (acc ref)
+		(if (has? acc ref) acc (merge acc (list ref))))
+		'())))
 
 /* ==================== Lift driver ==================== */
 
@@ -553,7 +577,7 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			   so each sq alias becomes visible above its point of introduction. */
 			(define chained (reduce markers (lambda (left-acc pair) (match pair
 				'(sq-alias sub)
-				(qpir-dep-join true left-acc (qpl-wrap-inner-subquery sub) '())
+				(qpir-dep-join true left-acc (qpl-wrap-inner-subquery sub) '() sq-alias)
 				left-acc))
 				outer-leaf))
 

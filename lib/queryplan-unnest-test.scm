@@ -88,7 +88,7 @@ Covers:
 	(define t-pi-uncorr (qpir-leaf (mk-tuple "memcp-tests"
 		(list (list "pi" "memcp-tests" "pi" false nil))
 		(list (list "value" (mk-col "pi" "amount"))) true)))
-	(define dj-trivial (qpir-dep-join true t-po t-pi-uncorr '()))
+	(define dj-trivial (qpir-dep-join true t-po t-pi-uncorr '() nil))
 	(define trivial-elim (qpu-trivial-eliminate dj-trivial))
 	(qpu-assert (qpir-kind trivial-elim) (quote qpir-join)
 		"trivial dep-join (uncorrelated right) → qpir-join")
@@ -100,7 +100,7 @@ Covers:
 		(list (list "pi" "memcp-tests" "pi" false nil))
 		(list (list "value" (mk-col "pi" "amount")))
 		(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k")))))
-	(define dj-nontrivial (qpir-dep-join true t-po t-pi-corr '()))
+	(define dj-nontrivial (qpir-dep-join true t-po t-pi-corr '() nil))
 	(define nontrivial-elim (qpu-trivial-eliminate dj-nontrivial))
 	(qpu-assert (qpir-kind nontrivial-elim) (quote qpir-dep-join)
 		"non-trivial dep-join stays as qpir-dep-join after trivial sub-pass")

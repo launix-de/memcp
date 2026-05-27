@@ -144,12 +144,32 @@ Runs at server startup after queryplan-lift.scm loads.
 	(define inner-bottom-leaf (qpir-select-child (qpir-groupby-child inner-gb)))
 	(qpl-assert (qpir-kind inner-bottom-leaf) (quote qpir-leaf) "inner bottom is qpir-leaf")
 	(define inner-leaf-tuple (qpir-leaf-7tuple inner-bottom-leaf))
-	(qpl-assert (count (qpp-tuple-fields inner-leaf-tuple)) 1 "inner leaf projects 1 column")
-	(qpl-assert (nth (nth (qpp-tuple-fields inner-leaf-tuple) 0) 0) "value"
-		"inner leaf's projected column named value (was agg's inner expr)")
+	/* Leaf projects every physical pi column referenced by the aggregate's inner
+	   expression OR by the hoisted WHERE — phase 5/6 keeps canonical source-column
+	   names per FAQ. For SUM(pi.amount) WHERE pi.k=po.k that's (amount) + (k). */
+	(qpl-assert (count (qpp-tuple-fields inner-leaf-tuple)) 2
+		"inner leaf projects 2 columns (amount from agg, k from WHERE)")
 	(qpl-assert (qpp-tuple-condition inner-leaf-tuple) true
 		"inner leaf's WHERE is true (real WHERE was hoisted to qpir-select)")
 	(qpl-assert (count (qpp-tuple-group inner-leaf-tuple)) 0 "inner leaf has no GROUP BY (moved up)")
+	/* Aggregate inside qpir-groupby keeps its ORIGINAL physical-column reference
+	   (no synthesized "" placeholder). */
+	(define inner-agg-pair (nth (qpir-groupby-aggs inner-gb) 0))
+	(define inner-agg-expr (nth inner-agg-pair 1))
+	(qpl-assert (nth inner-agg-expr 0) (quote aggregate) "inner agg is bare (aggregate …) form")
+	(define inner-agg-inner-arg (nth inner-agg-expr 1))
+	(qpl-assert (nth inner-agg-inner-arg 0) (quote get_column)
+		"inner agg's inner expr is a (get_column …) ref")
+	(qpl-assert (nth inner-agg-inner-arg 1) "pi"
+		"inner agg references the physical source alias (pi), not a synthesized placeholder")
+
+	/* ==== End-to-end F(N) check: lifted correlated SUM has F(root) = ∅ ==== */
+	/* The whole architectural point of phases 4 + 5: after lift, the dep-join
+	   binds the outer column references inside the inner subtree. F(root) MUST
+	   be empty — every column ref is bound by some provider in the tree. */
+	(define fv-after-lift (qpir-free-vars lifted-scalar))
+	(qpl-assert (count fv-after-lift) 0
+		"F(lifted dep-join) = ∅ — outer refs in inner are bound by dep-join's left provider")
 
 	/* ==== Path (c): scalar WHERE marker → qpir-select(qpir-dep-join …) ==== */
 	(define lifted-where (lift_dep_joins_pass t-where-scalar))
