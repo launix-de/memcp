@@ -46,6 +46,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
    derived-table entry per FAQ "groups are HARD borders"). */
 (import "queryplan-lower.scm")
 (import "queryplan-lower-test.scm")
+/* Public API for the new pipeline: neumann_compile_select runs L1→L4 and
+   returns a clean 7-tuple. The opt-in switch neumann_pipeline_enabled is
+   false by default; flipping it routes build_queryplan_term through the
+   new pipeline (when wired). */
+(import "queryplan-neumann.scm")
+(import "queryplan-neumann-test.scm")
 /* Integration tests for the full L1→L2→L3 pipeline composition.
    Until parser-wiring lands, these snapshot tests are the proof that the
    architecture works end-to-end on parser-shaped inputs. */
