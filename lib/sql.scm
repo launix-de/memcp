@@ -18,6 +18,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-parser.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
+/* Layer 1 of the BTW2025 top-down compiler — algebra IR operators.
+   See lib/queryplan-ir.scm header for the operator set and invariants.
+   Must load BEFORE queryplan.scm so later passes can depend on it. */
+(import "queryplan-ir.scm")
+(import "queryplan-ir-test.scm")
 (import "queryplan.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
