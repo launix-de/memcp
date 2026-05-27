@@ -30,6 +30,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
    untangle_query is deleted, those helpers move into queryplan-passes.scm. */
 (import "queryplan-passes.scm")
 (import "queryplan-passes-test.scm")
+/* Layer 2 — lift_dep_joins_pass: bridges 7-tuple to operator IR. Every
+   inner_select* marker becomes an explicit qpir-dep-join so the holistic
+   unnesting pass (Day 4-5) can eliminate correlations top-down per BTW2025. */
+(import "queryplan-lift.scm")
+(import "queryplan-lift-test.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
