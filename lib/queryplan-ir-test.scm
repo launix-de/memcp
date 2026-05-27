@@ -79,7 +79,7 @@ pass/fail summary and a loud warning if any assertion fails.
 	(define n-rhs (qpir-scan "memcp-tests" "pi"))
 	(define n-join (qpir-join (quote inner)
 		(qpir-mk-eq (qpir-mk-col "po" "k") (qpir-mk-col "pi" "k"))
-		n-scan n-rhs))
+		n-scan n-rhs nil))
 	(qpir-assert (qpir-kind n-join) (quote qpir-join) "qpir-join kind")
 	(qpir-assert (qpir-join-type n-join) (quote inner) "qpir-join type")
 	(qpir-assert (qpir-join-left n-join) n-scan "qpir-join left")

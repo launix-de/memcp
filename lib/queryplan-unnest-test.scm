@@ -184,6 +184,107 @@ Covers:
 	(qpu-assert (qpir-groupby-having gb-pushed) nil
 		"after push: having preserved (nil)")
 
+	/* ==== Predicate splitting helpers ==== */
+	(qpu-assert (count (qpu-and-conjuncts true)) 0 "and-conjuncts of true is empty")
+	(qpu-assert (count (qpu-and-conjuncts (list (quote equal??) 1 2))) 1
+		"and-conjuncts of bare predicate is 1")
+	(qpu-assert (count (qpu-and-conjuncts
+		(list (quote and) (list (quote equal??) 1 2) (list (quote >) 3 4)))) 2
+		"and-conjuncts splits (and a b) into 2")
+	(qpu-assert (qpu-and-from-conjuncts '()) true
+		"and-from-conjuncts of empty is true")
+	(qpu-assert (qpu-and-from-conjuncts (list (list (quote >) 1 2))) (list (quote >) 1 2)
+		"and-from-conjuncts of 1 returns bare predicate")
+
+	(qpu-assert (qpu-expr-references-aliases? (mk-col "po" "k") (list "po")) true
+		"expr-refs-aliases positive case")
+	(qpu-assert (qpu-expr-references-aliases? (mk-col "pi" "k") (list "po")) false
+		"expr-refs-aliases negative case")
+
+	/* split: predicate fully outer-correlated → entire predicate to outer */
+	(define split-corr (qpu-split-predicate
+		(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
+		(list "po")))
+	(qpu-assert (nth split-corr 0) (list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
+		"split: pure outer-corr predicate → outer side")
+	(qpu-assert (nth split-corr 1) true "split: pure outer-corr → pure side is true")
+
+	/* split: mixed AND → conjuncts go to respective sides */
+	(define split-mixed (qpu-split-predicate
+		(list (quote and)
+			(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
+			(list (quote >) (mk-col "pi" "amount") 100))
+		(list "po")))
+	(qpu-assert (nth split-mixed 0) (list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
+		"split mixed: outer side = corr conjunct")
+	(qpu-assert (nth split-mixed 1) (list (quote >) (mk-col "pi" "amount") 100)
+		"split mixed: pure side = inner conjunct")
+
+	/* ==== qpu-unnest-dep-join — end-to-end correlated SUM shape ==== */
+	(define inner-leaf (qpir-leaf (mk-tuple "memcp-tests"
+		(list (list "pi" "memcp-tests" "pi" false nil))
+		(list (list "amount" (mk-col "pi" "amount")) (list "k" (mk-col "pi" "k")))
+		true)))
+	(define inner-select (qpir-select
+		(list (quote equal??) (mk-col "pi" "k") (mk-col "po" "k"))
+		inner-leaf))
+	(define inner-gb (qpir-groupby '()
+		(list (list "value"
+			(list (quote aggregate) (mk-col "pi" "amount") (quote +) 0)))
+		nil inner-select))
+	(define outer-leaf-su (qpir-leaf (mk-tuple "memcp-tests"
+		(list (list "po" "memcp-tests" "po" false nil))
+		(list (list "id" (mk-col "po" "id"))
+			(list "total" (list (quote get_column) "sq_1" false "value" false)))
+		true)))
+	(define dj-su (qpir-dep-join true outer-leaf-su inner-gb '() "sq_1"))
+	(qpu-assert (count (qpir-free-vars dj-su)) 0
+		"input dj-su has F = ∅ (rhs-alias makes sq_1 bound)")
+	(qpu-assert (count (qpu-collect-outer-refs dj-su)) 1
+		"dj-su has 1 outer ref (po.k)")
+
+	(define unnested-su (qpu-unnest-dep-join dj-su))
+	(qpu-assert (qpir-kind unnested-su) (quote qpir-join)
+		"unnested dj-su is qpir-join")
+	(qpu-assert (qpir-join-type unnested-su) (quote inner)
+		"unnested dj-su is inner join")
+	(qpu-assert (qpir-join-rhs-alias unnested-su) "sq_1"
+		"unnested join preserves rhs-alias = sq_1")
+	(qpu-assert (qpir-join-left unnested-su) outer-leaf-su
+		"unnested join left = original outer")
+
+	/* The right is qpir-groupby with pi.k now in keys, child is qpir-leaf (select dropped). */
+	(define unnested-right (qpir-join-right unnested-su))
+	(qpu-assert (qpir-kind unnested-right) (quote qpir-groupby)
+		"unnested right is qpir-groupby")
+	(qpu-assert (count (qpir-groupby-keys unnested-right)) 1
+		"groupby has 1 key after outer-refs push (was 0)")
+	(qpu-assert (nth (nth (qpir-groupby-keys unnested-right) 0) 1) "po"
+		"groupby key references po (the outer alias — substitution is phase 3)")
+	(qpu-assert (count (qpir-groupby-aggs unnested-right)) 1
+		"groupby aggs preserved")
+	(qpu-assert (qpir-kind (qpir-groupby-child unnested-right)) (quote qpir-leaf)
+		"select was extracted (groupby child is now the inner leaf)")
+
+	/* Join's predicate is the extracted correlation predicate */
+	(define unnested-pred (qpir-join-predicate unnested-su))
+	(qpu-assert (nth unnested-pred 0) (quote equal??)
+		"join predicate is equal?? (extracted from inner select)")
+
+	/* F(root) of the unnested tree must be ∅ */
+	(qpu-assert (count (qpir-free-vars unnested-su)) 0
+		"F(unnested tree) = ∅ — fully unnested")
+
+	(qpu-assert (qpu-count-dep-joins unnested-su) 0
+		"no qpir-dep-join remains after unnest")
+
+	/* ==== unnest_pass driver — end-to-end ==== */
+	(define pass-out (unnest_pass dj-su))
+	(qpu-assert (qpu-count-dep-joins pass-out) 0
+		"unnest_pass on correlated SUM eliminates all dep-joins")
+	(qpu-assert (qpir-kind pass-out) (quote qpir-join)
+		"unnest_pass result is qpir-join for the canonical SUM shape")
+
 	(print "  qpu tests: " (- (qpu-tests "count") (qpu-tests "fail")) "/" (qpu-tests "count") " passed")
 	(if (> (qpu-tests "fail") 0) (begin
 		(print "")

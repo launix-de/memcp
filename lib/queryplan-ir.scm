@@ -81,9 +81,14 @@ child — child operator */
 /* qpir-join: regular join ⋈_p.
 type — one of: inner, left, right, full, semi, anti
 predicate — boolean expression
-left, right — child operators */
-(define qpir-join (lambda (type predicate left right)
-	(list (quote qpir-join) type predicate left right)))
+left, right — child operators
+rhs-alias — synthesized alias (or nil) under which the right's output column
+is exposed to operators ABOVE this join. Symmetric to qpir-dep-join's
+rhs-alias and used when unnest_pass converts a dep-join with an
+introduced sq_N alias into a regular join — the alias must survive the
+conversion or outer references like (get_column sq_N value) become free. */
+(define qpir-join (lambda (type predicate left right rhs-alias)
+	(list (quote qpir-join) type predicate left right rhs-alias)))
 
 /* qpir-dep-join: dependent join ⋈ᵈ_p (BTW2025 §2.1).
 The right side may reference columns from the left side (correlation).
@@ -168,6 +173,7 @@ Compiled to nested scans by Layer 4 (build_queryplan_inner). */
 (define qpir-join-predicate (lambda (n) (nth n 2)))
 (define qpir-join-left      (lambda (n) (nth n 3)))
 (define qpir-join-right     (lambda (n) (nth n 4)))
+(define qpir-join-rhs-alias (lambda (n) (nth n 5)))
 
 (define qpir-dep-join-predicate (lambda (n) (nth n 1)))
 (define qpir-dep-join-left      (lambda (n) (nth n 2)))
@@ -254,9 +260,12 @@ bound vs free. */
 			(qpir-provided-aliases (qpir-map-child node))))
 		(quote qpir-groupby) (qpir-provided-aliases (qpir-groupby-child node))
 		(quote qpir-window)  (qpir-provided-aliases (qpir-window-child node))
-		(quote qpir-join)    (merge_unique (list
-			(qpir-provided-aliases (qpir-join-left node))
-			(qpir-provided-aliases (qpir-join-right node))))
+		(quote qpir-join)    (begin
+			(define base (merge_unique (list
+				(qpir-provided-aliases (qpir-join-left node))
+				(qpir-provided-aliases (qpir-join-right node)))))
+			(define rhs-alias (qpir-join-rhs-alias node))
+			(if (nil? rhs-alias) base (merge_unique (list base (list rhs-alias)))))
 		(quote qpir-dep-join) (begin
 			(define base (merge_unique (list
 				(qpir-provided-aliases (qpir-dep-join-left node))

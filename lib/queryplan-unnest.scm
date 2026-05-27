@@ -234,7 +234,8 @@ the same; only the child slots are replaced. */
 			(qpir-window-computations node) (nth new-children 0))
 		(quote qpir-join)
 		(qpir-join (qpir-join-type node) (qpir-join-predicate node)
-			(nth new-children 0) (nth new-children 1))
+			(nth new-children 0) (nth new-children 1)
+			(qpir-join-rhs-alias node))
 		(quote qpir-dep-join)
 		(qpir-dep-join (qpir-dep-join-predicate node)
 			(nth new-children 0) (nth new-children 1)
@@ -278,8 +279,9 @@ self-contained right sides (e.g. uncorrelated subqueries that snuck through). */
 				false))))
 			(if (equal? (count correlated-free) 0)
 				/* Trivial: right doesn't reference left → inner join with true predicate
-				   (or the dep-join's own predicate, if it had one). */
-				(qpir-join (quote inner) (qpir-dep-join-predicate node) left right)
+				   (or the dep-join's own predicate, if it had one). Preserve rhs-alias. */
+				(qpir-join (quote inner) (qpir-dep-join-predicate node) left right
+					(qpir-dep-join-rhs-alias node))
 				node)))))
 
 (define qpu-trivial-eliminate-tree (lambda (tree)
@@ -348,19 +350,199 @@ be bound by the dep-join. */
 		'(tv col) (list (quote get_column) tv false col false)
 		ref))))))
 
-/* ==================== Public driver (Phase 1: trivial only) ==================== */
+/* ==================== Predicate splitting (FAQ §3.2 simple-elim) ==================== */
 
-/* unnest_pass — the L3 transformation.
-Phase 1 (this commit) only handles trivial dep-joins. For real correlations
-the pass currently errors when residual dep-joins remain after trivial
-elimination, prompting the next implementation phase. */
+/* qpu-and-conjuncts — flatten an AND-tree into a list of conjuncts.
+A non-AND expression yields a single-element list. Constant `true` yields
+the empty list (no constraint). */
+(define qpu-and-conjuncts (lambda (expr)
+	(if (or (nil? expr) (equal? expr true) (equal? expr (quote true)))
+		'()
+		(match expr
+			(cons head args) (match head
+				(symbol and)        (qpu-flatten-and-args args)
+				(quote and)         (qpu-flatten-and-args args)
+				'(quote and)        (qpu-flatten-and-args args)
+				'and                (qpu-flatten-and-args args)
+				(list expr))
+			(list expr)))))
+
+(define qpu-flatten-and-args (lambda (args)
+	(reduce (coalesceNil args '()) (lambda (acc a)
+		(merge acc (qpu-and-conjuncts a))) '())))
+
+/* qpu-and-from-conjuncts — rebuild an AND expression from a conjunct list.
+Empty → true; one element → bare; >1 → (and a b c …). */
+(define qpu-and-from-conjuncts (lambda (cs)
+	(if (equal? (count cs) 0) true
+		(if (equal? (count cs) 1) (nth cs 0)
+			(cons (quote and) cs)))))
+
+/* qpu-expr-references-aliases? — true if expr contains any (get_column tv …)
+whose tv is in `aliases`. Used to identify outer-correlation conjuncts. */
+(define qpu-expr-references-aliases? (lambda (expr aliases)
+	(begin
+		(define refs (qpir-expr-column-refs expr))
+		(> (count (filter refs (lambda (ref) (match ref
+			'(tv col) (has? aliases tv)
+			false)))) 0))))
+
+/* qpu-split-predicate — split a predicate into (outer-conjuncts pure-conjuncts).
+Outer-conjuncts reference any alias in outer-aliases; pure-conjuncts don't.
+Returns the pair (outer-pred-or-true pure-pred-or-true) as already-ANDed
+expressions ready for use as dep-join condition and remaining select. */
+(define qpu-split-predicate (lambda (pred outer-aliases) (begin
+	(define cs (qpu-and-conjuncts pred))
+	(define outer-cs (filter cs (lambda (c)
+		(qpu-expr-references-aliases? c outer-aliases))))
+	(define pure-cs (filter cs (lambda (c)
+		(not (qpu-expr-references-aliases? c outer-aliases)))))
+	(list (qpu-and-from-conjuncts outer-cs) (qpu-and-from-conjuncts pure-cs)))))
+
+/* ==================== Right-side walker (§3.3 rules) ==================== */
+
+/* qpu-unnest-right — walk a dep-join's RIGHT subtree top-down applying the
+BTW2025 §3.3 per-operator rules. Returns a pair (new-right join-predicate)
+where:
+  - new-right is the rewritten subtree (no more correlation to outer)
+  - join-predicate is the AND of all outer-correlation conjuncts extracted
+    from the right; becomes the dep-join's predicate after conversion.
+
+This is the simple variant — uses NO cclasses-based substitution yet. The
+correlation conjuncts that get extracted to the join condition are kept
+as-is (e.g. `(equal?? pi.k po.k)`) rather than substituted via repr. The
+groupby rule adds the outer-ref expressions to keys directly so each outer
+combo gets its own group. */
+(define qpu-unnest-right (lambda (node outer-aliases outer-ref-exprs)
+	(match (qpir-kind node)
+		(quote qpir-leaf) (begin
+			/* The leaf MUST NOT have its own WHERE referencing outer columns.
+			   lift_dep_joins_pass phase 5 hoists such WHERE conjuncts to a
+			   qpir-select wrapper precisely so this walker can extract them.
+			   If we hit a leaf whose WHERE still has outer refs, lift didn't
+			   fire as expected — error loudly per FAQ §1. */
+			(define leaf-tuple (qpir-leaf-7tuple node))
+			(define cond (qpp-tuple-condition leaf-tuple))
+			(if (qpu-expr-references-aliases? cond outer-aliases)
+				(error "qpu-unnest-right: qpir-leaf has WHERE referencing outer columns. lift phase 5 should have hoisted it into a qpir-select wrapper.")
+				(list node true)))
+		(quote qpir-scan) (list node true)
+
+		(quote qpir-select) (begin
+			(define child-result (qpu-unnest-right (qpir-select-child node)
+				outer-aliases outer-ref-exprs))
+			(define child-new (nth child-result 0))
+			(define child-join (nth child-result 1))
+			(define split (qpu-split-predicate (qpir-select-predicate node) outer-aliases))
+			(define outer-pred (nth split 0))
+			(define pure-pred (nth split 1))
+			(define combined-join (qpu-and-from-conjuncts
+				(merge (qpu-and-conjuncts child-join) (qpu-and-conjuncts outer-pred))))
+			(define new-node
+				(if (or (nil? pure-pred) (equal? pure-pred true))
+					child-new   /* select fully consumed → drop */
+					(qpir-select pure-pred child-new)))
+			(list new-node combined-join))
+
+		(quote qpir-map) (begin
+			(define child-result (qpu-unnest-right (qpir-map-child node)
+				outer-aliases outer-ref-exprs))
+			(define child-new (nth child-result 0))
+			(define child-join (nth child-result 1))
+			(list (qpir-map (qpir-map-projections node) child-new) child-join))
+
+		(quote qpir-groupby) (begin
+			(define child-result (qpu-unnest-right (qpir-groupby-child node)
+				outer-aliases outer-ref-exprs))
+			(define child-new (nth child-result 0))
+			(define child-join (nth child-result 1))
+			/* §3.3 / FAQ §33: push outer refs into keys so each outer
+			   combination becomes its own group. */
+			(define new-keys (merge (qpir-groupby-keys node) outer-ref-exprs))
+			(list (qpir-groupby new-keys (qpir-groupby-aggs node)
+				(qpir-groupby-having node) child-new) child-join))
+
+		(error (concat "qpu-unnest-right: operator " (string (qpir-kind node))
+			" not yet supported in right-side walker (phase 2)")))))
+
+/* qpu-equate-conjuncts — for each (get_column tv col) in outer-ref-exprs,
+produce a tautology-free predicate that asserts the outer ref equals its
+"natural binding" in the unnested tree. With the simple algorithm we don't
+substitute, so the join's predicate IS the outer-correlation predicate that
+the right's select(s) carried — which is what qpu-unnest-right returns as
+join-predicate. This helper exists so a future cclasses-aware variant can
+build the IS-NOT-DISTINCT-FROM bindings directly. */
+(define qpu-equate-conjuncts (lambda (outer-refs binding-map) '()))
+
+/* qpu-unnest-dep-join — the main per-dep-join transformer. Combines:
+   - Right-side walker (qpu-unnest-right)
+   - Conversion of qpir-dep-join → qpir-join preserving rhs-alias
+   - Combination of dep-join's own predicate with the extracted join condition
+
+Pre-condition: dj is a qpir-dep-join. */
+(define qpu-unnest-dep-join (lambda (dj)
+	(if (not (equal? (qpir-kind dj) (quote qpir-dep-join)))
+		dj
+		(begin
+			(define left (qpir-dep-join-left dj))
+			(define right (qpir-dep-join-right dj))
+			(define outer-aliases (qpir-provided-aliases left))
+			(define outer-ref-exprs (qpu-collect-outer-refs dj))
+			/* Trivial case — no outer refs in right: convert to inner join directly. */
+			(if (equal? (count outer-ref-exprs) 0)
+				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
+					(qpir-dep-join-rhs-alias dj))
+				(begin
+					(define right-result (qpu-unnest-right right outer-aliases outer-ref-exprs))
+					(define new-right (nth right-result 0))
+					(define extracted-join-pred (nth right-result 1))
+					(define combined-pred (qpu-and-from-conjuncts
+						(merge (qpu-and-conjuncts (qpir-dep-join-predicate dj))
+							(qpu-and-conjuncts extracted-join-pred))))
+					(qpir-join (quote inner) combined-pred left new-right
+						(qpir-dep-join-rhs-alias dj))))))))
+
+/* qpu-unnest-tree-bottom-up — walks the tree, applying qpu-unnest-dep-join
+to every qpir-dep-join encountered. Bottom-up ensures inner dep-joins are
+unnested before outer ones — matches the §3.2 root-to-leaves order when the
+tree's dep-joins are independent (the common case after lift). For nested
+dep-joins with parent-chained Unnesting context we'll need a top-down
+driver — that's a later phase. */
+(define qpu-unnest-tree-bottom-up (lambda (tree)
+	(qpu-map-tree tree qpu-unnest-dep-join)))
+
+/* ==================== Public driver (Phase 2: full algorithm for simple cases) ==================== */
+
+/* unnest_pass — the L3 transformation. After this pass:
+  - F(root) = ∅ (no unbound column references)
+  - No qpir-dep-join remains anywhere in the tree
+
+Phase 2 (this commit) handles BOTH trivial dep-joins AND non-trivial ones
+whose right side is composed of qpir-select / qpir-map / qpir-groupby /
+qpir-leaf (the canonical shape from lift_dep_joins_pass). The per-operator
+§3.3 rules in qpu-unnest-right walk the right top-down extracting outer-
+correlation predicates into a join condition and pushing outer-ref expressions
+into qpir-groupby keys (FAQ §33 static-groupby rule).
+
+Limitations (Phase 3+):
+  - No cclasses/repr substitution yet — extracted predicates stay as
+    `outer.x = inner.y` rather than being simplified to tautologies
+  - No nested-dep-join parent-chained UnnestingInfo — independent dep-joins
+    handled correctly via bottom-up walk; nested ones need top-down driver
+  - qpir-join / qpir-union / qpir-iterate / qpir-window not supported as
+    intermediate operators in the right-side walker yet */
 (define unnest_pass (lambda (tree) (begin
-	(define eliminated (qpu-trivial-eliminate-tree tree))
-	(define residual-djs (qpu-count-dep-joins eliminated))
+	(define unnested (qpu-unnest-tree-bottom-up tree))
+	(define residual-djs (qpu-count-dep-joins unnested))
 	(if (> residual-djs 0)
-		(error (concat "unnest_pass: " (string residual-djs) " non-trivial dep-join(s) remain. "
-			"Phase 2+ (simple_djoin_elimination, per-operator §3.3 rules) not yet implemented."))
-		eliminated))))
+		(error (concat "unnest_pass: " (string residual-djs) " dep-join(s) remain after unnest. "
+			"qpu-unnest-dep-join failed to convert them — check shape against supported phase-2 patterns.")) nil)
+	/* F(root) must be ∅ — every column ref bound by some provider. */
+	(define fv (qpir-free-vars unnested))
+	(if (> (count fv) 0)
+		(error (concat "unnest_pass: " (string (count fv)) " free var(s) remain at root after unnest — "
+			"output is not lowerable. First free ref: " (string (nth fv 0))))
+		unnested))))
 
 /* qpu-count-dep-joins — count remaining qpir-dep-join nodes in the tree. */
 (define qpu-count-dep-joins (lambda (tree) (begin
