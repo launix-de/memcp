@@ -98,15 +98,20 @@ pairs (caller decides flattening at the boundary). */
 		'(name expr) (list name (fn expr))
 		pair)))))
 
-/* qpp-map-order — apply fn to every order expression. order: ((expr dir) ...) */
+/* qpp-map-order — apply fn to every order expression. order: ((expr dir) ...).
+Preserves nil as nil (legacy code distinguishes nil from empty-list ()). */
 (define qpp-map-order (lambda (order fn)
-	(map (coalesceNil order '()) (lambda (item) (match item
-		'(expr dir) (list (fn expr) dir)
-		item)))))
+	(if (nil? order) nil
+		(map order (lambda (item) (match item
+			'(expr dir) (list (fn expr) dir)
+			item))))))
 
-/* qpp-map-group — apply fn to every group-by expression. group: (expr ...) */
+/* qpp-map-group — apply fn to every group-by expression. group: (expr ...).
+Preserves nil as nil (legacy treats nil-group = "no GROUP BY" vs empty-list
+= "explicit empty group" differently in the count_distinct 2-stage path). */
 (define qpp-map-group (lambda (group fn)
-	(map (coalesceNil group '()) fn)))
+	(if (nil? group) nil
+		(map group fn))))
 
 /* qpp-apply-to-tuple — apply expression-rewrite fn to every expression-bearing
 slot of a 7-tuple (fields, condition, group, having, order). limit/offset are
