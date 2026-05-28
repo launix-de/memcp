@@ -278,9 +278,10 @@ self-contained right sides (e.g. uncorrelated subqueries that snuck through). */
 				'(tv col) (has? left-aliases tv)
 				false))))
 			(if (equal? (count correlated-free) 0)
-				/* Trivial: right doesn't reference left → inner join with true predicate
-				   (or the dep-join's own predicate, if it had one). Preserve rhs-alias. */
-				(qpir-join (quote inner) (qpir-dep-join-predicate node) left right
+				/* Trivial: right doesn't reference left → LEFT join (per FAQ §22
+				   per-key-misses: outer rows whose right is empty must survive).
+				   Preserve rhs-alias. */
+				(qpir-join (quote left) (qpir-dep-join-predicate node) left right
 					(qpir-dep-join-rhs-alias node))
 				node)))))
 
@@ -749,9 +750,21 @@ Pre-condition: dj is a qpir-dep-join. */
 			(define right (qpir-dep-join-right dj))
 			(define outer-aliases (qpir-provided-aliases left))
 			(define outer-ref-exprs (qpu-collect-outer-refs dj))
-			/* Trivial case — no outer refs in right: convert directly. */
+			/* Per FAQ §22 "per-key misses MUST survive": when unnesting a
+			   dep-join, every outer row whose domain key is absent in the
+			   helper must survive and get NULL-extended. That is LEFT JOIN
+			   semantics, not INNER JOIN. The FAQ §11 EXISTS/IN rewrite
+			   depends on this: COUNT(...) returning NULL for unmatched rows,
+			   then COALESCE(NULL, 0) = 0, then the (> 0) check correctly
+			   evaluates to false. With INNER JOIN the unmatched outer row
+			   would silently vanish — wrong for NOT EXISTS, COALESCE-default
+			   scalar subselects, and other LEFT-tolerant patterns.
+
+			   Trivial case (no outer refs in right): even here we want LEFT
+			   because the right might be empty for some outer iteration; an
+			   inner join would drop those outer rows. */
 			(if (equal? (count outer-ref-exprs) 0)
-				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
+				(qpir-join (quote left) (qpir-dep-join-predicate dj) left right
 					(qpir-dep-join-rhs-alias dj))
 				(begin
 					/* Pass 1: collect cclasses from select equalities in the right. */
@@ -779,7 +792,9 @@ Pre-condition: dj is a qpir-dep-join. */
 							(merge (qpu-and-conjuncts (qpir-dep-join-predicate dj))
 								(qpu-and-conjuncts extracted-join-pred))
 							(qpu-and-conjuncts cc-join-cond))))
-					(qpir-join (quote inner) combined-pred left new-right
+					/* LEFT JOIN preserves outer rows whose right side is empty (FAQ §22
+					   "per-key misses"). For correlated scalars/EXISTS this is required. */
+					(qpir-join (quote left) combined-pred left new-right
 						(qpir-dep-join-rhs-alias dj))))))))
 
 /* qpu-unnest-tree-bottom-up — walks the tree, applying qpu-unnest-dep-join

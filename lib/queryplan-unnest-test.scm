@@ -92,8 +92,8 @@ Covers:
 	(define trivial-elim (qpu-trivial-eliminate dj-trivial))
 	(qpu-assert (qpir-kind trivial-elim) (quote qpir-join)
 		"trivial dep-join (uncorrelated right) → qpir-join")
-	(qpu-assert (qpir-join-type trivial-elim) (quote inner)
-		"trivial elim produces inner join")
+	(qpu-assert (qpir-join-type trivial-elim) (quote left)
+		"trivial elim produces LEFT join (FAQ §22 per-key-misses)")
 
 	/* Non-trivial dep-join: right's leaf has WHERE referencing po. */
 	(define t-pi-corr (qpir-leaf (mk-tuple "memcp-tests"
@@ -246,8 +246,8 @@ Covers:
 	(define unnested-su (qpu-unnest-dep-join dj-su))
 	(qpu-assert (qpir-kind unnested-su) (quote qpir-join)
 		"unnested dj-su is qpir-join")
-	(qpu-assert (qpir-join-type unnested-su) (quote inner)
-		"unnested dj-su is inner join")
+	(qpu-assert (qpir-join-type unnested-su) (quote left)
+		"unnested dj-su is LEFT join (FAQ §22 per-key-misses)")
 	(qpu-assert (qpir-join-rhs-alias unnested-su) "sq_1"
 		"unnested join preserves rhs-alias = sq_1")
 	(qpu-assert (qpir-join-left unnested-su) outer-leaf-su

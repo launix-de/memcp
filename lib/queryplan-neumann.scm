@@ -48,6 +48,38 @@ during development.
 
 /* ==================== Public API ==================== */
 
+/* qpn-flatten-tuple-recursive — convert all fields lists in a 7-tuple from
+list-of-pairs to flat (name1 expr1 name2 expr2 …), INCLUDING any derived
+sub-tuples nested in the tables list. The legacy build_queryplan_inner /
+untangle_query consumers iterate fields via extract_assoc / reduce_assoc
+which assume the flat form. */
+(define qpn-flatten-tuple-recursive (lambda (t)
+	(if (not (qpp-tuple? t)) t
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema t)
+			(map (coalesceNil (qpp-tuple-tables t) (list)) (lambda (td)
+				(if (or (nil? td) (< (count td) 3)) td
+					(begin
+						(define tname (nth td 2))
+						(if (qpp-tuple? tname)
+							/* derived table: recursively flatten its 7-tuple */
+							(merge (list (nth td 0) (nth td 1)
+								(qpn-flatten-tuple-recursive tname))
+								(if (>= (count td) 4)
+									(list (nth td 3))
+									(list false))
+								(if (>= (count td) 5)
+									(list (nth td 4))
+									(list nil)))
+							td)))))
+			(qpp-fields-to-flat (qpp-tuple-fields t))
+			(qpp-tuple-condition t)
+			(qpp-tuple-group t)
+			(qpp-tuple-having t)
+			(qpp-tuple-order t)
+			(qpp-tuple-limit t)
+			(qpp-tuple-offset t)))))
+
 /* neumann_compile_select tuple [schemas] →
    a clean 7-tuple ready for build_queryplan_inner.
 
@@ -58,28 +90,63 @@ callers supply the real schemas list. */
 (define neumann_compile_select (lambda (tuple) (begin
 	(if (not (qpp-tuple? tuple))
 		(error "neumann_compile_select: input is not a 7-tuple") nil)
-	(define t1 (alias_normalize_pass tuple))
+	/* Parser emits fields as FLAT (name1 expr1 name2 expr2 …) per
+	   sql-parser.scm sql_select_core's (merge cols). My pipeline operates
+	   on list-of-pairs ((name1 expr1) (name2 expr2) …) for clarity.
+	   Convert at entry; convert back at exit. */
+	(define tuple-pairs (qpp-rebuild-tuple
+		(qpp-tuple-schema tuple)
+		(qpp-tuple-tables tuple)
+		(qpp-fields-to-pairs (qpp-tuple-fields tuple))
+		(qpp-tuple-condition tuple)
+		(qpp-tuple-group tuple)
+		(qpp-tuple-having tuple)
+		(qpp-tuple-order tuple)
+		(qpp-tuple-limit tuple)
+		(qpp-tuple-offset tuple)))
+	(define t1 (alias_normalize_pass tuple-pairs))
 	(define t2 (column_resolve_pass t1 (list)))
 	(define t3 (lift_dep_joins_pass t2))
 	(define t4 (unnest_pass t3))
 	(define t5 (lower_to_scans_pass t4))
 	(if (not (qpp-tuple? t5))
 		(error "neumann_compile_select: pipeline did not produce a 7-tuple")
-		t5))))
+		/* Re-flatten fields recursively (including derived sub-tuples) to
+		   match the flat (name1 expr1 …) parser convention. */
+		(qpn-flatten-tuple-recursive t5)))))
 
 /* neumann_compile_select_with_schemas tuple schemas →
    Same as above but with an explicit schemas list passed to column_resolve. */
 (define neumann_compile_select_with_schemas (lambda (tuple schemas) (begin
 	(if (not (qpp-tuple? tuple))
 		(error "neumann_compile_select_with_schemas: input is not a 7-tuple") nil)
-	(define t1 (alias_normalize_pass tuple))
+	(define tuple-pairs (qpp-rebuild-tuple
+		(qpp-tuple-schema tuple)
+		(qpp-tuple-tables tuple)
+		(qpp-fields-to-pairs (qpp-tuple-fields tuple))
+		(qpp-tuple-condition tuple)
+		(qpp-tuple-group tuple)
+		(qpp-tuple-having tuple)
+		(qpp-tuple-order tuple)
+		(qpp-tuple-limit tuple)
+		(qpp-tuple-offset tuple)))
+	(define t1 (alias_normalize_pass tuple-pairs))
 	(define t2 (column_resolve_pass t1 schemas))
 	(define t3 (lift_dep_joins_pass t2))
 	(define t4 (unnest_pass t3))
 	(define t5 (lower_to_scans_pass t4))
 	(if (not (qpp-tuple? t5))
 		(error "neumann_compile_select_with_schemas: pipeline did not produce a 7-tuple")
-		t5))))
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema t5)
+			(qpp-tuple-tables t5)
+			(qpp-fields-to-flat (qpp-tuple-fields t5))
+			(qpp-tuple-condition t5)
+			(qpp-tuple-group t5)
+			(qpp-tuple-having t5)
+			(qpp-tuple-order t5)
+			(qpp-tuple-limit t5)
+			(qpp-tuple-offset t5))))))
 
 /* ==================== Opt-in switch ==================== */
 

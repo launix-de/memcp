@@ -67,10 +67,34 @@ it will land before lift_dep_joins_pass needs it.
 (define qpp-rebuild-tuple (lambda (schema tables fields condition group having order limit offset)
 	(list schema tables fields condition group having order limit offset)))
 
+/* qpp-fields-to-pairs — convert FLAT parser fields (name1 expr1 name2 expr2 …)
+into list-of-pairs ((name1 expr1) (name2 expr2) …). The flat form is what
+sql-parser.scm produces via (merge cols); my pipeline operates on pairs for
+clarity. Idempotent on already-pairs input. */
+(define qpp-fields-to-pairs (lambda (fields) (begin
+	(define fs (coalesceNil fields (list)))
+	(if (equal? (count fs) 0) (list)
+		/* Detect if already pairs: first element is a 2-element list. */
+		(if (and (list? (nth fs 0)) (equal? (count (nth fs 0)) 2))
+			fs
+			/* Flat: pair up via stride 2 */
+			(map (produceN (/ (count fs) 2)) (lambda (i)
+				(list (nth fs (* i 2)) (nth fs (+ (* i 2) 1))))))))))
+
+/* qpp-fields-to-flat — convert list-of-pairs back to flat (kN vN kN+1 vN+1 …).
+This is the inverse — used at the boundary between my pipeline (pairs) and
+legacy consumers (flat). */
+(define qpp-fields-to-flat (lambda (fields)
+	(reduce (coalesceNil fields (list)) (lambda (acc pair) (match pair
+		'(name expr) (merge acc (list name expr))
+		(merge acc (list pair))))
+		(list))))
+
 /* qpp-map-fields — apply fn to every projection expression in a fields list.
-fields shape: ((name expr) (name expr) ...) */
+Accepts both flat and pair forms; converts to pairs internally, then back to
+pairs (caller decides flattening at the boundary). */
 (define qpp-map-fields (lambda (fields fn)
-	(map (coalesceNil fields '()) (lambda (pair) (match pair
+	(map (qpp-fields-to-pairs fields) (lambda (pair) (match pair
 		'(name expr) (list name (fn expr))
 		pair)))))
 

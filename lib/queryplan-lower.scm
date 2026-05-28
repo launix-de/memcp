@@ -217,7 +217,8 @@ and column refs to the right's underlying tables are retargeted. */
 	(define join-pred (qpir-join-predicate node))
 	(if (nil? rhs-alias)
 		(qpu-low-join-merge-tables left-tuple right-tuple join-pred)
-		(qpu-low-join-wrap-derived left-tuple right-tuple join-pred rhs-alias)))))
+		(qpu-low-join-wrap-derived left-tuple right-tuple join-pred rhs-alias
+			(qpir-join-type node))))))
 
 /* qpu-low-join-merge-tables — for a join WITHOUT rhs-alias: append the
 right's tables into the left's tables list and AND conditions/predicate. */
@@ -243,25 +244,45 @@ to the right's underlying tables are retargeted to rhs-alias so they
 resolve through the derived table's projection.
 
 Per lib/sql-parser.scm tabledef: a derived table is
-  (alias schema sub-7-tuple false nil)
-The 3rd slot can be either a string table-name or a sub-7-tuple. */
-(define qpu-low-join-wrap-derived (lambda (left-tuple right-tuple join-pred rhs-alias)
+  (alias schema sub-7-tuple isOuter joinExpr)
+
+For qpir-join-type = left (FAQ §22 per-key-misses): isOuter=true and the
+join predicate becomes the joinExpr (so per-key misses get NULL-extended,
+not filtered out).
+
+For qpir-join-type = inner: isOuter=false; predicate goes into the outer's
+WHERE condition (existing behavior). */
+(define qpu-low-join-wrap-derived (lambda (left-tuple right-tuple join-pred rhs-alias join-type)
 	(begin
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
-		(define derived-entry (list rhs-alias (qpp-tuple-schema right-tuple)
-			right-tuple false nil))
 		(define rewritten-fields (qpu-low-rewrite-projections
 			(qpp-tuple-fields left-tuple) right-source-aliases rhs-alias))
 		(define rewritten-cond (qpu-low-rewrite-refs
 			(qpp-tuple-condition left-tuple) right-source-aliases rhs-alias))
 		(define rewritten-pred (qpu-low-rewrite-refs
 			join-pred right-source-aliases rhs-alias))
+		(define is-left (equal? join-type (quote left)))
+		(define derived-entry
+			(if is-left
+				/* LEFT join: derived table is isOuter=true with joinExpr = pred.
+				   Per-key misses get NULL-extended automatically by the scan
+				   infrastructure (FAQ §22 isOuter contract). */
+				(list rhs-alias (qpp-tuple-schema right-tuple)
+					right-tuple true rewritten-pred)
+				/* INNER join: derived table is plain; predicate flows into WHERE. */
+				(list rhs-alias (qpp-tuple-schema right-tuple)
+					right-tuple false nil)))
+		(define final-cond
+			(if is-left
+				/* LEFT: predicate is in joinExpr, NOT in WHERE (else inner-join semantics). */
+				rewritten-cond
+				(qpu-low-and-cond rewritten-cond rewritten-pred)))
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema left-tuple)
 			(merge (qpp-tuple-tables left-tuple) (list derived-entry))
 			rewritten-fields
-			(qpu-low-and-cond rewritten-cond rewritten-pred)
+			final-cond
 			(qpp-tuple-group left-tuple)
 			(qpp-tuple-having left-tuple)
 			(qpp-tuple-order left-tuple)

@@ -81,8 +81,8 @@ then, these snapshot tests are the proof that the architecture works.
 	(define after-unnest (unnest_pass after-lift))
 	(qpipe-assert (qpir-kind after-unnest) (quote qpir-join)
 		"after unnest: root is qpir-join (dep-join eliminated)")
-	(qpipe-assert (qpir-join-type after-unnest) (quote inner)
-		"after unnest: inner join")
+	(qpipe-assert (qpir-join-type after-unnest) (quote left)
+		"after unnest: LEFT join (FAQ §22 per-key-misses)")
 	(qpipe-assert (count (qpir-free-vars after-unnest)) 0
 		"after unnest: F(root) = ∅")
 
