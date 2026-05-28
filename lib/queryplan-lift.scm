@@ -395,6 +395,28 @@ Cases:
       groupby aggregates it.
   (3) Multiple fields, GROUP BY, HAVING, complex agg expressions → not yet
       supported, errors loudly per FAQ §1. */
+/* qpl-rename-first-field-to-value — produce a copy of sub where the single
+visible field is named "value" so callers can reference the scalar subquery's
+output as `(get_column sq_N false "value" false)` regardless of the user's
+original SQL alias. */
+(define qpl-rename-first-field-to-value (lambda (sub) (begin
+	(define fields (qpp-tuple-fields sub))
+	(if (not (equal? (count fields) 1))
+		(error (concat "qpl-rename-first-field-to-value: expected 1 field, found "
+			(string (count fields)))) nil)
+	(define field-pair (nth fields 0))
+	(define field-expr (nth field-pair 1))
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema sub)
+		(qpp-tuple-tables sub)
+		(list (list "value" field-expr))
+		(qpp-tuple-condition sub)
+		(qpp-tuple-group sub)
+		(qpp-tuple-having sub)
+		(qpp-tuple-order sub)
+		(qpp-tuple-limit sub)
+		(qpp-tuple-offset sub)))))
+
 (define qpl-wrap-inner-subquery (lambda (sub)
 	(if (not (qpp-tuple? sub))
 		(error "qpl-wrap-inner-subquery: sub is not a 7-tuple")
@@ -403,12 +425,34 @@ Cases:
 			(if (not (equal? (count fields) 1))
 				(error (concat "qpl-wrap-inner-subquery: inner subquery has "
 					(string (count fields)) " fields; expected exactly 1. "
-					"Multi-field inner subqueries are phase 5+."))
-				(if (not (nil? (qpp-tuple-having sub)))
-					(error "qpl-wrap-inner-subquery: inner subquery with HAVING not yet supported (phase 5+)")
-					(if (qpl-needs-decompose? sub)
-						(qpl-build-groupby-wrapped-inner sub)
-						(qpl-build-simple-leaf-inner sub))))))))
+					"Multi-field inner subqueries are phase 5+.")) nil)
+			(if (not (nil? (qpp-tuple-having sub)))
+				(error "qpl-wrap-inner-subquery: inner subquery with HAVING not yet supported (phase 5+)") nil)
+			/* Step 1: rename the visible field to "value" so callers uniformly
+			   reference sq_N.value regardless of the user's SQL alias. */
+			(define renamed (qpl-rename-first-field-to-value sub))
+			/* Step 2: RECURSIVELY lift the renamed sub. This is the architectural
+			   fix per FAQ "every query is unnestable": if `sub` itself contains
+			   inner_select markers (a NESTED correlated subquery), lift turns
+			   them into qpir-dep-join nodes in the right subtree. The outer
+			   dep-join (built by the caller) then wraps this whole tree, and
+			   unnest_pass eliminates BOTH the outer dep-join and the inner
+			   ones (top-down per BTW2025 §3.2 with parent-chained UnnestingInfo
+			   — see queryplan-unnest.scm). */
+			(define lifted (lift_dep_joins_pass renamed))
+			/* Step 3: if lifted is a plain qpir-leaf whose 7-tuple needs
+			   aggregate/group-by decomposition (the static-group case for the
+			   typical SUM correlated subquery), apply the decomposition so the
+			   §3.3 groupby rule has a target during unnest. If lifted is a
+			   richer tree (because the sub had its own markers), return as-is —
+			   any aggregates are already operator-level inside that tree. */
+			(if (equal? (qpir-kind lifted) (quote qpir-leaf))
+				(begin
+					(define leaf-tuple (qpir-leaf-7tuple lifted))
+					(if (qpl-needs-decompose? leaf-tuple)
+						(qpl-build-groupby-wrapped-inner leaf-tuple)
+						(qpl-build-simple-leaf-inner leaf-tuple)))
+				lifted)))))
 
 /* qpl-condition-is-trivial? — true when a WHERE condition is `true` (or
 the literal true symbol); such conditions don't need to be hoisted. */

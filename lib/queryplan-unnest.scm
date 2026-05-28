@@ -656,6 +656,31 @@ converted dep-join. */
 			(define final-having (if (equal? sub-having true) nil sub-having))
 			(list (qpir-groupby new-keys sub-aggs final-having child-new) child-join))
 
+		/* qpir-join inside the right subtree of a dep-join. This happens after
+		   nested inner subqueries are lifted (recursive lift_dep_joins_pass) and
+		   the bottom-up walker has converted the INNER dep-join to a regular
+		   join BEFORE processing the OUTER dep-join. Walk into both children to
+		   apply substitution; the join condition gets repr-substituted too.
+
+		   We do NOT split the join's predicate against outer-aliases here — a
+		   nested-correlation conjunct that referenced outer would have been
+		   moved to the inner-join's predicate during the INNER dep-join's
+		   processing. The OUTER walk just propagates substitution. */
+		(quote qpir-join) (begin
+			(define sub-pred (qpu-substitute-expr (qpir-join-predicate node) repr))
+			(define left-result (qpu-unnest-right (qpir-join-left node)
+				outer-aliases outer-ref-exprs repr))
+			(define right-result (qpu-unnest-right (qpir-join-right node)
+				outer-aliases outer-ref-exprs repr))
+			(define left-new (nth left-result 0))
+			(define right-new (nth right-result 0))
+			(define combined-join (qpu-and-from-conjuncts
+				(merge
+					(qpu-and-conjuncts (nth left-result 1))
+					(qpu-and-conjuncts (nth right-result 1)))))
+			(list (qpir-join (qpir-join-type node) sub-pred left-new right-new
+				(qpir-join-rhs-alias node)) combined-join))
+
 		(error (concat "qpu-unnest-right: operator " (string (qpir-kind node))
 			" not yet supported in right-side walker (phase 3)")))))
 

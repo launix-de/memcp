@@ -163,6 +163,42 @@ then, these snapshot tests are the proof that the architecture works.
 	(qpipe-assert (count (qpir-groupby-keys uc-right)) 0
 		"uncorrelated SUM: groupby keys empty (no correlation)")
 
+	/* ==== Test 4: nested correlated subqueries (recursive lift + bottom-up unnest) ==== */
+	/* SQL: SELECT outer.id,
+	          (SELECT (SELECT SUM(t1.x) FROM t1 WHERE t1.a=t0.a) AS inner
+	           FROM t0 WHERE t0.b=outer.b) AS total
+	        FROM outer
+	   Two levels of correlated nesting. lift_dep_joins_pass recursively handles
+	   the inner-most marker via wrap_inner_subquery, producing 2 qpir-dep-joins
+	   stacked. unnest_pass bottom-up converts inner first then outer. */
+	(define n-t1-sub (list "memcp-tests"
+		(list (list "t1" "memcp-tests" "t1" false nil))
+		(list (list "inner" (list (quote aggregate) (mk-col "t1" "x") (quote +) 0)))
+		(list (quote equal??) (mk-col "t1" "a") (mk-col "t0" "a"))
+		(list) nil (list) nil nil))
+	(define n-t0-sub (list "memcp-tests"
+		(list (list "t0" "memcp-tests" "t0" false nil))
+		(list (list "inner" (list (quote inner_select) n-t1-sub)))
+		(list (quote equal??) (mk-col "t0" "b") (mk-col "outer" "b"))
+		(list) nil (list) nil nil))
+	(define n-top (list "memcp-tests"
+		(list (list "outer" "memcp-tests" "outer" false nil))
+		(list (list "id" (mk-col "outer" "id"))
+			(list "total" (list (quote inner_select) n-t0-sub)))
+		true (list) nil (list) nil nil))
+
+	(define n-after-lift (lift_dep_joins_pass n-top))
+	(qpipe-assert (count (qpir-free-vars n-after-lift)) 0
+		"nested-lift: F(root) = ∅")
+	(qpipe-assert (qpu-count-dep-joins n-after-lift) 2
+		"nested-lift: 2 dep-joins (outer + inner from recursive lift)")
+
+	(define n-after-unnest (unnest_pass n-after-lift))
+	(qpipe-assert (count (qpir-free-vars n-after-unnest)) 0
+		"nested-unnest: F(root) = ∅")
+	(qpipe-assert (qpu-count-dep-joins n-after-unnest) 0
+		"nested-unnest: NO dep-joins remain (both converted)")
+
 	(print "  qpipe tests: "
 		(- (qpipe-tests "count") (qpipe-tests "fail")) "/" (qpipe-tests "count") " passed")
 	(if (> (qpipe-tests "fail") 0) (begin

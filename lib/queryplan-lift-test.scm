@@ -262,6 +262,41 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (qpir-kind (qpir-select-child (qpir-groupby-child ex-right))) (quote qpir-leaf)
 		"EXISTS rewrite bottom is qpir-leaf")
 
+	/* ==== Nested correlated subquery — recursive lift ==== */
+	/* SQL: SELECT outer.id,
+	          (SELECT (SELECT MAX(t1.x) FROM t1 WHERE t1.a=t0.a) AS inner
+	           FROM t0 WHERE t0.b=outer.b) AS total
+	        FROM outer
+	   The OUTER's "total" field's marker contains an outer-inner 7tuple
+	   whose ONE field ("inner") is itself a marker over t1. */
+	(define t1-sub (mk-tuple "memcp-tests"
+		(list (list "t1" "memcp-tests" "t1" false nil))
+		(list (list "inner" (list (quote aggregate) (mk-col "t1" "x") (quote +) 0)))
+		(list (quote equal??) (mk-col "t1" "a") (mk-col "t0" "a"))))
+	(define t0-sub (mk-tuple "memcp-tests"
+		(list (list "t0" "memcp-tests" "t0" false nil))
+		(list (list "inner" (list (quote inner_select) t1-sub)))
+		(list (quote equal??) (mk-col "t0" "b") (mk-col "outer" "b"))))
+	(define t-nested (mk-tuple "memcp-tests"
+		(list (list "outer" "memcp-tests" "outer" false nil))
+		(list (list "id" (mk-col "outer" "id"))
+			(list "total" (list (quote inner_select) t0-sub)))
+		true))
+	(define lifted-nested (lift_dep_joins_pass t-nested))
+	(qpl-assert (qpir-kind lifted-nested) (quote qpir-dep-join)
+		"nested lift: root is qpir-dep-join (outer's marker)")
+	/* Walk the tree counting qpir-dep-joins (qpu-count-dep-joins isn't
+	   loaded yet at this point — define a local counter). */
+	(define qpl-count-djs (lambda (node) (begin
+		(define self-count (if (equal? (qpir-kind node) (quote qpir-dep-join)) 1 0))
+		(define child-count (reduce (qpir-children node)
+			(lambda (acc c) (+ acc (qpl-count-djs c))) 0))
+		(+ self-count child-count))))
+	(define dj-count (qpl-count-djs lifted-nested))
+	/* Outer dep-join + inner dep-join from recursive lift = 2 */
+	(qpl-assert dj-count 2
+		"nested lift: exactly 2 qpir-dep-joins total (outer + inner from recursive lift)")
+
 	/* ==== Errors-loudly ==== */
 
 	(define t-having-marker (list "memcp-tests"
