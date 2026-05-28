@@ -161,7 +161,7 @@ neumann_compile_select. Queries my pipeline doesn't support yet (errors
 loudly) still surface their errors loudly per FAQ §1 — no silent fallback
 to legacy. */
 (set neumann_pipeline_enabled false)
-(set neumann_pipeline_trace false)  /* enable to print [neumann] lowered: <tuple> per query */
+(set neumann_pipeline_trace false)
 
 /* qpn-tuple-has-derived-table? — true if any entry in the tuple's tables
 list has a sub-7-tuple in its tname slot (FROM-SELECT / derived view).

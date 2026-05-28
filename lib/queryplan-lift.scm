@@ -145,21 +145,25 @@ the strict (two-valued) rewrite. */
 			(list (quote and) a b)))))
 
 (define qpl-make-count-subquery-for-exists (lambda (sub)
-	(qpp-rebuild-tuple
-		(qpp-tuple-schema sub)
-		(qpp-tuple-tables sub)
-		(list (list "value" qpl-count-star-aggregate))
-		(qpp-tuple-condition sub)
-		(qpp-tuple-group sub)
-		nil   /* HAVING dropped: the count above the group reduces to 0/n */
-		'()   /* ORDER BY irrelevant for a scalar count */
-		nil   /* LIMIT dropped */
-		nil)))
+	(if (not (qpp-tuple? sub))
+		(error "qpl-make-count-subquery-for-exists: sub is not a 7-tuple (likely UNION ALL — phase 5+)")
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema sub)
+			(qpp-tuple-tables sub)
+			(list (list "value" qpl-count-star-aggregate))
+			(qpp-tuple-condition sub)
+			(qpp-tuple-group sub)
+			nil   /* HAVING dropped: the count above the group reduces to 0/n */
+			'()   /* ORDER BY irrelevant for a scalar count */
+			nil   /* LIMIT dropped */
+			nil))))
 
 (define qpl-make-count-subquery-for-in (lambda (a sub)
-	(begin
-		(define sub-fields (qpp-tuple-fields sub))
-		(if (not (equal? (count sub-fields) 1))
+	(if (not (qpp-tuple? sub))
+		(error "qpl-make-count-subquery-for-in: sub is not a 7-tuple (likely UNION ALL — phase 5+)")
+		(begin
+			(define sub-fields (qpp-tuple-fields sub))
+			(if (not (equal? (count sub-fields) 1))
 			(error (concat "lift_dep_joins_pass: IN-subquery has " (string (count sub-fields))
 				" projected fields; expected exactly 1. Multi-row IN is FAQ §22 territory and not yet implemented."))
 			(begin
@@ -173,7 +177,7 @@ the strict (two-valued) rewrite. */
 						(qpp-tuple-condition sub))
 					(qpp-tuple-group sub)
 					nil   /* HAVING dropped — see EXISTS comment */
-					'() nil nil))))))
+					'() nil nil)))))))
 
 /* qpl-wrap-as-count-gt-zero — wrap a synthesized scalar inner_select in the
 COALESCE-COUNT > 0 boolean shape per FAQ §11. */
