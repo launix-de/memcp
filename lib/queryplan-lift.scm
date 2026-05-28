@@ -211,12 +211,14 @@ substitution walker expects). */
 		pair)))))
 
 (define qpl-rewrite-in-exists-group (lambda (group)
-	(map (coalesceNil group '()) qpl-rewrite-in-exists)))
+	(if (nil? group) nil
+		(map group qpl-rewrite-in-exists))))
 
 (define qpl-rewrite-in-exists-order (lambda (order)
-	(map (coalesceNil order '()) (lambda (item) (match item
-		'(expr dir) (list (qpl-rewrite-in-exists expr) dir)
-		item)))))
+	(if (nil? order) nil
+		(map order (lambda (item) (match item
+			'(expr dir) (list (qpl-rewrite-in-exists expr) dir)
+			item))))))
 
 /* qpl-rewrite-in-exists-tuple — apply qpl-rewrite-in-exists to every
 expression slot of a 7-tuple. */
@@ -271,15 +273,20 @@ expression in a fields list, accumulating subqueries into acc. */
 		'(name expr) (list name (qpl-substitute-markers expr acc))
 		pair)))))
 
-/* qpl-substitute-group — apply to every group-by expression. */
+/* qpl-substitute-group — apply to every group-by expression.
+Preserves nil as nil — legacy distinguishes nil-group ("no GROUP BY",
+top-level scalar) from empty-list ("explicit empty key set"). */
 (define qpl-substitute-group (lambda (group acc)
-	(map (coalesceNil group '()) (lambda (e) (qpl-substitute-markers e acc)))))
+	(if (nil? group) nil
+		(map group (lambda (e) (qpl-substitute-markers e acc))))))
 
-/* qpl-substitute-order — apply to every order-by expression (preserving dir). */
+/* qpl-substitute-order — apply to every order-by expression (preserving dir).
+Preserves nil as nil. */
 (define qpl-substitute-order (lambda (order acc)
-	(map (coalesceNil order '()) (lambda (item) (match item
-		'(expr dir) (list (qpl-substitute-markers expr acc) dir)
-		item)))))
+	(if (nil? order) nil
+		(map order (lambda (item) (match item
+			'(expr dir) (list (qpl-substitute-markers expr acc) dir)
+			item))))))
 
 /* qpl-fields-touched? — true if any projection in `orig` differs from `sub`
 (meaning at least one field had a marker substituted). */

@@ -153,7 +153,7 @@ callers supply the real schemas list. */
 /* neumann_pipeline_enabled — global toggle.
 Default: false → build_queryplan_term uses the legacy untangle_query path.
 Set to true to route through the new pipeline. Tests / dev can flip via
-  (set neumann_pipeline_enabled true)
+  (set neumann_pipeline_enabled false)
 without modifying any other code.
 
 When enabled, build_queryplan_term will route compatible queries through
