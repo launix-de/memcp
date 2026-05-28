@@ -278,10 +278,14 @@ self-contained right sides (e.g. uncorrelated subqueries that snuck through). */
 				'(tv col) (has? left-aliases tv)
 				false))))
 			(if (equal? (count correlated-free) 0)
-				/* Trivial: right doesn't reference left → LEFT join (per FAQ §22
-				   per-key-misses: outer rows whose right is empty must survive).
-				   Preserve rhs-alias. */
-				(qpir-join (quote left) (qpir-dep-join-predicate node) left right
+				/* Trivial: right doesn't reference left → INNER join.
+				   For an UNCORRELATED subquery the right side always produces
+				   exactly one row (COUNT returns 0, SUM returns NULL, etc. —
+				   never empty). INNER and LEFT are semantically equivalent
+				   here. INNER is what build_queryplan_inner reliably handles
+				   for `LEFT JOIN ON TRUE` (the joinExpr=true case the
+				   physical layer would degenerate to). */
+				(qpir-join (quote inner) (qpir-dep-join-predicate node) left right
 					(qpir-dep-join-rhs-alias node))
 				node)))))
 
@@ -699,6 +703,15 @@ in an assoc list of (name expr) projections. */
 		(filter (qpu-and-conjuncts pred) (lambda (c)
 			(not (qpu-is-tautology? c)))))))
 
+/* qpu-col-ref-key — for tautology detection, reduce a (get_column tv ti col ci)
+form to a canonical (tv col) key that ignores the ti/ci case-insensitivity
+flags. Two refs that differ only in flags are SEMANTICALLY equal (same column)
+but list-equal? would say no. Returns nil for non-get_column expressions. */
+(define qpu-col-ref-key (lambda (expr) (match expr
+	'((symbol get_column) tv ti col ci) (list tv col)
+	'((quote get_column)  tv ti col ci) (list tv col)
+	nil)))
+
 (define qpu-is-tautology? (lambda (expr) (match expr
 	(cons head args) (begin
 		(define is-eq (match head
@@ -708,7 +721,18 @@ in an assoc list of (name expr) projections. */
 			'equal??           true
 			false))
 		(if (and is-eq (equal? (count args) 2))
-			(equal? (nth args 0) (nth args 1))
+			(begin
+				(define a (nth args 0))
+				(define b (nth args 1))
+				/* Direct equality */
+				(if (equal? a b) true
+					/* Or both are get_column refs to the SAME (tv col) ignoring
+					   ti/ci flags (FAQ §22: column identity is by source, not by
+					   the case-sensitivity of the access path). */
+					(begin
+						(define ka (qpu-col-ref-key a))
+						(define kb (qpu-col-ref-key b))
+						(and (not (nil? ka)) (not (nil? kb)) (equal? ka kb)))))
 			false))
 	false)))
 
@@ -760,11 +784,14 @@ Pre-condition: dj is a qpir-dep-join. */
 			   would silently vanish — wrong for NOT EXISTS, COALESCE-default
 			   scalar subselects, and other LEFT-tolerant patterns.
 
-			   Trivial case (no outer refs in right): even here we want LEFT
-			   because the right might be empty for some outer iteration; an
-			   inner join would drop those outer rows. */
+			   Trivial case (no outer refs in right): INNER join is correct
+			   here because an uncorrelated subquery always produces exactly
+			   one row (COUNT returns 0, SUM returns NULL, etc. — never
+			   empty). INNER ≡ LEFT for the single-row case, and INNER lowers
+			   reliably through build_queryplan_inner without the
+			   `LEFT JOIN ON TRUE` degeneracy. */
 			(if (equal? (count outer-ref-exprs) 0)
-				(qpir-join (quote left) (qpir-dep-join-predicate dj) left right
+				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
 					(qpir-dep-join-rhs-alias dj))
 				(begin
 					/* Pass 1: collect cclasses from select equalities in the right. */

@@ -92,8 +92,8 @@ Covers:
 	(define trivial-elim (qpu-trivial-eliminate dj-trivial))
 	(qpu-assert (qpir-kind trivial-elim) (quote qpir-join)
 		"trivial dep-join (uncorrelated right) → qpir-join")
-	(qpu-assert (qpir-join-type trivial-elim) (quote left)
-		"trivial elim produces LEFT join (FAQ §22 per-key-misses)")
+	(qpu-assert (qpir-join-type trivial-elim) (quote inner)
+		"trivial elim produces INNER join (uncorrelated → right is single-row → INNER ≡ LEFT)")
 
 	/* Non-trivial dep-join: right's leaf has WHERE referencing po. */
 	(define t-pi-corr (qpir-leaf (mk-tuple "memcp-tests"

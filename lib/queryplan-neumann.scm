@@ -161,6 +161,7 @@ neumann_compile_select. Queries my pipeline doesn't support yet (errors
 loudly) still surface their errors loudly per FAQ §1 — no silent fallback
 to legacy. */
 (set neumann_pipeline_enabled false)
+(set neumann_pipeline_trace false)  /* enable to print [neumann] lowered: <tuple> per query */
 
 /* neumann_pipeline_supports? tuple → true if the pipeline currently handles
 this tuple's shape WITHOUT errors. Used by the build_queryplan_term gate to
