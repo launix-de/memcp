@@ -197,8 +197,7 @@ Returns false on any error during a dry-run pipeline invocation, OR on
 syntactic shapes the pipeline is known to mis-handle (derived tables,
 outer-flagged joins) even if no error is raised. */
 (define neumann_pipeline_supports? (lambda (tuple)
-	(if (or (qpn-tuple-has-derived-table? tuple)
-			(qpn-tuple-has-outer-flag? tuple))
+	(if (qpn-tuple-has-derived-table? tuple)
 		false
 		(try
 			(lambda () (begin
