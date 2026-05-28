@@ -5836,7 +5836,12 @@ lambda params, other refs become (outer alias.col) closure captures. */
 		(if (and neumann_pipeline_enabled
 				(qpp-tuple? query)
 				(neumann_pipeline_supports? query))
-			(neumann_compile_select query)
+			(begin
+				(define neu (neumann_compile_select query))
+				(if (and (settings "NeumannPipelineTrace") neu)
+					(print "[neumann] lowered: " neu)
+					nil)
+				neu)
 			query))
 	(build_queryplan_term_with_sink routed-query '(resultrow))
 )))
