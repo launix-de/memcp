@@ -163,6 +163,27 @@ to legacy. */
 (set neumann_pipeline_enabled false)
 (set neumann_pipeline_trace false)  /* enable to print [neumann] lowered: <tuple> per query */
 
+/* qpn-tuple-has-derived-table? — true if any entry in the tuple's tables
+list has a sub-7-tuple in its tname slot (FROM-SELECT / derived view).
+The new pipeline doesn't yet inline derived tables per FAQ §36 (phase 5+
+of lift); such queries must stay on the legacy path until that lands. */
+(define qpn-tuple-has-derived-table? (lambda (t)
+	(reduce (coalesceNil (qpp-tuple-tables t) (list)) (lambda (acc td)
+		(if acc true
+			(if (or (nil? td) (< (count td) 3)) false
+				(qpp-tuple? (nth td 2)))))
+		false)))
+
+/* qpn-tuple-has-outer-flag? — true if any table entry has isOuter=true
+(parsed LEFT/RIGHT/OUTER JOIN). The new pipeline doesn't yet emit these
+joins via qpu-unnest-right; safe to keep on legacy. */
+(define qpn-tuple-has-outer-flag? (lambda (t)
+	(reduce (coalesceNil (qpp-tuple-tables t) (list)) (lambda (acc td)
+		(if acc true
+			(if (or (nil? td) (< (count td) 4)) false
+				(equal? (nth td 3) true))))
+		false)))
+
 /* neumann_pipeline_supports? tuple → true if the pipeline currently handles
 this tuple's shape WITHOUT errors. Used by the build_queryplan_term gate to
 decide whether to invoke neumann_compile_select or fall through to legacy.
@@ -172,10 +193,15 @@ to identify shapes the pipeline doesn't yet implement so the legacy code
 keeps working during the transition. Once the pipeline is complete, this
 predicate becomes `true` for everything and the legacy code is deleted.
 
-Returns false on any error during a dry-run pipeline invocation. */
+Returns false on any error during a dry-run pipeline invocation, OR on
+syntactic shapes the pipeline is known to mis-handle (derived tables,
+outer-flagged joins) even if no error is raised. */
 (define neumann_pipeline_supports? (lambda (tuple)
-	(try
-		(lambda () (begin
-			(neumann_compile_select tuple)
-			true))
-		(lambda (e) false))))
+	(if (or (qpn-tuple-has-derived-table? tuple)
+			(qpn-tuple-has-outer-flag? tuple))
+		false
+		(try
+			(lambda () (begin
+				(neumann_compile_select tuple)
+				true))
+			(lambda (e) false)))))
