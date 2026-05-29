@@ -372,7 +372,11 @@ with PARTITION BY <outer-refs> ORDER BY <order-items>. */
 					(define outer-refs (qpl-sub-outer-refs sub))
 					(if (equal? (count outer-refs) 0) sub
 						(begin
-							/* Build inner-with-window: same as sub but add __rn field. */
+							/* Build inner-with-window: same as sub but add __rn field.
+							   Field format is FLAT (parser shape) so downstream
+							   reduce_assoc consumers receive the expected even-length
+							   dict. Pairs form would error per the qpp-shape-preserving
+							   investigation. */
 							(define sub-fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
 							(if (not (equal? (count sub-fields-pairs) 1))
 								(error (concat
@@ -380,12 +384,14 @@ with PARTITION BY <outer-refs> ORDER BY <order-items>. */
 									"found " (string (count sub-fields-pairs))
 									" — multi-field LIMIT rewrite is phase 5+")) nil)
 							(define orig-field-pair (nth sub-fields-pairs 0))
+							(define orig-field-name (nth orig-field-pair 0))
 							(define orig-field-expr (nth orig-field-pair 1))
 							(define order-items (qpp-tuple-order sub))
 							(define window-expr (qpl-build-rownumber-window outer-refs order-items))
+							/* FLAT fields: (name1 expr1 name2 expr2). */
 							(define inner-sub-fields (list
-								(list "__value" orig-field-expr)
-								(list "__rn" window-expr)))
+								"__value" orig-field-expr
+								"__rn" window-expr))
 							(define inner-sub (qpp-rebuild-tuple
 								(qpp-tuple-schema sub)
 								(qpp-tuple-tables sub)
@@ -411,8 +417,9 @@ with PARTITION BY <outer-refs> ORDER BY <order-items>. */
 							(qpp-rebuild-tuple
 								schema
 								(list (list wrap-alias schema inner-sub false nil))
-								(list (list (nth orig-field-pair 0)
-									(list (quote get_column) wrap-alias false "__value" false)))
+								/* FLAT fields for wrapper too. */
+								(list orig-field-name
+									(list (quote get_column) wrap-alias false "__value" false))
 								rn-condition
 								nil nil nil nil nil))))))))))
 
@@ -947,13 +954,15 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			   becomes a global LIMIT on the derived sub and clips correlated
 			   rows before the join. */
 			(define t-lim (qpl-rewrite-redundant-limit-tuple t))
-			/* Step 0b — for correlated sub-tuples whose LIMIT is NOT dropped
-			   by 0a (no equi-binding), apply the FAQ §43 ROW_NUMBER PARTITION
-			   rewrite: wrap with a derived table that adds ROW_NUMBER OVER
-			   (PARTITION BY <outer-refs> ORDER BY o) AS __rn, filter by
-			   __rn ≤ k+offset. This makes the LIMIT per-outer-binding.
-			   DISABLED — implementation needs more work (regresses some tests). */
-			(define t-rn t-lim)  /* (qpl-rewrite-correlated-limit-tuple t-lim) */
+			/* Step 0b — DISABLED. Scaffold for FAQ §43 ROW_NUMBER PARTITION
+			   rewrite is in qpl-rewrite-correlated-limit-with-rownumber,
+			   but the unnest pass doesn't yet have a rule for qpir-window
+			   inside dep-joins (FAQ §34 correlated window partitioning).
+			   Without that, the correlation against outer-refs in the
+			   PARTITION BY clause stays buried inside the nested derived
+			   table and never gets bound by the join. Re-enable after the
+			   unnest qpir-window rule lands. */
+			(define t-rn t-lim)
 			(define t-prime (qpl-rewrite-in-exists-tuple t-rn))
 			(if (not (qpl-tuple-has-markers? t-prime))
 				(qpir-leaf t-prime)
