@@ -304,18 +304,102 @@ when the pair (tv col) appears in rename-map. */
 		(qpp-tuple-limit child-tuple)
 		(qpp-tuple-offset child-tuple)))))
 
+/* qpu-low-map-counter — counter for synthesized derived-wrapper aliases when
+the map's child has aggregation that must be materialized before the map can
+project. */
+(define qpu-low-map-counter (newsession))
+(qpu-low-map-counter "n" 0)
+(define qpu-low-fresh-map-wrap (lambda () (begin
+	(qpu-low-map-counter "n" (+ (qpu-low-map-counter "n") 1))
+	(concat "__map_wrap_" (string (qpu-low-map-counter "n"))))))
+
+/* qpu-low-fields-have-aggregate? — walk fields, return true if any
+projection expression contains an (aggregate …) subexpr or a (window_func …)
+subexpr. Used by qpu-low-map to detect "child has aggregation that must
+materialize before map's projections". Fields format may be flat (parser)
+or pairs (pipeline). */
+(define qpu-low-expr-has-aggregate? (lambda (expr)
+	(match expr
+		'((symbol aggregate)   _ _ _) true
+		'((quote aggregate)    _ _ _) true
+		'((symbol window_func) _ _ _) true
+		'((quote window_func)  _ _ _) true
+		(cons head args) (reduce (coalesceNil args '()) (lambda (acc a)
+			(or acc (qpu-low-expr-has-aggregate? a))) false)
+		false)))
+
+(define qpu-low-fields-have-aggregate? (lambda (fields)
+	(reduce (qpp-fields-to-pairs fields) (lambda (acc pair) (match pair
+		'(name expr) (or acc (qpu-low-expr-has-aggregate? expr))
+		acc)) false)))
+
 (define qpu-low-map (lambda (node) (begin
 	(define child-tuple (qpu-lower-to-tuple (qpir-map-child node)))
-	(qpp-rebuild-tuple
-		(qpp-tuple-schema child-tuple)
-		(qpp-tuple-tables child-tuple)
-		(qpir-map-projections node)
-		(qpp-tuple-condition child-tuple)
-		(qpp-tuple-group child-tuple)
-		(qpp-tuple-having child-tuple)
-		(qpp-tuple-order child-tuple)
-		(qpp-tuple-limit child-tuple)
-		(qpp-tuple-offset child-tuple)))))
+	(define child-group (qpp-tuple-group child-tuple))
+	(define child-has-group (and (not (nil? child-group)) (> (count child-group) 0)))
+	/* Also wrap when child has aggregates in fields (e.g. static-group from
+	   qpir-groupby with empty keys lowers to group='() + N agg projections).
+	   Without this, qpu-low-map's blind field-replace loses the aggregate
+	   computations and the map's expression refs can't resolve. */
+	(define child-explicit-group (and (not (nil? child-group))
+		(equal? (count child-group) 0)
+		(qpu-low-fields-have-aggregate? (qpp-tuple-fields child-tuple))))
+	(define needs-wrap (or child-has-group child-explicit-group))
+	(if needs-wrap
+		/* Child has aggregation (qpir-groupby below): the GROUP BY must
+		   materialize BEFORE map's projections run, because map's expressions
+		   reference aggregate output columns. Wrap child as a derived table;
+		   the map's projections become the outer tuple's fields with refs
+		   resolved against the derived alias.
+
+		   The map's projections use (get_column nil false NAME false)
+		   placeholders for aggregate-output column refs (FAQ §35 canonical
+		   names). qpp-resolve-tuple-scoped (run AFTER lower if schemas
+		   provided) would qualify them; otherwise the nil-tv refs match the
+		   derived's schema via scope-fallback. */
+		(begin
+			(define wrap-alias (qpu-low-fresh-map-wrap))
+			(define schema (qpp-tuple-schema child-tuple))
+			(qpp-rebuild-tuple
+				schema
+				(list (list wrap-alias schema child-tuple false nil))
+				(qpu-low-rewrite-map-projections (qpir-map-projections node) wrap-alias)
+				true
+				nil nil nil nil nil))
+		/* No GROUP BY: standard replace-fields path. */
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema child-tuple)
+			(qpp-tuple-tables child-tuple)
+			(qpir-map-projections node)
+			(qpp-tuple-condition child-tuple)
+			(qpp-tuple-group child-tuple)
+			(qpp-tuple-having child-tuple)
+			(qpp-tuple-order child-tuple)
+			(qpp-tuple-limit child-tuple)
+			(qpp-tuple-offset child-tuple))))))
+
+/* qpu-low-rewrite-map-projections — qualify nil-tv refs in map projections
+to the wrap-alias when wrapping the groupby child as derived. Without this,
+the legacy resolver doesn't know the derived produces those names. */
+(define qpu-low-rewrite-map-projections (lambda (projections wrap-alias)
+	(map (coalesceNil projections '()) (lambda (pair) (match pair
+		'(name expr) (list name (qpu-low-qualify-nil-refs expr wrap-alias))
+		pair)))))
+
+(define qpu-low-qualify-nil-refs (lambda (expr wrap-alias)
+	(match expr
+		'((symbol get_column) tv ti col ci)
+			(if (nil? tv)
+				(list (quote get_column) wrap-alias false col false)
+				expr)
+		'((quote get_column) tv ti col ci)
+			(if (nil? tv)
+				(list (quote get_column) wrap-alias false col false)
+				expr)
+		(cons head args)
+			(cons head (map (coalesceNil args '())
+				(lambda (a) (qpu-low-qualify-nil-refs a wrap-alias))))
+		expr)))
 
 (define qpu-low-groupby (lambda (node) (begin
 	(define child-tuple (qpu-lower-to-tuple (qpir-groupby-child node)))

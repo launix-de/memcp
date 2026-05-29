@@ -889,11 +889,25 @@ Returns: (list-of-leaf-fields  list-of-rewritten-groupby-aggs). */
 /* qpl-needs-decompose? — true if the subquery has aggregates in its fields
 or a non-empty GROUP BY. Phase 4 also rejects HAVING/ORDER/LIMIT inner
 subqueries because they need additional wrappers (phase 5+).
-NOTE: (nil? '()) is FALSE in this dialect — use (> (count ...) 0) instead. */
+NOTE: (nil? '()) is FALSE in this dialect — use (> (count ...) 0) instead.
+
+Phase 5: also detect COMPOUND expressions that CONTAIN aggregates (e.g.
+AVG = (/ SUM COUNT), `MAX-MIN`, `SUM(x)+1`, etc.). These need multi-
+aggregate decomposition into qpir-groupby + qpir-map. */
 (define qpl-needs-decompose? (lambda (sub)
 	(or
 		(> (count (qpl-collect-aggregates-in-fields (qpp-tuple-fields sub))) 0)
-		(> (count (coalesceNil (qpp-tuple-group sub) '())) 0))))
+		(> (count (coalesceNil (qpp-tuple-group sub) '())) 0)
+		(qpl-fields-contain-compound-aggregate? (qpp-tuple-fields sub)))))
+
+/* qpl-fields-contain-compound-aggregate? — true if any field's expression
+contains an aggregate inside a non-bare position (e.g. (/ agg agg), (+ agg 1)). */
+(define qpl-fields-contain-compound-aggregate? (lambda (fields)
+	(reduce (qpp-fields-to-pairs fields) (lambda (acc pair) (match pair
+		'(name expr) (or acc
+			(and (not (qpl-is-aggregate-expr? expr))
+				 (qpl-expr-has-aggregate? expr)))
+		acc)) false)))
 
 /* qpl-wrap-inner-subquery — convert a parser-emitted inner subquery 7-tuple
 into a Layer-1 IR subtree exposing one column named "value".
@@ -1004,39 +1018,66 @@ can apply during unnest_pass. */
 				(qpp-tuple-limit sub)
 				(qpp-tuple-offset sub))))))))
 
-(define qpl-build-groupby-wrapped-inner (lambda (sub) (begin
-	(define agg-fields (qpl-collect-aggregates-in-fields (qpp-tuple-fields sub)))
-	(define non-agg-fields (qpl-collect-non-aggregate-fields (qpp-tuple-fields sub)))
-	/* Phase 4 only supports the single-bare-aggregate case (the most common
-	   shape for scalar correlated subqueries and the FAQ §11 COUNT rewrite). */
-	(if (not (equal? (count agg-fields) 1))
-		(error (concat "qpl-build-groupby-wrapped-inner: expected 1 aggregate field, found "
-			(string (count agg-fields)) " — multiple aggregates per inner subquery is phase 5+")) nil)
-	(if (> (count non-agg-fields) 0)
-		(error "qpl-build-groupby-wrapped-inner: mixed agg + non-agg fields not supported in phase 4") nil)
-	(define agg-pair (nth agg-fields 0))
-	(define agg-name (nth agg-pair 0))
-	(define agg-expr (nth agg-pair 1))
-	(define agg-args (cdr agg-expr))
-	(define agg-inner (nth agg-args 0))
-	(define agg-reducer (nth agg-args 1))
-	(define agg-init (nth agg-args 2))
-	/* Per FAQ "canonical names / helper identities derived from physical source
-	   columns": don't synthesize placeholder aliases. The aggregate keeps its
-	   original column refs (e.g. (get_column pi amount)); the leaf below must
-	   project every column referenced by the aggregate's inner expression AND
-	   the WHERE predicate so the runtime can read them at scan time.
+/* qpl-agg-counter — counter for synthesized aggregate names in decomposition. */
+(define qpl-agg-counter (newsession))
+(qpl-agg-counter "n" 0)
+(define qpl-fresh-agg-name (lambda () (begin
+	(qpl-agg-counter "n" (+ (qpl-agg-counter "n") 1))
+	(concat "__agg_" (string (qpl-agg-counter "n"))))))
 
-	   The qpir-groupby outputs its aggregate under the name "value" so callers
-	   uniformly reference sq.value. The WHERE clause is hoisted to a qpir-select
-	   between groupby and leaf so the unnest §3.3 select rule can fire. */
-	(define leaf-cols-from-agg (qpir-expr-column-refs agg-inner))
+/* qpl-extract-aggregates — walk an expression; for each bare (aggregate …)
+subexpr, allocate a fresh __agg_N name and replace the subexpr with a
+(get_column nil false __agg_N false) placeholder. Accumulate (name agg-expr)
+pairs into agg-acc. Returns the rewritten expression.
+
+The placeholder uses nil tv (the qpir-map projection won't qualify it; the
+SUB's outer scope resolves it via name match against the agg-projections
+that the qpir-groupby outputs).
+
+This is the FAQ §33 compound-aggregate decomposition: split user-written
+(/ SUM COUNT) (AVG) or (- MAX MIN) (range) into N bare aggregates + a final
+projection that COMBINES them. */
+(define qpl-extract-aggregates (lambda (expr agg-acc)
+	(if (qpl-is-aggregate-expr? expr)
+		(begin
+			(define n (qpl-fresh-agg-name))
+			(agg-acc "list" (merge (coalesceNil (agg-acc "list") '())
+				(list (list n expr))))
+			(list (quote get_column) nil false n false))
+		(match expr
+			(cons head args) (cons head (map (coalesceNil args '())
+				(lambda (a) (qpl-extract-aggregates a agg-acc))))
+			expr))))
+
+(define qpl-build-groupby-wrapped-inner (lambda (sub) (begin
+	(define fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+	(if (not (equal? (count fields-pairs) 1))
+		(error (concat "qpl-build-groupby-wrapped-inner: expected 1 field, found "
+			(string (count fields-pairs)) " — multi-field inner subqueries are phase 5+")) nil)
+	(define field-pair (nth fields-pairs 0))
+	(define field-expr (nth field-pair 1))
+	/* Decompose field-expr into N bare aggregates + final projection.
+	   For bare aggregate: agg-acc gets 1 entry, final-expr is a get_column
+	   placeholder. For compound (e.g. AVG): N entries, final-expr is the
+	   compound with placeholder refs. */
+	(define agg-acc (newsession))
+	(agg-acc "list" '())
+	(define final-expr (qpl-extract-aggregates field-expr agg-acc))
+	(define agg-pairs (agg-acc "list"))
+	(if (equal? (count agg-pairs) 0)
+		(error "qpl-build-groupby-wrapped-inner: no aggregates found — shouldn't reach here") nil)
+
+	/* Collect every column ref needed by the aggregates' inner expressions
+	   + WHERE; the leaf must project all of them so runtime sees them. */
+	(define agg-inners (map agg-pairs (lambda (pair) (begin
+		(define agg-expr (nth pair 1))
+		(define agg-args (cdr agg-expr))
+		(nth agg-args 0)))))
+	(define leaf-cols-from-aggs (reduce agg-inners (lambda (acc inner)
+		(merge acc (qpir-expr-column-refs inner))) '()))
 	(define leaf-cols-from-where
 		(qpir-expr-column-refs (coalesceNil (qpp-tuple-condition sub) true)))
-	(define leaf-cols (qpl-dedupe-col-refs (merge leaf-cols-from-agg leaf-cols-from-where)))
-	/* Materialize the leaf's projections. Only project columns that the leaf
-	   can actually provide — i.e. those whose tblvar matches one of sub's tables.
-	   Outer-ref columns stay as free vars and are resolved by the dep-join. */
+	(define leaf-cols (qpl-dedupe-col-refs (merge leaf-cols-from-aggs leaf-cols-from-where)))
 	(define leaf-aliases (map (coalesceNil (qpp-tuple-tables sub) '()) (lambda (td)
 		(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
 	(define leaf-fields (map
@@ -1051,21 +1092,34 @@ can apply during unnest_pass. */
 		(qpp-tuple-tables sub)
 		leaf-fields
 		true
-		'()  /* GROUP BY moves up to qpir-groupby */
+		'()
 		nil
-		'()  /* ORDER BY irrelevant for an aggregate scalar */
-		nil  /* LIMIT same */
+		'()
+		nil
 		nil)))
 	(define leaf-with-select (qpl-wrap-with-select-if-needed
 		(qpp-tuple-condition sub)
 		leaf-bare))
 	(define group-keys (coalesceNil (qpp-tuple-group sub) '()))
-	(qpir-groupby
+	(define groupby (qpir-groupby
 		group-keys
-		(list (list "value"
-			(list (quote aggregate) agg-inner agg-reducer agg-init)))
+		agg-pairs       /* N aggregates with synthesized __agg_N names */
 		(qpp-tuple-having sub)
-		leaf-with-select))))
+		leaf-with-select))
+	(if (equal? (count agg-pairs) 1)
+		/* Single bare aggregate: legacy path — qpir-groupby outputs "value"
+		   directly. The single agg gets renamed to "value" so callers
+		   reference sq.value uniformly. */
+		(qpir-groupby
+			group-keys
+			(list (list "value" (nth (nth agg-pairs 0) 1)))
+			(qpp-tuple-having sub)
+			leaf-with-select)
+		/* Multi-aggregate: wrap with qpir-map that projects "value" = final-expr.
+		   final-expr references the synthesized agg names via get_column nil
+		   placeholders; downstream lower wraps the groupby as a derived table
+		   and the placeholders resolve to the derived's columns. */
+		(qpir-map (list (list "value" final-expr)) groupby)))))
 
 /* qpl-dedupe-col-refs — remove duplicate (tv col) pairs from a list. */
 (define qpl-dedupe-col-refs (lambda (refs)
