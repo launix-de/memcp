@@ -442,8 +442,7 @@ original SQL alias. */
 				(error (concat "qpl-wrap-inner-subquery: inner subquery has "
 					(string (count fields)) " fields; expected exactly 1. "
 					"Multi-field inner subqueries are phase 5+.")) nil)
-			(if (not (nil? (qpp-tuple-having sub)))
-				(error "qpl-wrap-inner-subquery: inner subquery with HAVING not yet supported (phase 5+)") nil)
+			/* HAVING passes through into the qpir-groupby's having slot. */
 			/* Step 1: rename the visible field to "value" so callers uniformly
 			   reference sq_N.value regardless of the user's SQL alias. */
 			(define renamed (qpl-rename-first-field-to-value sub))
@@ -565,7 +564,7 @@ can apply during unnest_pass. */
 		group-keys
 		(list (list "value"
 			(list (quote aggregate) agg-inner agg-reducer agg-init)))
-		nil
+		(qpp-tuple-having sub)
 		leaf-with-select))))
 
 /* qpl-dedupe-col-refs — remove duplicate (tv col) pairs from a list. */
