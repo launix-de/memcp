@@ -106,14 +106,15 @@ callers supply the real schemas list. */
 		(qpp-tuple-offset tuple)))
 	(define t1 (alias_normalize_pass tuple-pairs))
 	(define t2 (column_resolve_pass t1 (list)))
-	(define t3 (lift_dep_joins_pass t2))
-	(define t4 (unnest_pass t3))
-	(define t5 (lower_to_scans_pass t4))
-	(if (not (qpp-tuple? t5))
+	(define t3 (derived_table_inline_pass t2))
+	(define t4 (lift_dep_joins_pass t3))
+	(define t5 (unnest_pass t4))
+	(define t6 (lower_to_scans_pass t5))
+	(if (not (qpp-tuple? t6))
 		(error "neumann_compile_select: pipeline did not produce a 7-tuple")
 		/* Re-flatten fields recursively (including derived sub-tuples) to
 		   match the flat (name1 expr1 …) parser convention. */
-		(qpn-flatten-tuple-recursive t5)))))
+		(qpn-flatten-tuple-recursive t6)))))
 
 /* neumann_compile_select_with_schemas tuple schemas →
    Same as above but with an explicit schemas list passed to column_resolve. */
@@ -132,28 +133,29 @@ callers supply the real schemas list. */
 		(qpp-tuple-offset tuple)))
 	(define t1 (alias_normalize_pass tuple-pairs))
 	(define t2 (column_resolve_pass t1 schemas))
-	(define t3 (lift_dep_joins_pass t2))
-	(define t4 (unnest_pass t3))
-	(define t5 (lower_to_scans_pass t4))
-	(if (not (qpp-tuple? t5))
+	(define t3 (derived_table_inline_pass t2))
+	(define t4 (lift_dep_joins_pass t3))
+	(define t5 (unnest_pass t4))
+	(define t6 (lower_to_scans_pass t5))
+	(if (not (qpp-tuple? t6))
 		(error "neumann_compile_select_with_schemas: pipeline did not produce a 7-tuple")
 		(qpp-rebuild-tuple
-			(qpp-tuple-schema t5)
-			(qpp-tuple-tables t5)
-			(qpp-fields-to-flat (qpp-tuple-fields t5))
-			(qpp-tuple-condition t5)
-			(qpp-tuple-group t5)
-			(qpp-tuple-having t5)
-			(qpp-tuple-order t5)
-			(qpp-tuple-limit t5)
-			(qpp-tuple-offset t5))))))
+			(qpp-tuple-schema t6)
+			(qpp-tuple-tables t6)
+			(qpp-fields-to-flat (qpp-tuple-fields t6))
+			(qpp-tuple-condition t6)
+			(qpp-tuple-group t6)
+			(qpp-tuple-having t6)
+			(qpp-tuple-order t6)
+			(qpp-tuple-limit t6)
+			(qpp-tuple-offset t6))))))
 
 /* ==================== Opt-in switch ==================== */
 
 /* neumann_pipeline_enabled — global toggle.
 Default: false → build_queryplan_term uses the legacy untangle_query path.
 Set to true to route through the new pipeline. Tests / dev can flip via
-  (set neumann_pipeline_enabled false)
+  (set neumann_pipeline_enabled true)
 without modifying any other code.
 
 When enabled, build_queryplan_term will route compatible queries through
@@ -193,14 +195,13 @@ to identify shapes the pipeline doesn't yet implement so the legacy code
 keeps working during the transition. Once the pipeline is complete, this
 predicate becomes `true` for everything and the legacy code is deleted.
 
-Returns false on any error during a dry-run pipeline invocation, OR on
-syntactic shapes the pipeline is known to mis-handle (derived tables,
-outer-flagged joins) even if no error is raised. */
+Returns false on any error during a dry-run of the pipeline. Per FAQ §1
+"every query is unnestable" — don't reject shapes syntactically; let the
+pipeline try, only gate to legacy if it actually errors. derived_table_inline_pass
+handles FAQ §36 inlining for non-LEFT non-grouped derived tables. */
 (define neumann_pipeline_supports? (lambda (tuple)
-	(if (qpn-tuple-has-derived-table? tuple)
-		false
-		(try
-			(lambda () (begin
-				(neumann_compile_select tuple)
-				true))
-			(lambda (e) false)))))
+	(try
+		(lambda () (begin
+			(neumann_compile_select tuple)
+			true))
+		(lambda (e) false))))
