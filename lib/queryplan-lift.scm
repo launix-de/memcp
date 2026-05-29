@@ -162,7 +162,8 @@ the strict (two-valued) rewrite. */
 	(if (not (qpp-tuple? sub))
 		(error "qpl-make-count-subquery-for-in: sub is not a 7-tuple (likely UNION ALL — phase 5+)")
 		(begin
-			(define sub-fields (qpp-tuple-fields sub))
+			/* Normalize to pairs — sub may be parser-flat or pipeline-pairs. */
+			(define sub-fields (qpp-fields-to-pairs (qpp-tuple-fields sub)))
 			(if (not (equal? (count sub-fields) 1))
 			(error (concat "lift_dep_joins_pass: IN-subquery has " (string (count sub-fields))
 				" projected fields; expected exactly 1. Multi-row IN is FAQ §22 territory and not yet implemented."))
@@ -411,11 +412,14 @@ visible field is named "value" so callers can reference the scalar subquery's
 output as `(get_column sq_N false "value" false)` regardless of the user's
 original SQL alias. */
 (define qpl-rename-first-field-to-value (lambda (sub) (begin
-	(define fields (qpp-tuple-fields sub))
-	(if (not (equal? (count fields) 1))
+	/* Sub's fields can be EITHER flat (name1 expr1 …) (parser shape) or
+	   list-of-pairs ((name1 expr1) …) (pipeline-internal shape). Normalize
+	   to pairs via qpp-fields-to-pairs before counting/extracting. */
+	(define fields-as-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+	(if (not (equal? (count fields-as-pairs) 1))
 		(error (concat "qpl-rename-first-field-to-value: expected 1 field, found "
-			(string (count fields)))) nil)
-	(define field-pair (nth fields 0))
+			(string (count fields-as-pairs)))) nil)
+	(define field-pair (nth fields-as-pairs 0))
 	(define field-expr (nth field-pair 1))
 	(qpp-rebuild-tuple
 		(qpp-tuple-schema sub)
@@ -432,7 +436,8 @@ original SQL alias. */
 	(if (not (qpp-tuple? sub))
 		(error "qpl-wrap-inner-subquery: sub is not a 7-tuple")
 		(begin
-			(define fields (qpp-tuple-fields sub))
+			/* Normalize to pairs — sub may be parser-flat or pipeline-pairs. */
+			(define fields (qpp-fields-to-pairs (qpp-tuple-fields sub)))
 			(if (not (equal? (count fields) 1))
 				(error (concat "qpl-wrap-inner-subquery: inner subquery has "
 					(string (count fields)) " fields; expected exactly 1. "

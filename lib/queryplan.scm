@@ -5820,32 +5820,22 @@ lambda params, other refs become (outer alias.col) closure captures. */
 	(build_queryplan_term_from_logical_with_sink logical_term '(resultrow))
 ))
 (define build_queryplan_term (lambda (query) (begin
-	/* BTW2025 neumann pipeline is the standard path on this branch. For SELECT
-	   7-tuples, route through neumann_compile_select to get a clean 7-tuple
-	   (no inner_select markers, F(root)=∅). The subsequent
-	   build_queryplan_term_with_sink call sees no subquery work to do and
-	   just emits the standard physical plan via untangle_query → join_reorder
-	   → build_queryplan_inner.
+	/* BTW2025 neumann pipeline is the standard path on this branch (no
+	   fallback to legacy per FAQ §1 "no fallback paths"). For SELECT 7-tuples
+	   route through neumann_compile_select. Any error surfaces as an SQL
+	   error — the pipeline MUST handle every shape it sees.
 
 	   For non-SELECT shapes (UNION ALL produces a (union_all …) form, not a
-	   7-tuple), the legacy path handles them directly. */
+	   7-tuple), build_queryplan_term_with_sink handles them directly via its
+	   union_all_term branch. */
 	(define routed-query
 		(if (qpp-tuple? query)
-			(try
-				(lambda () (begin
-					(define neu (neumann_compile_select query))
-					(if neumann_pipeline_trace (begin
-						(print "[neumann] input:   " query)
-						(print "[neumann] lowered: " neu)) nil)
-					neu))
-				/* If the pipeline errors on a shape it doesn't yet handle
-				   cleanly, fall through to the legacy path. This is the
-				   transitional fallback; as the pipeline grows coverage,
-				   fewer queries take this branch. */
-				(lambda (e) (begin
-					(if neumann_pipeline_trace
-						(print "[neumann] pipeline error, using legacy: " e) nil)
-					query)))
+			(begin
+				(define neu (neumann_compile_select query))
+				(if neumann_pipeline_trace (begin
+					(print "[neumann] input:   " query)
+					(print "[neumann] lowered: " neu)) nil)
+				neu)
 			query))
 	(build_queryplan_term_with_sink routed-query '(resultrow))
 )))

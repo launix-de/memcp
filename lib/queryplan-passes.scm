@@ -281,6 +281,9 @@ If the outer query has SELECT * (wildcard ref), inlining is skipped
 entirely — wildcard expansion is done by legacy code using the
 table-list schema lookup, which needs the derived alias intact. */
 (define derived_table_inline_pass (lambda (t) (begin
+	/* SELECT * over derived: skip inlining (wildcard expansion happens in
+	   the downstream emit code which uses table-list schema lookup; the
+	   derived alias must stay so the lookup finds it). */
 	(if (qpp-tuple-has-wildcard? t) t (begin
 	(define orig-tables (qpp-tuple-tables t))
 	(define accumulator (newsession))
