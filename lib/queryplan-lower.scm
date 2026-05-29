@@ -134,6 +134,137 @@ projection in a fields list. */
 		'(name expr) (list name (qpu-low-rewrite-refs expr from-aliases to-alias))
 		pair)))))
 
+/* qpu-low-collect-refs-for-aliases — walk expr, return all `(tv col)` pairs
+for `(get_column tv ti col ci)` where tv ∈ aliases. */
+(define qpu-low-collect-refs-for-aliases (lambda (expr aliases) (begin
+	(match expr
+		'((symbol get_column) tv ti col ci)
+			(if (and (not (nil? tv)) (has? aliases tv)) (list (list tv col)) '())
+		'((quote get_column)  tv ti col ci)
+			(if (and (not (nil? tv)) (has? aliases tv)) (list (list tv col)) '())
+		(cons head args)
+			(reduce (coalesceNil args '()) (lambda (acc a)
+				(merge acc (qpu-low-collect-refs-for-aliases a aliases))) '())
+		'()))))
+
+/* qpu-low-fields-find-by-expr — find the field whose VALUE expression matches
+`(get_column tv false col false)`. Returns the field NAME or nil. */
+(define qpu-low-fields-find-by-expr (lambda (fields tv col)
+	(reduce (coalesceNil fields '()) (lambda (acc pair) (match pair
+		'(n e) (if (not (nil? acc)) acc
+			(match e
+				'((symbol get_column) etv eti ecol eci)
+					(if (and (equal? etv tv) (equal? ecol col)) n acc)
+				'((quote get_column) etv eti ecol eci)
+					(if (and (equal? etv tv) (equal? ecol col)) n acc)
+				acc))
+		acc)) nil)))
+
+/* qpu-low-ensure-join-key-fields — for every `(tv col)` referenced by
+`join-pred` against the right-tuple's underlying tables, ensure the
+right-tuple's fields list projects it under SOME name. Returns a pair
+(updated-right-tuple, rename-map) where rename-map is an assoc list of
+((tv col) projected-name) so the caller can rewrite join-pred refs to use
+the canonical projected name (which may differ from `col` if `col` was
+already taken by a different expression).
+
+Without this, the join predicate retargeting `(t4 id)` → `(sq_N id)` produces
+a reference to a non-existent field of the derived sub-tuple — the legacy
+lower-level engine then returns nil for that lookup and the join never
+matches (per FAQ §22 LEFT-JOIN semantics, every outer row gets NULL-extended).
+
+Naming: we use a synthesized name `__kt_<col>` to avoid colliding with any
+existing projection name in the sub. The rename-map ensures join-pred refs
+get retargeted to this name. */
+(define qpu-low-ensure-join-key-fields (lambda (right-tuple join-pred right-source-aliases)
+	(begin
+		(define needed-refs (qpu-low-collect-refs-for-aliases join-pred right-source-aliases))
+		(define existing-fields (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)))
+		(define plan (reduce needed-refs (lambda (acc ref) (match ref
+			'(tv col)
+				(begin
+					(define existing-name (qpu-low-fields-find-by-expr existing-fields tv col))
+					(if (not (nil? existing-name))
+						/* Already projected under existing-name — reuse it. */
+						(list (nth acc 0) (merge (nth acc 1)
+							(list (list (list tv col) existing-name))))
+						(begin
+							(define synthesized (concat "__kt_" col))
+							/* If synthesized name already taken or already added to acc, suffix it. */
+							(define unique-name (qpu-low-unique-projection-name
+								synthesized (merge existing-fields (nth acc 0))))
+							(list (merge (nth acc 0)
+									(list (list unique-name
+										(list (quote get_column) tv false col false))))
+								(merge (nth acc 1)
+									(list (list (list tv col) unique-name)))))))
+			acc)) (list (list) (list))))
+		(define added-projections (nth plan 0))
+		(define rename-map (nth plan 1))
+		(list
+			(if (equal? (count added-projections) 0) right-tuple
+				(qpp-rebuild-tuple
+					(qpp-tuple-schema right-tuple)
+					(qpp-tuple-tables right-tuple)
+					(merge existing-fields added-projections)
+					(qpp-tuple-condition right-tuple)
+					(qpp-tuple-group right-tuple)
+					(qpp-tuple-having right-tuple)
+					(qpp-tuple-order right-tuple)
+					(qpp-tuple-limit right-tuple)
+					(qpp-tuple-offset right-tuple)))
+			rename-map))))
+
+/* qpu-low-unique-projection-name — given a candidate name and an existing
+fields list, return either the candidate or `candidate_N` so the result is
+unique. */
+(define qpu-low-unique-projection-name (lambda (name fields)
+	(begin
+		(define taken? (lambda (n) (reduce (coalesceNil fields '()) (lambda (acc p) (match p
+			'(fn fe) (or acc (equal? fn n))
+			acc)) false)))
+		(if (not (taken? name)) name
+			(begin
+				(define n 1)
+				(define candidate (concat name "_" (string n)))
+				(reduce '(2 3 4 5 6 7 8 9) (lambda (acc i)
+					(if (taken? candidate)
+						(begin
+							(define candidate (concat name "_" (string i)))
+							acc)
+						acc)) nil)
+				candidate)))))
+
+/* qpu-low-rewrite-by-renames — rewrite join-pred refs using rename-map.
+Maps `(get_column tv ti col ci)` → `(get_column to-alias false renamed-col false)`
+when the pair (tv col) appears in rename-map. */
+(define qpu-low-rewrite-by-renames (lambda (expr rename-map to-alias)
+	(match expr
+		'((symbol get_column) tv ti col ci)
+			(begin
+				(define renamed (reduce rename-map (lambda (acc entry) (match entry
+					'(refpair newname) (match refpair
+						'(rtv rcol)
+							(if (and (equal? rtv tv) (equal? rcol col)) newname acc)
+						acc)
+					acc)) nil))
+				(if (nil? renamed) expr
+					(list (quote get_column) to-alias false renamed false)))
+		'((quote get_column) tv ti col ci)
+			(begin
+				(define renamed (reduce rename-map (lambda (acc entry) (match entry
+					'(refpair newname) (match refpair
+						'(rtv rcol)
+							(if (and (equal? rtv tv) (equal? rcol col)) newname acc)
+						acc)
+					acc)) nil))
+				(if (nil? renamed) expr
+					(list (quote get_column) to-alias false renamed false)))
+		(cons head args)
+			(cons head (map (coalesceNil args '())
+				(lambda (a) (qpu-low-rewrite-by-renames a rename-map to-alias))))
+		expr)))
+
 /* ==================== Lowering ==================== */
 
 /* qpu-lower-to-tuple — top-level operator dispatch. */
@@ -256,23 +387,37 @@ WHERE condition (existing behavior). */
 	(begin
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+		/* Ensure the right-tuple exposes every column referenced by the join
+		   predicate against its underlying tables. Without this, retargeting
+		   `(t4 id)` to `(sq_N id)` produces a reference to a non-existent
+		   field of the derived sub-tuple. The rename-map records (tv col) →
+		   projected-name so we can rewrite the predicate with the correct
+		   (possibly synthesized) field name. */
+		(define keys-result (qpu-low-ensure-join-key-fields
+			right-tuple join-pred right-source-aliases))
+		(define right-tuple-keys (nth keys-result 0))
+		(define key-rename-map (nth keys-result 1))
 		(define rewritten-fields (qpu-low-rewrite-projections
 			(qpp-tuple-fields left-tuple) right-source-aliases rhs-alias))
 		(define rewritten-cond (qpu-low-rewrite-refs
 			(qpp-tuple-condition left-tuple) right-source-aliases rhs-alias))
+		/* Rewrite join-pred using the rename-map so synthesized __kt_* names
+		   are referenced under rhs-alias. Refs not in rename-map use the
+		   regular rewrite (alias bump). */
 		(define rewritten-pred (qpu-low-rewrite-refs
-			join-pred right-source-aliases rhs-alias))
+			(qpu-low-rewrite-by-renames join-pred key-rename-map rhs-alias)
+			right-source-aliases rhs-alias))
 		(define is-left (equal? join-type (quote left)))
 		(define derived-entry
 			(if is-left
 				/* LEFT join: derived table is isOuter=true with joinExpr = pred.
 				   Per-key misses get NULL-extended automatically by the scan
 				   infrastructure (FAQ §22 isOuter contract). */
-				(list rhs-alias (qpp-tuple-schema right-tuple)
-					right-tuple true rewritten-pred)
+				(list rhs-alias (qpp-tuple-schema right-tuple-keys)
+					right-tuple-keys true rewritten-pred)
 				/* INNER join: derived table is plain; predicate flows into WHERE. */
-				(list rhs-alias (qpp-tuple-schema right-tuple)
-					right-tuple false nil)))
+				(list rhs-alias (qpp-tuple-schema right-tuple-keys)
+					right-tuple-keys false nil)))
 		(define final-cond
 			(if is-left
 				/* LEFT: predicate is in joinExpr, NOT in WHERE (else inner-join semantics). */
