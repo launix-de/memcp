@@ -569,6 +569,37 @@ that the subsequent passes expect (pairs). */
 		(if (or (nil? b) (equal? b true) (equal? b (quote true))) a
 			(list (quote and) a b)))))
 
+/* qpp-derived-can-inline-as-left-join? — true if `sub` is a 7-tuple safe to
+inline AS a LEFT JOIN. Stronger than qpp-derived-can-inline? — requires
+exactly 1 source-table entry in tables (no nested derived), no GROUP BY,
+HAVING, LIMIT, OFFSET. Used by derived_table_inline_pass for isOuter=true
+entries.
+
+When a LEFT JOIN derived has this shape:
+  (alias schema <sub> true <joinExpr>)
+  sub: (schema ((src-alias schema-src src-tbl false nil)) (projections) WHERE-true ...)
+…the derived can be replaced with the underlying source table as a SOURCE
+LEFT JOIN entry, with projections rewritten via rename map. */
+(define qpp-derived-can-inline-as-left-join? (lambda (sub)
+	(and (qpp-tuple? sub)
+		(or (nil? (qpp-tuple-group sub))
+			(equal? (count (qpp-tuple-group sub)) 0))
+		(nil? (qpp-tuple-having sub))
+		(or (nil? (qpp-tuple-order sub))
+			(equal? (count (qpp-tuple-order sub)) 0))
+		(nil? (qpp-tuple-limit sub))
+		(nil? (qpp-tuple-offset sub))
+		/* Sub must have exactly 1 source table (not derived). */
+		(equal? (count (coalesceNil (qpp-tuple-tables sub) '())) 1)
+		(begin
+			(define td (nth (qpp-tuple-tables sub) 0))
+			(and (list? td) (>= (count td) 3)
+				(not (qpp-tuple? (nth td 2)))
+				/* Sub's table entry must itself be a simple source (no
+				   isOuter; the inlined entry adopts the outer derived's
+				   isOuter/joinExpr). */
+				(or (< (count td) 4) (not (nth td 3))))))))
+
 /* derived_table_inline_pass — the main entry. Walks tables; for each
 inlinable derived entry, inlines it. Returns a new 7-tuple.
 
@@ -598,7 +629,7 @@ table-list schema lookup, which needs the derived alias intact. */
 						(not (qpp-derived-can-inline? maybe-sub)))
 					/* Can't inline: keep this table entry as-is. */
 					(accumulator "tables" (merge (accumulator "tables") (list td)))
-					/* Inlinable derived sub-tuple: */
+					/* Inlinable INNER derived sub-tuple: */
 					(begin
 						/* Build rename map from sub's projections under this alias. */
 						(define ren-pairs
