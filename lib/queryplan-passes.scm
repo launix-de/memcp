@@ -190,6 +190,14 @@ local+visible schemas, recursing into inner_select / inner_select_in /
 inner_select_exists markers with the sub-tuple's OWN local schemas and
 the caller's visible schemas extended by the caller's locals (= SQL scope
 nesting per ISO standard). */
+/* qpp-unresolved-nil-ref? — true if expr is `(get_column nil … … …)` with
+   any of ti/ci flags still true (= unresolved). Used to detect fallback need
+   after a local-only resolution attempt. */
+(define qpp-unresolved-nil-ref? (lambda (expr) (match expr
+	'((symbol get_column) tv ti col ci) (and (nil? tv) (or ti ci))
+	'((quote get_column)  tv ti col ci) (and (nil? tv) (or ti ci))
+	false)))
+
 (define qpp-resolve-expr-scoped (lambda (expr local-schemas visible-schemas) (begin
 	(define is-scalar-marker? (lambda (sym) (match sym
 		(symbol inner_select)       true
@@ -221,8 +229,20 @@ nesting per ISO standard). */
 				/* Atomic — resolve the WHOLE get_column expression in one shot
 				   using canonicalize_columns_scoped (which understands the
 				   (get_column alias ti col ci) shape and uses ti/ci to do
-				   case-insensitive lookups via local + visible schemas). */
-				(canonicalize_columns_scoped expr local-schemas visible-schemas)
+				   case-insensitive lookups via local + visible schemas).
+
+				   canonicalize_columns_scoped only resolves UNQUALIFIED refs
+				   against local schemas (so recursive scopes don't accidentally
+				   bind to outer aliases). For SQL scope-fallback semantics —
+				   an unqualified inner ref that doesn't exist in local tables
+				   should resolve to the outer scope — fall through to a second
+				   resolve against visible-schemas as both local and visible. */
+				(begin
+					(define first-try
+						(canonicalize_columns_scoped expr local-schemas visible-schemas))
+					(if (qpp-unresolved-nil-ref? first-try)
+						(canonicalize_columns_scoped first-try visible-schemas visible-schemas)
+						first-try))
 			(if (is-scalar-marker? sym)
 				/* (inner_select sub-7tuple): recurse with sub's scope. */
 				(list sym (qpp-resolve-tuple-scoped (nth args 0) visible-schemas))

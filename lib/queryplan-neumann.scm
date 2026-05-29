@@ -113,7 +113,13 @@ callers supply the real schemas list. */
 	   names as columns. */
 	(define t2 (column_resolve_scoped_pass t1 (list)))
 	(define t3 (derived_table_inline_pass t2))
-	(define t4 (lift_dep_joins_pass t3))
+	/* Re-resolve after inlining: derived-table inlining can introduce refs
+	   to the now-directly-visible underlying tables that were nil-tv inside
+	   the derived sub-tuple. A second scoped resolve binds them with the new
+	   table set visible. Idempotent for already-resolved refs (no false=false
+	   markers to resolve). */
+	(define t3b (column_resolve_scoped_pass t3 (list)))
+	(define t4 (lift_dep_joins_pass t3b))
 	(define t5 (unnest_pass t4))
 	(define t6 (lower_to_scans_pass t5))
 	(if (not (qpp-tuple? t6))
@@ -140,7 +146,8 @@ callers supply the real schemas list. */
 	(define t1 (alias_normalize_pass tuple-pairs))
 	(define t2 (column_resolve_scoped_pass t1 schemas))
 	(define t3 (derived_table_inline_pass t2))
-	(define t4 (lift_dep_joins_pass t3))
+	(define t3b (column_resolve_scoped_pass t3 schemas))
+	(define t4 (lift_dep_joins_pass t3b))
 	(define t5 (unnest_pass t4))
 	(define t6 (lower_to_scans_pass t5))
 	(if (not (qpp-tuple? t6))
