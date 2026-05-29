@@ -540,10 +540,47 @@ COALESCE-COUNT > 0 boolean shape per FAQ §11. */
 		(list (quote coalesce) (list (quote inner_select) count-sub) 0)
 		0)))
 
+/* qpl-union-all-parts — if `sub` is a union_all form, return its branches
+list; else nil. The parser emits UNION ALL as
+  (union_all branches order limit offset)
+where branches is a list of inner queries (each a 7-tuple OR another
+union_all). For the FAQ §14 IN/EXISTS rewrite we ignore order/limit/offset
+on the union (those would need additional handling; current callers only
+hit branches+no-order-limit shapes). Returns nil if sub is a 7-tuple or
+anything else. */
+(define qpl-union-all-parts (lambda (sub) (match sub
+	'(union_all branches order limit offset)
+		(if (and (or (nil? order) (equal? order '()))
+				 (nil? limit) (nil? offset))
+			branches nil)
+	'((symbol union_all) branches order limit offset)
+		(if (and (or (nil? order) (equal? order '()))
+				 (nil? limit) (nil? offset))
+			branches nil)
+	'((quote union_all) branches order limit offset)
+		(if (and (or (nil? order) (equal? order '()))
+				 (nil? limit) (nil? offset))
+			branches nil)
+	nil)))
+
+/* qpl-and-or-from-branches — build `(or BR1 BR2 ...)` for IN-UNION rewrite
+(positive: any branch matches) or `(and BR1 BR2 ...)` for NOT-IN rewrite
+(negative: every branch fails). Empty branches: false for or, true for and. */
+(define qpl-or-from-list (lambda (terms)
+	(if (equal? (count terms) 0) false
+		(if (equal? (count terms) 1) (nth terms 0)
+			(reduce (cdr terms) (lambda (acc t)
+				(list (quote or) acc t)) (car terms))))))
+
 /* qpl-rewrite-in-exists — walk an expression tree, rewrite every
 inner_select_in / inner_select_exists into the COALESCE-COUNT > 0 form.
 Leaves scalar inner_select untouched (it's already in the form the
 substitution walker expects).
+
+FAQ §14: IN/EXISTS over UNION ALL is rewritten as OR-of-IN/EXISTS per
+branch BEFORE the COUNT lowering, so each branch becomes its own
+COALESCE(COUNT(),0)>0 wrapper. Equivalent semantics, gives the unnest
+a flat set of 7-tuple subs to process.
 
 `outer-aliases` is the list of OUTER table aliases visible at the SQL scope
 of this expression — passed through so qpl-make-count-subquery-for-in can
@@ -552,15 +589,34 @@ sub's WHERE. */
 (define qpl-rewrite-in-exists (lambda (expr outer-aliases) (begin
 	(define k (qpl-marker-kind expr))
 	(if (equal? k (quote inner_select_in))
-		(qpl-wrap-as-count-gt-zero
-			(qpl-make-count-subquery-for-in
-				(qpl-qualify-outer-nil-refs
-					(qpl-rewrite-in-exists (qpl-marker-lhs expr) outer-aliases)
+		(begin
+			(define sub (qpl-marker-subquery expr))
+			(define branches (qpl-union-all-parts sub))
+			(if (not (nil? branches))
+				/* IN (UNION ALL of branches) → (lhs IN br1) OR (lhs IN br2) OR …
+				   Re-run rewrite on each new marker to recurse properly. */
+				(qpl-rewrite-in-exists
+					(qpl-or-from-list (map branches (lambda (br)
+						(list (quote inner_select_in) (qpl-marker-lhs expr) br))))
 					outer-aliases)
-				(qpl-marker-subquery expr)))
+				(qpl-wrap-as-count-gt-zero
+					(qpl-make-count-subquery-for-in
+						(qpl-qualify-outer-nil-refs
+							(qpl-rewrite-in-exists (qpl-marker-lhs expr) outer-aliases)
+							outer-aliases)
+						sub))))
 		(if (equal? k (quote inner_select_exists))
-			(qpl-wrap-as-count-gt-zero
-				(qpl-make-count-subquery-for-exists (qpl-marker-subquery expr)))
+			(begin
+				(define sub (qpl-marker-subquery expr))
+				(define branches (qpl-union-all-parts sub))
+				(if (not (nil? branches))
+					/* EXISTS (UNION ALL of branches) → EXISTS br1 OR EXISTS br2 OR … */
+					(qpl-rewrite-in-exists
+						(qpl-or-from-list (map branches (lambda (br)
+							(list (quote inner_select_exists) br))))
+						outer-aliases)
+					(qpl-wrap-as-count-gt-zero
+						(qpl-make-count-subquery-for-exists sub))))
 			(match expr
 				(cons sym args) (cons sym (map (coalesceNil args '())
 					(lambda (a) (qpl-rewrite-in-exists a outer-aliases))))
