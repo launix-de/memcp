@@ -105,7 +105,13 @@ callers supply the real schemas list. */
 		(qpp-tuple-limit tuple)
 		(qpp-tuple-offset tuple)))
 	(define t1 (alias_normalize_pass tuple-pairs))
-	(define t2 (column_resolve_pass t1 (list)))
+	/* Use scope-aware column resolution: recurses into inner_select / _in /
+	   _exists markers with the sub-tuple's own local schemas, so nil-tv refs
+	   resolve correctly inside nested scopes (per SQL scope rules). Schemas
+	   come from the live storage via `(show schema table)` per
+	   qpp-schemas-from-tables — derived sub-tuples expose their projection
+	   names as columns. */
+	(define t2 (column_resolve_scoped_pass t1 (list)))
 	(define t3 (derived_table_inline_pass t2))
 	(define t4 (lift_dep_joins_pass t3))
 	(define t5 (unnest_pass t4))
@@ -132,7 +138,7 @@ callers supply the real schemas list. */
 		(qpp-tuple-limit tuple)
 		(qpp-tuple-offset tuple)))
 	(define t1 (alias_normalize_pass tuple-pairs))
-	(define t2 (column_resolve_pass t1 schemas))
+	(define t2 (column_resolve_scoped_pass t1 schemas))
 	(define t3 (derived_table_inline_pass t2))
 	(define t4 (lift_dep_joins_pass t3))
 	(define t5 (unnest_pass t4))

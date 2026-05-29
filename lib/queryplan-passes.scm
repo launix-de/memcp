@@ -147,10 +147,117 @@ reduce_assoc convention used throughout queryplan.scm:
 where each cols entry is a list of column-defining dicts (each with a "Field"
 key, as produced by `show "columns" schema table`).
 
-Pure function: the caller supplies schemas, the pass does no I/O. */
+Pure function: the caller supplies schemas, the pass does no I/O.
+
+Single-scope variant. For correlated queries with nested inner_select markers,
+use [column_resolve_scoped_pass] which recurses into sub-tuples with their own
+local schemas — that variant is the architectural fix for nil-tv refs leaking
+across scope boundaries. */
 (define column_resolve_pass (lambda (t schemas)
 	(qpp-apply-to-tuple t (lambda (expr)
 		(canonicalize_columns_scoped expr schemas schemas)))))
+
+/* qpp-schemas-from-tables — build a schemas assoc list from a 7-tuple's tables
+list. Real tables resolve via `(show schema tbl)`; derived sub-tuples expose
+their projection field names as columns (Type "any").
+
+Returns a flat assoc list (alias1 cols1 alias2 cols2 ...) suitable for
+reduce_assoc and canonicalize_columns_scoped. */
+(define qpp-schemas-from-tables (lambda (tables)
+	(reduce (coalesceNil tables '()) (lambda (acc td) (match td
+		'(alias tschema ttbl io je)
+			(begin
+				(define resolved-alias (if (nil? alias) ttbl alias))
+				(if (qpp-tuple? ttbl)
+					/* Derived sub-tuple: project field names as columns. */
+					(merge acc (list resolved-alias
+						(map (qpp-fields-to-pairs (qpp-tuple-fields ttbl))
+							(lambda (p) (list "Field" (nth p 0) "Type" "any")))))
+					/* Real table name (string or symbol): use get_schema which
+					   handles INFORMATION_SCHEMA + falls through to (show schema tbl)
+					   for normal tables. Wrapped in try in case the table doesn't
+					   yet exist (CREATE TABLE flows, EXPLAIN) — drop the entry
+					   rather than poisoning the resolver. */
+					(begin
+						(define cols (try (lambda () (get_schema tschema ttbl))
+							(lambda (e) '())))
+						(if (or (nil? cols) (equal? cols '())) acc
+							(merge acc (list resolved-alias cols))))))
+		acc)) '())))
+
+/* qpp-resolve-expr-scoped — resolve (get_column …) refs in expr with
+local+visible schemas, recursing into inner_select / inner_select_in /
+inner_select_exists markers with the sub-tuple's OWN local schemas and
+the caller's visible schemas extended by the caller's locals (= SQL scope
+nesting per ISO standard). */
+(define qpp-resolve-expr-scoped (lambda (expr local-schemas visible-schemas) (begin
+	(define is-scalar-marker? (lambda (sym) (match sym
+		(symbol inner_select)       true
+		(quote inner_select)        true
+		'(quote inner_select)       true
+		'inner_select               true
+		false)))
+	(define is-in-marker? (lambda (sym) (match sym
+		(symbol inner_select_in)    true
+		(quote inner_select_in)     true
+		'(quote inner_select_in)    true
+		'inner_select_in            true
+		false)))
+	(define is-exists-marker? (lambda (sym) (match sym
+		(symbol inner_select_exists) true
+		(quote inner_select_exists)  true
+		'(quote inner_select_exists) true
+		'inner_select_exists         true
+		false)))
+	(define is-getcol? (lambda (sym) (match sym
+		(symbol get_column) true
+		(quote get_column)  true
+		'(quote get_column) true
+		'get_column         true
+		false)))
+	(match expr
+		(cons sym args)
+			(if (is-getcol? sym)
+				/* Atomic — resolve the WHOLE get_column expression in one shot
+				   using canonicalize_columns_scoped (which understands the
+				   (get_column alias ti col ci) shape and uses ti/ci to do
+				   case-insensitive lookups via local + visible schemas). */
+				(canonicalize_columns_scoped expr local-schemas visible-schemas)
+			(if (is-scalar-marker? sym)
+				/* (inner_select sub-7tuple): recurse with sub's scope. */
+				(list sym (qpp-resolve-tuple-scoped (nth args 0) visible-schemas))
+			(if (is-in-marker? sym)
+				/* (inner_select_in lhs sub): lhs in caller scope, sub recurses. */
+				(list sym
+					(qpp-resolve-expr-scoped (nth args 0) local-schemas visible-schemas)
+					(qpp-resolve-tuple-scoped (nth args 1) visible-schemas))
+			(if (is-exists-marker? sym)
+				(list sym (qpp-resolve-tuple-scoped (nth args 0) visible-schemas))
+			/* Default: recurse into args (operator call). */
+			(cons sym (map (coalesceNil args '())
+				(lambda (a) (qpp-resolve-expr-scoped a local-schemas visible-schemas))))))))
+		/* Leaf atom: nothing to resolve. */
+		expr))))
+
+/* qpp-resolve-tuple-scoped — recursive scope-aware column resolution for a
+sub 7-tuple. Builds the sub's local schemas, merges with the caller's
+visible-schemas to form the new visible (per SQL scope rules: outer
+qualified refs are visible inside, unqualified inner refs match local
+schemas first). */
+(define qpp-resolve-tuple-scoped (lambda (t outer-schemas)
+	(if (not (qpp-tuple? t)) t
+		(begin
+			(define local-schemas (qpp-schemas-from-tables (qpp-tuple-tables t)))
+			(define visible-schemas (merge outer-schemas local-schemas))
+			(qpp-apply-to-tuple t (lambda (expr)
+				(qpp-resolve-expr-scoped expr local-schemas visible-schemas)))))))
+
+/* column_resolve_scoped_pass — the architecturally-correct column resolver.
+Drop-in replacement for column_resolve_pass that recurses into inner_select*
+markers with proper scope nesting. At the top level outer-schemas is the
+empty list. */
+(define column_resolve_scoped_pass (lambda (t outer-schemas)
+	(qpp-resolve-tuple-scoped t (coalesceNil outer-schemas '()))))
 
 /* ==================== Pass 3: derived_table_inline_pass (FAQ §36) ==================== */
 

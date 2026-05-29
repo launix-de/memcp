@@ -387,6 +387,16 @@ WHERE condition (existing behavior). */
 	(begin
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+		/* Outer's tables (LEFT) — when an alias appears in BOTH outer and
+		   right, that alias name collides. Outer's existing field/cond refs to
+		   the colliding alias are LEGITIMATE outer references and must NOT be
+		   retargeted to rhs-alias. Only the join-pred (which carries the
+		   synthesized correlation against right-source tables) gets full
+		   retargeting. */
+		(define left-source-aliases (map (qpp-tuple-tables left-tuple) (lambda (td)
+			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+		(define right-only-aliases (filter right-source-aliases (lambda (a)
+			(not (has? left-source-aliases a)))))
 		/* Ensure the right-tuple exposes every column referenced by the join
 		   predicate against its underlying tables. Without this, retargeting
 		   `(t4 id)` to `(sq_N id)` produces a reference to a non-existent
@@ -398,9 +408,9 @@ WHERE condition (existing behavior). */
 		(define right-tuple-keys (nth keys-result 0))
 		(define key-rename-map (nth keys-result 1))
 		(define rewritten-fields (qpu-low-rewrite-projections
-			(qpp-tuple-fields left-tuple) right-source-aliases rhs-alias))
+			(qpp-tuple-fields left-tuple) right-only-aliases rhs-alias))
 		(define rewritten-cond (qpu-low-rewrite-refs
-			(qpp-tuple-condition left-tuple) right-source-aliases rhs-alias))
+			(qpp-tuple-condition left-tuple) right-only-aliases rhs-alias))
 		/* Rewrite join-pred using the rename-map so synthesized __kt_* names
 		   are referenced under rhs-alias. Refs not in rename-map use the
 		   regular rewrite (alias bump). */
