@@ -53,73 +53,36 @@ list-of-pairs to flat (name1 expr1 name2 expr2 …), INCLUDING any derived
 sub-tuples nested in the tables list. The legacy build_queryplan_inner /
 untangle_query consumers iterate fields via extract_assoc / reduce_assoc
 which assume the flat form. */
-/* qpn-flatten-expr-recursive — walk expr, find inner_select* markers,
-recursively flatten their embedded sub-tuples. Other forms pass through. */
-(define qpn-flatten-expr-recursive (lambda (expr)
-	(match expr
-		(cons sym args)
-			(begin
-				(define is-marker (match sym
-					(symbol inner_select)        true
-					(quote inner_select)         true
-					'(quote inner_select)        true
-					'inner_select                true
-					(symbol inner_select_in)     true
-					(quote inner_select_in)      true
-					'(quote inner_select_in)     true
-					'inner_select_in             true
-					(symbol inner_select_exists) true
-					(quote inner_select_exists)  true
-					'(quote inner_select_exists) true
-					'inner_select_exists         true
-					false))
-				(if is-marker
-					/* Recurse into each arg — the qpp-tuple? check inside
-					   qpn-flatten-tuple-recursive guards non-tuple args. */
-					(cons sym (map (coalesceNil args '())
-						(lambda (a) (if (qpp-tuple? a)
-							(qpn-flatten-tuple-recursive a)
-							(qpn-flatten-expr-recursive a)))))
-					(cons sym (map (coalesceNil args '())
-						(lambda (a) (qpn-flatten-expr-recursive a))))))
-		expr)))
-
 (define qpn-flatten-tuple-recursive (lambda (t)
 	(if (not (qpp-tuple? t)) t
-		(begin
-			/* Walk expression slots to flatten any inner_select* sub-tuples
-			   they contain — sub-tuples nested inside markers (not in tables)
-			   would otherwise stay in pair-fields form and break legacy
-			   reduce_assoc consumers. */
-			(define rewrite-expr qpn-flatten-expr-recursive)
-			(qpp-rebuild-tuple
-				(qpp-tuple-schema t)
-				(map (coalesceNil (qpp-tuple-tables t) (list)) (lambda (td)
-					(if (or (nil? td) (< (count td) 3)) td
-						(begin
-							(define tname (nth td 2))
-							(if (qpp-tuple? tname)
-								/* derived table: recursively flatten its 7-tuple */
-								(merge (list (nth td 0) (nth td 1)
-									(qpn-flatten-tuple-recursive tname))
-									(if (>= (count td) 4)
-										(list (nth td 3))
-										(list false))
-									(if (>= (count td) 5)
-										(list (nth td 4))
-										(list nil)))
-								td)))))
-				/* Normalize to pairs FIRST then flatten — qpp-fields-to-flat's
-				   match clause '(name expr) accidentally splits `(inner_select sub)`
-				   into [inner_select, sub] when given flat input (the parser shape).
-				   pair-normalize is idempotent on already-pair input. */
-				(qpp-fields-to-flat (qpp-map-fields (qpp-tuple-fields t) rewrite-expr))
-				(rewrite-expr (qpp-tuple-condition t))
-				(qpp-map-group (qpp-tuple-group t) rewrite-expr)
-				(rewrite-expr (qpp-tuple-having t))
-				(qpp-map-order (qpp-tuple-order t) rewrite-expr)
-				(qpp-tuple-limit t)
-				(qpp-tuple-offset t))))))
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema t)
+			(map (coalesceNil (qpp-tuple-tables t) (list)) (lambda (td)
+				(if (or (nil? td) (< (count td) 3)) td
+					(begin
+						(define tname (nth td 2))
+						(if (qpp-tuple? tname)
+							/* derived table: recursively flatten its 7-tuple */
+							(merge (list (nth td 0) (nth td 1)
+								(qpn-flatten-tuple-recursive tname))
+								(if (>= (count td) 4)
+									(list (nth td 3))
+									(list false))
+								(if (>= (count td) 5)
+									(list (nth td 4))
+									(list nil)))
+							td)))))
+			/* Normalize to pairs FIRST then flatten — qpp-fields-to-flat's
+			   match clause '(name expr) accidentally splits `(inner_select sub)`
+			   into [inner_select, sub] when given flat input (the parser shape).
+			   pair-normalize is idempotent on already-pair input. */
+			(qpp-fields-to-flat (qpp-fields-to-pairs (qpp-tuple-fields t)))
+			(qpp-tuple-condition t)
+			(qpp-tuple-group t)
+			(qpp-tuple-having t)
+			(qpp-tuple-order t)
+			(qpp-tuple-limit t)
+			(qpp-tuple-offset t)))))
 
 /* neumann_compile_select tuple [schemas] →
    a clean 7-tuple ready for build_queryplan_inner.
@@ -145,12 +108,7 @@ callers supply the real schemas list. */
 		(qpp-tuple-order tuple)
 		(qpp-tuple-limit tuple)
 		(qpp-tuple-offset tuple)))
-	/* Pre-pass: disambiguate alias collisions across SQL scopes (FAQ §35
-	   canonical names). The parser may emit the same alias string at outer
-	   and inner scope levels; my lowered 7-tuple would then confuse the
-	   legacy compiler. */
-	(define t0 (alias_disambiguate_pass tuple-pairs))
-	(define t1 (alias_normalize_pass t0))
+	(define t1 (alias_normalize_pass tuple-pairs))
 	/* Use scope-aware column resolution: recurses into inner_select / _in /
 	   _exists markers with the sub-tuple's own local schemas, so nil-tv refs
 	   resolve correctly inside nested scopes (per SQL scope rules). Schemas
@@ -189,12 +147,7 @@ callers supply the real schemas list. */
 		(qpp-tuple-order tuple)
 		(qpp-tuple-limit tuple)
 		(qpp-tuple-offset tuple)))
-	/* Pre-pass: disambiguate alias collisions across SQL scopes (FAQ §35
-	   canonical names). The parser may emit the same alias string at outer
-	   and inner scope levels; my lowered 7-tuple would then confuse the
-	   legacy compiler. */
-	(define t0 (alias_disambiguate_pass tuple-pairs))
-	(define t1 (alias_normalize_pass t0))
+	(define t1 (alias_normalize_pass tuple-pairs))
 	(define t2 (column_resolve_scoped_pass t1 schemas))
 	(define t3 (derived_table_inline_pass t2))
 	(define t3b (column_resolve_scoped_pass t3 schemas))
