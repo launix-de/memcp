@@ -227,7 +227,15 @@ needs per-outer-binding window semantics that this drop does not provide. */
 		(begin
 			(define lim (qpp-tuple-limit sub))
 			(define off (qpp-tuple-offset sub))
-			(if (or (nil? lim) (not (nil? off))) sub
+			(define ord (qpp-tuple-order sub))
+			/* Drop ONLY when: LIMIT is set, no OFFSET, no ORDER BY.
+			   ORDER BY means the LIMIT selects a SPECIFIC subset (e.g. top-k);
+			   dropping the LIMIT would change which rows are returned, even
+			   if equi-binding bounds the cardinality. The ROW_NUMBER PARTITION
+			   rewrite (qpl-rewrite-correlated-limit-with-rownumber) handles
+			   the ordered case correctly. */
+			(if (or (nil? lim) (not (nil? off))
+				(and (not (nil? ord)) (> (count ord) 0))) sub
 				(begin
 					(define inner-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
 					(define cond (qpp-tuple-condition sub))
@@ -276,6 +284,155 @@ apply qpl-drop-redundant-correlated-limit to their sub-tuples. */
 
 (define qpl-rewrite-redundant-limit-tuple (lambda (t)
 	(qpp-apply-to-tuple t qpl-rewrite-redundant-limit-in-expr)))
+
+/* ==================== FAQ §43 ROW_NUMBER PARTITION rewrite ==================== */
+
+/* qpl-rewrite-correlated-limit-with-rownumber — for an inner_select's
+sub-tuple that has LIMIT k [OFFSET o] AND outer-correlation that
+qpl-drop-redundant-correlated-limit could NOT eliminate, rewrite the sub
+per FAQ §43 using a ROW_NUMBER OVER (PARTITION BY <outer-refs>) wrapper.
+
+Transformation:
+  sub:  SELECT X FROM T WHERE corr [ORDER BY o] LIMIT k [OFFSET off]
+        (with outer-refs in corr)
+  →
+  wrapper:
+    SELECT __value
+    FROM (
+      SELECT X AS __value,
+             ROW_NUMBER() OVER (PARTITION BY <outer-refs> ORDER BY o) AS __rn
+      FROM T WHERE corr
+    ) AS __limit_wrap
+    WHERE __rn BETWEEN off+1 AND k+off
+
+The partition-by carries the outer-refs (still correlated). After my
+pipeline unnests the outer correlation, the partition keys align with the
+outer-binding domain so the LIMIT applies PER OUTER ROW (FAQ §43 "must
+hold per outer binding, not globally").
+
+Conditions for rewrite:
+  - sub has LIMIT k (non-nil)
+  - sub is correlated (has outer-refs in WHERE, fields, group, etc.)
+  - sub is NOT already handled by qpl-drop-redundant-correlated-limit
+    (caller must check the drop didn't fire — i.e. sub.limit is still set)
+
+Output: a new sub-tuple containing one fields entry (renamed __value),
+condition rn-filter, no ORDER BY (moved into window) / no LIMIT (moved up).
+The inner derived `__limit_wrap` carries the window function + original
+WHERE.
+
+This is the general case complement to qpl-drop-redundant-correlated-limit
+which handles the equi-binding optimization case. */
+
+/* qpl-uniq-counter / qpl-fresh-limwrap — generate unique sub-alias names. */
+(define qpl-limwrap-counter (newsession))
+(qpl-limwrap-counter "n" 0)
+(define qpl-fresh-limwrap-alias (lambda () (begin
+	(qpl-limwrap-counter "n" (+ (qpl-limwrap-counter "n") 1))
+	(concat "__limit_wrap_" (string (qpl-limwrap-counter "n"))))))
+
+/* qpl-sub-outer-refs — collect (tv col) pairs in sub's expressions that are
+NOT bound by any of sub's table aliases. Walks WHERE, fields, group, having,
+order. Deduplicates by (tv col). */
+(define qpl-sub-outer-refs (lambda (sub) (begin
+	(define inner-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
+	(define all-cond-refs (qpl-extract-col-refs (qpp-tuple-condition sub)))
+	(define all-fields-refs (reduce
+		(qpp-fields-to-pairs (qpp-tuple-fields sub))
+		(lambda (acc pair) (match pair
+			'(name expr) (merge acc (qpl-extract-col-refs expr))
+			acc))
+		'()))
+	(define all-refs (merge all-cond-refs all-fields-refs))
+	(define outer-refs (filter all-refs (lambda (rp) (match rp
+		'(tv col) (and (not (nil? tv)) (not (has? inner-aliases tv)))
+		false))))
+	/* Deduplicate */
+	(reduce outer-refs (lambda (acc rp)
+		(if (has? acc rp) acc (merge acc (list rp))))
+		'()))))
+
+/* qpl-build-rownumber-window — build the window_func node for ROW_NUMBER
+with PARTITION BY <outer-refs> ORDER BY <order-items>. */
+(define qpl-build-rownumber-window (lambda (outer-refs order-items) (begin
+	(define partition-exprs (map outer-refs (lambda (rp) (match rp
+		'(tv col) (list (quote get_column) tv false col false)
+		rp))))
+	(define order-list (if (nil? order-items) '() order-items))
+	(list (quote window_func) "ROW_NUMBER" '()
+		(list partition-exprs order-list)))))
+
+(define qpl-rewrite-correlated-limit-with-rownumber (lambda (sub)
+	(if (not (qpp-tuple? sub)) sub
+		(begin
+			(define lim (qpp-tuple-limit sub))
+			(define off (qpp-tuple-offset sub))
+			(if (nil? lim) sub
+				(begin
+					(define outer-refs (qpl-sub-outer-refs sub))
+					(if (equal? (count outer-refs) 0) sub
+						(begin
+							/* Build inner-with-window: same as sub but add __rn field. */
+							(define sub-fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+							(if (not (equal? (count sub-fields-pairs) 1))
+								(error (concat
+									"qpl-rewrite-correlated-limit-with-rownumber: expected 1 field, "
+									"found " (string (count sub-fields-pairs))
+									" — multi-field LIMIT rewrite is phase 5+")) nil)
+							(define orig-field-pair (nth sub-fields-pairs 0))
+							(define orig-field-expr (nth orig-field-pair 1))
+							(define order-items (qpp-tuple-order sub))
+							(define window-expr (qpl-build-rownumber-window outer-refs order-items))
+							(define inner-sub-fields (list
+								(list "__value" orig-field-expr)
+								(list "__rn" window-expr)))
+							(define inner-sub (qpp-rebuild-tuple
+								(qpp-tuple-schema sub)
+								(qpp-tuple-tables sub)
+								inner-sub-fields
+								(qpp-tuple-condition sub)
+								(qpp-tuple-group sub)
+								(qpp-tuple-having sub)
+								nil    /* ORDER moved into window */
+								nil    /* LIMIT moved up */
+								nil))  /* OFFSET moved up */
+							(define wrap-alias (qpl-fresh-limwrap-alias))
+							(define schema (qpp-tuple-schema sub))
+							(define offset-val (if (nil? off) 0 off))
+							/* Build the WHERE: rn > offset AND rn <= k+offset.
+							   For pure LIMIT k (no OFFSET), this simplifies to rn <= k. */
+							(define rn-ref (list (quote get_column) wrap-alias false "__rn" false))
+							(define rn-condition
+								(if (nil? off)
+									(list (quote <=) rn-ref lim)
+									(list (quote and)
+										(list (quote >) rn-ref offset-val)
+										(list (quote <=) rn-ref (list (quote +) lim offset-val)))))
+							(qpp-rebuild-tuple
+								schema
+								(list (list wrap-alias schema inner-sub false nil))
+								(list (list (nth orig-field-pair 0)
+									(list (quote get_column) wrap-alias false "__value" false)))
+								rn-condition
+								nil nil nil nil nil))))))))))
+
+(define qpl-rewrite-correlated-limit-in-expr (lambda (expr)
+	(match expr
+		(cons sym args) (begin
+			(define is-scalar (match sym
+				(symbol inner_select) true
+				(quote inner_select)  true
+				'(quote inner_select) true
+				'inner_select         true
+				false))
+			(if (and is-scalar (equal? (count args) 1))
+				(list sym (qpl-rewrite-correlated-limit-with-rownumber (nth args 0)))
+				(cons sym (map (coalesceNil args '())
+					(lambda (a) (qpl-rewrite-correlated-limit-in-expr a))))))
+		expr)))
+
+(define qpl-rewrite-correlated-limit-tuple (lambda (t)
+	(qpp-apply-to-tuple t qpl-rewrite-correlated-limit-in-expr)))
 
 (define qpl-and-cond (lambda (a b)
 	(if (or (nil? a) (equal? a true)) b
@@ -784,13 +941,20 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 	(if (not (qpp-tuple? t))
 		(error "lift_dep_joins_pass: input is not a 7-tuple")
 		(begin
-			/* Step 0 — drop redundant LIMIT k from sub-tuples whose WHERE
+			/* Step 0a — drop redundant LIMIT k from sub-tuples whose WHERE
 			   equi-binds every outer-ref to an inner column (FAQ §38/§39
 			   simple unnesting + trivial dep-join). Without this, the LIMIT
 			   becomes a global LIMIT on the derived sub and clips correlated
 			   rows before the join. */
 			(define t-lim (qpl-rewrite-redundant-limit-tuple t))
-			(define t-prime (qpl-rewrite-in-exists-tuple t-lim))
+			/* Step 0b — for correlated sub-tuples whose LIMIT is NOT dropped
+			   by 0a (no equi-binding), apply the FAQ §43 ROW_NUMBER PARTITION
+			   rewrite: wrap with a derived table that adds ROW_NUMBER OVER
+			   (PARTITION BY <outer-refs> ORDER BY o) AS __rn, filter by
+			   __rn ≤ k+offset. This makes the LIMIT per-outer-binding.
+			   DISABLED — implementation needs more work (regresses some tests). */
+			(define t-rn t-lim)  /* (qpl-rewrite-correlated-limit-tuple t-lim) */
+			(define t-prime (qpl-rewrite-in-exists-tuple t-rn))
 			(if (not (qpl-tuple-has-markers? t-prime))
 				(qpir-leaf t-prime)
 				(qpl-lift-with-markers t-prime))))))
