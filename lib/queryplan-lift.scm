@@ -534,10 +534,20 @@ schema info to disambiguate — a separate concern). */
 					'() nil nil)))))))
 
 /* qpl-wrap-as-count-gt-zero — wrap a synthesized scalar inner_select in the
-COALESCE-COUNT > 0 boolean shape per FAQ §11. */
+COALESCE-COUNT > 0 boolean shape per FAQ §11.
+
+The COALESCE around the inner_select is supplied by qpl-substitute-markers
+via qpl-wrap-with-aggregate-neutral (FAQ §33) — for COUNT-LIKE aggregates
+it auto-wraps. So this helper just emits `(> (inner_select count-sub) 0)`;
+substitute-markers turns the inner_select into
+`(coalesce (get_column sq_N false value false) 0)`, yielding the
+mathematically equivalent `(> (coalesce sq-ref 0) 0)`.
+
+If qpl-wrap-with-aggregate-neutral is later changed to NOT auto-wrap by
+default, restore the explicit `(coalesce … 0)` here. */
 (define qpl-wrap-as-count-gt-zero (lambda (count-sub)
 	(list (quote >)
-		(list (quote coalesce) (list (quote inner_select) count-sub) 0)
+		(list (quote inner_select) count-sub)
 		0)))
 
 /* qpl-union-all-parts — if `sub` is a union_all form, return its branches
@@ -736,13 +746,10 @@ encountered is replaced by a get_column reference; the marker's subquery is
 recorded into `acc` (a newsession with key "list" → list of (sq-alias subquery)).
 Non-scalar markers (IN/EXISTS) trigger an error — those are Phase 3+.
 
-FAQ §33 static-group preservation (COUNT-returns-0 for empty inner) is
-NOT auto-applied here — qpl-wrap-with-aggregate-neutral would double-wrap
-the IN/EXISTS rewrite path which already adds its own coalesce per FAQ §11.
-Cleaner architectural fix would distinguish "user-written scalar COUNT" from
-"COUNT synthesized by IN/EXISTS rewrite" via a marker on the sub-tuple, or
-move the IN/EXISTS coalesce out of qpl-wrap-as-count-gt-zero and into the
-auto-wrap. Deferred. */
+Per FAQ §33 static-group preservation: when sub is a COUNT-LIKE aggregate
+(inner = 1 or (if (nil? expr) 0 1)), wrap the sq-ref in COALESCE so empty
+inner produces 0 instead of NULL (LEFT JOIN's NULL-extension). SUM/MIN/MAX
+return NULL on empty per SQL semantics — those are NOT wrapped. */
 (define qpl-substitute-markers (lambda (expr acc) (begin
 	(define k (qpl-marker-kind expr))
 	(if (equal? k (quote inner_select))
@@ -751,7 +758,7 @@ auto-wrap. Deferred. */
 			(define sq-alias (qpl-fresh-sq-alias))
 			(acc "list" (merge (coalesceNil (acc "list") '())
 				(list (list sq-alias sub))))
-			(qpl-sq-col sq-alias))
+			(qpl-wrap-with-aggregate-neutral (qpl-sq-col sq-alias) sub))
 		(if (not (nil? k))
 			(error (concat "lift_dep_joins_pass: marker kind " (string k)
 				" not yet supported (Phase 3+). Only scalar inner_select is handled."))
