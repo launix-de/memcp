@@ -128,6 +128,174 @@ pass through — alias/schema lookup is not part of expression rewriting. */
 	(qpp-tuple-limit t)
 	(qpp-tuple-offset t))))
 
+/* qpp-shape-preserving-map-fields — like qpp-map-fields but preserves the
+input's flat-or-pairs shape exactly. flat input stays flat; pair input stays
+pairs. Critical for sub-tuples that downstream legacy consumers expect in
+flat form (e.g. derived sub-tuples carrying window_func expressions). */
+(define qpp-shape-preserving-map-fields (lambda (fields fn) (begin
+	(define fs (coalesceNil fields '()))
+	(if (equal? (count fs) 0)
+		fs
+		(if (and (list? (nth fs 0)) (equal? (count (nth fs 0)) 2))
+			/* PAIRS form: map over pairs */
+			(map fs (lambda (pair)
+				(match pair
+					'(name expr) (list name (fn expr))
+					pair)))
+			/* FLAT form: stride 2, apply fn to expr positions only */
+			(merge
+				(map (produceN (/ (count fs) 2))
+					(lambda (i)
+						(list
+							(nth fs (* i 2))
+							(fn (nth fs (+ (* i 2) 1))))))))))))
+
+/* ==================== Pass 0.5: alias_disambiguate_pass (v2) ==================== */
+
+/* alias_disambiguate_pass — rename table aliases inside inner scopes
+(derived sub-tuples in tables list, and inner_select / inner_select_in /
+inner_select_exists markers in expressions) when they collide with an outer
+scope's alias. The renamed alias is suffixed with `:N` where N is a fresh
+counter so the new alias is provably unique across the whole tree.
+
+V2 fixes the original draft's structural bug: it preserves the field-shape
+(flat vs pairs) of every sub-tuple so downstream consumers expecting flat
+form (e.g. derived sub-tuples carrying window_func expressions through
+legacy build_queryplan_inner) are not corrupted.
+
+Per FAQ §35 "canonical names from physical source columns": renaming
+is purely syntactic. The underlying table identity is unchanged. */
+
+(define qpp-alias-counter (newsession))
+(qpp-alias-counter "n" 0)
+(define qpp-fresh-suffix (lambda () (begin
+	(qpp-alias-counter "n" (+ (qpp-alias-counter "n") 1))
+	(string (qpp-alias-counter "n")))))
+
+/* qpp-rename-refs-in-expr — walk expr, rewrite get_column tv refs using
+rename-map. rename-map is a list of (from-alias to-alias) pairs. */
+(define qpp-rename-refs-in-expr (lambda (expr rename-map)
+	(if (equal? (count rename-map) 0) expr
+		(match expr
+			'((symbol get_column) tv ti col ci)
+				(begin
+					(define new-tv (reduce rename-map (lambda (acc entry) (match entry
+						'(from to) (if (and (nil? acc) (equal? from tv)) to acc)
+						acc)) nil))
+					(if (nil? new-tv) expr
+						(list (quote get_column) new-tv ti col ci)))
+			'((quote get_column) tv ti col ci)
+				(begin
+					(define new-tv (reduce rename-map (lambda (acc entry) (match entry
+						'(from to) (if (and (nil? acc) (equal? from tv)) to acc)
+						acc)) nil))
+					(if (nil? new-tv) expr
+						(list (quote get_column) new-tv ti col ci)))
+			(cons head args) (cons head (map (coalesceNil args '())
+				(lambda (a) (qpp-rename-refs-in-expr a rename-map))))
+			expr))))
+
+(define qpp-disambiguate-tuple-recursive (lambda (t outer-aliases)
+	(if (not (qpp-tuple? t)) t
+		(begin
+			(define orig-tables (coalesceNil (qpp-tuple-tables t) '()))
+			/* Decide renames for each colliding table */
+			(define plan (reduce orig-tables (lambda (acc td) (match td
+				'(alias tschema ttbl io je)
+					(begin
+						(define effective-alias (if (nil? alias) ttbl alias))
+						(if (has? outer-aliases effective-alias)
+							(begin
+								(define new-alias (concat (string effective-alias) ":" (qpp-fresh-suffix)))
+								(list
+									(merge (nth acc 0) (list (list effective-alias new-alias)))
+									(merge (nth acc 1) (list (list new-alias tschema ttbl io je)))))
+							(list (nth acc 0) (merge (nth acc 1) (list td)))))
+				(list (nth acc 0) (merge (nth acc 1) (list td)))))
+				(list '() '())))
+			(define rename-map (nth plan 0))
+			(define renamed-tables-step1 (nth plan 1))
+			/* Apply renames to joinExpr in this scope's tables */
+			(define renamed-tables-with-je (map renamed-tables-step1 (lambda (td) (match td
+				'(alias tschema ttbl io je)
+					(list alias tschema ttbl io
+						(if (nil? je) nil (qpp-rename-refs-in-expr je rename-map)))
+				td))))
+			/* New visible set = outer + this scope's aliases */
+			(define this-scope-aliases (map renamed-tables-with-je (lambda (td) (match td
+				'(alias tschema ttbl io je) (if (nil? alias) ttbl alias)
+				nil))))
+			(define new-visible (merge outer-aliases (filter this-scope-aliases
+				(lambda (a) (not (nil? a))))))
+			/* Recurse into derived sub-tuples in tables */
+			(define final-tables (map renamed-tables-with-je (lambda (td) (match td
+				'(alias tschema ttbl io je)
+					(if (qpp-tuple? ttbl)
+						(list alias tschema
+							(qpp-disambiguate-tuple-recursive ttbl new-visible)
+							io je)
+						td)
+				td))))
+			/* Rewrite expression slots: apply renames + recurse into inner_select* */
+			(define rewrite-expr (lambda (expr)
+				(qpp-disambiguate-expr-recursive
+					(qpp-rename-refs-in-expr expr rename-map)
+					new-visible)))
+			/* Build with SHAPE-PRESERVING field mapping */
+			(qpp-rebuild-tuple
+				(qpp-tuple-schema t)
+				final-tables
+				(qpp-shape-preserving-map-fields (qpp-tuple-fields t) rewrite-expr)
+				(rewrite-expr (qpp-tuple-condition t))
+				(qpp-map-group (qpp-tuple-group t) rewrite-expr)
+				(rewrite-expr (qpp-tuple-having t))
+				(qpp-map-order (qpp-tuple-order t) rewrite-expr)
+				(qpp-tuple-limit t)
+				(qpp-tuple-offset t))))))
+
+(define qpp-disambiguate-expr-recursive (lambda (expr outer-aliases)
+	(match expr
+		(cons sym args)
+			(begin
+				(define is-scalar (match sym
+					(symbol inner_select)        true
+					(quote inner_select)         true
+					'(quote inner_select)        true
+					'inner_select                true
+					false))
+				(define is-in (match sym
+					(symbol inner_select_in)     true
+					(quote inner_select_in)      true
+					'(quote inner_select_in)     true
+					'inner_select_in             true
+					false))
+				(define is-exists (match sym
+					(symbol inner_select_exists) true
+					(quote inner_select_exists)  true
+					'(quote inner_select_exists) true
+					'inner_select_exists         true
+					false))
+				(if is-scalar
+					(if (>= (count args) 1)
+						(list sym (qpp-disambiguate-tuple-recursive (nth args 0) outer-aliases))
+						expr)
+				(if is-in
+					(if (>= (count args) 2)
+						(list sym
+							(qpp-disambiguate-expr-recursive (nth args 0) outer-aliases)
+							(qpp-disambiguate-tuple-recursive (nth args 1) outer-aliases))
+						expr)
+				(if is-exists
+					(if (>= (count args) 1)
+						(list sym (qpp-disambiguate-tuple-recursive (nth args 0) outer-aliases))
+						expr)
+					(cons sym (map (coalesceNil args '())
+						(lambda (a) (qpp-disambiguate-expr-recursive a outer-aliases))))))))
+		expr)))
+
+(define alias_disambiguate_pass (lambda (t)
+	(qpp-disambiguate-tuple-recursive t '())))
+
 /* ==================== Pass 1: alias_normalize_pass ==================== */
 
 /* alias_normalize_pass — replace every (get_column alias ti col ci) alias

@@ -108,7 +108,12 @@ callers supply the real schemas list. */
 		(qpp-tuple-order tuple)
 		(qpp-tuple-limit tuple)
 		(qpp-tuple-offset tuple)))
-	(define t1 (alias_normalize_pass tuple-pairs))
+	/* Pre-pass: disambiguate alias collisions across SQL scopes (FAQ §35).
+	   v2 preserves field-shape per sub-tuple to avoid corrupting downstream
+	   legacy consumers that expect flat form (e.g. derived sub-tuples
+	   carrying window_func expressions). */
+	(define t0 (alias_disambiguate_pass tuple-pairs))
+	(define t1 (alias_normalize_pass t0))
 	/* Use scope-aware column resolution: recurses into inner_select / _in /
 	   _exists markers with the sub-tuple's own local schemas, so nil-tv refs
 	   resolve correctly inside nested scopes (per SQL scope rules). Schemas
