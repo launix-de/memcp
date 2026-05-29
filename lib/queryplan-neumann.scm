@@ -72,7 +72,11 @@ which assume the flat form. */
 									(list (nth td 4))
 									(list nil)))
 							td)))))
-			(qpp-fields-to-flat (qpp-tuple-fields t))
+			/* Normalize to pairs FIRST then flatten — qpp-fields-to-flat's
+			   match clause '(name expr) accidentally splits `(inner_select sub)`
+			   into [inner_select, sub] when given flat input (the parser shape).
+			   pair-normalize is idempotent on already-pair input. */
+			(qpp-fields-to-flat (qpp-fields-to-pairs (qpp-tuple-fields t)))
 			(qpp-tuple-condition t)
 			(qpp-tuple-group t)
 			(qpp-tuple-having t)
