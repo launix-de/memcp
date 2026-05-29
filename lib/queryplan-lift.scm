@@ -139,6 +139,144 @@ the strict (two-valued) rewrite. */
 
 (define qpl-count-star-aggregate '((quote aggregate) 1 (quote +) 0))
 
+/* qpl-and-conjuncts — flatten a nested (and a b c …) tree into a list of leaf
+conjuncts. Trivial cases (nil / true) become an empty list. Used by the
+correlated-LIMIT detector to scan WHERE for equality conjuncts that bind
+outer-refs to inner columns. */
+(define qpl-and-conjuncts (lambda (expr)
+	(if (or (nil? expr) (equal? expr true)) '()
+		(match expr
+			(cons head args) (begin
+				(define is-and (match head
+					(symbol and)  true
+					(quote and)   true
+					'(quote and)  true
+					'and          true
+					false))
+				(if is-and
+					(reduce (coalesceNil args '()) (lambda (acc a)
+						(merge acc (qpl-and-conjuncts a))) '())
+					(list expr)))
+			(list expr)))))
+
+/* qpl-ref-bound-by-equality? — true if `ref-pair` (tv col) appears on one
+side of any equality conjunct in `conjuncts` where the OTHER side is a
+column ref to a non-outer alias (= inner-bound). This is FAQ §38's "simple
+unnesting" condition: when an outer-ref is equi-bound to an inner column,
+the correlation is provided by the join condition itself, and a LIMIT on
+the sub becomes per-outer-binding implicitly. */
+(define qpl-ref-bound-by-equality? (lambda (ref-pair conjuncts inner-aliases) (begin
+	(define is-eq-sym (lambda (sym) (match sym
+		(symbol equal??)  true
+		(quote equal??)   true
+		'(quote equal??)  true
+		'equal??          true
+		(symbol equal?)   true
+		(quote equal?)    true
+		'(quote equal?)   true
+		'equal?           true
+		(symbol =)        true
+		(quote =)         true
+		'(quote =)        true
+		'=                true
+		false)))
+	(define ref-key (lambda (e) (match e
+		'((symbol get_column) tv ti col ci) (list tv col)
+		'((quote get_column)  tv ti col ci) (list tv col)
+		nil)))
+	(reduce conjuncts (lambda (acc c) (or acc (match c
+		(cons head args) (if (and (is-eq-sym head) (equal? (count args) 2))
+			(begin
+				(define a (nth args 0))
+				(define b (nth args 1))
+				(define ka (ref-key a))
+				(define kb (ref-key b))
+				(if (or (nil? ka) (nil? kb)) false
+					/* Check both orderings: ref on left/inner on right, or vice versa. */
+					(or (and (equal? ka ref-pair) (has? inner-aliases (nth kb 0)))
+					    (and (equal? kb ref-pair) (has? inner-aliases (nth ka 0))))))
+			false)
+		false))) false))))
+
+/* qpl-extract-col-refs — like qpir-expr-column-refs but doesn't skip nil-tv.
+Returns a list of (tv col) pairs for every (get_column …) leaf. */
+(define qpl-extract-col-refs (lambda (expr)
+	(match expr
+		'((symbol get_column) tv ti col ci) (list (list tv col))
+		'((quote get_column)  tv ti col ci) (list (list tv col))
+		(cons head args) (reduce (coalesceNil args '()) (lambda (acc a)
+			(merge acc (qpl-extract-col-refs a))) '())
+		'())))
+
+/* qpl-drop-redundant-correlated-limit — for an inner_select's sub-tuple,
+if it has LIMIT k AND its WHERE has equality conjuncts that fully equi-bind
+every outer-ref to an inner column (FAQ §38 "simple unnesting" condition,
+trivial dep-join after equi-binding per FAQ §39), the LIMIT applies
+per-outer-binding implicitly via the equality and can be safely dropped.
+
+Without this, my pipeline lowers LIMIT k GLOBALLY on the derived sub,
+which limits before the outer-correlation join — yielding wrong rows.
+
+Returns the sub-tuple with LIMIT dropped if conditions are met, else
+returns sub unchanged. This is NOT a substitute for the general FAQ §43
+ROW_NUMBER PARTITION rewrite — when outer-refs are NOT equi-bound (e.g.
+INEQUALITY correlation, or no WHERE-equality binding) the LIMIT genuinely
+needs per-outer-binding window semantics that this drop does not provide. */
+(define qpl-drop-redundant-correlated-limit (lambda (sub)
+	(if (not (qpp-tuple? sub)) sub
+		(begin
+			(define lim (qpp-tuple-limit sub))
+			(define off (qpp-tuple-offset sub))
+			(if (or (nil? lim) (not (nil? off))) sub
+				(begin
+					(define inner-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
+					(define cond (qpp-tuple-condition sub))
+					(define conjuncts (qpl-and-conjuncts cond))
+					/* All column refs in the WHERE that are NOT bound by an inner
+					   alias are outer-refs. We require EVERY such outer-ref to be
+					   equi-bound to an inner column. */
+					(define all-refs (qpl-extract-col-refs cond))
+					(define outer-refs (filter all-refs (lambda (rp) (match rp
+						'(tv col) (not (has? inner-aliases tv))
+						false))))
+					(if (equal? (count outer-refs) 0) sub
+						(begin
+							(define all-bound (reduce outer-refs (lambda (acc ref)
+								(and acc (qpl-ref-bound-by-equality? ref conjuncts inner-aliases)))
+								true))
+							(if all-bound
+								(qpp-rebuild-tuple
+									(qpp-tuple-schema sub)
+									(qpp-tuple-tables sub)
+									(qpp-tuple-fields sub)
+									cond
+									(qpp-tuple-group sub)
+									(qpp-tuple-having sub)
+									(qpp-tuple-order sub)
+									nil   /* LIMIT dropped — equi-binding makes it per-outer-binding */
+									nil)
+								sub))))))))))
+
+/* qpl-rewrite-redundant-limit-in-expr — walk expr, find inner_select markers,
+apply qpl-drop-redundant-correlated-limit to their sub-tuples. */
+(define qpl-rewrite-redundant-limit-in-expr (lambda (expr)
+	(match expr
+		(cons sym args) (begin
+			(define is-scalar (match sym
+				(symbol inner_select) true
+				(quote inner_select)  true
+				'(quote inner_select) true
+				'inner_select         true
+				false))
+			(if (and is-scalar (equal? (count args) 1))
+				(list sym (qpl-drop-redundant-correlated-limit (nth args 0)))
+				(cons sym (map (coalesceNil args '())
+					(lambda (a) (qpl-rewrite-redundant-limit-in-expr a))))))
+		expr)))
+
+(define qpl-rewrite-redundant-limit-tuple (lambda (t)
+	(qpp-apply-to-tuple t qpl-rewrite-redundant-limit-in-expr)))
+
 (define qpl-and-cond (lambda (a b)
 	(if (or (nil? a) (equal? a true)) b
 		(if (or (nil? b) (equal? b true)) a
@@ -646,7 +784,13 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 	(if (not (qpp-tuple? t))
 		(error "lift_dep_joins_pass: input is not a 7-tuple")
 		(begin
-			(define t-prime (qpl-rewrite-in-exists-tuple t))
+			/* Step 0 — drop redundant LIMIT k from sub-tuples whose WHERE
+			   equi-binds every outer-ref to an inner column (FAQ §38/§39
+			   simple unnesting + trivial dep-join). Without this, the LIMIT
+			   becomes a global LIMIT on the derived sub and clips correlated
+			   rows before the join. */
+			(define t-lim (qpl-rewrite-redundant-limit-tuple t))
+			(define t-prime (qpl-rewrite-in-exists-tuple t-lim))
 			(if (not (qpl-tuple-has-markers? t-prime))
 				(qpir-leaf t-prime)
 				(qpl-lift-with-markers t-prime))))))
