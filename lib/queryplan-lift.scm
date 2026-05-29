@@ -144,6 +144,49 @@ the strict (two-valued) rewrite. */
 		(if (or (nil? b) (equal? b true)) a
 			(list (quote and) a b)))))
 
+/* qpl-outer-aliases — derive the visible table aliases of a 7-tuple's
+table list. Used by qpl-rewrite-in-exists-tuple to qualify nil-tv outer
+references that get moved into a synthesized inner WHERE (IN-rewrite).
+
+Without qualification, a nil-tv ref `(get_column nil ID …)` placed into the
+inner sub's WHERE re-resolves in inner scope (wrong) instead of outer
+(correct). Qualifying with the outer's alias makes qpu-collect-outer-refs
+detect it as a true outer-ref and lets cclasses/substitution handle it. */
+(define qpl-outer-aliases (lambda (tables) (begin
+	(define raw (map (coalesceNil tables '()) (lambda (td)
+		(if (or (nil? td) (< (count td) 1)) nil
+			(if (nil? (nth td 0))
+				(if (>= (count td) 3) (nth td 2) nil)
+				(nth td 0))))))
+	(filter raw (lambda (a) (not (nil? a)))))))
+
+/* qpl-qualify-walk — recursive walker for qpl-qualify-outer-nil-refs. */
+(define qpl-qualify-walk (lambda (expr alias)
+	(match expr
+		'((symbol get_column) tv ti col ci)
+			(if (nil? tv)
+				(list (quote get_column) alias ti col ci)
+				expr)
+		'((quote get_column)  tv ti col ci)
+			(if (nil? tv)
+				(list (quote get_column) alias ti col ci)
+				expr)
+		(cons sym args)
+			(cons sym (map (coalesceNil args '())
+				(lambda (a) (qpl-qualify-walk a alias))))
+		expr)))
+
+/* qpl-qualify-outer-nil-refs — walks an expression tree and rewrites every
+unqualified `(get_column nil ti col ci)` into `(get_column alias ti col ci)`
+where `alias` is the SINGLE outer alias passed in. If outer-aliases has
+0 or >1 entries, returns expr unchanged (the multi-outer-table case needs
+schema info to disambiguate — a separate concern). */
+(define qpl-qualify-outer-nil-refs (lambda (expr outer-aliases) (begin
+	(if (not (equal? (count outer-aliases) 1)) expr
+		(begin
+			(define alias (nth outer-aliases 0))
+			(qpl-qualify-walk expr alias))))))
+
 (define qpl-make-count-subquery-for-exists (lambda (sub)
 	(if (not (qpp-tuple? sub))
 		(error "qpl-make-count-subquery-for-exists: sub is not a 7-tuple (likely UNION ALL — phase 5+)")
@@ -168,7 +211,15 @@ the strict (two-valued) rewrite. */
 			(error (concat "lift_dep_joins_pass: IN-subquery has " (string (count sub-fields))
 				" projected fields; expected exactly 1. Multi-row IN is FAQ §22 territory and not yet implemented."))
 			(begin
-				(define sub-expr (nth (nth sub-fields 0) 1))
+				/* Qualify the sub's projection expression: nil-tv refs in the
+				   inner SELECT field must resolve to the sub's own tables, not
+				   leak as ambiguous refs into the synthesized equality. With
+				   schemas threaded later this becomes unnecessary, but for
+				   now (schemas=empty in column_resolve_pass), do the local
+				   qualification here. */
+				(define sub-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
+				(define raw-sub-expr (nth (nth sub-fields 0) 1))
+				(define sub-expr (qpl-qualify-outer-nil-refs raw-sub-expr sub-aliases))
 				(qpp-rebuild-tuple
 					(qpp-tuple-schema sub)
 					(qpp-tuple-tables sub)
@@ -190,49 +241,61 @@ COALESCE-COUNT > 0 boolean shape per FAQ §11. */
 /* qpl-rewrite-in-exists — walk an expression tree, rewrite every
 inner_select_in / inner_select_exists into the COALESCE-COUNT > 0 form.
 Leaves scalar inner_select untouched (it's already in the form the
-substitution walker expects). */
-(define qpl-rewrite-in-exists (lambda (expr) (begin
+substitution walker expects).
+
+`outer-aliases` is the list of OUTER table aliases visible at the SQL scope
+of this expression — passed through so qpl-make-count-subquery-for-in can
+qualify nil-tv outer references in `a` before placing them inside the inner
+sub's WHERE. */
+(define qpl-rewrite-in-exists (lambda (expr outer-aliases) (begin
 	(define k (qpl-marker-kind expr))
 	(if (equal? k (quote inner_select_in))
 		(qpl-wrap-as-count-gt-zero
 			(qpl-make-count-subquery-for-in
-				(qpl-rewrite-in-exists (qpl-marker-lhs expr))
+				(qpl-qualify-outer-nil-refs
+					(qpl-rewrite-in-exists (qpl-marker-lhs expr) outer-aliases)
+					outer-aliases)
 				(qpl-marker-subquery expr)))
 		(if (equal? k (quote inner_select_exists))
 			(qpl-wrap-as-count-gt-zero
 				(qpl-make-count-subquery-for-exists (qpl-marker-subquery expr)))
 			(match expr
-				(cons sym args) (cons sym (map (coalesceNil args '()) qpl-rewrite-in-exists))
+				(cons sym args) (cons sym (map (coalesceNil args '())
+					(lambda (a) (qpl-rewrite-in-exists a outer-aliases))))
 				expr))))))
 
 /* qpl-rewrite-in-exists-fields — apply the rewrite to each projection. */
-(define qpl-rewrite-in-exists-fields (lambda (fields)
+(define qpl-rewrite-in-exists-fields (lambda (fields outer-aliases)
 	(map (coalesceNil fields '()) (lambda (pair) (match pair
-		'(name expr) (list name (qpl-rewrite-in-exists expr))
+		'(name expr) (list name (qpl-rewrite-in-exists expr outer-aliases))
 		pair)))))
 
-(define qpl-rewrite-in-exists-group (lambda (group)
+(define qpl-rewrite-in-exists-group (lambda (group outer-aliases)
 	(if (nil? group) nil
-		(map group qpl-rewrite-in-exists))))
+		(map group (lambda (e) (qpl-rewrite-in-exists e outer-aliases))))))
 
-(define qpl-rewrite-in-exists-order (lambda (order)
+(define qpl-rewrite-in-exists-order (lambda (order outer-aliases)
 	(if (nil? order) nil
 		(map order (lambda (item) (match item
-			'(expr dir) (list (qpl-rewrite-in-exists expr) dir)
+			'(expr dir) (list (qpl-rewrite-in-exists expr outer-aliases) dir)
 			item))))))
 
 /* qpl-rewrite-in-exists-tuple — apply qpl-rewrite-in-exists to every
-expression slot of a 7-tuple. */
-(define qpl-rewrite-in-exists-tuple (lambda (t) (qpp-rebuild-tuple
-	(qpp-tuple-schema t)
-	(qpp-tuple-tables t)
-	(qpl-rewrite-in-exists-fields (qpp-tuple-fields t))
-	(qpl-rewrite-in-exists (qpp-tuple-condition t))
-	(qpl-rewrite-in-exists-group (qpp-tuple-group t))
-	(qpl-rewrite-in-exists (qpp-tuple-having t))
-	(qpl-rewrite-in-exists-order (qpp-tuple-order t))
-	(qpp-tuple-limit t)
-	(qpp-tuple-offset t))))
+expression slot of a 7-tuple. Derives outer-aliases from the tuple's tables
+and threads them through so synthesized IN-equality predicates get qualified
+correctly. */
+(define qpl-rewrite-in-exists-tuple (lambda (t) (begin
+	(define outer-aliases (qpl-outer-aliases (qpp-tuple-tables t)))
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema t)
+		(qpp-tuple-tables t)
+		(qpl-rewrite-in-exists-fields (qpp-tuple-fields t) outer-aliases)
+		(qpl-rewrite-in-exists (qpp-tuple-condition t) outer-aliases)
+		(qpl-rewrite-in-exists-group (qpp-tuple-group t) outer-aliases)
+		(qpl-rewrite-in-exists (qpp-tuple-having t) outer-aliases)
+		(qpl-rewrite-in-exists-order (qpp-tuple-order t) outer-aliases)
+		(qpp-tuple-limit t)
+		(qpp-tuple-offset t)))))
 
 /* ==================== Substitution + collection ==================== */
 
