@@ -150,58 +150,8 @@ callers supply the real schemas list. */
 			(qpp-tuple-limit t6)
 			(qpp-tuple-offset t6))))))
 
-/* ==================== Opt-in switch ==================== */
+/* ==================== Trace toggle (debugging only) ==================== */
 
-/* neumann_pipeline_enabled — global toggle.
-Default: false → build_queryplan_term uses the legacy untangle_query path.
-Set to true to route through the new pipeline. Tests / dev can flip via
-  (set neumann_pipeline_enabled true)
-without modifying any other code.
-
-When enabled, build_queryplan_term will route compatible queries through
-neumann_compile_select. Queries my pipeline doesn't support yet (errors
-loudly) still surface their errors loudly per FAQ §1 — no silent fallback
-to legacy. */
-(set neumann_pipeline_enabled false)
+/* neumann_pipeline_trace — when set to true, prints input + lowered tuple
+for each query routed through the new pipeline. Default off. */
 (set neumann_pipeline_trace false)
-
-/* qpn-tuple-has-derived-table? — true if any entry in the tuple's tables
-list has a sub-7-tuple in its tname slot (FROM-SELECT / derived view).
-The new pipeline doesn't yet inline derived tables per FAQ §36 (phase 5+
-of lift); such queries must stay on the legacy path until that lands. */
-(define qpn-tuple-has-derived-table? (lambda (t)
-	(reduce (coalesceNil (qpp-tuple-tables t) (list)) (lambda (acc td)
-		(if acc true
-			(if (or (nil? td) (< (count td) 3)) false
-				(qpp-tuple? (nth td 2)))))
-		false)))
-
-/* qpn-tuple-has-outer-flag? — true if any table entry has isOuter=true
-(parsed LEFT/RIGHT/OUTER JOIN). The new pipeline doesn't yet emit these
-joins via qpu-unnest-right; safe to keep on legacy. */
-(define qpn-tuple-has-outer-flag? (lambda (t)
-	(reduce (coalesceNil (qpp-tuple-tables t) (list)) (lambda (acc td)
-		(if acc true
-			(if (or (nil? td) (< (count td) 4)) false
-				(equal? (nth td 3) true))))
-		false)))
-
-/* neumann_pipeline_supports? tuple → true if the pipeline currently handles
-this tuple's shape WITHOUT errors. Used by the build_queryplan_term gate to
-decide whether to invoke neumann_compile_select or fall through to legacy.
-
-NOTE: Per FAQ §1 there are no fallback paths. This predicate exists ONLY
-to identify shapes the pipeline doesn't yet implement so the legacy code
-keeps working during the transition. Once the pipeline is complete, this
-predicate becomes `true` for everything and the legacy code is deleted.
-
-Returns false on any error during a dry-run of the pipeline. Per FAQ §1
-"every query is unnestable" — don't reject shapes syntactically; let the
-pipeline try, only gate to legacy if it actually errors. derived_table_inline_pass
-handles FAQ §36 inlining for non-LEFT non-grouped derived tables. */
-(define neumann_pipeline_supports? (lambda (tuple)
-	(try
-		(lambda () (begin
-			(neumann_compile_select tuple)
-			true))
-		(lambda (e) false))))

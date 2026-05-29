@@ -20,9 +20,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 Covers:
   - neumann_compile_select on hand-built parser-shaped 7-tuples
-  - neumann_pipeline_supports? predicate
   - End-to-end output is a clean 7-tuple (no inner_select markers)
-  - The opt-in switch defaults to false
+  - Errors-loudly on bad inputs per FAQ §1
 */
 
 (begin
@@ -40,9 +39,6 @@ Covers:
 
 	(define mk-col (lambda (tv col) (list (quote get_column) tv false col false)))
 
-	/* Default switch is off */
-	(qpn-assert neumann_pipeline_enabled false "default: neumann_pipeline_enabled is false")
-
 	/* ==== Trivial leaf-only query passes through cleanly ==== */
 	(define t-trivial (list "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))
@@ -53,8 +49,10 @@ Covers:
 	(qpn-assert (qpp-tuple-condition out-trivial) true "compile(trivial leaf) preserves cond")
 	(qpn-assert (qpp-tuple-tables out-trivial) (qpp-tuple-tables t-trivial) "tables preserved")
 
-	(qpn-assert (neumann_pipeline_supports? t-trivial) true
-		"supports?(trivial) = true")
+	/* Trivial query compiles end-to-end without error */
+	(qpn-assert (try (lambda () (begin (neumann_compile_select t-trivial) "ok"))
+		(lambda (e) "errored")) "ok"
+		"compile(trivial) does not error")
 
 	/* ==== Correlated scalar SUM goes through the full pipeline ==== */
 	(define t-corr-inner (list "memcp-tests"
@@ -90,8 +88,9 @@ Covers:
 	(qpn-assert (qpn-tuple-has-markers? out-corr) false
 		"compile output has NO inner_select markers (lift removed them)")
 
-	(qpn-assert (neumann_pipeline_supports? t-corr) true
-		"supports?(correlated SUM) = true")
+	(qpn-assert (try (lambda () (begin (neumann_compile_select t-corr) "ok"))
+		(lambda (e) "errored")) "ok"
+		"compile(correlated SUM) does not error")
 
 	/* ==== EXISTS via §11 COUNT rewrite goes through cleanly ==== */
 	(define t-exists-inner (list "memcp-tests"
@@ -115,13 +114,15 @@ Covers:
 		(lambda (e) "errored")) "errored"
 		"compile errors on non-tuple input")
 
-	/* ==== supports? returns false for shapes the pipeline doesn't handle ==== */
+	/* ==== HAVING marker errors loudly per FAQ §1 ==== */
 	(define t-having (list "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))
 		(list (list "id" (mk-col "po" "id"))) true
 		(list) (list (quote inner_select) t-corr-inner) (list) nil nil))
-	(qpn-assert (neumann_pipeline_supports? t-having) false
-		"supports?(HAVING-marker tuple) = false (lift phase 5+ feature)")
+	(qpn-assert (try
+		(lambda () (begin (neumann_compile_select t-having) "no-error"))
+		(lambda (e) "errored")) "errored"
+		"compile(HAVING-marker tuple) errors loudly (lift phase 5+ feature)")
 
 	(print "  qpn tests: " (- (qpn-tests "count") (qpn-tests "fail")) "/" (qpn-tests "count") " passed")
 	(if (> (qpn-tests "fail") 0) (begin

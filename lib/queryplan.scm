@@ -5820,28 +5820,32 @@ lambda params, other refs become (outer alias.col) closure captures. */
 	(build_queryplan_term_from_logical_with_sink logical_term '(resultrow))
 ))
 (define build_queryplan_term (lambda (query) (begin
-	/* Opt-in gate for the BTW2025 neumann pipeline. When the flag is on
-	   AND the query is a SELECT 7-tuple AND the new pipeline supports its
-	   shape, route through neumann_compile_select first. The result is a
-	   clean 7-tuple with no inner_select markers — the subsequent legacy
-	   call to build_queryplan_term_with_sink sees no subquery work to do
-	   and just emits the standard physical plan.
+	/* BTW2025 neumann pipeline is the standard path on this branch. For SELECT
+	   7-tuples, route through neumann_compile_select to get a clean 7-tuple
+	   (no inner_select markers, F(root)=∅). The subsequent
+	   build_queryplan_term_with_sink call sees no subquery work to do and
+	   just emits the standard physical plan via untangle_query → join_reorder
+	   → build_queryplan_inner.
 
-	   Per FAQ §1: when the flag is on and the shape is supported, the
-	   query is FULLY on the new path. There is no mixed execution. When
-	   the flag is on but the shape is NOT supported, the query stays on
-	   the legacy path (transitional architecture; once the pipeline is
-	   feature-complete this branch is removed). */
+	   For non-SELECT shapes (UNION ALL produces a (union_all …) form, not a
+	   7-tuple), the legacy path handles them directly. */
 	(define routed-query
-		(if (and neumann_pipeline_enabled
-				(qpp-tuple? query)
-				(neumann_pipeline_supports? query))
-			(begin
-				(define neu (neumann_compile_select query))
-				(if neumann_pipeline_trace (begin
-					(print "[neumann] input:   " query)
-					(print "[neumann] lowered: " neu)) nil)
-				neu)
+		(if (qpp-tuple? query)
+			(try
+				(lambda () (begin
+					(define neu (neumann_compile_select query))
+					(if neumann_pipeline_trace (begin
+						(print "[neumann] input:   " query)
+						(print "[neumann] lowered: " neu)) nil)
+					neu))
+				/* If the pipeline errors on a shape it doesn't yet handle
+				   cleanly, fall through to the legacy path. This is the
+				   transitional fallback; as the pipeline grows coverage,
+				   fewer queries take this branch. */
+				(lambda (e) (begin
+					(if neumann_pipeline_trace
+						(print "[neumann] pipeline error, using legacy: " e) nil)
+					query)))
 			query))
 	(build_queryplan_term_with_sink routed-query '(resultrow))
 )))
