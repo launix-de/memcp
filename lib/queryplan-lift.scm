@@ -668,17 +668,89 @@ that replaces a scalar marker after lifting. */
 (define qpl-sq-col (lambda (sq-alias)
 	(list (quote get_column) sq-alias false "value" false)))
 
+/* qpl-sub-aggregate-neutral — if sub is a single-aggregate-field 7-tuple,
+return the aggregate's neutral element (e.g. 0 for COUNT, nil for SUM/MIN/
+MAX). Else return nil. FAQ §33 static-group preservation: when an outer
+binding has no matching inner row, the aggregate's NEUTRAL is the correct
+value for that binding (e.g. COUNT(*) → 0, not NULL). LEFT JOIN semantics
+gives NULL by default; COALESCE-with-neutral wrappers restore the
+mathematically correct behaviour. Only meaningful for COUNT-like aggregates
+where neutral ≠ NULL — SUM/MIN/MAX have NULL neutral so wrapping is
+pointless (NULL coalesce NULL = NULL). */
+(define qpl-sub-aggregate-neutral (lambda (sub)
+	(if (not (qpp-tuple? sub)) nil
+		(begin
+			(define fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+			(if (not (equal? (count fields-pairs) 1)) nil
+				(begin
+					(define field-pair (nth fields-pairs 0))
+					(define field-expr (nth field-pair 1))
+					(define agg-info (match field-expr
+						'((symbol aggregate) inner reducer neutral)
+							(list inner reducer neutral)
+						'((quote aggregate)  inner reducer neutral)
+							(list inner reducer neutral)
+						nil))
+					(if (nil? agg-info) nil
+						(begin
+							(define inner (nth agg-info 0))
+							(define neutral (nth agg-info 2))
+							/* Only return the neutral for COUNT-LIKE aggregates
+							   where the inner expression yields 0/1 (non-NULL):
+							     COUNT(*)    inner = 1
+							     COUNT(expr) inner = (if (nil? expr) 0 1)
+							   For SUM/MIN/MAX the inner can yield NULL and the
+							   SQL semantic for empty input is NULL (not the
+							   reducer's algebraic neutral). Returning nil for
+							   those cases means qpl-wrap-with-aggregate-neutral
+							   does NOT add COALESCE. */
+							(if (qpl-is-count-like-inner? inner)
+								neutral
+								nil)))))))))
+
+/* qpl-is-count-like-inner? — true if the aggregate's `inner` expression is
+the COUNT(*) constant 1 or the parser-emitted COUNT(expr) pattern
+(if (nil? expr) 0 1). Other shapes (column refs, arithmetic, etc.) are
+treated as SUM-like and yield NULL on empty input per SQL semantics. */
+(define qpl-is-count-like-inner? (lambda (inner)
+	(if (equal? inner 1) true
+		(match inner
+			'((symbol if) ((symbol nil?) _) 0 1) true
+			'((quote if)  ((quote nil?)  _) 0 1) true
+			'(if          (nil?           _) 0 1) true
+			false))))
+
+/* qpl-wrap-with-aggregate-neutral — given the sq-ref and a sub-tuple,
+return COALESCE(sq-ref, neutral) if sub's aggregate has a non-nil neutral
+(e.g. COUNT's 0); else return sq-ref as-is. */
+(define qpl-wrap-with-aggregate-neutral (lambda (sq-ref sub) (begin
+	(define neutral (qpl-sub-aggregate-neutral sub))
+	/* `equal? 0 nil` is true in this Scheme dialect — see
+	   feedback memory `equal? Bug`. Use explicit nil? only. */
+	(if (nil? neutral)
+		sq-ref
+		(list (quote coalesce) sq-ref neutral)))))
+
 /* qpl-substitute-markers — walks an expression. Each scalar inner_select
 encountered is replaced by a get_column reference; the marker's subquery is
 recorded into `acc` (a newsession with key "list" → list of (sq-alias subquery)).
-Non-scalar markers (IN/EXISTS) trigger an error — those are Phase 3+. */
+Non-scalar markers (IN/EXISTS) trigger an error — those are Phase 3+.
+
+FAQ §33 static-group preservation (COUNT-returns-0 for empty inner) is
+NOT auto-applied here — qpl-wrap-with-aggregate-neutral would double-wrap
+the IN/EXISTS rewrite path which already adds its own coalesce per FAQ §11.
+Cleaner architectural fix would distinguish "user-written scalar COUNT" from
+"COUNT synthesized by IN/EXISTS rewrite" via a marker on the sub-tuple, or
+move the IN/EXISTS coalesce out of qpl-wrap-as-count-gt-zero and into the
+auto-wrap. Deferred. */
 (define qpl-substitute-markers (lambda (expr acc) (begin
 	(define k (qpl-marker-kind expr))
 	(if (equal? k (quote inner_select))
 		(begin
+			(define sub (qpl-marker-subquery expr))
 			(define sq-alias (qpl-fresh-sq-alias))
 			(acc "list" (merge (coalesceNil (acc "list") '())
-				(list (list sq-alias (qpl-marker-subquery expr)))))
+				(list (list sq-alias sub))))
 			(qpl-sq-col sq-alias))
 		(if (not (nil? k))
 			(error (concat "lift_dep_joins_pass: marker kind " (string k)
