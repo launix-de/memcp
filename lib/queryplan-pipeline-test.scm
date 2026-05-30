@@ -155,13 +155,23 @@ then, these snapshot tests are the proof that the architecture works.
 		"uncorrelated SUM: no dep-joins after unnest")
 	(qpipe-assert (count (qpir-free-vars uc-after-unnest)) 0
 		"uncorrelated SUM: F(root) = ∅")
-	/* For an uncorrelated subquery there are no outer-refs to push into the
-	   groupby keys; the groupby stays as static-group (empty keys). */
+	/* Post-correlation-gate (commit 4bb15564d): uncorrelated subqueries pass
+	   through lift as a qpir-leaf with the full 7-tuple intact — the legacy
+	   compile_inner path handles GROUP/HAVING/ORDER/LIMIT in one shot. No
+	   need to materialize a qpir-groupby operator when there's no outer
+	   correlation to push into the group keys (FAQ §3.2 §3.3 only fire when
+	   the inner sub has free vars). */
 	(define uc-right (qpir-join-right uc-after-unnest))
-	(qpipe-assert (qpir-kind uc-right) (quote qpir-groupby)
-		"uncorrelated SUM: right is qpir-groupby")
-	(qpipe-assert (count (qpir-groupby-keys uc-right)) 0
-		"uncorrelated SUM: groupby keys empty (no correlation)")
+	(qpipe-assert (qpir-kind uc-right) (quote qpir-leaf)
+		"uncorrelated SUM: right is qpir-leaf (passthrough, no decomposition)")
+	/* The leaf's 7-tuple should carry the aggregate field expression
+	   directly (renamed to "value" by qpl-rename-first-field-to-value). */
+	(define uc-right-tuple (qpir-leaf-7tuple uc-right))
+	(define uc-right-fields (qpp-fields-to-pairs (qpp-tuple-fields uc-right-tuple)))
+	(qpipe-assert (count uc-right-fields) 1
+		"uncorrelated SUM: leaf 7-tuple has exactly 1 field")
+	(qpipe-assert (nth (nth uc-right-fields 0) 0) "value"
+		"uncorrelated SUM: leaf field is renamed to 'value'")
 
 	/* ==== Test 4: nested correlated subqueries (recursive lift + bottom-up unnest) ==== */
 	/* SQL: SELECT outer.id,
