@@ -4703,6 +4703,17 @@ seeing the correctly prefixed outer alias. */
 						(not (nil? group))
 						(not (nil? having))
 						(reduce_assoc fields (lambda (acc _k v) (or acc (not (equal? (extract_aggregates v) '())))) false)))
+					/* Force materialize when ANOTHER derived at this outer level
+					   has ALREADY been flattened (and pushed its stage into
+					   sq_cache "groups"). The legacy build_queryplan_inner
+					   recursion only supports ONE non-group "tail" stage; two
+					   flattened sibling scalars produce two such stages and trip
+					   the "non-group stage must be last" assertion at line 8077.
+					   By materializing the second+ sibling, we avoid pushing its
+					   stage up — the inner becomes a temp table whose scan is
+					   a self-contained block. */
+					(define previously_flattened_stages_present
+						(not (equal? (coalesceNil (sq_cache "groups") '()) '())))
 					(define use_materialize (or
 						subquery_has_window
 						unsupported_groups
@@ -4711,7 +4722,8 @@ seeing the correctly prefixed outer alias. */
 						(and (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
 						(and (not (equal? flatten_groups2 '())) outer_has_group_stage)
 						(and (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))
-						(and flatten_has_helper_backed_projection outer_uses_subquery_group_boundary)))
+						(and flatten_has_helper_backed_projection outer_uses_subquery_group_boundary)
+						(and (not (equal? flatten_groups2 '())) previously_flattened_stages_present)))
 					/* Window-function LIMIT pushdown */
 					(define mat_limit nil)
 					(if subquery_has_window (begin
