@@ -1195,12 +1195,14 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			(define t-lim (qpl-rewrite-redundant-limit-tuple t))
 			/* Step 0b — DISABLED. Scaffold for FAQ §43 ROW_NUMBER PARTITION
 			   rewrite is in qpl-rewrite-correlated-limit-with-rownumber,
-			   but the unnest pass doesn't yet have a rule for qpir-window
-			   inside dep-joins (FAQ §34 correlated window partitioning).
-			   Without that, the correlation against outer-refs in the
-			   PARTITION BY clause stays buried inside the nested derived
-			   table and never gets bound by the join. Re-enable after the
-			   unnest qpir-window rule lands. */
+			   but enabling it regresses ~7 tests across 32/96 (verified
+			   2026-05-30). The rewrite produces a nested 7-tuple with
+			   window_func + __rn filter; legacy's window-function path
+			   doesn't handle correlated PARTITION BY (outer-refs) cleanly
+			   in this nested-derived shape. Need either:
+			    - qpir-window unnest rule (FAQ §34), OR
+			    - legacy fixup for correlated PARTITION BY in derived sub.
+			   Re-enable after one of those lands. */
 			(define t-rn t-lim)
 			(define t-prime (qpl-rewrite-in-exists-tuple t-rn))
 			(if (not (qpl-tuple-has-markers? t-prime))
