@@ -160,52 +160,152 @@ for `(get_column tv ti col ci)` where tv ∈ aliases. */
 				acc))
 		acc)) nil)))
 
-/* qpu-low-ensure-join-key-fields — for every `(tv col)` referenced by
-`join-pred` against the right-tuple's underlying tables, ensure the
-right-tuple's fields list projects it under SOME name. Returns a pair
-(updated-right-tuple, rename-map) where rename-map is an assoc list of
-((tv col) projected-name) so the caller can rewrite join-pred refs to use
-the canonical projected name (which may differ from `col` if `col` was
-already taken by a different expression).
+/* qpu-low-find-deep-alias-in-tables — for an alias name NOT in the top-level
+table aliases, find which top-level DERIVED table's sub-tuple contains it.
+Returns the derived-alias name, or nil if alias isn't reachable through any
+of the top-level deriveds. Used by qpu-low-ensure-join-key-fields to cascade
+__kt projections through nested rhs-aliased wrappers (FAQ §42 step 2/2). */
+(define qpu-low-find-deep-alias-in-tables (lambda (tables alias)
+	(reduce (coalesceNil tables '()) (lambda (acc td) (match td
+		'(td-alias td-schema td-tname td-isOuter td-jE)
+			(if (not (nil? acc)) acc
+				(if (qpp-tuple? td-tname)
+					(begin
+						(define inner-aliases (map
+							(coalesceNil (qpp-tuple-tables td-tname) '())
+							(lambda (itd) (if (or (nil? itd) (< (count itd) 1))
+								nil (nth itd 0)))))
+						(if (has? inner-aliases alias) td-alias nil))
+					nil))
+		acc)) nil)))
 
-Without this, the join predicate retargeting `(t4 id)` → `(sq_N id)` produces
-a reference to a non-existent field of the derived sub-tuple — the legacy
-lower-level engine then returns nil for that lookup and the join never
-matches (per FAQ §22 LEFT-JOIN semantics, every outer row gets NULL-extended).
-
-Naming: we use a synthesized name `__kt_<col>` to avoid colliding with any
-existing projection name in the sub. The rename-map ensures join-pred refs
-get retargeted to this name. */
-(define qpu-low-ensure-join-key-fields (lambda (right-tuple join-pred right-source-aliases)
-	(begin
-		(define needed-refs (qpu-low-collect-refs-for-aliases join-pred right-source-aliases))
-		(define existing-fields (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)))
-		(define plan (reduce needed-refs (lambda (acc ref) (match ref
-			'(tv col)
+/* qpu-low-ensure-nested-derived-projects — for a `(tv col)` ref where `tv`
+lives INSIDE one of right-tables's top-level deriveds (alias=derived-alias),
+ensure that derived's sub-tuple projects (tv col) under some name. Returns
+(updated-tables, name-in-derived) — the caller wraps this with a passthrough
+projection at the outer level. */
+(define qpu-low-ensure-nested-derived-projects (lambda (tables derived-alias tv col) (begin
+	(define result-name (newsession))
+	(result-name "n" nil)
+	(define updated-tables (map (coalesceNil tables '()) (lambda (td) (match td
+		'(td-alias td-schema td-tname td-isOuter td-jE)
+			(if (and (equal? td-alias derived-alias) (qpp-tuple? td-tname))
 				(begin
-					(define existing-name (qpu-low-fields-find-by-expr existing-fields tv col))
+					(define sub td-tname)
+					(define sub-fields (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+					(define existing-name (qpu-low-fields-find-by-expr sub-fields tv col))
 					(if (not (nil? existing-name))
-						/* Already projected under existing-name — reuse it. */
-						(list (nth acc 0) (merge (nth acc 1)
-							(list (list (list tv col) existing-name))))
+						(begin (result-name "n" existing-name) td)
 						(begin
 							(define synthesized (concat "__kt_" col))
-							/* If synthesized name already taken or already added to acc, suffix it. */
 							(define unique-name (qpu-low-unique-projection-name
-								synthesized (merge existing-fields (nth acc 0))))
-							(list (merge (nth acc 0)
-									(list (list unique-name
-										(list (quote get_column) tv false col false))))
-								(merge (nth acc 1)
-									(list (list (list tv col) unique-name)))))))
-			acc)) (list (list) (list))))
-		(define added-projections (nth plan 0))
-		(define rename-map (nth plan 1))
+								synthesized sub-fields))
+							(result-name "n" unique-name)
+							(define new-sub-fields (merge sub-fields
+								(list (list unique-name
+									(list (quote get_column) tv false col false)))))
+							(define new-sub (qpp-rebuild-tuple
+								(qpp-tuple-schema sub)
+								(qpp-tuple-tables sub)
+								new-sub-fields
+								(qpp-tuple-condition sub)
+								(qpp-tuple-group sub)
+								(qpp-tuple-having sub)
+								(qpp-tuple-order sub)
+								(qpp-tuple-limit sub)
+								(qpp-tuple-offset sub)))
+							(list td-alias td-schema new-sub td-isOuter td-jE))))
+				td)
+		td))))
+	(list updated-tables (result-name "n")))))
+
+/* qpu-low-ensure-join-key-fields — for every `(tv col)` referenced by
+`join-pred`, ensure the right-tuple's fields list projects it under SOME
+name. Returns a pair (updated-right-tuple, rename-map) where rename-map is
+an assoc list of ((tv col) projected-name) so the caller can rewrite
+join-pred refs to use the canonical projected name (which may differ from
+`col` if `col` was already taken by a different expression).
+
+Three cases per ref:
+  - tv ∈ right-source-aliases (direct base or derived at top level):
+    synthesize __kt_<col> projection at top level
+  - tv lives INSIDE a top-level derived's sub-tuple (FAQ §42 doubly-nested
+    cascade): recursively ensure the nested derived projects (tv col),
+    then add a passthrough projection at the top level that exposes it
+  - tv unreachable (ancestor outer-ref): skip — outer wrapper handles it
+
+Without the cascade case, join-pred retargeting `(r src)` → `(sq_N src)`
+produces a reference to a non-existent field — sq_N's sub-tuple doesn't
+project r.src at its boundary even though r is reachable inside.
+
+Naming: synthesized name `__kt_<col>` (suffixed if collision). */
+(define qpu-low-ensure-join-key-fields (lambda (right-tuple join-pred right-source-aliases)
+	(begin
+		/* Collect ALL refs in join-pred (not just those in right-source-aliases) —
+		   the cascade case needs to see refs to deeper-nested aliases too. */
+		(define all-refs (qpir-expr-column-refs join-pred))
+		(define existing-fields (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)))
+		(define top-tables (qpp-tuple-tables right-tuple))
+		/* Plan: walk every ref, classify (direct / cascaded / skip), accumulate
+		   (current-tables, added-projections, rename-map). current-tables may
+		   change for cascaded refs because nested deriveds get updated in place. */
+		(define plan (reduce all-refs (lambda (acc ref) (match ref
+			'(tv col)
+				(if (has? right-source-aliases tv)
+					/* Direct case (existing behavior) */
+					(begin
+						(define existing-name (qpu-low-fields-find-by-expr
+							(merge existing-fields (nth acc 1)) tv col))
+						(if (not (nil? existing-name))
+							(list (nth acc 0) (nth acc 1) (merge (nth acc 2)
+								(list (list (list tv col) existing-name))))
+							(begin
+								(define synthesized (concat "__kt_" col))
+								(define unique-name (qpu-low-unique-projection-name
+									synthesized (merge existing-fields (nth acc 1))))
+								(list
+									(nth acc 0)
+									(merge (nth acc 1)
+										(list (list unique-name
+											(list (quote get_column) tv false col false))))
+									(merge (nth acc 2)
+										(list (list (list tv col) unique-name)))))))
+					/* Not a direct ref — check if tv is inside a top-level derived
+					   (FAQ §42 cascade case). */
+					(begin
+						(define deep-derived
+							(qpu-low-find-deep-alias-in-tables (nth acc 0) tv))
+						(if (nil? deep-derived)
+							/* Unreachable from this subtree — ancestor outer ref. */
+							acc
+							(begin
+								(define ensure-result (qpu-low-ensure-nested-derived-projects
+									(nth acc 0) deep-derived tv col))
+								(define updated-tables (nth ensure-result 0))
+								(define name-in-derived (nth ensure-result 1))
+								/* Add passthrough projection at top level. */
+								(define synthesized (concat "__kt_" col))
+								(define unique-name (qpu-low-unique-projection-name
+									synthesized (merge existing-fields (nth acc 1))))
+								(list
+									updated-tables
+									(merge (nth acc 1)
+										(list (list unique-name
+											(list (quote get_column) deep-derived
+												false name-in-derived false))))
+									(merge (nth acc 2)
+										(list (list (list tv col) unique-name))))))))
+			acc)) (list top-tables (list) (list))))
+		(define final-tables (nth plan 0))
+		(define added-projections (nth plan 1))
+		(define rename-map (nth plan 2))
 		(list
-			(if (equal? (count added-projections) 0) right-tuple
+			(if (and (equal? (count added-projections) 0)
+					 (equal? final-tables top-tables))
+				right-tuple
 				(qpp-rebuild-tuple
 					(qpp-tuple-schema right-tuple)
-					(qpp-tuple-tables right-tuple)
+					final-tables
 					(merge existing-fields added-projections)
 					(qpp-tuple-condition right-tuple)
 					(qpp-tuple-group right-tuple)
