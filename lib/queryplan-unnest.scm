@@ -375,6 +375,20 @@ subtree's ORIGINAL OUTER scope. */
 		'(tv col) (list (quote get_column) tv false col false)
 		ref))))))
 
+/* qpu-collect-outer-refs-with-aliases — variant used by the top-down driver
+that takes an explicit outer-aliases set (the union of this dep-join's
+immediate-left aliases + ALL ancestor dep-join lefts). Needed for FAQ §42
+doubly-nested correlation: an inner dep-join's right may reference an
+OUTERMOST table that isn't in its own immediate-left subtree. */
+(define qpu-collect-outer-refs-with-aliases (lambda (dj outer-aliases) (begin
+	(define right-free (qpir-free-vars (qpir-dep-join-right dj)))
+	(define outer-refs (filter right-free (lambda (ref) (match ref
+		'(tv col) (has? outer-aliases tv)
+		false))))
+	(map outer-refs (lambda (ref) (match ref
+		'(tv col) (list (quote get_column) tv false col false)
+		ref))))))
+
 /* ==================== Predicate splitting (FAQ §3.2 simple-elim) ==================== */
 
 /* qpu-and-conjuncts — flatten an AND-tree into a list of conjuncts.
@@ -851,14 +865,112 @@ Pre-condition: dj is a qpir-dep-join. */
 					(qpir-join (quote left) combined-pred left new-right
 						(qpir-dep-join-rhs-alias dj))))))))
 
-/* qpu-unnest-tree-bottom-up — walks the tree, applying qpu-unnest-dep-join
-to every qpir-dep-join encountered. Bottom-up ensures inner dep-joins are
-unnested before outer ones — matches the §3.2 root-to-leaves order when the
-tree's dep-joins are independent (the common case after lift). For nested
-dep-joins with parent-chained Unnesting context we'll need a top-down
-driver — that's a later phase. */
+/* qpu-unnest-dep-join-with-aliases — variant of qpu-unnest-dep-join that
+takes an explicit outer-aliases set (ancestor lefts ∪ this dep-join's own
+left). Used by qpu-unnest-tree-topdown to honor FAQ §42's "inner dep-joins
+must see the full ancestor chain" requirement. The logic mirrors
+qpu-unnest-dep-join exactly — only the outer-aliases derivation differs. */
+(define qpu-unnest-dep-join-with-aliases (lambda (dj outer-aliases)
+	(if (not (equal? (qpir-kind dj) (quote qpir-dep-join)))
+		dj
+		(begin
+			(define left (qpir-dep-join-left dj))
+			(define right (qpir-dep-join-right dj))
+			(define outer-ref-exprs
+				(qpu-collect-outer-refs-with-aliases dj outer-aliases))
+			(if (equal? (count outer-ref-exprs) 0)
+				/* Trivial case: see qpu-unnest-dep-join comment for the
+				   INNER-vs-LEFT trade-off documented in commit 5b6a9872f. */
+				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
+					(qpir-dep-join-rhs-alias dj))
+				(begin
+					(define cc (qpu-make-cclasses))
+					(qpu-collect-cclasses right cc)
+					(define repr (qpu-cc-build-repr cc outer-aliases))
+					(define outer-refs-as-pairs (map outer-ref-exprs (lambda (e) (match e
+						'((symbol get_column) tv ti col ci) (list tv col)
+						'((quote get_column)  tv ti col ci) (list tv col)
+						nil))))
+					(define right-result (qpu-unnest-right right outer-aliases
+						outer-ref-exprs repr))
+					(define new-right (nth right-result 0))
+					(define extracted-join-pred (nth right-result 1))
+					(define cc-join-cond (qpu-build-join-condition-from-cclasses
+						outer-refs-as-pairs repr))
+					(define combined-pred (qpu-and-from-conjuncts
+						(merge
+							(merge (qpu-and-conjuncts (qpir-dep-join-predicate dj))
+								(qpu-and-conjuncts extracted-join-pred))
+							(qpu-and-conjuncts cc-join-cond))))
+					(qpir-join (quote left) combined-pred left new-right
+						(qpir-dep-join-rhs-alias dj))))))))
+
+/* qpu-unnest-tree-bottom-up — DEPRECATED in favor of qpu-unnest-tree-topdown
+which handles the FAQ §42 doubly-nested case. Kept for backward compat with
+existing qpipe-test assertions; the topdown driver is identical for single-
+level / sibling-chained dep-joins (the common case). */
 (define qpu-unnest-tree-bottom-up (lambda (tree)
 	(qpu-map-tree tree qpu-unnest-dep-join)))
+
+/* qpu-unnest-tree-topdown — walk the tree TOP-DOWN, threading the union of
+ancestor-left aliases through the recursion. At each qpir-dep-join:
+  - own-outer = qpu-bottom-left-aliases of its immediate left
+  - extended = ancestor-aliases ∪ own-outer
+  - Recurse into LEFT with ancestor-aliases (left doesn't see this dep-join's
+    own outer in its right because left IS this dep-join's outer)
+  - Recurse into RIGHT with extended (inner dep-joins see the full chain)
+  - Convert THIS dep-join to qpir-join using extended as outer-aliases set
+
+This fixes the leaked-free-var bug for doubly-nested correlated scalars
+(FAQ §42): inner sq_N now correctly classifies outermost-table refs as
+outer-correlations, extracts them to its join condition, and the cclasses
+substitution makes the rewrite well-formed. */
+(define qpu-unnest-tree-topdown-helper (lambda (node ancestor-aliases)
+	(match (qpir-kind node)
+		(quote qpir-dep-join) (begin
+			(define left (qpir-dep-join-left node))
+			(define right (qpir-dep-join-right node))
+			(define own-outer (qpu-bottom-left-aliases left))
+			(define extended (merge_unique (list ancestor-aliases own-outer)))
+			(define left-rec (qpu-unnest-tree-topdown-helper left ancestor-aliases))
+			(define right-rec (qpu-unnest-tree-topdown-helper right extended))
+			(define new-dj (qpir-dep-join
+				(qpir-dep-join-predicate node)
+				left-rec right-rec
+				(qpir-dep-join-accessing node)
+				(qpir-dep-join-rhs-alias node)))
+			(qpu-unnest-dep-join-with-aliases new-dj extended))
+		(quote qpir-join) (qpir-join
+			(qpir-join-type node)
+			(qpir-join-predicate node)
+			(qpu-unnest-tree-topdown-helper (qpir-join-left node) ancestor-aliases)
+			(qpu-unnest-tree-topdown-helper (qpir-join-right node) ancestor-aliases)
+			(qpir-join-rhs-alias node))
+		(quote qpir-select) (qpir-select
+			(qpir-select-predicate node)
+			(qpu-unnest-tree-topdown-helper (qpir-select-child node) ancestor-aliases))
+		(quote qpir-map) (qpir-map
+			(qpir-map-projections node)
+			(qpu-unnest-tree-topdown-helper (qpir-map-child node) ancestor-aliases))
+		(quote qpir-groupby) (qpir-groupby
+			(qpir-groupby-keys node)
+			(qpir-groupby-aggs node)
+			(qpir-groupby-having node)
+			(qpu-unnest-tree-topdown-helper (qpir-groupby-child node) ancestor-aliases))
+		(quote qpir-window) (qpir-window
+			(qpir-window-partition node)
+			(qpir-window-order node)
+			(qpir-window-computations node)
+			(qpu-unnest-tree-topdown-helper (qpir-window-child node) ancestor-aliases))
+		(quote qpir-union) (qpir-union
+			(qpir-union-order node)
+			(qpir-union-limit node)
+			(qpir-union-offset node)
+			(map (qpir-union-branches node) (lambda (br)
+				(qpu-unnest-tree-topdown-helper br ancestor-aliases))))
+		node)))
+(define qpu-unnest-tree-topdown (lambda (tree)
+	(qpu-unnest-tree-topdown-helper tree '())))
 
 /* ==================== Public driver (Phase 2: full algorithm for simple cases) ==================== */
 
@@ -881,7 +993,14 @@ Limitations (Phase 3+):
   - qpir-join / qpir-union / qpir-iterate / qpir-window not supported as
     intermediate operators in the right-side walker yet */
 (define unnest_pass (lambda (tree) (begin
-	(define unnested (qpu-unnest-tree-bottom-up tree))
+	/* Switched to qpu-unnest-tree-topdown (was qpu-unnest-tree-bottom-up):
+	   the topdown driver threads ancestor-aliases through the recursion so
+	   inner dep-joins see the FULL outer scope (FAQ §42). For trees with
+	   only single-level / sibling-chained dep-joins (the historical common
+	   case) the two drivers produce identical results — the bottom-up one
+	   is kept for compat with existing qpipe-test assertions but is no
+	   longer the production path. */
+	(define unnested (qpu-unnest-tree-topdown tree))
 	(define residual-djs (qpu-count-dep-joins unnested))
 	(if (> residual-djs 0)
 		(error (concat "unnest_pass: " (string residual-djs) " dep-join(s) remain after unnest. "
