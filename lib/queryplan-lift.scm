@@ -978,10 +978,60 @@ original SQL alias. */
 			(if (equal? (qpir-kind lifted) (quote qpir-leaf))
 				(begin
 					(define leaf-tuple (qpir-leaf-7tuple lifted))
-					(if (qpl-needs-decompose? leaf-tuple)
-						(qpl-build-groupby-wrapped-inner leaf-tuple)
-						(qpl-build-simple-leaf-inner leaf-tuple)))
+					/* Correlation gate: decomposition into qpir-groupby is
+					   only required when the sub references outer scope —
+					   that's when unnest §3.3 needs operator-level groupby
+					   to push the dep-join through. UNCORRELATED subs lower
+					   cleanly as a passthrough qpir-leaf; legacy
+					   build_queryplan_inner handles the full 7-tuple's
+					   GROUP/HAVING/ORDER/LIMIT slots in one shot.
+
+					   This unblocks GROUP-BY-with-ORDER-BY-and-LIMIT
+					   scalar subqueries that decompose would error on
+					   ("no aggregates found" when fields are pure
+					   group-key projections). */
+					(if (qpl-tuple-has-outer-refs? leaf-tuple)
+						/* Correlated: existing decompose-or-hoist logic */
+						(if (qpl-needs-decompose? leaf-tuple)
+							(qpl-build-groupby-wrapped-inner leaf-tuple)
+							(qpl-build-simple-leaf-inner leaf-tuple))
+						/* Uncorrelated: pass full 7-tuple through as-is.
+						   Field is already renamed to "value" so callers
+						   reference sq.value uniformly. */
+						(qpir-leaf leaf-tuple)))
 				lifted)))))
+
+/* qpl-tuple-own-aliases — return the list of table aliases the tuple itself
+introduces (its tables list). Used by qpl-tuple-has-outer-refs?. */
+(define qpl-tuple-own-aliases (lambda (sub)
+	(map (coalesceNil (qpp-tuple-tables sub) '()) (lambda (td)
+		(if (or (nil? td) (< (count td) 1)) nil (nth td 0))))))
+
+/* qpl-tuple-has-outer-refs? — true when any expression in the sub-tuple
+(fields, condition, group, having, order) references a table-alias that is
+NOT in the sub's own tables list. This is the correlation predicate used to
+decide whether the sub needs operator-level decomposition for unnest §3.3
+push-down. UNcorrelated subqueries can pass through as a qpir-leaf with
+the full 7-tuple intact; legacy build_queryplan_inner handles their
+WHERE/GROUP/HAVING/ORDER/LIMIT slots directly. */
+(define qpl-tuple-has-outer-refs? (lambda (sub) (begin
+	(define own-aliases (qpl-tuple-own-aliases sub))
+	(define field-refs (qpir-assoc-list-refs
+		(qpp-fields-to-pairs (qpp-tuple-fields sub))))
+	(define cond-refs (qpir-expr-column-refs
+		(coalesceNil (qpp-tuple-condition sub) true)))
+	(define group-refs (qpir-expr-list-refs
+		(coalesceNil (qpp-tuple-group sub) '())))
+	(define having-refs (qpir-expr-column-refs
+		(coalesceNil (qpp-tuple-having sub) true)))
+	(define order-refs (qpir-order-list-refs
+		(coalesceNil (qpp-tuple-order sub) '())))
+	(define all-refs (merge (merge (merge (merge
+		field-refs cond-refs) group-refs) having-refs) order-refs))
+	(define outer-refs (filter all-refs (lambda (ref) (match ref
+		'(tv col) (and (not (nil? tv)) (not (has? own-aliases tv)))
+		false))))
+	(> (count outer-refs) 0))))
 
 /* qpl-condition-is-trivial? — true when a WHERE condition is `true` (or
 the literal true symbol); such conditions don't need to be hoisted. */
