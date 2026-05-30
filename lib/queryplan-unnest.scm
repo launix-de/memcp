@@ -811,7 +811,12 @@ Pre-condition: dj is a qpir-dep-join. */
 			   one row (COUNT returns 0, SUM returns NULL, etc. — never
 			   empty). INNER ≡ LEFT for the single-row case, and INNER lowers
 			   reliably through build_queryplan_inner without the
-			   `LEFT JOIN ON TRUE` degeneracy. */
+			   `LEFT JOIN ON TRUE` degeneracy.
+
+			   EDGE CASES that DO produce 0 rows (HAVING-false in inner sub,
+			   LIMIT 0, etc.) would lose the outer with INNER. Those are
+			   tracked separately — needs LEFT-JOIN scalar contract that
+			   doesn't trip the legacy LEFT-ON-TRUE issue. */
 			(if (equal? (count outer-ref-exprs) 0)
 				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
 					(qpir-dep-join-rhs-alias dj))
