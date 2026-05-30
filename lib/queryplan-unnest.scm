@@ -341,12 +341,32 @@ and a dep-join node, return the list of accessor paths recorded against it. */
 			(qpir-groupby-having gb)
 			(qpir-groupby-child gb)))))
 
+/* qpu-bottom-left-aliases — walk down qpir-dep-join / qpir-join chains in
+the LEFT subtree to find the ORIGINAL outer's provided aliases. For chained
+sibling dep-joins (e.g. two scalar subselects in the same outer's SELECT
+list lift to (dep-join sq_19 (dep-join sq_18 outer-leaf sub_18) sub_19)),
+this returns just outer-leaf's aliases — NOT sub_18's k and sq_18 which
+would otherwise pollute sq_19's outer-aliases and break cclasses-based
+substitution.
+
+Per FAQ §42: nested/chained dep-joins must NOT inherit sibling-introduced
+aliases as outer. The original outer scope is the bottom of the left
+chain. */
+(define qpu-bottom-left-aliases (lambda (node)
+	(match (qpir-kind node)
+		(quote qpir-dep-join) (qpu-bottom-left-aliases (qpir-dep-join-left node))
+		(quote qpir-join)     (qpu-bottom-left-aliases (qpir-join-left node))
+		(quote qpir-select)   (qpu-bottom-left-aliases (qpir-select-child node))
+		(quote qpir-map)      (qpu-bottom-left-aliases (qpir-map-child node))
+		(quote qpir-groupby)  (qpu-bottom-left-aliases (qpir-groupby-child node))
+		(quote qpir-window)   (qpu-bottom-left-aliases (qpir-window-child node))
+		(qpir-provided-aliases node))))
+
 /* qpu-collect-outer-refs — for a dep-join, return the list of get_column
 expressions in the RIGHT subtree that reference columns from the LEFT
-subtree's provided aliases. These are the outer references that need to
-be bound by the dep-join. */
+subtree's ORIGINAL OUTER scope. */
 (define qpu-collect-outer-refs (lambda (dj) (begin
-	(define left-aliases (qpir-provided-aliases (qpir-dep-join-left dj)))
+	(define left-aliases (qpu-bottom-left-aliases (qpir-dep-join-left dj)))
 	(define right-free (qpir-free-vars (qpir-dep-join-right dj)))
 	(define outer-refs (filter right-free (lambda (ref) (match ref
 		'(tv col) (has? left-aliases tv)
@@ -772,7 +792,9 @@ Pre-condition: dj is a qpir-dep-join. */
 		(begin
 			(define left (qpir-dep-join-left dj))
 			(define right (qpir-dep-join-right dj))
-			(define outer-aliases (qpir-provided-aliases left))
+			/* Use bottom-left aliases: ignore aliases introduced by
+			   sibling/previous dep-joins in the chain. */
+			(define outer-aliases (qpu-bottom-left-aliases left))
 			(define outer-ref-exprs (qpu-collect-outer-refs dj))
 			/* Per FAQ §22 "per-key misses MUST survive": when unnesting a
 			   dep-join, every outer row whose domain key is absent in the
