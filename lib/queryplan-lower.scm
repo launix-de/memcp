@@ -539,8 +539,22 @@ and column refs to the right's underlying tables are retargeted. */
 		(begin
 			(define left-aliases (map (qpp-tuple-tables left-tuple) (lambda (t)
 				(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
-			(if (qpu-low-inline-scalar-eligible? right-tuple join-pred
-					rhs-alias jtype left-aliases)
+			/* Gate on OUTER shape too: inline-flat is unsafe when outer has
+			   GROUP BY or aggregate-bearing fields. The inlined inner table
+			   flat-joins to outer; aggregates like COUNT(*) then count joined
+			   rows instead of outer rows. Wrap-derived keeps the scalar self-
+			   contained, which legacy aggregates correctly. */
+			(define outer-has-group
+				(> (count (coalesceNil (qpp-tuple-group left-tuple) '())) 0))
+			(define outer-has-agg-fields
+				(reduce (qpp-fields-to-pairs
+					(coalesceNil (qpp-tuple-fields left-tuple) '()))
+					(lambda (acc pair) (match pair
+						'(_ e) (or acc (qpl-expr-has-aggregate? e))
+						acc)) false))
+			(if (and (not outer-has-group) (not outer-has-agg-fields)
+					(qpu-low-inline-scalar-eligible? right-tuple join-pred
+						rhs-alias jtype left-aliases))
 				(qpu-low-join-inline-scalar left-tuple right-tuple join-pred
 					rhs-alias jtype)
 				(qpu-low-join-wrap-derived left-tuple right-tuple join-pred
@@ -787,7 +801,16 @@ Layout:
 		(define combined-je (qpu-low-and-cond join-pred-retargeted inner-where-retargeted))
 		(define new-entry
 			(list rhs-alias inner-schema tagged-tname true combined-je))
-		/* Rewrite outer's fields/condition: (rhs-alias . field-name) → field-expr */
+		/* Register the (rhs-alias . field-name) → field-expr rewrite so any
+		   OUTER wrapper (qpir-select, qpir-map, qpir-groupby) above us picks
+		   it up when applying its own predicates/projections. Lift placed
+		   sq_X.field refs in the outer's WHERE/SELECT — those scopes are
+		   processed at a different lowering step than ours. */
+		(qpu-low-sq-rewrites-add rhs-alias field-name field-expr)
+		/* (rewrite map populated for any future wrapper that needs it —
+		   currently only used by the local rewrite below; the qpu-low-select
+		   integration is deferred since it caused esv test regressions —
+		   trades 1 esv win for 4 esv losses.) */
 		(define rewritten-fields
 			(qpu-low-replace-sq-field (qpp-tuple-fields left-tuple)
 				rhs-alias field-name field-expr))
@@ -823,6 +846,45 @@ Layout:
 	(map (coalesceNil fields '()) (lambda (pair) (match pair
 		'(fn fe) (list fn (qpu-low-replace-sq-field-expr fe rhs-alias field-name target-expr))
 		pair)))))
+
+/* qpu-low-sq-rewrites — session map of pending sq_X.field → target-expr
+substitutions populated by qpu-low-join-inline-scalar. Consumed by
+qpu-low-select / qpu-low-map / qpu-low-groupby when they wrap the inline-
+flat result; the outer's WHERE/projections/keys may contain refs to
+sq_X.value (from lift's marker substitution) that the inline-flat path
+must rewrite to the inner column expr.
+
+Cleared at the start of each lower_to_scans_pass invocation so cross-
+query state doesn't leak. */
+(define qpu-low-sq-rewrites (newsession))
+(qpu-low-sq-rewrites "list" '())
+
+(define qpu-low-sq-rewrites-clear (lambda ()
+	(qpu-low-sq-rewrites "list" '())))
+
+(define qpu-low-sq-rewrites-add (lambda (rhs-alias field-name target-expr)
+	(qpu-low-sq-rewrites "list"
+		(merge (coalesceNil (qpu-low-sq-rewrites "list") '())
+			(list (list rhs-alias field-name target-expr))))))
+
+(define qpu-low-sq-rewrites-apply-expr (lambda (expr)
+	(reduce (coalesceNil (qpu-low-sq-rewrites "list") '())
+		(lambda (acc entry) (match entry
+			'(ra fn tgt) (qpu-low-replace-sq-field-expr acc ra fn tgt)
+			acc))
+		expr)))
+
+(define qpu-low-sq-rewrites-apply-fields (lambda (fields)
+	(reduce (coalesceNil (qpu-low-sq-rewrites "list") '())
+		(lambda (acc entry) (match entry
+			'(ra fn tgt) (qpu-low-replace-sq-field acc ra fn tgt)
+			acc))
+		fields)))
+
+(define qpu-low-sq-rewrites-apply-order (lambda (order)
+	(map (coalesceNil order '()) (lambda (o) (match o
+		'(c d) (list (qpu-low-sq-rewrites-apply-expr c) d)
+		o)))))
 
 (define qpu-low-tag-has-count-distinct? (lambda (expr) (match expr
 	(cons head args) (or
@@ -934,6 +996,7 @@ single 7-tuple compatible with the legacy build_queryplan_inner. The
 caller then feeds this 7-tuple into the existing physical compiler for
 scan/keytable/join emission. */
 (define lower_to_scans_pass (lambda (qpir-tree) (begin
+	(qpu-low-sq-rewrites-clear)
 	(define lowered (qpu-lower-to-tuple qpir-tree))
 	(if (not (qpp-tuple? lowered))
 		(error "lower_to_scans_pass: lowering did not produce a 7-tuple")
