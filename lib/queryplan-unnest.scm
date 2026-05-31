@@ -543,16 +543,34 @@ substitution). */
 
 /* qpu-cc-build-repr — given cclasses and a list of outer-aliases, build a
 repr map mapping outer-refs to their inner equivalents. An outer ref
-`(tv col)` (where tv ∈ outer-aliases) maps to the first ref in its class
-whose tv is NOT in outer-aliases — i.e. an inner column we can substitute to.
+`(tv col)` (where tv ∈ outer-aliases) maps to a ref in its class
+whose tv is NOT in outer-aliases.
+
+Preference order for picking the inner ref (FAQ §35 + scope-aware lowering):
+  1. sq_X-aliased refs (rhs-aliases from dep-joins, which are stable at the
+     scope where the cclass was assembled)
+  2. Any other inner ref (base table column, etc.)
+
+Picking sq_X over deep-nested base columns matters for doubly-nested cases:
+the inner dep-join's projection sq_X.__kt_col is reachable AT the outer
+scope where the cc-join-cond lives, while the base column `t.col` is buried
+inside sq_X's derived (FAQ §38 scope graph).
 
 Returns a session whose "map" key holds an assoc list of (outer-ref . inner-ref). */
+(define qpu-cc-pick-inner-ref (lambda (inners) (begin
+	/* Prefer sq_X-aliased refs over others. */
+	(define sq-refs (filter inners (lambda (ref) (match ref
+		'(tv col) (and (string? tv) (>= (strlen tv) 3)
+			(equal? (substr tv 0 3) "sq_"))
+		false))))
+	(if (> (count sq-refs) 0) (nth sq-refs 0) (nth inners 0)))))
+
 (define qpu-cc-build-repr (lambda (cc outer-aliases) (begin
 	(define repr (newsession))
 	(repr "map" (list))
 	(define classes (cc "classes"))
 	(reduce classes (lambda (acc c) (begin
-		/* For each class, find outer refs and the first inner ref */
+		/* For each class, find outer refs and the preferred inner ref */
 		(define outers (filter c (lambda (ref) (match ref
 			'(tv col) (has? outer-aliases tv)
 			false))))
@@ -561,7 +579,7 @@ Returns a session whose "map" key holds an assoc list of (outer-ref . inner-ref)
 			false))))
 		(if (and (> (count outers) 0) (> (count inners) 0))
 			(begin
-				(define inner-ref (nth inners 0))
+				(define inner-ref (qpu-cc-pick-inner-ref inners))
 				(reduce outers (lambda (a outer-ref) (begin
 					(repr "map" (merge (repr "map") (list (list outer-ref inner-ref))))
 					a)) nil)) nil)
