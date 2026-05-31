@@ -386,15 +386,97 @@ inside nested subs aren't wrongly classified as outer-refs at this level. */
 		(if (has? acc rp) acc (merge acc (list rp))))
 		'()))))
 
+/* qpl-find-equibind-inner-col — for an outer-ref (tv, col), find an
+equality conjunct in WHERE that binds it to an INNER column. Returns
+(inner-tv, inner-col) or nil. Used by qpl-build-rownumber-window so
+PARTITION BY uses the inner-equivalent column (FAQ §35 canonical names)
+when available, avoiding correlated PARTITION BY that legacy's window
+path can't handle inside derived sub-tuples. */
+(define qpl-find-equibind-inner-col (lambda (where outer-ref inner-aliases)
+	(reduce (qpl-and-conjuncts where) (lambda (found conj)
+		(if (not (nil? found)) found
+			(match conj
+				'((symbol equal??) lhs rhs) (qpl-equibind-pair lhs rhs outer-ref inner-aliases)
+				'((quote equal??)  lhs rhs) (qpl-equibind-pair lhs rhs outer-ref inner-aliases)
+				'((symbol =)       lhs rhs) (qpl-equibind-pair lhs rhs outer-ref inner-aliases)
+				'((quote =)        lhs rhs) (qpl-equibind-pair lhs rhs outer-ref inner-aliases)
+				nil)))
+		nil)))
+
+(define qpl-equibind-pair (lambda (lhs rhs outer-ref inner-aliases)
+	(begin
+		(define li (qpl-col-ref-info lhs))
+		(define ri (qpl-col-ref-info rhs))
+		(define out-tv (nth outer-ref 0))
+		(define out-col (nth outer-ref 1))
+		(if (and (not (nil? li))
+				 (equal? (nth li 0) out-tv) (equal? (nth li 1) out-col)
+				 (not (nil? ri))
+				 (has? inner-aliases (nth ri 0)))
+			ri
+			(if (and (not (nil? ri))
+					 (equal? (nth ri 0) out-tv) (equal? (nth ri 1) out-col)
+					 (not (nil? li))
+					 (has? inner-aliases (nth li 0)))
+				li
+				nil)))))
+
+(define qpl-col-ref-info (lambda (expr) (match expr
+	'((symbol get_column) tv ti col ci) (list tv col)
+	'((quote get_column)  tv ti col ci) (list tv col)
+	nil)))
+
+(define qpl-and-conjuncts (lambda (expr) (match expr
+	(cons head args)
+		(if (or (equal? head (quote and)) (equal? head 'and))
+			(reduce args (lambda (acc a)
+				(merge acc (qpl-and-conjuncts a))) '())
+			(list expr))
+	(if (nil? expr) '() (list expr)))))
+
 /* qpl-build-rownumber-window — build the window_func node for ROW_NUMBER
-with PARTITION BY <outer-refs> ORDER BY <order-items>. */
-(define qpl-build-rownumber-window (lambda (outer-refs order-items) (begin
-	(define partition-exprs (map outer-refs (lambda (rp) (match rp
-		'(tv col) (list (quote get_column) tv false col false)
-		rp))))
-	(define order-list (if (nil? order-items) '() order-items))
-	(list (quote window_func) "ROW_NUMBER" '()
-		(list partition-exprs order-list)))))
+with PARTITION BY <outer-refs> ORDER BY <order-items>.
+
+Per FAQ §35 canonical names: when an outer-ref is equi-bound to an inner
+column in the sub's WHERE, use the inner column in PARTITION BY. This
+turns a correlated window (outer-ref in PARTITION BY) into an uncorrelated
+window over the inner table alone — which legacy's window-function path
+handles correctly inside derived sub-tuples. */
+(define qpl-build-rownumber-window (lambda (outer-refs order-items where inner-aliases)
+	(begin
+		(define partition-exprs (map outer-refs (lambda (rp) (match rp
+			'(tv col) (begin
+				(define inner-equiv (qpl-find-equibind-inner-col where rp inner-aliases))
+				(if (not (nil? inner-equiv))
+					(list (quote get_column) (nth inner-equiv 0) false
+						(nth inner-equiv 1) false)
+					(list (quote get_column) tv false col false)))
+			rp))))
+		(define order-list (if (nil? order-items) '() order-items))
+		(list (quote window_func) "ROW_NUMBER" '()
+			(list partition-exprs order-list)))))
+
+/* qpl-split-where-by-correlation — split a WHERE expression into
+(correlated-conjuncts, uncorrelated-conjuncts). A conjunct is "correlated"
+when it references any outer-ref (passed in). Used by the FAQ §43 rewrite
+to keep the correlation filter at the WRAPPER level (outside the window-
+computing inner sub) — legacy's window-function path handles uncorrelated
+inner subs cleanly, but breaks on correlated-WHERE inside a window-bearing
+derived. */
+(define qpl-expr-refs-any-outer? (lambda (expr outer-ref-pairs)
+	(reduce (qpl-extract-col-refs-skip-nested expr) (lambda (acc rp)
+		(or acc (has? outer-ref-pairs rp))) false)))
+
+(define qpl-split-where-by-correlation (lambda (where outer-ref-pairs)
+	(begin
+		(define conjs (qpl-and-conjuncts where))
+		(define corr (filter conjs (lambda (c)
+			(qpl-expr-refs-any-outer? c outer-ref-pairs))))
+		(define uncorr (filter conjs (lambda (c)
+			(not (qpl-expr-refs-any-outer? c outer-ref-pairs)))))
+		(list
+			(reduce corr qpl-and-cond nil)
+			(reduce uncorr qpl-and-cond nil)))))
 
 (define qpl-rewrite-correlated-limit-with-rownumber (lambda (sub)
 	(if (not (qpp-tuple? sub)) sub
@@ -409,8 +491,7 @@ with PARTITION BY <outer-refs> ORDER BY <order-items>. */
 							/* Build inner-with-window: same as sub but add __rn field.
 							   Field format is FLAT (parser shape) so downstream
 							   reduce_assoc consumers receive the expected even-length
-							   dict. Pairs form would error per the qpp-shape-preserving
-							   investigation. */
+							   dict. */
 							(define sub-fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
 							(if (not (equal? (count sub-fields-pairs) 1))
 								(error (concat
@@ -421,16 +502,41 @@ with PARTITION BY <outer-refs> ORDER BY <order-items>. */
 							(define orig-field-name (nth orig-field-pair 0))
 							(define orig-field-expr (nth orig-field-pair 1))
 							(define order-items (qpp-tuple-order sub))
-							(define window-expr (qpl-build-rownumber-window outer-refs order-items))
-							/* FLAT fields: (name1 expr1 name2 expr2). */
-							(define inner-sub-fields (list
-								"__value" orig-field-expr
-								"__rn" window-expr))
+							(define sub-inner-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
+							(define window-expr (qpl-build-rownumber-window
+								outer-refs order-items
+								(qpp-tuple-condition sub) sub-inner-aliases))
+							/* Split WHERE: keep uncorrelated inside the window sub,
+							   move correlated OUT to the wrapper. Legacy's window-
+							   function path handles uncorrelated derived cleanly.
+							   The window's PARTITION BY (using inner-equibound col
+							   per FAQ §35) already encodes the per-outer-group
+							   partitioning, so moving the correlation filter to the
+							   wrapper preserves semantics. Also project the inner
+							   equi-bound cols as passthrough so the wrapper's
+							   correlation conjunct can reference them. */
+							(define split (qpl-split-where-by-correlation
+								(qpp-tuple-condition sub) outer-refs))
+							(define corr-where (nth split 0))
+							(define uncorr-where (nth split 1))
+							/* Collect inner-equibound passthroughs needed by corr-where. */
+							(define passthrough-cols
+								(qpl-collect-corr-passthroughs corr-where sub-inner-aliases))
+							(define passthrough-pairs (reduce passthrough-cols
+								(lambda (acc col-ref) (match col-ref
+									'(tv col) (merge acc (list col
+										(list (quote get_column) tv false col false)))
+									acc)) '()))
+							/* FLAT fields: __value, __rn, plus passthrough cols. */
+							(define inner-sub-fields (merge
+								(list "__value" orig-field-expr
+									"__rn" window-expr)
+								passthrough-pairs))
 							(define inner-sub (qpp-rebuild-tuple
 								(qpp-tuple-schema sub)
 								(qpp-tuple-tables sub)
 								inner-sub-fields
-								(qpp-tuple-condition sub)
+								uncorr-where   /* only uncorrelated WHERE inside */
 								(qpp-tuple-group sub)
 								(qpp-tuple-having sub)
 								nil    /* ORDER moved into window */
@@ -439,8 +545,9 @@ with PARTITION BY <outer-refs> ORDER BY <order-items>. */
 							(define wrap-alias (qpl-fresh-limwrap-alias))
 							(define schema (qpp-tuple-schema sub))
 							(define offset-val (if (nil? off) 0 off))
-							/* Build the WHERE: rn > offset AND rn <= k+offset.
-							   For pure LIMIT k (no OFFSET), this simplifies to rn <= k. */
+							/* Wrapper WHERE: rn-filter AND retargeted corr-where.
+							   Retarget refs to inner cols → wrap-alias (since they're
+							   now projected via the wrapper's __limit_wrap). */
 							(define rn-ref (list (quote get_column) wrap-alias false "__rn" false))
 							(define rn-condition
 								(if (nil? off)
@@ -448,14 +555,54 @@ with PARTITION BY <outer-refs> ORDER BY <order-items>. */
 									(list (quote and)
 										(list (quote >) rn-ref offset-val)
 										(list (quote <=) rn-ref (list (quote +) lim offset-val)))))
+							(define retargeted-corr
+								(if (nil? corr-where) nil
+									(qpl-retarget-refs corr-where sub-inner-aliases wrap-alias)))
+							(define wrapper-where
+								(if (nil? retargeted-corr) rn-condition
+									(list (quote and) rn-condition retargeted-corr)))
 							(qpp-rebuild-tuple
 								schema
 								(list (list wrap-alias schema inner-sub false nil))
 								/* FLAT fields for wrapper too. */
 								(list orig-field-name
 									(list (quote get_column) wrap-alias false "__value" false))
-								rn-condition
+								wrapper-where
 								nil nil nil nil nil))))))))))
+
+/* qpl-collect-corr-passthroughs — find inner-side col refs in a correlated
+WHERE expression, return the list of (tv col) pairs that need to be projected
+through the window-bearing derived so the wrapper can reference them. */
+(define qpl-collect-corr-passthroughs (lambda (expr inner-aliases)
+	(if (nil? expr) '()
+		(begin
+			(define all-refs (qpl-extract-col-refs-skip-nested expr))
+			(define inner-refs (filter all-refs (lambda (rp) (match rp
+				'(tv col) (has? inner-aliases tv)
+				false))))
+			/* Deduplicate */
+			(reduce inner-refs (lambda (acc rp)
+				(if (has? acc rp) acc (merge acc (list rp))))
+				'())))))
+
+/* qpl-retarget-refs — rewrite (get_column tv ti col ci) where tv ∈ from-aliases
+to (get_column to-alias false col false). Used to retarget inner refs in the
+correlated WHERE conjunct to use the wrapping derived's alias after the cols
+get projected through as passthroughs. */
+(define qpl-retarget-refs (lambda (expr from-aliases to-alias)
+	(match expr
+		'((symbol get_column) tv ti col ci)
+			(if (has? from-aliases tv)
+				(list (quote get_column) to-alias false col false)
+				expr)
+		'((quote get_column) tv ti col ci)
+			(if (has? from-aliases tv)
+				(list (quote get_column) to-alias false col false)
+				expr)
+		(cons head args)
+			(cons head (map (coalesceNil args '())
+				(lambda (a) (qpl-retarget-refs a from-aliases to-alias))))
+		expr)))
 
 (define qpl-rewrite-correlated-limit-in-expr (lambda (expr)
 	(match expr
@@ -1227,19 +1374,14 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			   becomes a global LIMIT on the derived sub and clips correlated
 			   rows before the join. */
 			(define t-lim (qpl-rewrite-redundant-limit-tuple t))
-			/* Step 0b — DISABLED. Scaffold for FAQ §43 ROW_NUMBER PARTITION
-			   rewrite is in qpl-rewrite-correlated-limit-with-rownumber.
-			   Re-enabled 2026-06-01 with nested-skip fix in qpl-sub-outer-refs;
-			   still regresses ~5 tests because legacy's window-function path
-			   doesn't handle correlated PARTITION BY (outer-refs) inside a
-			   derived sub-tuple — the wrap-derived produces `isOuter=false`
-			   for the new outer-shape and the window's PARTITION BY refs to
-			   outer (t3.id) don't resolve when the window lives inside the
-			   nested __limit_wrap derived. Real fix: lower the rewrite to
-			   produce qpir-window IR operator (currently errors at lower),
-			   then implement unnest + lower for qpir-window per FAQ §34.
-			   ~1-2 sessions. */
-			(define t-rn t-lim)
+			/* Step 0b — FAQ §43 ROW_NUMBER PARTITION rewrite per FAQ:
+			   "rewrite the inner select into a window over the same domain
+			   keys: SELECT *, ROW_NUMBER() OVER (PARTITION BY <outer-refs>
+			   ORDER BY x) rn ... WHERE rn BETWEEN o+1 AND k+o".
+			   ENABLED 2026-06-01 with FAQ §35 canonical-names refinement:
+			   PARTITION BY uses inner-equibound col where available,
+			   avoiding correlated PARTITION BY that legacy can't handle. */
+			(define t-rn (qpl-rewrite-correlated-limit-tuple t-lim))
 			(define t-prime (qpl-rewrite-in-exists-tuple t-rn))
 			(if (not (qpl-tuple-has-markers? t-prime))
 				(qpir-leaf t-prime)
