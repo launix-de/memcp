@@ -390,9 +390,18 @@ when the pair (tv col) appears in rename-map. */
 
 (define qpu-low-select (lambda (node) (begin
 	(define child-tuple (qpu-lower-to-tuple (qpir-select-child node)))
+	/* Apply any sq_X.field rewrites from inline-flat scalars below us.
+	   The rewrites are registered in qpu-low-sq-rewrites via
+	   qpu-low-join-inline-scalar. We only apply them to the predicate
+	   when the child-tuple's tables list actually contains the registered
+	   rhs-alias — otherwise the rewrite belongs to a different scope (a
+	   nested scalar's inner WHERE, processed by its own qpu-low-select). */
+	(define new-pred (qpu-low-sq-rewrites-apply-expr-scoped
+		(qpir-select-predicate node)
+		(qpp-tuple-tables child-tuple)))
 	(define new-cond (qpu-low-and-cond
 		(qpp-tuple-condition child-tuple)
-		(qpir-select-predicate node)))
+		new-pred))
 	(qpp-rebuild-tuple
 		(qpp-tuple-schema child-tuple)
 		(qpp-tuple-tables child-tuple)
@@ -885,6 +894,22 @@ query state doesn't leak. */
 	(map (coalesceNil order '()) (lambda (o) (match o
 		'(c d) (list (qpu-low-sq-rewrites-apply-expr c) d)
 		o)))))
+
+/* qpu-low-sq-rewrites-apply-expr-scoped — apply ONLY those rewrites whose
+rhs-alias appears in `tables`. This scopes the rewrite to the level where
+the inlined sq_X table is actually visible, preventing a nested scalar's
+rewrite from leaking into a sibling/outer scope's predicate. */
+(define qpu-low-sq-rewrites-apply-expr-scoped (lambda (expr tables) (begin
+	(define table-aliases (map (coalesceNil tables '()) (lambda (td)
+		(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+	(reduce (coalesceNil (qpu-low-sq-rewrites "list") '())
+		(lambda (acc entry) (match entry
+			'(ra fn tgt)
+			(if (has? table-aliases ra)
+				(qpu-low-replace-sq-field-expr acc ra fn tgt)
+				acc)
+			acc))
+		expr))))
 
 (define qpu-low-tag-has-count-distinct? (lambda (expr) (match expr
 	(cons head args) (or
