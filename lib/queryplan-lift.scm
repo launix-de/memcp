@@ -1210,10 +1210,11 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 				(qpl-lift-with-markers t-prime))))))
 
 (define qpl-lift-with-markers (lambda (t) (begin
-	/* Reject shapes Phase 2 does not yet handle: HAVING markers, group-by markers,
-	   order-by markers. These need their own structural lifting. */
-	(if (> (count (qpl-collect-markers (qpp-tuple-having t))) 0)
-		(error "lift_dep_joins_pass: HAVING-level marker not yet supported (Phase 3+)") nil)
+	/* Reject shapes Phase 2 does not yet handle: group-by markers,
+	   order-by markers. HAVING-level markers are supported via the
+	   same substitution mechanism as fields/condition — the substituted
+	   HAVING references sq_X.value which resolves through the dep-join
+	   chain wrapped around the outer-leaf. */
 	(if (> (reduce (coalesceNil (qpp-tuple-group t) '()) (lambda (acc e)
 			(+ acc (count (qpl-collect-markers e)))) 0) 0)
 		(error "lift_dep_joins_pass: GROUP-BY-level marker not yet supported (Phase 3+)") nil)
@@ -1222,15 +1223,19 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			acc)) 0) 0)
 		(error "lift_dep_joins_pass: ORDER-BY-level marker not yet supported (Phase 3+)") nil)
 
-	/* Collect + substitute all scalar markers from fields and condition.
-	   Order matters: keep fields-first then condition-second so sq_N numbering
-	   is deterministic for snapshot tests. */
+	/* Collect + substitute all scalar markers from fields, condition, and
+	   HAVING. Order matters: fields → condition → having for deterministic
+	   sq_N numbering. */
 	(define acc (newsession))
 	(acc "list" '())
 	(define orig-fields (qpp-tuple-fields t))
 	(define sub-fields (qpl-substitute-fields orig-fields acc))
 	(define orig-cond (qpp-tuple-condition t))
 	(define sub-cond (qpl-substitute-markers orig-cond acc))
+	(define orig-having (qpp-tuple-having t))
+	(define sub-having
+		(if (nil? orig-having) nil
+			(qpl-substitute-markers orig-having acc)))
 	(define markers (acc "list"))
 
 	(if (equal? (count markers) 0)
@@ -1240,14 +1245,17 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 		(begin
 			/* Build outer leaf: substituted fields, WHERE replaced by true
 			   (real condition is re-applied above the dep-join chain so its
-			   sq.value references can resolve to the dep-join's right side). */
+			   sq.value references can resolve to the dep-join's right side).
+			   HAVING uses the substituted form directly — the sq_X.value
+			   refs in HAVING resolve through the dep-join chain just like
+			   refs in fields do (both are at the outer-leaf's projection level). */
 			(define outer-leaf (qpir-leaf (qpp-rebuild-tuple
 				(qpp-tuple-schema t)
 				(qpp-tuple-tables t)
 				sub-fields
 				true
 				(qpp-tuple-group t)
-				(qpp-tuple-having t)
+				sub-having
 				(qpp-tuple-order t)
 				(qpp-tuple-limit t)
 				(qpp-tuple-offset t))))
