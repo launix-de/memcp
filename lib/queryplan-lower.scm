@@ -664,10 +664,12 @@ WHERE condition (existing behavior). */
 		(define key-rename-map (nth keys-result 1))
 		/* For UNCORRELATED sq_*-aliased scalar derived: tag the inner base
 		   table with scan-tagged-table once_limit=2 so multi-row inner scans
-		   error per FAQ §20. CORRELATED scalars need partition-aware tagging
-		   (FAQ §43) — that's a later phase; for now they stay on the existing
-		   path. Uncorrelated detection: join-pred is true (no per-row
-		   correlation, scan runs once globally). */
+		   error per FAQ §20. CORRELATED scalars: tried partition-tagging in
+		   tick 12 of session 2026-05-31 — regressed -30 tests. The flat
+		   derived path doesn't have enough scope to set partition_cols
+		   correctly without breaking sibling queries. Correlated remains on
+		   the existing derived-wrap path until a proper inline-flat refactor
+		   restructures the IR (FAQ §43 plan). */
 		(define is-scalar-rhs
 			(and (string? rhs-alias) (>= (strlen rhs-alias) 3)
 				(equal? (substr rhs-alias 0 3) "sq_")))
