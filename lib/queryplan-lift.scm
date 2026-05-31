@@ -331,16 +331,50 @@ which handles the equi-binding optimization case. */
 	(qpl-limwrap-counter "n" (+ (qpl-limwrap-counter "n") 1))
 	(concat "__limit_wrap_" (string (qpl-limwrap-counter "n"))))))
 
+/* qpl-extract-col-refs-skip-nested — like qpl-extract-col-refs but does NOT
+descend into nested inner_select / inner_select_in / inner_select_exists
+markers. Refs inside those sub-tuples are inner to the nested scope, not
+free at this level. Without this, a nested sub's WHERE refs are wrongly
+classified as "outer refs" of the outer sub. */
+(define qpl-marker-head? (lambda (head) (match head
+	(symbol inner_select)         true
+	(quote inner_select)          true
+	'(quote inner_select)         true
+	'inner_select                 true
+	(symbol inner_select_in)      true
+	(quote inner_select_in)       true
+	'(quote inner_select_in)      true
+	'inner_select_in              true
+	(symbol inner_select_exists)  true
+	(quote inner_select_exists)   true
+	'(quote inner_select_exists)  true
+	'inner_select_exists          true
+	false)))
+
+(define qpl-extract-col-refs-skip-nested (lambda (expr)
+	(match expr
+		'((symbol get_column) tv ti col ci) (list (list tv col))
+		'((quote get_column)  tv ti col ci) (list (list tv col))
+		(cons head args)
+			(if (qpl-marker-head? head)
+				/* Stop descent at nested-sub markers — their refs are inner-scope. */
+				'()
+				(reduce (coalesceNil args '()) (lambda (acc a)
+					(merge acc (qpl-extract-col-refs-skip-nested a))) '()))
+		'())))
+
 /* qpl-sub-outer-refs — collect (tv col) pairs in sub's expressions that are
 NOT bound by any of sub's table aliases. Walks WHERE, fields, group, having,
-order. Deduplicates by (tv col). */
+order. Deduplicates by (tv col). Skips nested inner_select markers so refs
+inside nested subs aren't wrongly classified as outer-refs at this level. */
 (define qpl-sub-outer-refs (lambda (sub) (begin
 	(define inner-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
-	(define all-cond-refs (qpl-extract-col-refs (qpp-tuple-condition sub)))
+	(define all-cond-refs (qpl-extract-col-refs-skip-nested
+		(qpp-tuple-condition sub)))
 	(define all-fields-refs (reduce
 		(qpp-fields-to-pairs (qpp-tuple-fields sub))
 		(lambda (acc pair) (match pair
-			'(name expr) (merge acc (qpl-extract-col-refs expr))
+			'(name expr) (merge acc (qpl-extract-col-refs-skip-nested expr))
 			acc))
 		'()))
 	(define all-refs (merge all-cond-refs all-fields-refs))
@@ -1194,15 +1228,17 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			   rows before the join. */
 			(define t-lim (qpl-rewrite-redundant-limit-tuple t))
 			/* Step 0b — DISABLED. Scaffold for FAQ §43 ROW_NUMBER PARTITION
-			   rewrite is in qpl-rewrite-correlated-limit-with-rownumber,
-			   but enabling it regresses ~7 tests across 32/96 (verified
-			   2026-05-30). The rewrite produces a nested 7-tuple with
-			   window_func + __rn filter; legacy's window-function path
-			   doesn't handle correlated PARTITION BY (outer-refs) cleanly
-			   in this nested-derived shape. Need either:
-			    - qpir-window unnest rule (FAQ §34), OR
-			    - legacy fixup for correlated PARTITION BY in derived sub.
-			   Re-enable after one of those lands. */
+			   rewrite is in qpl-rewrite-correlated-limit-with-rownumber.
+			   Re-enabled 2026-06-01 with nested-skip fix in qpl-sub-outer-refs;
+			   still regresses ~5 tests because legacy's window-function path
+			   doesn't handle correlated PARTITION BY (outer-refs) inside a
+			   derived sub-tuple — the wrap-derived produces `isOuter=false`
+			   for the new outer-shape and the window's PARTITION BY refs to
+			   outer (t3.id) don't resolve when the window lives inside the
+			   nested __limit_wrap derived. Real fix: lower the rewrite to
+			   produce qpir-window IR operator (currently errors at lower),
+			   then implement unnest + lower for qpir-window per FAQ §34.
+			   ~1-2 sessions. */
 			(define t-rn t-lim)
 			(define t-prime (qpl-rewrite-in-exists-tuple t-rn))
 			(if (not (qpl-tuple-has-markers? t-prime))
