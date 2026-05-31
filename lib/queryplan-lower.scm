@@ -444,6 +444,15 @@ or pairs (pipeline). */
 
 (define qpu-low-map (lambda (node) (begin
 	(define child-tuple (qpu-lower-to-tuple (qpir-map-child node)))
+	/* Apply scoped sq_X.field rewrites to map projections — sq_X tables may
+	   have been added by inline-flat below; map projections placed by lift
+	   may reference sq_X.value that needs the actual inner expr. */
+	(define raw-projections (qpir-map-projections node))
+	(define projections
+		(map (coalesceNil raw-projections '()) (lambda (pair) (match pair
+			'(n e) (list n (qpu-low-sq-rewrites-apply-expr-scoped e
+				(qpp-tuple-tables child-tuple)))
+			pair))))
 	(define child-group (qpp-tuple-group child-tuple))
 	(define child-has-group (and (not (nil? child-group)) (> (count child-group) 0)))
 	/* Also wrap when child has aggregates in fields (e.g. static-group from
@@ -472,14 +481,14 @@ or pairs (pipeline). */
 			(qpp-rebuild-tuple
 				schema
 				(list (list wrap-alias schema child-tuple false nil))
-				(qpu-low-rewrite-map-projections (qpir-map-projections node) wrap-alias)
+				(qpu-low-rewrite-map-projections projections wrap-alias)
 				true
 				nil nil nil nil nil))
 		/* No GROUP BY: standard replace-fields path. */
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema child-tuple)
 			(qpp-tuple-tables child-tuple)
-			(qpir-map-projections node)
+			projections
 			(qpp-tuple-condition child-tuple)
 			(qpp-tuple-group child-tuple)
 			(qpp-tuple-having child-tuple)
@@ -826,13 +835,17 @@ Layout:
 		(define rewritten-cond
 			(qpu-low-replace-sq-field-expr (qpp-tuple-condition left-tuple)
 				rhs-alias field-name field-expr))
+		(define rewritten-having
+			(if (nil? (qpp-tuple-having left-tuple)) nil
+				(qpu-low-replace-sq-field-expr (qpp-tuple-having left-tuple)
+					rhs-alias field-name field-expr)))
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema left-tuple)
 			(merge (qpp-tuple-tables left-tuple) (list new-entry))
 			rewritten-fields
 			rewritten-cond
 			(qpp-tuple-group left-tuple)
-			(qpp-tuple-having left-tuple)
+			rewritten-having
 			(qpp-tuple-order left-tuple)
 			(qpp-tuple-limit left-tuple)
 			(qpp-tuple-offset left-tuple)))))
