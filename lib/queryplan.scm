@@ -4436,7 +4436,23 @@ seeing the correctly prefixed outer alias. */
 					nil))
 			(list (list ".(1)" schema ".(1)" false nil)))
 		tables))
-	(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
+	(set zipped (zip (map tables (lambda (tbldesc) (begin
+		/* PRE-CHECK: scan-tagged-table is a TAGGED base table per FAQ §20
+		   inline-flat lowering for scalar context — NOT a derived sub-query.
+		   Use the existing scan_tagged_table_needs_scan_order predicate
+		   (handles all quoting variants). Treat as base so its order/limit
+		   slots aren't misinterpreted as a 9-tuple SELECT shape (which
+		   breaks reduce_assoc on the order list as "fields"). */
+		(define _tbl_at_3 (if (and (list? tbldesc) (>= (count tbldesc) 3))
+			(nth tbldesc 2) nil))
+		(if (and (not (nil? _tbl_at_3))
+				(scan_tagged_table_needs_scan_order _tbl_at_3))
+			(begin
+				(define _alias (nth tbldesc 0))
+				(define _schema (nth tbldesc 1))
+				(define _base (scan_tagged_table_base _tbl_at_3))
+				(list (list tbldesc) '() true (list _alias (get_schema _schema _base))))
+			(match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 		'(id schemax subquery isOuter joinexpr) (begin
 			(define union_parts_from (query_union_all_parts subquery))
@@ -4797,7 +4813,7 @@ seeing the correctly prefixed outer alias. */
 			)
 		)
 		(error (concat "unknown tabledesc: " tbldesc))
-	)))))
+	)))))))
 	(set tablesList (car zipped))
 	(set renameList (car (cdr zipped)))
 	(set conditionList (car (cdr (cdr zipped))))

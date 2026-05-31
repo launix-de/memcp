@@ -530,10 +530,21 @@ and column refs to the right's underlying tables are retargeted. */
 	(define right-tuple (qpu-lower-to-tuple (qpir-join-right node)))
 	(define rhs-alias (qpir-join-rhs-alias node))
 	(define join-pred (qpir-join-predicate node))
+	(define jtype (qpir-join-type node))
 	(if (nil? rhs-alias)
 		(qpu-low-join-merge-tables left-tuple right-tuple join-pred)
-		(qpu-low-join-wrap-derived left-tuple right-tuple join-pred rhs-alias
-			(qpir-join-type node))))))
+		/* Inline-flat for correlated scalar dep-joins per FAQ §20+§43.
+		   The derived-wrap fallback handles cases inline-flat doesn't fit
+		   (multi-table inner, aggregates, complex right tree). */
+		(begin
+			(define left-aliases (map (qpp-tuple-tables left-tuple) (lambda (t)
+				(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
+			(if (qpu-low-inline-scalar-eligible? right-tuple join-pred
+					rhs-alias jtype left-aliases)
+				(qpu-low-join-inline-scalar left-tuple right-tuple join-pred
+					rhs-alias jtype)
+				(qpu-low-join-wrap-derived left-tuple right-tuple join-pred
+					rhs-alias jtype)))))))
 
 /* qpu-low-join-merge-tables — for a join WITHOUT rhs-alias: append the
 right's tables into the left's tables list and AND conditions/predicate. */
@@ -614,6 +625,204 @@ in earlier broader attempts):
 		(reduce (coalesceNil args '()) (lambda (acc a)
 			(or acc (qpu-low-tag-expr-has-aggregate? a))) false))
 	false)))
+
+/* ==================== Inline-flat scalar lowering (FAQ §43) ==================== */
+
+/* qpu-low-col-ref-info — extract (tv col) from a get_column expr, or nil. */
+(define qpu-low-col-ref-info (lambda (expr) (match expr
+	'((symbol get_column) tv _ col _) (list tv col)
+	'((quote get_column) tv _ col _) (list tv col)
+	nil)))
+
+/* qpu-low-corr-from-pred — given join-pred + inner alias + outer aliases,
+return list of inner-side column names paired with outer cols via equality
+conjuncts. Order preserves first-seen. */
+(define qpu-low-corr-from-pred (lambda (join-pred inner-alias outer-aliases)
+	(begin
+		(define seen (newsession))
+		(seen "cols" '())
+		(define handle-eq (lambda (lhs rhs)
+			(begin
+				(define li (qpu-low-col-ref-info lhs))
+				(define ri (qpu-low-col-ref-info rhs))
+				(define inner-col
+					(if (and (not (nil? li)) (equal? (nth li 0) inner-alias)
+							 (not (nil? ri)) (has? outer-aliases (nth ri 0)))
+						(nth li 1)
+						(if (and (not (nil? ri)) (equal? (nth ri 0) inner-alias)
+								 (not (nil? li)) (has? outer-aliases (nth li 0)))
+							(nth ri 1)
+							nil)))
+				(if (and (not (nil? inner-col))
+						(not (has? (seen "cols") inner-col)))
+					(seen "cols" (merge (seen "cols") (list inner-col)))
+					nil))))
+		(reduce (qpu-and-conjuncts join-pred) (lambda (acc c)
+			(begin
+				(match c
+					'((symbol equal??) lhs rhs) (handle-eq lhs rhs)
+					'((quote equal??)  lhs rhs) (handle-eq lhs rhs)
+					'((symbol =)       lhs rhs) (handle-eq lhs rhs)
+					'((quote =)        lhs rhs) (handle-eq lhs rhs)
+					nil)
+				acc)) nil)
+		(seen "cols"))))
+
+/* qpu-low-inline-scalar-eligible? — true when the scalar dep-join's right
+side can be inlined as flat (instead of derived-wrap). Conservative gate
+matching qpu-low-tag-inner-once-limit:
+  - join-type=left
+  - rhs-alias starts with sq_
+  - right has 1 table entry, base table (not derived/tagged)
+  - right has 1 field (the scalar value)
+  - right has no group/having (aggregates use derived path)
+  - right's field has no aggregate / count_distinct
+  - join-pred is NOT trivially-true (correlated case — uncorrelated keeps
+    Phase 1 path which is simpler)
+  - extracted correlation cols match the inner table's alias */
+(define qpu-low-inline-scalar-eligible? (lambda (right-tuple join-pred rhs-alias join-type left-aliases)
+	(begin
+		(define tbls (coalesceNil (qpp-tuple-tables right-tuple) '()))
+		(define flds (qpp-fields-to-pairs
+			(coalesceNil (qpp-tuple-fields right-tuple) '())))
+		(define grp (coalesceNil (qpp-tuple-group right-tuple) '()))
+		(define hav (qpp-tuple-having right-tuple))
+		(if (not (and
+				(equal? join-type (quote left))
+				(string? rhs-alias)
+				(>= (strlen rhs-alias) 3)
+				(equal? (substr rhs-alias 0 3) "sq_")
+				(equal? (count tbls) 1)
+				(equal? (count flds) 1)
+				(equal? (count grp) 0)
+				(nil? hav)
+				/* correlated only — uncorrelated has dedicated tag path */
+				(not (or (nil? join-pred) (equal? join-pred true)
+						(equal? join-pred (quote true))))))
+			false
+			(begin
+				(define td (nth tbls 0))
+				(match td
+					'(td-alias _ td-tname _ _)
+					(if (or (qpp-tuple? td-tname)
+							(and (list? td-tname) (> (count td-tname) 0)
+								(or (equal? (car td-tname) (quote scan-tagged-table))
+									(equal? (car td-tname) (symbol scan-tagged-table)))))
+						false
+						(begin
+							(define fpair (nth flds 0))
+							(define fexpr (nth fpair 1))
+							(if (or (qpl-expr-has-aggregate? fexpr)
+									(qpu-low-tag-has-count-distinct? fexpr))
+								false
+								(begin
+									/* Must extract at least 1 correlation column */
+									(define cc (qpu-low-corr-from-pred join-pred td-alias left-aliases))
+									(> (count cc) 0)))))
+					false))))))
+
+/* qpu-low-join-inline-scalar — produce a flat-join outer tuple instead of
+wrapping right as derived. Inline the inner table with scan-tagged-table
+carrying correlation cols at front of sortcols and partition_cols=N.
+Outer field refs to sq_X.value get rewritten to inner-aliased col directly.
+
+Aliasing: the inner table is REALIASED to rhs-alias (sq_X) so multiple
+scalars over the same base table (e.g. two identical correlated scalars
+in the same SELECT list) don't collide on the inner natural alias. All
+refs in join-pred, inner-where, and field-expr get retargeted from
+inner-natural-alias → rhs-alias.
+
+Layout:
+  - outer's tables: existing + (rhs-alias inner_schema tagged-tname true joinExpr)
+  - joinExpr = retargeted join-pred AND retargeted inner-where
+  - outer fields/cond: refs (rhs-alias . field-name) → retargeted field-expr
+*/
+(define qpu-low-join-inline-scalar (lambda (left-tuple right-tuple join-pred rhs-alias join-type)
+	(begin
+		(define tbls (qpp-tuple-tables right-tuple))
+		(define td (nth tbls 0))
+		(define inner-natural-alias (nth td 0))
+		(define inner-schema (nth td 1))
+		(define inner-base (nth td 2))
+		(define inner-where (qpp-tuple-condition right-tuple))
+		(define inner-order (coalesceNil (qpp-tuple-order right-tuple) '()))
+		(define inner-offset (qpp-tuple-offset right-tuple))
+		(define sub-lim (qpp-tuple-limit right-tuple))
+		(define fpair (nth (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)) 0))
+		(define field-name (nth fpair 0))
+		(define field-expr-raw (nth fpair 1))
+		(define left-aliases (map (qpp-tuple-tables left-tuple) (lambda (t)
+			(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
+		(define corr-cols (qpu-low-corr-from-pred join-pred inner-natural-alias left-aliases))
+		/* Retarget all refs to inner-natural-alias → rhs-alias */
+		(define retarget-aliases (list inner-natural-alias))
+		(define field-expr (qpu-low-rewrite-refs field-expr-raw retarget-aliases rhs-alias))
+		(define inner-where-clean
+			(if (or (nil? inner-where) (equal? inner-where true)
+					(equal? inner-where (quote true))) nil inner-where))
+		(define inner-where-retargeted
+			(if (nil? inner-where-clean) nil
+				(qpu-low-rewrite-refs inner-where-clean retarget-aliases rhs-alias)))
+		(define join-pred-retargeted (qpu-low-rewrite-refs
+			join-pred retarget-aliases rhs-alias))
+		(define corr-order
+			(map corr-cols (lambda (c) (list
+				(list (quote get_column) rhs-alias false c false)
+				(quote <)))))
+		(define inner-order-retargeted
+			(map inner-order (lambda (o) (match o
+				'(c d) (list (qpu-low-rewrite-refs c retarget-aliases rhs-alias) d)
+				o))))
+		(define stag-order (merge corr-order inner-order-retargeted))
+		/* Limit + once_limit per once-limit-rework. */
+		(define stag-limit
+			(if (nil? sub-lim) 2
+				(if (equal? sub-lim 1) 1 sub-lim)))
+		(define stag-once-limit
+			(if (nil? sub-lim) 2
+				(if (equal? sub-lim 1) 1 0)))
+		(define tagged-tname (make_scan_tagged_table
+			inner-base stag-order stag-limit inner-offset
+			(count corr-cols) stag-once-limit))
+		(define combined-je (qpu-low-and-cond join-pred-retargeted inner-where-retargeted))
+		(define new-entry
+			(list rhs-alias inner-schema tagged-tname true combined-je))
+		/* Rewrite outer's fields/condition: (rhs-alias . field-name) → field-expr */
+		(define rewritten-fields
+			(qpu-low-replace-sq-field (qpp-tuple-fields left-tuple)
+				rhs-alias field-name field-expr))
+		(define rewritten-cond
+			(qpu-low-replace-sq-field-expr (qpp-tuple-condition left-tuple)
+				rhs-alias field-name field-expr))
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema left-tuple)
+			(merge (qpp-tuple-tables left-tuple) (list new-entry))
+			rewritten-fields
+			rewritten-cond
+			(qpp-tuple-group left-tuple)
+			(qpp-tuple-having left-tuple)
+			(qpp-tuple-order left-tuple)
+			(qpp-tuple-limit left-tuple)
+			(qpp-tuple-offset left-tuple)))))
+
+(define qpu-low-replace-sq-field-expr (lambda (expr rhs-alias field-name target-expr)
+	(match expr
+		'((symbol get_column) tv _ col _)
+			(if (and (equal? tv rhs-alias) (equal? col field-name))
+				target-expr expr)
+		'((quote get_column) tv _ col _)
+			(if (and (equal? tv rhs-alias) (equal? col field-name))
+				target-expr expr)
+		(cons head args)
+			(cons (qpu-low-replace-sq-field-expr head rhs-alias field-name target-expr)
+				(map (coalesceNil args '()) (lambda (a)
+					(qpu-low-replace-sq-field-expr a rhs-alias field-name target-expr))))
+		expr)))
+
+(define qpu-low-replace-sq-field (lambda (fields rhs-alias field-name target-expr)
+	(map (coalesceNil fields '()) (lambda (pair) (match pair
+		'(fn fe) (list fn (qpu-low-replace-sq-field-expr fe rhs-alias field-name target-expr))
+		pair)))))
 
 (define qpu-low-tag-has-count-distinct? (lambda (expr) (match expr
 	(cons head args) (or
