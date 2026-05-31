@@ -685,13 +685,20 @@ converted dep-join. */
 			(define child-join (nth child-result 1))
 			/* §3.3 / FAQ §33: push outer refs into keys. With cclasses, push
 			   the SUBSTITUTED outer-ref-exprs so the keys reference inner
-			   columns the child actually provides. */
+			   columns the child actually provides. Dedupe: multiple outer
+			   refs may resolve to the same inner col via cclasses (e.g.
+			   `WHERE d.did=e.did AND d.did=e.eid` → both project d.did);
+			   without dedupe the keytable build fails with
+			   "column ... already exists". */
 			(define sub-outer-refs (qpu-substitute-exprs outer-ref-exprs repr))
 			(define sub-aggs (qpu-substitute-map-projections
 				(qpir-groupby-aggs node) repr))
 			(define sub-having (qpu-substitute-expr
 				(coalesceNil (qpir-groupby-having node) true) repr))
-			(define new-keys (merge (qpir-groupby-keys node) sub-outer-refs))
+			(define existing-keys (coalesceNil (qpir-groupby-keys node) '()))
+			(define new-keys (reduce sub-outer-refs (lambda (acc k)
+				(if (has? acc k) acc (merge acc (list k))))
+				existing-keys))
 			(define final-having (if (equal? sub-having true) nil sub-having))
 			(list (qpir-groupby new-keys sub-aggs final-having child-new) child-join))
 
