@@ -553,6 +553,77 @@ right's tables into the left's tables list and AND conditions/predicate. */
 		(qpp-tuple-limit left-tuple)
 		(qpp-tuple-offset left-tuple))))
 
+/* qpu-low-tag-inner-once-limit — for the simplest scalar-context derived
+shape, replace the inner sub-tuple's single base table tname with a
+`(scan-tagged-table ...)` carrying once_limit=2 per FAQ §20 / once-limit-
+rework. This makes legacy build_scan emit a per-scan once-promise that
+errors on the 2nd row, enforcing SQL scalar cardinality.
+
+Conservative gate (avoid the "map expects a list, got X" failures observed
+in earlier broader attempts):
+  - exactly 1 table entry in the sub
+  - tname is a string (not nested derived 7-tuple, not already-tagged)
+  - sub has no LIMIT (LIMIT 1 is its own contract handled elsewhere)
+  - sub has no aggregate-bearing fields (aggregation is per-group ≤1 row
+    anyway, and helper scans for aggregates break the simple tag) */
+(define qpu-low-tag-inner-once-limit (lambda (sub-tuple)
+	(begin
+		(define tbls (coalesceNil (qpp-tuple-tables sub-tuple) '()))
+		(define has-lim (not (nil? (qpp-tuple-limit sub-tuple))))
+		(define flds (qpp-fields-to-pairs
+			(coalesceNil (qpp-tuple-fields sub-tuple) '())))
+		(define has-agg (reduce flds (lambda (acc pair) (match pair
+			'(_ e) (or acc (qpl-expr-has-aggregate? e)
+				/* count_distinct is parser-emitted and gets rewritten to
+				   (aggregate ...) only inside untangle_query — by lower
+				   time we still see it as (count_distinct expr). Treat as
+				   aggregate so we don't tag its inner table. */
+				(qpu-low-tag-has-count-distinct? e))
+			acc)) false))
+		(if (or has-lim has-agg (not (equal? (count tbls) 1)))
+			sub-tuple
+			(begin
+				(define td (nth tbls 0))
+				(match td
+					'(td-alias td-schema td-tname td-io td-je)
+					(if (or (qpp-tuple? td-tname)
+							(and (list? td-tname) (> (count td-tname) 0)
+								(or (equal? (car td-tname) (quote scan-tagged-table))
+									(equal? (car td-tname) (symbol scan-tagged-table)))))
+						sub-tuple
+						(begin
+							(define tagged (make_scan_tagged_table td-tname '() 2 nil 0 2))
+							(define new-td (list td-alias td-schema tagged td-io td-je))
+							(define new-tbls (cons new-td (cdr tbls)))
+							(qpp-rebuild-tuple
+								(qpp-tuple-schema sub-tuple)
+								new-tbls
+								(qpp-tuple-fields sub-tuple)
+								(qpp-tuple-condition sub-tuple)
+								(qpp-tuple-group sub-tuple)
+								(qpp-tuple-having sub-tuple)
+								(qpp-tuple-order sub-tuple)
+								(qpp-tuple-limit sub-tuple)
+								(qpp-tuple-offset sub-tuple))))
+					sub-tuple))))))
+
+(define qpu-low-tag-expr-has-aggregate? (lambda (expr) (match expr
+	'((symbol aggregate) . _) true
+	'((quote aggregate) . _) true
+	(cons head args) (or (qpu-low-tag-expr-has-aggregate? head)
+		(reduce (coalesceNil args '()) (lambda (acc a)
+			(or acc (qpu-low-tag-expr-has-aggregate? a))) false))
+	false)))
+
+(define qpu-low-tag-has-count-distinct? (lambda (expr) (match expr
+	(cons head args) (or
+		(equal? head (quote count_distinct))
+		(equal? head (symbol count_distinct))
+		(qpu-low-tag-has-count-distinct? head)
+		(reduce (coalesceNil args '()) (lambda (acc a)
+			(or acc (qpu-low-tag-has-count-distinct? a))) false))
+	false)))
+
 /* qpu-low-join-wrap-derived — for a join WITH rhs-alias: wrap the right's
 7-tuple as a derived-table entry aliased rhs-alias. Outer column references
 to the right's underlying tables are retargeted to rhs-alias so they
@@ -589,8 +660,24 @@ WHERE condition (existing behavior). */
 		   (possibly synthesized) field name. */
 		(define keys-result (qpu-low-ensure-join-key-fields
 			right-tuple join-pred right-source-aliases))
-		(define right-tuple-keys (nth keys-result 0))
+		(define right-tuple-keys-raw (nth keys-result 0))
 		(define key-rename-map (nth keys-result 1))
+		/* For UNCORRELATED sq_*-aliased scalar derived: tag the inner base
+		   table with scan-tagged-table once_limit=2 so multi-row inner scans
+		   error per FAQ §20. CORRELATED scalars need partition-aware tagging
+		   (FAQ §43) — that's a later phase; for now they stay on the existing
+		   path. Uncorrelated detection: join-pred is true (no per-row
+		   correlation, scan runs once globally). */
+		(define is-scalar-rhs
+			(and (string? rhs-alias) (>= (strlen rhs-alias) 3)
+				(equal? (substr rhs-alias 0 3) "sq_")))
+		(define is-uncorrelated
+			(or (nil? join-pred) (equal? join-pred true)
+				(equal? join-pred (quote true))))
+		(define right-tuple-keys
+			(if (and is-scalar-rhs is-uncorrelated)
+				(qpu-low-tag-inner-once-limit right-tuple-keys-raw)
+				right-tuple-keys-raw))
 		(define rewritten-fields (qpu-low-rewrite-projections
 			(qpp-tuple-fields left-tuple) right-only-aliases rhs-alias))
 		(define rewritten-cond (qpu-low-rewrite-refs
