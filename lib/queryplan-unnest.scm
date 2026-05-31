@@ -629,8 +629,39 @@ correlation conjuncts that get extracted to the join condition are kept
 as-is (e.g. `(equal?? pi.k po.k)`) rather than substituted via repr. The
 groupby rule adds the outer-ref expressions to keys directly so each outer
 combo gets its own group. */
+/* qpu-rewrite-refs-to-sq-kt — for every (get_column tv ti col ci) whose
+tv matches `inner-aliases-of-sq` (the tables inside sq_X's derived), rewrite
+to (get_column sq_X false __kt_col false). This anticipates the rename that
+qpu-low-ensure-join-key-fields will apply during lower wrap-derived. Used
+when collecting cclasses from a qpir-join with rhs-alias=sq_X so the cclass
+contains the post-lower sq_X.__kt_col reference (visible at outer scope
+after hoist) instead of the deeply-buried inner ref (t.col). */
+(define qpu-rewrite-refs-to-sq-kt (lambda (expr inner-aliases sq-alias)
+	(match expr
+		'((symbol get_column) tv ti col ci)
+			(if (has? inner-aliases tv)
+				(list (quote get_column) sq-alias false
+					(concat "__kt_" col) false)
+				expr)
+		'((quote get_column) tv ti col ci)
+			(if (has? inner-aliases tv)
+				(list (quote get_column) sq-alias false
+					(concat "__kt_" col) false)
+				expr)
+		(cons head args)
+			(cons head (map (coalesceNil args '())
+				(lambda (a) (qpu-rewrite-refs-to-sq-kt a inner-aliases sq-alias))))
+		expr)))
+
 /* qpu-collect-cclasses — first pass: walk the right subtree and accumulate
-all column-equality predicates from qpir-select operators into cclasses. */
+all column-equality predicates from qpir-select operators into cclasses.
+
+For qpir-join with rhs-alias=sq_X, pre-rewrite the predicate's inner-side
+refs to sq_X.__kt_col form before adding to cclasses (FAQ §38 + §35). This
+mirrors the rename that qpu-low-ensure-join-key-fields will apply at lower
+time, so cclasses contain scope-stable refs from the moment they're collected.
+Without this, cclasses see `t.col` (buried inside sq_X's derived) and any
+substitution into outer scope produces dangling refs. */
 (define qpu-collect-cclasses (lambda (node cc)
 	(match (qpir-kind node)
 		(quote qpir-leaf)    nil
@@ -642,7 +673,19 @@ all column-equality predicates from qpir-select operators into cclasses. */
 		(quote qpir-groupby) (qpu-collect-cclasses (qpir-groupby-child node) cc)
 		(quote qpir-window)  (qpu-collect-cclasses (qpir-window-child node) cc)
 		(quote qpir-join)    (begin
-			(qpu-cc-add-from-predicate cc (qpir-join-predicate node))
+			(define rhs (qpir-join-rhs-alias node))
+			(define raw-pred (qpir-join-predicate node))
+			(define adjusted-pred
+				(if (and (string? rhs) (>= (strlen rhs) 3)
+						(equal? (substr rhs 0 3) "sq_"))
+					/* Get inner aliases (the tables that sq_X wraps) by walking
+					   the right subtree's bottom-left aliases — those are the
+					   aliases that will be renamed to sq_X at lower time. */
+					(qpu-rewrite-refs-to-sq-kt raw-pred
+						(qpu-bottom-left-aliases (qpir-join-right node))
+						rhs)
+					raw-pred))
+			(qpu-cc-add-from-predicate cc adjusted-pred)
 			(qpu-collect-cclasses (qpir-join-left node) cc)
 			(qpu-collect-cclasses (qpir-join-right node) cc))
 		nil)))
@@ -729,7 +772,16 @@ converted dep-join. */
 		   We do NOT split the join's predicate against outer-aliases here — a
 		   nested-correlation conjunct that referenced outer would have been
 		   moved to the inner-join's predicate during the INNER dep-join's
-		   processing. The OUTER walk just propagates substitution. */
+		   processing. The OUTER walk just propagates substitution.
+
+		   processing. The OUTER walk just propagates substitution. *
+		   a non-tautology predicate INTO a tautology, this is the cclasses-
+		   rediscovery bug (inner dep-join's joinExpr added a class that maps
+		   both sides to the same inner col). Preserve original predicate so
+		   inner correlation stays expressed; the outer cc-join-cond (built
+		   via qpu-cc-pick-inner-ref which prefers sq_X refs) AND the hoisting
+		   of nested sq_Y deriveds in qpu-low-join-wrap-derived together
+		   ensure the preserved refs are accessible at outer scope. */
 		(quote qpir-join) (begin
 			(define sub-pred (qpu-substitute-expr (qpir-join-predicate node) repr))
 			(define left-result (qpu-unnest-right (qpir-join-left node)
