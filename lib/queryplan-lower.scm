@@ -1018,12 +1018,18 @@ sq_Y.col map directly to (table.col) per sq_Y's projection definition. */
 		(define base-tbls (filter tbls (lambda (td)
 			(not (qpu-low-is-sq-derived-entry? td)))))
 		/* Gate: skip inline if right has barrier (GROUP BY / HAVING / agg field)
-		   OR if any nested sq_Y has barrier in its sub-tuple. */
+		   OR if any nested sq_Y has barrier in its sub-tuple
+		   OR if right has LIMIT (because per-outer LIMIT semantics requires
+		   ROW_NUMBER wrap which currently has open issues with isOuter+joinExpr
+		   cardinality — see ae65ca36e commit message; cleanest path is to
+		   preserve original wrap-derived nesting until that's resolved). */
 		(define any-sq-has-barrier
 			(reduce sq-entries (lambda (acc td) (match td
 				'(_ _ sub _ _) (or acc (qpu-low-tuple-has-barrier? sub))
 				acc)) false))
+		(define has-limit (not (nil? (qpp-tuple-limit right-tuple))))
 		(if (or (qpu-low-tuple-has-barrier? right-tuple) any-sq-has-barrier
+				has-limit
 				(equal? (count sq-entries) 0))
 			(list right-tuple '())
 			(begin
