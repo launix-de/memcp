@@ -4730,6 +4730,16 @@ seeing the correctly prefixed outer alias. */
 					   a self-contained block. */
 					(define previously_flattened_stages_present
 						(not (equal? (coalesceNil (sq_cache "groups") '()) '())))
+					/* sub-LIMIT with correlation (isOuter+joinexpr): the flatten path
+					   loses per-outer LIMIT semantics — LIMIT becomes a global stage
+					   that doesn't partition by the correlation. Force materialize
+					   for these cases (FAQ §32: materialization at "explicit
+					   materialization semantics" — per-outer LIMIT is one). */
+					(define sub_has_limit_correlated
+						(and isOuter (not (or (nil? joinexpr) (equal? joinexpr true)))
+							(not (equal? flatten_groups2 '()))
+							(reduce flatten_groups2 (lambda (acc stage)
+								(or acc (not (nil? (stage_limit_val stage))))) false)))
 					(define use_materialize (or
 						subquery_has_window
 						unsupported_groups
@@ -4739,7 +4749,8 @@ seeing the correctly prefixed outer alias. */
 						(and (not (equal? flatten_groups2 '())) outer_has_group_stage)
 						(and (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))
 						(and flatten_has_helper_backed_projection outer_uses_subquery_group_boundary)
-						(and (not (equal? flatten_groups2 '())) previously_flattened_stages_present)))
+						(and (not (equal? flatten_groups2 '())) previously_flattened_stages_present)
+						sub_has_limit_correlated))
 					/* Window-function LIMIT pushdown */
 					(define mat_limit nil)
 					(if subquery_has_window (begin
