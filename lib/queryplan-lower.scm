@@ -1142,6 +1142,26 @@ Skips when:
 								(equal? (substr alias 0 11) "__limit_rn_"))))))))
 		false)))
 
+/* qpu-low-find-partition-table-alias — when partition cols all belong to
+ONE table alias, return that alias. Otherwise nil (mixed table partition). */
+(define qpu-low-find-partition-table-alias (lambda (inner-cols)
+	(if (equal? (count inner-cols) 0) nil
+		(begin
+			(define first-tv (nth (nth inner-cols 0) 0))
+			(define all-same (reduce inner-cols (lambda (acc rp) (match rp
+				'(tv col) (and acc (equal? tv first-tv))
+				false)) true))
+			(if all-same first-tv nil)))))
+
+/* qpu-low-table-schema-of — given an alias and tables list, return the
+table-spec (alias schema tname isOuter joinExpr) for that alias, or nil. */
+(define qpu-low-table-schema-of (lambda (alias tbls)
+	(reduce tbls (lambda (acc td)
+		(if (not (nil? acc)) acc
+			(if (or (nil? td) (< (count td) 1)) nil
+				(if (equal? (nth td 0) alias) td nil))))
+		nil)))
+
 (define qpu-low-wrap-limit-with-rownumber (lambda (right-tuple join-pred rename-map)
 	(begin
 		(define lim (qpp-tuple-limit right-tuple))
@@ -1155,63 +1175,111 @@ Skips when:
 					(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
 				(define inner-cols (qpu-low-extract-inner-cols-from-pred
 					join-pred inner-aliases))
-				(if (equal? (count inner-cols) 0) right-tuple
+				(define partition-alias (qpu-low-find-partition-table-alias inner-cols))
+				(if (or (equal? (count inner-cols) 0) (nil? partition-alias))
+					right-tuple
 					(begin
-						/* Build ROW_NUMBER window over inner correlation cols.
-						   If sub has no ORDER BY, use partition cols as synthetic
-						   ORDER BY — legacy's ORC window path requires has_over_order
-						   to dispatch correctly (queryplan.scm:8211). Without this,
-						   ROW_NUMBER without order falls to LAG/LEAD path → error. */
-						(define partition-exprs (map inner-cols (lambda (rp) (match rp
-							'(tv col) (list (quote get_column) tv false col false)
-							rp))))
-						(define sub-order (coalesceNil (qpp-tuple-order right-tuple) '()))
-						(define effective-order
-							(if (> (count sub-order) 0) sub-order
-								/* Default: order by partition cols ASC. Result is
-								   per-partition arbitrary-but-deterministic. */
-								(map partition-exprs (lambda (p)
-									(list p (quote <))))))
-						(define window-expr (list (quote window_func) "ROW_NUMBER" '()
-							(list partition-exprs effective-order)))
-						/* Build inner-sub with original fields + __rn projection. */
-						(define orig-fields (qpp-fields-to-pairs
-							(coalesceNil (qpp-tuple-fields right-tuple) '())))
-						(define inner-fields-flat
-							(qpp-fields-to-flat
-								(merge orig-fields (list (list "__rn" window-expr)))))
-						(define inner-sub (qpp-rebuild-tuple
-							(qpp-tuple-schema right-tuple)
-							(qpp-tuple-tables right-tuple)
-							inner-fields-flat
-							(qpp-tuple-condition right-tuple)
-							(qpp-tuple-group right-tuple)
-							(qpp-tuple-having right-tuple)
-							nil    /* order moved into window */
-							nil    /* limit lifted */
-							nil))  /* offset lifted */
-						(define wrap-alias (qpu-low-fresh-rn-alias))
-						(define schema (qpp-tuple-schema right-tuple))
-						(define off (qpp-tuple-offset right-tuple))
-						(define rn-ref (list (quote get_column) wrap-alias false "__rn" false))
-						(define rn-cond
-							(if (nil? off)
-								(list (quote <=) rn-ref lim)
-								(list (quote and)
-									(list (quote >) rn-ref off)
-									(list (quote <=) rn-ref (list (quote +) lim off)))))
-						/* Outer fields reference the wrap-alias for each original field. */
-						(define outer-fields-flat
-							(qpp-fields-to-flat
-								(map orig-fields (lambda (pair) (match pair
-									'(n e) (list n (list (quote get_column) wrap-alias false n false))
-									pair)))))
-						(qpp-rebuild-tuple
-							schema
-							(list (list wrap-alias schema inner-sub false nil))
-							outer-fields-flat
-							rn-cond
-							nil nil nil nil nil))))))))
+						/* Multi-table-safe RESTRUCTURE per FAQ §43:
+						   Instead of putting the ROW_NUMBER over the JOINED right-tuple
+						   (which legacy doesn't support multi-table), wrap ONLY the
+						   partition-owning table as a single-table derived with the
+						   window, replace its entry in right-tuple, and lift the LIMIT
+						   to a `rn <= k` filter at right-tuple level. The OTHER tables
+						   remain flat siblings, just joining to the wrapped one. */
+						(define partition-td (qpu-low-table-schema-of partition-alias tbls))
+						(if (nil? partition-td) right-tuple
+							(begin
+								(match partition-td '(pa-alias pa-schema pa-tname pa-isOuter pa-joinExpr)
+									(begin
+										/* Build single-table sub-tuple for the partition
+										   table with __rn projection.
+										   Fields: all the partition cols (passthrough) +
+										           __rn = ROW_NUMBER over those.
+										   Other cols of pa-alias accessed by right-tuple's
+										   fields/cond also need passthrough — collect them. */
+										(define all-refs (merge
+											(qpl-extract-col-refs-skip-nested
+												(coalesceNil (qpp-tuple-condition right-tuple) true))
+											(reduce (qpp-fields-to-pairs
+													(coalesceNil (qpp-tuple-fields right-tuple) '()))
+												(lambda (acc pair) (match pair
+													'(_ e) (merge acc (qpl-extract-col-refs-skip-nested e))
+													acc)) '())))
+										(define pa-cols (reduce all-refs (lambda (acc rp) (match rp
+											'(tv col) (if (and (equal? tv pa-alias) (not (has? acc col)))
+												(merge acc (list col)) acc)
+											acc)) '()))
+										/* Also include join-pred refs to pa-alias (for outer joinExpr). */
+										(define jp-pa-cols (reduce
+											(qpl-extract-col-refs-skip-nested join-pred)
+											(lambda (acc rp) (match rp
+												'(tv col) (if (and (equal? tv pa-alias) (not (has? acc col)))
+													(merge acc (list col)) acc)
+												acc)) pa-cols))
+										(define final-pa-cols
+											(if (equal? (count jp-pa-cols) 0)
+												/* fallback: at least project the partition cols */
+												(map inner-cols (lambda (rp) (match rp
+													'(_ col) col rp)))
+												jp-pa-cols))
+										/* Build partition expression. */
+										(define partition-exprs (map inner-cols (lambda (rp) (match rp
+											'(tv col) (list (quote get_column) tv false col false)
+											rp))))
+										(define sub-order (coalesceNil (qpp-tuple-order right-tuple) '()))
+										(define effective-order
+											(if (> (count sub-order) 0) sub-order
+												(map partition-exprs (lambda (p) (list p (quote <))))))
+										(define window-expr (list (quote window_func) "ROW_NUMBER" '()
+											(list partition-exprs effective-order)))
+										/* Single-table sub: partition-table + projections + __rn. */
+										(define pa-fields-pairs
+											(merge
+												(map final-pa-cols (lambda (col)
+													(list col (list (quote get_column) pa-alias false col false))))
+												(list (list "__rn" window-expr))))
+										(define pa-fields-flat (qpp-fields-to-flat pa-fields-pairs))
+										(define pa-sub (qpp-rebuild-tuple
+											pa-schema
+											(list (list pa-alias pa-schema pa-tname pa-isOuter pa-joinExpr))
+											pa-fields-flat
+											true   /* sub WHERE = true (no filter inside) */
+											nil nil nil nil nil))
+										(define wrap-alias (qpu-low-fresh-rn-alias))
+										/* Replace pa-alias's entry in right-tuple's tables with
+										   the wrapped derived, KEEPING the same alias so refs to
+										   pa-alias.col still resolve via the new derived (which
+										   projects those cols by name). */
+										(define new-tbls
+											(map tbls (lambda (td)
+												(if (or (nil? td) (< (count td) 1)) td
+													(if (equal? (nth td 0) pa-alias)
+														(list pa-alias pa-schema pa-sub pa-isOuter pa-joinExpr)
+														td)))))
+										/* Add rn-filter to right-tuple's cond. */
+										(define off (qpp-tuple-offset right-tuple))
+										(define rn-ref (list (quote get_column) pa-alias false "__rn" false))
+										(define rn-cond
+											(if (nil? off)
+												(list (quote <=) rn-ref lim)
+												(list (quote and)
+													(list (quote >) rn-ref off)
+													(list (quote <=) rn-ref (list (quote +) lim off)))))
+										(define new-cond
+											(qpu-low-and-cond
+												(qpp-tuple-condition right-tuple)
+												rn-cond))
+										(qpp-rebuild-tuple
+											(qpp-tuple-schema right-tuple)
+											new-tbls
+											(qpp-tuple-fields right-tuple)
+											new-cond
+											(qpp-tuple-group right-tuple)
+											(qpp-tuple-having right-tuple)
+											nil      /* order moved into window */
+											nil      /* limit replaced by rn-filter */
+											nil))    /* offset replaced by rn-filter */
+									right-tuple)))))))))))
 
 /* qpu-low-join-wrap-derived — for a join WITH rhs-alias: wrap the right's
 7-tuple as a derived-table entry aliased rhs-alias. Outer column references
@@ -1242,19 +1310,15 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				(reduce inline-rename-map (lambda (acc pair) (match pair
 					'(sa pm) (qpu-low-rewrite-sq-refs-to-inner acc sa pm)
 					acc)) join-pred-raw)))
-		/* FAQ §43 per-outer LIMIT for inline-merged sq_X: when right has
-		   LIMIT k post inline-merge, replace with ROW_NUMBER PARTITION BY
-		   inner correlation cols. Skip when outer (left-tuple) has aggregate
-		   fields (MAX/SUM/COUNT over the scalar) — the aggregate collapses
-		   the multiple outer rows, making per-outer LIMIT equivalent to
-		   global LIMIT, and the extra window wrap breaks legacy's aggregate
-		   evaluation. */
-		(define outer-has-agg
-			(qpu-low-tuple-has-aggregate-field? left-tuple))
-		(define right-tuple
-			(if outer-has-agg right-merged
-				(qpu-low-wrap-limit-with-rownumber
-					right-merged join-pred inline-rename-map)))
+		/* FAQ §43 per-outer LIMIT: scaffold in qpu-low-wrap-limit-with-rownumber
+		   (and qpu-low-find-partition-table-alias for the multi-table-safe
+		   restructure), currently DISABLED because the restructured approach
+		   (wrap partition table as single-table derived with ROW_NUMBER, keep
+		   others flat) produces correct IR but the LEFT JOIN of outer to sq_X
+		   doesn't filter by joinExpr per-outer — yields N×M cross product
+		   instead of LEFT JOIN with NULL-extension. Needs deeper integration
+		   with legacy's isOuter+joinExpr evaluation path. */
+		(define right-tuple right-merged)
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
 		/* Outer's tables (LEFT) — when an alias appears in BOTH outer and
