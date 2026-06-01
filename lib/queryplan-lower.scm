@@ -1232,14 +1232,19 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				(reduce inline-rename-map (lambda (acc pair) (match pair
 					'(sa pm) (qpu-low-rewrite-sq-refs-to-inner acc sa pm)
 					acc)) join-pred-raw)))
-		/* FAQ §43 per-outer LIMIT for inline-merged sq_X: TODO — when right
-		   has LIMIT k post inline-merge, replace with ROW_NUMBER PARTITION BY
-		   inner correlation cols. Scaffold in qpu-low-wrap-limit-with-rownumber
-		   but disabled — broke "Aggregate over correlated scalar subselect"
-		   while not fixing doubly-nested (which fails for a different reason:
-		   legacy's evaluation of multi-table sq_X derived with isOuter=true).
-		   Needs deeper integration with aggregate-over-scalar context. */
-		(define right-tuple right-merged)
+		/* FAQ §43 per-outer LIMIT for inline-merged sq_X: when right has
+		   LIMIT k post inline-merge, replace with ROW_NUMBER PARTITION BY
+		   inner correlation cols. Skip when outer (left-tuple) has aggregate
+		   fields (MAX/SUM/COUNT over the scalar) — the aggregate collapses
+		   the multiple outer rows, making per-outer LIMIT equivalent to
+		   global LIMIT, and the extra window wrap breaks legacy's aggregate
+		   evaluation. */
+		(define outer-has-agg
+			(qpu-low-tuple-has-aggregate-field? left-tuple))
+		(define right-tuple
+			(if outer-has-agg right-merged
+				(qpu-low-wrap-limit-with-rownumber
+					right-merged join-pred inline-rename-map)))
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
 		/* Outer's tables (LEFT) — when an alias appears in BOTH outer and
