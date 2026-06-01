@@ -1081,6 +1081,128 @@ sq_Y.col map directly to (table.col) per sq_Y's projection definition. */
 						(qpp-tuple-offset right-tuple))
 					rename-map))))))
 
+/* qpu-low-limit-rownumber-counter / qpu-low-fresh-rn-alias —
+generate unique alias names for the per-outer LIMIT ROW_NUMBER wrap. */
+(define qpu-low-limit-rownumber-counter (newsession))
+(qpu-low-limit-rownumber-counter "n" 0)
+(define qpu-low-fresh-rn-alias (lambda () (begin
+	(qpu-low-limit-rownumber-counter "n" (+ (qpu-low-limit-rownumber-counter "n") 1))
+	(concat "__limit_rn_" (string (qpu-low-limit-rownumber-counter "n"))))))
+
+/* qpu-low-extract-inner-cols-from-pred — find (tv col) refs in expr where
+tv is one of inner-aliases. Returns deduped list. */
+(define qpu-low-extract-inner-cols-from-pred (lambda (expr inner-aliases)
+	(begin
+		(define refs (qpl-extract-col-refs-skip-nested expr))
+		(define inner-refs (filter refs (lambda (rp) (match rp
+			'(tv col) (has? inner-aliases tv)
+			false))))
+		(reduce inner-refs (lambda (acc rp)
+			(if (has? acc rp) acc (merge acc (list rp))))
+			'()))))
+
+/* qpu-low-wrap-limit-with-rownumber — if right-tuple has LIMIT k AND inline-
+merge happened (rename-map non-empty), wrap the right-tuple in a ROW_NUMBER
+per FAQ §43 so LIMIT is per-outer-binding. PARTITION BY uses the inner
+correlation cols extracted from join-pred (FAQ §35 canonical names).
+
+Inner correlation cols = (tv col) refs in join-pred where tv is one of
+right-tuple's tables (= inner table aliases).
+
+Transformation:
+  right-tuple:
+    tables T, fields F, cond C, LIMIT k
+  →
+  wrapped:
+    tables: [(__rn_wrap derived(
+      tables T,
+      fields F + (__rn = ROW_NUMBER OVER (PARTITION BY <inner cols>)),
+      cond C,
+      no order/limit
+    ))]
+    fields: F (rewritten to refer to __rn_wrap)
+    cond: __rn_wrap.__rn <= k
+    no limit
+
+Skips when:
+  - LIMIT is nil
+  - No inline-merge happened (no nested deriveds were flattened)
+  - Inner cols can't be extracted from join-pred
+*/
+(define qpu-low-tables-already-wrapped? (lambda (tbls)
+	(reduce tbls (lambda (acc td)
+		(or acc
+			(if (or (nil? td) (< (count td) 1)) false
+				(begin
+					(define alias (nth td 0))
+					(and (string? alias)
+						(or (and (>= (strlen alias) 13)
+								(equal? (substr alias 0 13) "__limit_wrap_"))
+							(and (>= (strlen alias) 11)
+								(equal? (substr alias 0 11) "__limit_rn_"))))))))
+		false)))
+
+(define qpu-low-wrap-limit-with-rownumber (lambda (right-tuple join-pred rename-map)
+	(begin
+		(define lim (qpp-tuple-limit right-tuple))
+		(define tbls (qpp-tuple-tables right-tuple))
+		(if (or (nil? lim) (equal? (count rename-map) 0)
+				/* Already wrapped by lift-time ROW_NUMBER — adding another
+				   wrap would double the partition logic. */
+				(qpu-low-tables-already-wrapped? tbls)) right-tuple
+			(begin
+				(define inner-aliases (map tbls (lambda (td)
+					(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+				(define inner-cols (qpu-low-extract-inner-cols-from-pred
+					join-pred inner-aliases))
+				(if (equal? (count inner-cols) 0) right-tuple
+					(begin
+						/* Build ROW_NUMBER window over inner correlation cols. */
+						(define partition-exprs (map inner-cols (lambda (rp) (match rp
+							'(tv col) (list (quote get_column) tv false col false)
+							rp))))
+						(define sub-order (coalesceNil (qpp-tuple-order right-tuple) '()))
+						(define window-expr (list (quote window_func) "ROW_NUMBER" '()
+							(list partition-exprs sub-order)))
+						/* Build inner-sub with original fields + __rn projection. */
+						(define orig-fields (qpp-fields-to-pairs
+							(coalesceNil (qpp-tuple-fields right-tuple) '())))
+						(define inner-fields-flat
+							(qpp-fields-to-flat
+								(merge orig-fields (list (list "__rn" window-expr)))))
+						(define inner-sub (qpp-rebuild-tuple
+							(qpp-tuple-schema right-tuple)
+							(qpp-tuple-tables right-tuple)
+							inner-fields-flat
+							(qpp-tuple-condition right-tuple)
+							(qpp-tuple-group right-tuple)
+							(qpp-tuple-having right-tuple)
+							nil    /* order moved into window */
+							nil    /* limit lifted */
+							nil))  /* offset lifted */
+						(define wrap-alias (qpu-low-fresh-rn-alias))
+						(define schema (qpp-tuple-schema right-tuple))
+						(define off (qpp-tuple-offset right-tuple))
+						(define rn-ref (list (quote get_column) wrap-alias false "__rn" false))
+						(define rn-cond
+							(if (nil? off)
+								(list (quote <=) rn-ref lim)
+								(list (quote and)
+									(list (quote >) rn-ref off)
+									(list (quote <=) rn-ref (list (quote +) lim off)))))
+						/* Outer fields reference the wrap-alias for each original field. */
+						(define outer-fields-flat
+							(qpp-fields-to-flat
+								(map orig-fields (lambda (pair) (match pair
+									'(n e) (list n (list (quote get_column) wrap-alias false n false))
+									pair)))))
+						(qpp-rebuild-tuple
+							schema
+							(list (list wrap-alias schema inner-sub false nil))
+							outer-fields-flat
+							rn-cond
+							nil nil nil nil nil))))))))
+
 /* qpu-low-join-wrap-derived — for a join WITH rhs-alias: wrap the right's
 7-tuple as a derived-table entry aliased rhs-alias. Outer column references
 to the right's underlying tables are retargeted to rhs-alias so they
@@ -1101,7 +1223,7 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 (define qpu-low-join-wrap-derived (lambda (left-tuple right-tuple-raw join-pred-raw rhs-alias join-type)
 	(begin
 		(define inline-result (qpu-low-inline-merge-sq-derived-with-map right-tuple-raw))
-		(define right-tuple (nth inline-result 0))
+		(define right-merged (nth inline-result 0))
 		(define inline-rename-map (nth inline-result 1))
 		/* Also apply the rename-map to the incoming join-pred so any refs to
 		   the inlined sq_Y.__kt_col map to the underlying inner col. */
@@ -1110,6 +1232,14 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				(reduce inline-rename-map (lambda (acc pair) (match pair
 					'(sa pm) (qpu-low-rewrite-sq-refs-to-inner acc sa pm)
 					acc)) join-pred-raw)))
+		/* FAQ §43 per-outer LIMIT for inline-merged sq_X: TODO — when right
+		   has LIMIT k post inline-merge, replace with ROW_NUMBER PARTITION BY
+		   inner correlation cols. Scaffold in qpu-low-wrap-limit-with-rownumber
+		   but disabled — broke "Aggregate over correlated scalar subselect"
+		   while not fixing doubly-nested (which fails for a different reason:
+		   legacy's evaluation of multi-table sq_X derived with isOuter=true).
+		   Needs deeper integration with aggregate-over-scalar context. */
+		(define right-tuple right-merged)
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
 		/* Outer's tables (LEFT) — when an alias appears in BOTH outer and
