@@ -933,6 +933,154 @@ rewrite from leaking into a sibling/outer scope's predicate. */
 			(or acc (qpu-low-tag-has-count-distinct? a))) false))
 	false)))
 
+/* qpu-low-is-sq-derived-entry? — true when a table-spec is a sq_X-aliased
+derived sub-tuple (came from inner dep-join lowering). */
+(define qpu-low-is-sq-derived-entry? (lambda (td)
+	(if (or (nil? td) (< (count td) 3)) false
+		(begin
+			(define alias (nth td 0))
+			(define tname (nth td 2))
+			(and (string? alias) (>= (strlen alias) 3)
+				(equal? (substr alias 0 3) "sq_")
+				(qpp-tuple? tname))))))
+
+/* qpu-low-inline-merge-sq-derived — FAQ §32 flatten step. When the right-tuple
+contains a nested sq_Y-aliased derived (from inner dep-join lowering), MERGE
+sq_Y's tables/cond/fields INTO the right-tuple itself, eliminating the
+nesting. This is the "inline as default" approach per FAQ:
+
+"Ordinary derived tables should be flattened; materialization is reserved
+for semantic or physical barriers such as group caches, shared CTE/DAG
+roots, conflicting window orders, and explicit materialization semantics."
+
+For each nested sq_Y entry (sq_Y schema sub-7tuple isOuter joinExpr):
+  - Pull sq_Y.sub.tables into right-tuple.tables (alongside existing ones)
+  - sq_Y's joinExpr becomes part of right-tuple.cond
+  - sq_Y's projections (fields) become referenceable via the inner tables
+    they come from — refs to sq_Y.col rewrite to sq_Y-projection-source.col
+
+Gate: only inline when right-tuple has NO group/having/aggregate (those
+are real barriers). Aggregate gate matches inline-flat eligibility.
+
+Returns (merged-right-tuple, sq-alias-to-source-rename-map) where the rename
+map tells outer how to rewrite refs to sq_Y.col after inlining. */
+
+(define qpu-low-tuple-has-aggregate-field? (lambda (t)
+	(reduce (qpp-fields-to-pairs (coalesceNil (qpp-tuple-fields t) '()))
+		(lambda (acc pair) (match pair
+			'(_ e) (or acc (qpl-expr-has-aggregate? e))
+			acc)) false)))
+
+(define qpu-low-tuple-has-barrier? (lambda (t)
+	(or
+		/* has GROUP BY */
+		(> (count (coalesceNil (qpp-tuple-group t) '())) 0)
+		/* has HAVING */
+		(not (nil? (qpp-tuple-having t)))
+		/* has aggregate field */
+		(qpu-low-tuple-has-aggregate-field? t))))
+
+/* qpu-low-rewrite-sq-refs-to-inner — rewrite refs to sq_Y.col where col is a
+projection name in sq_Y, replacing with the underlying expression from sq_Y's
+fields list. After inlining, sq_Y's tables are at the same level, so refs to
+sq_Y.col map directly to (table.col) per sq_Y's projection definition. */
+(define qpu-low-rewrite-sq-refs-to-inner (lambda (expr sq-alias projections-map)
+	(match expr
+		'((symbol get_column) tv ti col ci)
+			(if (equal? tv sq-alias)
+				(begin
+					(define replacement (qpu-low-projmap-lookup projections-map col))
+					(if (nil? replacement) expr replacement))
+				expr)
+		'((quote get_column) tv ti col ci)
+			(if (equal? tv sq-alias)
+				(begin
+					(define replacement (qpu-low-projmap-lookup projections-map col))
+					(if (nil? replacement) expr replacement))
+				expr)
+		(cons head args)
+			(cons head (map (coalesceNil args '())
+				(lambda (a) (qpu-low-rewrite-sq-refs-to-inner a sq-alias projections-map))))
+		expr)))
+
+(define qpu-low-projmap-lookup (lambda (map col)
+	(reduce map (lambda (acc pair) (match pair
+		'(name expr) (if (equal? name col) expr acc)
+		acc)) nil)))
+
+(define qpu-low-inline-merge-sq-derived (lambda (right-tuple)
+	(nth (qpu-low-inline-merge-sq-derived-with-map right-tuple) 0)))
+
+(define qpu-low-inline-merge-sq-derived-with-map (lambda (right-tuple)
+	(begin
+		(define tbls (coalesceNil (qpp-tuple-tables right-tuple) '()))
+		(define sq-entries (filter tbls qpu-low-is-sq-derived-entry?))
+		(define base-tbls (filter tbls (lambda (td)
+			(not (qpu-low-is-sq-derived-entry? td)))))
+		/* Gate: skip inline if right has barrier (GROUP BY / HAVING / agg field)
+		   OR if any nested sq_Y has barrier in its sub-tuple. */
+		(define any-sq-has-barrier
+			(reduce sq-entries (lambda (acc td) (match td
+				'(_ _ sub _ _) (or acc (qpu-low-tuple-has-barrier? sub))
+				acc)) false))
+		(if (or (qpu-low-tuple-has-barrier? right-tuple) any-sq-has-barrier
+				(equal? (count sq-entries) 0))
+			(list right-tuple '())
+			(begin
+				/* For each sq_Y entry, collect its tables + cond + fields. */
+				(define merge-acc (reduce sq-entries (lambda (acc entry) (match entry
+					'(sq-alias _ sub _ joinExpr)
+					(begin
+						(define added-tbls (coalesceNil (qpp-tuple-tables sub) '()))
+						(define sub-cond (qpp-tuple-condition sub))
+						(define sub-fields-pairs (qpp-fields-to-pairs
+							(coalesceNil (qpp-tuple-fields sub) '())))
+						(list
+							/* accumulated tables */
+							(merge (nth acc 0) added-tbls)
+							/* accumulated conds (AND of joinExpr + sub.cond + ...) */
+							(qpu-low-and-cond
+								(qpu-low-and-cond (nth acc 1)
+									(if (or (nil? joinExpr) (equal? joinExpr true)) nil joinExpr))
+								(if (or (nil? sub-cond) (equal? sub-cond true)) nil sub-cond))
+							/* accumulated rename map: (sq-alias . projection-map) */
+							(merge (nth acc 2)
+								(list (list sq-alias sub-fields-pairs)))))
+					acc)) (list '() nil '())))
+				(define added-tables (nth merge-acc 0))
+				(define added-cond-raw (nth merge-acc 1))
+				(define rename-map (nth merge-acc 2))
+				/* Apply rename-map to right's existing fields/cond AND to the
+				   added-cond (which contains sq_Y.col refs from joinExpr that
+				   need to be rewritten to underlying inner refs). */
+				(define rewrite-expr (lambda (e)
+					(reduce rename-map (lambda (acc pair) (match pair
+						'(sa pm) (qpu-low-rewrite-sq-refs-to-inner acc sa pm)
+						acc)) e)))
+				(define added-cond (if (nil? added-cond-raw) nil (rewrite-expr added-cond-raw)))
+				(define new-fields
+					(map (qpp-fields-to-pairs (coalesceNil (qpp-tuple-fields right-tuple) '()))
+						(lambda (pair) (match pair
+							'(n e) (list n (rewrite-expr e))
+							pair))))
+				(define new-fields-flat (qpp-fields-to-flat new-fields))
+				(define new-cond
+					(qpu-low-and-cond
+						(rewrite-expr (qpp-tuple-condition right-tuple))
+						added-cond))
+				(list
+					(qpp-rebuild-tuple
+						(qpp-tuple-schema right-tuple)
+						(merge base-tbls added-tables)
+						new-fields-flat
+						new-cond
+						(qpp-tuple-group right-tuple)
+						(qpp-tuple-having right-tuple)
+						(qpp-tuple-order right-tuple)
+						(qpp-tuple-limit right-tuple)
+						(qpp-tuple-offset right-tuple))
+					rename-map))))))
+
 /* qpu-low-join-wrap-derived — for a join WITH rhs-alias: wrap the right's
 7-tuple as a derived-table entry aliased rhs-alias. Outer column references
 to the right's underlying tables are retargeted to rhs-alias so they
@@ -946,9 +1094,22 @@ join predicate becomes the joinExpr (so per-key misses get NULL-extended,
 not filtered out).
 
 For qpir-join-type = inner: isOuter=false; predicate goes into the outer's
-WHERE condition (existing behavior). */
-(define qpu-low-join-wrap-derived (lambda (left-tuple right-tuple join-pred rhs-alias join-type)
+WHERE condition (existing behavior).
+
+Pre-step (FAQ §32 flatten): if right-tuple has nested sq_Y deriveds,
+INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
+(define qpu-low-join-wrap-derived (lambda (left-tuple right-tuple-raw join-pred-raw rhs-alias join-type)
 	(begin
+		(define inline-result (qpu-low-inline-merge-sq-derived-with-map right-tuple-raw))
+		(define right-tuple (nth inline-result 0))
+		(define inline-rename-map (nth inline-result 1))
+		/* Also apply the rename-map to the incoming join-pred so any refs to
+		   the inlined sq_Y.__kt_col map to the underlying inner col. */
+		(define join-pred
+			(if (equal? (count inline-rename-map) 0) join-pred-raw
+				(reduce inline-rename-map (lambda (acc pair) (match pair
+					'(sa pm) (qpu-low-rewrite-sq-refs-to-inner acc sa pm)
+					acc)) join-pred-raw)))
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
 		/* Outer's tables (LEFT) — when an alias appears in BOTH outer and
