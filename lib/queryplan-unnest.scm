@@ -783,7 +783,14 @@ converted dep-join. */
 		   of nested sq_Y deriveds in qpu-low-join-wrap-derived together
 		   ensure the preserved refs are accessible at outer scope. */
 		(quote qpir-join) (begin
-			(define sub-pred (qpu-substitute-expr (qpir-join-predicate node) repr))
+			(define raw-sub-pred (qpu-substitute-expr (qpir-join-predicate node) repr))
+			/* Simplify: drop tautology conjuncts (x = x post-substitution).
+			   Per FAQ §38 trivial dep-join rule: when all outer refs are equi-
+			   bound, the predicate becomes a tautology and the dep-join is
+			   converted to a plain join. The lower pass already handles join
+			   predicate = true as a cross-product; keeping tautology conjuncts
+			   in the predicate just clutters the joinExpr without semantic effect. */
+			(define sub-pred (qpu-simplify-predicate raw-sub-pred))
 			(define left-result (qpu-unnest-right (qpir-join-left node)
 				outer-aliases outer-ref-exprs repr))
 			(define right-result (qpu-unnest-right (qpir-join-right node)
