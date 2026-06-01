@@ -1157,13 +1157,23 @@ Skips when:
 					join-pred inner-aliases))
 				(if (equal? (count inner-cols) 0) right-tuple
 					(begin
-						/* Build ROW_NUMBER window over inner correlation cols. */
+						/* Build ROW_NUMBER window over inner correlation cols.
+						   If sub has no ORDER BY, use partition cols as synthetic
+						   ORDER BY — legacy's ORC window path requires has_over_order
+						   to dispatch correctly (queryplan.scm:8211). Without this,
+						   ROW_NUMBER without order falls to LAG/LEAD path → error. */
 						(define partition-exprs (map inner-cols (lambda (rp) (match rp
 							'(tv col) (list (quote get_column) tv false col false)
 							rp))))
 						(define sub-order (coalesceNil (qpp-tuple-order right-tuple) '()))
+						(define effective-order
+							(if (> (count sub-order) 0) sub-order
+								/* Default: order by partition cols ASC. Result is
+								   per-partition arbitrary-but-deterministic. */
+								(map partition-exprs (lambda (p)
+									(list p (quote <))))))
 						(define window-expr (list (quote window_func) "ROW_NUMBER" '()
-							(list partition-exprs sub-order)))
+							(list partition-exprs effective-order)))
 						/* Build inner-sub with original fields + __rn projection. */
 						(define orig-fields (qpp-fields-to-pairs
 							(coalesceNil (qpp-tuple-fields right-tuple) '())))
