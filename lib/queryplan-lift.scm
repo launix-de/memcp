@@ -886,6 +886,13 @@ pointless (NULL coalesce NULL = NULL). */
 						(begin
 							(define inner (nth agg-info 0))
 							(define neutral (nth agg-info 2))
+							/* Skip COALESCE wrap when sub has HAVING — HAVING can
+							   filter the group to empty, in which case SQL spec
+							   says scalar = NULL. COALESCE-to-neutral would convert
+							   NULL to 0 for COUNT — wrong per SQL. */
+							(define sub-having (qpp-tuple-having sub))
+							(if (and (not (nil? sub-having)) (not (equal? sub-having true)))
+								nil
 							/* Only return the neutral for COUNT-LIKE aggregates
 							   where the inner expression yields 0/1 (non-NULL):
 							     COUNT(*)    inner = 1
@@ -897,7 +904,7 @@ pointless (NULL coalesce NULL = NULL). */
 							   does NOT add COALESCE. */
 							(if (qpl-is-count-like-inner? inner)
 								neutral
-								nil)))))))))
+								nil))))))))))
 
 /* qpl-is-count-like-inner? — true if the aggregate's `inner` expression is
 the COUNT(*) constant 1 or the parser-emitted COUNT(expr) pattern

@@ -4834,8 +4834,19 @@ seeing the correctly prefixed outer alias. */
 								(list mat_init)))
 							(define mat_schema_def
 								(register_materialized_subquery_metadata mat_source fields2 outer_uses_subquery_group_boundary))
+							/* Sub may produce 0 rows when ANY stage has HAVING filter
+							   (which can filter all groups out). Outer scalar should
+							   get NULL in that case → force isOuter=true so the
+							   cache-scan emits NULL row on empty. */
+							(define _mat_can_be_empty
+								(reduce (coalesceNil groups2 '()) (lambda (acc stage)
+									(or acc
+										(begin
+											(define sh (stage_having_expr stage))
+											(and (not (nil? sh)) (not (equal? sh true)))))) false))
+							(define _mat_isOuter (if _mat_can_be_empty true isOuter))
 							(list
-								(list (list id schemax mat_source isOuter joinexpr))
+								(list (list id schemax mat_source _mat_isOuter joinexpr))
 								'()
 								true
 								(list id (merge_schema_fields_unique (list mat_schema_def)))
