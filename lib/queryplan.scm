@@ -4742,6 +4742,37 @@ seeing the correctly prefixed outer alias. */
 							(not (equal? flatten_groups2 '()))
 							(reduce flatten_groups2 (lambda (acc stage)
 								(or acc (not (nil? (stage_limit_val stage))))) false)))
+					/* Extract correlation pairs from joinexpr: each (equal?? outer inner)
+					   conjunct gives one outer-source. The outer ref must be a
+					   get_column with non-nil tv (legitimate outer alias). The inner
+					   side is the inside-sub col reference (after alias rewriting). */
+					(define extract_outer_source_from_conj (lambda (conj)
+						(match conj
+							'((symbol equal??) lhs rhs) (extract_outer_source_pair lhs rhs)
+							'((quote equal??)  lhs rhs) (extract_outer_source_pair lhs rhs)
+							'((symbol =)       lhs rhs) (extract_outer_source_pair lhs rhs)
+							'((quote =)        lhs rhs) (extract_outer_source_pair lhs rhs)
+							nil)))
+					(define extract_outer_source_pair (lambda (lhs rhs)
+						(begin
+							(define li (match lhs
+								'((symbol get_column) tv _ col _) (if (and (not (nil? tv)) (not (equal? tv id))) (list tv col) nil)
+								'((quote get_column) tv _ col _) (if (and (not (nil? tv)) (not (equal? tv id))) (list tv col) nil)
+								nil))
+							(define ri (match rhs
+								'((symbol get_column) tv _ col _) (if (and (not (nil? tv)) (not (equal? tv id))) (list tv col) nil)
+								'((quote get_column) tv _ col _) (if (and (not (nil? tv)) (not (equal? tv id))) (list tv col) nil)
+								nil))
+							/* If lhs is outer-ref (not id alias) and rhs is id-ref, return (outer-tv outer-col rhs). */
+							(if (and (not (nil? li)) (nil? ri))
+								(list (nth li 0) (nth li 1) rhs)
+								(if (and (not (nil? ri)) (nil? li))
+									(list (nth ri 0) (nth ri 1) lhs)
+									nil)))))
+					(define joinexpr_outer_sources
+						(if (or (nil? joinexpr) (equal? joinexpr true)) '()
+							(filter (map (flatten_and_terms joinexpr) extract_outer_source_from_conj)
+								(lambda (s) (not (nil? s))))))
 					(define use_materialize (or
 						subquery_has_window
 						unsupported_groups
