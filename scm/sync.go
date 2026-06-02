@@ -335,9 +335,41 @@ func SetValues(vals map[string]any, fn func()) {
 	mgr.SetValues(glsVals, fn)
 }
 
+var defaultGLSPropagationKeys = []string{"session", "context", "sessionStatePtr", "querySeq"}
+
+func snapshotGLSValues(extraKeys ...string) gls.Values {
+	if mgr == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(defaultGLSPropagationKeys)+len(extraKeys))
+	keys = append(keys, defaultGLSPropagationKeys...)
+	keys = append(keys, extraKeys...)
+	values := make(gls.Values, len(keys))
+	for _, key := range keys {
+		if val, ok := mgr.GetValue(key); ok {
+			values[key] = val
+		}
+	}
+	return values
+}
+
+// Go starts fn in a new goroutine with a point-in-time copy of the current GLS
+// values. github.com/jtolds/gls.Go reuses the caller's mutable value map while
+// the child goroutine installs it, which can race with concurrent SetValues.
+func Go(fn func(), extraKeys ...string) {
+	values := snapshotGLSValues(extraKeys...)
+	if len(values) == 0 {
+		go fn()
+		return
+	}
+	go func() {
+		mgr.SetValues(values, fn)
+	}()
+}
+
 // GetGLSValue returns the GLS value for a given key, or nil if no GLS context
 // is installed. Used by packages outside scm to read goroutine-local markers
-// that propagate across gls.Go-spawned worker goroutines.
+// that propagate across Go-spawned worker goroutines.
 func GetGLSValue(key string) (any, bool) {
 	if mgr == nil {
 		return nil, false
@@ -363,7 +395,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "newpromise",
 		Desc: "Creates a single-value promise cell (thread-safe via CAS spin-lock). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
-		Fn: NewPromise,
+		Fn:   NewPromise,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "list", ParamDesc: "optional: ≥2-element slice to use as backing", Optional: true},
@@ -381,7 +413,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "newsession",
 		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
-		Fn: NewSession,
+		Fn:   NewSession,
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
 				Params: []*TypeDescriptor{
@@ -409,7 +441,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "context",
 		Desc: "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
-		Fn: Context,
+		Fn:   Context,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "args...", ParamDesc: "depends on the usage", Variadic: true},
@@ -499,7 +531,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -517,7 +549,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "dict"},
-			Const: true,
+			Const:  true,
 		},
 	})
 }

@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jtolds/gls"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -132,7 +131,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 
 	for worker := 0; worker < computeWorkers; worker++ {
 		wg.Add(1)
-		gls.Go(func(worker int) func() {
+		scm.Go(func(worker int) func() {
 			return func() {
 				defer wg.Done()
 				defer func() {
@@ -150,7 +149,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 
 	for worker := 0; worker < insertWorkers; worker++ {
 		wg.Add(1)
-		gls.Go(func(worker int) func() {
+		scm.Go(func(worker int) func() {
 			return func() {
 				defer wg.Done()
 				defer func() {

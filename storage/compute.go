@@ -22,7 +22,6 @@ import "strings"
 import "strconv"
 import "runtime/debug"
 import "sync/atomic"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 // newCachedColumnReaderTx returns a per-goroutine ColumnReader for the given
@@ -104,7 +103,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			shardlist := t.ActiveShards()
 			currentTx := CurrentTx()
 			for i, s := range shardlist {
-				gls.Go(func(i int, s *storageShard) func() {
+				scm.Go(func(i int, s *storageShard) func() {
 					return func() {
 						defer func() {
 							if r := recover(); r != nil {
@@ -294,8 +293,9 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	// fresh scan_order pass if the cached proxy is still valid. ORC recomputation
 	// is driven by validMask invalidation, not by repeated planner setup.
 	// If ORC params changed (different OVER clause), invalidate all proxies.
+	recomputeTargets := []*storageShard{}
 	for _, s := range t.maintenanceShards() {
-		t.initORCShard(s, name)
+		createdProxy := t.initORCShard(s, name)
 		if paramsChanged {
 			s.mu.RLock()
 			cs := s.columns[name]
@@ -304,6 +304,21 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 				proxy.InvalidateAll()
 			}
 		}
+		if createdProxy || paramsChanged {
+			s.mu.RLock()
+			hasRows := s.Count() > 0
+			s.mu.RUnlock()
+			if hasRows {
+				recomputeTargets = append(recomputeTargets, s)
+			}
+		}
+	}
+	if len(recomputeTargets) > 0 {
+		t.orcMu.Lock()
+		for _, s := range recomputeTargets {
+			t.incrementalRecomputeORC(name, s, 0)
+		}
+		t.orcMu.Unlock()
 	}
 }
 
@@ -315,7 +330,7 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 
 // initORCShard ensures a StorageComputeProxy with isOrdered=true exists on shard s.
 // If a proxy already exists and has data (compressed), it is left untouched.
-func (t *table) initORCShard(s *storageShard, name string) {
+func (t *table) initORCShard(s *storageShard, name string) bool {
 	s.ensureLoaded()
 	s.ensureMainCount(false)
 
@@ -326,7 +341,7 @@ func (t *table) initORCShard(s *storageShard, name string) {
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.isOrdered = true
 		// Don't InvalidateAll — keep existing data; triggers handle partial invalidation.
-		return
+		return false
 	} else {
 		proxy := &StorageComputeProxy{
 			delta:     make(map[uint32]scm.Scmer),
@@ -338,6 +353,7 @@ func (t *table) initORCShard(s *storageShard, name string) {
 		s.mu.Lock()
 		s.columns[name] = proxy
 		s.mu.Unlock()
+		return true
 	}
 }
 

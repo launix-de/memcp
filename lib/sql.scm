@@ -18,7 +18,43 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-parser.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
+/* Layer 1 of the BTW2025 top-down compiler — algebra IR operators.
+See lib/queryplan-ir.scm header for the operator set and invariants.
+Must load BEFORE queryplan.scm so later passes can depend on it. */
+(import "queryplan-ir.scm")
+(import "queryplan-ir-test.scm")
 (import "queryplan.scm")
+/* Layer 2 of the BTW2025 top-down compiler — 7-tuple normalization passes.
+Loaded AFTER queryplan.scm because the passes delegate to existing helpers
+(normalize_visible_aliases, canonicalize_columns_scoped). Once the legacy
+untangle_query is deleted, those helpers move into queryplan-passes.scm. */
+(import "queryplan-passes.scm")
+(import "queryplan-passes-test.scm")
+/* Layer 2 — lift_dep_joins_pass: bridges 7-tuple to operator IR. Every
+inner_select* marker becomes an explicit qpir-dep-join so the holistic
+unnesting pass (Day 4-5) can eliminate correlations top-down per BTW2025. */
+(import "queryplan-lift.scm")
+(import "queryplan-lift-test.scm")
+/* Layer 3 — unnest_pass: BTW2025 §3 holistic decorrelation. Consumes the
+qpir-dep-join nodes produced by lift_dep_joins_pass and rewrites them
+away top-down with parent-chained UnnestingInfo, cclasses, and per-op
+§3.3 rules. After this pass F(root) = ∅ and no qpir-dep-join remains. */
+(import "queryplan-unnest.scm")
+(import "queryplan-unnest-test.scm")
+/* Layer 4 — lower_to_scans_pass: re-emits the unnested qpir tree as a single
+7-tuple compatible with build_queryplan_inner (qpir-groupby becomes a
+derived-table entry per FAQ "groups are HARD borders"). */
+(import "queryplan-lower.scm")
+(import "queryplan-lower-test.scm")
+/* Public API for the new pipeline: neumann_compile_select runs L1→L4 and
+returns a clean 7-tuple. On this branch SELECT 7-tuples are routed through
+the new pipeline as the standard path. */
+(import "queryplan-neumann.scm")
+(import "queryplan-neumann-test.scm")
+/* Integration tests for the full L1→L2→L3 pipeline composition.
+Until parser-wiring lands, these snapshot tests are the proof that the
+architecture works end-to-end on parser-shaped inputs. */
+(import "queryplan-pipeline-test.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))

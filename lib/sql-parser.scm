@@ -1407,7 +1407,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (define query sql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (explain_queryplan_code query))))
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into

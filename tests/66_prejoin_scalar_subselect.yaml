@@ -101,6 +101,7 @@ test_cases:
           pname: "Beta"
 
   - name: "JOIN + GROUP BY + EXISTS in WHERE with scalar subselect"
+    max_time: 8
     sql: |
       SELECT c.parent_id,
         COUNT(*) AS cnt

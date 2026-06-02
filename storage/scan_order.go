@@ -437,7 +437,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		lower, upperLast := indexFromBoundaries(bounds)
 
-		if Settings.ScanDebugging {
+		if shouldLogScan(t.schema.Name, t.Name) && Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
 			for _, b := range bounds {
 				dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)

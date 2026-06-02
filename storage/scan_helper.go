@@ -239,6 +239,9 @@ func ensureSystemStatistic() {
 // TODO: measurements are temporary; remove later (nanoseconds)
 func safeLogScan(schema, table string, ordered bool, filter, order, indexCols string, inputCount, outputCount, analyzeNs, execNs int64) {
 	defer func() { _ = recover() }()
+	if !shouldLogScan(schema, table) {
+		return
+	}
 	db := GetDatabase("system_statistic")
 	if db == nil {
 		return
@@ -263,6 +266,10 @@ func safeLogScan(schema, table string, ordered bool, filter, order, indexCols st
 		scm.NewInt(time.Now().UnixNano()),
 	}
 	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
+}
+
+func shouldLogScan(schema, table string) bool {
+	return schema != "system" && schema != "system_statistic"
 }
 
 // boundaryIndexCols returns a comma-separated list of column names from boundaries,

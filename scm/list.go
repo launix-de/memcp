@@ -30,7 +30,6 @@ import "runtime"
 import "sync"
 import "sync/atomic"
 import "github.com/carli2/hybridsort"
-import "github.com/jtolds/gls"
 
 func descriptorWithLength(td *TypeDescriptor, length int) *TypeDescriptor {
 	if td == nil {
@@ -1097,7 +1096,7 @@ func init_list() {
 			var firstErr atomic.Value
 			wg.Add(workers)
 			for w := 0; w < workers; w++ {
-				gls.Go(func() {
+				Go(func() {
 					defer wg.Done()
 					fn := OptimizeProcToSerialFunction(a[1])
 					for i := range jobs {
@@ -1157,7 +1156,7 @@ func init_list() {
 			var firstErr atomic.Value
 			wg.Add(workers)
 			for w := 0; w < workers; w++ {
-				gls.Go(func() {
+				Go(func() {
 					defer wg.Done()
 					fn := OptimizeProcToSerialFunction(a[1])
 					for i := range jobs {

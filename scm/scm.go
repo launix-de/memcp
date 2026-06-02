@@ -27,7 +27,6 @@ package scm
 
 import (
 	"fmt"
-	"github.com/jtolds/gls"
 	"reflect"
 	"runtime"
 	"strings"
@@ -355,7 +354,7 @@ restart:
 				errs := make(chan any, len(childExprs))
 				for _, expr := range childExprs {
 					expr := expr
-					gls.Go(func(e Scmer) func() {
+					Go(func(e Scmer) func() {
 						return func() {
 							defer func() {
 								if r := recover(); r != nil {

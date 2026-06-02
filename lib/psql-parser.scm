@@ -730,13 +730,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		/* Bare `SELECT pg_catalog.setval(...)` from pg_dump must execute as DDL
-		   (alter auto_increment), not be wrapped as a SELECT projection. */
+		(alter auto_increment), not be wrapped as a SELECT projection. */
 		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
 		(parser (define query psql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (explain_queryplan_code query))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_table

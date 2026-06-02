@@ -23,7 +23,6 @@ import "sync/atomic"
 import "time"
 import "runtime"
 import "strings"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/scm"
 
@@ -77,7 +76,7 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 		var done sync.WaitGroup
 		done.Add(len(shards))
 		for i := 0; i < workers; i++ {
-			gls.Go(func() {
+			scm.Go(func() {
 				for s := range jobs {
 					release := s.GetRead()
 					callback(s, false)
@@ -87,7 +86,7 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 					}
 					done.Done()
 				}
-			})
+			}, orcRecomputeMarkerKey)
 		}
 		for _, s := range shards {
 			jobs <- s

@@ -235,7 +235,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	}
 	// log statistics (best-effort, async so it doesn't add latency)
 	execNs := time.Since(execStart).Nanoseconds()
-	if Settings.ScanDebugging || inputCount > int64(Settings.AnalyzeMinItems) {
+	if shouldLogScan(t.schema.Name, t.Name) && (Settings.ScanDebugging || inputCount > int64(Settings.AnalyzeMinItems)) {
 		go func(anNs, exNs int64) {
 			defer func() { _ = recover() }()
 			filterEnc := ""
