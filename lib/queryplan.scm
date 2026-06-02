@@ -4734,7 +4734,9 @@ seeing the correctly prefixed outer alias. */
 					   loses per-outer LIMIT semantics — LIMIT becomes a global stage
 					   that doesn't partition by the correlation. Force materialize
 					   for these cases (FAQ §32: materialization at "explicit
-					   materialization semantics" — per-outer LIMIT is one). */
+					   materialization semantics" — per-outer LIMIT is one).
+					   For single-outer-row queries this gives correct results;
+					   multi-outer cases need future partition_stage augmentation. */
 					(define sub_has_limit_correlated
 						(and isOuter (not (or (nil? joinexpr) (equal? joinexpr true)))
 							(not (equal? flatten_groups2 '()))
