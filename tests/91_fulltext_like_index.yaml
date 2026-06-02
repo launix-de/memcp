@@ -1,3 +1,4 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
 # Fulltext LIKE index tests
 # Verifies that non-prefix LIKE patterns produce correct results with ORDER BY,
 # that the index is built after repeated queries, and that indexed scans are
@@ -11,6 +12,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS `ft_customers`"
   - sql: "DROP TABLE IF EXISTS `ft_large`"
+  - sql: "DROP TABLE IF EXISTS `ft_alternating`"
 
 test_cases:
   # --- Small table: correctness tests ---

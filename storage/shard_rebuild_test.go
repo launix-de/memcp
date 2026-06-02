@@ -532,8 +532,7 @@ func TestPartitionTableEmptySpecKeepsFreeShardMode(t *testing.T) {
 	origUUID := tbl.Shards[0].uuid
 
 	res := callBuiltin(t, "partitiontable",
-		scm.NewString("temptypartition"),
-		scm.NewString("items"),
+		NewTableScmer(tbl),
 		scm.NewSlice(nil),
 	)
 	if scm.ToBool(res) {
@@ -581,8 +580,7 @@ func TestPartitionTableNestedAssocAppliesRealPartitioning(t *testing.T) {
 	}, nil, scm.NewNil(), false, nil)
 
 	res := callBuiltin(t, "partitiontable",
-		scm.NewString("tnestedpartition"),
-		scm.NewString("items"),
+		NewTableScmer(tbl),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSlice([]scm.Scmer{
 				scm.NewString("id"),
@@ -632,8 +630,7 @@ func TestPartitionTableSinglePartitionSpecIsNoop(t *testing.T) {
 	origUUID := tbl.Shards[0].uuid
 
 	res := callBuiltin(t, "partitiontable",
-		scm.NewString("tsinglepartition"),
-		scm.NewString("items"),
+		NewTableScmer(tbl),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSlice([]scm.Scmer{
 				scm.NewString("id"),
@@ -1032,8 +1029,7 @@ func TestCreateColumnBuiltinUpgradesExistingColumnToORC(t *testing.T) {
 	createcolumn := scm.Globalenv.Vars[scm.Symbol("createcolumn")]
 	result := scm.Apply(
 		createcolumn,
-		scm.NewString("tcreatecolumnorc"),
-		scm.NewString("items"),
+		NewTableScmer(tbl),
 		scm.NewString("running"),
 		scm.NewString("INT"),
 		scm.NewSlice(nil),

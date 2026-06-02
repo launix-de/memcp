@@ -1035,11 +1035,31 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 							nil
 							nil)))
 				_ (error (concat "sql_semijoin_null_count_query requires a select_core query: " (serialize subquery))))))))
-	(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
-		(begin
-			(define contains_inner_select_expr (lambda (expr) (match expr
-				(cons sym args) (or
-					(not (nil? (sql_inner_select_kind sym)))
+		(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
+			(begin
+				(define subquery_has_outer_column_ref (lambda (query) (match query
+					'(_ tables fields condition group having order _ _)
+					(begin
+						(define aliases (map tables (lambda (td) (match td
+							'(alias _ tbl _ _) (if (nil? alias) tbl alias)
+							""))))
+						(define expr_has_outer_ref (lambda (expr) (match expr
+							'((symbol get_column) alias _ _ _) (and (not (nil? alias)) (not (has? aliases alias)))
+							'((quote get_column) alias _ _ _) (and (not (nil? alias)) (not (has? aliases alias)))
+							(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_outer_ref arg))) false)
+							false)))
+						(or
+							(reduce_assoc fields (lambda (found _k v) (or found (expr_has_outer_ref v))) false)
+							(expr_has_outer_ref condition)
+							(reduce (coalesceNil group '()) (lambda (found expr) (or found (expr_has_outer_ref expr))) false)
+							(expr_has_outer_ref having)
+							(reduce (coalesceNil order '()) (lambda (found item) (or found (match item
+								'(col _dir) (expr_has_outer_ref col)
+								false))) false)))
+					false)))
+				(define contains_inner_select_expr (lambda (expr) (match expr
+					(cons sym args) (or
+						(not (nil? (sql_inner_select_kind sym)))
 					(reduce args (lambda (a b) (or a (contains_inner_select_expr b))) false))
 				_ false)))
 			(define contains_inner_select_order_item (lambda (order_item) (match order_item
@@ -1076,31 +1096,44 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 									(reduce branches
 										(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (sql_semijoin_count_query branch target_expr))))
 										0)))))))
-			(if (not count_rewrite_safe)
-				(if (nil? target_expr)
-					(if negated
+				(if (not count_rewrite_safe)
+					(if (nil? target_expr)
+						(if negated
 						(list (quote not) (list (quote inner_select_exists) subquery))
 						(list (quote inner_select_exists) subquery))
-					(if negated
-						(list (quote not) (list (quote inner_select_in) target_expr subquery))
-						(list (quote inner_select_in) target_expr subquery)))
-				(if (and (not (nil? union_parts)) (nil? target_expr))
-					count_expr
-					(if (nil? target_expr)
-						/* EXISTS / NOT EXISTS: no LHS, no NULL semantics needed */
-						(list
-							(if negated (quote equal?) (quote >))
-							count_expr
-							0)
+						(if negated
+							(list (quote not) (list (quote inner_select_in) target_expr subquery))
+							(list (quote inner_select_in) target_expr subquery)))
+					(if (and negated (not (nil? target_expr)) (nil? union_parts) (subquery_has_outer_column_ref subquery))
+						(begin
+							(define anti_exists_query (sql_semijoin_count_query subquery target_expr))
+							(match anti_exists_query
+								'(ae_s ae_t _ae_f ae_c _ae_g _ae_h _ae_o _ae_l _ae_off)
+								(list (quote not)
+									(list (quote inner_select_exists)
+										(list ae_s ae_t (list "__exists" true) ae_c nil nil nil nil nil)))
+								(list (quote not) (list (quote inner_select_in) target_expr subquery))))
+					(if (and (not (nil? union_parts)) (nil? target_expr))
+						count_expr
+							(if (nil? target_expr)
+							/* EXISTS / NOT EXISTS: no LHS, no NULL semantics needed */
+							(list
+								(if negated (quote equal?) (quote >))
+								(list (quote coalesceNil) count_expr 0)
+								0)
 						/* IN / NOT IN: SQL tri-valued — match wins TRUE for IN /
 						FALSE for NOT IN; otherwise if any RHS row is NULL the
 						answer is UNKNOWN (NULL); otherwise NOT-match.
 						LHS itself NULL also yields UNKNOWN. */
 						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
-							/* UNION ALL IN/NOT IN with target_expr: leave for
-							finding-2 work; until then fall back to plain count
-							comparison (incorrect for NULL-in-branch). */
-							(list (if negated (quote equal?) (quote >)) count_expr 0)
+							/* UNION ALL IN/NOT IN keeps the semantic marker so
+							queryplan can lower each branch with the normal
+							top-down IN decorrelator instead of relying on a
+							branch-count sum. */
+							(match union_parts '(branches _ _ _)
+								(cons (if negated (quote and) (quote or))
+									(map branches (lambda (branch)
+										(sql_semijoin_count_expr branch target_expr negated)))))
 							(begin
 								(define null_count_expr
 									(list (quote inner_select)
@@ -1119,7 +1152,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 											true
 											(list (quote if) (list (quote >) null_count_expr 0)
 												nil
-												false))))))))))))
+												false)))))))))))))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
 			(quote inner_select)
@@ -1692,7 +1725,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (define query sql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term query)))))
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into

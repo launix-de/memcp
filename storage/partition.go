@@ -79,13 +79,17 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 		for i := 0; i < workers; i++ {
 			gls.Go(func() {
 				for s := range jobs {
-					release := s.GetRead()
-					callback(s, false)
-					release()
-					if onDone != nil {
-						onDone(s)
-					}
-					done.Done()
+					func() {
+						release := s.GetRead()
+						defer func() {
+							release()
+							if onDone != nil {
+								onDone(s)
+							}
+							done.Done()
+						}()
+						callback(s, false)
+					}()
 				}
 			})
 		}
@@ -125,9 +129,11 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 		if len(relevant) == 1 {
 			s := relevant[0]
 			release := s.GetRead()
+			defer func() {
+				release()
+				s.activeScanners.Add(-1)
+			}()
 			callback(s, true)
-			release()
-			s.activeScanners.Add(-1)
 			return nil
 		}
 		return runWorkers(relevant, func(s *storageShard) {
@@ -142,8 +148,8 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 		if len(relevant) == 1 {
 			s := relevant[0]
 			release := s.GetRead()
+			defer release()
 			callback(s, true)
-			release()
 			return nil
 		}
 		return runWorkers(relevant, nil)
@@ -532,11 +538,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			newshards[i].logfile = t.schema.persistence.OpenLog(newshards[i].uuid.String())
 		}
 	}
-	t.PShards = newshards
-	t.PDimensions = shardCandidates
 	// maintenanceKind was already set to 2 by the caller (db.rebuild or
 	// beginManualRepartition) under maintenanceMu.
-	// From this point, all concurrent inserts/updates go to BOTH shard sets.
 
 	// ── Phase B: Snapshot under t.mu, partition off-lock ──
 	// Hold t.mu only while taking cheap per-shard snapshots and enabling
@@ -549,9 +552,12 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	for si, s := range oldshards {
 		snapshots[si] = s.snapshotPartitionState(shardCandidates)
 	}
+	t.PShards = newshards
+	t.PDimensions = shardCandidates
 	t.setRepartitionTranslationMap(make(map[*storageShard]map[uint32]translatedRecid))
 	t.repartitionDualWriteActive.Store(true)
 	t.mu.Unlock()
+	// From this point, all concurrent inserts/updates go to BOTH shard sets.
 
 	for si, snap := range snapshots {
 		total_count += snap.count()

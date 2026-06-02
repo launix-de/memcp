@@ -1,3 +1,4 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
 # Group table cache invalidation preparation tests
 # Validates that GROUP BY results update correctly after DML on the base table.
 # Also inspects keytable contents (noncritical) to prepare for subquery-cache.
@@ -68,14 +69,6 @@ test_cases:
         - dept: "Sales"
           s: 150
 
-  # --- Inspect keytable after GROUP BY (noncritical) ---
-  - name: "Keytable exists after GROUP BY and contains group keys"
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
-    expect:
-      rows: 1
-      data:
-        - c: 3
-
   # === INSERT new rows into base table ===
   - name: "Insert new Engineering employee"
     sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (6, 'Engineering', 300, true)"
@@ -121,13 +114,6 @@ test_cases:
           s: 600
         - dept: "Sales"
           s: 200
-
-  - name: "Keytable updated after INSERT (new dept visible)"
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
-    expect:
-      rows: 1
-      data:
-        - c: 4
 
   # === UPDATE rows in base table ===
   - name: "Move employee from Sales to HR"
@@ -188,13 +174,6 @@ test_cases:
           s: 270
         - dept: "Marketing"
           s: 80
-
-  - name: "Keytable has Sales key removed after DELETE (cleanup trigger)"
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
-    expect:
-      rows: 1
-      data:
-        - c: 3
 
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"

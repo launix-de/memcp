@@ -64,6 +64,9 @@ func sumProc() scm.Scmer {
 // provides atomicity per hash.  Callers must call IncrBlobRefcount BEFORE
 // WriteBlob so that cleanBlobs never sees an orphaned file on disk.
 func (db *database) IncrBlobRefcount(hash string) {
+	db.blobMu.Lock()
+	defer db.blobMu.Unlock()
+
 	t := db.ensureBlobTable()
 	if t == nil {
 		return
@@ -109,6 +112,9 @@ func (db *database) IncrBlobRefcount(hash string) {
 // DecrBlobRefcount decrements the reference count for a blob hash in db.`.blobs`.
 // If the count reaches 0, the row is deleted and the blob file is removed.
 func (db *database) DecrBlobRefcount(hash string) {
+	db.blobMu.Lock()
+	defer db.blobMu.Unlock()
+
 	t := db.ensureBlobTable()
 	if t == nil {
 		return

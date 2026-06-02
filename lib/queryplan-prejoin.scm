@@ -21,14 +21,17 @@ delete_fn/insert_fn/update_fn are code-generator-produced lambda expressions (no
 Lifecycle triggers use code-generator pattern for the drop body as well.
 update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure capture). */
 (define register_prejoin_incremental (lambda (src_schema src_table pj_schema pj_table delete_fn insert_fn update_fn) (begin
-	(define prefix (concat ".pj_incr:" pj_table "|" src_table "|"))
-	(createtrigger (table src_schema src_table) (concat prefix "after_delete") "after_delete" "" delete_fn false)
-	(createtrigger (table src_schema src_table) (concat prefix "after_insert") "after_insert" "" insert_fn false)
-	(createtrigger (table src_schema src_table) (concat prefix "after_update") "after_update" "" update_fn false)
-	(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
-	(createtrigger (table src_schema src_table) (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
-	(createtrigger (table src_schema src_table) (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
-	true)))
+	(if (or (not (string? src_table)) (strlike src_table ".%"))
+		true
+		(begin
+			(define prefix (concat ".pj_incr:" pj_table "|" src_table "|"))
+			(createtrigger (table src_schema src_table) (concat prefix "after_delete") "after_delete" "" delete_fn false)
+			(createtrigger (table src_schema src_table) (concat prefix "after_insert") "after_insert" "" insert_fn false)
+			(createtrigger (table src_schema src_table) (concat prefix "after_update") "after_update" "" update_fn false)
+			(define drop_body (eval (list 'lambda (list 'OLD 'NEW 'session) (list 'droptable pj_schema pj_table true))))
+			(createtrigger (table src_schema src_table) (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
+			(createtrigger (table src_schema src_table) (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
+			true)))))
 
 /* prejoin_canonical_sources maps a materialized prejoin table name to an assoc
 of physical prejoin column name -> source expression. make_keytable uses this
@@ -274,12 +277,15 @@ scope is gone. */
 	(match table-source
 		'(materialized-subquery-source _) true
 		'((symbol materialized-subquery-source) _) true
+		'((quote materialized-subquery-source) _) true
 		false
 )))
 (define normalize-materialized-subquery-source (lambda (table-source)
 	(match table-source
 		'((symbol materialized-subquery-source) key) (make_materialized-subquery-source key)
+		'((quote materialized-subquery-source) key) (make_materialized-subquery-source key)
 		'((symbol materialized-subquery) key) (make_materialized-subquery-source key)
+		'((quote materialized-subquery) key) (make_materialized-subquery-source key)
 		_ (begin
 			(define legacy_key (legacy-materialized-subquery-source-key table-source))
 			(if (nil? legacy_key)
@@ -289,6 +295,7 @@ scope is gone. */
 (define materialized-subquery-source-key (lambda (table-source)
 	(match (normalize-materialized-subquery-source table-source)
 		'((symbol materialized-subquery-source) key) key
+		'((quote materialized-subquery-source) key) key
 		nil
 )))
 (define materialized-subquery-source (lambda (id subquery)
@@ -364,7 +371,13 @@ source-expression namespace for this materialized source. */
 (define make_unnest_helper_table (lambda (schema_name base_table helper_kind)
 	(if (nil? base_table)
 		nil
-		(list (quote unnest_helper_table) schema_name base_table helper_kind))
+		(begin
+			(define normalized_base (match base_table
+				'(unnest_helper_table _ nested_base _) nested_base
+				'((symbol unnest_helper_table) _ nested_base _) nested_base
+				'((quote unnest_helper_table) _ nested_base _) nested_base
+				_ base_table))
+			(list (quote unnest_helper_table) schema_name normalized_base helper_kind)))
 ))
 (define planner_table_source_base (lambda (table_source)
 	(match table_source

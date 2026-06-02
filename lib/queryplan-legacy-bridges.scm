@@ -44,7 +44,7 @@ persist produced rows in a session list. */
 		(list (quote merge) (list rows_sym "rows") (list (quote list) item_sym))))
 	(list (quote begin)
 		(list (quote set) rows_sym (list (quote newsession)))
-		(list rows_sym "rows" '())
+		(list rows_sym "rows" (list (quote list)))
 		(if (nil? limit_val)
 			(list (quote define) sink_sym
 				(list (quote lambda) (list item_sym)
@@ -65,17 +65,23 @@ persist produced rows in a session list. */
 session-backed query-term materialization bridge. Callers stay responsible
 for registering visible schema metadata. */
 (define legacy_materialized_query_term_binding_ast (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
-	(define mat_source (materialized-subquery-source id subquery))
 	(define materialized_rows
 		(planner_collect_rows_ast rows_sym sink_sym (symbol "item")
 			(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))
 			limit_val
 			cnt_sym))
+	(define runtime_id
+		(concat
+			id
+			(user_session_runtime_cache_suffix_from_exprs (list subquery materialized_rows))
+			":"
+			(uuid)))
+	(define mat_source (materialized-subquery-source runtime_id subquery))
 	(materialized_source_dependency_tables mat_source
 		(collect_materialized_query_dependency_tables subquery))
 	(list
 		mat_source
-		(materialized-subquery-init id subquery materialized_rows))
+		(materialized-subquery-init runtime_id subquery materialized_rows))
 )))
 
 /* dep_helper_keytable_binding: FAQ §32-compliant replacement for

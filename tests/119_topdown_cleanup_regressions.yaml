@@ -1,0 +1,206 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Top-down unnesting regressions.
+# These tests encode the correct behaviour for previously broken cases without
+# weakening the default client timeout.
+
+metadata:
+  version: "1.0"
+  description: "Top-down cleanup regressions for nested IN/EXISTS, HAVING, and session groups"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS tdr_a"
+  - sql: "DROP TABLE IF EXISTS tdr_b"
+  - sql: "DROP TABLE IF EXISTS tdr_c"
+  - sql: "DROP TABLE IF EXISTS tdr_d"
+  - sql: "DROP TABLE IF EXISTS tdr_tags"
+  - sql: "DROP TABLE IF EXISTS tdr_dept"
+  - sql: "DROP TABLE IF EXISTS tdr_emp"
+  - sql: "DROP TABLE IF EXISTS tdr_bonus"
+  - sql: "DROP TABLE IF EXISTS tdr_sgc_data"
+  - sql: "DROP TABLE IF EXISTS tdr_sgc_acl"
+  - sql: "CREATE TABLE tdr_d (id INT PRIMARY KEY, ref_e INT, label VARCHAR(20))"
+  - sql: "CREATE TABLE tdr_c (id INT PRIMARY KEY, ref_d INT)"
+  - sql: "CREATE TABLE tdr_b (id INT PRIMARY KEY, ref_c INT)"
+  - sql: "CREATE TABLE tdr_a (id INT PRIMARY KEY, ref_b INT)"
+  - sql: "CREATE TABLE tdr_tags (id INT PRIMARY KEY, ref_id INT, tag VARCHAR(20))"
+  - sql: "INSERT INTO tdr_d (id, ref_e, label) VALUES (10, 1, 'D10'), (20, 2, 'D20'), (30, 3, 'D30')"
+  - sql: "INSERT INTO tdr_c (id, ref_d) VALUES (100, 10), (200, 20), (300, 30)"
+  - sql: "INSERT INTO tdr_b (id, ref_c) VALUES (1000, 100), (2000, 200), (3000, 300)"
+  - sql: "INSERT INTO tdr_a (id, ref_b) VALUES (1, 1000), (2, 2000), (3, 3000)"
+  - sql: |
+      INSERT INTO tdr_tags (id, ref_id, tag) VALUES
+        (1, 1, 'important'), (2, 1, 'urgent'),
+        (3, 2, 'important'), (4, 3, 'archived'),
+        (5, 100, 'active'), (6, 200, 'active'), (7, 300, 'inactive')
+  - sql: "CREATE TABLE tdr_dept (id INT PRIMARY KEY, name VARCHAR(30))"
+  - sql: "CREATE TABLE tdr_emp (id INT PRIMARY KEY, did INT, salary INT)"
+  - sql: "CREATE TABLE tdr_bonus (id INT PRIMARY KEY, emp_id INT)"
+  - sql: "INSERT INTO tdr_dept VALUES (1, 'Engineering'), (2, 'Marketing'), (3, 'Sales')"
+  - sql: |
+      INSERT INTO tdr_emp VALUES
+        (1, 1, 90000), (2, 1, 80000), (3, 2, 70000),
+        (4, 2, 75000), (5, 3, 60000), (6, 1, 95000)
+  - sql: "INSERT INTO tdr_bonus VALUES (1, 1), (2, 2), (3, 6)"
+  - sql: "CREATE TABLE tdr_sgc_data (id INT PRIMARY KEY, category INT, owner INT, val INT)"
+  - sql: "CREATE TABLE tdr_sgc_acl (id INT PRIMARY KEY, usr INT, category INT)"
+  - sql: |
+      INSERT INTO tdr_sgc_data VALUES
+        (1, 1, 1, 7), (2, 2, 2, 14), (3, 3, 3, 21), (4, 4, 1, 28), (5, 5, 2, 35),
+        (6, 1, 3, 42), (7, 2, 1, 49), (8, 3, 2, 56), (9, 4, 3, 63), (10, 5, 1, 70),
+        (11, 1, 2, 77), (12, 2, 3, 84), (13, 3, 1, 91), (14, 4, 2, 98), (15, 5, 3, 105),
+        (16, 1, 1, 112), (17, 2, 2, 119), (18, 3, 3, 126), (19, 4, 1, 133), (20, 5, 2, 140)
+  - sql: |
+      INSERT INTO tdr_sgc_acl VALUES
+        (1, 1, 1), (2, 1, 2), (3, 1, 3),
+        (4, 2, 1), (5, 2, 4),
+        (6, 3, 2), (7, 3, 5)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS tdr_a"
+  - sql: "DROP TABLE IF EXISTS tdr_b"
+  - sql: "DROP TABLE IF EXISTS tdr_c"
+  - sql: "DROP TABLE IF EXISTS tdr_d"
+  - sql: "DROP TABLE IF EXISTS tdr_tags"
+  - sql: "DROP TABLE IF EXISTS tdr_dept"
+  - sql: "DROP TABLE IF EXISTS tdr_emp"
+  - sql: "DROP TABLE IF EXISTS tdr_bonus"
+  - sql: "DROP TABLE IF EXISTS tdr_sgc_data"
+  - sql: "DROP TABLE IF EXISTS tdr_sgc_acl"
+
+test_cases:
+  - name: "scalar EXISTS result must be false, not NULL, when the nested EXISTS has no match"
+    sql: |
+      SELECT a.id,
+        (SELECT EXISTS (SELECT 1 FROM tdr_tags t WHERE t.ref_id = a.id AND t.tag = 'important')
+         FROM tdr_b b WHERE b.id = a.ref_b LIMIT 1) AS is_important
+      FROM tdr_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          is_important: true
+        - id: 2
+          is_important: true
+        - id: 3
+          is_important: false
+
+  - name: "skip-level correlated IN inside scalar chain must bind the outermost row"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM tdr_c c
+           WHERE c.id = b.ref_c
+           AND c.ref_d IN (SELECT d.id FROM tdr_d d WHERE d.ref_e = a.id)
+           LIMIT 1)
+         FROM tdr_b b WHERE b.id = a.ref_b LIMIT 1) AS matched_d
+      FROM tdr_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          matched_d: 10
+        - id: 2
+          matched_d: 20
+        - id: 3
+          matched_d: 30
+
+  - name: "HAVING EXISTS must filter grouped rows by correlated group key"
+    sql: |
+      SELECT e.did, COUNT(*) AS cnt
+      FROM tdr_emp e
+      GROUP BY e.did
+      HAVING EXISTS (
+        SELECT 1
+        FROM tdr_bonus b
+        JOIN tdr_emp e2 ON e2.id = b.emp_id
+        WHERE e2.did = e.did
+      )
+      ORDER BY e.did
+    expect:
+      rows: 1
+      data:
+        - did: 1
+          cnt: 3
+
+  - name: "set session user for grouped cache baseline"
+    session_id: "tdr_sgc_session"
+    sql: "SET @fop_user = 1"
+    expect:
+      rows_affected: 0
+
+  - name: "session-filtered group cache baseline for user 1"
+    session_id: "tdr_sgc_session"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM tdr_sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM tdr_sgc_acl
+        WHERE tdr_sgc_acl.usr = @fop_user
+          AND tdr_sgc_acl.category = tdr_sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 4
+        - category: 2
+          cnt: 4
+        - category: 3
+          cnt: 4
+
+  - name: "switch session user for grouped cache"
+    session_id: "tdr_sgc_session"
+    sql: "SET @fop_user = 2"
+    expect:
+      rows_affected: 0
+
+  - name: "session-filtered group cache must not reuse user 1 rows for user 2"
+    session_id: "tdr_sgc_session"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM tdr_sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM tdr_sgc_acl
+        WHERE tdr_sgc_acl.usr = @fop_user
+          AND tdr_sgc_acl.category = tdr_sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 2
+      data:
+        - category: 1
+          cnt: 4
+        - category: 4
+          cnt: 4
+
+  - name: "skip-level NOT IN inside depth-4 scalar chain must compile under the default client timeout"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM tdr_d d
+             WHERE d.id = c.ref_d
+             AND d.ref_e NOT IN (
+               SELECT t.ref_id FROM tdr_tags t
+               WHERE t.ref_id = a.id AND t.tag = 'archived'
+             )
+             LIMIT 1)
+           FROM tdr_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM tdr_b b WHERE b.id = a.ref_b LIMIT 1) AS not_archived_label
+      FROM tdr_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          not_archived_label: "D10"
+        - id: 2
+          not_archived_label: "D20"
+        - id: 3
+          not_archived_label: null

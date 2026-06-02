@@ -253,6 +253,13 @@ func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {
 	return nil, false
 }
 
+func scanListArg(v scm.Scmer) ([]scm.Scmer, bool) {
+	if v.IsNil() {
+		return nil, true
+	}
+	return scmerSlice(v)
+}
+
 // describeScmerValue renders v for use in a panic message. Long values
 // (entire codegen'd expressions) are truncated at a UTF-8 rune boundary
 // so the panic stays readable and never leaves a half-encoded code point.
@@ -475,7 +482,7 @@ func Init(en scm.Env) {
 			tableArg := a[layout.tableIdx]
 			isOuter := len(a) > layout.outerIdx && scm.ToBool(a[layout.outerIdx])
 
-			if list, ok := scmerSlice(tableArg); ok {
+			if list, ok := scanListArg(tableArg); ok {
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx {
 					neutral = a[layout.neutralIdx]
@@ -571,7 +578,7 @@ func Init(en scm.Env) {
 			const sbShift = 2
 			isOuter := len(a) > layout.outerIdx+sbShift && scm.ToBool(a[layout.outerIdx+sbShift])
 
-			if list, ok := scmerSlice(tableArg); ok {
+			if list, ok := scanListArg(tableArg); ok {
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx+sbShift {
 					neutral = a[layout.neutralIdx+sbShift]
@@ -695,7 +702,7 @@ func Init(en scm.Env) {
 
 			isOuter := len(a) > layout.limitIdx+5 && scm.ToBool(a[layout.limitIdx+5])
 
-			if list, ok := scmerSlice(tableArg); ok {
+			if list, ok := scanListArg(tableArg); ok {
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))

@@ -1451,14 +1451,6 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	}
 
 insertDone:
-	// Dual-write: forward inserts to the secondary shard set during repartition.
-	// The secondary insert bypasses unique checks (already handled above),
-	// triggers, and auto-increment (already assigned in primary insert).
-	// Use repartitionDualWriteActive (set after Phase B snapshot) to avoid
-	// duplicating rows that are already captured in the snapshot.
-	if t.repartitionDualWriteActive.Load() {
-		t.dualWriteInsert(columns, values)
-	}
 
 	return result
 }
@@ -1505,6 +1497,15 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 	return values
 }
 
+func shardInSet(shards []*storageShard, target *storageShard) bool {
+	for _, shard := range shards {
+		if shard == target {
+			return true
+		}
+	}
+	return false
+}
+
 // dualWriteInsert routes rows into the secondary shard set (the one not selected
 // by ShardMode) during an active repartition. Called only when
 // repartitionDualWriteActive is true. Rows are inserted without unique/trigger processing.
@@ -1537,7 +1538,7 @@ func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
 			shard := t.PShards[computeShardIndex(dims, shardcols)]
 			if i > 0 && shard != last_shard {
 				rel := last_shard.GetExclusive()
-				last_shard.Insert(columns, values[last_i:i], false, nil, false)
+				last_shard.insertReplica(columns, values[last_i:i], true)
 				rel()
 				last_i = i
 			}
@@ -1545,7 +1546,7 @@ func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
 		}
 		if last_i < len(values) && last_shard != nil {
 			rel := last_shard.GetExclusive()
-			last_shard.Insert(columns, values[last_i:], false, nil, false)
+			last_shard.insertReplica(columns, values[last_i:], true)
 			rel()
 		}
 	} else {
@@ -1558,7 +1559,7 @@ func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
 		shard := t.Shards[len(t.Shards)-1]
 		t.mu.Unlock()
 		rel := shard.GetExclusive()
-		shard.Insert(columns, values, false, nil, false)
+		shard.insertReplica(columns, values, true)
 		rel()
 	}
 }
@@ -1588,7 +1589,7 @@ func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uin
 			return
 		}
 		rel := lastShard.GetExclusive()
-		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false)
+		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], true)
 		rel()
 		for i := lastI; i < end; i++ {
 			t.recordRepartitionTranslation(oldShard, firstOldRecid+uint32(i), translatedRecid{

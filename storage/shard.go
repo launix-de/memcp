@@ -1958,7 +1958,11 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			t.recordNextInsertRange(firstNewRecid, firstNextRecid, len(payloadVals))
 		}
 		if t.t.repartitionDualWriteActive.Load() {
-			t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals)
+			if shardInSet(t.t.PShards, t) {
+				t.t.dualWriteInsert(payloadCols, payloadVals)
+			} else {
+				t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals)
+			}
 		}
 	}
 	// transaction bookkeeping

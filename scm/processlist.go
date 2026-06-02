@@ -48,6 +48,7 @@ type SessionState struct {
 	cancelFns map[uint64]context.CancelFunc
 	active    map[uint64]bool
 	killed    map[uint64]bool
+	killedAny atomic.Bool
 	cancelMu  sync.Mutex // protects active query bookkeeping
 
 	heldLocks   []func()   // unlock callbacks for LOCK TABLES
@@ -104,6 +105,9 @@ func (s *SessionState) BeginQuery(cmd, info string) uint64 {
 	s.active[seq] = true
 	if s.killed != nil {
 		delete(s.killed, seq)
+	}
+	if len(s.killed) == 0 {
+		s.killedAny.Store(false)
 	}
 	s.cancelMu.Unlock()
 	s.SetState("")
@@ -171,25 +175,30 @@ func (s *SessionState) ClearCancel(seq uint64) {
 	if s.killed != nil {
 		delete(s.killed, seq)
 	}
+	if len(s.killed) == 0 {
+		s.killedAny.Store(false)
+	}
 	s.cancelMu.Unlock()
 }
 
 // IsKilled returns true if this session has been killed.
 func (s *SessionState) IsKilled() bool {
-	if mgr == nil {
-		return false
-	}
-	v, ok := mgr.GetValue("querySeq")
-	if !ok {
-		return false
-	}
-	seq, ok := v.(uint64)
-	if !ok || seq == 0 {
-		return false
-	}
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
-	return s.killed != nil && s.killed[seq]
+	if s.killed == nil {
+		return false
+	}
+	if mgr != nil {
+		if v, ok := mgr.GetValue("querySeq"); ok {
+			if seq, ok := v.(uint64); ok && seq != 0 {
+				return s.killed[seq]
+			}
+		}
+	}
+	// Storage scan workers do not inherit the request goroutine's GLS values.
+	// The session-level bit is only a fallback for those workers; the request
+	// goroutine path above stays query-generation specific.
+	return s.killedAny.Load()
 }
 
 func formatKillLog(s *SessionState, action string) string {
@@ -221,6 +230,7 @@ func (s *SessionState) Kill() bool {
 	fns := make([]context.CancelFunc, 0, len(s.cancelFns))
 	for seq := range s.active {
 		s.killed[seq] = true
+		s.killedAny.Store(true)
 		if fn := s.cancelFns[seq]; fn != nil {
 			fns = append(fns, fn)
 		}
@@ -249,6 +259,7 @@ func (s *SessionState) KillQuery(seq uint64) bool {
 		s.killed = make(map[uint64]bool)
 	}
 	s.killed[seq] = true
+	s.killedAny.Store(true)
 	s.cancelMu.Unlock()
 	if fn != nil {
 		fn()

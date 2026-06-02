@@ -880,6 +880,7 @@ ports the actual operator rules to the tree representation. */
 			(cons (symbol and) parts) parts
 			(cons (quote and) parts) parts
 			(list us_inner_cond_prefixed))))
+	(define us_join_parts_list (merge us_dom_je_parts us_inner_parts_list))
 	(define us_expr_refs (lambda (expr) (match expr
 		'((symbol get_column) tv _ _ _) (if (nil? tv) '() (list tv))
 		'((quote get_column) tv _ _ _) (if (nil? tv) '() (list tv))
@@ -891,7 +892,7 @@ ports the actual operator rules to the tree representation. */
 			(if (reduce part_refs (lambda (found r) (or found (equal?? r al))) false)
 				al best)) nil))))
 	(define us_parts_for (lambda (alias) (begin
-		(define my_part (filter us_inner_parts_list (lambda (p) (equal?? (us_last_alias p) alias))))
+		(define my_part (filter us_join_parts_list (lambda (p) (equal?? (us_last_alias p) alias))))
 		(if (equal? (count my_part) 0) nil
 			(if (equal? (count my_part) 1) (car my_part)
 				(cons (quote and) my_part))))))
@@ -913,9 +914,7 @@ ports the actual operator rules to the tree representation. */
 						(define my_cond_part (us_parts_for a))
 						(if (equal? a first_alias)
 							(list a s t true
-								(if (nil? my_cond_part) us_dom_je
-									(if (equal? us_dom_je true) my_cond_part
-										(us_merge_unique_and us_dom_je my_cond_part))))
+								(if (nil? my_cond_part) true my_cond_part))
 							(list a s t io
 								(if (nil? my_cond_part) je
 									(if (nil? je) my_cond_part

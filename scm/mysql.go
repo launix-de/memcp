@@ -113,6 +113,23 @@ type MySQLWrapper struct {
 	querycallback  Scmer
 }
 
+func mysqlPanicToError(context string, r any) error {
+	if r == nil {
+		return nil
+	}
+	if sqlErr, ok := r.(*sqldb.SQLError); ok {
+		PrintError(context + sqlErr.Error())
+		return sqlErr
+	}
+	if err, ok := r.(error); ok {
+		PrintError(context + err.Error())
+		return err
+	}
+	errMsg := fmt.Sprint(r)
+	PrintError(context + errMsg)
+	return ErrorWrapper(errMsg)
+}
+
 func mysqlScmSession(session *driver.Session) Scmer {
 	if scmSessionAny, ok := mysqlsessions.Load(session.ID()); ok {
 		return NewFunc(scmSessionAny.(func(...Scmer) Scmer))
@@ -177,7 +194,12 @@ func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 	return nil
 }
 
-func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
+func (m *MySQLWrapper) AuthCheck(session *driver.Session) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = mysqlPanicToError("error in mysql auth: ", r)
+		}
+	}()
 	m.log.Info("%s", "Auth Check with "+session.User())
 	// callback should load password from database
 	var password Scmer
@@ -194,7 +216,12 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	refreshMySQLSessionProcesslistMeta(session)
 	return nil
 }
-func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
+func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = mysqlPanicToError("error in mysql init db: ", r)
+		}
+	}()
 	m.log.Info("%s", "db "+database)
 	var allowed Scmer
 	withMySQLScmSession(session, func() {
@@ -321,6 +348,11 @@ func isSelectQuery(query string) bool {
 	return strings.HasPrefix(strings.ToLower(trimmed), "select")
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			myerr = mysqlPanicToError("error in mysql connection: ", r)
+		}
+	}()
 	atomic.AddInt64(&TotalHTTPRequests, 1)
 	var ss *SessionState
 	var querySeq uint64
@@ -405,14 +437,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	rowcount := func() Scmer {
 		defer func() {
 			if r := recover(); r != nil {
-				if sqlErr, ok := r.(*sqldb.SQLError); ok {
-					PrintError("error in mysql connection: " + sqlErr.Error())
-					myerr = sqlErr
-				} else {
-					errMsg := fmt.Sprint(r)
-					PrintError("error in mysql connection: " + errMsg)
-					myerr = ErrorWrapper(errMsg)
-				}
+				myerr = mysqlPanicToError("error in mysql connection: ", r)
 			}
 		}()
 		callbackFn := NewFunc(func(a ...Scmer) Scmer {

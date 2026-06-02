@@ -677,6 +677,9 @@ func Apply(procedure Scmer, args ...Scmer) (value Scmer) {
 	return ApplyEx(procedure, args, &Globalenv)
 }
 func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
+	if ss := GetCurrentSessionState(); ss != nil && ss.IsKilled() {
+		panic("query killed")
+	}
 	// Native funcs
 	switch procedure.GetTag() {
 	case tagFuncEnv:

@@ -250,16 +250,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(list (quote inner_select_in) target_expr subquery)))
 				(if (and (not (nil? union_parts)) (nil? target_expr))
 					count_expr
-					(if (nil? target_expr)
-						/* EXISTS / NOT EXISTS: no LHS, no NULL tri-valued shape */
-						(list
-							(if negated (quote equal?) (quote >))
-							count_expr
-							0)
+						(if (nil? target_expr)
+							/* EXISTS / NOT EXISTS: no LHS, no NULL tri-valued shape */
+							(list
+								(if negated (quote equal?) (quote >))
+								(list (quote coalesceNil) count_expr 0)
+								0)
 						/* IN / NOT IN: SQL tri-valued NULL handling. See
 						sql_semijoin_count_expr in sql-parser.scm for full rationale. */
 						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
-							(list (if negated (quote equal?) (quote >)) count_expr 0)
+							(match union_parts '(branches _ _ _)
+								(cons (if negated (quote and) (quote or))
+									(map branches (lambda (branch)
+										(psql_semijoin_count_expr branch target_expr negated)))))
 							(begin
 								(define null_count_expr
 									(list (quote inner_select)
@@ -903,7 +906,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (define query psql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term query)))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_table

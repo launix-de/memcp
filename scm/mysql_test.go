@@ -18,8 +18,11 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/launix-de/go-mysqlstack/driver"
+	"github.com/launix-de/go-mysqlstack/sqldb"
 	querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 	"github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
 )
@@ -44,5 +47,31 @@ func TestAppendMySQLResultRowDuplicateAliasUsesLastValueType(t *testing.T) {
 	}
 	if got := row[0].ToString(); got != "EUR" {
 		t.Fatalf("expected last duplicate value, got %q", got)
+	}
+}
+
+func TestMySQLPanicToErrorPreservesSQLError(t *testing.T) {
+	want := sqldb.NewSQLErrorf(sqldb.ER_SYNTAX_ERROR, "bad query")
+
+	got := mysqlPanicToError("test: ", want)
+
+	if got != want {
+		t.Fatalf("expected original SQLError, got %#v", got)
+	}
+}
+
+func TestComQueryRecoversUnexpectedPanic(t *testing.T) {
+	wrapper := &MySQLWrapper{}
+
+	err := wrapper.ComQuery((*driver.Session)(nil), "SELECT 1", nil, func(*sqltypes.Result) error {
+		t.Fatal("callback must not be called after setup panic")
+		return nil
+	})
+
+	if err == nil {
+		t.Fatal("expected recovered panic as error")
+	}
+	if !strings.Contains(err.Error(), "runtime error") {
+		t.Fatalf("expected runtime panic text, got %q", err.Error())
 	}
 }

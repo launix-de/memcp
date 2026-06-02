@@ -43,6 +43,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(sql_statement_starts_with query "EXPLAIN")
 		(sql_statement_starts_with query "SHOW")
 		(sql_statement_starts_with query "DESCRIBE"))))
+(define sql_explain_plan_query (lambda (query) (begin
+	(define trimmed (strltrim query))
+	(if (sql_statement_starts_with trimmed "EXPLAIN")
+		(begin
+			(define rest (strltrim (substr trimmed (strlen "EXPLAIN"))))
+			(if (or
+				(sql_statement_starts_with rest "SELECT")
+				(sql_statement_starts_with rest "WITH"))
+				rest
+				nil))
+		nil))))
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
@@ -57,11 +68,21 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session)
 	(begin
 		(define cache_key (concat username ":" schema ":" (fnv_hash query)))
+		(define session_sensitive_query (strlike query "%@%"))
 		(define cached (queryplan_cache cache_key))
-		(if cached cached
+		(if (and cached (not session_sensitive_query)) cached
 			(begin
-				(define formula (with_session session (lambda () (parse_fn schema query policy))))
-				(queryplan_cache cache_key formula)
+				(define explain_plan_query (sql_explain_plan_query query))
+				(define formula (if (nil? explain_plan_query)
+					(with_session session (lambda () (parse_fn schema query policy)))
+					(begin
+						(define plan_cache_key (concat username ":" schema ":" (fnv_hash explain_plan_query)))
+						(define plan_formula (coalesce
+							(if session_sensitive_query nil (queryplan_cache plan_cache_key))
+							(with_session session (lambda () (parse_fn schema explain_plan_query policy)))))
+						(if session_sensitive_query nil (queryplan_cache plan_cache_key plan_formula))
+						(list (quote resultrow) (list (quote list) "code" (serialize plan_formula))))))
+				(if session_sensitive_query nil (queryplan_cache cache_key formula))
 				formula)))))
 
 /* helper: build a policy function for table-level access checks
@@ -91,7 +112,7 @@ if the user is not allowed to access this property, the function will throw an e
 							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
 							'() (lambda () 1)
 							+ 0))
-						(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." table)))
+							(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
 		)

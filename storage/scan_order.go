@@ -911,9 +911,15 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		result.items = make([]uint32, resultCap)
 		resultN := 0
 		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
 			// filter in-place: overwrite batch with passing IDs
 			outN := 0
-			for _, idx := range batch {
+			for rowidx, idx := range batch {
+				if rowidx&63 == 0 && ss != nil && ss.IsKilled() {
+					panic("query killed")
+				}
 				if idx >= visibleUpper {
 					continue
 				}

@@ -91,6 +91,9 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	if len(innerScanSlice) > 10 && scm.ToBool(innerScanSlice[10]) {
 		return scm.NewNil()
 	}
+	if len(innerScanSlice) > 6 && astContainsHead(innerScanSlice[6], "scan_order") {
+		return scm.NewNil()
+	}
 
 	// The inner scan must actually reference at least one outer param
 	// (otherwise it's a cross-join where batching adds overhead for no gain
@@ -344,6 +347,25 @@ func astContainsSymbol(expr scm.Scmer, symbols map[string]bool) bool {
 	}
 	for _, child := range expr.Slice() {
 		if astContainsSymbol(child, symbols) {
+			return true
+		}
+	}
+	return false
+}
+
+func astContainsHead(expr scm.Scmer, headName string) bool {
+	if !expr.IsSlice() {
+		return false
+	}
+	sl := expr.Slice()
+	if len(sl) == 0 {
+		return false
+	}
+	if scmerHeadString(sl[0]) == headName {
+		return true
+	}
+	for _, child := range sl {
+		if astContainsHead(child, headName) {
 			return true
 		}
 	}

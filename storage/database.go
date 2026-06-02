@@ -51,6 +51,10 @@ type database struct {
 	savePending     []byte     `json:"-"`
 	savePendingSync bool       `json:"-"`
 	savePanic       any        `json:"-"`
+	// blobMu serializes lazy .blobs creation and refcount mutations. Blob
+	// refcounts are table-backed metadata, so concurrent rebuild workers must not
+	// race a scan+insert for the same hash.
+	blobMu sync.Mutex `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`

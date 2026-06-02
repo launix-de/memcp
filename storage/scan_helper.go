@@ -176,7 +176,99 @@ func encodeScmerToString(v scm.Scmer, columns []string, columnSymbols []scm.Scme
 // Deprecated: use Settings.AnalyzeMinItems instead
 const scanStatsMinInput int64 = 1000
 
-// ensureSystemStatistic ensures the `system_statistic.scans` table exists with expected columns.
+// dropInternalTempCaches clears planner-owned cache artifacts that are safe to rebuild.
+func dropInternalTempCaches() {
+	for _, db := range databases.GetAll() {
+		if db == nil {
+			continue
+		}
+		dropDatabaseInternalTempCaches(db)
+	}
+}
+
+func dropDatabaseInternalTempCaches(db *database) {
+	defer func() {
+		_ = recover()
+	}()
+	if db == nil {
+		return
+	}
+	db.ensureLoaded()
+	dropDatabaseInternalTempTriggers(db)
+	var tempTables []string
+	var tempCols []struct {
+		table *table
+		name  string
+	}
+	db.schemalock.RLock()
+	func() {
+		defer db.schemalock.RUnlock()
+		for _, tbl := range db.tables.GetAll() {
+			if tbl == nil {
+				continue
+			}
+			if strings.HasPrefix(tbl.Name, ".keytable:") || strings.HasPrefix(tbl.Name, ".prejoin:") {
+				tempTables = append(tempTables, tbl.Name)
+				continue
+			}
+			tbl.schema.schemalock.RLock()
+			func() {
+				defer tbl.schema.schemalock.RUnlock()
+				for _, c := range tbl.Columns {
+					if c.IsTemp {
+						tempCols = append(tempCols, struct {
+							table *table
+							name  string
+						}{table: tbl, name: c.Name})
+					}
+				}
+			}()
+		}
+	}()
+	for _, name := range tempTables {
+		DropTable(db.Name, name, true)
+	}
+	for _, col := range tempCols {
+		col.table.DropColumnIfExists(col.name)
+	}
+}
+
+func isPlannerInternalTriggerName(name string) bool {
+	return strings.HasPrefix(name, ".pj_incr:") ||
+		strings.HasPrefix(name, ".prejoin:") ||
+		strings.HasPrefix(name, ".kt_cleanup:")
+}
+
+func dropDatabaseInternalTempTriggers(db *database) {
+	for _, tbl := range db.tables.GetAll() {
+		if tbl == nil {
+			continue
+		}
+		tbl.ddlMu.Lock()
+		db.schemalock.Lock()
+		tbl.mu.Lock()
+		removed := false
+		filtered := tbl.Triggers[:0]
+		for _, trigger := range tbl.Triggers {
+			if isPlannerInternalTriggerName(trigger.Name) {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, trigger)
+		}
+		if removed {
+			tbl.Triggers = filtered
+		}
+		tbl.mu.Unlock()
+		if removed {
+			db.saveLockedWithDurabilityAndUnlock(tbl.PersistencyMode == Safe)
+		} else {
+			db.schemalock.Unlock()
+		}
+		tbl.ddlMu.Unlock()
+	}
+}
+
 func ensureSystemStatistic() {
 	const dbName = "system_statistic"
 	const tblName = "scans"
@@ -189,7 +281,7 @@ func ensureSystemStatistic() {
 	if db == nil {
 		return // should not happen; avoid panicking during init
 	}
-
+	dropInternalTempCaches()
 	// create table if missing (use Sloppy persistency to avoid fsync costs)
 	t, _ := CreateTable(dbName, tblName, Sloppy, true)
 	if t == nil {
@@ -239,6 +331,9 @@ func ensureSystemStatistic() {
 // TODO: measurements are temporary; remove later (nanoseconds)
 func safeLogScan(schema, table string, ordered bool, filter, order, indexCols string, inputCount, outputCount, analyzeNs, execNs int64) {
 	defer func() { _ = recover() }()
+	if schema == "system_statistic" && table == "scans" {
+		return
+	}
 	db := GetDatabase("system_statistic")
 	if db == nil {
 		return

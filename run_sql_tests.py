@@ -496,6 +496,8 @@ class SQLTestRunner:
         for attempt in range(5):
             try:
                 return requests.post(url, data=body, headers=headers, timeout=timeout)
+            except requests.exceptions.Timeout:
+                return None
             except Exception:
                 # parse port from base_url
                 try:
