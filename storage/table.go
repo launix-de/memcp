@@ -1102,7 +1102,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
-		case "filtercols", "filter":
+		case "filtercols", "filter", "lazy":
 			// handled by createcolumn builtin, not a column property
 		case "sortcols", "sortdirs", "mapcols", "mapfn", "reducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn

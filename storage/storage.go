@@ -1202,15 +1202,18 @@ func Init(en scm.Env) {
 				// extract filter from options
 				var filterCols []string
 				var filter scm.Scmer
+				lazy := false
 				for i := 0; i < len(typeparams); i += 2 {
 					key := scm.String(typeparams[i])
 					if key == "filtercols" {
 						filterCols = scmerSliceToStrings(mustScmerSlice(typeparams[i+1], "filter column names"))
 					} else if key == "filter" {
 						filter = typeparams[i+1]
+					} else if key == "lazy" {
+						lazy = scm.ToBool(typeparams[i+1])
 					}
 				}
-				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter)
+				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter, lazy)
 				return scm.NewBool(true)
 			}
 

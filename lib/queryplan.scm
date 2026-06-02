@@ -9933,7 +9933,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						- this keeps the aggregate cache persistent and incrementally
 						maintainable while still skipping empty groups */
 						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
+						(define lazy_group_compute (and (not has_later_group_stage) (not (nil? stage_limit))))
 						(define createcol_options (cons 'list (merge '("temp" true)
+							(if lazy_group_compute '("lazy" true) '())
 							(if (and needs_count filter_empty_groups)
 								(list "filtercols" (list 'list count_col_name)
 									"filter" '((quote lambda) (list (symbol count_col_name)) '('> (symbol count_col_name) 0)))
