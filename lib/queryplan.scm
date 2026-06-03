@@ -4737,11 +4737,22 @@ seeing the correctly prefixed outer alias. */
 					   materialization semantics" — per-outer LIMIT is one).
 					   For single-outer-row queries this gives correct results;
 					   multi-outer cases need future partition_stage augmentation. */
+					/* Session-var detection: when sub uses @session vars, materialize
+					   would cache by subquery hash (excluding session values) →
+					   stale cache across query calls when session vars change.
+					   Skip materialize for these — flatten gives fresh per-query
+					   eval which correctly reflects current session state. */
+					(define sub_uses_session_state
+						(or
+							(expr_uses_session_state (coalesceNil condition2 true))
+							(reduce_assoc fields2 (lambda (acc _k v)
+								(or acc (expr_uses_session_state v))) false)))
 					(define sub_has_limit_correlated
 						(and isOuter (not (or (nil? joinexpr) (equal? joinexpr true)))
 							(not (equal? flatten_groups2 '()))
 							(reduce flatten_groups2 (lambda (acc stage)
-								(or acc (not (nil? (stage_limit_val stage))))) false)))
+								(or acc (not (nil? (stage_limit_val stage))))) false)
+							(not sub_uses_session_state)))
 					/* Extract correlation pairs from joinexpr: each (equal?? outer inner)
 					   conjunct gives one outer-source. The outer ref must be a
 					   get_column with non-nil tv (legitimate outer alias). The inner
