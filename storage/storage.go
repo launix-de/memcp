@@ -758,12 +758,53 @@ func Init(en scm.Env) {
 				offset := int(scm.ToInt(a[layout.offsetIdx]))
 				limit := int(scm.ToInt(a[layout.limitIdx]))
 				hadValue := false
+				/* Per FAQ §43: when limitPartitionCols > 0, apply offset/limit
+				   per-partition where the partition key = first limitPartitionCols
+				   sort columns. Each distinct partition key resets the counter.
+				   The list is already sorted by sortcols so partition keys cluster.
+				   Without this, the list scan applied LIMIT globally, truncating
+				   the cache to one row across all outer keys — the doubly-nested
+				   correlated scalar bug. (see neumann_real_bug_2026-06-06.md.) */
+				partKeyEqual := func(a, b []scm.Scmer) bool {
+					for i := 0; i < len(a) && i < len(b); i++ {
+						if !scm.Equal(a[i], b[i]) {
+							return false
+						}
+					}
+					return len(a) == len(b)
+				}
+				extractPartKey := func(idx uint32) []scm.Scmer {
+					if limitPartitionCols == 0 {
+						return nil
+					}
+					key := make([]scm.Scmer, limitPartitionCols)
+					for c := 0; c < limitPartitionCols && c < len(scols); c++ {
+						key[c] = scols[c](idx)
+					}
+					return key
+				}
 				count := 0
+				skipped := 0
+				var curPK []scm.Scmer
 				for idx, val := range filtered {
-					if idx < offset {
+					if limitPartitionCols > 0 {
+						pk := extractPartKey(uint32(idx))
+						if curPK == nil || !partKeyEqual(pk, curPK) {
+							/* new partition — reset counters */
+							curPK = pk
+							count = 0
+							skipped = 0
+						}
+					}
+					if skipped < offset {
+						skipped++
 						continue
 					}
 					if limit >= 0 && count >= limit {
+						if limitPartitionCols > 0 {
+							/* per-partition limit reached; skip rest of this partition */
+							continue
+						}
 						break
 					}
 					row := mustScmerSlice(val, "scan_order row")
