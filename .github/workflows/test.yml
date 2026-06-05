@@ -21,5 +21,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install requests PyYAML
 
+      - name: Refuse disabled SQL hard time limit
+        run: python3 tools/check_sql_time_limit.py
+
       - name: Run tests
         run: bash git-pre-commit

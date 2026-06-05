@@ -273,7 +273,12 @@ for tf in "${test_files_arr[@]}"; do
   fi
 done
 
-max_jobs="${MEMCP_TEST_JOBS:-4}"
+# The SQL runner enforces a strict 1s wall-clock limit per non-perf query.
+# Running multiple suites concurrently makes that wall-clock budget measure
+# scheduler contention instead of query/compiler performance, so default to
+# serialized suites. Developers can still opt into parallel smoke runs via
+# MEMCP_TEST_JOBS, but CI and pre-commit must keep the deterministic default.
+max_jobs="${MEMCP_TEST_JOBS:-1}"
 if ! [[ "$max_jobs" =~ ^[0-9]+$ ]] || [ "$max_jobs" -lt 1 ]; then
   max_jobs=4
 fi

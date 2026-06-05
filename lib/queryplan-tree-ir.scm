@@ -533,21 +533,94 @@ ports the actual operator rules to the tree representation. */
 		(expr_uses_session_state
 			(list schema2 tables2 '() condition2 group2 having2 nil limit2 offset2))
 		(expr_uses_session_state query))))
+(define literal_sum_count_aggregate_args? (lambda (agg_args)
+	(match agg_args
+		'(agg_expr op 0) (and
+			(equal?? op (quote +))
+			(aggregate_count_literal_expr? agg_expr))
+		false)))
+(define literal_sum_count_aggregate_expr? (lambda (expr)
+	(match expr
+		(cons (symbol aggregate) agg_args) (literal_sum_count_aggregate_args? agg_args)
+		(cons '(quote aggregate) agg_args) (literal_sum_count_aggregate_args? agg_args)
+		false)))
 (define count_subquery_cache_policy (lambda (query target_expr)
 	(match query
 		'(s t f c g h o l off) (begin
-			(define only_count (match f
-				'("__cnt" ((quote aggregate) 1 op 0)) (equal?? op (quote +))
-				'("__cnt" ((symbol aggregate) 1 op 0)) (equal?? op (quote +))
-				false))
+			(define only_literal_sum_count (or
+				(match f
+					'("__cnt" agg_expr) (literal_sum_count_aggregate_expr? agg_expr)
+					false)
+				(literal_sum_count_aggregate_expr? target_expr)))
 			(define session_sensitive_count
 				(if (nil? target_expr)
-					(exists_subquery_uses_session_state_for_row_existence query)
-					(expr_uses_session_state query)))
-			(if (and only_count (equal? g '(1)) session_sensitive_count)
+					(not (equal? (runtime_cache_suffix_from_exprs (list query)) ""))
+					(not (equal? (runtime_cache_suffix_from_exprs (list query target_expr)) ""))))
+			(if (and only_literal_sum_count (unnest_groupby_rule_is_static_group g) session_sensitive_count)
 				(quote uncached-count)
 				nil))
 		nil)))
+(define unnest_scalar_scan_lower_expr (lambda (expr local_alias)
+	(match expr
+		'((symbol get_column) alias_ _ col _) (if (or (nil? alias_) (equal?? alias_ local_alias))
+			(symbol (concat local_alias "." col))
+			(list (quote outer) (symbol (concat alias_ "." col))))
+		'((quote get_column) alias_ _ col _) (if (or (nil? alias_) (equal?? alias_ local_alias))
+			(symbol (concat local_alias "." col))
+			(list (quote outer) (symbol (concat alias_ "." col))))
+		(cons sym args) (if (is_opaque_scope_sym sym)
+			expr
+			(cons
+				(unnest_scalar_scan_lower_expr sym local_alias)
+				(map args (lambda (arg) (unnest_scalar_scan_lower_expr arg local_alias)))))
+		expr)))
+(define unnest_static_session_aggregate_scalar_scan (lambda (schema tbl_desc filter_expr value_expr inner_stages group_expr having_expr order_expr limit_expr offset_expr cache_policy) (begin
+	(if (not (and
+			(equal? cache_policy (quote uncached-count))
+			(equal? (coalesceNil inner_stages '()) '())
+			(or (nil? having_expr) (equal? having_expr true))
+			(equal? (coalesceNil order_expr '()) '())
+			(or (nil? limit_expr) (>= limit_expr 1))
+			(or (nil? offset_expr) (equal? offset_expr 0))
+			(literal_sum_count_aggregate_expr? value_expr)))
+		nil
+		(match tbl_desc
+			'(local_alias local_schema local_tbl _local_outer local_joinexpr)
+			(if (materialized-source? local_tbl)
+				nil
+				(match value_expr
+					(cons _ agg_args)
+					(match agg_args
+						'(agg_expr agg_reduce agg_neutral)
+						(begin
+							(define combined_filter (combine_and_terms (list (coalesceNil local_joinexpr true) (coalesceNil filter_expr true))))
+							(define filter_cols
+								(reduce (extract_columns_for_tblvar local_alias combined_filter)
+									(lambda (acc col) (if (has? acc col) acc (merge acc (list col))))
+									'()))
+							(define map_cols
+								(reduce (extract_columns_for_tblvar local_alias agg_expr)
+									(lambda (acc col) (if (has? acc col) acc (merge acc (list col))))
+									'()))
+							(define filter_params (map filter_cols (lambda (col) (symbol (concat local_alias "." col)))))
+							(define map_params (map map_cols (lambda (col) (symbol (concat local_alias "." col)))))
+							(list (quote coalesceNil)
+								(list (quote scalar_scan)
+									local_schema
+									(scan_tagged_table_base local_tbl)
+									(cons (quote list) filter_cols)
+									(list (quote lambda) filter_params
+										(optimize (unnest_scalar_scan_lower_expr combined_filter local_alias)))
+									(cons (quote list) map_cols)
+									(list (quote lambda) map_params
+										(unnest_scalar_scan_lower_expr agg_expr local_alias))
+									agg_reduce
+									agg_neutral
+									nil)
+								0))
+						_ nil)
+					_ nil))
+			_ nil)))))
 (define unnest_map_rule_projection_expr (lambda (map_node field_name)
 	(if (nil? map_node)
 		nil
@@ -860,6 +933,31 @@ ports the actual operator rules to the tree representation. */
 				us_cache_policy)
 			(if (nil? us_cache_policy) nil subquery))
 		nil))
+	(define us_direct_domain_parts (map us_domain_cols_all (lambda (dc)
+		(list (quote equal??)
+			(us_prefix_ria (nth dc 0))
+			(us_rewrite_domain_outer_expr (nth dc 1))))))
+	(define us_direct_domain_filter (if (equal? (count us_direct_domain_parts) 0) true
+		(if (equal? (count us_direct_domain_parts) 1) (car us_direct_domain_parts)
+			(cons (quote and) us_direct_domain_parts))))
+	(define us_direct_filter (combine_and_terms (list us_direct_domain_filter us_inner_cond_prefixed)))
+	(define us_direct_scalar_scan (if (equal? (count us_prefixed_tables) 1)
+		(unnest_static_session_aggregate_scalar_scan
+			schema
+			(car us_prefixed_tables)
+			us_direct_filter
+			us_value_expr
+			us_inner_stages
+			us_new_group
+			us_new_having
+			us_new_order
+			us_new_limit
+			us_new_offset
+			us_cache_policy)
+		nil))
+	(if (not (nil? us_direct_scalar_scan))
+		(list us_direct_scalar_scan '())
+		(begin
 	(define us_prefixed_inner_stages (scalar_subselect_rewrite_stages_with_lookup
 		us_inner_stages
 		us_prefix_ria
@@ -928,7 +1026,7 @@ ports the actual operator rules to the tree representation. */
 		'((quote aggregate) _ '(symbol +) 0) true
 		false))
 	(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
-	(list us_subst '()))))
+	(list us_subst '()))))))
 (define planner_flat_tables_to_tree_ir (lambda (schema tables)
 	(if (or (nil? tables) (equal? tables '()))
 		(planner_tree_ir_scan schema nil)

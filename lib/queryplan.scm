@@ -1405,54 +1405,74 @@ helper filters can close over them at runtime. */
 		(is_opaque_scope_sym sym)
 		(reduce args (lambda (found arg) (or found (expr_has_opaque_scope arg))) false))
 	false)))
-/* extract runtime-sensitive subexpressions that do not depend on table rows.
-Those terms must affect cache identity (temp column names) even if the
-relational key/domain stays unchanged. */
-	(define extract_runtime_cache_terms (lambda (expr) (match expr
-		_ (if (not (nil? (session_read_expr expr)))
-			(list expr)
-				(match expr
-					(cons sym args) (if (is_opaque_scope_sym sym)
+	/* extract runtime-sensitive subexpressions that do not depend on table rows.
+	Those terms must affect cache identity (temp column names) even if the
+	relational key/domain stays unchanged. */
+		(define extract_runtime_cache_terms (lambda (expr) (match expr
+			_ (if (or
+					(not (nil? (session_read_expr expr)))
+					(not (nil? (materialized_context_runtime_key expr))))
+				(list expr)
+					(match expr
+						(cons sym args) (if (is_opaque_scope_sym sym)
 						(merge_unique (map args extract_runtime_cache_terms))
 						(merge_unique (map args extract_runtime_cache_terms)))
 					'()))
 		)))
-/* runtime_cache_suffix_from_exprs: derive a stable, value-sensitive appendix for
-temp column names from session-/context-dependent terms. The suffix is computed
-at plan-build time, so repeated queries with the same runtime values reuse the
-same cache column while different session values get separate temp columns. */
-	(define planner_eval_runtime_term (lambda (expr) (begin
-		(define bind_context_session (lambda (node) (match node
-			(symbol session) '(context "session")
-			(cons sym args) (cons (bind_context_session sym) (map args bind_context_session))
-			node)))
-		(eval (bind_context_session expr))
-	)))
-(define runtime_cache_suffix_from_exprs (lambda (exprs) (begin
-	(define terms (merge_unique (map exprs extract_runtime_cache_terms)))
-	(if (equal? terms '())
-		""
-		(concat "|rt:"
+	/* runtime_cache_suffix_from_exprs: derive a stable, value-sensitive appendix for
+	temp column names from session-/context-dependent terms. The suffix is computed
+	at plan-build time, so repeated queries with the same runtime values reuse the
+	same cache column while different session values get separate temp columns. */
+		(define materialized_context_runtime_key (lambda (_expr) nil))
+		(define planner_eval_runtime_term (lambda (expr) (begin
+			(define mat_key (materialized_context_runtime_key expr))
+			(if (not (nil? mat_key))
+				mat_key
+				(begin
+					(define bind_context_session (lambda (node) (match node
+						(symbol session) '(context "session")
+						(cons sym args) (cons (bind_context_session sym) (map args bind_context_session))
+						node)))
+					(eval (bind_context_session expr))))
+		)))
+	(define runtime_cache_suffix_from_exprs (lambda (exprs) (begin
+		(define terms (merge_unique (map exprs extract_runtime_cache_terms)))
+		(if (equal? terms '())
+			""
+			(concat "|rt:"
 			(serialize_canonical_expr
 				(canonicalize_expr
 					(map terms (lambda (term) (list term (planner_eval_runtime_term term))))
-					'(list)))))
-)))
-(define user_session_runtime_cache_suffix_from_exprs (lambda (exprs) (begin
-	(define user_session_term? (lambda (term) (match term
-		(cons sym (cons key '()))
-		(and
-			(or
+						'(list)))))
+	)))
+	(define planner_current_session_snapshot_suffix (lambda () (begin
+		(try
+			(lambda () (begin
+				(define sess (context "session"))
+				(define keys (sess))
+				(if (equal? keys '())
+					""
+					(concat "|sess:" (fnv_hash (serialize (map keys (lambda (key)
+						(list key (sess key))))))))))
+			(lambda (err) "")))))
+	(define user_session_runtime_cache_suffix_from_exprs (lambda (exprs) (begin
+		(define user_session_cache_key? (lambda (key)
+			(and
+				(string? key)
+				(not (strlike key "__%")))))
+		(define user_session_term? (lambda (term) (match term
+			(cons sym (cons key '()))
+			(and
+				(or
 				(equal?? sym (symbol session))
-				(equal?? sym (quote session))
-				(equal?? sym (quote (quote session))))
-			(string? key)
-			(not (strlike key "__%")))
-		(cons (cons (symbol context) '("session")) (cons key '()))
-		(and (string? key) (not (strlike key "__%")))
-		(cons (cons '(quote context) '("session")) (cons key '()))
-		(and (string? key) (not (strlike key "__%")))
-		false)))
+					(equal?? sym (quote session))
+					(equal?? sym (quote (quote session))))
+				(user_session_cache_key? key))
+			(cons (cons (symbol context) '("session")) (cons key '()))
+			(user_session_cache_key? key)
+			(cons (cons '(quote context) '("session")) (cons key '()))
+			(user_session_cache_key? key)
+			false)))
 	(define extract_user_session_terms (lambda (expr) (match expr
 		_ (if (user_session_term? expr)
 			(list expr)
@@ -3848,15 +3868,16 @@ seeing the correctly prefixed outer alias. */
 	(define count_subquery_cache_policy (lambda (query target_expr)
 		(match query
 			'(s t f c g h o l off) (begin
-				(define only_count (match f
-					'("__cnt" ((quote aggregate) 1 op 0)) (equal?? op (quote +))
-					'("__cnt" ((symbol aggregate) 1 op 0)) (equal?? op (quote +))
-					false))
+				(define only_literal_sum_count (or
+					(match f
+						'("__cnt" agg_expr) (literal_sum_count_aggregate_expr? agg_expr)
+						false)
+					(literal_sum_count_aggregate_expr? target_expr)))
 				(define session_sensitive_count
 					(if (nil? target_expr)
-						(exists_subquery_uses_session_state_for_row_existence query)
-						(expr_uses_session_state query)))
-				(if (and only_count (equal? g '(1)) session_sensitive_count)
+						(not (equal? (runtime_cache_suffix_from_exprs (list query)) ""))
+						(not (equal? (runtime_cache_suffix_from_exprs (list query target_expr)) ""))))
+				(if (and only_literal_sum_count (unnest_groupby_rule_is_static_group g) session_sensitive_count)
 					(quote uncached-count)
 					nil))
 			nil)))
@@ -4145,6 +4166,55 @@ seeing the correctly prefixed outer alias. */
 				(sq_cache "uncorr_promise_bindings"
 					(set_assoc uncorr_promise_cache uncorr_promise_key promise_name))
 				(list promise_sym "value"))))))
+	(define materialize_uncorrelated_direct_promise_value (lambda (cache_prefix subquery direct_expr error_message) (begin
+		(define uncorr_promise_cache (coalesceNil (sq_cache "uncorr_promise_bindings") '()))
+		(define uncorr_promise_key (concat cache_prefix ":" (serialize subquery)))
+		(define cached_promise_name (coalesce (uncorr_promise_cache uncorr_promise_key) nil))
+		(if (not (nil? cached_promise_name))
+			(list (symbol cached_promise_name) "value")
+			(begin
+				(define promise_idx (coalesceNil (sq_cache "idx") 0))
+				(sq_cache "idx" (+ promise_idx 1))
+				(define promise_name (concat "__uncorr_promise_" promise_idx))
+				(define promise_sym (symbol promise_name))
+				(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
+					(list
+						(list (quote set) promise_sym (list (quote newpromise)))
+						(list promise_sym "once" direct_expr error_message))))
+				(sq_cache "uncorr_promise_bindings"
+					(set_assoc uncorr_promise_cache uncorr_promise_key promise_name))
+				(list promise_sym "value"))))))
+	(define uncorrelated_session_aggregate_direct_expr (lambda (subquery value_expr) (match subquery
+		'(sub_schema sub_tables _sub_fields sub_condition sub_group sub_having sub_order sub_limit sub_offset)
+		(begin
+			(define cache_policy (count_subquery_cache_policy subquery value_expr))
+			(if (and
+					(equal? cache_policy (quote uncached-count))
+					(equal? (count sub_tables) 1)
+					(or (nil? sub_group) (equal? sub_group '()) (equal? sub_group '(1))))
+				(unnest_static_session_aggregate_scalar_scan
+					sub_schema
+					(car sub_tables)
+					sub_condition
+					value_expr
+					'()
+					(coalesceNil sub_group '(1))
+					sub_having
+					sub_order
+					sub_limit
+					sub_offset
+					cache_policy)
+				nil))
+		_ nil)))
+	(define uncorrelated_literal_sum_count_value_expr (lambda (field_name field_expr)
+		(if (literal_sum_count_aggregate_expr? field_expr)
+			field_expr
+			(if (or
+					(equal?? field_name "SUM(1)")
+					(equal?? field_name "COUNT(1)")
+					(equal?? field_name "COUNT(*)"))
+				(list (quote aggregate) 1 (quote +) 0)
+				field_expr))))
 	(define materialize_uncorrelated_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(define shape_facts (scalar_subselect_shape_facts subquery outer_schemas))
 		(match shape_facts
@@ -4161,11 +4231,42 @@ seeing the correctly prefixed outer alias. */
 							nil))
 						(if (nil? first_field_name)
 							nil
-							(materialize_uncorrelated_promise_value
-								"scalar"
-								subquery
-								(list (quote nth) (symbol "row") 1)
-								"scalar subselect returned more than one row")))
+							(begin
+								(define direct_subquery (if contains_inner_select
+									(match subquery
+										'(direct_schema direct_tables direct_fields direct_condition direct_group direct_having direct_order direct_limit direct_offset)
+										(list direct_schema
+											direct_tables
+											(map_assoc direct_fields (lambda (direct_name direct_expr)
+												(replace_inner_selects direct_expr outer_schemas)))
+											(replace_inner_selects direct_condition outer_schemas)
+											(map (coalesceNil direct_group '()) (lambda (direct_group_expr)
+												(replace_inner_selects direct_group_expr outer_schemas)))
+											(replace_inner_selects direct_having outer_schemas)
+											(map (coalesceNil direct_order '()) (lambda (direct_order_item) (match direct_order_item
+												'(direct_order_expr direct_order_dir)
+												(list (replace_inner_selects direct_order_expr outer_schemas) direct_order_dir)
+												_ direct_order_item)))
+											direct_limit
+											direct_offset)
+										_ subquery)
+									subquery))
+								(define direct_fields (match direct_subquery
+									'(_ _ direct_fields_list _ _ _ _ _ _) direct_fields_list
+									_ sub_fields))
+								(define first_field_expr (uncorrelated_literal_sum_count_value_expr first_field_name (nth direct_fields 1)))
+								(define direct_expr (uncorrelated_session_aggregate_direct_expr direct_subquery first_field_expr))
+								(if (nil? direct_expr)
+									(materialize_uncorrelated_promise_value
+										"scalar"
+										subquery
+										(list (quote nth) (symbol "row") 1)
+										"scalar subselect returned more than one row")
+									(materialize_uncorrelated_direct_promise_value
+										"scalar-direct"
+										subquery
+										direct_expr
+										"scalar subselect returned more than one row")))))
 					_ nil))
 			_ nil))))
 		(define try_build_scalar_subselect_with_strategy (lambda (subquery outer_schemas) (begin
@@ -4923,6 +5024,7 @@ seeing the correctly prefixed outer alias. */
 		(define dep_domain_exprs (merge_unique
 			(map (dependent_expr_compile_info_outer_bindings dep_info) visible_outer_binding_source_expr)
 			(extract_session_read_refs (dependent_expr_compile_info_expr dep_info))
+			(extract_session_read_refs (dependent_expr_compile_info_subquery dep_info))
 			(if (nil? (dependent_expr_compile_info_target_expr dep_info))
 				'()
 				(list (dependent_expr_compile_info_target_expr dep_info)))
@@ -5230,32 +5332,41 @@ seeing the correctly prefixed outer alias. */
 			_ e)))
 		(rewrite_expr (rewrite_independent_inner_selects expr)))))
 	(define dependent_join_helper_build_source_query (lambda (dep_info result_col domain_cols source_result_expr) (begin
-		(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
-		(define domain_alias (dependent_join_helper_domain_source_alias))
-		(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
-		(match dep_subquery
-			'(dep_schema dep_tables dep_fields dep_condition dep_group dep_having dep_order dep_limit dep_offset)
-			(list dep_schema
-				(merge
-					(list (list domain_alias dep_schema (make_dependent_domain_table_spec norm_domain_cols) false nil))
-					(map dep_tables (lambda (td) (match td
-						'(tv tschema ttbl toisOuter tje)
-						(list tv tschema ttbl toisOuter
-							(if (nil? tje) nil
-								(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
-						_ td))))
+			(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
+			(define domain_alias (dependent_join_helper_domain_source_alias))
+			(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
+			(match dep_subquery
+				'(dep_schema dep_tables dep_fields dep_condition dep_group dep_having dep_order dep_limit dep_offset)
+				(begin
+					(define pulled_semijoin
+						(dependent_join_helper_pull_simple_semijoins dep_tables dep_condition))
+					(define effective_dep_tables (match pulled_semijoin
+						'(tables_acc _terms_acc) tables_acc
+						_ dep_tables))
+					(define effective_dep_condition (match pulled_semijoin
+						'(_tables_acc terms_acc) (combine_and_terms terms_acc)
+						_ dep_condition))
+				(list dep_schema
+					(merge
+						(list (list domain_alias dep_schema (make_dependent_domain_table_spec norm_domain_cols) false nil))
+						(map effective_dep_tables (lambda (td) (match td
+							'(tv tschema ttbl toisOuter tje)
+							(list tv tschema ttbl toisOuter
+								(if (nil? tje) nil
+									(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
+							_ td))))
 				(merge
 					(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
 					(list result_col source_result_expr))
-				(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols)
-				(map (coalesceNil dep_group '()) (lambda (expr)
-					(dependent_join_helper_rewrite_expr_for_domain_source dep_info expr domain_cols)))
-				(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_having domain_cols)
-				(map (coalesceNil dep_order '()) (lambda (oi) (match oi
-					'(col dir) (list (dependent_join_helper_rewrite_expr_for_domain_source dep_info col domain_cols) dir)
-					_ oi)))
-				dep_limit dep_offset)
-			_ nil))))
+					(dependent_join_helper_rewrite_expr_for_domain_source dep_info effective_dep_condition domain_cols)
+					(map (coalesceNil dep_group '()) (lambda (expr)
+						(dependent_join_helper_rewrite_expr_for_domain_source dep_info expr domain_cols)))
+					(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_having domain_cols)
+					(map (coalesceNil dep_order '()) (lambda (oi) (match oi
+						'(col dir) (list (dependent_join_helper_rewrite_expr_for_domain_source dep_info col domain_cols) dir)
+						_ oi)))
+					dep_limit dep_offset))
+				_ nil))))
 	(define dependent_join_helper_build_source_query_with_extra_condition (lambda (dep_info result_col domain_cols source_result_expr extra_condition) (begin
 		(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
 		(define domain_alias (dependent_join_helper_domain_source_alias))
@@ -5263,22 +5374,32 @@ seeing the correctly prefixed outer alias. */
 		(match dep_subquery
 			'(dep_schema dep_tables dep_fields dep_condition dep_group dep_having dep_order dep_limit dep_offset)
 			(begin
-				(define rewritten_condition
-					(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_condition domain_cols))
-				(define merged_condition
-					(if (or (nil? extra_condition) (equal? extra_condition true))
-						rewritten_condition
-						(if (or (nil? rewritten_condition) (equal? rewritten_condition true))
-							extra_condition
+					(define rewritten_condition
+						(begin
+							(define pulled_semijoin
+								(dependent_join_helper_pull_simple_semijoins dep_tables dep_condition))
+							(define effective_dep_condition (match pulled_semijoin
+								'(_tables_acc terms_acc) (combine_and_terms terms_acc)
+								_ dep_condition))
+							(dependent_join_helper_rewrite_expr_for_domain_source dep_info effective_dep_condition domain_cols)))
+					(define effective_dep_tables (match
+						(dependent_join_helper_pull_simple_semijoins dep_tables dep_condition)
+						'(tables_acc _terms_acc) tables_acc
+						_ dep_tables))
+					(define merged_condition
+						(if (or (nil? extra_condition) (equal? extra_condition true))
+							rewritten_condition
+							(if (or (nil? rewritten_condition) (equal? rewritten_condition true))
+								extra_condition
 							(list (quote and) rewritten_condition extra_condition))))
-				(list dep_schema
-					(merge
-						(list (list domain_alias dep_schema (make_dependent_domain_table_spec norm_domain_cols) false nil))
-						(map dep_tables (lambda (td) (match td
-							'(tv tschema ttbl toisOuter tje)
-							(list tv tschema ttbl toisOuter
-								(if (nil? tje) nil
-									(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
+					(list dep_schema
+						(merge
+							(list (list domain_alias dep_schema (make_dependent_domain_table_spec norm_domain_cols) false nil))
+							(map effective_dep_tables (lambda (td) (match td
+								'(tv tschema ttbl toisOuter tje)
+								(list tv tschema ttbl toisOuter
+									(if (nil? tje) nil
+										(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
 							_ td))))
 					(merge
 						(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
@@ -5456,11 +5577,11 @@ seeing the correctly prefixed outer alias. */
 				(list sj_tables (coalesceNil sj_condition true))
 				nil))
 		_ nil)))
-	(define dependent_join_helper_simple_semijoin_join_parts (lambda (term current_tables) (match term
-		(cons sym args)
-		(begin
-			(define kind (inner_select_kind sym))
-			(if (or (equal?? kind (quote inner_select_in)) (equal?? kind (quote inner_select_exists)))
+		(define dependent_join_helper_simple_semijoin_join_parts (lambda (term current_tables) (match term
+			(cons sym args)
+			(begin
+				(define kind (inner_select_kind sym))
+				(if (or (equal?? kind (quote inner_select_in)) (equal?? kind (quote inner_select_exists)))
 				(begin
 					(define sj_target (if (equal?? kind (quote inner_select_in))
 						(match args (cons target_expr (cons _subquery '())) target_expr nil)
@@ -5497,16 +5618,106 @@ seeing the correctly prefixed outer alias. */
 				(dependent_join_helper_count_subquery_join_parts
 					(dependent_join_helper_parser_in_match_subquery term)
 					current_tables)))
-		_ nil)))
-	(define dependent_join_helper_pull_simple_semijoins (lambda (dep_tables dep_condition)
-		(reduce (flatten_and_terms (coalesceNil dep_condition true)) (lambda (state term)
-			(match state
-				'(tables_acc terms_acc)
-				(match (dependent_join_helper_simple_semijoin_join_parts term tables_acc)
-					'(sj_tables sj_condition)
-					(list
-						(merge tables_acc sj_tables)
-						(merge terms_acc (flatten_and_terms (coalesceNil sj_condition true))))
+			_ nil)))
+		(define dependent_join_helper_localize_outer_expr (lambda (expr local_aliases) (match expr
+			'((quote outer) outer_sym) (match (split (string outer_sym) ".")
+				(list alias_ col) (if (alias_in_list local_aliases alias_)
+					(list (quote get_column) alias_ false col false)
+					expr)
+				_ expr)
+			'((symbol outer) outer_sym) (match (split (string outer_sym) ".")
+				(list alias_ col) (if (alias_in_list local_aliases alias_)
+					(list (quote get_column) alias_ false col false)
+					expr)
+				_ expr)
+			(cons sym args) (if (is_opaque_scope_sym sym)
+				expr
+				(cons (dependent_join_helper_localize_outer_expr sym local_aliases)
+					(map args (lambda (arg)
+						(dependent_join_helper_localize_outer_expr arg local_aliases)))))
+			_ expr)))
+		(define dependent_join_helper_nil_test_expr (lambda (expr) (match expr
+			(cons sym (cons inner_expr '()))
+			(if (or
+					(equal?? sym (quote nil?))
+					(equal?? sym (symbol nil?))
+					(equal?? sym (quote (quote nil?))))
+				inner_expr
+				nil)
+			_ nil)))
+		(define dependent_join_helper_not_nil_test_expr (lambda (expr) (match expr
+			(cons sym (cons inner_expr '()))
+			(if (or
+					(equal?? sym (quote not))
+					(equal?? sym (symbol not))
+					(equal?? sym (quote (quote not))))
+				(dependent_join_helper_nil_test_expr inner_expr)
+				nil)
+			_ nil)))
+		(define dependent_join_helper_simple_scalar_bool_join_parts (lambda (term current_tables) (begin
+			(define scalar_expr (match term
+				(cons sym args) (if (equal?? (inner_select_kind sym) (quote inner_select))
+					term
+					(dependent_join_helper_not_nil_test_expr term))
+				_ nil))
+			(if (nil? scalar_expr)
+				nil
+				(match scalar_expr
+					(cons scalar_sym scalar_args)
+					(if (equal?? (inner_select_kind scalar_sym) (quote inner_select))
+						(match scalar_args
+							(cons scalar_subquery '())
+							(match scalar_subquery
+								'(sj_schema sj_tables sj_fields sj_condition sj_group sj_having sj_order sj_limit sj_offset)
+								(begin
+									(define first_field_expr (match sj_fields
+										(cons _ (cons v _)) v
+										nil))
+									(define current_aliases (dependent_join_helper_table_aliases current_tables))
+									(define sj_aliases (dependent_join_helper_table_aliases sj_tables))
+									(define local_aliases (merge_unique current_aliases sj_aliases))
+									(define is_not_nil_context (not (equal? scalar_expr term)))
+									(if (and
+											(not (nil? first_field_expr))
+											(not (equal? sj_tables '()))
+											(dependent_join_helper_aliases_disjoint current_aliases sj_aliases)
+											(or (nil? sj_group) (equal? sj_group '()))
+											(or (nil? sj_having) (equal? sj_having true))
+											(or (nil? sj_order) (equal? sj_order '()))
+											(or (nil? sj_limit) (equal? sj_limit 1))
+											(or (nil? sj_offset) (equal? sj_offset 0))
+											(equal? (extract_aggregates first_field_expr) '())
+											(not (contains_inner_select_marker first_field_expr))
+											(not (contains_inner_select_marker sj_condition)))
+										(begin
+											(define localized_field
+												(dependent_join_helper_localize_outer_expr first_field_expr local_aliases))
+											(define localized_condition
+												(dependent_join_helper_localize_outer_expr
+													(coalesceNil sj_condition true)
+													local_aliases))
+											(list sj_tables
+												(combine_and_terms (list
+													localized_condition
+													(if is_not_nil_context
+														(list (quote not) (list (quote nil?) localized_field))
+														localized_field)))))
+										nil))
+								_ nil)
+							_ nil)
+						nil)
+					_ nil)))))
+		(define dependent_join_helper_pull_simple_semijoins (lambda (dep_tables dep_condition)
+			(reduce (flatten_and_terms (coalesceNil dep_condition true)) (lambda (state term)
+				(match state
+					'(tables_acc terms_acc)
+					(match (coalesce
+						(dependent_join_helper_simple_semijoin_join_parts term tables_acc)
+						(dependent_join_helper_simple_scalar_bool_join_parts term tables_acc))
+						'(sj_tables sj_condition)
+						(list
+							(merge tables_acc sj_tables)
+							(merge terms_acc (flatten_and_terms (coalesceNil sj_condition true))))
 					_ (list tables_acc (merge terms_acc (list term))))
 				_ state))
 			(list dep_tables '()))))
@@ -5858,7 +6069,7 @@ seeing the correctly prefixed outer alias. */
 				pruned_outer_tables
 				domain_fields
 				(coalesceNil outer_condition true)
-				(dedupe_canonical_exprs (merge (coalesceNil outer_group '()) domain_group_exprs))
+				(dedupe_canonical_exprs domain_group_exprs)
 				outer_having
 				'()
 				nil
@@ -6651,12 +6862,18 @@ seeing the correctly prefixed outer alias. */
 									regressions. */
 									(define mat_inner_plan (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 nil))
 									(define mat_init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
-									(define mat_inner_plan (if (equal? mat_init_stmts '())
-										mat_inner_plan
-										(cons (quote !begin) (merge mat_init_stmts (list mat_inner_plan)))))
-									(define materialized_binding
-										(legacy_materialized_query_term_binding_ast
-											id subquery rows_sym row_sink_sym mat_limit cnt_sym))
+										(define mat_inner_plan (if (equal? mat_init_stmts '())
+											mat_inner_plan
+											(cons (quote !begin) (merge mat_init_stmts (list mat_inner_plan)))))
+										(define mat_runtime_id
+											(concat id
+												(runtime_cache_suffix_from_exprs
+													(list subquery))
+												(user_session_runtime_cache_suffix_from_exprs
+													(list subquery mat_inner_plan))))
+										(define materialized_binding
+											(legacy_materialized_query_term_binding_ast
+												mat_runtime_id subquery rows_sym row_sink_sym mat_limit cnt_sym))
 									(define mat_source (nth materialized_binding 0))
 									(define mat_init (nth materialized_binding 1))
 									(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
@@ -7118,31 +7335,50 @@ seeing the correctly prefixed outer alias. */
 									(renamelist alias_sym)
 									nil))))
 					(if (nil? rename_fn) nil (rename_fn col)))))))
-	(define dep_rewrite_domain_expr (lambda (expr) (match expr
-		'((quote get_column) alias_ _ col _)
-		(if (nil? alias_)
-			expr
-			(coalesce (dep_lookup_renamed_column alias_ col) expr))
-		'((symbol get_column) alias_ _ col _)
-		(if (nil? alias_)
-			expr
-			(coalesce (dep_lookup_renamed_column alias_ col) expr))
-		expr)))
-	(define dep_rewrite_domain_cols (lambda (domain_cols)
-		(map domain_cols (lambda (dc) (match dc
-			'(dom_col dom_expr)
-			(begin
-				(define rewritten (dep_rewrite_domain_expr dom_expr))
-				/* Adopt the rewrite when its remaining alias references all
-				point at live outer tables (or it became fully closed). Otherwise
-				the rewrite would expose another elided alias and we'd just shift
+		(define dep_rewrite_domain_expr (lambda (unnesting_info expr) (begin
+			(define parent_info (dependent_expr_unnesting_info_parent unnesting_info))
+			(define rewrite_parent_repr (lambda (node) (begin
+				(define parent_repr
+					(if (nil? parent_info)
+						nil
+						(dependent_join_helper_repr_lookup parent_info node)))
+				(if (and
+						(not (nil? parent_repr))
+						(list? parent_repr))
+					parent_repr
+					(match node
+						(cons sym args) (if (or
+								(is_opaque_scope_sym sym)
+								(is_quote_scope_sym sym))
+							node
+							(cons sym (map args rewrite_parent_repr)))
+						_ node)))))
+			(define rewritten_expr (rewrite_parent_repr expr))
+			(match rewritten_expr
+				'((quote get_column) alias_ _ col _)
+				(if (nil? alias_)
+					rewritten_expr
+					(coalesce (dep_lookup_renamed_column alias_ col) rewritten_expr))
+				'((symbol get_column) alias_ _ col _)
+				(if (nil? alias_)
+					rewritten_expr
+					(coalesce (dep_lookup_renamed_column alias_ col) rewritten_expr))
+				_ rewritten_expr))))
+		(define dep_rewrite_domain_cols (lambda (domain_cols unnesting_info)
+			(map domain_cols (lambda (dc) (match dc
+				'(dom_col dom_expr)
+				(begin
+					(define rewritten (dep_rewrite_domain_expr unnesting_info dom_expr))
+					/* Adopt the rewrite when its remaining alias references all
+					point at live outer tables (or it became fully closed). Otherwise
+					the rewrite would expose another elided alias and we'd just shift
 				the problem. */
 				(if (and
 					(not (equal? rewritten dom_expr))
 					(dep_expr_only_visible_outer_refs rewritten))
 					(list dom_col rewritten)
 					dc))
-			_ dc)))))
+				_ dc)))))
 	(define sq_tbls (map sq_tbls (lambda (td) (match td
 		'(tv tschema ttbl toisOuter tje)
 		(if (is_dependent_join_helper_spec ttbl)
@@ -7152,9 +7388,10 @@ seeing the correctly prefixed outer alias. */
 						(not (has? (extract_tblvars term) tv))))
 						'() true
 						terms (cons (quote and) terms)))
-				(define dep_spec_domain_cols
-					(dep_rewrite_domain_cols
-						(dependent_join_helper_spec_domain_cols ttbl)))
+					(define dep_spec_domain_cols
+						(dep_rewrite_domain_cols
+							(dependent_join_helper_spec_domain_cols ttbl)
+							(dependent_join_helper_spec_unnesting_info ttbl)))
 				(define dep_source_query
 					(dependent_join_helper_finalize_source_query
 						(dependent_join_helper_spec_source_query ttbl)
@@ -7174,20 +7411,21 @@ seeing the correctly prefixed outer alias. */
 					(dependent_join_helper_spec_dep_info ttbl))
 				(define dep_source_preserves_full_domain
 					(dependent_join_helper_source_preserves_full_domain dep_source_query dep_result_col))
-				(define dep_preserve_full_domain
-					(and
-						(not dep_source_preserves_full_domain)
-						(or
-							(or
-								(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select_exists))
-								(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select_in)))
+					(define dep_preserve_full_domain
+						(and
+							(not dep_source_preserves_full_domain)
 							(and
 								(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
-								(dependent_join_helper_scalar_count_aggregate? dep_info)))))
+								(dependent_join_helper_scalar_count_aggregate? dep_info))))
 				(define dep_materialize_source_query
 					(if dep_preserve_full_domain
 						(begin
-							(define dep_domain_alias "__dep_full_domain")
+							(define dep_domain_runtime_suffix
+								(runtime_cache_suffix_from_exprs dep_active_domain_cols))
+							(define dep_domain_alias
+								(if (equal? dep_domain_runtime_suffix "")
+									"__dep_full_domain"
+									(concat "__dep_full_domain_" (fnv_hash dep_domain_runtime_suffix))))
 							(define dep_match_alias "__dep_full_match")
 							(define dep_empty_result
 								(if (and
@@ -7243,41 +7481,51 @@ seeing the correctly prefixed outer alias. */
 				Returns nil for unsupported shapes; caller falls through to legacy.
 					See memory: keytable_refactoring_spec.md (via Claude memory) for migration plan. */
 					(define dep_helper_cache_name
-						(concat tv ":dep_helper:"
-							(fnv_hash (serialize dep_materialize_source_query))
-							(runtime_cache_suffix_from_exprs (list dep_materialize_source_query))
+							(concat tv ":dep_helper:"
+								(fnv_hash (serialize dep_materialize_source_query))
+							(runtime_cache_suffix_from_exprs (list
+								dep_materialize_source_query
+								dep_active_domain_cols
+								(dependent_expr_compile_info_subquery dep_info)
+								(dependent_join_helper_spec_domain_cols ttbl)
+								(dependent_join_helper_spec_unnesting_info ttbl)))
+							(if (dependent_expr_compile_info_uses_session_state dep_info)
+								(planner_current_session_snapshot_suffix)
+								"")
 							(user_session_runtime_cache_suffix_from_exprs (list
 								(dependent_expr_compile_info_expr dep_info)
 								(dependent_expr_compile_info_subquery dep_info)
-								dep_materialize_source_query))
-							":"
-							(uuid)))
-				(define dep_mat_binding
-					(coalesce
-						(dep_helper_keytable_binding
-							dep_helper_cache_name
-							dep_materialize_source_query
-							dep_rows_sym
-							dep_sink_sym
-							nil
-							nil)
-						(legacy_materialized_query_term_binding_ast
-							dep_helper_cache_name
-							dep_materialize_source_query
-							dep_rows_sym
-							dep_sink_sym
-							nil
-							nil)))
-				(define dep_mat_source (nth dep_mat_binding 0))
-				(define dep_mat_init (nth dep_mat_binding 1))
-				(match dep_materialize_source_query
-					'(_ _ dep_fields _ _ _ _ _ _)
-					(planned_materialized_fields dep_mat_source
-						(reduce_assoc dep_fields (lambda (acc k _v)
-							(merge acc (list (list "Field" k "Type" "any"))))
-							'()))
-					_ nil)
-				(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) (list dep_mat_init)))
+								dep_materialize_source_query
+								dep_active_domain_cols
+								(dependent_join_helper_spec_domain_cols ttbl)
+								(dependent_expr_unnesting_info_parent
+									(dependent_join_helper_spec_unnesting_info ttbl))))))
+					(define dep_mat_binding
+						(coalesce
+							(dep_helper_keytable_binding
+								dep_helper_cache_name
+								dep_materialize_source_query
+								dep_rows_sym
+								dep_sink_sym
+								nil
+								nil)
+							(legacy_materialized_query_term_binding_ast
+								dep_helper_cache_name
+								dep_materialize_source_query
+								dep_rows_sym
+								dep_sink_sym
+								nil
+								nil)))
+					(define dep_mat_source (nth dep_mat_binding 0))
+					(define dep_mat_init (nth dep_mat_binding 1))
+					(match dep_materialize_source_query
+						'(_ _ dep_fields _ _ _ _ _ _)
+						(planned_materialized_fields dep_mat_source
+							(reduce_assoc dep_fields (lambda (acc k _v)
+								(merge acc (list (list "Field" k "Type" "any"))))
+								'()))
+						_ nil)
+					(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) (list dep_mat_init)))
 				/* FAQ §10 once_limit lowering for non-aggregate scalar correlated
 				subselects: the materialized helper contains ALL matching inner rows
 				per partition. Wrap the consumer in a scan-tagged-table with

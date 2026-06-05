@@ -46,6 +46,28 @@ test_cases:
       data:
         - item_id: 1
 
+  - name: "EXPLAIN IR pulls nested scalar into EXISTS helper"
+    steps:
+      - session_id: "sess_esv"
+        sql: "SET @current_user = 1"
+      - session_id: "sess_esv"
+        sql: |
+          EXPLAIN IR SELECT i.ID, i.title,
+            EXISTS (
+              SELECT TRUE FROM esv_access a
+              WHERE a.item_id = i.ID
+              AND (SELECT u.ID = @current_user FROM esv_users u WHERE u.ID = a.user_id LIMIT 1)
+              LIMIT 1
+            ) AS has_access
+          FROM esv_items i ORDER BY i.ID
+        expect:
+          contains:
+            - "esv_access"
+            - "esv_users"
+          not_contains:
+            - "inner_select"
+            - "__dep_full_domain"
+
   - name: "EXISTS with AND scalar subselect session var"
     session_id: "sess_esv"
     sql: |

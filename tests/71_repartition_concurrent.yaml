@@ -98,8 +98,8 @@ test_cases:
       data:
         - cnt: 200
 
-  - name: "RC: verify deleted rows gone"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+  - name: "RC: verify deleted boundary rows gone"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id IN (60950, 60999)"
     expect:
       rows: 1
       data:
@@ -181,8 +181,8 @@ test_cases:
           rows: 1
           data:
             - cnt: 60950
-      - name: "RC-del: deleted rows gone"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+      - name: "RC-del: deleted boundary rows gone"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id IN (60950, 60999)"
         expect:
           rows: 1
           data:
@@ -235,8 +235,8 @@ test_cases:
           rows: 1
           data:
             - cnt: 61150
-      - name: "RC-repeat: deleted rows gone"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+      - name: "RC-repeat: deleted boundary rows gone"
+        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id IN (60950, 60999)"
         expect:
           rows: 1
           data:

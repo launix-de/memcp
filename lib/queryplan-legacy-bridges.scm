@@ -73,9 +73,7 @@ for registering visible schema metadata. */
 	(define runtime_id
 		(concat
 			id
-			(user_session_runtime_cache_suffix_from_exprs (list subquery materialized_rows))
-			":"
-			(uuid)))
+			(user_session_runtime_cache_suffix_from_exprs (list subquery materialized_rows))))
 	(define mat_source (materialized-subquery-source runtime_id subquery))
 	(materialized_source_dependency_tables mat_source
 		(collect_materialized_query_dependency_tables subquery))

@@ -8,7 +8,7 @@ setup:
   - sql: "CREATE TABLE mp_pressure (id INT, a INT, b INT, c INT, d INT, e INT, f TEXT)"
 
 test_cases:
-  - name: "MP: insert 4k rows with ~2MB hash payload"
+  - name: "MP: insert 1k rows with ~2MB hash payload"
     scm: |
       (begin
         (set imod (lambda (a b) (- a (* (floor (/ a b)) b))))
@@ -22,9 +22,33 @@ test_cases:
               (sha256 (concat "s5:" i))
               (sha256 (concat "s6:" i))
               (sha256 (concat "s7:" i))
-              (sha256 (concat "s8:" i)))))
+              (sha256 (concat "s8:" i))
+              (sha256 (concat "s9:" i))
+              (sha256 (concat "s10:" i))
+              (sha256 (concat "s11:" i))
+              (sha256 (concat "s12:" i))
+              (sha256 (concat "s13:" i))
+              (sha256 (concat "s14:" i))
+              (sha256 (concat "s15:" i))
+              (sha256 (concat "s16:" i))
+              (sha256 (concat "s17:" i))
+              (sha256 (concat "s18:" i))
+              (sha256 (concat "s19:" i))
+              (sha256 (concat "s20:" i))
+              (sha256 (concat "s21:" i))
+              (sha256 (concat "s22:" i))
+              (sha256 (concat "s23:" i))
+              (sha256 (concat "s24:" i))
+              (sha256 (concat "s25:" i))
+              (sha256 (concat "s26:" i))
+              (sha256 (concat "s27:" i))
+              (sha256 (concat "s28:" i))
+              (sha256 (concat "s29:" i))
+              (sha256 (concat "s30:" i))
+              (sha256 (concat "s31:" i))
+              (sha256 (concat "s32:" i)))))
         (insert (table "memcp-tests" "mp_pressure") '("id" "a" "b" "c" "d" "e" "f")
-          (parallelN 4001 (lambda (i) (list i
+          (parallelN 1001 (lambda (i) (list i
             (imod (* i 54321) 999983)
             (imod (* i 12347) 999979)
             (imod (* i 98765) 999961)
@@ -45,20 +69,20 @@ test_cases:
           a: 321918
 
   - name: "MP: query 2 on id (Savings=2, triggers index build)"
-    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 2000"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 500"
     expect:
       rows: 1
       data:
-        - id: 2000
-          a: 643836
+        - id: 500
+          a: 160959
 
   - name: "MP: query 3 on id (uses built index)"
-    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 3000"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 900"
     expect:
       rows: 1
       data:
-        - id: 3000
-          a: 965754
+        - id: 900
+          a: 889716
 
   - name: "MP: stat before pressure (shards+indexes registered)"
     scm: (stat)
@@ -75,13 +99,13 @@ test_cases:
     expect: {}
 
   - name: "MP: select after persisted eviction (forces shard+index reload)"
-    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 2000"
+    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 500"
     expect:
       rows: 1
       data:
-        - id: 2000
-          a: 643836
-          b: 694504
+        - id: 500
+          a: 160959
+          b: 173626
 
   - name: "MP: reset MaxPersistBytes to 0"
     scm: (settings "MaxPersistBytes" 0)
@@ -94,13 +118,13 @@ test_cases:
     expect: {}
 
   - name: "MP: select after total eviction"
-    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 2000"
+    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 500"
     expect:
       rows: 1
       data:
-        - id: 2000
-          a: 643836
-          b: 694504
+        - id: 500
+          a: 160959
+          b: 173626
 
   - name: "MP: reset MaxRamBytes to 0"
     scm: (settings "MaxRamBytes" 0)

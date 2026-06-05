@@ -1,0 +1,17 @@
+name: SQL Time Limit Guard
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  sql-time-limit-guard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse disabled SQL hard time limit
+        run: python3 tools/check_sql_time_limit.py

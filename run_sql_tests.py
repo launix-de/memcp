@@ -119,12 +119,10 @@ PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
-# Hard wall-clock limit per query — a GENEROUS backstop, not a precise gate.
-# Wall-clock is hardware-dependent (a Raspberry Pi is ~10x slower), so this is
-# only meant to catch gross runaways. The default gives a fast query (<100ms
-# here, <1s on a Pi) ample room while still tripping on multi-second runaways.
-# Per-case `max_time` / suite `metadata.max_time` override it.
-DEFAULT_MAX_TIME_SEC = float(os.environ.get("MEMCP_MAX_TIME", "5.0"))
+# Hard wall-clock limit per query. This default is intentionally strict: slow
+# SQL compiler regressions must fail tests instead of being hidden by a larger
+# timeout. Raising this default or making it configurable is not permitted.
+DEFAULT_MAX_TIME_SEC = 1.0
 # Hard limit on the serialized query-plan size (characters of the EXPLAIN
 # output). THIS is the hardware-independent detector for compile-time
 # blow-ups: a cubic/exponential planner regression produces a cubic/exponential
@@ -598,15 +596,25 @@ class SQLTestRunner:
         yaml_threshold_ms = test_case.get("threshold_ms")
         is_perf_test = yaml_threshold_ms is not None
 
-        # Hard wall-clock limit (seconds). Resolution: test_case > suite metadata
-        # > DEFAULT_MAX_TIME_SEC. Perf tests use their own calibrated threshold_ms
-        # and are exempt from the hard limit.
+        # Hard wall-clock limit (seconds). `max_time` may only tighten the
+        # fixed default for non-perf tests; it must never be used to hide slow
+        # compiler regressions by raising the budget above DEFAULT_MAX_TIME_SEC.
+        # Perf tests use their own calibrated threshold_ms and are exempt from
+        # this hard limit.
         if "max_time" in test_case:
             hard_limit_sec = float(test_case["max_time"])
         elif "max_time" in self.suite_metadata:
             hard_limit_sec = float(self.suite_metadata["max_time"])
         else:
             hard_limit_sec = DEFAULT_MAX_TIME_SEC
+        if not is_perf_test and hard_limit_sec > DEFAULT_MAX_TIME_SEC:
+            return self._record_fail(
+                name,
+                f"max_time override exceeds fixed default: {hard_limit_sec:.1f}s > {DEFAULT_MAX_TIME_SEC:.1f}s",
+                test_case.get("sql", ""),
+                None,
+                test_case.get("expect"),
+                is_noncritical)
 
         # Hard plan-size limit (characters of EXPLAIN output). Same resolution
         # order. This is the hardware-independent compile-time-blowup detector.
@@ -955,11 +963,12 @@ class SQLTestRunner:
             return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
                                      test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
 
-        # Hard wall-clock limit — applies to every non-perf test case. A query
-        # without an explicit `max_time` annotation must finish within
-        # DEFAULT_MAX_TIME_SEC; slower queries must declare a higher limit so the
-        # time budget stays explicit and visible in the test spec.
-        if not is_perf_test and response.status_code == 200:
+        # Hard wall-clock limit — applies to every non-perf test case. Slow
+        # queries must fail here; raising the default or adding a larger
+        # `max_time` override is intentionally forbidden. Crash-recovery cases
+        # with interrupted_ok are exempt because their request lifetime is
+        # intentionally race-shaped by a concurrent hard process kill.
+        if not is_perf_test and response.status_code == 200 and not self._expect_interrupted_ok(test_case.get("expect", {})):
             hard_limit_ms = hard_limit_sec * 1000.0
             if elapsed_ms > hard_limit_ms:
                 diag = self._run_on_fail(test_case, database)
