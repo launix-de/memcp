@@ -4830,7 +4830,35 @@ seeing the correctly prefixed outer alias. */
 							/* Build the materialized inner plan from the already untangled IR of
 							this subquery. Replanning from the raw AST here can drift from the
 							current alias/scope environment and reintroduce wrapper-specific
-							regressions. */
+							regressions.
+
+							FAQ §43 architectural gap (doubly-nested correlated scalar with
+							per-outer LIMIT): when sub_has_limit_correlated AND
+							joinexpr_outer_sources is non-empty, the inner LIMIT applies
+							GLOBALLY at cache-build time instead of per outer correlation
+							key. To fix this, ALL FOUR of the following must land together:
+
+							  1. Augment fields2 with correlation-key columns from
+							     joinexpr_outer_sources (rhs is the inner-side ref).
+							  2. Prefix groups2 ORDER with the new key columns, drop the
+							     LIMIT/OFFSET there (will be applied per-partition at outer
+							     scan).
+							  3. Register the augmented fields in mat_schema_def so the
+							     outer scan sees the key columns.
+							  4. Emit a make_scalar_partition_stage at OUTER level (via
+							     sq_cache "groups") with aliases=[id], partition_cols=N,
+							     order referencing the new __ps_key_N cols, limit/offset
+							     from inner.
+
+							The storage layer already honors limitPartitionCols in the
+							list-scan path (commit 66cfe43c7). The legacy unnest_subselect
+							at queryplan.scm:3809 does exactly this orchestration for the
+							flattened (non-materialize) path; for materialize we need the
+							same set of changes but adapted to the cache-row schema.
+
+							Each individual change of the 4 is insufficient (verified
+							2026-06-06): emission alone fails because the cache lacks key
+							cols; cols alone don't activate per-partition LIMIT. */
 							(define mat_inner_plan (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 nil))
 							(define mat_init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
 							(define mat_inner_plan (if (equal? mat_init_stmts '())
