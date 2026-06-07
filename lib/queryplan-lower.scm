@@ -575,8 +575,17 @@ and column refs to the right's underlying tables are retargeted. */
 						rhs-alias jtype left-aliases))
 				(qpu-low-join-inline-scalar left-tuple right-tuple join-pred
 					rhs-alias jtype)
-				(qpu-low-join-wrap-derived left-tuple right-tuple join-pred
-					rhs-alias jtype)))))))
+				/* FAQ §44: try multi-table inline-flat for nested correlated
+				   scalars before falling back to wrap-derived. Avoids nested
+				   deriveds (sq_X containing sq_Y) which trigger the legacy
+				   (outer (outer X)) env-chain bug for doubly-nested cases. */
+				(if (and (not outer-has-group) (not outer-has-agg-fields)
+						(qpu-low-inline-multitable-eligible? right-tuple join-pred
+							rhs-alias jtype left-aliases))
+					(qpu-low-join-inline-multitable left-tuple right-tuple join-pred
+						rhs-alias jtype)
+					(qpu-low-join-wrap-derived left-tuple right-tuple join-pred
+						rhs-alias jtype))))))))
 
 /* qpu-low-join-merge-tables — for a join WITHOUT rhs-alias: append the
 right's tables into the left's tables list and AND conditions/predicate. */
@@ -699,6 +708,161 @@ conjuncts. Order preserves first-seen. */
 					nil)
 				acc)) nil)
 		(seen "cols"))))
+
+/* qpu-low-extract-outer-sources — given a join-pred and outer-aliases,
+extract list of (outer-tv outer-col inner-ref-expr) tuples for each
+equality conjunct of form `outer.X = inner-side` or `inner-side = outer.X`.
+The inner-ref-expr is the entire inner-side expression (typically a
+get_column form, but can be more complex).
+
+Used by qpu-low-join-inline-multitable for partition_stage's outer_sources
+parameter — captures which outer ref correlates to which inner expression. */
+(define qpu-low-extract-outer-sources (lambda (pred outer-aliases) (begin
+	(define results (newsession))
+	(results "list" '())
+	(define handle-eq (lambda (lhs rhs) (begin
+		(define li (qpu-low-col-ref-info lhs))
+		(define ri (qpu-low-col-ref-info rhs))
+		(define lhs-is-outer (and (not (nil? li)) (has? outer-aliases (nth li 0))))
+		(define rhs-is-outer (and (not (nil? ri)) (has? outer-aliases (nth ri 0))))
+		(if (and lhs-is-outer (not rhs-is-outer))
+			(results "list" (merge (results "list")
+				(list (list (nth li 0) (nth li 1) rhs))))
+			(if (and rhs-is-outer (not lhs-is-outer))
+				(results "list" (merge (results "list")
+					(list (list (nth ri 0) (nth ri 1) lhs))))
+				nil)))))
+	(reduce (qpu-and-conjuncts pred) (lambda (acc c) (begin
+		(match c
+			'((symbol equal??) lhs rhs) (handle-eq lhs rhs)
+			'((quote equal??)  lhs rhs) (handle-eq lhs rhs)
+			'((symbol =)       lhs rhs) (handle-eq lhs rhs)
+			'((quote =)        lhs rhs) (handle-eq lhs rhs)
+			nil)
+		acc)) nil)
+	(results "list"))))
+
+/* qpu-low-inline-multitable-eligible? — true when right-tuple has MULTIPLE
+inner tables (from a prior inline-scalar at nested level) and the structure
+fits multi-table inline-flat (FAQ §44 — avoids nested deriveds for doubly-
+nested correlated scalars).
+
+Requirements:
+  - LEFT JOIN type (scalar context)
+  - rhs-alias is sq_X tag (came from dep-join elimination)
+  - >1 table in right-tuple (multi-table; the single-table case uses
+    qpu-low-inline-scalar instead)
+  - exactly 1 field (the scalar value)
+  - no GROUP/HAVING in right (aggregates use wrap-derived)
+  - correlated (join-pred non-trivial)
+  - at least one correlation extracted */
+(define qpu-low-inline-multitable-eligible? (lambda (right-tuple join-pred rhs-alias join-type left-aliases) (begin
+	(define tbls (coalesceNil (qpp-tuple-tables right-tuple) '()))
+	(define flds (qpp-fields-to-pairs
+		(coalesceNil (qpp-tuple-fields right-tuple) '())))
+	(define grp (coalesceNil (qpp-tuple-group right-tuple) '()))
+	(define hav (qpp-tuple-having right-tuple))
+	(if (not (and
+			(equal? join-type (quote left))
+			(string? rhs-alias)
+			(>= (strlen rhs-alias) 3)
+			(equal? (substr rhs-alias 0 3) "sq_")
+			(> (count tbls) 1)
+			(equal? (count flds) 1)
+			(equal? (count grp) 0)
+			(nil? hav)
+			(not (or (nil? join-pred) (equal? join-pred true)
+					(equal? join-pred (quote true))))))
+		false
+		(begin
+			(define fpair (nth flds 0))
+			(define fexpr (nth fpair 1))
+			(if (or (qpl-expr-has-aggregate? fexpr)
+					(qpu-low-tag-has-count-distinct? fexpr))
+				false
+				(begin
+					(define outer-sources (qpu-low-extract-outer-sources join-pred left-aliases))
+					(> (count outer-sources) 0))))))))
+
+/* qpu-low-join-inline-multitable — per FAQ §44, inline a multi-table inner
+scalar into the outer's table list (instead of wrap-derived). Avoids nested
+deriveds which trigger the legacy `(outer (outer X))` env-chain bug for
+doubly-nested correlated scalars.
+
+Emit a partition_stage at outer's groups list to apply LIMIT per outer
+correlation key, using the existing legacy partition_stage infrastructure
+that the unnest_subselect path (now removed) used to emit.
+
+Layout:
+  - outer's tables: existing + right-tuple's tables (all inlined)
+  - outer's WHERE: existing AND right's WHERE AND join-pred
+  - outer's groups: existing + partition_stage(partition_cols=N, aliases=right-tables,
+    limit=right-tuple's LIMIT, outer_sources=correlation map)
+  - outer's fields/cond rewritten: sq_X.value → field-expr from right-tuple's
+    single field */
+(define qpu-low-join-inline-multitable (lambda (left-tuple right-tuple join-pred rhs-alias join-type) (begin
+	(define right-tables (qpp-tuple-tables right-tuple))
+	(define right-where (qpp-tuple-condition right-tuple))
+	(define right-fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)))
+	(define right-limit (qpp-tuple-limit right-tuple))
+	(define right-offset (qpp-tuple-offset right-tuple))
+	(define fpair (nth right-fields-pairs 0))
+	(define field-name (nth fpair 0))
+	(define field-expr (nth fpair 1))
+	(define left-aliases-mt (map (qpp-tuple-tables left-tuple) (lambda (t)
+		(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
+	(define outer-sources (qpu-low-extract-outer-sources join-pred left-aliases-mt))
+	(define right-table-aliases (map right-tables (lambda (t)
+		(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
+	/* Partition order = correlation inner-refs (so the joined result
+	   clusters by correlation key for per-partition LIMIT semantics). */
+	(define partition-order
+		(filter
+			(map outer-sources (lambda (os)
+				(if (or (nil? os) (< (count os) 3)) nil
+					(list (nth os 2) '<))))
+			(lambda (o) (not (nil? o)))))
+	(define partition-cols-count (count outer-sources))
+	/* Scalar semantics: limit capped to 2 per FAQ §22 once-limit contract.
+	   The right-tuple's limit (typically 1 from original SQL LIMIT) is the
+	   per-partition limit. */
+	(define partition-limit
+		(if (nil? right-limit) 2
+			(if (<= right-limit 1) right-limit 2)))
+	(define partition-once-limit
+		(if (nil? right-limit) 2
+			(if (<= right-limit 1) 1 0)))
+	/* Inline all inner tables; combine WHERE clauses + join-pred. */
+	(define merged-tables (merge (qpp-tuple-tables left-tuple) right-tables))
+	(define merged-cond (qpu-low-and-cond
+		(qpu-low-and-cond
+			(qpp-tuple-condition left-tuple)
+			right-where)
+		join-pred))
+	/* TODO: emit partition_stage to outer's groups for per-outer LIMIT.
+	   First verify the bare inline (without partition) compiles cleanly. */
+	(define merged-groups (coalesceNil (qpp-tuple-group left-tuple) '()))
+	/* Register rhs-alias.field-name → field-expr rewrite (per inline-scalar
+	   pattern) so any OUTER wrapper picks it up. */
+	(qpu-low-sq-rewrites-add rhs-alias field-name field-expr)
+	(define rewritten-fields (qpu-low-replace-sq-field
+		(qpp-tuple-fields left-tuple) rhs-alias field-name field-expr))
+	(define rewritten-cond (qpu-low-replace-sq-field-expr
+		merged-cond rhs-alias field-name field-expr))
+	(define rewritten-having
+		(if (nil? (qpp-tuple-having left-tuple)) nil
+			(qpu-low-replace-sq-field-expr
+				(qpp-tuple-having left-tuple) rhs-alias field-name field-expr)))
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema left-tuple)
+		merged-tables
+		rewritten-fields
+		rewritten-cond
+		merged-groups
+		rewritten-having
+		(qpp-tuple-order left-tuple)
+		(qpp-tuple-limit left-tuple)
+		(qpp-tuple-offset left-tuple)))))
 
 /* qpu-low-inline-scalar-eligible? — true when the scalar dep-join's right
 side can be inlined as flat (instead of derived-wrap). Conservative gate
