@@ -1408,10 +1408,57 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 Takes a qpir tree (post-unnest, no dep-joins, F(root)=∅) and returns a
 single 7-tuple compatible with the legacy build_queryplan_inner. The
 caller then feeds this 7-tuple into the existing physical compiler for
-scan/keytable/join emission. */
+scan/keytable/join emission.
+
+FAQ §35 OUTER-OUTER PROJECTION GAP (next architectural piece — needed
+to unblock doubly-nested correlated scalar fix from session 2026-06-07):
+
+After UNNEST produces correct IR (qpir-join with rhs-alias=sq_X and
+joinExpr referencing outer-correlation refs), LOWER wraps the inner
+into a derived. For DOUBLY-NESTED cases the inner qpir-join (sq_Y)
+inside sq_X's content has joinExpr referencing the OUTERMOST outer
+alias (e.g. `oe.angebot = sq_Y.__kt_id` inside sq_X's content where
+oe is outer-outer). The legacy planner CANNOT correctly resolve
+`oe.angebot` from inside sq_X's nested derived scope — the Go-level
+`(outer (outer X))` env-chain bug (verified session 2026-06-05) breaks
+this resolution.
+
+The FIX per FAQ §35 "canonical names from physical source columns":
+after qpu-low-join-wrap-derived produces a derived-entry, walk the
+sub-tuple's nested derived entries. For each nested derived's joinExpr
+that references an alias which is NOT in the immediate enclosing
+sub-tuple's tables AND NOT in the nested derived's own tables (i.e.
+an outer-outer ref):
+  1. Add a passthrough field to the immediate enclosing derived's
+     fields that projects the outer-outer ref: `__pt_<tv>_<col> =
+     (get_column tv false col false)`. This projection is evaluated
+     during the cache-build using the legacy outer-ref mechanism for
+     THE FIRST LEVEL up (which works) — capturing the value at the
+     right scope.
+  2. Rewrite the nested derived's joinExpr to reference the passthrough:
+     `(get_column tv ... col ...)` → `(get_column <enclosing-sq>
+     false __pt_<tv>_<col> false)`. Now the legacy planner reads the
+     passthrough column from the cache row, eliminating the need to
+     traverse multiple env levels.
+
+This scaffold function `qpu-low-project-outer-outer-refs` is the entry
+point — currently a no-op pass-through pending the architectural
+refactor. It must run AFTER all LOWER wrap-derived steps complete.
+
+Combined with Option A in qpu-unnest-right (skip-predicate-sub for
+sq_X-tagged qpir-joins, see session 2026-06-07_correct_ir_legacy_gap),
+this should unblock the doubly-nested correlated LIMIT bug + the
+"Aggregate over correlated scalar subselect" test. */
+(define qpu-low-project-outer-outer-refs (lambda (tuple)
+	/* TODO(session-next): implement per FAQ §35.
+	   Identify nested derived joinExprs referencing outer-outer aliases.
+	   Add passthroughs to enclosing derived fields and rewrite refs.
+	   Currently a pass-through — does not modify the tuple. */
+	tuple))
+
 (define lower_to_scans_pass (lambda (qpir-tree) (begin
 	(qpu-low-sq-rewrites-clear)
 	(define lowered (qpu-lower-to-tuple qpir-tree))
 	(if (not (qpp-tuple? lowered))
 		(error "lower_to_scans_pass: lowering did not produce a 7-tuple")
-		lowered))))
+		(qpu-low-project-outer-outer-refs lowered)))))
