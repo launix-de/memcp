@@ -768,6 +768,16 @@ Requirements:
 			(>= (strlen rhs-alias) 3)
 			(equal? (substr rhs-alias 0 3) "sq_")
 			(> (count tbls) 1)
+			/* Depth limit: when right-tuple has 4+ tables (= depth-5+ nesting
+			   where inner inlines have stacked up b, c, d, sq_X-tagged), the
+			   legacy emit's outer-wrap counting for prejoin batching produces
+			   wrong (outer X) counts. Verified test 'Depth 5 in WHERE chain
+			   resolves' had baseline ✅ but my multi-table inline produced
+			   `(outer (outer (var 3)))` (2 wraps) where 4 wraps were needed
+			   per depth-4-comparison. Falling back to wrap-derived for these
+			   deep cases keeps the lambda nesting simpler so emit's outer-wrap
+			   counting matches the actual scan chain. */
+			(<= (count tbls) 3)
 			(equal? (count flds) 1)
 			(equal? (count grp) 0)
 			(nil? hav)
