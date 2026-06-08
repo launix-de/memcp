@@ -875,9 +875,42 @@ Layout:
 			(qpp-tuple-condition left-tuple)
 			right-where)
 		join-pred))
-	/* TODO: emit partition_stage to outer's groups for per-outer LIMIT.
-	   First verify the bare inline (without partition) compiles cleanly. */
-	(define merged-groups (coalesceNil (qpp-tuple-group left-tuple) '()))
+	/* Emit partition_stage at outer's groups for per-outer LIMIT semantics
+	   when right-tuple had a LIMIT. Per FAQ §22/§43: scalar subselects
+	   return NULL on 0 rows and error on >1 rows per outer binding.
+	   make_scalar_partition_stage encodes once_limit=2 if no LIMIT (scalar
+	   contract), else uses the provided LIMIT capped to 2 for scalar.
+	   Pass empty outer-sources to avoid downstream evaluation issues —
+	   the partition_cols + aliases + once_limit are sufficient for the
+	   per-partition semantics. */
+	(define partition-cols-count (count outer-sources))
+	(define partition-limit
+		(if (nil? right-limit) 2
+			(if (<= right-limit 1) right-limit 2)))
+	(define right-table-aliases (map right-tables (lambda (t)
+		(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
+	(define partition-order
+		(filter
+			(map outer-sources (lambda (os)
+				(if (or (nil? os) (< (count os) 3)) nil
+					(list (nth os 2) '<))))
+			(lambda (o) (not (nil? o)))))
+	(define partition-stage
+		(if (and (not (nil? right-limit)) (> partition-cols-count 0))
+			(make_scalar_partition_stage
+				partition-order
+				partition-limit
+				(coalesceNil right-offset 0)
+				partition-cols-count
+				right-table-aliases
+				'())
+			nil))
+	(define merged-groups
+		(if (nil? partition-stage)
+			(coalesceNil (qpp-tuple-group left-tuple) '())
+			(merge
+				(coalesceNil (qpp-tuple-group left-tuple) '())
+				(list partition-stage))))
 	/* Register rhs-alias.field-name → field-expr rewrite (per inline-scalar
 	   pattern) so any OUTER wrapper picks it up. */
 	(qpu-low-sq-rewrites-add rhs-alias field-name field-expr)
