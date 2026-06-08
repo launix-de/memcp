@@ -965,8 +965,14 @@ Layout:
 				(coalesceNil (qpp-tuple-group left-tuple) '())
 				(list partition-stage))))
 	/* Register rhs-alias.field-name → field-expr rewrite (per inline-scalar
-	   pattern) so any OUTER wrapper picks it up. */
+	   pattern) so any OUTER wrapper picks it up. Also mark the rhs-alias
+	   as inlined-away — unlike inline-scalar which keeps sq_X as a
+	   scan-tagged-table (visible in tables), multi-table inline-flat
+	   removes the wrapping sq_X entirely. The scoped-rewrite check uses
+	   this marker to apply the rewrite upward to ancestor predicates that
+	   still reference sq_X.value (e.g. Depth-5 in WHERE). */
 	(qpu-low-sq-rewrites-add rhs-alias field-name field-expr)
+	(qpu-low-sq-rewrites-mark-inlined rhs-alias)
 	(define rewritten-fields (qpu-low-replace-sq-field
 		(qpp-tuple-fields left-tuple) rhs-alias field-name field-expr))
 	(define rewritten-cond (qpu-low-replace-sq-field-expr
@@ -1166,14 +1172,30 @@ Cleared at the start of each lower_to_scans_pass invocation so cross-
 query state doesn't leak. */
 (define qpu-low-sq-rewrites (newsession))
 (qpu-low-sq-rewrites "list" '())
+/* Track sq_X aliases that were INLINED-AWAY by qpu-low-join-inline-multitable.
+   These rewrites should apply UPWARD to ancestors even though the sq_X
+   alias no longer appears in any table list. Different from
+   qpu-low-join-inline-scalar which keeps sq_X as a scan-tagged-table
+   (visible in tables → scoped-check passes naturally). */
+(qpu-low-sq-rewrites "inlined-aliases" '())
 
-(define qpu-low-sq-rewrites-clear (lambda ()
-	(qpu-low-sq-rewrites "list" '())))
+(define qpu-low-sq-rewrites-clear (lambda () (begin
+	(qpu-low-sq-rewrites "list" '())
+	(qpu-low-sq-rewrites "inlined-aliases" '()))))
 
 (define qpu-low-sq-rewrites-add (lambda (rhs-alias field-name target-expr)
 	(qpu-low-sq-rewrites "list"
 		(merge (coalesceNil (qpu-low-sq-rewrites "list") '())
 			(list (list rhs-alias field-name target-expr))))))
+
+/* qpu-low-sq-rewrites-mark-inlined — record that this rhs-alias was
+inlined-away by multi-table inline-flat. Subsequent scoped-rewrite checks
+will treat it as "still applicable" even though it's no longer in any
+table list. */
+(define qpu-low-sq-rewrites-mark-inlined (lambda (rhs-alias)
+	(qpu-low-sq-rewrites "inlined-aliases"
+		(merge (coalesceNil (qpu-low-sq-rewrites "inlined-aliases") '())
+			(list rhs-alias)))))
 
 (define qpu-low-sq-rewrites-apply-expr (lambda (expr)
 	(reduce (coalesceNil (qpu-low-sq-rewrites "list") '())
@@ -1201,10 +1223,15 @@ rewrite from leaking into a sibling/outer scope's predicate. */
 (define qpu-low-sq-rewrites-apply-expr-scoped (lambda (expr tables) (begin
 	(define table-aliases (map (coalesceNil tables '()) (lambda (td)
 		(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+	(define inlined-aliases (coalesceNil (qpu-low-sq-rewrites "inlined-aliases") '()))
 	(reduce (coalesceNil (qpu-low-sq-rewrites "list") '())
 		(lambda (acc entry) (match entry
 			'(ra fn tgt)
-			(if (has? table-aliases ra)
+			/* Apply if the sq_X alias is either visible in tables OR was
+			   inlined-away by multi-table inline-flat (rewrite must
+			   propagate upward to ancestor predicates that still reference
+			   sq_X.value, e.g. Depth-5 in WHERE). */
+			(if (or (has? table-aliases ra) (has? inlined-aliases ra))
 				(qpu-low-replace-sq-field-expr acc ra fn tgt)
 				acc)
 			acc))
