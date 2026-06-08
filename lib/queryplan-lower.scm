@@ -911,26 +911,6 @@ Layout:
 	(define left-aliases-mt (map (qpp-tuple-tables left-tuple) (lambda (t)
 		(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
 	(define outer-sources (qpu-low-extract-outer-sources join-pred left-aliases-mt))
-	(define right-table-aliases (map right-tables (lambda (t)
-		(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
-	/* Partition order = correlation inner-refs (so the joined result
-	   clusters by correlation key for per-partition LIMIT semantics). */
-	(define partition-order
-		(filter
-			(map outer-sources (lambda (os)
-				(if (or (nil? os) (< (count os) 3)) nil
-					(list (nth os 2) '<))))
-			(lambda (o) (not (nil? o)))))
-	(define partition-cols-count (count outer-sources))
-	/* Scalar semantics: limit capped to 2 per FAQ §22 once-limit contract.
-	   The right-tuple's limit (typically 1 from original SQL LIMIT) is the
-	   per-partition limit. */
-	(define partition-limit
-		(if (nil? right-limit) 2
-			(if (<= right-limit 1) right-limit 2)))
-	(define partition-once-limit
-		(if (nil? right-limit) 2
-			(if (<= right-limit 1) 1 0)))
 	/* Inline all inner tables; combine WHERE clauses + join-pred. */
 	(define merged-tables (merge (qpp-tuple-tables left-tuple) right-tables))
 	(define merged-cond (qpu-low-and-cond
