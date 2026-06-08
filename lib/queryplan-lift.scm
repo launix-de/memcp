@@ -419,7 +419,34 @@ path can't handle inside derived sub-tuples. */
 					 (not (nil? li))
 					 (has? inner-aliases (nth li 0)))
 				li
-				nil)))))
+				/* Extension for FAQ §43 / §44 depth-3+: handle cases where ONE
+				   side is a direct inner-col ref AND the OTHER side is an
+				   EXPRESSION containing the outer-ref (e.g.
+				   `c.ref_d = a.id * 10`). The PARTITION BY uses the inner-col
+				   as the partition key — semantically correct since values
+				   in the inner col cluster the rows by the corresponding
+				   outer-expression values. Avoids correlated PARTITION BY
+				   which legacy can't handle inside derived sub-tuples. */
+				(if (and (not (nil? li))
+						 (has? inner-aliases (nth li 0))
+						 (qpl-expr-contains-outer-ref? rhs outer-ref))
+					li
+					(if (and (not (nil? ri))
+							 (has? inner-aliases (nth ri 0))
+							 (qpl-expr-contains-outer-ref? lhs outer-ref))
+						ri
+						nil)))))))
+
+/* qpl-expr-contains-outer-ref? — true if expr references the given outer-ref
+(outer-tv, outer-col) anywhere in its column refs. Used by qpl-equibind-pair
+to detect expression-side outer correlations. */
+(define qpl-expr-contains-outer-ref? (lambda (expr outer-ref) (begin
+	(define out-tv (nth outer-ref 0))
+	(define out-col (nth outer-ref 1))
+	(define all-refs (qpl-extract-col-refs expr))
+	(reduce all-refs (lambda (acc rp) (or acc (match rp
+		'(tv col) (and (equal? tv out-tv) (equal? col out-col))
+		false))) false))))
 
 (define qpl-col-ref-info (lambda (expr) (match expr
 	'((symbol get_column) tv ti col ci) (list tv col)
