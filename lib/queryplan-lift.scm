@@ -191,10 +191,26 @@ the sub becomes per-outer-binding implicitly. */
 				(define b (nth args 1))
 				(define ka (ref-key a))
 				(define kb (ref-key b))
-				(if (or (nil? ka) (nil? kb)) false
-					/* Check both orderings: ref on left/inner on right, or vice versa. */
-					(or (and (equal? ka ref-pair) (has? inner-aliases (nth kb 0)))
-					    (and (equal? kb ref-pair) (has? inner-aliases (nth ka 0))))))
+				/* Direct case: both sides are simple column refs. */
+				(if (and (not (nil? ka)) (not (nil? kb))
+						(or (and (equal? ka ref-pair) (has? inner-aliases (nth kb 0)))
+						    (and (equal? kb ref-pair) (has? inner-aliases (nth ka 0)))))
+					true
+					/* Extension (FAQ §38 + §43): when ONE side is a direct
+					   inner-col ref AND the other side is an EXPRESSION
+					   containing the outer-ref (e.g. `c.ref_d = a.id * 10`),
+					   the equibinding is still semantically valid — values
+					   in the inner col cluster per outer-expr value. Same
+					   logic as qpl-equibind-pair extension. */
+					(if (and (not (nil? ka))
+							 (has? inner-aliases (nth ka 0))
+							 (qpl-expr-contains-outer-ref? b ref-pair))
+						true
+						(if (and (not (nil? kb))
+								 (has? inner-aliases (nth kb 0))
+								 (qpl-expr-contains-outer-ref? a ref-pair))
+							true
+							false))))
 			false)
 		false))) false))))
 
