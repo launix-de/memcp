@@ -581,7 +581,7 @@ and column refs to the right's underlying tables are retargeted. */
 				   (outer (outer X)) env-chain bug for doubly-nested cases. */
 				(if (and (not outer-has-group) (not outer-has-agg-fields)
 						(qpu-low-inline-multitable-eligible? right-tuple join-pred
-							rhs-alias jtype left-aliases))
+							rhs-alias jtype left-aliases left-tuple))
 					(qpu-low-join-inline-multitable left-tuple right-tuple join-pred
 						rhs-alias jtype)
 					(qpu-low-join-wrap-derived left-tuple right-tuple join-pred
@@ -756,7 +756,7 @@ Requirements:
   - no GROUP/HAVING in right (aggregates use wrap-derived)
   - correlated (join-pred non-trivial)
   - at least one correlation extracted */
-(define qpu-low-inline-multitable-eligible? (lambda (right-tuple join-pred rhs-alias join-type left-aliases) (begin
+(define qpu-low-inline-multitable-eligible? (lambda (right-tuple join-pred rhs-alias join-type left-aliases left-tuple) (begin
 	(define tbls (coalesceNil (qpp-tuple-tables right-tuple) '()))
 	(define flds (qpp-fields-to-pairs
 		(coalesceNil (qpp-tuple-fields right-tuple) '())))
@@ -782,7 +782,43 @@ Requirements:
 				false
 				(begin
 					(define outer-sources (qpu-low-extract-outer-sources join-pred left-aliases))
-					(> (count outer-sources) 0))))))))
+					/* Sibling-scalar collision check: if left-tuple already
+					   has a scan-tagged-table (from a prior scalar inline-flat
+					   for a sibling subquery), AND right-tuple's tables include
+					   a scan-tagged-table with the SAME base table, inlining
+					   both would cross-product on rows matching the same outer
+					   key. Verified test 32 'Wrapped derived view' regression
+					   (2026-06-08): two scalar subselects sharing inner sub
+					   `(SELECT r.file FROM rev WHERE r.src=src.ID ORDER...)`
+					   each inline a tagged-r → outer has r-tagged-X AND
+					   r-tagged-Y, both match same src.ID, yielding 2× rows.
+					   Fall back to wrap-derived in that case. */
+					(define left-tagged-bases
+						(reduce (qpp-tuple-tables left-tuple) (lambda (acc td)
+							(match td
+								'(_ _ src _ _)
+								(if (and (list? src) (> (count src) 0)
+										(or (equal? (car src) (quote scan-tagged-table))
+											(equal? (car src) (symbol scan-tagged-table))))
+									(if (and (> (count src) 1) (string? (nth src 1)))
+										(merge acc (list (nth src 1))) acc)
+									acc)
+								acc)) '()))
+					(define right-tagged-bases
+						(reduce tbls (lambda (acc td)
+							(match td
+								'(_ _ src _ _)
+								(if (and (list? src) (> (count src) 0)
+										(or (equal? (car src) (quote scan-tagged-table))
+											(equal? (car src) (symbol scan-tagged-table))))
+									(if (and (> (count src) 1) (string? (nth src 1)))
+										(merge acc (list (nth src 1))) acc)
+									acc)
+								acc)) '()))
+					(define has-base-collision
+						(reduce right-tagged-bases (lambda (acc base)
+							(or acc (has? left-tagged-bases base))) false))
+					(and (> (count outer-sources) 0) (not has-base-collision)))))))))
 
 /* qpu-low-join-inline-multitable — per FAQ §44, inline a multi-table inner
 scalar into the outer's table list (instead of wrap-derived). Avoids nested
