@@ -818,7 +818,60 @@ Requirements:
 					(define has-base-collision
 						(reduce right-tagged-bases (lambda (acc base)
 							(or acc (has? left-tagged-bases base))) false))
-					(and (> (count outer-sources) 0) (not has-base-collision)))))))))
+					/* LEFT JOIN scalar semantics check: if right-tuple's WHERE
+					   has any filter conjunct (a comparison with a literal
+					   constant or a non-equality condition), multi-table inline
+					   would behave as INNER JOIN against the filter, dropping
+					   outer rows when the filter eliminates all inner rows.
+					   This breaks tests like 'Depth 4: NULL chain' which has
+					   `b.id = a.ref_b AND b.id = 9999` — the constant filter
+					   eliminates all b rows, yet the outer should survive with
+					   NULL d_label. Fall back to wrap-derived for those cases.
+					   For pure-correlation WHERE (only column-column equalities
+					   where one side is outer-ref), multi-table inline is safe
+					   (e.g. min repro and depth-3 simple/skip-middle). */
+					(define has-filter-conjunct
+						(qpu-low-where-has-filter? (qpp-tuple-condition right-tuple) left-aliases))
+					(and (> (count outer-sources) 0)
+						 (not has-base-collision)
+						 (not has-filter-conjunct)))))))))
+
+/* qpu-low-where-has-filter? — true if any conjunct in `where` is NOT a
+pure correlation conjunct (outer_col EQ inner_col). Pure correlation:
+both sides are column refs, one is outer-aliased, the other isn't.
+Anything else — constants, function calls, non-equality ops, both-inner
+comparisons — counts as a filter that could eliminate inner rows. */
+(define qpu-low-where-has-filter? (lambda (where outer-aliases) (begin
+	(if (or (nil? where) (equal? where true) (equal? where (quote true))) false
+		(begin
+			(define conjuncts (qpu-and-conjuncts where))
+			(reduce conjuncts (lambda (acc c) (or acc
+				(not (qpu-low-is-pure-correlation? c outer-aliases))))
+				false))))))
+
+(define qpu-low-is-pure-correlation? (lambda (conj outer-aliases) (begin
+	(define is-eq-head (lambda (h) (match h
+		(symbol equal??) true
+		(quote equal??)  true
+		'equal??         true
+		(symbol =)       true
+		(quote =)        true
+		'=               true
+		false)))
+	(match conj
+		(cons head args)
+			(if (and (is-eq-head head) (equal? (count args) 2))
+				(begin
+					(define li (qpu-low-col-ref-info (nth args 0)))
+					(define ri (qpu-low-col-ref-info (nth args 1)))
+					/* Both sides MUST be column refs (no constants/funcs).
+					   Otherwise it's a filter that could eliminate inner
+					   rows — multi-table inline would break LEFT JOIN
+					   scalar semantics. Column-column equality (whether
+					   correlation or inner-inner join) is safe. */
+					(and (not (nil? li)) (not (nil? ri))))
+				false)
+		false))))
 
 /* qpu-low-join-inline-multitable — per FAQ §44, inline a multi-table inner
 scalar into the outer's table list (instead of wrap-derived). Avoids nested
