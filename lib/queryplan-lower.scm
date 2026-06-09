@@ -87,6 +87,47 @@ nesting, derived-table inlining for non-grouped sub-queries.
 
 /* ==================== Utility helpers ==================== */
 
+/* qpu-low-drop-kt-tautologies — drop conjuncts of form
+   `(equal?? (get_column X __kt_<col>) (get_column X <col>))` where X is the
+   given alias. These tautologies arise when cclasses substitution at parent
+   dep-join maps an outer-ref to sq_X.__kt_<col> (synthesized by the cascade
+   for join-key access) and inline-scalar's retargeting collapses both sides
+   to refer to sq_X. The __kt_<col> name doesn't exist on the underlying
+   scan-tagged-table (whose source is a plain base table), so the conjunct
+   would fail at scan emission. */
+(define qpu-low-drop-kt-tautologies (lambda (expr alias) (begin
+	(define is-kt-prefix-of (lambda (kt-col plain-col)
+		(and (string? kt-col) (string? plain-col)
+			 (>= (strlen kt-col) (+ 5 (strlen plain-col)))
+			 (equal? (substr kt-col 0 5) "__kt_")
+			 (equal? (substr kt-col 5 (- (strlen kt-col) 5)) plain-col))))
+	(define is-self-kt-tautology? (lambda (conj) (match conj
+		'((symbol equal??) lhs rhs) (qpu-low-kt-pair-tautology? lhs rhs alias is-kt-prefix-of)
+		'((quote equal??)  lhs rhs) (qpu-low-kt-pair-tautology? lhs rhs alias is-kt-prefix-of)
+		'((symbol =)       lhs rhs) (qpu-low-kt-pair-tautology? lhs rhs alias is-kt-prefix-of)
+		'((quote =)        lhs rhs) (qpu-low-kt-pair-tautology? lhs rhs alias is-kt-prefix-of)
+		false)))
+	(define conjuncts (qpu-and-conjuncts expr))
+	(define kept (filter conjuncts (lambda (c) (not (is-self-kt-tautology? c)))))
+	(if (equal? (count kept) 0) true
+		(if (equal? (count kept) 1) (nth kept 0)
+			(cons (quote and) kept))))))
+
+(define qpu-low-kt-pair-tautology? (lambda (lhs rhs alias is-kt-prefix-of) (begin
+	(define li (match lhs
+		'((symbol get_column) tv _ col _) (list tv col)
+		'((quote get_column)  tv _ col _) (list tv col)
+		nil))
+	(define ri (match rhs
+		'((symbol get_column) tv _ col _) (list tv col)
+		'((quote get_column)  tv _ col _) (list tv col)
+		nil))
+	(if (or (nil? li) (nil? ri)) false
+		(if (and (equal? (nth li 0) alias) (equal? (nth ri 0) alias))
+			(or (is-kt-prefix-of (nth li 1) (nth ri 1))
+				(is-kt-prefix-of (nth ri 1) (nth li 1)))
+			false)))))
+
 /* qpu-low-and-cond — combine two predicates with AND, eliding trivial true. */
 (define qpu-low-and-cond (lambda (a b)
 	(if (or (nil? a) (equal? a true) (equal? a (quote true))) b
@@ -1098,7 +1139,17 @@ Layout:
 		(define tagged-tname (make_scan_tagged_table
 			inner-base stag-order stag-limit inner-offset
 			(count corr-cols) stag-once-limit))
-		(define combined-je (qpu-low-and-cond join-pred-retargeted inner-where-retargeted))
+		(define combined-je-raw (qpu-low-and-cond join-pred-retargeted inner-where-retargeted))
+		/* Drop tautology conjuncts before emitting joinExpr. Without this,
+		   patterns like `sq_X.__kt_id = sq_X.id` (produced when cclasses
+		   substitution at parent dep-join mapped an outer-outer ref to
+		   sq_X.__kt_<col> and then inline-scalar's e → sq_X retargeting
+		   collapsed both sides to refer to sq_X) survive to scan emission,
+		   which then tries to look up the non-existent __kt_<col> on the
+		   scan-tagged-table's underlying base — "Column does not exist:
+		   dn_e.__kt_id" error (verified test 'Depth 5: innermost references
+		   outermost directly'). */
+		(define combined-je (qpu-low-drop-kt-tautologies combined-je-raw rhs-alias))
 		(define new-entry
 			(list rhs-alias inner-schema tagged-tname true combined-je))
 		/* Register the (rhs-alias . field-name) → field-expr rewrite so any
