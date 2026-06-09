@@ -901,6 +901,44 @@ Requirements:
 					(define has-base-collision
 						(reduce right-tagged-bases (lambda (acc base)
 							(or acc (has? left-tagged-bases base))) false))
+					/* Also check REGULAR base table collisions. For sibling
+					   scalar subselects that both use the same regular base
+					   table (e.g., test 32 'Wrapped derived view': filename
+					   and operation::pdf scalars both inline expr32_wrap_file),
+					   multi-table inline would put the SAME base table TWICE
+					   in outer's tables list, causing a cross-product
+					   duplication. Detect this by collecting base-table names
+					   (the td-source is a string for base tables) and checking
+					   for overlap. */
+					(define left-base-names
+						(reduce (qpp-tuple-tables left-tuple) (lambda (acc td)
+							(match td
+								'(_ _ src _ _)
+								(if (string? src)
+									(merge acc (list src))
+									(if (and (list? src) (> (count src) 0)
+											(or (equal? (car src) (quote scan-tagged-table))
+												(equal? (car src) (symbol scan-tagged-table)))
+											(> (count src) 1) (string? (nth src 1)))
+										(merge acc (list (nth src 1)))
+										acc))
+								acc)) '()))
+					(define right-base-names
+						(reduce tbls (lambda (acc td)
+							(match td
+								'(_ _ src _ _)
+								(if (string? src)
+									(merge acc (list src))
+									(if (and (list? src) (> (count src) 0)
+											(or (equal? (car src) (quote scan-tagged-table))
+												(equal? (car src) (symbol scan-tagged-table)))
+											(> (count src) 1) (string? (nth src 1)))
+										(merge acc (list (nth src 1)))
+										acc))
+								acc)) '()))
+					(define has-regular-base-collision
+						(reduce right-base-names (lambda (acc name)
+							(or acc (has? left-base-names name))) false))
 					/* LEFT JOIN scalar semantics check: if right-tuple's WHERE
 					   has any filter conjunct (a comparison with a literal
 					   constant or a non-equality condition), multi-table inline
@@ -917,6 +955,7 @@ Requirements:
 						(qpu-low-where-has-filter? (qpp-tuple-condition right-tuple) left-aliases))
 					(and (> (count outer-sources) 0)
 						 (not has-base-collision)
+						 (not has-regular-base-collision)
 						 (not has-filter-conjunct)))))))))
 
 /* qpu-low-where-has-filter? — true if any conjunct in `where` is NOT a
