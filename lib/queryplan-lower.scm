@@ -1023,13 +1023,82 @@ Layout:
 	(define left-aliases-mt (map (qpp-tuple-tables left-tuple) (lambda (t)
 		(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
 	(define outer-sources (qpu-low-extract-outer-sources join-pred left-aliases-mt))
-	/* Inline all inner tables; combine WHERE clauses + join-pred. */
-	(define merged-tables (merge (qpp-tuple-tables left-tuple) right-tables))
+	/* FAQ §22 per-key misses for LEFT-context scalar subselect:
+	   For each correlation in join-pred (outer.X = inner-alias.Y), attach
+	   it as joinExpr on the SPECIFIC inner table 'inner-alias' AND mark
+	   that table isOuter=true. This makes the nested scan emit one NULL
+	   row per outer binding when the filter/correlation eliminates inner
+	   matches. Without this, the correlation lives in outer's WHERE and
+	   acts as an INNER filter that drops outer rows (verified test
+	   'Depth 4 NULL chain').
+	   Naive "attach to first-inner" is wrong when the correlated alias
+	   is NOT the first table (e.g., doubly-nested test where join-pred
+	   references sq_21 (the inline-scalar-tagged inner) while first-inner
+	   is d). Must look up the right alias from outer-sources. */
+	(define is-left-scalar
+		(and (equal? join-type (quote left))
+			(> (count outer-sources) 0)))
+	/* Group outer-sources by the inner alias they reference. Each entry
+	   (outer-tv outer-col inner-expr) — inner-expr is typically a
+	   get_column; extract its alias. */
+	(define inner-alias-of-source (lambda (os) (match os
+		'(_ _ '((symbol get_column) ia _ _ _)) ia
+		'(_ _ '((quote get_column)  ia _ _ _)) ia
+		nil)))
+	(define correlated-alias-set
+		(reduce outer-sources (lambda (acc os) (begin
+			(define ia (inner-alias-of-source os))
+			(if (or (nil? ia) (has? acc ia)) acc (merge acc (list ia)))))
+			'()))
+	/* Build per-alias joinExpr from join-pred conjuncts.
+	   For each conjunct (outer.X = inner-alias.Y), associate it with
+	   inner-alias. Conjuncts that don't fit the outer=inner pattern stay
+	   in merged-cond as-is. */
+	(define je-per-alias
+		(if (not is-left-scalar) '()
+			(reduce (qpu-and-conjuncts join-pred) (lambda (acc c) (begin
+				(define os-list (qpu-low-extract-outer-sources c left-aliases-mt))
+				(if (or (equal? (count os-list) 0)
+						(nil? (inner-alias-of-source (car os-list))))
+					acc
+					(begin
+						(define ia (inner-alias-of-source (car os-list)))
+						(define existing (coalesceNil (get_assoc acc ia) nil))
+						(set_assoc acc ia (qpu-low-and-cond existing c))))))
+				'())))
+	/* The remaining join-pred conjuncts that are NOT outer-correlations
+	   (e.g., inner-inner equalities) stay in merged-cond. */
+	(define join-pred-residual
+		(if (not is-left-scalar) join-pred
+			(qpu-and-from-conjuncts
+				(filter (qpu-and-conjuncts join-pred) (lambda (c) (begin
+					(define os-list (qpu-low-extract-outer-sources c left-aliases-mt))
+					(or (equal? (count os-list) 0)
+						(nil? (inner-alias-of-source (car os-list)))))))
+				)))
+	/* Apply isOuter+joinExpr per correlated-alias-set entry. */
+	(define right-tables-fixed
+		(map right-tables (lambda (td) (match td
+			'(a s tname existing-isOuter existing-je)
+				(if (has? correlated-alias-set a)
+					(list a s tname true
+						(qpu-low-and-cond existing-je
+							(coalesceNil (get_assoc je-per-alias a) nil)))
+					td)
+			td))))
+	/* Inline all inner tables; combine WHERE clauses + join-pred.
+	   When is-left-scalar AND first-inner has joinExpr now, join-pred has
+	   moved into the joinExpr — drop it from merged-cond to avoid double
+	   filtering (which would re-introduce the INNER-filter drop). */
+	(define merged-tables (merge (qpp-tuple-tables left-tuple) right-tables-fixed))
 	(define merged-cond (qpu-low-and-cond
 		(qpu-low-and-cond
 			(qpp-tuple-condition left-tuple)
 			right-where)
-		join-pred))
+		/* Outer-correlation conjuncts were extracted to per-alias joinExprs;
+		   only residual (inner-inner equalities, non-correlation) goes to
+		   the merged WHERE. */
+		join-pred-residual))
 	/* Emit partition_stage at outer's groups for per-outer LIMIT semantics
 	   when right-tuple had a LIMIT. Per FAQ §22/§43: scalar subselects
 	   return NULL on 0 rows and error on >1 rows per outer binding.
