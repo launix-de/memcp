@@ -7729,6 +7729,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(canonicalize_expr
 						(normalize_canonical_aliases (canonicalize_prejoin_source_expr prejoin_row_domain_raw))
 						prejoin_alias_map)))
+				/* TODO: when prejoin_row_domain_raw uses session/context-dependent
+				terms, the canonical condition name above collapses them regardless
+				of value, so a prejoin cached for user=1 would be reused for user=2.
+				make_keytable line 2446 uses runtime_cache_suffix_from_exprs to
+				differentiate cache keys; the equivalent here needs the eval path
+				in planner_eval_runtime_term to produce a serializable value
+				instead of capturing the rewrite closure. See FAQ comment
+				line 3931+ #1 (volatile session predicates must prefer a
+				cache-free execution path) — fix path: skip prejoin OR
+				differentiate by evaluated session values. Pre-existing bug,
+				affects 66_exists_session_var, 107, 109, 110, 111. */
 				(define prejointbl (concat ".prejoin:"
 					(map prejoin_source_tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
