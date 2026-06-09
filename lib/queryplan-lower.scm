@@ -939,27 +939,18 @@ Requirements:
 					(define has-regular-base-collision
 						(reduce right-base-names (lambda (acc name)
 							(or acc (has? left-base-names name))) false))
-					/* Filter conjuncts at the OUTERMOST multi-table inline:
-					   when right-tuple's WHERE has a filter conjunct (constant
-					   or non-equality), the OUTERMOST level currently merges
-					   right-where into outer's WHERE — filter applies AFTER
-					   join, dropping outer rows on mismatch. wrap-derived
-					   evaluates the inner sub per outer binding which gives
-					   the correct LEFT-JOIN-of-derived NULL extension.
-					   Note: at INNER recursive levels, my per-alias FAQ §22
-					   isOuter+joinExpr already propagates into wrap-derived's
-					   sub-tuple, which gives the correct NULL chain handling
-					   (verified Depth 4/5 NULL chain passes via this path).
-					   The gate stays only for the OUTERMOST decision. Until
-					   inline-multitable also pushes filter conjuncts to per-
-					   table scan filters at the outermost (FAQ §40 predicate
-					   push-down), keep the gate at this level. */
-					(define has-filter-conjunct
-						(qpu-low-where-has-filter? (qpp-tuple-condition right-tuple) left-aliases))
+					/* Filter conjuncts are now handled by FAQ §40 predicate
+					   push-down inside qpu-low-join-inline-multitable:
+					   single-table-only filter conjuncts move into the
+					   referenced table's joinExpr with isOuter=true, so
+					   the legacy nested scan emits per-binding NULL when
+					   the filter eliminates inner rows. This was the
+					   missing piece for FAQ §38 'ordinary materialization
+					   is forbidden' — inline-multitable can now replace
+					   wrap-derived for filter-conjunct cases too. */
 					(and (> (count outer-sources) 0)
 						 (not has-base-collision)
-						 (not has-regular-base-collision)
-						 (not has-filter-conjunct)))))))))
+						 (not has-regular-base-collision)))))))))
 
 /* qpu-low-where-has-filter? — true if any conjunct in `where` is NOT a
 pure correlation conjunct (outer_col EQ inner_col). Pure correlation:
@@ -1079,28 +1070,75 @@ Layout:
 					(or (equal? (count os-list) 0)
 						(nil? (inner-alias-of-source (car os-list)))))))
 				)))
-	/* Apply isOuter+joinExpr per correlated-alias-set entry. */
+	/* FAQ §40 predicate push-down: split right-where into per-alias
+	   conjuncts. Each conjunct that references only ONE inner table goes
+	   into THAT table's joinExpr — applies during scan, preserves outer
+	   row when no match (combined with isOuter=true). Conjuncts that
+	   reference multiple inner tables or are constants stay in merged-cond.
+	   Without this push-down, filter conjuncts (e.g. b.id=9999) live in
+	   outer's WHERE and apply AFTER join, dropping outer rows. */
+	(define right-aliases (map right-tables (lambda (t)
+		(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
+	(define right-where-conjuncts
+		(if (or (nil? right-where) (equal? right-where true)
+				(equal? right-where (quote true))) '()
+			(qpu-and-conjuncts right-where)))
+	(define expr-only-references-alias? (lambda (e a)
+		(begin
+			(define refs (extract_tblvars e))
+			(and (> (count refs) 0) (equal? (count refs) 1) (equal? (car refs) a)))))
+	(define rw-per-alias
+		(if (not is-left-scalar) '()
+			(reduce right-where-conjuncts (lambda (acc c) (begin
+				(define matched-alias (reduce right-aliases (lambda (m a)
+					(if (or (not (nil? m)) (nil? a)) m
+						(if (expr-only-references-alias? c a) a nil))) nil))
+				(if (nil? matched-alias) acc
+					(begin
+						(define existing (coalesceNil (get_assoc acc matched-alias) nil))
+						(set_assoc acc matched-alias (qpu-low-and-cond existing c))))))
+				'())))
+	(define right-where-residual
+		(if (not is-left-scalar) right-where
+			(qpu-and-from-conjuncts
+				(filter right-where-conjuncts (lambda (c) (begin
+					(define matched-alias (reduce right-aliases (lambda (m a)
+						(if (or (not (nil? m)) (nil? a)) m
+							(if (expr-only-references-alias? c a) a nil))) nil))
+					(nil? matched-alias)))))))
+	/* Apply isOuter+joinExpr per correlated-alias-set entry, ALSO merging
+	   the per-alias push-down WHERE conjuncts.
+	   For non-correlated aliases that have a push-down conjunct, mark
+	   isOuter=true too so per-binding NULL extension works when the
+	   filter eliminates inner rows. */
+	(define aliases-needing-isOuter
+		(reduce right-aliases (lambda (acc a)
+			(if (or (nil? a)
+					(has? correlated-alias-set a)
+					(not (nil? (get_assoc rw-per-alias a))))
+				(if (and (not (nil? a))
+						(or (has? correlated-alias-set a)
+							(not (nil? (get_assoc rw-per-alias a)))))
+					(if (has? acc a) acc (merge acc (list a)))
+					acc)
+				acc)) '()))
 	(define right-tables-fixed
 		(map right-tables (lambda (td) (match td
 			'(a s tname existing-isOuter existing-je)
-				(if (has? correlated-alias-set a)
+				(if (has? aliases-needing-isOuter a)
 					(list a s tname true
-						(qpu-low-and-cond existing-je
-							(coalesceNil (get_assoc je-per-alias a) nil)))
+						(qpu-low-and-cond
+							(qpu-low-and-cond existing-je
+								(coalesceNil (get_assoc je-per-alias a) nil))
+							(coalesceNil (get_assoc rw-per-alias a) nil)))
 					td)
 			td))))
-	/* Inline all inner tables; combine WHERE clauses + join-pred.
-	   When is-left-scalar AND first-inner has joinExpr now, join-pred has
-	   moved into the joinExpr — drop it from merged-cond to avoid double
-	   filtering (which would re-introduce the INNER-filter drop). */
+	/* Inline all inner tables; combine WHERE clauses + join-pred residuals. */
 	(define merged-tables (merge (qpp-tuple-tables left-tuple) right-tables-fixed))
 	(define merged-cond (qpu-low-and-cond
 		(qpu-low-and-cond
 			(qpp-tuple-condition left-tuple)
-			right-where)
-		/* Outer-correlation conjuncts were extracted to per-alias joinExprs;
-		   only residual (inner-inner equalities, non-correlation) goes to
-		   the merged WHERE. */
+			right-where-residual)
 		join-pred-residual))
 	/* Emit partition_stage at outer's groups for per-outer LIMIT semantics
 	   when right-tuple had a LIMIT. Per FAQ §22/§43: scalar subselects
