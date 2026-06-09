@@ -845,11 +845,12 @@ Requirements:
 			   where inner inlines have stacked up b, c, d, sq_X-tagged), the
 			   legacy emit's outer-wrap counting for prejoin batching produces
 			   wrong (outer X) counts. Verified test 'Depth 5 in WHERE chain
-			   resolves' had baseline ✅ but my multi-table inline produced
-			   `(outer (outer (var 3)))` (2 wraps) where 4 wraps were needed
-			   per depth-4-comparison. Falling back to wrap-derived for these
-			   deep cases keeps the lambda nesting simpler so emit's outer-wrap
-			   counting matches the actual scan chain. */
+			   resolves' had baseline ✅ but multi-table inline produced wrong
+			   wrap counts. Even with FAQ §22 per-alias isOuter+joinExpr +
+			   FAQ §40 push-down, the legacy emit's outer-wrap counting is
+			   still the bottleneck for depth-5+ — needs deeper fix in
+			   build_queryplan_inner's scan-chain wrap counting. Until then
+			   falls back to wrap-derived for these deep cases. */
 			(<= (count tbls) 3)
 			(equal? (count flds) 1)
 			(equal? (count grp) 0)
