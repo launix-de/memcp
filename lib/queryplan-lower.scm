@@ -939,18 +939,21 @@ Requirements:
 					(define has-regular-base-collision
 						(reduce right-base-names (lambda (acc name)
 							(or acc (has? left-base-names name))) false))
-					/* LEFT JOIN scalar semantics check: if right-tuple's WHERE
-					   has any filter conjunct (a comparison with a literal
-					   constant or a non-equality condition), multi-table inline
-					   would behave as INNER JOIN against the filter, dropping
-					   outer rows when the filter eliminates all inner rows.
-					   This breaks tests like 'Depth 4: NULL chain' which has
-					   `b.id = a.ref_b AND b.id = 9999` — the constant filter
-					   eliminates all b rows, yet the outer should survive with
-					   NULL d_label. Fall back to wrap-derived for those cases.
-					   For pure-correlation WHERE (only column-column equalities
-					   where one side is outer-ref), multi-table inline is safe
-					   (e.g. min repro and depth-3 simple/skip-middle). */
+					/* Filter conjuncts at the OUTERMOST multi-table inline:
+					   when right-tuple's WHERE has a filter conjunct (constant
+					   or non-equality), the OUTERMOST level currently merges
+					   right-where into outer's WHERE — filter applies AFTER
+					   join, dropping outer rows on mismatch. wrap-derived
+					   evaluates the inner sub per outer binding which gives
+					   the correct LEFT-JOIN-of-derived NULL extension.
+					   Note: at INNER recursive levels, my per-alias FAQ §22
+					   isOuter+joinExpr already propagates into wrap-derived's
+					   sub-tuple, which gives the correct NULL chain handling
+					   (verified Depth 4/5 NULL chain passes via this path).
+					   The gate stays only for the OUTERMOST decision. Until
+					   inline-multitable also pushes filter conjuncts to per-
+					   table scan filters at the outermost (FAQ §40 predicate
+					   push-down), keep the gate at this level. */
 					(define has-filter-conjunct
 						(qpu-low-where-has-filter? (qpp-tuple-condition right-tuple) left-aliases))
 					(and (> (count outer-sources) 0)
