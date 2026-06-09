@@ -1166,7 +1166,15 @@ Layout:
 				(coalesceNil right-offset 0)
 				partition-cols-count
 				right-table-aliases
-				'())
+				/* Pass outer-sources so inject_anti_passes (queryplan.scm
+				   §FAQ 28) can detect when join_reorder lifts a helper
+				   above its outer correlation source and inject a companion
+				   anti-pass scan. Previous '() suppressed this mechanism
+				   entirely for inline-multitable, leaving wrap-derived as
+				   the only path that anti-pass could fix. With outer-sources
+				   populated, inline-multitable also benefits when reorder
+				   would otherwise lose per-domain miss visibility. */
+				outer-sources)
 			nil))
 	(define merged-groups
 		(if (nil? partition-stage)
