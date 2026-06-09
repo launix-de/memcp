@@ -201,6 +201,22 @@ for `(get_column tv ti col ci)` where tv ∈ aliases. */
 				acc))
 		acc)) nil)))
 
+/* qpu-low-tv-is-scan-tagged-table-alias? — true when the given alias `tv`
+in `tables` has a scan-tagged-table source (vs a base-table string or a
+nested 7-tuple derived). Used by qpu-low-ensure-join-key-fields to detect
+when a sq_X.__kt_<col> ref should normalize to sq_X.<col> (the __kt_
+projection synthesis from UNNEST cclasses doesn't apply since scan-tagged-
+table has no projection layer). */
+(define qpu-low-tv-is-scan-tagged-table-alias? (lambda (tv tables) (begin
+	(reduce (coalesceNil tables '()) (lambda (acc td) (or acc (match td
+		'(td-alias _ td-source _ _)
+		(and (equal? td-alias tv)
+			 (list? td-source)
+			 (> (count td-source) 0)
+			 (or (equal? (car td-source) (quote scan-tagged-table))
+				 (equal? (car td-source) (symbol scan-tagged-table))))
+		false))) false))))
+
 /* qpu-low-find-deep-alias-in-tables — for an alias name NOT in the top-level
 table aliases, find which top-level DERIVED table's sub-tuple contains it.
 Returns the derived-alias name, or nil if alias isn't reachable through any
@@ -295,20 +311,36 @@ Naming: synthesized name `__kt_<col>` (suffixed if collision). */
 				(if (has? right-source-aliases tv)
 					/* Direct case (existing behavior) */
 					(begin
+						/* Normalize __kt_<col> on scan-tagged-table alias: cclasses
+						   substitution synthesized sq_X.__kt_<col> at UNNEST level
+						   (via qpu-rewrite-refs-to-sq-kt) anticipating a derived
+						   wrapper. When tv resolves to a scan-tagged-table (from
+						   inline-scalar), the __kt_<col> projection doesn't exist —
+						   the underlying base table has only the plain col. Strip
+						   the __kt_ prefix so the synthesized projection maps to a
+						   real column. Fixes 'Depth 5: innermost references outermost
+						   directly' which had sq_98.__kt___kt_id projecting from
+						   non-existent sq_101.__kt_id. */
+						(define normalized-col
+							(if (and (qpu-low-tv-is-scan-tagged-table-alias? tv top-tables)
+									 (string? col) (>= (strlen col) 5)
+									 (equal? (substr col 0 5) "__kt_"))
+								(substr col 5 (- (strlen col) 5))
+								col))
 						(define existing-name (qpu-low-fields-find-by-expr
-							(merge existing-fields (nth acc 1)) tv col))
+							(merge existing-fields (nth acc 1)) tv normalized-col))
 						(if (not (nil? existing-name))
 							(list (nth acc 0) (nth acc 1) (merge (nth acc 2)
 								(list (list (list tv col) existing-name))))
 							(begin
-								(define synthesized (concat "__kt_" col))
+								(define synthesized (concat "__kt_" normalized-col))
 								(define unique-name (qpu-low-unique-projection-name
 									synthesized (merge existing-fields (nth acc 1))))
 								(list
 									(nth acc 0)
 									(merge (nth acc 1)
 										(list (list unique-name
-											(list (quote get_column) tv false col false))))
+											(list (quote get_column) tv false normalized-col false))))
 									(merge (nth acc 2)
 										(list (list (list tv col) unique-name)))))))
 					/* Not a direct ref — check if tv is inside a top-level derived
