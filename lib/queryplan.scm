@@ -6034,7 +6034,17 @@ lambda params, other refs become (outer alias.col) closure captures. */
 							/* check sub's WHERE — nested-in-WHERE case is the
 							   isodoc/wrapped-derived pattern where the SCALAR's
 							   WHERE has another scalar (not its projection) */
-							(expr-walk-contains-marker (coalesceNil (qpp-tuple-condition sub) true)))
+							(expr-walk-contains-marker (coalesceNil (qpp-tuple-condition sub) true))
+							/* check sub's TABLES for nested derived sub-tuples —
+							   covers the 'scalar over grouped derived' pattern
+							   (66_correlated_group_domain) where the scalar's
+							   FROM contains a derived with its own structure. */
+							(reduce (qpp-tuple-tables sub) (lambda (acc td)
+								(if (or (nil? td) (< (count td) 3)) acc
+									(begin
+										(define tn (nth td 2))
+										(if (qpp-tuple? tn) true acc))))
+								false))
 						(reduce e (lambda (acc se)
 							(or acc (expr-walk-find-nested-marker se))) false)))
 				(reduce e (lambda (acc se)
