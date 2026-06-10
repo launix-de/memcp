@@ -6058,6 +6058,11 @@ lambda params, other refs become (outer alias.col) closure captures. */
 		(if (qpp-tuple? query)
 			(or
 				(expr-walk-find-nested-marker (coalesceNil (qpp-tuple-condition query) true))
+				(expr-walk-find-nested-marker (coalesceNil (qpp-tuple-having query) true))
+				(reduce (coalesceNil (qpp-tuple-order query) '()) (lambda (acc oi)
+					(match oi
+						'(c _) (or acc (expr-walk-find-nested-marker c))
+						acc)) false)
 				(reduce (qpp-fields-to-pairs (qpp-tuple-fields query))
 					(lambda (acc pair) (match pair
 						'(_ e) (or acc (expr-walk-find-nested-marker e))
@@ -6069,6 +6074,7 @@ lambda params, other refs become (outer alias.col) closure captures. */
 							(if (qpp-tuple? tn)
 								(or acc
 									(expr-walk-find-nested-marker (coalesceNil (qpp-tuple-condition tn) true))
+									(expr-walk-find-nested-marker (coalesceNil (qpp-tuple-having tn) true))
 									(reduce (qpp-fields-to-pairs (qpp-tuple-fields tn))
 										(lambda (a2 p2) (match p2
 											'(_ e2) (or a2 (expr-walk-find-nested-marker e2))
@@ -6076,9 +6082,66 @@ lambda params, other refs become (outer alias.col) closure captures. */
 								acc))))
 					false))
 			false))
+	/* HAVING with inner_select marker bypass: when the OUTER query has
+	   HAVING containing any inner_select marker (whether nested or not),
+	   route to legacy. Test 106 'HAVING: correlated scalar references
+	   group key' has HAVING SUM(salary) > (SELECT d.budget/3 FROM ...) —
+	   our new pipeline mishandles the prejoin column resolution. */
+	(define query-has-having-marker
+		(if (qpp-tuple? query)
+			(expr-walk-contains-marker (coalesceNil (qpp-tuple-having query) true))
+			false))
+	/* Scalar with aggregate-in-projection bypass: when an inner_select
+	   marker's subquery has an aggregate marker in its projection AND the
+	   outer context wraps it (COALESCE, derived-table, etc.), the new
+	   pipeline returns wrong values. Tests 66_compute_proxy_repartition
+	   'COUNT+SUM after rebuild' and 66_derived_table_count_minimal: outer
+	   SUM(t.total) over derived with COALESCE(scalar-SUM) — returns 650
+	   instead of 1200. Detection: check if any inner_select marker's
+	   subquery's fields contain (aggregate ...) markers. */
+	(define expr-walk-find-marker-with-agg-projection (lambda (e)
+		(if (or (nil? e) (not (list? e))) false
+			(if (and (expr-is-inner-select-marker e) (>= (count e) 2))
+				(begin
+					(define sub (nth e (if (equal?? (car e) (quote inner_select_in)) 2 1)))
+					(if (qpp-tuple? sub)
+						(or
+							(reduce (qpp-fields-to-pairs (qpp-tuple-fields sub))
+								(lambda (acc pair) (match pair
+									'(_ se) (or acc (qpl-expr-has-aggregate? se))
+									acc)) false)
+							(reduce e (lambda (acc se)
+								(or acc (expr-walk-find-marker-with-agg-projection se))) false))
+						(reduce e (lambda (acc se)
+							(or acc (expr-walk-find-marker-with-agg-projection se))) false)))
+				(reduce e (lambda (acc se)
+					(or acc (expr-walk-find-marker-with-agg-projection se))) false)))))
+	(define query-has-scalar-agg-projection
+		(if (qpp-tuple? query)
+			(or
+				(expr-walk-find-marker-with-agg-projection (coalesceNil (qpp-tuple-condition query) true))
+				(expr-walk-find-marker-with-agg-projection (coalesceNil (qpp-tuple-having query) true))
+				(reduce (qpp-fields-to-pairs (qpp-tuple-fields query))
+					(lambda (acc pair) (match pair
+						'(_ e) (or acc (expr-walk-find-marker-with-agg-projection e))
+						acc)) false)
+				(reduce (qpp-tuple-tables query) (lambda (acc td)
+					(if (or (nil? td) (< (count td) 3)) acc
+						(begin
+							(define tn (nth td 2))
+							(if (qpp-tuple? tn)
+								(or acc
+									(reduce (qpp-fields-to-pairs (qpp-tuple-fields tn))
+										(lambda (a2 p2) (match p2
+											'(_ e2) (or a2 (expr-walk-find-marker-with-agg-projection e2))
+											a2)) false))
+								acc))))
+					false))
+			false))
 	(define routed-query
 		(if (and (qpp-tuple? query) (not query-has-window) (not query-has-session)
-				(not query-has-nested-scalar))
+				(not query-has-nested-scalar) (not query-has-having-marker)
+				(not query-has-scalar-agg-projection))
 			(begin
 				(define neu (neumann_compile_select query))
 				(if neumann_pipeline_trace (begin
