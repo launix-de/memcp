@@ -5963,8 +5963,24 @@ lambda params, other refs become (outer alias.col) closure captures. */
 					'(_ e) (or acc (not (equal? (extract_window_funcs e) '())))
 					acc)) false)
 			false))
+	/* Session-state bypass: when the WHERE or fields contain session-state
+	   references (@var, context, __memcp_tx), route through legacy too.
+	   The new pipeline's prejoin emission doesn't include session values
+	   in cache keys, leading to stale-cache and runtime errors for
+	   session-var queries. Documented in commit a59a47a0b. Legacy at
+	   least produces correct (or master-matching wrong) data instead of
+	   crashing. */
+	(define query-has-session
+		(if (qpp-tuple? query)
+			(or
+				(expr_uses_session_state (coalesceNil (qpp-tuple-condition query) true))
+				(reduce (qpp-fields-to-pairs (qpp-tuple-fields query))
+					(lambda (acc pair) (match pair
+						'(_ e) (or acc (expr_uses_session_state e))
+						acc)) false))
+			false))
 	(define routed-query
-		(if (and (qpp-tuple? query) (not query-has-window))
+		(if (and (qpp-tuple? query) (not query-has-window) (not query-has-session))
 			(begin
 				(define neu (neumann_compile_select query))
 				(if neumann_pipeline_trace (begin
