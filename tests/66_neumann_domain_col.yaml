@@ -1,10 +1,12 @@
 # Neumann decorrelation: domain join column must be created in the temp table.
 # Pattern: COALESCE((SELECT SUM(k.val) FROM detail k WHERE k.parent = m.ID AND ...), 0)
-# The domain-join column (parent) becomes a column in .unnest:$sq0.
+# The domain-join column (parent) must be present in the decorrelated helper.
 
 metadata:
   version: "1.0"
   description: "Neumann decorrelation domain column in temp table"
+  isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS ndc_main"
@@ -48,7 +50,7 @@ test_cases:
           name: "Bob"
           total: 0
 
-  - name: "multiple SUM with different domain joins (triggers $sq1)"
+  - name: "multiple SUM subqueries with distinct domain filters"
     sql: |
       SELECT m.ID, m.name,
         COALESCE((SELECT SUM(k.val) FROM ndc_detail k WHERE k.parent = m.ID AND k.dt < 2500), 0) AS total_early,

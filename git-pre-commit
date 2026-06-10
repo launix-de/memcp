@@ -82,13 +82,13 @@ $resolved"
   printf "%s\n" "$selected" | sed '/^$/d' | sort -u
 }
 
-# Find all numbered test files (01_*.yaml, 02_*.yaml, etc.) or use the selected subset.
+# Find all numbered test files (01_*.yaml, 100_*.yaml, etc.) or use the selected subset.
 if [ "$#" -gt 0 ]; then
     if ! test_files="$(resolve_test_selection "$@")"; then
         exit 1
     fi
 else
-    test_files=$(find tests/ -name "[0-9][0-9]_*.yaml" | sort)
+    test_files=$(find tests/ -name "[0-9]*_*.yaml" | sort)
 fi
 mapfile -t test_files_arr <<< "$test_files"
 
@@ -133,15 +133,16 @@ echo ""
 
 test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
 tmpdir=""
+test_datadir="$(mktemp -d "/tmp/memcp-sql-tests-${test_port}.XXXXXX")"
 supervisor_pid=""
 
 # Runner contract:
-# - All suites use the repository-local ./data directory.
-# - ./data must never be deleted by this hook.
-# - "isolated" means serialized execution on the same shared database, not
-#   storage isolation.
+# - All suites in one hook run use a fresh temporary data directory.
+# - The data directory survives restart/SHUTDOWN suites inside that run.
+# - "isolated" means serialized execution on the same run-local database, not
+#   a separate storage directory per suite.
 # - restart/SHUTDOWN suites may temporarily stop the shared supervisor, but
-#   they must come back on the same ./data afterwards.
+#   they must come back on the same run-local data directory afterwards.
 
 run_memcp_forever() {
   trap 'kill $memcp_pid 2>/dev/null; exit 0' TERM INT
@@ -150,7 +151,7 @@ run_memcp_forever() {
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
     memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
-    ./memcp --no-repl -data ./data --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
+    ./memcp --no-repl -data "$test_datadir" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
     wait $memcp_pid
     rc=$?
@@ -200,6 +201,7 @@ wait_for_sql_ready() {
 }
 
 if ! start_supervisor; then
+  rm -rf "$test_datadir" 2>/dev/null || true
   exit 1
 fi
 
@@ -217,6 +219,9 @@ cleanup() {
   stop_supervisor
   if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
     rm -rf "$tmpdir" 2>/dev/null || true
+  fi
+  if [ -n "$test_datadir" ] && [ -d "$test_datadir" ]; then
+    rm -rf "$test_datadir" 2>/dev/null || true
   fi
   echo "✅ MemCP stopped"
 }
@@ -263,7 +268,7 @@ PY
 # Scheduling contract:
 # - shared suites may run in parallel against the long-lived shared MemCP
 #   process
-# - isolated suites must run one after another, but still on the same ./data
+# - isolated suites must run one after another, but still on the same run-local
 #   database state
 for tf in "${test_files_arr[@]}"; do
   if [ "$(suite_mode "$tf")" = "isolated" ]; then

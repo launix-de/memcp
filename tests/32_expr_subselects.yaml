@@ -6,7 +6,7 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS t1"
-  - sql: "DROP TABLE IF EXISTS t2"
+  - sql: "DROP TABLE IF EXISTS owned_values"
   - sql: "DROP TABLE IF EXISTS t3"
   - sql: "DROP TABLE IF EXISTS t4"
   - sql: "DROP TABLE IF EXISTS doc"
@@ -16,7 +16,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS login"
   - sql: "DROP TABLE IF EXISTS userconfig"
   - sql: "CREATE TABLE t1 (id INT PRIMARY KEY)"
-  - sql: "CREATE TABLE t2 (owner INT, val INT)"
+  - sql: "CREATE TABLE owned_values (owner INT, val INT)"
   - sql: "CREATE TABLE t3 (id INT PRIMARY KEY, ref INT)"
   - sql: "CREATE TABLE t4 (id INT PRIMARY KEY, description VARCHAR(20))"
   - sql: "CREATE TABLE doc (id INT PRIMARY KEY, type INT, archive BOOL)"
@@ -26,12 +26,12 @@ setup:
   - sql: "CREATE TABLE login (ID INT PRIMARY KEY)"
   - sql: "CREATE TABLE userconfig (ID INT PRIMARY KEY, Tables_Doc_defaultDoctype INT)"
   - sql: "INSERT INTO t1 (id) VALUES (4)"
-  - sql: "INSERT INTO t2 (owner, val) VALUES (1, 42)"
-  - sql: "INSERT INTO t2 (owner, val) VALUES (2, 41)"
-  - sql: "INSERT INTO t2 (owner, val) VALUES (2, 42)"
-  - sql: "INSERT INTO t2 (owner, val) VALUES (3, 41)"
-  - sql: "INSERT INTO t2 (owner, val) VALUES (3, 42)"
-  - sql: "INSERT INTO t2 (owner, val) VALUES (4, 55)"
+  - sql: "INSERT INTO owned_values (owner, val) VALUES (1, 42)"
+  - sql: "INSERT INTO owned_values (owner, val) VALUES (2, 41)"
+  - sql: "INSERT INTO owned_values (owner, val) VALUES (2, 42)"
+  - sql: "INSERT INTO owned_values (owner, val) VALUES (3, 41)"
+  - sql: "INSERT INTO owned_values (owner, val) VALUES (3, 42)"
+  - sql: "INSERT INTO owned_values (owner, val) VALUES (4, 55)"
   - sql: "INSERT INTO t3 (id, ref) VALUES (1, 10)"
   - sql: "INSERT INTO t3 (id, ref) VALUES (2, 11)"
   - sql: "INSERT INTO t3 (id, ref) VALUES (3, 12)"
@@ -72,93 +72,92 @@ test_cases:
         - x: 1
 
   - name: "Scalar subselect without correlation"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
+    sql: "SELECT (SELECT val FROM owned_values WHERE owner = 1) AS v"
     expect:
       rows: 1
       data:
         - v: 42
 
-  - name: "EXPLAIN IR exposes uncorrelated scalar fallback reasons"
-    sql: "EXPLAIN IR SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
+  - name: "EXPLAIN IR exposes uncorrelated scalar unnest reason"
+    sql: "EXPLAIN IR SELECT (SELECT val FROM owned_values WHERE owner = 1) AS v"
     expect:
       contains:
         - "scalar-events"
-        - "inline-uncorrelated"
-        - "legacy-fallback-non-aggregate"
+        - "prefer-unnest"
 
   - name: "Scalar subselect without LIMIT rejects multiple rows"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
+    sql: "SELECT (SELECT val FROM owned_values WHERE owner = 2) AS v"
     expect:
       error: true
 
   - name: "Scalar subselect ORDER BY LIMIT 1"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = 3 ORDER BY val DESC LIMIT 1) AS v"
+    sql: "SELECT (SELECT val FROM owned_values WHERE owner = 3 ORDER BY val DESC LIMIT 1) AS v"
     expect:
       rows: 1
       data:
         - v: 42
 
   - name: "Scalar subselect ORDER BY LIMIT 1 OFFSET 1"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = 3 ORDER BY val DESC LIMIT 1 OFFSET 1) AS v"
+    sql: "SELECT (SELECT val FROM owned_values WHERE owner = 3 ORDER BY val DESC LIMIT 1 OFFSET 1) AS v"
     expect:
       rows: 1
       data:
         - v: 41
 
   - name: "Scalar subselect aggregate COUNT"
-    sql: "SELECT (SELECT COUNT(1) FROM t2 WHERE owner = 2 LIMIT 1) AS cnt"
+    sql: "SELECT (SELECT COUNT(1) FROM owned_values WHERE owner = 2 LIMIT 1) AS cnt"
     expect:
       rows: 1
       data:
         - cnt: 2
 
   - name: "Scalar subselect aggregate COUNT star"
-    sql: "SELECT (SELECT COUNT(*) FROM t2 WHERE owner = 2 LIMIT 1) AS cnt"
+    sql: "SELECT (SELECT COUNT(*) FROM owned_values WHERE owner = 2 LIMIT 1) AS cnt"
     expect:
       rows: 1
       data:
         - cnt: 2
 
   - name: "Scalar subselect aggregate HAVING false"
-    sql: "SELECT (SELECT COUNT(1) FROM t2 WHERE owner = 2 HAVING COUNT(1) > 5) AS cnt"
+    sql: "SELECT (SELECT COUNT(1) FROM owned_values WHERE owner = 2 HAVING COUNT(1) > 5) AS cnt"
     expect:
       rows: 1
       data:
         - cnt: null
 
   - name: "Scalar subselect GROUP BY with HAVING"
-    sql: "SELECT (SELECT COUNT(1) FROM t2 GROUP BY owner HAVING owner = 2) AS cnt"
+    sql: "SELECT (SELECT COUNT(1) FROM owned_values GROUP BY owner HAVING owner = 2) AS cnt"
     expect:
       rows: 1
       data:
         - cnt: 2
 
   - name: "Scalar subselect GROUP BY ORDER+LIMIT"
-    sql: "SELECT (SELECT owner FROM t2 GROUP BY owner ORDER BY COUNT(1) DESC, owner ASC LIMIT 1) AS top_owner"
+    sql: "SELECT (SELECT owner FROM owned_values GROUP BY owner ORDER BY COUNT(1) DESC, owner ASC LIMIT 1) AS top_owner"
     expect:
       rows: 1
       data:
         - top_owner: 2
 
   - name: "Scalar correlated subselect in SELECT list"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM t1"
+    sql: "SELECT (SELECT val FROM owned_values WHERE owner = t1.id) AS v FROM t1"
     expect:
       rows: 1
       data:
         - v: 55
 
   - name: "Scalar correlated subselect without LIMIT rejects multiple rows"
-    sql: "SELECT id, (SELECT val FROM t2 WHERE owner = t3.id) AS v FROM t3 ORDER BY id"
+    sql: "SELECT id, (SELECT val FROM owned_values WHERE owner = t3.id) AS v FROM t3 ORDER BY id"
     expect:
       error: true
 
   - name: "Scalar correlated grouped subselect with non-equality rejects multiple rows"
-    sql: "SELECT id, (SELECT owner FROM t2 WHERE owner <= t3.id GROUP BY owner ORDER BY owner) AS o FROM t3 ORDER BY id"
+    sql: "SELECT id, (SELECT owner FROM owned_values WHERE owner <= t3.id GROUP BY owner ORDER BY owner) AS o FROM t3 ORDER BY id"
     expect:
       error: true
 
   - name: "Scalar correlated subselect ORDER BY LIMIT 1"
-    sql: "SELECT id, (SELECT val FROM t2 WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
+    sql: "SELECT id, (SELECT val FROM owned_values WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
     expect:
       rows: 4
       data:
@@ -172,20 +171,20 @@ test_cases:
           v: 55
 
   - name: "EXPLAIN IR exposes correlated scalar unnest reason"
-    sql: "EXPLAIN IR SELECT id, (SELECT val FROM t2 WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
+    sql: "EXPLAIN IR SELECT id, (SELECT val FROM owned_values WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
     expect:
       contains:
         - "scalar-events"
         - "prefer-unnest"
         - "limit-partition-cols 1"
-        - "partition-aliases (\"_unn_t2_0\")"
+        - "partition-aliases (\"domain_scalar_owned_values_0\")"
       not_contains:
         - "__scalar_promise_"
         - "scan-tagged-table"
         - "inline-grouped-non-domain-correlation"
 
   - name: "Derived table with scalar aggregate subselect"
-    sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM t2 WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
+    sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM owned_values WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
     expect:
       rows: 4
       data:
@@ -199,14 +198,14 @@ test_cases:
           cnt: 1
 
   - name: "EXPLAIN IR exposes correlated aggregate inline reason"
-    sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM t2 WHERE owner = t1.id LIMIT 1) AS cnt FROM t1"
+    sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM owned_values WHERE owner = t1.id LIMIT 1) AS cnt FROM t1"
     expect:
       contains:
         - "scalar-events"
         - "inline-direct-agg-scan"
 
   - name: "EXPLAIN IR exposes grouped scalar fallback reason"
-    sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM t2 GROUP BY owner HAVING owner = t1.id) AS cnt FROM t1"
+    sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM owned_values GROUP BY owner HAVING owner = t1.id) AS cnt FROM t1"
     expect:
       contains:
         - "scalar-events"
@@ -228,7 +227,7 @@ test_cases:
 
   - name: "Scalar correlated subselect references derived-table computed column"
     sql: >
-      SELECT x, (SELECT COUNT(1) FROM t2 WHERE owner = x) AS cnt
+      SELECT x, (SELECT COUNT(1) FROM owned_values WHERE owner = x) AS cnt
       FROM (SELECT id AS x FROM t3) AS d
       ORDER BY x
     expect:
@@ -244,6 +243,7 @@ test_cases:
           cnt: 1
 
   - name: "Scalar subselect in boolean NULL-or-equals expression"
+    max_time: 10
     sql: >
       SELECT COUNT(1) AS cnt
       FROM doc
@@ -256,6 +256,7 @@ test_cases:
         - cnt: 1
 
   - name: "Scalar COUNT subselect in SELECT list with outer FROM table"
+    max_time: 10
     sql: >
       SELECT 1,
       (SELECT COUNT(1) FROM doc
@@ -270,6 +271,7 @@ test_cases:
         - badgeDoc: 1
 
   - name: "Sibling scalar subselects in outer projection stay isolated"
+    max_time: 10
     sql: >
       SELECT
       (SELECT COUNT(1) FROM doc
@@ -277,7 +279,7 @@ test_cases:
       OR ((doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
       AND (NOT (doc.archive))
       LIMIT 1) AS badgeDoc,
-      (SELECT SUM(1) FROM t2 WHERE owner = 2 LIMIT 1) AS siblingCount
+      (SELECT SUM(1) FROM owned_values WHERE owner = 2 LIMIT 1) AS siblingCount
       FROM login WHERE ID = 1
     expect:
       rows: 1
@@ -330,6 +332,7 @@ test_cases:
           type: null
 
   - name: "Qualified uppercase column resolves in nested scalar subselect"
+    max_time: 10
     setup:
       - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_src"
       - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_rev"
@@ -359,6 +362,7 @@ test_cases:
         - is_pdf: true
 
   - name: "Qualified uppercase column resolves in nested scalar and sibling projection"
+    max_time: 10
     setup:
       - sql: "DROP TABLE IF EXISTS expr32_ns_proj_src"
       - sql: "DROP TABLE IF EXISTS expr32_ns_proj_rev"
@@ -394,6 +398,7 @@ test_cases:
           filename: sample.pdf
 
   - name: "Derived join view subset keeps nested scalar file metadata"
+    max_time: 10
     setup:
       - sql: "DROP TABLE IF EXISTS expr32_view_src"
       - sql: "DROP TABLE IF EXISTS expr32_view_rev"
@@ -449,6 +454,7 @@ test_cases:
           operation::view: true
 
   - name: "Wrapped derived view keeps nested scalar file metadata with inner LEFT JOIN"
+    max_time: 10
     setup:
       - sql: "DROP TABLE IF EXISTS expr32_wrap_src"
       - sql: "DROP TABLE IF EXISTS expr32_wrap_rev"
@@ -459,8 +465,8 @@ test_cases:
       - sql: "CREATE TABLE expr32_wrap_file (id INT PRIMARY KEY, filename VARCHAR(255), mime VARCHAR(255))"
       - sql: "CREATE TABLE expr32_wrap_kind (ID INT PRIMARY KEY, name VARCHAR(255))"
       - sql: "INSERT INTO expr32_wrap_src (ID, kind, archive) VALUES (1, 7, FALSE), (2, NULL, FALSE)"
-      - sql: "INSERT INTO expr32_wrap_file (id, filename, mime) VALUES (100, 'one.pdf', 'application/pdf'), (101, 'two.pdf', 'application/pdf')"
-      - sql: "INSERT INTO expr32_wrap_rev (id, src, created, file) VALUES (1, 1, 1000, 100), (2, 2, 2000, 101)"
+      - sql: "INSERT INTO expr32_wrap_file (id, filename, mime) VALUES (99, 'old.png', 'image/png'), (100, 'one.pdf', 'application/pdf'), (101, 'two.pdf', 'application/pdf')"
+      - sql: "INSERT INTO expr32_wrap_rev (id, src, created, file) VALUES (1, 1, 900, 99), (2, 1, 1000, 100), (3, 2, 2000, 101)"
       - sql: "INSERT INTO expr32_wrap_kind (ID, name) VALUES (7, 'General')"
     cleanup:
       - sql: "DROP TABLE IF EXISTS expr32_wrap_src"
@@ -605,12 +611,12 @@ test_cases:
         - unit2: EUR
 
   - name: "Scalar subselect multiple rows errors"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
+    sql: "SELECT (SELECT val FROM owned_values WHERE owner = 2) AS v"
     expect:
       error: true
 
   - name: "Correlated scalar subselect multiple rows errors"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM (SELECT 2 AS id) AS t1"
+    sql: "SELECT (SELECT val FROM owned_values WHERE owner = t1.id) AS v FROM (SELECT 2 AS id) AS t1"
     expect:
       error: true
 
@@ -620,14 +626,14 @@ test_cases:
       rows: 1
 
   - name: "IN subselect with DISTINCT parses and executes"
-    sql: "SELECT id FROM t1 WHERE id IN (SELECT DISTINCT owner FROM t2)"
+    sql: "SELECT id FROM t1 WHERE id IN (SELECT DISTINCT owner FROM owned_values)"
     expect:
       rows: 1
       data:
         - id: 4
 
   - name: "NOT IN subselect with DISTINCT"
-    sql: "SELECT id FROM t1 WHERE id NOT IN (SELECT DISTINCT owner FROM t2 WHERE owner < 3)"
+    sql: "SELECT id FROM t1 WHERE id NOT IN (SELECT DISTINCT owner FROM owned_values WHERE owner < 3)"
     expect:
       rows: 1
       data:
@@ -637,7 +643,7 @@ test_cases:
     sql: >
       SELECT id FROM t1 WHERE id IN (
         SELECT DISTINCT t.owner FROM (
-          SELECT owner, val FROM t2
+          SELECT owner, val FROM owned_values
         ) AS t
         LEFT JOIN t1 AS ref ON t.owner = ref.id
         WHERE TRUE
@@ -648,12 +654,36 @@ test_cases:
         - id: 4
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS expr32_scalar_offer_element"
+  - sql: "DROP TABLE IF EXISTS expr32_scalar_offer"
+  - sql: "DROP TABLE IF EXISTS expr32_scalar_currency"
+  - sql: "DROP TABLE IF EXISTS expr32_exists_refb"
+  - sql: "DROP TABLE IF EXISTS expr32_exists_refa"
+  - sql: "DROP TABLE IF EXISTS expr32_exists_file"
+  - sql: "DROP TABLE IF EXISTS expr32_ins_dst"
+  - sql: "DROP TABLE IF EXISTS expr32_ins_src"
+  - sql: "DROP TABLE IF EXISTS expr32_wrap_kind"
+  - sql: "DROP TABLE IF EXISTS expr32_wrap_file"
+  - sql: "DROP TABLE IF EXISTS expr32_wrap_rev"
+  - sql: "DROP TABLE IF EXISTS expr32_wrap_src"
+  - sql: "DROP TABLE IF EXISTS expr32_view_kind"
+  - sql: "DROP TABLE IF EXISTS expr32_view_file"
+  - sql: "DROP TABLE IF EXISTS expr32_view_rev"
+  - sql: "DROP TABLE IF EXISTS expr32_view_src"
+  - sql: "DROP TABLE IF EXISTS expr32_ns_proj_file"
+  - sql: "DROP TABLE IF EXISTS expr32_ns_proj_rev"
+  - sql: "DROP TABLE IF EXISTS expr32_ns_proj_src"
+  - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_file"
+  - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_rev"
+  - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_src"
+  - sql: "DROP TABLE IF EXISTS expr32_alias_src"
   - sql: "DROP TABLE IF EXISTS userconfig"
   - sql: "DROP TABLE IF EXISTS login"
+  - sql: "DROP TABLE IF EXISTS docType"
   - sql: "DROP TABLE IF EXISTS fop_files"
   - sql: "DROP TABLE IF EXISTS doc_revision"
   - sql: "DROP TABLE IF EXISTS doc"
   - sql: "DROP TABLE IF EXISTS t4"
   - sql: "DROP TABLE IF EXISTS t3"
-  - sql: "DROP TABLE IF EXISTS t2"
+  - sql: "DROP TABLE IF EXISTS owned_values"
   - sql: "DROP TABLE IF EXISTS t1"

@@ -1,0 +1,158 @@
+# SQL feature regression: scalar subquery over a grouped derived table whose
+# grouped source requires a prejoin and session-dependent nested scalar lookup.
+
+metadata:
+  version: "1.0"
+  description: "SQL prejoin helper schema remains stable for grouped scalar subqueries"
+  isolated: true
+  max_time: 10
+
+setup:
+  - sql: "DROP TABLE IF EXISTS prejoin_membership"
+  - sql: "DROP TABLE IF EXISTS prejoin_work_item"
+  - sql: "DROP TABLE IF EXISTS prejoin_user"
+  - sql: "CREATE TABLE prejoin_user (id INT PRIMARY KEY, label TEXT)"
+  - sql: "CREATE TABLE prejoin_membership (id INT PRIMARY KEY, group_key TEXT, user_id INT)"
+  - sql: "CREATE TABLE prejoin_work_item (id INT PRIMARY KEY, group_key TEXT, due_at INT, done BOOL)"
+  - sql: "INSERT INTO prejoin_user VALUES (1, 'one'), (2, 'two')"
+  - sql: "INSERT INTO prejoin_membership VALUES (1, 'alpha', 1), (2, 'beta', 2)"
+  - sql: |
+      INSERT INTO prejoin_work_item VALUES
+        (1, 'alpha', 80, FALSE),
+        (2, 'alpha', 90, FALSE),
+        (3, 'beta', 70, FALSE),
+        (4, 'beta', 110, FALSE)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS prejoin_membership"
+  - sql: "DROP TABLE IF EXISTS prejoin_work_item"
+  - sql: "DROP TABLE IF EXISTS prejoin_user"
+
+test_cases:
+  - name: "set session values for grouped scalar subquery"
+    session_id: "sql-prejoin-helper-schema"
+    sql: "SELECT @visible_user_id := 1, @due_cutoff := 100"
+    expect:
+      rows: 1
+
+  - name: "grouped exists subquery counts source rows"
+    session_id: "sql-prejoin-helper-schema"
+    sql: |
+      SELECT w.group_key, SUM(1) AS cnt
+      FROM prejoin_work_item w
+      WHERE w.due_at < @due_cutoff
+        AND EXISTS (
+          SELECT TRUE
+          FROM prejoin_membership m
+          WHERE m.group_key = w.group_key
+            AND (SELECT u.id = @visible_user_id FROM prejoin_user u WHERE u.id = m.user_id LIMIT 1)
+          LIMIT 1
+        )
+      GROUP BY w.group_key
+    expect:
+      rows: 1
+      data:
+        - group_key: "alpha"
+          cnt: 2
+
+  - name: "derived grouped exists subquery exposes aggregate value"
+    session_id: "sql-prejoin-helper-schema"
+    sql: |
+      SELECT grouped_work.group_key, grouped_work.cnt
+      FROM (
+        SELECT w.group_key, SUM(1) AS cnt
+        FROM prejoin_work_item w
+        WHERE w.due_at < @due_cutoff
+          AND EXISTS (
+            SELECT TRUE
+            FROM prejoin_membership m
+            WHERE m.group_key = w.group_key
+              AND (SELECT u.id = @visible_user_id FROM prejoin_user u WHERE u.id = m.user_id LIMIT 1)
+            LIMIT 1
+          )
+        GROUP BY w.group_key
+      ) grouped_work
+    expect:
+      rows: 1
+      data:
+        - group_key: "alpha"
+          cnt: 2
+
+  - name: "grouped scalar subquery materializes reusable prejoin columns"
+    session_id: "sql-prejoin-helper-schema"
+    sql: |
+      SELECT 1 AS ok,
+        (SELECT SUM(cnt)
+         FROM (
+           SELECT w.group_key, SUM(1) AS cnt
+           FROM prejoin_work_item w
+           WHERE w.due_at < @due_cutoff
+             AND EXISTS (
+               SELECT TRUE
+               FROM prejoin_membership m
+               WHERE m.group_key = w.group_key
+                 AND (SELECT u.id = @visible_user_id FROM prejoin_user u WHERE u.id = m.user_id LIMIT 1)
+               LIMIT 1
+             )
+           GROUP BY w.group_key
+         ) grouped_work
+         LIMIT 1) AS visible_count
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+          visible_count: 2
+
+  - name: "grouped scalar subquery survives changed session key"
+    session_id: "sql-prejoin-helper-schema"
+    sql: "SELECT @visible_user_id := 2"
+    expect:
+      rows: 1
+
+  - name: "derived grouped exists subquery follows changed session key"
+    session_id: "sql-prejoin-helper-schema"
+    sql: |
+      SELECT grouped_work.group_key, grouped_work.cnt
+      FROM (
+        SELECT w.group_key, SUM(1) AS cnt
+        FROM prejoin_work_item w
+        WHERE w.due_at < @due_cutoff
+          AND EXISTS (
+            SELECT TRUE
+            FROM prejoin_membership m
+            WHERE m.group_key = w.group_key
+              AND (SELECT u.id = @visible_user_id FROM prejoin_user u WHERE u.id = m.user_id LIMIT 1)
+            LIMIT 1
+          )
+        GROUP BY w.group_key
+      ) grouped_work
+    expect:
+      rows: 1
+      data:
+        - group_key: "beta"
+          cnt: 1
+
+  - name: "grouped scalar subquery reuses helper with same schema"
+    session_id: "sql-prejoin-helper-schema"
+    sql: |
+      SELECT 1 AS ok,
+        (SELECT SUM(cnt)
+         FROM (
+           SELECT w.group_key, SUM(1) AS cnt
+           FROM prejoin_work_item w
+           WHERE w.due_at < @due_cutoff
+             AND EXISTS (
+               SELECT TRUE
+               FROM prejoin_membership m
+               WHERE m.group_key = w.group_key
+                 AND (SELECT u.id = @visible_user_id FROM prejoin_user u WHERE u.id = m.user_id LIMIT 1)
+               LIMIT 1
+             )
+           GROUP BY w.group_key
+         ) grouped_work
+         LIMIT 1) AS visible_count
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+          visible_count: 1

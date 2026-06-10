@@ -5,6 +5,8 @@
 metadata:
   version: "1.0"
   description: "Correlated scalar subselects in WHERE, GROUP BY, HAVING"
+  isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS sc_dept"

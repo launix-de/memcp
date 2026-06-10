@@ -163,6 +163,18 @@ pass/fail summary and a loud warning if any assertion fails.
 	(qpir-assert (count fv-right-only) 1 "F(right-of-correlated-dep-join) has 1 free var")
 	(qpir-assert (car fv-right-only) (list "po" "k") "F free var is (po k)")
 
+	/* F(N) is a set: repeated refs to the same outer column must not duplicate
+	domain keys in later unnesting passes. */
+	(define n-duplicate-free-vars (qpir-map
+		(list (list "outer_k" (qpir-mk-col "po" "k")))
+		(qpir-select
+			(qpir-mk-eq (qpir-mk-col "po" "k") (qpir-mk-col "pi" "k"))
+			(qpir-scan "memcp-tests" "pi"))))
+	(define fv-duplicate-free (qpir-free-vars n-duplicate-free-vars))
+	(qpir-assert (count fv-duplicate-free) 1 "F(N) deduplicates repeated outer refs")
+	(qpir-assert (car fv-duplicate-free) (list "po" "k")
+		"F(N) duplicate-free ref is (po k)")
+
 	/* ==== Pretty-printer doesn't crash ==== */
 	(define show-out (qpir-show n-dep-correlated))
 	(qpir-assert (> (strlen show-out) 0) true "qpir-show returns non-empty string")

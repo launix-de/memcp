@@ -6,6 +6,8 @@
 metadata:
   version: "1.0"
   description: "ERPL integration regression queries"
+  isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS erpl_ticket"

@@ -10,15 +10,15 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS jd_item"
-  - sql: "DROP TABLE IF EXISTS jd_ref"
+  - sql: "DROP TABLE IF EXISTS reference_labels"
   - sql: |
       CREATE TABLE jd_item (id INT, ref_id INT)
   - sql: |
       INSERT INTO jd_item (id, ref_id) VALUES (1, 10), (2, 20), (3, 10), (4, NULL)
   - sql: |
-      CREATE TABLE jd_ref (id INT, label VARCHAR(40), score INT)
+      CREATE TABLE reference_labels (id INT, label VARCHAR(40), score INT)
   - sql: |
-      INSERT INTO jd_ref (id, label, score) VALUES (10, 'Alpha', 100), (20, 'Beta', 200)
+      INSERT INTO reference_labels (id, label, score) VALUES (10, 'Alpha', 100), (20, 'Beta', 200)
 
 test_cases:
 
@@ -26,8 +26,8 @@ test_cases:
   - name: "Two identical scalar subqueries return same result"
     sql: |
       SELECT id,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c2
       FROM jd_item
       ORDER BY id
     expect:
@@ -50,25 +50,25 @@ test_cases:
     sql: |
       EXPLAIN IR
       SELECT id,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c2
       FROM jd_item
       ORDER BY id
     expect:
       rows: 8
       contains:
-        - "_unn_jd_ref_0"
+        - "domain_scalar_reference_labels_0"
       not_contains:
-        - "_unn_jd_ref_1"
+        - "domain_scalar_reference_labels_1"
         - "scan-tagged-table"
 
   # Three identical subqueries: all three must match
   - name: "Three identical scalar subqueries all agree"
     sql: |
       SELECT id,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c3
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c2,
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c3
       FROM jd_item
       WHERE id = 1
     expect:
@@ -83,8 +83,8 @@ test_cases:
   - name: "Same table same condition different fields both correct"
     sql: |
       SELECT id,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS lbl,
-        (SELECT score FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS sc
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS lbl,
+        (SELECT score FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS sc
       FROM jd_item
       ORDER BY id
     expect:
@@ -107,25 +107,25 @@ test_cases:
     sql: |
       EXPLAIN IR
       SELECT id,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS lbl,
-        (SELECT score FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS sc
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS lbl,
+        (SELECT score FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS sc
       FROM jd_item
       ORDER BY id
     expect:
       rows: 8
       contains:
-        - "_unn_jd_ref_0"
+        - "domain_scalar_reference_labels_0"
       not_contains:
-        - "_unn_jd_ref_1"
+        - "domain_scalar_reference_labels_1"
         - "scan-tagged-table"
 
   # Mix of identical + different-field subqueries
   - name: "Mixed identical and different-field subqueries"
     sql: |
       SELECT id,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2,
-        (SELECT score FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS sc
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c2,
+        (SELECT score FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS sc
       FROM jd_item
       WHERE id = 2
     expect:
@@ -140,8 +140,8 @@ test_cases:
   - name: "Non-correlated identical scalar subqueries"
     sql: |
       SELECT id,
-        (SELECT COUNT(*) FROM jd_ref) AS total1,
-        (SELECT COUNT(*) FROM jd_ref) AS total2
+        (SELECT COUNT(*) FROM reference_labels) AS total1,
+        (SELECT COUNT(*) FROM reference_labels) AS total2
       FROM jd_item
       WHERE id = 1
     expect:
@@ -164,8 +164,8 @@ test_cases:
   - name: "NULL outer ref produces NULL in all identical subqueries"
     sql: |
       SELECT id,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
-        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM reference_labels WHERE reference_labels.id = jd_item.ref_id) AS c2
       FROM jd_item
       WHERE id = 4
     expect:
@@ -177,4 +177,4 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS jd_item"
-  - sql: "DROP TABLE IF EXISTS jd_ref"
+  - sql: "DROP TABLE IF EXISTS reference_labels"

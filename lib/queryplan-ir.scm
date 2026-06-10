@@ -30,6 +30,7 @@ qpir-scan   schema table                          — base table scan (leaf)
 qpir-select predicate child                       — σ_p
 qpir-map    projections child                     — χ (computed columns)
 qpir-groupby keys aggs having child               — Γ_{keys; aggs}
+qpir-topk   order limit offset child              — ORDER BY / LIMIT / OFFSET
 qpir-window partition order computations child    — Ω
 qpir-join   type predicate left right             — ⋈_p (inner/left/right/full/semi/anti)
 qpir-dep-join predicate left right accessing      — ⋈ᵈ_p (BTW2025 notation)
@@ -70,6 +71,12 @@ child — child operator */
 (define qpir-groupby (lambda (keys aggs having child)
 	(list (quote qpir-groupby) keys aggs having child)))
 
+/* qpir-topk: top-level ordering/limit operator.
+order — list of (expr direction) order items, or nil
+limit, offset — numeric or nil */
+(define qpir-topk (lambda (order limit offset child)
+	(list (quote qpir-topk) order limit offset child)))
+
 /* qpir-window: window operator Ω.
 partition — list of partition-by expressions
 order — list of (expr direction) order items
@@ -85,8 +92,8 @@ left, right — child operators
 rhs-alias — synthesized alias (or nil) under which the right's output column
 is exposed to operators ABOVE this join. Symmetric to qpir-dep-join's
 rhs-alias and used when unnest_pass converts a dep-join with an
-introduced sq_N alias into a regular join — the alias must survive the
-conversion or outer references like (get_column sq_N value) become free. */
+introduced scalar-helper alias into a regular join — the alias must survive the
+conversion or outer references like (get_column domain_scalar_* value) become free. */
 (define qpir-join (lambda (type predicate left right rhs-alias)
 	(list (quote qpir-join) type predicate left right rhs-alias)))
 
@@ -97,9 +104,9 @@ left, right — child operators
 accessing — list of operator references in right that read columns from left
 (set by [annotate_dep_joins], used by [unnest_pass])
 rhs-alias — the (synthesized) alias under which the right's single output
-column is exposed to operators ABOVE the dep-join (e.g. "sq_1"). nil if
+column is exposed to operators ABOVE the dep-join (e.g. "domain_scalar_payments_1"). nil if
 the right's natural alias is used. This makes qpir-provided-aliases
-report the synthesized alias so outer references like (get_column sq_1
+report the synthesized alias so outer references like (get_column domain_scalar_payments_1
 value …) resolve as bound, not free.
 This node MUST NOT appear in the tree after the unnesting pass. */
 (define qpir-dep-join (lambda (predicate left right accessing rhs-alias)
@@ -136,6 +143,7 @@ Compiled to nested scans by Layer 4 (build_queryplan_inner). */
 		(symbol qpir-select) (quote qpir-select)
 		(symbol qpir-map) (quote qpir-map)
 		(symbol qpir-groupby) (quote qpir-groupby)
+		(symbol qpir-topk) (quote qpir-topk)
 		(symbol qpir-window) (quote qpir-window)
 		(symbol qpir-join) (quote qpir-join)
 		(symbol qpir-dep-join) (quote qpir-dep-join)
@@ -163,6 +171,11 @@ Compiled to nested scans by Layer 4 (build_queryplan_inner). */
 (define qpir-groupby-aggs   (lambda (n) (nth n 2)))
 (define qpir-groupby-having (lambda (n) (nth n 3)))
 (define qpir-groupby-child  (lambda (n) (nth n 4)))
+
+(define qpir-topk-order  (lambda (n) (nth n 1)))
+(define qpir-topk-limit  (lambda (n) (nth n 2)))
+(define qpir-topk-offset (lambda (n) (nth n 3)))
+(define qpir-topk-child  (lambda (n) (nth n 4)))
 
 (define qpir-window-partition    (lambda (n) (nth n 1)))
 (define qpir-window-order        (lambda (n) (nth n 2)))
@@ -203,6 +216,7 @@ Used by generic tree walks. */
 		(quote qpir-select)  (list (qpir-select-child node))
 		(quote qpir-map)     (list (qpir-map-child node))
 		(quote qpir-groupby) (list (qpir-groupby-child node))
+		(quote qpir-topk)    (list (qpir-topk-child node))
 		(quote qpir-window)  (list (qpir-window-child node))
 		(quote qpir-join)    (list (qpir-join-left node) (qpir-join-right node))
 		(quote qpir-dep-join) (list (qpir-dep-join-left node) (qpir-dep-join-right node))
@@ -259,6 +273,7 @@ bound vs free. */
 			/* map adds projections but doesn't strip table aliases — they pass through */
 			(qpir-provided-aliases (qpir-map-child node))))
 		(quote qpir-groupby) (qpir-provided-aliases (qpir-groupby-child node))
+		(quote qpir-topk)    (qpir-provided-aliases (qpir-topk-child node))
 		(quote qpir-window)  (qpir-provided-aliases (qpir-window-child node))
 		(quote qpir-join)    (begin
 			(define base (merge_unique (list
@@ -297,6 +312,7 @@ Per operator: select uses predicate; map uses projections; etc. */
 			(qpir-expr-list-refs (qpir-groupby-keys node))
 			(qpir-assoc-list-refs (qpir-groupby-aggs node))
 			(qpir-expr-column-refs (coalesceNil (qpir-groupby-having node) true)))
+		(quote qpir-topk)     (qpir-order-list-refs (qpir-topk-order node))
 		(quote qpir-window)   (merge
 			(qpir-expr-list-refs (qpir-window-partition node))
 			(qpir-order-list-refs (qpir-window-order node)))
@@ -316,9 +332,10 @@ After [unnest_pass], the root's F must be empty. */
 	(define all-refs (merge (qpir-own-refs node)
 		(reduce (qpir-children node) (lambda (acc c)
 			(merge acc (qpir-free-vars c))) '())))
-	(filter all-refs (lambda (ref) (match ref
-		'(tv col) (not (has? provided tv))
-		false))))))
+	(merge_unique (list
+		(filter all-refs (lambda (ref) (match ref
+			'(tv col) (not (has? provided tv))
+			false))))))))
 
 /* ==================== Pretty printer ==================== */
 
@@ -343,6 +360,10 @@ For debugging/snapshot tests. Limits expression detail to keep output readable. 
 		(concat pad "(qpir-groupby keys=" (string (count (qpir-groupby-keys node)))
 			" aggs=" (string (count (qpir-groupby-aggs node))) "\n"
 			(qpir-show-indent (qpir-groupby-child node) (+ depth 2)) ")")
+		(quote qpir-topk)
+		(concat pad "(qpir-topk order=" (string (count (coalesceNil (qpir-topk-order node) '())))
+			" limit=" (string (qpir-topk-limit node)) "\n"
+			(qpir-show-indent (qpir-topk-child node) (+ depth 2)) ")")
 		(quote qpir-window)
 		(concat pad "(qpir-window\n"
 			(qpir-show-indent (qpir-window-child node) (+ depth 2)) ")")

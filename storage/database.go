@@ -82,7 +82,13 @@ func (d *database) MarshalJSON() ([]byte, error) {
 		Name   string                                             `json:"name"`
 		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
 	}
-	return json.Marshal(persist{Name: d.Name, Tables: d.tables})
+	tables := NonLockingReadMap.New[table, string]()
+	for _, t := range d.tables.GetAll() {
+		if !t.isEphemeralQueryTable() {
+			tables.Set(t)
+		}
+	}
+	return json.Marshal(persist{Name: d.Name, Tables: tables})
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {
@@ -95,7 +101,12 @@ func (d *database) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	d.Name = p.Name
-	d.tables = p.Tables
+	d.tables = NonLockingReadMap.New[table, string]()
+	for _, t := range p.Tables.GetAll() {
+		if !t.isEphemeralQueryTable() {
+			d.tables.Set(t)
+		}
+	}
 	return nil
 }
 

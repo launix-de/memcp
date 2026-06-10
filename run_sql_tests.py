@@ -56,6 +56,7 @@ import time
 import multiprocessing
 import re
 import random
+import shutil
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
@@ -1268,25 +1269,28 @@ def wait_for_memcp(port=4321, timeout=30) -> bool:
     return wait_for_sql_ready(f"http://localhost:{port}", timeout=timeout)
 
 _memcp_log_file: str = ""
+_memcp_datadir: str = ""
+_memcp_datadir_initialized = False
 
 def start_memcp_process(port: int) -> subprocess.Popen | None:
-    global _memcp_log_file
+    global _memcp_log_file, _memcp_datadir, _memcp_datadir_initialized
     try:
         # Test-runner contract:
-        # - Always use the repository-local ./data directory.
-        # - Never create port-specific or temp datadirs here.
-        # - Never delete ./data in the runner.
-        #
-        # The SQL suites intentionally share one database state across tables and
-        # restart/shutdown scenarios. "isolated" means serialized execution, not
-        # storage isolation.
-        datadir = "./data"
+        # - Standalone runs use a fresh port-specific temp data directory.
+        # - The directory is kept across restart/shutdown scenarios in this run.
+        # - It is removed when the runner exits.
+        if not _memcp_datadir:
+            _memcp_datadir = f"/tmp/memcp-sql-tests-{port}"
+        if not _memcp_datadir_initialized:
+            shutil.rmtree(_memcp_datadir, ignore_errors=True)
+            os.makedirs(_memcp_datadir, exist_ok=True)
+            _memcp_datadir_initialized = True
         _memcp_log_file = f"/tmp/memcp-test-{port}.log"
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
         logfile = open(_memcp_log_file, 'w')
         proc = subprocess.Popen([
-            memcp_bin, "-data", datadir,
+            memcp_bin, "-data", _memcp_datadir,
             f"--api-port={port}", f"--mysql-port={port+1000}",
             "--disable-mysql", "lib/main.scm"
         ], cwd=os.path.dirname(os.path.abspath(__file__)),
@@ -1349,6 +1353,13 @@ def stop_memcp_process(proc: subprocess.Popen) -> None:
                 kill_memcp_by_port(port)
         except Exception:
             pass
+
+def cleanup_memcp_datadir() -> None:
+    global _memcp_datadir, _memcp_datadir_initialized
+    if _memcp_datadir:
+        shutil.rmtree(_memcp_datadir, ignore_errors=True)
+    _memcp_datadir = ""
+    _memcp_datadir_initialized = False
 
 def kill_memcp_by_port(port: int) -> None:
     pattern = f"memcp.*--api-port={port}"
@@ -1625,6 +1636,7 @@ def main():
             memcp_process = start_memcp_process(port)
             if not memcp_process:
                 print("❌ Failed to start MemCP")
+                cleanup_memcp_datadir()
                 sys.exit(1)
 
     runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=fail_fast)
@@ -1644,6 +1656,7 @@ def main():
 
     if not connect_only and memcp_process:
         stop_memcp_process(memcp_process)
+        cleanup_memcp_datadir()
 
     sys.exit(0 if success else 1)
 

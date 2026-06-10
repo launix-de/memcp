@@ -52,7 +52,201 @@ list-of-pairs to flat (name1 expr1 name2 expr2 …), INCLUDING any derived
 sub-tuples nested in the tables list. The legacy build_queryplan_inner /
 untangle_query consumers iterate fields via extract_assoc / reduce_assoc
 which assume the flat form. */
+(define qpn-domain-key-field? (lambda (pair) (match pair
+	'(name _)
+	(and
+		(not (nil? name))
+		(not (list? name))
+		(begin
+			(define name-str (string name))
+			(and
+				(>= (strlen name-str) 5)
+				(equal? (substr name-str 0 5) "__kt_"))))
+	false)))
+
+(define qpn-limit-one-value-reducer
+	(list (quote lambda)
+		(list (quote acc) (quote val))
+		(list (quote if)
+			(list (quote nil?) (quote val))
+			(quote acc)
+			(quote val))))
+
+(define qpn-direct-scalar-helper-ref? (lambda (expr)
+	(match expr
+		'(get_column tv _ _ _)
+		(qpp-scalar-helper-alias? tv)
+		'((symbol get_column) tv _ _ _)
+		(qpp-scalar-helper-alias? tv)
+		'((quote get_column) tv _ _ _)
+		(qpp-scalar-helper-alias? tv)
+		false)))
+
+(define qpn-collapse-local-limit-one-domain (lambda (t)
+	(if (not (qpp-tuple? t)) t
+		(begin
+			(define fields (qpp-fields-to-pairs (qpp-tuple-fields t)))
+			(define key-fields (filter fields qpn-domain-key-field?))
+			(define value-fields (filter fields (lambda (pair)
+				(not (qpn-domain-key-field? pair)))))
+			(define direct-scalar-values
+				(reduce value-fields (lambda (ok pair) (match pair
+					'(_ expr) (and ok (qpn-direct-scalar-helper-ref? expr))
+					false))
+					true))
+			(if (and
+				(equal? (qpp-tuple-limit t) 1)
+				(nil? (qpp-tuple-offset t))
+				(equal? (coalesceNil (qpp-tuple-order t) '()) '())
+				(equal? (coalesceNil (qpp-tuple-group t) '()) '())
+				(nil? (qpp-tuple-having t))
+				(> (count key-fields) 0)
+				(> (count value-fields) 0)
+				direct-scalar-values)
+				(qpp-rebuild-tuple
+					(qpp-tuple-schema t)
+					(qpp-tuple-tables t)
+					(map fields (lambda (pair) (match pair
+						'(name expr)
+						(if (qpn-domain-key-field? pair)
+							pair
+							(list name (list (quote aggregate) expr
+								qpn-limit-one-value-reducer nil)))
+						pair)))
+					(qpp-tuple-condition t)
+					(map key-fields (lambda (pair) (match pair
+						'(_ expr) expr
+						nil)))
+					nil
+					'()
+					nil
+					nil)
+				t)))))
+
 (define qpn-flatten-tuple-recursive (lambda (t)
+	(if (not (qpp-tuple? t)) t
+		(begin
+			(define collapsed (qpn-collapse-local-limit-one-domain t))
+			(qpp-rebuild-tuple
+				(qpp-tuple-schema collapsed)
+				(map (coalesceNil (qpp-tuple-tables collapsed) (list)) (lambda (td)
+					(if (or (nil? td) (< (count td) 3)) td
+						(begin
+							(define tname (nth td 2))
+							(if (qpp-tuple? tname)
+								/* derived table: recursively flatten its 7-tuple */
+								(merge (list (nth td 0) (nth td 1)
+									(qpn-flatten-tuple-recursive tname))
+									(if (>= (count td) 4)
+										(list (nth td 3))
+										(list false))
+									(if (>= (count td) 5)
+										(list (nth td 4))
+										(list nil)))
+								td)))))
+				/* Normalize to pairs FIRST then flatten — qpp-fields-to-flat's
+				match clause '(name expr) accidentally splits `(inner_select sub)`
+				into [inner_select, sub] when given flat input (the parser shape).
+				pair-normalize is idempotent on already-pair input. */
+				(qpp-fields-to-flat (qpp-fields-to-pairs (qpp-tuple-fields collapsed)))
+				(qpp-tuple-condition collapsed)
+				(qpp-tuple-group collapsed)
+				(qpp-tuple-having collapsed)
+				(qpp-tuple-order collapsed)
+				(qpp-tuple-limit collapsed)
+				(qpp-tuple-offset collapsed))))))
+
+(define qpn-restore-root-stage-limits (lambda (tuple root-limit root-offset)
+	(if (or (not (nil? root-limit)) (not (nil? root-offset)))
+		tuple
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema tuple)
+			(qpp-tuple-tables tuple)
+			(qpp-tuple-fields tuple)
+			(qpp-tuple-condition tuple)
+			(map (coalesceNil (qpp-tuple-group tuple) '()) (lambda (stage)
+				(if (or
+					(stage_is_dedup stage)
+					(not (nil? (stage_partition_aliases stage))))
+					stage
+					(stage_set
+						(stage_set stage (quote limit) nil)
+						(quote offset) nil))))
+			(qpp-tuple-having tuple)
+			(qpp-tuple-order tuple)
+			root-limit
+			root-offset))))
+
+(define qpn-table-scalar-helper-aliases (lambda (tables)
+	(filter (map (coalesceNil tables (list)) (lambda (td)
+		(match td
+			'(alias_ _ source_ _ _)
+			(if (and (qpu-low-scalar-helper-alias? alias_)
+				(qpu-low-scan-tagged-table? source_))
+				alias_
+				nil)
+			nil)))
+		(lambda (alias_) (not (nil? alias_))))))
+
+(define qpn-push-local-field-guards-for-aliases (lambda (tuple aliases)
+	(reduce aliases (lambda (acc alias_)
+		(begin
+			(define pulled
+				(qpu-low-pull-rhs-local-value-guards-fields
+					(qpp-fields-to-pairs (qpp-tuple-fields acc)) alias_))
+			(define guard-cond (nth pulled 0))
+			(if (or (nil? guard-cond) (equal? guard-cond true)
+				(equal? guard-cond (quote true)))
+				acc
+				(qpp-rebuild-tuple
+					(qpp-tuple-schema acc)
+					(qpu-low-add-join-cond-to-table
+						(qpp-tuple-tables acc) alias_ guard-cond)
+					(qpp-fields-to-flat (nth pulled 1))
+					(qpp-tuple-condition acc)
+					(qpp-tuple-group acc)
+					(qpp-tuple-having acc)
+					(qpp-tuple-order acc)
+					(qpp-tuple-limit acc)
+					(qpp-tuple-offset acc)))))
+		tuple)))
+
+(define qpn-push-local-field-guards (lambda (tuple)
+	(if (not (qpp-tuple? tuple)) tuple
+		(qpn-push-local-field-guards-for-aliases
+			tuple
+			(qpn-table-scalar-helper-aliases (qpp-tuple-tables tuple))))))
+
+/* qpn-compile-derived-subqueries — a FROM-derived SELECT is its own SQL
+scope. Compile that scope through the same Neumann pipeline before the
+enclosing SELECT is lifted, so no inner_select marker can leak through a
+preserved derived-table boundary (for example SELECT t.* FROM (SELECT ...)).
+This is recursive over nested derived tables. */
+(define qpn-compile-derived-subqueries-in-expr (lambda (expr) (match expr
+	(cons sym args) (begin
+		(define kind (qpl-marker-kind expr))
+		(match kind
+			'inner_select
+			(match args
+				'(subquery)
+				(list sym (qpn-compile-derived-subqueries subquery))
+				(cons sym (map args qpn-compile-derived-subqueries-in-expr)))
+			'inner_select_exists
+			(match args
+				'(subquery)
+				(list sym (qpn-compile-derived-subqueries subquery))
+				(cons sym (map args qpn-compile-derived-subqueries-in-expr)))
+			'inner_select_in
+			(match args
+				'(target subquery)
+				(list sym
+					(qpn-compile-derived-subqueries-in-expr target)
+					(qpn-compile-derived-subqueries subquery))
+				(cons sym (map args qpn-compile-derived-subqueries-in-expr)))
+			(cons sym (map args qpn-compile-derived-subqueries-in-expr))))
+	expr)))
+
+(define qpn-compile-derived-subqueries (lambda (t)
 	(if (not (qpp-tuple? t)) t
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema t)
@@ -61,9 +255,10 @@ which assume the flat form. */
 					(begin
 						(define tname (nth td 2))
 						(if (qpp-tuple? tname)
-							/* derived table: recursively flatten its 7-tuple */
 							(merge (list (nth td 0) (nth td 1)
-								(qpn-flatten-tuple-recursive tname))
+								(if (qpp-tuple-contains-window? tname)
+									(qpn-compile-derived-subqueries tname)
+									(neumann_compile_select tname)))
 								(if (>= (count td) 4)
 									(list (nth td 3))
 									(list false))
@@ -71,15 +266,11 @@ which assume the flat form. */
 									(list (nth td 4))
 									(list nil)))
 							td)))))
-			/* Normalize to pairs FIRST then flatten — qpp-fields-to-flat's
-			match clause '(name expr) accidentally splits `(inner_select sub)`
-			into [inner_select, sub] when given flat input (the parser shape).
-			pair-normalize is idempotent on already-pair input. */
-			(qpp-fields-to-flat (qpp-fields-to-pairs (qpp-tuple-fields t)))
-			(qpp-tuple-condition t)
-			(qpp-tuple-group t)
-			(qpp-tuple-having t)
-			(qpp-tuple-order t)
+			(qpp-map-fields (qpp-tuple-fields t) qpn-compile-derived-subqueries-in-expr)
+			(qpn-compile-derived-subqueries-in-expr (qpp-tuple-condition t))
+			(qpp-map-group (qpp-tuple-group t) qpn-compile-derived-subqueries-in-expr)
+			(qpn-compile-derived-subqueries-in-expr (qpp-tuple-having t))
+			(qpp-map-order (qpp-tuple-order t) qpn-compile-derived-subqueries-in-expr)
 			(qpp-tuple-limit t)
 			(qpp-tuple-offset t)))))
 
@@ -119,7 +310,8 @@ callers supply the real schemas list. */
 	come from the live storage via `(show schema table)` per
 	qpp-schemas-from-tables — derived sub-tuples expose their projection
 	names as columns. */
-	(define t2 (column_resolve_scoped_pass t1 (list)))
+	(define t1b (qpn-compile-derived-subqueries t1))
+	(define t2 (column_resolve_scoped_pass t1b (list)))
 	(define t3 (derived_table_inline_pass t2))
 	/* Re-resolve after inlining: derived-table inlining can introduce refs
 	to the now-directly-visible underlying tables that were nil-tv inside
@@ -132,11 +324,17 @@ callers supply the real schemas list. */
 	(define t5 (unnest_pass t4))
 	(if neumann_pipeline_trace (print "[neumann] unnested: " t5) nil)
 	(define t6 (lower_to_scans_pass t5))
+	(define t6-root-limits
+		(qpn-restore-root-stage-limits
+			t6
+			(qpp-tuple-limit tuple-pairs)
+			(qpp-tuple-offset tuple-pairs)))
 	(if (not (qpp-tuple? t6))
 		(error "neumann_compile_select: pipeline did not produce a 7-tuple")
 		/* Re-flatten fields recursively (including derived sub-tuples) to
 		match the flat (name1 expr1 …) parser convention. */
-		(qpn-flatten-tuple-recursive t6)))))
+		(qpn-push-local-field-guards
+			(qpn-flatten-tuple-recursive t6-root-limits))))))
 
 /* neumann_compile_select_with_schemas tuple schemas →
 Same as above but with an explicit schemas list passed to column_resolve. */
@@ -154,24 +352,22 @@ Same as above but with an explicit schemas list passed to column_resolve. */
 		(qpp-tuple-limit tuple)
 		(qpp-tuple-offset tuple)))
 	(define t1 (alias_normalize_pass tuple-pairs))
-	(define t2 (column_resolve_scoped_pass t1 schemas))
+	(define t1b (qpn-compile-derived-subqueries t1))
+	(define t2 (column_resolve_scoped_pass t1b schemas))
 	(define t3 (derived_table_inline_pass t2))
 	(define t3b (column_resolve_scoped_pass t3 schemas))
 	(define t4 (lift_dep_joins_pass t3b))
 	(define t5 (unnest_pass t4))
 	(define t6 (lower_to_scans_pass t5))
+	(define t6-root-limits
+		(qpn-restore-root-stage-limits
+			t6
+			(qpp-tuple-limit tuple-pairs)
+			(qpp-tuple-offset tuple-pairs)))
 	(if (not (qpp-tuple? t6))
 		(error "neumann_compile_select_with_schemas: pipeline did not produce a 7-tuple")
-		(qpp-rebuild-tuple
-			(qpp-tuple-schema t6)
-			(qpp-tuple-tables t6)
-			(qpp-fields-to-flat (qpp-tuple-fields t6))
-			(qpp-tuple-condition t6)
-			(qpp-tuple-group t6)
-			(qpp-tuple-having t6)
-			(qpp-tuple-order t6)
-			(qpp-tuple-limit t6)
-			(qpp-tuple-offset t6))))))
+		(qpn-push-local-field-guards
+			(qpn-flatten-tuple-recursive t6-root-limits))))))
 
 /* ==================== Trace toggle (debugging only) ==================== */
 

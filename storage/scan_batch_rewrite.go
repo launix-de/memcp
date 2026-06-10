@@ -91,6 +91,9 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	if len(innerScanSlice) > 10 && scm.ToBool(innerScanSlice[10]) {
 		return scm.NewNil()
 	}
+	if len(innerScanSlice) > 7 && !innerScanSlice[7].IsNil() {
+		return scm.NewNil()
+	}
 
 	// The inner scan must actually reference at least one outer param
 	// (otherwise it's a cross-join where batching adds overhead for no gain

@@ -6,6 +6,8 @@
 metadata:
   version: "1.0"
   description: "Nested subselect column resolution in derived table"
+  isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS nsc_doc"

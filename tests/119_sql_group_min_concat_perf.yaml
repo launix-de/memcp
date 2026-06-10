@@ -1,0 +1,38 @@
+# SQL feature regression: grouped MIN(CONCAT(...)) must not materialize
+# redundant helper aggregates that make the first execution time out.
+
+metadata:
+  version: "1.0"
+  description: "SQL GROUP BY with MIN CONCAT stays within the unit-test time budget"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sgmc_location"
+  - scm: "(rebuild)"
+  - sql: "CREATE TABLE sgmc_location (id INT PRIMARY KEY, code TEXT, city TEXT)"
+  - scm: |
+      (begin
+        (set rows (map (produceN 3000) (lambda (i)
+          (list i
+            (concat "K" (- i (* 1500 (floor (/ i 1500)))))
+            (concat "City" (- i (* 300 (floor (/ i 300)))))))))
+        (insert (table "memcp-tests" "sgmc_location") '("id" "code" "city") rows)
+        (rebuild))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sgmc_location"
+
+test_cases:
+  - name: "sql-group-min-concat first execution avoids redundant count helper"
+    max_time: 4.0
+    sql: |
+      SELECT sgmc_location.code AS value,
+        MIN(CONCAT(sgmc_location.code, ' - ', sgmc_location.city)) AS label
+      FROM sgmc_location
+      WHERE TRUE
+      GROUP BY sgmc_location.code
+      LIMIT 10
+    expect:
+      rows: 10
+      contains:
+        - "K0 - City0"

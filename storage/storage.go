@@ -466,6 +466,43 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scalar_scan",
+		Desc: "internal scalar existence scan used by queryplan anti-pass filters",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewNil()
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				return scm.NewNil()
+			}
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
+			tx, _ := scm.GetCurrentTx().(*TxContext)
+			reduce := scm.NewNil()
+			if len(a) > 6 {
+				reduce = a[6]
+			}
+			return t.scan(tx, filtercols, a[3], mapcols, a[5], reduce, scm.NewNil(), scm.NewNil(), false)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema"},
+				{Kind: "string", ParamName: "table"},
+				{Kind: "list", ParamName: "filterColumns"},
+				{Kind: "func", ParamName: "filter", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", ParamName: "mapColumns"},
+				{Kind: "func", ParamName: "map", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce", Optional: true},
+				{Kind: "any", ParamName: "limit", Optional: true},
+				{Kind: "any", ParamName: "offset", Optional: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",
 		Desc: "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1178,16 +1215,19 @@ func Init(en scm.Env) {
 				paramNames := scmerSliceToStrings(mustScmerSlice(a[5], "computor param names"))
 				// extract filter from options
 				var filterCols []string
-				var filter scm.Scmer
+				filter := scm.NewNil()
+				lazy := false
 				for i := 0; i < len(typeparams); i += 2 {
 					key := scm.String(typeparams[i])
 					if key == "filtercols" {
 						filterCols = scmerSliceToStrings(mustScmerSlice(typeparams[i+1], "filter column names"))
 					} else if key == "filter" {
 						filter = typeparams[i+1]
+					} else if key == "lazy" {
+						lazy = scm.ToBool(typeparams[i+1])
 					}
 				}
-				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter)
+				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter, lazy)
 				return scm.NewBool(true)
 			}
 

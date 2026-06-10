@@ -1,8 +1,8 @@
 # UPDATE with CASE WHEN ... EXISTS (SELECT ... FROM same_table alias WHERE alias.col = outer.ID).
-# Pattern from ERPL migration:
-#   UPDATE `campaignState` s1 SET contactmode = CASE
+# Pattern:
+#   UPDATE state_table s1 SET contactmode = CASE
 #     WHEN aftercontact IS NOT NULL THEN 1
-#     WHEN EXISTS (SELECT * FROM `campaignState` s2 WHERE s2.aftercontact = s1.`ID`) THEN 2
+#     WHEN EXISTS (SELECT * FROM state_table s2 WHERE s2.aftercontact = s1.`ID`) THEN 2
 #     ELSE 0 END
 # The alias s2 must resolve in the subquery scope.
 

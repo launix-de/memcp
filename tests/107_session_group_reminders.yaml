@@ -6,6 +6,7 @@ metadata:
   version: "1.0"
   description: "Session-sensitive grouped reminder queries should survive session changes"
   isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS sgr_team_item"
@@ -44,8 +45,27 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "sql-neumann-topdown: session exists plan stays bounded"
+    session_id: "sgr-reminder-session"
+    sql: |
+      EXPLAIN SELECT t.ID
+      FROM sgr_task t
+      WHERE t.due_at < @fop_time
+        AND EXISTS (
+          SELECT TRUE
+          FROM sgr_team_item ti
+          WHERE ti.list = t.ownerTeam
+            AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+          LIMIT 1
+        )
+      ORDER BY t.ID
+    expect:
+      contains:
+        - "scan"
+
   - name: "Session workflow sanity: direct visible task rows for user 1"
     session_id: "sgr-reminder-session"
+    max_plan_size: 30000
     sql: |
       SELECT t.ID
       FROM sgr_task t
@@ -66,7 +86,6 @@ test_cases:
 
   - name: "Reminder badge query with grouped inner aggregate for user 1"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT 1 AS ok,
         (SELECT SUM(cnt)
@@ -129,7 +148,6 @@ test_cases:
 
   - name: "Materialized grouped reminder source for user 1"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT *
       FROM (
@@ -179,7 +197,6 @@ test_cases:
           cnt: 1
   - name: "Reminder badge query reflects changed equality session key"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT 1 AS ok,
         (SELECT SUM(cnt)
@@ -274,7 +291,6 @@ test_cases:
           cnt: 2
   - name: "Reminder badge query reflects changed range session key"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT 1 AS ok,
         (SELECT SUM(cnt)
@@ -311,5 +327,5 @@ test_cases:
       rows: 1
       data:
         - ok: 1
-          grouped_due: 1
+          grouped_due: 2
           reminder_tickets: 1

@@ -84,7 +84,7 @@ test_cases:
       ORDER BY o.grp
     expect:
       contains:
-        - "\"_unn_"
+        - "\"domain_scalar_"
       not_contains:
         - "__mat:o:"
 cleanup:

@@ -68,12 +68,16 @@ runtime helper names and cache domains may depend on current session variables.
 On parse error the result is not cached (e.g. table does not exist yet). */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session)
 	(begin
+		(define query_session_sensitive (or
+			(strlike query "%@%")
+			(strlike query "%?%")))
 		(define cache_key (concat username ":" schema ":" (fnv_hash query)))
-		(define cached (queryplan_cache cache_key))
+		(define cached (if query_session_sensitive nil (queryplan_cache cache_key)))
 		(if cached cached
 			(begin
 				(define formula (with_session session (lambda () (parse_fn schema query policy))))
-				(queryplan_cache cache_key formula)
+				(if (not query_session_sensitive)
+					(queryplan_cache cache_key formula))
 				formula)))))
 
 /* helper: build a policy function for table-level access checks
@@ -144,11 +148,19 @@ if the user is not allowed to access this property, the function will throw an e
 	) true)
 )) (lambda (e) true))
 
-/* migration: ensure root always has admin=true */
+/* migration: ensure root exists and always has admin=true */
 (try (lambda () (begin
-	(if (has? (show "system") "user")
+	(if (has? (show "system") "user") (begin
+		(define root_exists (scan nil (table "system" "user")
+			'("username") (lambda (username) (equal? username "root"))
+			'() (lambda () true)
+			(lambda (a b) (or a b))
+			false))
+		(if root_exists true
+			(insert (table "system" "user") '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
+		)
 		(scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("$update") (lambda ($update) ($update '("admin" true))))
-		true)
+	) true)
 )) (lambda (e) true))
 
 /* ensure unique username constraint to avoid duplicates */

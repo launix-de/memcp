@@ -1,5 +1,5 @@
 # Correlated scalar subselect containing a derived table with window function.
-# Pattern from ERPL: COALESCE((SELECT sub.col FROM (SELECT ..., ROW_NUMBER()
+# Pattern: COALESCE((SELECT sub.col FROM (SELECT ..., ROW_NUMBER()
 # OVER (PARTITION BY parent ORDER BY time DESC) AS rn FROM hist) sub
 # WHERE sub.parent = main.ID AND sub.rn = 1), default)
 #
@@ -16,7 +16,7 @@ setup:
   - sql: "CREATE TABLE swd_main (ID INT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE swd_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
   - sql: "INSERT INTO swd_main VALUES (1, 'Alice'), (2, 'Bob')"
-  - sql: "INSERT INTO swd_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000)"
+  - sql: "INSERT INTO swd_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000), (4, 1, 50, 500)"
 
 test_cases:
 
@@ -29,7 +29,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - cnt: 3
+        - cnt: 4
 
   - name: "standalone window function with filter (COUNT)"
     sql: |
@@ -80,7 +80,22 @@ test_cases:
           name: "Bob"
           latest: 300
 
-  - name: "COALESCE wrapped (ERPL pattern)"
+  - name: "correlated scalar subselect keeps deferred window filter"
+    sql: |
+      SELECT m.ID,
+        (SELECT sub.val FROM (
+          SELECT parent, val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY ts DESC) AS rn
+          FROM swd_hist
+        ) sub WHERE sub.parent = m.ID AND sub.rn = 3) AS third_val
+      FROM swd_main m
+      WHERE m.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          third_val: 50
+
+  - name: "COALESCE wrapped scalar subselect"
     sql: |
       SELECT m.ID,
         COALESCE((SELECT sub.val FROM (

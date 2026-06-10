@@ -30,11 +30,13 @@ test_cases:
           s: 7
 
   - name: "Group by modulo expression"
+    max_time: 10
     sql: "SELECT a % 2 AS g, COUNT(*) AS c, SUM(b) AS s FROM tbl GROUP BY a % 2"
     expect:
       rows: 2
 
   - name: "Group by modulo across main and delta"
+    max_time: 10
     setup:
       - sql: "DROP TABLE IF EXISTS tbl_mix"
       - sql: "CREATE TABLE tbl_mix (a INT, b INT)"

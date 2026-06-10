@@ -70,7 +70,7 @@ Covers:
 	(define out-corr (neumann_compile_select t-corr))
 	(qpn-assert (qpp-tuple? out-corr) true "compile(correlated SUM) returns 7-tuple")
 	(qpn-assert (count (qpp-tuple-tables out-corr)) 2
-		"correlated SUM lowered: 2 tables (po + derived sq_N)")
+		"correlated SUM lowered: 2 tables (po + derived scalar helper)")
 
 	/* Output 7-tuple must have NO inner_select markers anywhere */
 	(define qpn-has-marker? (lambda (expr)

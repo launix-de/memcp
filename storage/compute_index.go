@@ -42,6 +42,17 @@ func extractSessionKeys(expr scm.Scmer) []string {
 					out = append(out, key)
 				}
 			}
+		} else if items[0].IsSlice() {
+			head := items[0].Slice()
+			if len(head) == 2 && head[0].IsSymbol() && head[0].String() == "context" &&
+				head[1].IsString() && head[1].String() == "session" &&
+				len(items) >= 2 && items[1].IsString() {
+				key := items[1].String()
+				if !seen[key] {
+					seen[key] = true
+					out = append(out, key)
+				}
+			}
 		}
 		for _, it := range items {
 			walk(it)

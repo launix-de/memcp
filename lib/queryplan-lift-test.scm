@@ -222,7 +222,7 @@ Runs at server startup after queryplan-lift.scm loads.
 	(define in-pred (qpir-select-predicate lifted-in))
 	(qpl-assert (nth in-pred 0) (quote >) "lift: IN rewrite uses > comparison")
 	(qpl-assert (nth in-pred 2) 0 "lift: IN rewrite compares to 0")
-	/* The (coalesce sq.value 0) shape */
+	/* The (coalesce helper.value 0) shape */
 	(qpl-assert (nth (nth in-pred 1) 0) (quote coalesce) "lift: IN rewrite wraps with coalesce")
 	(qpl-assert (nth (nth in-pred 1) 2) 0 "lift: IN rewrite coalesce default = 0")
 	(define in-sq-ref (nth (nth in-pred 1) 1))
@@ -231,36 +231,44 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (qpir-kind (qpir-select-child lifted-in)) (quote qpir-dep-join)
 		"lift: IN-rewrite chain has qpir-dep-join under select")
 
-	/* ==== Path (f): EXISTS-marker in WHERE rewrites the same way ==== */
-	(define t-exists (mk-tuple "memcp-tests"
-		(list (list "po" "memcp-tests" "po" false nil))
-		(list (list "id" (mk-col "po" "id")))
-		marker-exists))
-	(define lifted-exists (lift_dep_joins_pass t-exists))
-	(qpl-assert (qpir-kind lifted-exists) (quote qpir-select)
-		"lift: EXISTS-in-WHERE → qpir-select at root")
-	(define ex-pred (qpir-select-predicate lifted-exists))
-	(qpl-assert (nth ex-pred 0) (quote >) "lift: EXISTS rewrite uses > comparison")
-	(qpl-assert (nth (nth ex-pred 1) 0) (quote coalesce) "lift: EXISTS rewrite uses coalesce")
-	(qpl-assert (qpir-kind (qpir-select-child lifted-exists)) (quote qpir-dep-join)
-		"lift: EXISTS-rewrite chain has qpir-dep-join under select")
+		/* ==== Path (f): simple EXISTS-marker in WHERE rewrites to boolean LIMIT 1 ==== */
+		(define t-exists (mk-tuple "memcp-tests"
+			(list (list "po" "memcp-tests" "po" false nil))
+			(list (list "id" (mk-col "po" "id")))
+			marker-exists))
+		(define lifted-exists (lift_dep_joins_pass t-exists))
+		(qpl-assert (qpir-kind lifted-exists) (quote qpir-select)
+			"lift: EXISTS-in-WHERE → qpir-select at root")
+		(define ex-pred (qpir-select-predicate lifted-exists))
+		(qpl-assert (nth ex-pred 0) (quote >) "lift: EXISTS rewrite uses positive numeric guard")
+		(qpl-assert (nth (nth ex-pred 1) 0) (quote coalesce) "lift: EXISTS rewrite uses numeric coalesce")
+		(qpl-assert (nth (nth (nth ex-pred 1) 1) 0) (quote get_column) "lift: EXISTS rewrite reads value column directly")
+		(qpl-assert (nth (nth (nth ex-pred 1) 1) 3) "value" "lift: EXISTS rewrite reads value column")
+		(qpl-assert (nth (nth ex-pred 1) 2) 0 "lift: EXISTS rewrite defaults to zero")
+		(qpl-assert (nth ex-pred 2) 0 "lift: EXISTS rewrite compares to zero")
+		(qpl-assert (qpir-kind (qpir-select-child lifted-exists)) (quote qpir-dep-join)
+			"lift: EXISTS-rewrite chain has qpir-dep-join under select")
 
-	/* ==== Decomposition verification for FAQ §11 COUNT subqueries ==== */
-	/* IN rewrite produces an inner COUNT(*) subquery — phase 4 decomposes it
-	into qpir-groupby (empty keys, one COUNT agg). Since sub-pi has a
-	correlated WHERE, phase 5 also wraps the inner leaf with qpir-select. */
-	(define ex-dj (qpir-select-child lifted-exists))
-	(define ex-right (qpir-dep-join-right ex-dj))
-	(qpl-assert (qpir-kind ex-right) (quote qpir-groupby)
-		"EXISTS rewrite: right of dep-join is qpir-groupby (COUNT decomposed)")
-	(qpl-assert (count (qpir-groupby-keys ex-right)) 0
-		"EXISTS rewrite groupby: empty keys (static group)")
-	(qpl-assert (count (qpir-groupby-aggs ex-right)) 1
-		"EXISTS rewrite groupby: exactly one aggregate")
-	(qpl-assert (qpir-kind (qpir-groupby-child ex-right)) (quote qpir-select)
-		"EXISTS rewrite groupby child is qpir-select (correlated WHERE hoisted)")
-	(qpl-assert (qpir-kind (qpir-select-child (qpir-groupby-child ex-right))) (quote qpir-leaf)
-		"EXISTS rewrite bottom is qpir-leaf")
+		/* ==== Decomposition verification for simple EXISTS subqueries ==== */
+		/* A simple EXISTS does not need COUNT(*). It is represented as a
+		LIMIT-1 value domain; lowering recognizes the payload and collapses
+		the domain by outer keys to preserve semi-join cardinality. */
+		(define ex-dj (qpir-select-child lifted-exists))
+		(define ex-right (qpir-dep-join-right ex-dj))
+		(qpl-assert (qpir-kind ex-right) (quote qpir-select)
+			"EXISTS rewrite: right of dep-join hoists WHERE into qpir-select")
+		(qpl-assert (qpir-kind (qpir-select-child ex-right)) (quote qpir-leaf)
+			"EXISTS rewrite bottom is qpir-leaf")
+		(define ex-leaf-tuple (qpir-leaf-7tuple (qpir-select-child ex-right)))
+		(qpl-assert (qpp-tuple-limit ex-leaf-tuple) 1
+			"EXISTS rewrite keeps LIMIT 1 for domain collapse")
+		(qpl-assert (count (qpp-tuple-fields ex-leaf-tuple)) 1
+			"EXISTS rewrite projects one payload field")
+		(define ex-value-expr (nth (nth (qpp-tuple-fields ex-leaf-tuple) 0) 1))
+		(qpl-assert (nth ex-value-expr 0) (quote if)
+			"EXISTS rewrite payload is recognizable if form")
+		(qpl-assert (nth ex-value-expr 2) 1
+			"EXISTS rewrite payload true value is one")
 
 	/* ==== Nested correlated subquery — recursive lift ==== */
 	/* SQL: SELECT outer.id,

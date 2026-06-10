@@ -602,12 +602,17 @@ func (t *table) beginManualRepartition() bool {
 	return true
 }
 
-// isEphemeralQueryTable identifies planner-owned query scratch tables
-// (keytables, prejoins, scalar helper tables, etc.). These relations are
-// dot-prefixed cache-engine tables: durable internal tables such as ".blobs"
-// use persisted engines and must not be treated as ephemeral helpers.
+// isEphemeralQueryTable identifies planner-owned query scratch tables that are
+// safe to rebuild from a query plan. Some dot-prefixed cache tables are part of
+// persisted runtime metadata in current releases, so keep this predicate on
+// explicit planner helper prefixes instead of treating every dot/cache table as
+// disposable.
 func (t *table) isEphemeralQueryTable() bool {
-	return strings.HasPrefix(t.Name, ".") && t.PersistencyMode == Cache
+	return t.PersistencyMode == Cache &&
+		(strings.HasPrefix(t.Name, ".prejoin:") ||
+			strings.HasPrefix(t.Name, ".keytable:") ||
+			strings.HasPrefix(t.Name, ".mat_") ||
+			strings.HasPrefix(t.Name, ".mat:"))
 }
 
 // schemaWriteDurable reports whether schema.json must be flushed with Sync for
@@ -1102,7 +1107,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
-		case "filtercols", "filter":
+		case "filtercols", "filter", "lazy":
 			// handled by createcolumn builtin, not a column property
 		case "sortcols", "sortdirs", "mapcols", "mapfn", "reducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn

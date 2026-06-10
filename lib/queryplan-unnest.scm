@@ -229,6 +229,9 @@ the same; only the child slots are replaced. */
 		(quote qpir-groupby)
 		(qpir-groupby (qpir-groupby-keys node) (qpir-groupby-aggs node)
 			(qpir-groupby-having node) (nth new-children 0))
+		(quote qpir-topk)
+		(qpir-topk (qpir-topk-order node) (qpir-topk-limit node)
+			(qpir-topk-offset node) (nth new-children 0))
 		(quote qpir-window)
 		(qpir-window (qpir-window-partition node) (qpir-window-order node)
 			(qpir-window-computations node) (nth new-children 0))
@@ -301,6 +304,7 @@ self-contained right sides (e.g. uncorrelated subqueries that snuck through). */
 		(quote qpir-groupby) (or
 			(> (count (coalesceNil (qpir-groupby-keys node) '())) 0)
 			(not (nil? (qpir-groupby-having node))))
+		(quote qpir-topk) (qpu-right-may-be-empty? (qpir-topk-child node))
 		(quote qpir-window) (qpu-right-may-be-empty? (qpir-window-child node))
 		(quote qpir-join) true
 		(quote qpir-union) true
@@ -355,12 +359,17 @@ contains a qpir-groupby. */
 			(qpir-groupby-having gb)
 			(qpir-groupby-child gb)))))
 
+(define qpu-scalar-helper-alias? (lambda (alias_)
+	(and (string? alias_)
+		(>= (strlen alias_) 14)
+		(equal? (substr alias_ 0 14) "domain_scalar_"))))
+
 /* qpu-bottom-left-aliases — walk down qpir-dep-join / qpir-join chains in
 the LEFT subtree to find the ORIGINAL outer's provided aliases. For chained
 sibling dep-joins (e.g. two scalar subselects in the same outer's SELECT
-list lift to (dep-join sq_19 (dep-join sq_18 outer-leaf sub_18) sub_19)),
-this returns just outer-leaf's aliases — NOT sub_18's k and sq_18 which
-would otherwise pollute sq_19's outer-aliases and break cclasses-based
+list lift to a chain of scalar-helper dep-joins),
+this returns just outer-leaf's aliases — NOT an earlier helper's keys and alias which
+would otherwise pollute a later helper's outer-aliases and break cclasses-based
 substitution.
 
 Per FAQ §42: nested/chained dep-joins must NOT inherit sibling-introduced
@@ -373,6 +382,7 @@ chain. */
 		(quote qpir-select)   (qpu-bottom-left-aliases (qpir-select-child node))
 		(quote qpir-map)      (qpu-bottom-left-aliases (qpir-map-child node))
 		(quote qpir-groupby)  (qpu-bottom-left-aliases (qpir-groupby-child node))
+		(quote qpir-topk)     (qpu-bottom-left-aliases (qpir-topk-child node))
 		(quote qpir-window)   (qpu-bottom-left-aliases (qpir-window-child node))
 		(qpir-provided-aliases node))))
 
@@ -567,21 +577,21 @@ whose tv is NOT in outer-aliases.
 
 Preference order for picking the inner ref (FAQ §35 + scope-aware lowering):
 1. Base/current-scope refs
-2. sq_X-aliased refs (rhs-aliases from dep-joins)
+2. scalar-helper refs (rhs-aliases from dep-joins)
 
-Prefer base/current-scope refs when available because sq_X refs are often
-NULL-extended by a LEFT join. Using a nullable sq_X key as the representative
-breaks anti-joins: the miss row is exactly where sq_X.key is NULL, while the
-preserved base key still carries the domain value. If only sq_X is available,
+Prefer base/current-scope refs when available because scalar-helper refs are often
+NULL-extended by a LEFT join. Using a nullable helper key as the representative
+breaks anti-joins: the miss row is exactly where helper.key is NULL, while the
+preserved base key still carries the domain value. If only a helper ref is available,
 the lowerer cascades that key through the derived wrapper.
 
 Returns a session whose "map" key holds an assoc list of (outer-ref . inner-ref). */
 (define qpu-cc-pick-inner-ref (lambda (inners) (begin
-	(define non-sq-refs (filter inners (lambda (ref) (match ref
-		'(tv col) (and (string? tv) (>= (strlen tv) 3)
-			(not (equal? (substr tv 0 3) "sq_")))
+	(define base-refs (filter inners (lambda (ref) (match ref
+		'(tv col) (and (string? tv)
+			(not (qpu-scalar-helper-alias? tv)))
 		false))))
-	(if (> (count non-sq-refs) 0) (nth non-sq-refs 0) (nth inners 0)))))
+	(if (> (count base-refs) 0) (nth base-refs 0) (nth inners 0)))))
 
 (define qpu-cc-build-repr (lambda (cc outer-aliases) (begin
 	(define repr (newsession))
@@ -633,6 +643,35 @@ whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
 (define qpu-substitute-exprs (lambda (exprs repr)
 	(map (coalesceNil exprs (list)) (lambda (e) (qpu-substitute-expr e repr)))))
 
+(define qpu-substitute-cclass-predicate (lambda (expr repr)
+	(match expr
+		(cons head args) (begin
+			(define is-and (match head
+				(symbol and) true
+				(quote and) true
+				'(quote and) true
+				'and true
+				false))
+			(define is-eq (match head
+				(symbol equal??) true
+				(quote equal??) true
+				'(quote equal??) true
+				'equal?? true
+				(symbol equal?) true
+				(quote equal?) true
+				'(quote equal?) true
+				'equal? true
+				false))
+			(if is-and
+				(cons head (map (coalesceNil args '())
+					(lambda (a) (qpu-substitute-cclass-predicate a repr))))
+				(if (and is-eq (equal? (count args) 2)
+					(equal? (qpu-strip-expr-to-col-ref? (nth args 0)) true)
+					(equal? (qpu-strip-expr-to-col-ref? (nth args 1)) true))
+					(qpu-substitute-expr expr repr)
+					expr)))
+		expr)))
+
 /* ==================== Right-side walker (§3.3 rules) ==================== */
 
 /* qpu-unnest-right — walk a dep-join's RIGHT subtree top-down applying the
@@ -647,38 +686,45 @@ correlation conjuncts that get extracted to the join condition are kept
 as-is (e.g. `(equal?? pi.k po.k)`) rather than substituted via repr. The
 groupby rule adds the outer-ref expressions to keys directly so each outer
 combo gets its own group. */
-/* qpu-rewrite-refs-to-sq-kt — for every (get_column tv ti col ci) whose
-tv matches `inner-aliases-of-sq` (the tables inside sq_X's derived), rewrite
-to (get_column sq_X false __kt_col false). This anticipates the rename that
+/* qpu-rewrite-refs-to-helper-kt — for every (get_column tv ti col ci) whose
+tv matches `inner-aliases-of-helper` (the tables inside a helper's derived), rewrite
+to (get_column helper false __kt_col false). This anticipates the rename that
 qpu-low-ensure-join-key-fields will apply during lower wrap-derived. Used
-when collecting cclasses from a qpir-join with rhs-alias=sq_X so the cclass
-contains the post-lower sq_X.__kt_col reference (visible at outer scope
+when collecting cclasses from a qpir-join with a scalar-helper rhs-alias so the cclass
+contains the post-lower helper.__kt_col reference (visible at outer scope
 after hoist) instead of the deeply-buried inner ref (t.col). */
-(define qpu-rewrite-refs-to-sq-kt (lambda (expr inner-aliases sq-alias)
+(define qpu-rewrite-refs-to-helper-kt (lambda (expr inner-aliases helper-alias)
 	(match expr
 		'((symbol get_column) tv ti col ci)
 		(if (has? inner-aliases tv)
-			(list (quote get_column) sq-alias false
+			(list (quote get_column) helper-alias false
 				(concat "__kt_" col) false)
 			expr)
 		'((quote get_column) tv ti col ci)
 		(if (has? inner-aliases tv)
-			(list (quote get_column) sq-alias false
+			(list (quote get_column) helper-alias false
 				(concat "__kt_" col) false)
 			expr)
 		(cons head args)
 		(cons head (map (coalesceNil args '())
-			(lambda (a) (qpu-rewrite-refs-to-sq-kt a inner-aliases sq-alias))))
+			(lambda (a) (qpu-rewrite-refs-to-helper-kt a inner-aliases helper-alias))))
 		expr)))
+
+(define qpu-node-has-topk? (lambda (node)
+	(or
+		(equal? (qpir-kind node) (quote qpir-topk))
+		(reduce (qpir-children node) (lambda (found child)
+			(or found (qpu-node-has-topk? child)))
+			false))))
 
 /* qpu-collect-cclasses — first pass: walk the right subtree and accumulate
 all column-equality predicates from qpir-select operators into cclasses.
 
-For qpir-join with rhs-alias=sq_X, pre-rewrite the predicate's inner-side
-refs to sq_X.__kt_col form before adding to cclasses (FAQ §38 + §35). This
+For qpir-join with a scalar-helper rhs-alias, pre-rewrite the predicate's inner-side
+refs to helper.__kt_col form before adding to cclasses (FAQ §38 + §35). This
 mirrors the rename that qpu-low-ensure-join-key-fields will apply at lower
 time, so cclasses contain scope-stable refs from the moment they're collected.
-Without this, cclasses see `t.col` (buried inside sq_X's derived) and any
+Without this, cclasses see `t.col` (buried inside a helper's derived) and any
 substitution into outer scope produces dangling refs. */
 (define qpu-collect-cclasses (lambda (node cc)
 	(match (qpir-kind node)
@@ -689,12 +735,31 @@ substitution into outer scope produces dangling refs. */
 			(qpu-collect-cclasses (qpir-select-child node) cc))
 		(quote qpir-map)     (qpu-collect-cclasses (qpir-map-child node) cc)
 		(quote qpir-groupby) (qpu-collect-cclasses (qpir-groupby-child node) cc)
+		(quote qpir-topk)    (qpu-collect-cclasses (qpir-topk-child node) cc)
 		(quote qpir-window)  (qpu-collect-cclasses (qpir-window-child node) cc)
 		(quote qpir-join)    (begin
 			(define raw-pred (qpir-join-predicate node))
-			(qpu-cc-add-from-predicate cc raw-pred)
-			(qpu-collect-cclasses (qpir-join-left node) cc)
-			(qpu-collect-cclasses (qpir-join-right node) cc))
+			(if (qpu-scalar-helper-alias? (qpir-join-rhs-alias node))
+				(begin
+					/* A scalar-helper join is a decorrelated boundary. The
+					parent dep-join may use THIS helper's own join predicate,
+					but must not recurse into the helper and rediscover
+					skip-level predicates that belong to the helper's
+					domain. */
+					(qpu-cc-add-from-predicate cc raw-pred)
+					(qpu-collect-cclasses (qpir-join-left node) cc))
+				(begin
+					(define provided (qpir-provided-aliases node))
+					(define local-pred (qpu-and-from-conjuncts
+						(filter (qpu-and-conjuncts raw-pred) (lambda (conj)
+							(reduce (qpir-expr-column-refs conj) (lambda (ok ref)
+								(and ok (match ref
+									'(tv _) (has? provided tv)
+									false)))
+								true)))))
+					(qpu-cc-add-from-predicate cc local-pred)
+					(qpu-collect-cclasses (qpir-join-left node) cc)
+					(qpu-collect-cclasses (qpir-join-right node) cc))))
 		nil)))
 
 /* qpu-unnest-right — walks the right subtree TOP-DOWN applying §3.3 rules
@@ -714,7 +779,7 @@ converted dep-join. */
 
 		(quote qpir-select) (begin
 			(define raw-pred (qpir-select-predicate node))
-			(define sub-pred (qpu-substitute-expr raw-pred repr))
+			(define sub-pred (qpu-substitute-cclass-predicate raw-pred repr))
 			(define child-result (qpu-unnest-right (qpir-select-child node)
 				outer-aliases outer-ref-exprs repr))
 			(define child-new (nth child-result 0))
@@ -776,27 +841,34 @@ converted dep-join. */
 			(define final-having (if (equal? sub-having true) nil sub-having))
 			(list (qpir-groupby new-keys sub-aggs final-having child-new) child-join))
 
-		/* qpir-join inside the right subtree of a dep-join. This happens after
-		nested inner subqueries are lifted (recursive lift_dep_joins_pass) and
-		the bottom-up walker has converted the INNER dep-join to a regular
-		join BEFORE processing the OUTER dep-join. Walk into both children to
-		apply substitution; the join condition gets repr-substituted too.
+		(quote qpir-topk) (begin
+			(define child-result (qpu-unnest-right (qpir-topk-child node)
+				outer-aliases outer-ref-exprs repr))
+			(define child-new (nth child-result 0))
+			(define child-join (nth child-result 1))
+			(define new-order
+				(map (coalesceNil (qpir-topk-order node) '()) (lambda (item) (match item
+					'(expr dir) (list (qpu-substitute-expr expr repr) dir)
+					item))))
+			(list (qpir-topk new-order (qpir-topk-limit node)
+				(qpir-topk-offset node) child-new) child-join))
 
-		We do NOT split the join's predicate against outer-aliases here — a
-		nested-correlation conjunct that referenced outer would have been
-		moved to the inner-join's predicate during the INNER dep-join's
-		processing. The OUTER walk just propagates substitution.
-
-		processing. The OUTER walk just propagates substitution. *
-		a non-tautology predicate INTO a tautology, this is the cclasses-
-		rediscovery bug (inner dep-join's joinExpr added a class that maps
-		both sides to the same inner col). Preserve original predicate so
-		inner correlation stays expressed; the outer cc-join-cond (built
-		via qpu-cc-pick-inner-ref which prefers sq_X refs) AND the hoisting
-		of nested sq_Y deriveds in qpu-low-join-wrap-derived together
-		ensure the preserved refs are accessible at outer scope. */
+		/* qpir-join inside the right subtree of a dep-join. Nested dep-joins
+		have already become regular joins by the top-down driver before the
+		parent dep-join is eliminated. The join predicate can still contain
+		conjuncts that reference the parent's outer aliases, for example an
+		IN helper condition that skips one scalar nesting level. Per the
+		top-down rule, those conjuncts must be extracted to the parent join;
+		only predicates local to this right subtree may remain here. */
 		(quote qpir-join) (begin
-			(define sub-pred (qpu-substitute-expr (qpir-join-predicate node) repr))
+			(define sub-pred (qpu-substitute-cclass-predicate
+				(qpir-join-predicate node) repr))
+			(define split
+				(if (qpu-node-has-topk? node)
+					(list true sub-pred)
+					(qpu-split-predicate sub-pred outer-aliases)))
+			(define own-outer-pred (nth split 0))
+			(define own-pure-pred (qpu-simplify-predicate (nth split 1)))
 			(define left-child (qpir-join-left node))
 			(define right-child (qpir-join-right node))
 			(define left-outer-refs (qpu-filter-outer-refs-for-node
@@ -812,8 +884,10 @@ converted dep-join. */
 			(define combined-join (qpu-and-from-conjuncts
 				(merge
 					(qpu-and-conjuncts (nth left-result 1))
-					(qpu-and-conjuncts (nth right-result 1)))))
-			(list (qpir-join (qpir-join-type node) (qpu-simplify-predicate sub-pred) left-new right-new
+					(merge
+						(qpu-and-conjuncts (nth right-result 1))
+						(qpu-and-conjuncts own-outer-pred)))))
+			(list (qpir-join (qpir-join-type node) own-pure-pred left-new right-new
 				(qpir-join-rhs-alias node)) combined-join))
 
 		(error (concat "qpu-unnest-right: operator " (string (qpir-kind node))
@@ -1030,7 +1104,7 @@ own outer in its right because left IS this dep-join's outer)
 - Convert THIS dep-join to qpir-join using extended as outer-aliases set
 
 This fixes the leaked-free-var bug for doubly-nested correlated scalars
-(FAQ §42): inner sq_N now correctly classifies outermost-table refs as
+(FAQ §42): an inner scalar helper now correctly classifies outermost-table refs as
 outer-correlations, extracts them to its join condition, and the cclasses
 substitution makes the rewrite well-formed. */
 (define qpu-unnest-tree-topdown-helper (lambda (node ancestor-aliases)
@@ -1065,6 +1139,11 @@ substitution makes the rewrite well-formed. */
 			(qpir-groupby-aggs node)
 			(qpir-groupby-having node)
 			(qpu-unnest-tree-topdown-helper (qpir-groupby-child node) ancestor-aliases))
+		(quote qpir-topk) (qpir-topk
+			(qpir-topk-order node)
+			(qpir-topk-limit node)
+			(qpir-topk-offset node)
+			(qpu-unnest-tree-topdown-helper (qpir-topk-child node) ancestor-aliases))
 		(quote qpir-window) (qpir-window
 			(qpir-window-partition node)
 			(qpir-window-order node)

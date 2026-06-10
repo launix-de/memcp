@@ -1,11 +1,13 @@
 # Scalar subquery with SUM + NOT(column) + nested correlated COALESCE subquery.
-# Extracted from ERPL reminder query that produces broken internal column names:
+# Regression for reminder-style aggregate filters that used to produce broken internal column names:
 #   .tbl:(1)|(and (not (get_column "alias" false "col" false)) "0")
 # The group cache key incorrectly embeds the filter condition into the table name.
 
 metadata:
   version: "1.0"
   description: "SUM subquery with NOT column and nested correlated COALESCE"
+  isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS nea_share"
@@ -83,7 +85,7 @@ test_cases:
       data:
         - unseen: 1
 
-  - name: "ERPL reminder pattern: SET session var for SELECT 1 tests"
+  - name: "set session var for scalar SUM SELECT 1 tests"
     session_id: "nea_sess"
     sql: "SET @nea_user = 'alice'"
     expect:
@@ -160,7 +162,73 @@ test_cases:
       data:
         - unseen: 1
 
+  - name: "sql-nested-scalar-where-filter"
+    session_id: "nea_sess"
+    sql: |
+      SELECT e.ID
+      FROM nea_email e
+      WHERE NOT(e.seen)
+        AND COALESCE(
+          (SELECT
+            COALESCE(
+              (SELECT
+                CASE
+                  WHEN FALSE THEN TRUE
+                  ELSE NOT (b.fopuser <> @test_user)
+                END
+              FROM nea_box b
+              WHERE b.ID = d.mailbox
+              LIMIT 1),
+            FALSE)
+          FROM nea_dir d
+          WHERE d.ID = e.directory
+          LIMIT 1),
+        FALSE)
+      ORDER BY e.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 100
+
+  - name: "sql-nested-exists-scalar-where-filter"
+    session_id: "nea_sess"
+    sql: |
+      SELECT e.ID
+      FROM nea_email e
+      WHERE NOT(e.seen)
+        AND COALESCE(
+          (SELECT
+            COALESCE(
+              (SELECT
+                CASE
+                  WHEN FALSE THEN TRUE
+                  ELSE NOT (
+                    (b.fopuser <> @test_user)
+                    AND NOT EXISTS (
+                      SELECT TRUE
+                      FROM nea_share s
+                      WHERE s.mailbox = b.ID
+                        AND s.fopuser = @test_user
+                      LIMIT 1
+                    )
+                  )
+                END
+              FROM nea_box b
+              WHERE b.ID = d.mailbox
+              LIMIT 1),
+            FALSE)
+          FROM nea_dir d
+          WHERE d.ID = e.directory
+          LIMIT 1),
+        FALSE)
+      ORDER BY e.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 100
+
   - name: "SUM with session var, nested CASE, and nested EXISTS"
+    max_time: 10
     session_id: "nea_sess"
     sql: |
       SELECT

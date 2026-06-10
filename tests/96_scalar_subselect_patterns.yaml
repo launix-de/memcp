@@ -3,55 +3,55 @@ metadata:
   description: "Scalar subselect patterns: derived tables, CASE WHEN, badge queries, permission checks"
 
 setup:
-  - sql: "DROP TABLE IF EXISTS sq_uconf"
-  - sql: "DROP TABLE IF EXISTS sq_ptype"
-  - sql: "DROP TABLE IF EXISTS sq_prop"
-  - sql: "DROP TABLE IF EXISTS sq_doc"
-  - sql: "DROP TABLE IF EXISTS sq_cat"
-  - sql: "DROP TABLE IF EXISTS sq_rev"
-  - sql: "DROP TABLE IF EXISTS sq_plz"
-  - sql: "CREATE TABLE sq_uconf (ID INT PRIMARY KEY, deftype VARCHAR(50))"
-  - sql: "INSERT INTO sq_uconf (ID, deftype) VALUES (1, 'invoice')"
-  - sql: "CREATE TABLE sq_ptype (ID INT PRIMARY KEY, name VARCHAR(50), type VARCHAR(20))"
+  - sql: "DROP TABLE IF EXISTS default_document_type"
+  - sql: "DROP TABLE IF EXISTS scalar_property_types"
+  - sql: "DROP TABLE IF EXISTS scalar_properties"
+  - sql: "DROP TABLE IF EXISTS scalar_documents"
+  - sql: "DROP TABLE IF EXISTS scalar_categories"
+  - sql: "DROP TABLE IF EXISTS scalar_revisions"
+  - sql: "DROP TABLE IF EXISTS scalar_postal_codes"
+  - sql: "CREATE TABLE default_document_type (ID INT PRIMARY KEY, deftype VARCHAR(50))"
+  - sql: "INSERT INTO default_document_type (ID, deftype) VALUES (1, 'invoice')"
+  - sql: "CREATE TABLE scalar_property_types (ID INT PRIMARY KEY, name VARCHAR(50), type VARCHAR(20))"
   - sql: |
-      INSERT INTO sq_ptype (ID, name, type) VALUES
+      INSERT INTO scalar_property_types (ID, name, type) VALUES
         (1, 'Date', 'date'), (2, 'Amount', 'number'), (3, 'Notes', 'text')
-  - sql: "CREATE TABLE sq_prop (ID INT PRIMARY KEY, type INT, dateVal VARCHAR(20), textVal VARCHAR(100), numVal DECIMAL(10,2), doc INT)"
+  - sql: "CREATE TABLE scalar_properties (ID INT PRIMARY KEY, type INT, dateVal VARCHAR(20), textVal VARCHAR(100), numVal DECIMAL(10,2), doc INT)"
   - sql: |
-      INSERT INTO sq_prop (ID, type, dateVal, textVal, numVal, doc) VALUES
+      INSERT INTO scalar_properties (ID, type, dateVal, textVal, numVal, doc) VALUES
         (1, 1, '2025-01-01', NULL, NULL, 1),
         (2, 2, NULL, NULL, 99.50, 1),
         (3, 3, NULL, 'note', NULL, 2),
         (4, 1, '2025-06-15', NULL, NULL, 2)
-  - sql: "CREATE TABLE sq_doc (ID INT PRIMARY KEY, type VARCHAR(50), archive BOOLEAN DEFAULT FALSE, boxid INT, date VARCHAR(20))"
+  - sql: "CREATE TABLE scalar_documents (ID INT PRIMARY KEY, type VARCHAR(50), archive BOOLEAN DEFAULT FALSE, boxid INT, date VARCHAR(20))"
   - sql: |
-      INSERT INTO sq_doc (ID, type, archive, boxid, date) VALUES
+      INSERT INTO scalar_documents (ID, type, archive, boxid, date) VALUES
         (1, 'invoice', FALSE, 1, '2025-01-01'),
         (2, 'invoice', FALSE, 2, '2025-02-01'),
         (3, 'receipt', TRUE, 1, '2025-03-01')
-  - sql: "CREATE TABLE sq_cat (ID INT PRIMARY KEY, name VARCHAR(50), parent INT)"
+  - sql: "CREATE TABLE scalar_categories (ID INT PRIMARY KEY, name VARCHAR(50), parent INT)"
   - sql: |
-      INSERT INTO sq_cat (ID, name, parent) VALUES
+      INSERT INTO scalar_categories (ID, name, parent) VALUES
         (1, 'Invoices', NULL), (2, 'Receipts', NULL), (3, 'Sub', 1)
-  - sql: "CREATE TABLE sq_rev (ID INT PRIMARY KEY, doc INT, created VARCHAR(20), file INT)"
+  - sql: "CREATE TABLE scalar_revisions (ID INT PRIMARY KEY, doc INT, created VARCHAR(20), file INT)"
   - sql: |
-      INSERT INTO sq_rev (ID, doc, created, file) VALUES
+      INSERT INTO scalar_revisions (ID, doc, created, file) VALUES
         (1, 1, '2025-01-01', 100), (2, 1, '2025-01-02', 101), (3, 2, '2025-02-01', 102)
-  - sql: "CREATE TABLE sq_plz (ID INT PRIMARY KEY, PLZ VARCHAR(10), Ort VARCHAR(100))"
+  - sql: "CREATE TABLE scalar_postal_codes (ID INT PRIMARY KEY, PLZ VARCHAR(10), Ort VARCHAR(100))"
   - sql: |
-      INSERT INTO sq_plz (ID, PLZ, Ort) VALUES
+      INSERT INTO scalar_postal_codes (ID, PLZ, Ort) VALUES
         (1, '10115', 'Berlin'), (2, '10117', 'Berlin'),
         (3, '80331', 'Muenchen'), (4, '80333', 'Muenchen'),
         (5, '50667', 'Koeln'), (6, '10115', 'Berlin Mitte')
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS sq_uconf"
-  - sql: "DROP TABLE IF EXISTS sq_ptype"
-  - sql: "DROP TABLE IF EXISTS sq_prop"
-  - sql: "DROP TABLE IF EXISTS sq_doc"
-  - sql: "DROP TABLE IF EXISTS sq_cat"
-  - sql: "DROP TABLE IF EXISTS sq_rev"
-  - sql: "DROP TABLE IF EXISTS sq_plz"
+  - sql: "DROP TABLE IF EXISTS default_document_type"
+  - sql: "DROP TABLE IF EXISTS scalar_property_types"
+  - sql: "DROP TABLE IF EXISTS scalar_properties"
+  - sql: "DROP TABLE IF EXISTS scalar_documents"
+  - sql: "DROP TABLE IF EXISTS scalar_categories"
+  - sql: "DROP TABLE IF EXISTS scalar_revisions"
+  - sql: "DROP TABLE IF EXISTS scalar_postal_codes"
 
 test_cases:
   # Pattern 1: Scalar subselects in SELECT list (12s in prod)
@@ -59,12 +59,12 @@ test_cases:
   - name: "Scalar subselect in SELECT list - repeated type lookup"
     sql: |
       SELECT
-        sq_prop.ID,
-        sq_prop.dateVal,
-        ('date') = ((SELECT sq_ptype.type FROM sq_ptype WHERE sq_ptype.ID = sq_prop.type LIMIT 1)) AS dateVis,
-        ('number') = ((SELECT sq_ptype.type FROM sq_ptype WHERE sq_ptype.ID = sq_prop.type LIMIT 1)) AS numVis,
-        ('text') = ((SELECT sq_ptype.type FROM sq_ptype WHERE sq_ptype.ID = sq_prop.type LIMIT 1)) AS textVis
-      FROM sq_prop
+        scalar_properties.ID,
+        scalar_properties.dateVal,
+        ('date') = ((SELECT scalar_property_types.type FROM scalar_property_types WHERE scalar_property_types.ID = scalar_properties.type LIMIT 1)) AS dateVis,
+        ('number') = ((SELECT scalar_property_types.type FROM scalar_property_types WHERE scalar_property_types.ID = scalar_properties.type LIMIT 1)) AS numVis,
+        ('text') = ((SELECT scalar_property_types.type FROM scalar_property_types WHERE scalar_property_types.ID = scalar_properties.type LIMIT 1)) AS textVis
+      FROM scalar_properties
     expect:
       rows: 4
 
@@ -74,17 +74,17 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT
-          sq_doc.ID,
+          scalar_documents.ID,
           CASE
-            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
-              AND ((sq_doc.type) IS NULL))
-              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            WHEN ((((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) IS NULL)
+              AND ((scalar_documents.type) IS NULL))
+              OR ((scalar_documents.type) = ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)))
             THEN 'green'
             ELSE 'gray'
           END AS color,
-          sq_doc.date
-        FROM sq_doc
-        WHERE NOT sq_doc.archive
+          scalar_documents.date
+        FROM scalar_documents
+        WHERE NOT scalar_documents.archive
       ) AS t
       WHERE TRUE
       LIMIT 72 OFFSET 0
@@ -95,14 +95,14 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT
-          sq_doc.ID,
+          scalar_documents.ID,
           CASE
-            WHEN ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) = 'invoice')
+            WHEN ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1) = 'invoice')
             THEN 'green'
             ELSE 'gray'
           END AS color
-        FROM sq_doc
-        WHERE sq_doc.ID = 1
+        FROM scalar_documents
+        WHERE scalar_documents.ID = 1
       ) AS t
     expect:
       rows: 1
@@ -115,12 +115,12 @@ test_cases:
       SELECT t.color FROM (
         SELECT
           CASE
-            WHEN ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) = 'invoice')
+            WHEN ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1) = 'invoice')
             THEN 'green'
             ELSE 'gray'
           END AS color
-        FROM sq_doc
-        WHERE sq_doc.ID = 1
+        FROM scalar_documents
+        WHERE scalar_documents.ID = 1
       ) AS t
     expect:
       rows: 1
@@ -130,16 +130,16 @@ test_cases:
   - name: "Direct CASE repeated scalar null-or-equals"
     sql: |
       SELECT
-        sq_doc.ID,
+        scalar_documents.ID,
         CASE
-          WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
-            AND ((sq_doc.type) IS NULL))
-            OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+          WHEN ((((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) IS NULL)
+            AND ((scalar_documents.type) IS NULL))
+            OR ((scalar_documents.type) = ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)))
           THEN 'green'
           ELSE 'gray'
         END AS color
-      FROM sq_doc
-      WHERE sq_doc.ID = 1
+      FROM scalar_documents
+      WHERE scalar_documents.ID = 1
     expect:
       rows: 1
       data:
@@ -151,14 +151,14 @@ test_cases:
       SELECT t.color FROM (
         SELECT
           CASE
-            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
-              AND ((sq_doc.type) IS NULL))
-              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            WHEN ((((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) IS NULL)
+              AND ((scalar_documents.type) IS NULL))
+              OR ((scalar_documents.type) = ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)))
             THEN 'green'
             ELSE 'gray'
           END AS color
-        FROM sq_doc
-        WHERE sq_doc.ID = 1
+        FROM scalar_documents
+        WHERE scalar_documents.ID = 1
       ) AS t
     expect:
       rows: 1
@@ -169,16 +169,16 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT
-          sq_doc.ID,
+          scalar_documents.ID,
           CASE
-            WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
-              AND ((sq_doc.type) IS NULL))
-              OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+            WHEN ((((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) IS NULL)
+              AND ((scalar_documents.type) IS NULL))
+              OR ((scalar_documents.type) = ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)))
             THEN 'green'
             ELSE 'gray'
           END AS color
-        FROM sq_doc
-        WHERE sq_doc.ID = 1
+        FROM scalar_documents
+        WHERE scalar_documents.ID = 1
       ) AS t
     expect:
       rows: 1
@@ -189,10 +189,10 @@ test_cases:
   - name: "Arithmetic expression wraps scalar subselect in direct projection"
     sql: |
       SELECT
-        sq_doc.ID,
-        (3 + 4 * (((SELECT ID FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) + 1)) AS score
-      FROM sq_doc
-      WHERE sq_doc.ID = 1
+        scalar_documents.ID,
+        (3 + 4 * (((SELECT ID FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) + 1)) AS score
+      FROM scalar_documents
+      WHERE scalar_documents.ID = 1
     expect:
       rows: 1
       data:
@@ -203,10 +203,10 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT
-          sq_doc.ID,
-          (3 + 4 * (((SELECT ID FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) + 1)) AS score
-        FROM sq_doc
-        WHERE sq_doc.ID = 1
+          scalar_documents.ID,
+          (3 + 4 * (((SELECT ID FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) + 1)) AS score
+        FROM scalar_documents
+        WHERE scalar_documents.ID = 1
       ) AS t
     expect:
       rows: 1
@@ -218,9 +218,9 @@ test_cases:
     sql: |
       SELECT t.color FROM (
         SELECT
-          COALESCE((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1), 'fallback') AS color
-        FROM sq_doc
-        WHERE sq_doc.ID = 1
+          COALESCE((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1), 'fallback') AS color
+        FROM scalar_documents
+        WHERE scalar_documents.ID = 1
       ) AS t
     expect:
       rows: 1
@@ -230,14 +230,14 @@ test_cases:
   - name: "NOT IS NULL wrapper around scalar subselect"
     sql: |
       SELECT
-        sq_doc.ID,
+        scalar_documents.ID,
         CASE
-          WHEN NOT (((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
+          WHEN NOT (((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) IS NULL)
           THEN 'present'
           ELSE 'missing'
         END AS status
-      FROM sq_doc
-      WHERE sq_doc.ID = 1
+      FROM scalar_documents
+      WHERE scalar_documents.ID = 1
     expect:
       rows: 1
       data:
@@ -247,24 +247,24 @@ test_cases:
   - name: "Correlated repeated scalar in CASE null-or-equals"
     sql: |
       SELECT
-        sq_doc.ID,
+        scalar_documents.ID,
         CASE
-          WHEN ((((SELECT sq_prop.doc
-                    FROM sq_prop
-                    WHERE sq_prop.doc = sq_doc.ID
-                    ORDER BY sq_prop.ID
+          WHEN ((((SELECT scalar_properties.doc
+                    FROM scalar_properties
+                    WHERE scalar_properties.doc = scalar_documents.ID
+                    ORDER BY scalar_properties.ID
                     LIMIT 1)) IS NULL)
-            AND ((sq_doc.ID) IS NULL))
-            OR ((sq_doc.ID) = ((SELECT sq_prop.doc
-                                 FROM sq_prop
-                                 WHERE sq_prop.doc = sq_doc.ID
-                                 ORDER BY sq_prop.ID
+            AND ((scalar_documents.ID) IS NULL))
+            OR ((scalar_documents.ID) = ((SELECT scalar_properties.doc
+                                 FROM scalar_properties
+                                 WHERE scalar_properties.doc = scalar_documents.ID
+                                 ORDER BY scalar_properties.ID
                                  LIMIT 1)))
           THEN 'hit'
           ELSE 'miss'
         END AS match_state
-      FROM sq_doc
-      WHERE sq_doc.ID = 1
+      FROM scalar_documents
+      WHERE scalar_documents.ID = 1
     expect:
       rows: 1
       data:
@@ -275,18 +275,18 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT
-          sq_doc.ID,
+          scalar_documents.ID,
           CASE
-            WHEN (3 + 4 * COALESCE((SELECT sq_prop.doc
-                                     FROM sq_prop
-                                     WHERE sq_prop.doc = sq_doc.ID
-                                     ORDER BY sq_prop.ID
+            WHEN (3 + 4 * COALESCE((SELECT scalar_properties.doc
+                                     FROM scalar_properties
+                                     WHERE scalar_properties.doc = scalar_documents.ID
+                                     ORDER BY scalar_properties.ID
                                      LIMIT 1), 0)) = 7
             THEN 'scaled'
             ELSE 'other'
           END AS state
-        FROM sq_doc
-        WHERE sq_doc.ID = 1
+        FROM scalar_documents
+        WHERE scalar_documents.ID = 1
       ) AS t
     expect:
       rows: 1
@@ -299,27 +299,27 @@ test_cases:
       EXPLAIN IR
       SELECT COUNT(*) AS cnt FROM (
         SELECT
-          sq_doc.ID,
-          sq_doc.date,
-          (SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1) AS colorType
-        FROM sq_doc
-        WHERE NOT sq_doc.archive
+          scalar_documents.ID,
+          scalar_documents.date,
+          (SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1) AS colorType
+        FROM scalar_documents
+        WHERE NOT scalar_documents.archive
       ) AS t
     expect:
       contains:
-        - "sq_doc"
+        - "scalar_documents"
       not_contains:
-        - "_unn_sq_uconf_0"
+        - "domain_scalar_default_document_type_0"
 
   - name: "Derived table pruning keeps join key columns used only in outer ON"
     sql: |
-      SELECT sq_rev.ID
-      FROM sq_rev
+      SELECT scalar_revisions.ID
+      FROM scalar_revisions
       LEFT JOIN (
-        SELECT sq_doc.ID AS docID, sq_doc.date AS docDate
-        FROM sq_doc
-      ) refDoc ON refDoc.docID = sq_rev.doc
-      ORDER BY sq_rev.ID
+        SELECT scalar_documents.ID AS docID, scalar_documents.date AS docDate
+        FROM scalar_documents
+      ) refDoc ON refDoc.docID = scalar_revisions.doc
+      ORDER BY scalar_revisions.ID
     expect:
       rows: 3
       data:
@@ -331,33 +331,33 @@ test_cases:
     sql: |
       EXPLAIN IR
       SELECT
-        sq_doc.ID,
+        scalar_documents.ID,
         CASE
-          WHEN ((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
-            AND ((sq_doc.type) IS NULL))
-            OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)))
+          WHEN ((((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) IS NULL)
+            AND ((scalar_documents.type) IS NULL))
+            OR ((scalar_documents.type) = ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)))
           THEN 'green'
           ELSE 'gray'
         END AS color,
-        sq_doc.date
-      FROM sq_doc
-      WHERE NOT sq_doc.archive
+        scalar_documents.date
+      FROM scalar_documents
+      WHERE NOT scalar_documents.archive
       LIMIT 72 OFFSET 0
     expect:
       rows: 8
       contains:
-        - "_unn_sq_uconf_0"
+        - "domain_scalar_default_document_type_0"
       not_contains:
-        - "_unn_sq_uconf_1"
+        - "domain_scalar_default_document_type_1"
 
   # Pattern 3: GROUP BY with MIN(CONCAT(...)) (6s in prod)
   # Aggregation with string concat in GROUP BY
   - name: "GROUP BY with MIN CONCAT"
     sql: |
-      SELECT sq_plz.PLZ AS value, MIN(CONCAT(sq_plz.PLZ, ' - ', sq_plz.Ort)) AS `desc`
-      FROM sq_plz
+      SELECT scalar_postal_codes.PLZ AS value, MIN(CONCAT(scalar_postal_codes.PLZ, ' - ', scalar_postal_codes.Ort)) AS `desc`
+      FROM scalar_postal_codes
       WHERE TRUE
-      GROUP BY sq_plz.PLZ
+      GROUP BY scalar_postal_codes.PLZ
       LIMIT 20000
     expect:
       rows: 5
@@ -368,16 +368,16 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT
-          sq_rev.ID,
-          sq_rev.created,
-          sq_rev.doc,
-          (SELECT sq_doc.date FROM sq_doc WHERE sq_doc.ID = sq_rev.doc LIMIT 1) AS docDate,
+          scalar_revisions.ID,
+          scalar_revisions.created,
+          scalar_revisions.doc,
+          (SELECT scalar_documents.date FROM scalar_documents WHERE scalar_documents.ID = scalar_revisions.doc LIMIT 1) AS docDate,
           1
-        FROM sq_rev
+        FROM scalar_revisions
         LEFT JOIN (
-          SELECT ID AS docID, sq_doc.date AS docDate, (TRUE) AS canView
-          FROM sq_doc
-        ) refDoc ON refDoc.docID = sq_rev.doc
+          SELECT ID AS docID, scalar_documents.date AS docDate, (TRUE) AS canView
+          FROM scalar_documents
+        ) refDoc ON refDoc.docID = scalar_revisions.doc
         WHERE TRUE
       ) AS t
       WHERE TRUE
@@ -390,13 +390,13 @@ test_cases:
   - name: "Multiple unrelated scalar subselects (badge pattern)"
     sql: |
       SELECT 1,
-        (SELECT COUNT(1) FROM sq_doc WHERE TRUE
-          AND (((((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1)) IS NULL)
-            AND ((sq_doc.type) IS NULL))
-            OR ((sq_doc.type) = ((SELECT deftype FROM sq_uconf WHERE sq_uconf.ID = 1 LIMIT 1))))
-          AND (NOT (sq_doc.archive))
+        (SELECT COUNT(1) FROM scalar_documents WHERE TRUE
+          AND (((((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1)) IS NULL)
+            AND ((scalar_documents.type) IS NULL))
+            OR ((scalar_documents.type) = ((SELECT deftype FROM default_document_type WHERE default_document_type.ID = 1 LIMIT 1))))
+          AND (NOT (scalar_documents.archive))
         LIMIT 1) AS badgeDoc,
-        (SELECT COUNT(1) FROM sq_rev WHERE TRUE LIMIT 1) AS revCount
+        (SELECT COUNT(1) FROM scalar_revisions WHERE TRUE LIMIT 1) AS revCount
     expect:
       rows: 1
       data:
@@ -407,11 +407,11 @@ test_cases:
   - name: "Nested COALESCE permission check pattern"
     sql: |
       SELECT
-        sq_prop.ID,
+        scalar_properties.ID,
         (TRUE) AND (COALESCE(
-          (SELECT (TRUE) FROM sq_cat WHERE sq_cat.ID = sq_prop.type LIMIT 1),
+          (SELECT (TRUE) FROM scalar_categories WHERE scalar_categories.ID = scalar_properties.type LIMIT 1),
           FALSE
         )) AS canView
-      FROM sq_prop
+      FROM scalar_properties
     expect:
       rows: 4

@@ -235,11 +235,11 @@ qpu-find-provider-path, qpu-find-enclosing-dep-join)
 	(define outer-leaf-su (qpir-leaf (mk-tuple "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))
 		(list (list "id" (mk-col "po" "id"))
-			(list "total" (list (quote get_column) "sq_1" false "value" false)))
+			(list "total" (list (quote get_column) "domain_scalar_payments_1" false "value" false)))
 		true)))
-	(define dj-su (qpir-dep-join true outer-leaf-su inner-gb (list) "sq_1"))
+	(define dj-su (qpir-dep-join true outer-leaf-su inner-gb (list) "domain_scalar_payments_1"))
 	(qpu-assert (count (qpir-free-vars dj-su)) 0
-		"input dj-su has F = ∅ (rhs-alias makes sq_1 bound)")
+		"input dj-su has F = ∅ (rhs-alias makes domain_scalar_payments_1 bound)")
 	(qpu-assert (count (qpu-collect-outer-refs dj-su)) 1
 		"dj-su has 1 outer ref (po.k)")
 
@@ -248,8 +248,8 @@ qpu-find-provider-path, qpu-find-enclosing-dep-join)
 		"unnested dj-su is qpir-join")
 	(qpu-assert (qpir-join-type unnested-su) (quote left)
 		"unnested dj-su is LEFT join (FAQ §22 per-key-misses)")
-	(qpu-assert (qpir-join-rhs-alias unnested-su) "sq_1"
-		"unnested join preserves rhs-alias = sq_1")
+	(qpu-assert (qpir-join-rhs-alias unnested-su) "domain_scalar_payments_1"
+		"unnested join preserves rhs-alias = domain_scalar_payments_1")
 	(qpu-assert (qpir-join-left unnested-su) outer-leaf-su
 		"unnested join left = original outer")
 

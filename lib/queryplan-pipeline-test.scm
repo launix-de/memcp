@@ -98,14 +98,14 @@ then, these snapshot tests are the proof that the architecture works.
 	(qpipe-assert (nth join-pred 0) (quote equal??)
 		"after unnest: join predicate is the equality from inner WHERE")
 
-	/* rhs-alias preserved through dep-join → join conversion. The exact sq_N
+	/* rhs-alias preserved through dep-join → join conversion. The exact scalar alias
 	depends on the global counter (tests run in load order), so just check
-	the synthesized "sq_" prefix is present and that the alias is non-nil. */
+	the synthesized domain_scalar_ prefix is present and that the alias is non-nil. */
 	(define preserved-alias (qpir-join-rhs-alias after-unnest))
 	(qpipe-assert (nil? preserved-alias) false
 		"after unnest: rhs-alias is non-nil")
-	(qpipe-assert (substr preserved-alias 0 3) "sq_"
-		"after unnest: rhs-alias keeps sq_ prefix")
+	(qpipe-assert (substr preserved-alias 0 14) "domain_scalar_"
+		"after unnest: rhs-alias keeps domain_scalar_ prefix")
 
 	/* ==== Test 2: SELECT po.id FROM po WHERE EXISTS (SELECT * FROM pi WHERE pi.k=po.k) ==== */
 	/* EXISTS subquery: the parser emits inner_select_exists wrapping a 7-tuple.

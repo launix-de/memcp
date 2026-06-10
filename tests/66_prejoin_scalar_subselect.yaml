@@ -5,6 +5,8 @@
 metadata:
   version: "1.0"
   description: "Prejoin with scalar subselect in aggregate query"
+  isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS pjs_child"
@@ -101,7 +103,6 @@ test_cases:
           pname: "Beta"
 
   - name: "JOIN + GROUP BY + EXISTS in WHERE with scalar subselect"
-    max_time: 8
     sql: |
       SELECT c.parent_id,
         COUNT(*) AS cnt

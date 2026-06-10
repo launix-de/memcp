@@ -24,7 +24,7 @@ Per the neumann_compiler_plan, the L2 pipeline normalizes the parser-emitted
 A 7-tuple has the parser shape:
 (schema tables fields condition group having order limit offset)
 
-Each pre-pass is a PURE function — no shared mutable state, no sq_cache
+Each pre-pass is a PURE function — no shared mutable state, no scalar_subquery_cache
 mutation, no side effects. Inputs in, outputs out. This is the contract
 that distinguishes the L2 pipeline from the legacy untangle_query.
 
@@ -505,6 +505,107 @@ they stay as derived entries (build_queryplan_inner handles the materialization
 		(nil? (qpp-tuple-limit sub))
 		(nil? (qpp-tuple-offset sub)))))
 
+(define qpp-expr-has-inner-select-marker? (lambda (expr) (match expr
+	(cons sym args)
+	(or
+		(match sym
+			(symbol inner_select) true
+			(quote inner_select) true
+			'(quote inner_select) true
+			'inner_select true
+			(symbol inner_select_in) true
+			(quote inner_select_in) true
+			'(quote inner_select_in) true
+			'inner_select_in true
+			(symbol inner_select_exists) true
+			(quote inner_select_exists) true
+			'(quote inner_select_exists) true
+			'inner_select_exists true
+			false)
+		(qpp-expr-has-inner-select-marker? sym)
+		(reduce (coalesceNil args '()) (lambda (acc a)
+			(or acc (qpp-expr-has-inner-select-marker? a))) false))
+	false)))
+
+(define qpp-tuple-has-inner-select-marker? (lambda (sub)
+	(if (not (qpp-tuple? sub))
+		false
+		(or
+			(reduce (qpp-fields-to-pairs (qpp-tuple-fields sub)) (lambda (acc pair) (match pair
+				'(_ expr) (or acc (qpp-expr-has-inner-select-marker? expr))
+				acc)) false)
+			(qpp-expr-has-inner-select-marker? (qpp-tuple-condition sub))
+			(reduce (coalesceNil (qpp-tuple-group sub) '()) (lambda (acc expr)
+				(or acc (qpp-expr-has-inner-select-marker? expr))) false)
+			(qpp-expr-has-inner-select-marker? (qpp-tuple-having sub))
+			(reduce (coalesceNil (qpp-tuple-order sub) '()) (lambda (acc item) (match item
+				'(expr _dir) (or acc (qpp-expr-has-inner-select-marker? expr))
+				(or acc (qpp-expr-has-inner-select-marker? item)))) false)))))
+
+(define qpp-aggregate-refs-derived-alias? (lambda (expr derived-alias)
+	(reduce (extract_aggregates expr) (lambda (acc ag)
+		(or acc (match ag
+			'(agg_expr _ _)
+			(reduce (extract_tblvars agg_expr) (lambda (found tv)
+				(or found (equal?? tv derived-alias))) false)
+			false)))
+		false)))
+
+(define qpp-expr-has-aggregate? (lambda (expr)
+	(not (equal? (extract_aggregates expr) '()))))
+
+(define qpp-tuple-has-aggregate? (lambda (t)
+	(or
+		(reduce (qpp-fields-to-pairs (qpp-tuple-fields t)) (lambda (acc pair) (match pair
+			'(_ expr) (or acc (qpp-expr-has-aggregate? expr))
+			acc)) false)
+		(qpp-expr-has-aggregate? (qpp-tuple-having t))
+		(reduce (coalesceNil (qpp-tuple-order t) '()) (lambda (acc item) (match item
+			'(expr _dir) (or acc (qpp-expr-has-aggregate? expr))
+			(or acc (qpp-expr-has-aggregate? item)))) false))))
+
+(define qpp-scalar-helper-alias? (lambda (alias_)
+	(begin
+		(define alias_text (if (nil? alias_) "" (string alias_)))
+		(and
+			(>= (strlen alias_text) 14)
+			(equal? (substr alias_text 0 14) "domain_scalar_")))))
+
+(define qpp-tuple-has-scalar-helper-table? (lambda (sub)
+	(if (not (qpp-tuple? sub))
+		false
+		(reduce (coalesceNil (qpp-tuple-tables sub) '()) (lambda (found td)
+			(or found (match td
+				'(alias_ _ source_ _ _)
+				(or
+					(qpp-scalar-helper-alias? alias_)
+					(qpp-scalar-helper-alias? source_))
+				false)))
+			false))))
+
+(define qpp-derived-aggregate-boundary-needed? (lambda (outer-t derived-alias sub)
+	(and
+		(or
+			(and
+				(qpp-tuple-has-inner-select-marker? sub)
+				(or
+					(reduce (qpp-fields-to-pairs (qpp-tuple-fields outer-t)) (lambda (acc pair) (match pair
+						'(_ expr) (or acc (qpp-aggregate-refs-derived-alias? expr derived-alias))
+						acc)) false)
+					(qpp-aggregate-refs-derived-alias? (qpp-tuple-having outer-t) derived-alias)
+					(reduce (coalesceNil (qpp-tuple-order outer-t) '()) (lambda (acc item) (match item
+						'(expr _dir) (or acc (qpp-aggregate-refs-derived-alias? expr derived-alias))
+						(or acc (qpp-aggregate-refs-derived-alias? item derived-alias)))) false)
+					(and
+						(qpp-expr-has-inner-select-marker? (qpp-tuple-condition sub))
+						(qpp-tuple-has-aggregate? outer-t))))
+			(and
+				(qpp-tuple-has-scalar-helper-table? sub)
+				(qpp-tuple-has-aggregate? outer-t))
+			(and
+				(qpp-scalar-helper-alias? derived-alias)
+				(qpp-tuple-has-aggregate? outer-t))))))
+
 /* qpp-expr-has-wildcard? — true if expr contains a (get_column _ _ "*" _) ref.
 SELECT *-style queries can't be inlined because * expansion happens via the
 legacy code's schema lookup which needs the derived alias to still be in the
@@ -645,7 +746,8 @@ table-list schema lookup, which needs the derived alias intact. */
 					(define is-outer (if (and (list? td) (>= (count td) 4)) (nth td 3) false))
 					(if (or (not (qpp-tuple? maybe-sub))
 						(equal? is-outer true)
-						(not (qpp-derived-can-inline? maybe-sub)))
+						(not (qpp-derived-can-inline? maybe-sub))
+						(qpp-derived-aggregate-boundary-needed? t derived-alias maybe-sub))
 						/* Can't inline: keep this table entry as-is. */
 						(accumulator "tables" (merge (accumulator "tables") (list td)))
 						/* Inlinable INNER derived sub-tuple: */

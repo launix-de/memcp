@@ -266,6 +266,20 @@ func Context(a ...Scmer) (result Scmer) {
 	panic("unimplemented")
 }
 
+func ContextSessionGet(a ...Scmer) Scmer {
+	if len(a) != 1 {
+		panic("context_session_get expects exactly one key")
+	}
+	if mgr == nil {
+		mgr = gls.NewContextManager()
+	}
+	val, ok := mgr.GetValue("session")
+	if !ok {
+		panic("no session set")
+	}
+	return Apply(val.(Scmer), a[0])
+}
+
 func NewContext(ctx context.Context, fn func()) {
 	if mgr == nil {
 		// prone to race conditions, to the first call should be called in the initialization
@@ -447,6 +461,18 @@ func init_sync() {
 				{Kind: "any", ParamName: "args...", ParamDesc: "depends on the usage", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "context_session_get",
+		Desc: "Reads one key from the session installed in the current context.",
+		Fn:   ContextSessionGet,
+		Type: &TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*TypeDescriptor{
+				{Kind: "string", ParamName: "key", ParamDesc: "session key to read"},
+			},
+			Return: &TypeDescriptor{Kind: "any", HasSideEffects: true},
 		},
 	})
 	Declare(&Globalenv, &Declaration{

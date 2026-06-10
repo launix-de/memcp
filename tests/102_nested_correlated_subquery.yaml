@@ -6,6 +6,7 @@
 metadata:
   version: "1.0"
   description: "Doubly-nested correlated scalar subquery returns NULL instead of value"
+  isolated: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS nc_doc"

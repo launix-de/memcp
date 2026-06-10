@@ -54,6 +54,24 @@ test_cases:
         - ID: 1
           title: "Team A"
 
+  - name: "sql-exists-nested-scalar-or-aggregate"
+    session_id: "sess_ens"
+    sql: |
+      SELECT SUM(1) AS visible_count
+      FROM ens_items i
+      WHERE i.ID = 999
+        OR EXISTS (
+          SELECT TRUE
+          FROM ens_team t
+          WHERE t.list_id = i.team_id
+            AND (SELECT u.ID = @current_user FROM ens_users u WHERE u.ID = t.member LIMIT 1)
+          LIMIT 1
+        )
+    expect:
+      rows: 1
+      data:
+        - visible_count: 1
+
   - name: "NOT EXISTS with nested scalar"
     sql: |
       SELECT i.ID, i.title FROM ens_items i WHERE

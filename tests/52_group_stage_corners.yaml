@@ -172,7 +172,10 @@ test_cases:
     sql: |
       SELECT o.customer,
              COUNT(*) AS order_cnt,
-             (SELECT SUM(qty) FROM gs_items i WHERE i.order_id = o.id) AS item_qty
+             (SELECT SUM(i.qty)
+              FROM gs_items i
+              JOIN gs_orders o2 ON o2.id = i.order_id
+              WHERE o2.customer = o.customer) AS item_qty
       FROM gs_orders o
       GROUP BY o.customer
       ORDER BY o.customer

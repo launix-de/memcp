@@ -118,14 +118,14 @@ Covers:
 
 	/* ==== qpir-join WITH rhs-alias → derived-table wrap + ref retarget ==== */
 	/* This is the canonical post-unnest correlated SUM shape:
-	qpir-join (po.k=pi.k) rhs-alias=sq_1
-	qpir-leaf po with fields [(id po.id) (total sq_1.value)]
+	qpir-join (po.k=pi.k) rhs-alias=domain_scalar_payments_1
+	qpir-leaf po with fields [(id po.id) (total domain_scalar_payments_1.value)]
 	qpir-groupby [pi.k] [(value SUM(pi.amount))] nil
 	qpir-leaf pi */
-	(define outer-with-sq (qpir-leaf (mk-tuple "memcp-tests"
+	(define outer-with-scalar-helper (qpir-leaf (mk-tuple "memcp-tests"
 		(list (list "po" "memcp-tests" "po" false nil))
 		(list (list "id" (mk-col "po" "id"))
-			(list "total" (mk-col "sq_1" "value")))
+			(list "total" (mk-col "domain_scalar_payments_1" "value")))
 		true)))
 	(define inner-gb (qpir-groupby
 		(list (mk-col "pi" "k"))
@@ -135,23 +135,23 @@ Covers:
 		pi-leaf))
 	(define join-corr (qpir-join (quote inner)
 		(list (quote equal??) (mk-col "po" "k") (mk-col "pi" "k"))
-		outer-with-sq inner-gb "sq_1"))
+		outer-with-scalar-helper inner-gb "domain_scalar_payments_1"))
 	(define lo-corr (lower_to_scans_pass join-corr))
 	(qpw-assert (qpp-tuple? lo-corr) true "lower(join with rhs-alias) returns 7-tuple")
 	(qpw-assert (count (qpp-tuple-tables lo-corr)) 2
 		"lower(join with rhs-alias): 2 tables (outer + derived)")
 
-	/* The second table should be the derived table: (sq_1 schema sub-7-tuple false nil) */
+	/* The second table should be the derived table: (domain_scalar_payments_1 schema sub-7-tuple false nil) */
 	(define derived-entry (nth (qpp-tuple-tables lo-corr) 1))
-	(qpw-assert (nth derived-entry 0) "sq_1" "derived entry alias = sq_1")
+	(qpw-assert (nth derived-entry 0) "domain_scalar_payments_1" "derived entry alias = domain_scalar_payments_1")
 	(qpw-assert (qpp-tuple? (nth derived-entry 2)) true
 		"derived entry's 3rd slot is a sub-7-tuple")
 
-	/* The join predicate was (po.k = pi.k); after lowering, pi.k retargets to sq_1.k */
+	/* The join predicate was (po.k = pi.k); after lowering, pi.k retargets to domain_scalar_payments_1.k */
 	(define cond-corr (qpp-tuple-condition lo-corr))
 	(qpw-assert (nth cond-corr 0) (quote equal??) "lowered join condition starts with equal??")
-	(qpw-assert (nth (nth cond-corr 2) 1) "sq_1"
-		"join condition's right side retargeted from pi to sq_1")
+	(qpw-assert (nth (nth cond-corr 2) 1) "domain_scalar_payments_1"
+		"join condition's right side retargeted from pi to domain_scalar_payments_1")
 	(qpw-assert (nth (nth cond-corr 2) 3) "k"
 		"join condition's right side column is k")
 
@@ -183,10 +183,10 @@ Covers:
 	(qpw-assert (qpp-tuple? e2e-lowered) true
 		"e2e: pipeline output is a 7-tuple ready for build_queryplan_inner")
 	(qpw-assert (count (qpp-tuple-tables e2e-lowered)) 2
-		"e2e: lowered 7-tuple has 2 tables (po + derived sq_N)")
+		"e2e: lowered 7-tuple has 2 tables (po + derived scalar helper)")
 	(qpw-assert (qpp-tuple? (nth (nth (qpp-tuple-tables e2e-lowered) 1) 2)) true
 		"e2e: second table is a derived sub-7-tuple")
-	/* The outer field "total" should reference sq_N.value (not pi.value) */
+	/* The outer field "total" should reference scalar-helper value (not pi.value) */
 	(define total-field (nth (qpp-tuple-fields e2e-lowered) 1))
 	(qpw-assert (nth total-field 0) "total" "e2e: outer field name preserved")
 	(define total-expr (nth total-field 1))

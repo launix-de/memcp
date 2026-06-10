@@ -20,6 +20,7 @@
 metadata:
   version: "1.0"
   description: "COUNT + SUM over derived table with scalar subselects"
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS csd_main"

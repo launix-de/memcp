@@ -132,7 +132,17 @@ restart:
 						}
 					}
 				}
-				return Eval(list[1], en.Outer)
+				outer := en.Outer
+				if list[1].IsNthLocalVar() {
+					idx := int(list[1].NthLocalVar())
+					for outer != nil && idx >= len(outer.VarsNumbered) {
+						outer = outer.Outer
+					}
+					if outer == nil {
+						return NewNil()
+					}
+				}
+				return Eval(list[1], outer)
 			case "quote":
 				return list[1]
 			case "eval":

@@ -1,0 +1,153 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Minimal anonymized regressions for ordered correlated scalar subqueries
+# with session predicates and duplicate helper subqueries.
+
+metadata:
+  version: "1.0"
+  description: "Ordered scalar and duplicate-helper unnesting regressions"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS subjects"
+  - sql: "DROP TABLE IF EXISTS subject_score_history"
+  - sql: |
+      CREATE TABLE subjects (
+        ID INT PRIMARY KEY,
+        role_rank INT,
+        archived INT,
+        valid_from INT,
+        valid_until INT,
+        owner_id INT
+      )
+  - sql: |
+      CREATE TABLE subject_score_history (
+        ID INT PRIMARY KEY,
+        subject_id INT,
+        score_time INT,
+        score_value INT
+      )
+  - sql: |
+      INSERT INTO subjects VALUES
+        (1, 0, 0, 100, 999999, 1),
+        (2, 1, 0, 100, 999999, 2)
+  - sql: |
+      INSERT INTO subject_score_history VALUES
+        (1, 1, 10, 1),
+        (2, 1, 20, 5),
+        (3, 2, 10, 9)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS subject_score_history"
+  - sql: "DROP TABLE IF EXISTS subjects"
+
+test_cases:
+  - name: "legacy system-table scan shape stays accepted"
+    scm: |
+      (scan nil (table "system" "user")
+        '() (lambda () true)
+        '("username") (lambda (u) u)
+        (lambda (a b) b) "")
+
+  - name: "set session variables for duplicate-helper regression"
+    session_id: "ordered_scalar_sess"
+    sql: "SET @current_user_id = 1, @cutoff_time = 15"
+    expect:
+      rows_affected: 15
+
+  - name: "EXPLAIN IR does not emit bogus helper call inside ordered scalar"
+    session_id: "ordered_scalar_sess"
+    sql: |
+      EXPLAIN IR
+      SELECT ID,
+        COALESCE((
+          SELECT h.score_value
+          FROM subject_score_history h
+          WHERE h.subject_id = subjects.ID
+            AND h.score_time <= @cutoff_time
+          ORDER BY h.score_time DESC
+          LIMIT 1
+        ), 0) AS latest_score,
+        (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_first,
+        (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_second
+      FROM subjects
+      WHERE ID = 1
+    expect:
+      rows: 8
+      not_contains:
+        - "(\"domain_scalar_subjects_0\" \"domain_scalar_subjects_1\")"
+
+  - name: "sql_ordered_scalar_local_filter_before_limit"
+    session_id: "ordered_scalar_sess"
+    sql: |
+      SELECT ID,
+        COALESCE((
+          SELECT h.score_value
+          FROM subject_score_history h
+          WHERE h.subject_id = subjects.ID
+            AND h.score_time <= @cutoff_time
+          ORDER BY h.score_time DESC
+          LIMIT 1
+        ), 0) AS latest_score
+      FROM subjects
+      WHERE ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          latest_score: 1
+
+  - name: "ordered scalar with duplicate self helper returns one row"
+    session_id: "ordered_scalar_sess"
+    sql: |
+      SELECT ID,
+        COALESCE((
+          SELECT h.score_value
+          FROM subject_score_history h
+          WHERE h.subject_id = subjects.ID
+            AND h.score_time <= @cutoff_time
+          ORDER BY h.score_time DESC
+          LIMIT 1
+        ), 0) AS latest_score,
+        (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_first,
+        (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_second
+      FROM subjects
+      WHERE ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          latest_score: 1
+          same_user_first: true
+          same_user_second: true
+    on_fail:
+      - sql: |
+          EXPLAIN
+          SELECT ID,
+            COALESCE((
+              SELECT h.score_value
+              FROM subject_score_history h
+              WHERE h.subject_id = subjects.ID
+                AND h.score_time <= @cutoff_time
+              ORDER BY h.score_time DESC
+              LIMIT 1
+            ), 0) AS latest_score,
+            (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_first,
+            (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_second
+          FROM subjects
+          WHERE ID = 1
+      - sql: |
+          EXPLAIN IR
+          SELECT ID,
+            COALESCE((
+              SELECT h.score_value
+              FROM subject_score_history h
+              WHERE h.subject_id = subjects.ID
+                AND h.score_time <= @cutoff_time
+              ORDER BY h.score_time DESC
+              LIMIT 1
+            ), 0) AS latest_score,
+            (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_first,
+            (SELECT (s.ID = @current_user_id) FROM subjects s WHERE s.ID = subjects.ID LIMIT 1) AS same_user_second
+          FROM subjects
+          WHERE ID = 1

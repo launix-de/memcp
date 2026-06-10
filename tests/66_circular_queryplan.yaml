@@ -9,6 +9,7 @@ metadata:
   version: "1.0"
   description: "Circular query plan from complex derived-table LEFT JOIN"
   isolated: true
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS cqp_task"

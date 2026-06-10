@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "DATE_FORMAT with various format specifiers"
+  isolated: true
 
 test_cases:
   - name: "DATE_FORMAT from unix timestamp via FROM_UNIXTIME"

@@ -6,6 +6,7 @@
 metadata:
   version: "1.0"
   description: "COUNT(*) with WHERE conditions on keytable"
+  max_time: 10
 
 setup:
   - sql: "DROP TABLE IF EXISTS ckw_features"

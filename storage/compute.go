@@ -68,7 +68,7 @@ func runWithTxSession(tx *TxContext, fn func()) {
 	}))
 }
 
-func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, lazy bool) {
 	t.schema.schemalock.Lock()
 	metadataLocked := true
 	defer func() {
@@ -111,7 +111,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 								done <- scanError{r, string(debug.Stack())}
 							}
 						}()
-						for !s.ComputeColumn(name, inputCols, computor, filterCols, filter, len(shardlist) == 1, currentTx) {
+						for !s.ComputeColumn(name, inputCols, computor, filterCols, filter, len(shardlist) == 1, currentTx, lazy) {
 							// couldn't compute column because delta is still active
 							t.mu.Lock()
 							s = s.rebuild(false)
@@ -151,10 +151,10 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
+	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter, false)
 }
 
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool, tx *TxContext) bool {
+func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool, tx *TxContext, lazy bool) bool {
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}
@@ -185,6 +185,9 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.computor = computor // update lambda
 		proxy.sessionKeys = mergeSessionKeys(extractSessionKeys(computor), extractSessionKeys(filter), dependentSessionKeys)
+		if lazy {
+			return true
+		}
 		if proxy.hasSessionVariants() {
 			runWithTxSession(tx, func() {
 				if !filter.IsNil() {
@@ -230,6 +233,9 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	s.mu.Lock()
 	s.columns[name] = proxy
 	s.mu.Unlock()
+	if lazy {
+		return true
+	}
 
 	// pre-free memory before allocating the compute result array
 	GlobalCache.CheckPressure(int64(s.main_count) * 16)

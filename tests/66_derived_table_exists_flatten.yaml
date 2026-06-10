@@ -20,7 +20,7 @@ setup:
 
 test_cases:
 
-  - name: "COUNT with WHERE EXISTS + scalar subselect (no derived table)"
+  - name: "sql-exists-nested-scalar-count-without-derived"
     sql: |
       SELECT COUNT(*) AS cnt FROM dtef_items i
       WHERE EXISTS (
@@ -34,7 +34,7 @@ test_cases:
       data:
         - cnt: 2
 
-  - name: "COUNT over derived table with EXISTS + scalar subselect"
+  - name: "sql-derived-exists-nested-scalar-count"
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.val) AS total FROM (
         SELECT i.ID AS ID, i.val AS val FROM dtef_items i
@@ -51,7 +51,7 @@ test_cases:
         - cnt: 2
           total: 300
 
-  - name: "SUM(CASE) over derived table with EXISTS + scalar subselect"
+  - name: "sql-exists-nested-scalar-sum-case"
     sql: |
       SELECT
         SUM(CASE WHEN EXISTS (

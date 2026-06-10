@@ -166,6 +166,12 @@ type topKHeap struct {
 	less  func(a, b uint32) bool
 }
 
+type orderedKeyedItem struct {
+	id  uint32
+	key scm.Scmer
+	pos int
+}
+
 func (h *topKHeap) Len() int {
 	return len(h.items)
 }
@@ -266,6 +272,28 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 	hybridsort.Slice(out, func(i, j int) bool {
 		return less(out[i], out[j])
 	})
+	return out
+}
+
+func sortByCachedSingleKey(items []uint32, keyFn func(uint32) scm.Scmer, dir func(...scm.Scmer) scm.Scmer) []uint32 {
+	keyed := make([]orderedKeyedItem, len(items))
+	for i, id := range items {
+		keyed[i] = orderedKeyedItem{id: id, key: keyFn(id), pos: i}
+	}
+	hybridsort.Slice(keyed, func(i, j int) bool {
+		a, b := keyed[i], keyed[j]
+		if scm.ToBool(dir(a.key, b.key)) {
+			return true
+		}
+		if scm.ToBool(dir(b.key, a.key)) {
+			return false
+		}
+		return a.pos < b.pos
+	})
+	out := make([]uint32, len(keyed))
+	for i, item := range keyed {
+		out[i] = item.id
+	}
 	return out
 }
 
@@ -910,10 +938,17 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		resultCap := 1024
 		result.items = make([]uint32, resultCap)
 		resultN := 0
+		earlyLimit := -1
+		if len(sortcols) == 0 && limit >= 0 && limitPartitionCols == 0 {
+			earlyLimit = offset + limit
+		}
 		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
 			// filter in-place: overwrite batch with passing IDs
 			outN := 0
 			for _, idx := range batch {
+				if earlyLimit >= 0 && resultN+outN >= earlyLimit {
+					break
+				}
 				if idx >= visibleUpper {
 					continue
 				}
@@ -965,6 +1000,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			}
 			copy(result.items[resultN:], batch[:outN])
 			resultN += outN
+			if earlyLimit >= 0 && resultN >= earlyLimit {
+				return false
+			}
 			return true
 		})
 		result.items = result.items[:resultN]
@@ -1008,7 +1046,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// When these conditions are met, the same knowledge could also be
 	// used to exit early during iterateIndex (stop after OFFSET+LIMIT).
 	if len(sortcols) > 0 {
-		if limit >= 0 && limitPartitionCols == 0 {
+		if len(sortcols) == 1 && len(result.sortdirs) > 0 && limit >= 0 && limitPartitionCols == 0 && offset+limit >= len(result.items)/2 {
+			result.items = sortByCachedSingleKey(result.items, result.scols[0], result.sortdirs[0])
+		} else if limit >= 0 && limitPartitionCols == 0 {
 			// ORDER BY ... LIMIT only needs the best k rows from each shard.
 			// Keeping all matching rows and fully sorting them makes small-LIMIT
 			// queries degenerate into an expensive full sort with dynamic Scheme

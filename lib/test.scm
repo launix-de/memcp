@@ -142,6 +142,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (zip (list (list 1 2) (list 3 4))) (list (list 1 3) (list 2 4))) true "zip list of lists")
 	(assert (equal? (merge (list (list 1 2) (list 3))) '(1 2 3)) true "merge flattens")
 	(assert (equal? (merge_unique (list (list 1 2) (list 2 3))) '(1 2 3)) true "merge_unique removes duplicates")
+	(assert (equal? (merge_unique '(1 1 2)) '(1 2)) true "merge_unique deduplicates flat single arg")
 	(assert (equal? (merge_unique_mut '(1 2) '(2 3)) '(1 2 3)) true "merge_unique_mut multi-arg semantics")
 	(assert (equal? (merge_unique_mut '(1 1 2) '(2 3)) '(1 2 3)) true "merge_unique_mut deduplicates first arg too")
 	(assert (equal? (merge_unique_mut (list (list 1 2) (list 2 3))) '(1 2 3)) true "merge_unique_mut single-arg list-of-lists semantics")
@@ -212,7 +213,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (scalar_subselect_inline_reason '(1 + 0) true false false nil '() '(dummy-table) true)
 		'inline-direct-agg-scan) true "scalar_subselect_inline_reason names direct aggregate inline path")
 	(assert (equal? (scalar_subselect_lowering_reason_from_facts false false true false false 1 true false false)
-		'inline-uncorrelated) true "scalar_subselect_lowering_reason_from_facts names uncorrelated inline lowering")
+		'prefer-unnest) true "scalar_subselect_lowering_reason_from_facts unnests uncorrelated scalar lowering")
 	(assert (equal? (scalar_subselect_lowering_reason_from_facts true true true false false 1 true false false)
 		'inline-grouped-non-domain-correlation) true "scalar_subselect_lowering_reason_from_facts names grouped non-domain fallback")
 	(assert (equal? (scalar_subselect_lowering_reason_from_facts true false true false false 1 true false false)
@@ -268,10 +269,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		true) true "unnest_correlated_residual_part? keeps non-equality correlated predicates on the inner side")
 	(define iap_domain_cols (list
 		(list iap_outer_source_expr (list 'get_column "outer_t" false "id" false))
+		(list (list 'get_column "helper_t" false "offset_key" false)
+			(list '- (list 'get_column "outer_t" false "ref_c" false) 90))
 		(list (list 'get_column "helper_t" false "grp" false) (list 'session "v1"))))
 	(assert (equal? (domain_outer_sources_from_correlation_cols iap_domain_cols (lambda (expr) expr))
-		(list (list "outer_t" "id" iap_outer_source_expr))) true "domain_outer_sources_from_correlation_cols keeps direct outer get_column refs only")
-	(define tagged_helper (make_scan_tagged_table "sq_helper" '() 2 nil 1 2))
+		(list
+			(list "outer_t" "id" iap_outer_source_expr)
+			(list 'expr
+				(list '- (list 'get_column "outer_t" false "ref_c" false) 90)
+				(list 'get_column "helper_t" false "offset_key" false)))) true "domain_outer_sources_from_correlation_cols keeps direct and expression outer table refs")
+	(define tagged_helper (make_scan_tagged_table "scalar_scan_helper" '() 2 nil 1 2))
 	(define tagged_helper_with_sources (scan_tagged_table_with_outer_sources tagged_helper
 		(list (list "outer_t" "id" iap_outer_source_expr))))
 	(assert (equal? (scan_tagged_table_outer_sources tagged_helper) '()) true "scan_tagged_table_outer_sources is empty by default")
@@ -933,7 +940,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(list 'list
 							(list 'map (list 'produceN 3) (list 'lambda (list 'i) 'i))
 							(list 'reverse (list 'list 'a 'b 'c))))))))
-		 10 20 30)
+			10 20 30)
 		3
 		"length hook: zip preserves exact producer length")
 	(assert

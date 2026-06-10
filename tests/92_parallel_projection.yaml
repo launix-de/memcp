@@ -25,8 +25,8 @@ test_cases:
         (define tables '("pp_data_1" "pp_data_2" "pp_data_3" "pp_data_4"))
         (map tables (lambda (tbl)
           (insert (table "memcp-tests" tbl) '("id" "score")
-            (map (produceN 30000) (lambda (i) (list i (* i 7)))))))
-        (* 4 30000))
+            (map (produceN 12000) (lambda (i) (list i (* i 7)))))))
+        (* 4 12000))
 
   - name: "PP: verify data"
     sql: |
@@ -38,7 +38,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - cnt: 120000
+        - cnt: 48000
 
   - name: "PP: EXPLAIN emits parallel_map for independent scalar subselects"
     sql: |

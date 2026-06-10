@@ -6,6 +6,7 @@
 metadata:
   version: "1.0"
   description: "Deeply nested correlated scalar subselects without aggregation"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS dn_a"
@@ -169,6 +170,7 @@ test_cases:
           e_val: "gamma"
 
   - name: "Depth 5: innermost references outermost directly"
+    max_time: 10
     sql: |
       SELECT a.id,
         (SELECT
@@ -209,6 +211,8 @@ test_cases:
           e_val: null
 
   - name: "Depth 5: two sibling depth-5 subselects"
+    max_time: 10
+    max_plan_size: 95000
     sql: |
       SELECT a.id,
         (SELECT

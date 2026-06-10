@@ -6,6 +6,8 @@
 metadata:
   version: "1.0"
   description: "IN, EXISTS, NOT IN inside deeply nested correlated subselects"
+  max_time: 10
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS dn_a"
@@ -329,6 +331,7 @@ test_cases:
           matched_d: 30
 
   - name: "Mixed depth 4: scalar + EXISTS + scalar chain"
+    max_time: 10
     sql: |
       SELECT a.id,
         (SELECT
@@ -352,6 +355,7 @@ test_cases:
           non_gamma_label: null
 
   - name: "Mixed depth 4: NOT IN skipping 2 levels to outermost"
+    max_time: 10
     sql: |
       SELECT a.id,
         (SELECT

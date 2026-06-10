@@ -640,6 +640,22 @@ func init_list() {
 	})
 
 	Declare(&Globalenv, &Declaration{
+		Name: "heap_list",
+		Desc: "constructs a heap-backed list from its arguments",
+		Fn: func(a ...Scmer) Scmer {
+			out := append([]Scmer{}, a...)
+			return NewSlice(out)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "items", ParamDesc: "items to put into the list", Variadic: true},
+			},
+			Return: FreshAlloc,
+			Const:  true,
+		},
+	})
+
+	Declare(&Globalenv, &Declaration{
 		Name: "count",
 		Desc: "counts the number of elements in the list",
 		Fn: func(a ...Scmer) Scmer {
@@ -948,6 +964,16 @@ func init_list() {
 			lists := a
 			if len(a) == 1 {
 				lists = asSlice(a[0], "merge_unique")
+				flat := false
+				for _, v := range lists {
+					if !v.IsNil() && !v.IsSlice() {
+						flat = true
+						break
+					}
+				}
+				if flat {
+					lists = a
+				}
 			}
 			size := 0
 			for _, v := range lists {

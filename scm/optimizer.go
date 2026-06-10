@@ -513,16 +513,34 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		// Copy() wraps inherited variable replacements in (outer ...), but (outer expr)
 		// already represents one scope transition. We need to "unwrap" one (outer ...)
 		// level from the variable replacements to avoid double-wrapping.
+		innerSlice, nestedOuter := scmerSlice(v[1])
+		nestedOuter = nestedOuter && len(innerSlice) == 2 && scmerIsSymbol(innerSlice[0], "outer")
 		outerOme := optimizerMetainfo{
 			variableReplacement: make(map[Symbol]Scmer),
 			setBlacklist:        ome.setBlacklist,
 		}
 		for k, repl := range ome.variableReplacement {
-			if slice, ok := scmerSlice(repl); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
+			if nestedOuter {
+				for {
+					slice, ok := scmerSlice(repl)
+					if !ok || len(slice) != 2 || !scmerIsSymbol(slice[0], "outer") {
+						break
+					}
+					repl = slice[1]
+				}
+				outerOme.variableReplacement[k] = repl
+			} else if slice, ok := scmerSlice(repl); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
 				outerOme.variableReplacement[k] = slice[1]
 			}
 			// Local NthLocalVar replacements (current lambda params) are NOT
 			// accessible in the outer scope, so we intentionally exclude them.
+		}
+		if nestedOuter {
+			inner, transferOwnership, isConstant := optimizeExCompat(innerSlice[1], env, &outerOme, useResult)
+			if isConstant {
+				return NewSlice([]Scmer{NewSymbol("outer"), NewSlice([]Scmer{NewSymbol("outer"), inner})}), tiConstTransfer
+			}
+			return NewSlice([]Scmer{NewSymbol("outer"), NewSlice([]Scmer{NewSymbol("outer"), inner})}), MakeTypeInfo(transferOwnership, false)
 		}
 		inner, transferOwnership, isConstant := optimizeExCompat(v[1], env, &outerOme, useResult)
 		if isConstant {

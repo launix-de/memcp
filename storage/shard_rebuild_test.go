@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/launix-de/NonLockingReadMap"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -990,6 +992,62 @@ func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
 	}
 	if got := reloaded.Count(); got != 0 {
 		t.Fatalf("ephemeral helper row count = %d, want 0", got)
+	}
+}
+
+func TestEphemeralQueryTablesAreNotSerializedInSchema(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-ephemeral-helper-schema-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tephemeralschema")
+
+	CreateDatabase("tephemeralschema", false)
+	live, _ := CreateTable("tephemeralschema", "items", Safe, false)
+	live.CreateColumn("id", "INT", nil, nil)
+	helper, _ := CreateTable("tephemeralschema", ".prejoin:helper", Cache, false)
+	helper.CreateColumn("grp", "INT", nil, nil)
+
+	db := GetDatabase("tephemeralschema")
+	raw, err := json.Marshal(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemaJSON := string(raw)
+	if !strings.Contains(schemaJSON, `"items"`) {
+		t.Fatalf("schema JSON lost durable table: %s", schemaJSON)
+	}
+	if strings.Contains(schemaJSON, `".prejoin:helper"`) {
+		t.Fatalf("schema JSON serialized ephemeral helper table: %s", schemaJSON)
+	}
+
+	oldTables := NonLockingReadMap.New[table, string]()
+	oldTables.Set(live)
+	oldTables.Set(helper)
+	type persist struct {
+		Name   string                                             `json:"name"`
+		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+	}
+	oldRaw, err := json.Marshal(persist{Name: "tephemeralschema", Tables: oldTables})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := new(database)
+	if err := json.Unmarshal(oldRaw, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.tables.Get("items") == nil {
+		t.Fatal("unmarshal lost durable table")
+	}
+	if loaded.tables.Get(".prejoin:helper") != nil {
+		t.Fatal("unmarshal kept ephemeral helper table from old schema")
 	}
 }
 

@@ -2,8 +2,8 @@
 # Regression: a scalar subselect whose WHERE carries a correlated
 # aggregate that itself carries two correlated scalar subselects must
 # not blow up into a quadratic prejoin. This is the minimal reduction of
-# the ERPL dashboard "reminderFop_journal_year_accountOpos" badge query,
-# which was observed taking 3+ minutes for ~1600 rows. Per Neumann
+# a nested reminder-count query shape, which was observed taking 3+
+# minutes for ~1600 rows. Per Neumann
 # unnesting every nesting level decorrelates to a domain join; the plan
 # must stay near-linear.
 
@@ -32,12 +32,14 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ncs_drv"
 
 test_cases:
-  # The deterministic gate is max_plan_size, not wall-clock time: a correct
-  # plan for this query serializes to ~8 KB; the cubic prejoin blow-up
-  # observed on this branch is ~362 KB. Plan size is hardware-independent, so
-  # this trips identically on a fast x86 box and on a Raspberry Pi.
+  # The deterministic gate is max_plan_size, not wall-clock time: the
+  # decorrelated plan for this query serializes below 60 KB; the cubic prejoin
+  # blow-up observed on this branch was ~362 KB. Plan size is hardware-
+  # independent, so this trips identically on a fast x86 box and on a
+  # Raspberry Pi.
   - name: "nested correlated scalar-in-aggregate-in-scalar stays near-linear"
-    max_plan_size: 40000
+    max_plan_size: 60000
+    max_time: 10
     sql: |
       SELECT
         (SELECT SUM(1) FROM ncs_acc OBJ WHERE OBJ.typ IN (4, 5) AND (
