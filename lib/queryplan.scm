@@ -6001,8 +6001,74 @@ lambda params, other refs become (outer alias.col) closure captures. */
 						'(_ e) (or acc (expr_uses_session_state e))
 						acc)) false))
 			false))
+	/* Doubly-nested scalar bypass: when a scalar subselect's projection
+	   contains another inner_select marker, route to legacy. The new
+	   pipeline mis-emits scan-tagged-table markers that escape into
+	   function-call position. Pattern: SELECT (SELECT (COALESCE((SELECT
+	   ...))) FROM ...) AS X — the inner-scalar's projection includes
+	   another scalar. Detection via expr-has-nested-inner: walk markers,
+	   for each marker check if its subquery's fields contain another
+	   marker (recursive). Examples: 66_nested_subselect_column_as_table,
+	   86 isodoc, 32 Wrapped derived view. */
+	(define expr-is-inner-select-marker (lambda (e)
+		(if (or (nil? e) (not (list? e))) false
+			(begin
+				(define h (if (>= (count e) 1) (car e) nil))
+				(or
+					(equal?? h (quote inner_select))
+					(equal?? h (quote inner_select_in))
+					(equal?? h (quote inner_select_exists)))))))
+	(define expr-walk-find-nested-marker (lambda (e)
+		(if (or (nil? e) (not (list? e))) false
+			(if (and (expr-is-inner-select-marker e) (>= (count e) 2))
+				(begin
+					(define sub (nth e (if (equal?? (car e) (quote inner_select_in)) 2 1)))
+					(if (qpp-tuple? sub)
+						(or
+							/* check sub's fields */
+							(begin
+								(define sub-fields (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+								(reduce sub-fields (lambda (acc pair) (match pair
+									'(_ se) (or acc (expr-walk-contains-marker se))
+									acc)) false))
+							/* check sub's WHERE — nested-in-WHERE case is the
+							   isodoc/wrapped-derived pattern where the SCALAR's
+							   WHERE has another scalar (not its projection) */
+							(expr-walk-contains-marker (coalesceNil (qpp-tuple-condition sub) true)))
+						(reduce e (lambda (acc se)
+							(or acc (expr-walk-find-nested-marker se))) false)))
+				(reduce e (lambda (acc se)
+					(or acc (expr-walk-find-nested-marker se))) false)))))
+	(define expr-walk-contains-marker (lambda (e)
+		(if (or (nil? e) (not (list? e))) false
+			(if (expr-is-inner-select-marker e) true
+				(reduce e (lambda (acc se)
+					(or acc (expr-walk-contains-marker se))) false)))))
+	(define query-has-nested-scalar
+		(if (qpp-tuple? query)
+			(or
+				(expr-walk-find-nested-marker (coalesceNil (qpp-tuple-condition query) true))
+				(reduce (qpp-fields-to-pairs (qpp-tuple-fields query))
+					(lambda (acc pair) (match pair
+						'(_ e) (or acc (expr-walk-find-nested-marker e))
+						acc)) false)
+				(reduce (qpp-tuple-tables query) (lambda (acc td)
+					(if (or (nil? td) (< (count td) 3)) acc
+						(begin
+							(define tn (nth td 2))
+							(if (qpp-tuple? tn)
+								(or acc
+									(expr-walk-find-nested-marker (coalesceNil (qpp-tuple-condition tn) true))
+									(reduce (qpp-fields-to-pairs (qpp-tuple-fields tn))
+										(lambda (a2 p2) (match p2
+											'(_ e2) (or a2 (expr-walk-find-nested-marker e2))
+											a2)) false))
+								acc))))
+					false))
+			false))
 	(define routed-query
-		(if (and (qpp-tuple? query) (not query-has-window) (not query-has-session))
+		(if (and (qpp-tuple? query) (not query-has-window) (not query-has-session)
+				(not query-has-nested-scalar))
 			(begin
 				(define neu (neumann_compile_select query))
 				(if neumann_pipeline_trace (begin
