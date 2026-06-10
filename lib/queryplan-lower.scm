@@ -630,17 +630,26 @@ and column refs to the right's underlying tables are retargeted. */
 		(begin
 			(define left-aliases (map (qpp-tuple-tables left-tuple) (lambda (t)
 				(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
-			/* Outer-shape gate: GROUP BY in outer still routes to wrap-derived
-			   (groups are FAQ §33 HARD borders, can't cross inline). The
-			   prior outer-has-agg-fields gate was removed — with FAQ §22
-			   per-alias isOuter+joinExpr making inner emit exactly one row
-			   per outer binding (match or NULL), aggregates like COUNT(*)
-			   on outer rows still count correctly (1 inner row per outer
-			   row, same as without scalar). Removing it preserves all
-			   tests AND opens more queries to the cleaner inline path. */
+			/* Gate on OUTER shape too: inline-flat is unsafe when outer has
+			   GROUP BY or aggregate-bearing fields. The inlined inner table
+			   flat-joins to outer; aggregates like COUNT(*) then count joined
+			   rows instead of outer rows. Wrap-derived keeps the scalar self-
+			   contained, which legacy aggregates correctly. 2026-06-10 NOTE:
+			   tested removing outer-has-agg-fields (commit 10150fbd3 since
+			   reverted) — caused -4 in 66_* family (exists_session_var,
+			   derived_table_exists_flatten, exists_nested_scalar). The COUNT
+			   subquery rewrite path for EXISTS uses aggregate fields with a
+			   different evaluation context than my multi-table inline assumes,
+			   so removing the gate exposed it incorrectly. Gate stays. */
 			(define outer-has-group
 				(> (count (coalesceNil (qpp-tuple-group left-tuple) '())) 0))
-			(if (and (not outer-has-group)
+			(define outer-has-agg-fields
+				(reduce (qpp-fields-to-pairs
+					(coalesceNil (qpp-tuple-fields left-tuple) '()))
+					(lambda (acc pair) (match pair
+						'(_ e) (or acc (qpl-expr-has-aggregate? e))
+						acc)) false))
+			(if (and (not outer-has-group) (not outer-has-agg-fields)
 					(qpu-low-inline-scalar-eligible? right-tuple join-pred
 						rhs-alias jtype left-aliases))
 				(qpu-low-join-inline-scalar left-tuple right-tuple join-pred
@@ -649,7 +658,7 @@ and column refs to the right's underlying tables are retargeted. */
 				   scalars before falling back to wrap-derived. Avoids nested
 				   deriveds (sq_X containing sq_Y) which trigger the legacy
 				   (outer (outer X)) env-chain bug for doubly-nested cases. */
-				(if (and (not outer-has-group)
+				(if (and (not outer-has-group) (not outer-has-agg-fields)
 						(qpu-low-inline-multitable-eligible? right-tuple join-pred
 							rhs-alias jtype left-aliases left-tuple))
 					(qpu-low-join-inline-multitable left-tuple right-tuple join-pred
