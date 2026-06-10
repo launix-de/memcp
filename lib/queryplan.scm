@@ -5950,8 +5950,21 @@ lambda params, other refs become (outer alias.col) closure captures. */
 	   For non-SELECT shapes (UNION ALL produces a (union_all …) form, not a
 	   7-tuple), build_queryplan_term_with_sink handles them directly via its
 	   union_all_term branch. */
-	(define routed-query
+	/* Window function bypass: when fields contain window_func nodes,
+	   skip the new LIFT/UNNEST/LOWER pipeline. Master's legacy
+	   build_queryplan_inner handles LAG/LEAD/ROW_NUMBER/RANK correctly;
+	   our new pipeline doesn't yet preserve window_func structure
+	   through alias/resolve passes. TEMPORARY until window support
+	   is added properly to the pipeline. */
+	(define query-has-window
 		(if (qpp-tuple? query)
+			(reduce (qpp-fields-to-pairs (qpp-tuple-fields query))
+				(lambda (acc pair) (match pair
+					'(_ e) (or acc (not (equal? (extract_window_funcs e) '())))
+					acc)) false)
+			false))
+	(define routed-query
+		(if (and (qpp-tuple? query) (not query-has-window))
 			(begin
 				(define neu (neumann_compile_select query))
 				(if neumann_pipeline_trace (begin
