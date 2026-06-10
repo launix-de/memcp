@@ -5950,18 +5950,40 @@ lambda params, other refs become (outer alias.col) closure captures. */
 	   For non-SELECT shapes (UNION ALL produces a (union_all …) form, not a
 	   7-tuple), build_queryplan_term_with_sink handles them directly via its
 	   union_all_term branch. */
-	/* Window function bypass: when fields contain window_func nodes,
-	   skip the new LIFT/UNNEST/LOWER pipeline. Master's legacy
-	   build_queryplan_inner handles LAG/LEAD/ROW_NUMBER/RANK correctly;
-	   our new pipeline doesn't yet preserve window_func structure
-	   through alias/resolve passes. TEMPORARY until window support
-	   is added properly to the pipeline. */
+	/* Window function bypass: when ANY field or condition (including
+	   nested subqueries) contains window_func nodes, skip the new
+	   LIFT/UNNEST/LOWER pipeline. Master's legacy build_queryplan_inner
+	   handles LAG/LEAD/ROW_NUMBER/RANK correctly; our new pipeline doesn't
+	   yet preserve window_func structure through alias/resolve passes.
+	   Recurse into inner_select / inner_select_in / inner_select_exists
+	   markers AND into derived sub-tuples to catch nested window cases
+	   (test 73 Case 4 ERPL pattern, Case 12b nested ORDER BY LIMIT via
+	   ROW_NUMBER). */
+	(define expr-contains-window-deep (lambda (expr)
+		(if (or (nil? expr) (not (list? expr))) false
+			(if (not (equal? (extract_window_funcs expr) '())) true
+				(reduce expr (lambda (acc e)
+					(or acc (expr-contains-window-deep e))) false)))))
 	(define query-has-window
 		(if (qpp-tuple? query)
-			(reduce (qpp-fields-to-pairs (qpp-tuple-fields query))
-				(lambda (acc pair) (match pair
-					'(_ e) (or acc (not (equal? (extract_window_funcs e) '())))
-					acc)) false)
+			(or
+				(reduce (qpp-fields-to-pairs (qpp-tuple-fields query))
+					(lambda (acc pair) (match pair
+						'(_ e) (or acc (expr-contains-window-deep e))
+						acc)) false)
+				(expr-contains-window-deep (coalesceNil (qpp-tuple-condition query) true))
+				(reduce (qpp-tuple-tables query) (lambda (acc td)
+					(if (or (nil? td) (< (count td) 3)) acc
+						(begin
+							(define tname (nth td 2))
+							(if (qpp-tuple? tname)
+								(or acc
+									(expr-contains-window-deep tname)
+									(reduce (qpp-fields-to-pairs (qpp-tuple-fields tname))
+										(lambda (a2 p2) (match p2
+											'(_ e2) (or a2 (expr-contains-window-deep e2))
+											a2)) false))
+								acc)))) false))
 			false))
 	/* Session-state bypass: when the WHERE or fields contain session-state
 	   references (@var, context, __memcp_tx), route through legacy too.
