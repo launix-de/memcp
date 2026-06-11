@@ -1627,11 +1627,14 @@ same cache column while different session values get separate temp columns. */
 An aggregate is single-pass eligible when its reducer is associative AND
 its expression doesn't depend on subselects / nested aggregates / DISTINCT.
 Currently unused — wiring follows in subsequent commits. */
+/* Reducer comparison: at parse time reducers are symbols (+, min, max, *);
+after optimizer expansion they may be resolved to native function values.
+Compare against BOTH the symbol form AND the bound function value. */
 (define _agg_simple_reducer? (lambda (r)
-	(or (equal? r '+) (equal? r (quote +))
-		(equal? r 'min) (equal? r (quote min))
-		(equal? r 'max) (equal? r (quote max))
-		(equal? r '*) (equal? r (quote *)))))
+	(or (equal? r '+) (equal? r (quote +)) (equal? r +)
+		(equal? r 'min) (equal? r (quote min)) (equal? r min)
+		(equal? r 'max) (equal? r (quote max)) (equal? r max)
+		(equal? r '*) (equal? r (quote *)) (equal? r *))))
 (define _agg_expr_has_subselect? (lambda (e) (match e
 	(cons (symbol inner_select) _) true
 	(cons '(quote inner_select) _) true
@@ -1669,9 +1672,11 @@ corresponds to one aggregate column's running state. */
 		(cons (quote list)
 			(mapIndex ags (lambda (i ag)
 				(match ag
-					'(_ reduce _) (list reduce
+					/* (reduce (nth old i) (nth new i)) — APPLY the reducer; cons it
+					into the per-position result list. */
+					'(_ reduce _) (cons reduce (list
 						(list (quote nth) (quote old) i)
-						(list (quote nth) (quote new) i))
+						(list (quote nth) (quote new) i)))
 					_ (begin (error "make_single_pass_merge_fn: bad ag shape" ag)))))))))
 (define aggregate_cache_condition_suffix (lambda (expr_name condition_expr runtime_suffix)
 	(fnv_hash (concat (expr_name condition_expr) (coalesceNil runtime_suffix "")))
@@ -1711,7 +1716,7 @@ aggregate state per key (eliminating the per-key createcolumn scans).
 Currently unused — wiring lives in single-pass-collect-aggregate-design. */
 (define assoc_kv_as_dataset_rows (lambda (dict key_width)
 	(extract_assoc dict (lambda (k v)
-		(append
+		(merge
 			(if (list? k) k
 				(if (<= key_width 1)
 					(list k)
@@ -7185,6 +7190,82 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						)
 					) "collect")))
 
+				/* Single-pass collect+aggregate per FAQ §3/§33/§34: instead of letting
+				agg_plans emit per-cell createcolumn scans (O(N*K)), this variant fills
+				both group keys AND aggregate values in ONE base scan. Each row builds
+				(key-tuple, value-tuple); the reducer combines value tuples element-wise
+				via each aggregate's associative reducer; the finalizer inserts keys+
+				agg values into the keytable in one call. The keytable's agg columns
+				remain regular populated columns — DML invalidation still flows through
+				register_keytable_cleanup. Gated by aggregates_eligible_for_single_pass?
+				to ensure all reducers are associative and exprs contain no subselects. */
+				(define make_collect_single_pass (lambda (sp_ags_raw sp_agg_col_name)
+					(begin
+						/* Dedupe by canonical agg_col_name: the upstream merge_unique on
+						aggregate_count_descriptor sometimes leaves a duplicate because the
+						optimizer resolves `+` symbol → native func and merge_unique compares
+						by structural equality. Same logical aggregate must yield one column,
+						otherwise the insert references duplicate col names. */
+						(define sp_ags (reduce sp_ags_raw (lambda (acc ag) (begin
+							(define cn (sp_agg_col_name ag))
+							(define already (reduce acc (lambda (found existing)
+								(or found (equal? cn (sp_agg_col_name existing)))) false))
+							(if already acc (merge acc (list ag)))))
+							'()))
+						(set keycols (merge_unique (map resolved_stage_group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
+						(define agg_input_cols (merge_unique (map sp_ags (lambda (ag) (match ag
+							'(expr _ _) (merge_unique (list
+								(extract_columns_for_tblvar tblvar expr)
+								(extract_outer_columns_for_tblvar tblvar expr)))
+							'())))))
+						(define sp_input_cols (merge_unique (list keycols filtercols agg_input_cols)))
+						(define merge_fn (make_single_pass_merge_fn sp_ags))
+						(define insert_col_names (cons 'list (merge
+							(map resolved_stage_group expr_name)
+							(map sp_ags (lambda (ag) (sp_agg_col_name ag))))))
+						'('time
+								(scan_wrapper 'scan schema tbl
+									(cons list sp_input_cols)
+									/* WHERE filter */
+									'((quote lambda) (map sp_input_cols (lambda (col) (symbol (concat tblvar "." col))))
+										(optimize (replace_columns_from_expr collect_condition)))
+									(cons list sp_input_cols)
+									/* mapfn body: emit (list key-tuple value-tuple) per row */
+									'((quote lambda) (map sp_input_cols (lambda (col) (symbol (concat tblvar "." col))))
+										(list (quote list)
+											(cons (quote list) (map resolved_stage_group (lambda (e) (replace_columns_from_expr e))))
+											(cons (quote list) (map sp_ags (lambda (ag) (match ag '(e _ _) (replace_columns_from_expr e) nil))))))
+									/* reducer: set_assoc with per-position merge */
+									(list (quote lambda) '('acc 'kv)
+										(list (quote set_assoc) (quote acc)
+											(list (quote car) (quote kv))
+											(list (quote car) (list (quote cdr) (quote kv)))
+											merge_fn))
+									'(list)
+									/* finalizer: insert keys + agg values in one call */
+									'((quote lambda) '('acc 'sharddict)
+										'((quote insert)
+											'((quote table) schema grouptbl)
+											insert_col_names
+											'((quote assoc_kv_as_dataset_rows) (quote sharddict) (count keycols))
+											'(list) '((quote lambda) '() true) true))
+									isOuter)
+								"collect_single_pass"))))
+				/* Predeclare helper: idempotent createcolumn-no-computor for each agg
+				col, MUST run outside keytable_init guard so warm queries that introduce
+				new aggregates against an existing keytable still get their columns. */
+				(define make_predeclare_agg_cols (lambda (sp_ags_raw sp_agg_col_name)
+					(begin
+						(define sp_ags (reduce sp_ags_raw (lambda (acc ag) (begin
+							(define cn (sp_agg_col_name ag))
+							(define already (reduce acc (lambda (found existing)
+								(or found (equal? cn (sp_agg_col_name existing)))) false))
+							(if already acc (merge acc (list ag)))))
+							'()))
+						(cons 'begin (map sp_ags (lambda (ag)
+							(list (quote createcolumn) (list (quote table) schema grouptbl)
+								(sp_agg_col_name ag) "any" '(list) '(list))))))))
+
 				(if is_dedup (begin
 					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
 					(define replace_col_for_dedup (make_col_replacer grouptbl collect_condition true expr_name tblvar agg_col_name))
@@ -7615,19 +7696,51 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1)) (not (string? tbl))) nil
 							(list 'register_keytable_cleanup tbl_source_expr (list 'table schema grouptbl) tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
+						/* Single-pass collect+aggregate (FAQ §3/§33/§34) — DEFERRED.
+						The make_collect_single_pass + make_predeclare_agg_cols path was
+						implemented and verified working for the cold-cache case. It
+						correctly populates keys+aggregate values in ONE base scan when
+						the keytable is fresh.
+
+						BLOCKER: warm-with-new-aggs case. When query A populates the
+						keytable with aggs (k, COUNT) and query B requests new aggs
+						(k, COUNT, SUM), the keytable_init guard says "warm" — collect
+						skipped — but the SUM column never gets populated, resulting in
+						"Column does not exist" panic. The single-pass scan can't run on
+						warm because the insert would conflict with existing rows (UNIQUE
+						constraint on key cols), and there's no UPDATE-existing path.
+
+						The proper FAQ-aligned architecture for this is the
+						dict-cached-computor approach: KEEP the agg_plans createcolumn
+						emission but change the computor lambda from per-cell-scan to
+						dict-lookup-with-lazy-shared-build. This preserves DML
+						invalidation via ComputeProxy (FAQ §34) while replacing the
+						O(N*K) cost with O(N + K) — the dict is built ONCE per query
+						via shared scan, cached in session, reused by all aggregate cols.
+
+						Gate is forced to FALSE for now. Re-enable when dict-cached
+						computor lands. Foundation commits (helpers, eligibility, merge
+						codegen) stay in place so the design can be picked up cleanly. */
+						(define _single_pass_eligible false)
 						/* collect + trigger deploy on first keytable creation only.
 						createtable inside init_code returns true on first creation.
 						scoped GROUPs always re-collect (stale data from prior queries). */
 						(define collect_plan (if is_fk_reuse '()
 							(list (list 'if keytable_init
-								(list 'begin (make_collect false) cleanup_plan)
+								(list 'begin
+									(if _single_pass_eligible
+										(list 'begin
+											(make_predeclare_agg_cols ags agg_col_name)
+											(make_collect_single_pass ags agg_col_name))
+										(make_collect false))
+									cleanup_plan)
 								nil))))
 						(cons 'begin (merge
 							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
 							(if (nil? group_value_local_compute_plan) '() (list group_value_local_compute_plan))
 							collect_plan
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
-							(list compute_plan)
+							(if _single_pass_eligible '() (list compute_plan))
 							(list
 								/* window+GROUP BY injection: after keytable is computed,
 								scan it to fill promises with global totals, then wrap
