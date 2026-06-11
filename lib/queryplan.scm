@@ -7266,6 +7266,49 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list (quote createcolumn) (list (quote table) schema grouptbl)
 								(sp_agg_col_name ag) "any" '(list) '(list))))))))
 
+				/* make_build_groupby_dict_fn: emits a 0-arg lambda whose body does
+				ONE shared base-table scan and returns a dict {key-tuple → value-tuple}.
+				The dict is the shared backing store for the dict-cached agg computors
+				(see dict-cached-computor architecture). Each value-tuple has one slot
+				per aggregate in sp_ags (in order); each aggregate's computor extracts
+				its slot via nth. The build function reuses the same mapfn/reducer
+				machinery as make_collect_single_pass but with a no-side-effect
+				finalizer that just returns the accumulated dict. */
+				(define make_build_groupby_dict_fn (lambda (sp_ags)
+					(begin
+						(define sp_input_cols_local (merge_unique (list
+							(merge_unique (map resolved_stage_group (lambda (e) (extract_columns_for_tblvar tblvar e))))
+							filtercols
+							(merge_unique (map sp_ags (lambda (ag) (match ag
+								'(expr _ _) (merge_unique (list
+									(extract_columns_for_tblvar tblvar expr)
+									(extract_outer_columns_for_tblvar tblvar expr)))
+								'())))))))
+						(define merge_fn_local (make_single_pass_merge_fn sp_ags))
+						/* Return: (lambda () (scan ... → dict)) */
+						(list (quote lambda) '()
+							(scan_wrapper 'scan schema tbl
+								(cons list sp_input_cols_local)
+								/* filter: WHERE condition AND optionally the key-equality (which we DON'T add — we want ALL rows) */
+								'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
+									(optimize (replace_columns_from_expr (coalesceNil condition true))))
+								(cons list sp_input_cols_local)
+								/* mapfn: per row, emit (key-tuple value-tuple) */
+								'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
+									(list (quote list)
+										(cons (quote list) (map resolved_stage_group (lambda (e) (replace_columns_from_expr e))))
+										(cons (quote list) (map sp_ags (lambda (ag) (match ag '(e _ _) (replace_columns_from_expr e) nil))))))
+								/* reducer: set_assoc with merge */
+								(list (quote lambda) '('acc 'kv)
+									(list (quote set_assoc) (quote acc)
+										(list (quote car) (quote kv))
+										(list (quote car) (list (quote cdr) (quote kv)))
+										merge_fn_local))
+								'(list)
+								/* finalizer: return the dict as-is, NO side effects */
+								'((quote lambda) '('acc 'sharddict) (quote sharddict))
+								false)))))
+
 				(if is_dedup (begin
 					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
 					(define replace_col_for_dedup (make_col_replacer grouptbl collect_condition true expr_name tblvar agg_col_name))
@@ -7625,6 +7668,27 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(list (quote get_column) tblvar false match_col false))))
 							(cons sym args) (cons sym (map args lower_runtime_materialized_aggs_single))
 							expr)))
+						/* Dict-cached computor pre-compute: ONE shared dict per group stage,
+						built lazily on first agg's first computor call, cached in the
+						per-API-call session, looked up by all sibling aggs.
+						COLD: O(N) build + O(K*M) lookups instead of legacy O(N*K*M). */
+						(define _dca_eligible _single_pass_eligible)
+						(define _dca_sp_ags (if _dca_eligible
+							(reduce ags (lambda (acc ag) (begin
+								(define cn (agg_col_name ag))
+								(define already (reduce acc (lambda (found existing)
+									(or found (equal? cn (agg_col_name existing)))) false))
+								(if already acc (merge acc (list ag)))))
+								'())
+							'()))
+						(define _dca_build_fn (if _dca_eligible (make_build_groupby_dict_fn _dca_sp_ags) nil))
+						(define _dca_cache_key (if _dca_eligible (concat "gbd:" grouptbl) nil))
+						(define _dca_ag_index_for (lambda (ag)
+							(reduce (produceN (count _dca_sp_ags)) (lambda (found i)
+								(if (not (nil? found)) found
+									(if (equal? (agg_col_name (nth _dca_sp_ags i)) (agg_col_name ag)) i nil)))
+								nil)))
+
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 							(define runtime_expr
 								(rewrite_materialized_source_cols_single
@@ -7636,21 +7700,54 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							)))
 							/* COUNT column itself must not filter by itself (circular); all others filter by COUNT>0 */
 							(define this_options (if (and needs_count (equal? (agg_col_name ag) count_col_name)) '(list "temp" true) createcol_options))
-							'((quote createcolumn) '('table schema grouptbl) (agg_col_name ag) "any" '(list) this_options
-								(cons list (map resolved_stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
-								'((quote lambda) (map resolved_stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
-									(scan_wrapper 'scan schema tbl
-										(cons list (merge tblvar_cols filtercols))
-										/* check group equality AND WHERE-condition */
-										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map resolved_stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
-										(cons list cols)
-										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr runtime_expr))
-										reduce
-										neutral
-										nil
-										false /* never isOuter in createcolumn: COUNT=0 for empty matches, not COUNT=1 */
-									)
-							))
+							(if _dca_eligible
+								/* Dict-cached computor body. The lambda parameter symbols
+								must NOT collide with Scheme reader syntax — canonical agg
+								names like (get_column "g" false "k" false) would be parsed
+								as function calls inside the body. Use positional kt_k<i>
+								names that only appear in our body. */
+								(begin
+									(define _dca_idx (_dca_ag_index_for ag))
+									(define _dca_n (count resolved_stage_group))
+									(define _dca_key_syms (map (produceN _dca_n) (lambda (i) (symbol (concat "kt_k" i)))))
+									(define _dca_computor_body (list (quote begin)
+										(list (quote define) (quote sess) (list (quote context) "session"))
+										/* Lookup or build dict, then bind dict to the chosen value. */
+										(list (quote define) (quote dict)
+											(list (quote begin)
+												(list (quote define) (quote cached) (list (quote sess) _dca_cache_key))
+												(list (quote if) (list (quote nil?) (quote cached))
+													(list (quote begin)
+														(list (quote define) (quote built) (list _dca_build_fn))
+														(list (quote sess) _dca_cache_key (quote built))
+														(quote built))
+													(quote cached))))
+										(list (quote define) (quote key_tuple)
+											(cons (quote list) _dca_key_syms))
+										(list (quote define) (quote row)
+											(list (quote get_assoc) (quote dict) (quote key_tuple)))
+										(list (quote if) (list (quote nil?) (quote row))
+											neutral
+											(list (quote nth) (quote row) _dca_idx))))
+									'((quote createcolumn) '('table schema grouptbl) (agg_col_name ag) "any" '(list) this_options
+										(cons list (map resolved_stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
+										(list (quote lambda) _dca_key_syms _dca_computor_body)))
+								/* Legacy per-cell scan computor. */
+								'((quote createcolumn) '('table schema grouptbl) (agg_col_name ag) "any" '(list) this_options
+									(cons list (map resolved_stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
+									'((quote lambda) (map resolved_stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
+										(scan_wrapper 'scan schema tbl
+											(cons list (merge tblvar_cols filtercols))
+											/* check group equality AND WHERE-condition */
+											'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map resolved_stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
+											(cons list cols)
+											'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr runtime_expr))
+											reduce
+											neutral
+											nil
+											false /* never isOuter in createcolumn: COUNT=0 for empty matches, not COUNT=1 */
+										)
+								)))
 						)))))
 						/* COUNT is a dependency for filtered aggregates: non-count keytable
 						columns may filter on COUNT>0 and therefore must not race the COUNT
@@ -7696,51 +7793,35 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(define cleanup_plan (if (or is_fk_reuse (equal? resolved_stage_group '(1)) (not (string? tbl))) nil
 							(list 'register_keytable_cleanup tbl_source_expr (list 'table schema grouptbl) tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
-						/* Single-pass collect+aggregate (FAQ §3/§33/§34) — DEFERRED.
-						The make_collect_single_pass + make_predeclare_agg_cols path was
-						implemented and verified working for the cold-cache case. It
-						correctly populates keys+aggregate values in ONE base scan when
-						the keytable is fresh.
-
-						BLOCKER: warm-with-new-aggs case. When query A populates the
-						keytable with aggs (k, COUNT) and query B requests new aggs
-						(k, COUNT, SUM), the keytable_init guard says "warm" — collect
-						skipped — but the SUM column never gets populated, resulting in
-						"Column does not exist" panic. The single-pass scan can't run on
-						warm because the insert would conflict with existing rows (UNIQUE
-						constraint on key cols), and there's no UPDATE-existing path.
-
-						The proper FAQ-aligned architecture for this is the
-						dict-cached-computor approach: KEEP the agg_plans createcolumn
-						emission but change the computor lambda from per-cell-scan to
-						dict-lookup-with-lazy-shared-build. This preserves DML
-						invalidation via ComputeProxy (FAQ §34) while replacing the
-						O(N*K) cost with O(N + K) — the dict is built ONCE per query
-						via shared scan, cached in session, reused by all aggregate cols.
-
-						Gate is forced to FALSE for now. Re-enable when dict-cached
-						computor lands. Foundation commits (helpers, eligibility, merge
-						codegen) stay in place so the design can be picked up cleanly. */
-						(define _single_pass_eligible false)
+						/* Dict-cached agg computor (FAQ §3/§33/§34): KEEP the legacy
+						agg_plans createcolumn emission so DML invalidation via
+						ComputeProxy stays intact, but REPLACE each ag's per-cell scan
+						computor with a dict-lookup over a shared lazily-built dict.
+						Cold cost drops from O(N*K*M) to ~O(N + K*M). Eligibility:
+						associative reducers, no nested aggs / subselects, FK-reuse and
+						global-group already optimal; scoped stages keep legacy. */
+						(define _single_pass_eligible (and
+							(not is_fk_reuse)
+							(not (equal? resolved_stage_group '(1)))
+							(nil? _stage_scope)
+							(aggregates_eligible_for_single_pass? ags)))
 						/* collect + trigger deploy on first keytable creation only.
 						createtable inside init_code returns true on first creation.
 						scoped GROUPs always re-collect (stale data from prior queries). */
+						/* collect_plan always populates KEY cols. Aggregate cols are still
+						populated lazily via createcolumn (legacy collect mechanism),
+						but its computor body is dict-cached when _single_pass_eligible
+						(see agg_plans above). */
 						(define collect_plan (if is_fk_reuse '()
 							(list (list 'if keytable_init
-								(list 'begin
-									(if _single_pass_eligible
-										(list 'begin
-											(make_predeclare_agg_cols ags agg_col_name)
-											(make_collect_single_pass ags agg_col_name))
-										(make_collect false))
-									cleanup_plan)
+								(list 'begin (make_collect false) cleanup_plan)
 								nil))))
 						(cons 'begin (merge
 							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
 							(if (nil? group_value_local_compute_plan) '() (list group_value_local_compute_plan))
 							collect_plan
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
-							(if _single_pass_eligible '() (list compute_plan))
+							(list compute_plan)
 							(list
 								/* window+GROUP BY injection: after keytable is computed,
 								scan it to fill promises with global totals, then wrap
