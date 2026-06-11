@@ -39,6 +39,12 @@ func NewTableScmer(t *table) scm.Scmer {
 
 // TableFromScmer extracts a *table from a TagTable Scmer.
 func TableFromScmer(s scm.Scmer) *table {
+	for s.IsSourceInfo() {
+		s = s.SourceInfo().Value()
+	}
+	if !s.IsCustom(TagTable) {
+		panic("missing table handle")
+	}
 	return (*table)(s.Custom(TagTable))
 }
 

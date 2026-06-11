@@ -1,3 +1,4 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
 # KILL QUERY and LOCK TABLES functional tests
 
 metadata:
@@ -388,6 +389,19 @@ test_cases:
         expect:
           rows: 1
           contains: "0"
+
+  - name: "sql-missing-table-handle reports clean scan error"
+    scm: |
+      (scan nil nil '()
+        (lambda () true)
+        '()
+        (lambda () 1))
+    expect:
+      error: true
+      contains: "missing table"
+      not_contains:
+        - "wrong custom tag"
+        - "expected 101"
 
   # ── cleanup ────────────────────────────────────────────────────────────────
 

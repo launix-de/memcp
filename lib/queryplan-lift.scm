@@ -643,21 +643,11 @@ schema info to disambiguate — a separate concern). */
 				nil   /* LIMIT dropped */
 				nil)))))
 
-(define qpl-simple-exists-subquery? (lambda (sub outer-aliases)
-	(and
-		(qpp-tuple? sub)
-		(equal? (coalesceNil (qpp-tuple-group sub) '()) '())
-		(nil? (qpp-tuple-having sub))
-		(begin
-			(define own-aliases
-				(qpl-outer-aliases (qpp-tuple-tables sub)))
-			(reduce (extract_tblvars (qpp-tuple-condition sub))
-				(lambda (ok tv)
-					(and ok
-						(or
-							(has? own-aliases tv)
-							(has? outer-aliases tv))))
-				true)))))
+	(define qpl-simple-exists-subquery? (lambda (sub outer-aliases)
+		(and
+			(qpp-tuple? sub)
+			(equal? (coalesceNil (qpp-tuple-group sub) '()) '())
+			(nil? (qpp-tuple-having sub)))))
 
 (define qpl-make-value-subquery-for-exists (lambda (sub)
 	(if (not (qpp-tuple? sub))
@@ -825,23 +815,36 @@ anything else. */
 		(equal? head (quote =))
 		(equal? head (symbol =)))))
 
+(define qpl-count-inner-nullable-expr (lambda (inner)
+	(match inner
+		(cons head args)
+		(if (and
+			(qpl-head-is? head (quote if))
+			(equal? (count args) 3)
+			(equal? (nth args 1) 0)
+			(equal? (nth args 2) 1))
+			(match (nth args 0)
+				(cons nil-head nil-args)
+				(if (and
+					(qpl-head-is? nil-head (quote nil?))
+					(equal? (count nil-args) 1))
+					(list (nth nil-args 0))
+					nil)
+				nil)
+			nil)
+		nil)))
+
 (define qpl-count-inner-presence-condition (lambda (inner)
 	(if (equal? inner 1)
 		true
-		(match inner
-			'((symbol if) ((symbol nil?) nullable_expr) 0 1)
-			(if (number? nullable_expr)
-				true
-				(list (quote not) (list (quote nil?) nullable_expr)))
-			'((quote if) ((quote nil?) nullable_expr) 0 1)
-			(if (number? nullable_expr)
-				true
-				(list (quote not) (list (quote nil?) nullable_expr)))
-			'(if (nil? nullable_expr) 0 1)
-			(if (number? nullable_expr)
-				true
-				(list (quote not) (list (quote nil?) nullable_expr)))
-			nil))))
+		(begin
+			(define nullable-expr (qpl-count-inner-nullable-expr inner))
+			(if (nil? nullable-expr) nil
+				(begin
+					(define nullable_expr (nth nullable-expr 0))
+					(if (number? nullable_expr)
+						true
+						(list (quote not) (list (quote nil?) nullable_expr)))))))))
 
 (define qpl-count-zero-subquery (lambda (sub)
 	(if (not (qpp-tuple? sub))
@@ -929,92 +932,105 @@ a flat set of 7-tuple subs to process.
 of this expression — passed through so qpl-make-count-subquery-for-in can
 qualify nil-tv outer references in `a` before placing them inside the inner
 sub's WHERE. */
-(define qpl-rewrite-in-exists (lambda (expr outer-aliases) (begin
+(define qpl-rewrite-in-exists (lambda (expr outer-aliases prefer-value-exists) (begin
 	(define scalar-not-null-rewrite
 		(qpl-rewrite-limit-one-scalar-not-null expr))
 	(if (not (nil? scalar-not-null-rewrite))
 		scalar-not-null-rewrite
 		(begin
 			(define k (qpl-marker-kind expr))
-			(if (equal? k (quote inner_select_in))
-				(begin
-					(define sub (qpl-marker-subquery expr))
-					(define branches (qpl-union-all-parts sub))
-					(if (not (nil? branches))
-						/* IN (UNION ALL of branches) → (lhs IN br1) OR (lhs IN br2) OR …
-						Re-run rewrite on each new marker to recurse properly. */
-						(qpl-rewrite-in-exists
-							(qpl-or-from-list (map branches (lambda (br)
-								(list (quote inner_select_in) (qpl-marker-lhs expr) br))))
-							outer-aliases)
-						(qpl-wrap-as-count-gt-zero
-							(qpl-make-count-subquery-for-in
-								(qpl-qualify-outer-nil-refs
-									(qpl-rewrite-in-exists (qpl-marker-lhs expr) outer-aliases)
-									outer-aliases)
-								sub))))
-				(if (equal? k (quote inner_select_exists))
+			(if (equal? k (quote inner_select))
+				(if prefer-value-exists
+					(list (quote inner_select)
+						(qpl-rewrite-in-exists-tuple-mode
+							(qpl-marker-subquery expr)
+							prefer-value-exists))
+					expr)
+				(if (equal? k (quote inner_select_in))
 					(begin
 						(define sub (qpl-marker-subquery expr))
 						(define branches (qpl-union-all-parts sub))
 						(if (not (nil? branches))
-							/* EXISTS (UNION ALL of branches) → EXISTS br1 OR EXISTS br2 OR … */
-							(list (quote coalesceNil)
+							/* IN (UNION ALL of branches) → (lhs IN br1) OR (lhs IN br2) OR …
+							Re-run rewrite on each new marker to recurse properly. */
+							(qpl-rewrite-in-exists
 								(qpl-or-from-list (map branches (lambda (br)
-									(qpl-rewrite-in-exists
-										(list (quote inner_select_exists) br)
-										outer-aliases))))
-								false)
-							(begin
-								(define split-sub (qpl-split-exists-outer-only-condition sub))
-								(define inner-sub (nth split-sub 0))
-								(define outer-guard (nth split-sub 1))
-								(qpl-and-cond outer-guard
-									(if (qpl-simple-exists-subquery? inner-sub outer-aliases)
-										(qpl-wrap-as-exists-value
-											(qpl-make-value-subquery-for-exists inner-sub))
-										(qpl-wrap-as-count-gt-zero
-											(qpl-make-count-subquery-for-exists inner-sub)))))))
-					(match expr
-						(cons sym args)
-						(coalesce
-							(qpl-rewrite-count-zero-comparison expr)
-							(cons sym (map (coalesceNil args '())
-								(lambda (a) (qpl-rewrite-in-exists a outer-aliases)))))
-						expr))))))))
+									(list (quote inner_select_in) (qpl-marker-lhs expr) br))))
+								outer-aliases
+								prefer-value-exists)
+							(qpl-wrap-as-count-gt-zero
+								(qpl-make-count-subquery-for-in
+									(qpl-qualify-outer-nil-refs
+										(qpl-rewrite-in-exists (qpl-marker-lhs expr) outer-aliases prefer-value-exists)
+										outer-aliases)
+									sub))))
+					(if (equal? k (quote inner_select_exists))
+						(begin
+							(define sub (qpl-marker-subquery expr))
+							(define branches (qpl-union-all-parts sub))
+							(if (not (nil? branches))
+								/* EXISTS (UNION ALL of branches) → EXISTS br1 OR EXISTS br2 OR … */
+								(list (quote coalesceNil)
+									(qpl-or-from-list (map branches (lambda (br)
+										(qpl-rewrite-in-exists
+											(list (quote inner_select_exists) br)
+											outer-aliases
+											prefer-value-exists))))
+									false)
+								(begin
+									(define split-sub (qpl-split-exists-outer-only-condition sub))
+									(define inner-sub (nth split-sub 0))
+									(define outer-guard (nth split-sub 1))
+									(qpl-and-cond outer-guard
+										(if (and prefer-value-exists
+												(qpl-simple-exists-subquery? inner-sub outer-aliases))
+											(qpl-wrap-as-exists-value
+												(qpl-make-value-subquery-for-exists inner-sub))
+											(qpl-wrap-as-count-gt-zero
+												(qpl-make-count-subquery-for-exists inner-sub)))))))
+						(match expr
+							(cons sym args)
+							(coalesce
+								(qpl-rewrite-count-zero-comparison expr)
+								(cons sym (map (coalesceNil args '())
+									(lambda (a) (qpl-rewrite-in-exists a outer-aliases prefer-value-exists)))))
+							expr)))))))))
 
 /* qpl-rewrite-in-exists-fields — apply the rewrite to each projection. */
-(define qpl-rewrite-in-exists-fields (lambda (fields outer-aliases)
+(define qpl-rewrite-in-exists-fields (lambda (fields outer-aliases prefer-value-exists)
 	(map (coalesceNil fields '()) (lambda (pair) (match pair
-		'(name expr) (list name (qpl-rewrite-in-exists expr outer-aliases))
+		'(name expr) (list name (qpl-rewrite-in-exists expr outer-aliases prefer-value-exists))
 		pair)))))
 
-(define qpl-rewrite-in-exists-group (lambda (group outer-aliases)
+(define qpl-rewrite-in-exists-group (lambda (group outer-aliases prefer-value-exists)
 	(if (nil? group) nil
-		(map group (lambda (e) (qpl-rewrite-in-exists e outer-aliases))))))
+		(map group (lambda (e) (qpl-rewrite-in-exists e outer-aliases prefer-value-exists))))))
 
-(define qpl-rewrite-in-exists-order (lambda (order outer-aliases)
+(define qpl-rewrite-in-exists-order (lambda (order outer-aliases prefer-value-exists)
 	(if (nil? order) nil
 		(map order (lambda (item) (match item
-			'(expr dir) (list (qpl-rewrite-in-exists expr outer-aliases) dir)
+			'(expr dir) (list (qpl-rewrite-in-exists expr outer-aliases prefer-value-exists) dir)
 			item))))))
 
 /* qpl-rewrite-in-exists-tuple — apply qpl-rewrite-in-exists to every
 expression slot of a 7-tuple. Derives outer-aliases from the tuple's tables
 and threads them through so synthesized IN-equality predicates get qualified
 correctly. */
-(define qpl-rewrite-in-exists-tuple (lambda (t) (begin
+(define qpl-rewrite-in-exists-tuple-mode (lambda (t prefer-value-exists) (begin
 	(define outer-aliases (qpl-outer-aliases (qpp-tuple-tables t)))
 	(qpp-rebuild-tuple
 		(qpp-tuple-schema t)
 		(qpp-tuple-tables t)
-		(qpl-rewrite-in-exists-fields (qpp-tuple-fields t) outer-aliases)
-		(qpl-rewrite-in-exists (qpp-tuple-condition t) outer-aliases)
-		(qpl-rewrite-in-exists-group (qpp-tuple-group t) outer-aliases)
-		(qpl-rewrite-in-exists (qpp-tuple-having t) outer-aliases)
-		(qpl-rewrite-in-exists-order (qpp-tuple-order t) outer-aliases)
+		(qpl-rewrite-in-exists-fields (qpp-tuple-fields t) outer-aliases prefer-value-exists)
+		(qpl-rewrite-in-exists (qpp-tuple-condition t) outer-aliases prefer-value-exists)
+		(qpl-rewrite-in-exists-group (qpp-tuple-group t) outer-aliases prefer-value-exists)
+		(qpl-rewrite-in-exists (qpp-tuple-having t) outer-aliases prefer-value-exists)
+		(qpl-rewrite-in-exists-order (qpp-tuple-order t) outer-aliases prefer-value-exists)
 		(qpp-tuple-limit t)
 		(qpp-tuple-offset t)))))
+
+(define qpl-rewrite-in-exists-tuple (lambda (t)
+	(qpl-rewrite-in-exists-tuple-mode t false)))
 
 /* ==================== Substitution + collection ==================== */
 
@@ -1060,6 +1076,13 @@ correctly. */
 		(string col)
 		(concat (string (resolve_source_alias alias-map alias_)) "." (string col)))))
 
+(define qpl-canonical-outer-column-name (lambda (alias-map symname)
+	(match (split (string symname) ".")
+		(list outer_alias outer_col)
+		(concat (string (resolve_source_alias alias-map outer_alias)) "." (string outer_col))
+		_
+		(string symname))))
+
 (define qpl-canonical-scalar-order (lambda (order alias-map)
 	(if (nil? order) nil
 		(map order (lambda (item) (match item
@@ -1082,6 +1105,7 @@ correctly. */
 			(define tables (qpp-tuple-tables sub))
 			(define local-alias-map (build_occurrence_alias_map tables))
 			(define alias-map (merge local-alias-map inherited-alias-map))
+			(define field-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
 			(list
 				(quote select)
 				(qpp-tuple-schema sub)
@@ -1094,8 +1118,9 @@ correctly. */
 						isOuter
 						(qpl-canonical-scalar-expr joinexpr alias-map))
 					td)))
-				(map (qpp-fields-to-pairs (qpp-tuple-fields sub)) (lambda (pair)
-					(list (nth pair 0) (qpl-canonical-scalar-expr (nth pair 1) alias-map))))
+				(map (produceN (count field-pairs)) (lambda (idx)
+					(list (concat "field#" (string idx))
+						(qpl-canonical-scalar-expr (nth (nth field-pairs idx) 1) alias-map))))
 				(qpl-canonical-scalar-expr (qpp-tuple-condition sub) alias-map)
 				(qpp-map-group (qpp-tuple-group sub) (lambda (expr)
 					(qpl-canonical-scalar-expr expr alias-map)))
@@ -1110,6 +1135,18 @@ correctly. */
 		(qpl-canonical-column-name alias-map alias_ col)
 		'((quote get_column) alias_ _ col _)
 		(qpl-canonical-column-name alias-map alias_ col)
+		(cons (symbol outer) args)
+		(if (equal? (count args) 1)
+			(qpl-canonical-outer-column-name alias-map (car args))
+			(cons (quote outer) (map args (lambda (arg) (qpl-canonical-scalar-expr arg alias-map)))))
+		(cons '(quote outer) args)
+		(if (equal? (count args) 1)
+			(qpl-canonical-outer-column-name alias-map (car args))
+			(cons '(quote outer) (map args (lambda (arg) (qpl-canonical-scalar-expr arg alias-map)))))
+		'((symbol outer) symname)
+		(qpl-canonical-outer-column-name alias-map symname)
+		'((quote outer) symname)
+		(qpl-canonical-outer-column-name alias-map symname)
 		'((symbol inner_select) sub)
 		(list (quote inner_select) (qpl-canonical-scalar-subquery sub alias-map))
 		'((quote inner_select) sub)
@@ -1191,11 +1228,7 @@ the COUNT(*) constant 1 or the parser-emitted COUNT(expr) pattern
 treated as SUM-like and yield NULL on empty input per SQL semantics. */
 (define qpl-is-count-like-inner? (lambda (inner)
 	(if (equal? inner 1) true
-		(match inner
-			'((symbol if) ((symbol nil?) _) 0 1) true
-			'((quote if)  ((quote nil?)  _) 0 1) true
-			'(if          (nil?           _) 0 1) true
-			false))))
+		(not (nil? (qpl-count-inner-nullable-expr inner))))))
 
 /* qpl-wrap-with-aggregate-neutral — given the sq-ref and a sub-tuple,
 return COALESCE(sq-ref, neutral) if sub's aggregate has a non-nil neutral
@@ -1653,7 +1686,7 @@ projection that COMBINES them. */
 (define qpl-substituted-subquery-for-wrapper (lambda (sub) (begin
 	(define t-lim (qpl-rewrite-redundant-limit-tuple sub))
 	(define t-const (qpl-rewrite-trivial-scalars-tuple t-lim))
-	(define t-prime (qpl-rewrite-in-exists-tuple t-const))
+	(define t-prime (qpl-rewrite-in-exists-tuple-mode t-const true))
 	(define acc (newsession))
 	(acc "list" '())
 	(define scalar-alias-map (build_occurrence_alias_map (qpp-tuple-tables t-prime)))

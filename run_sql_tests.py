@@ -723,6 +723,8 @@ class SQLTestRunner:
                 return True
             if expect_error:
                 if resp.status_code != 200:
+                    if not self._validate_text_expectation(expect, resp.text):
+                        return self._record_fail(name, f"SCM error text mismatch: {resp.text[:200]}", scm_code, resp, expect, is_noncritical)
                     self._record_success(name, is_noncritical)
                     return True
                 return self._record_fail(name, f"Expected error but got 200: {resp.text[:200]}", scm_code, None, None, is_noncritical)
@@ -985,7 +987,9 @@ class SQLTestRunner:
             return True
 
         if expect.get("error"):
-            return response.status_code != 200 or "Error" in response.text
+            if not (response.status_code != 200 or "Error" in response.text):
+                return False
+            return self._validate_text_expectation(expect, response.text)
 
         if "Error" in response.text or response.status_code != 200:
             return False
@@ -1013,6 +1017,17 @@ class SQLTestRunner:
                             return False
                     elif results[i].get(k) != v:
                         return False
+        return True
+
+    def _validate_text_expectation(self, expect: Dict, text: str) -> bool:
+        if "contains" in expect:
+            for needle in (expect["contains"] if isinstance(expect["contains"], list) else [expect["contains"]]):
+                if str(needle) not in text:
+                    return False
+        if "not_contains" in expect:
+            for needle in (expect["not_contains"] if isinstance(expect["not_contains"], list) else [expect["not_contains"]]):
+                if str(needle) in text:
+                    return False
         return True
 
     # ----------------------

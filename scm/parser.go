@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -33,6 +33,10 @@ type SourceInfo struct {
 
 func (source_info SourceInfo) String() string {
 	return fmt.Sprintf("%s:%d:%d", source_info.source, source_info.line, source_info.col)
+}
+
+func (source_info SourceInfo) Value() Scmer {
+	return source_info.value
 }
 
 func Simplify(s string) Scmer {

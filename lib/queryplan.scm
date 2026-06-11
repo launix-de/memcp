@@ -322,7 +322,10 @@ createcolumn results bleed across queries. The rows themselves are session-bound
 so stored compute lambdas can still resolve them after the surrounding lexical
 scope is gone. */
 (define materialized-subquery-key (lambda (id subquery) (begin
-	(define key_hash (fnv_hash (concat id ":" (string (normalize_canonical_aliases subquery)))))
+	(define key_seed (if (scalar_helper_root_alias? id)
+		id
+		(concat id ":" (string (normalize_canonical_aliases subquery)))))
+	(define key_hash (fnv_hash key_seed))
 	(if (scalar_helper_root_alias? id)
 		(concat "__mat:domain_scalar_" key_hash)
 		(concat "__mat:" key_hash)))))
@@ -371,10 +374,15 @@ scope is gone. */
 	(if (and (string? name) (> (strlen name) 48))
 		(concat "__pc:" (sha1 name))
 		name)))
+(define compact-prejoin-source-table-key (lambda (td)
+	(match td
+		'(tv tschema ttbl isOuter _)
+		(list tschema (scan_tagged_table_base ttbl) isOuter)
+		td)))
 (define compact-prejoin-table-name (lambda (prejoin_source_tables prejoin_col_names prejoin_condition_name)
 	(concat ".prejoin:" (fnv_hash (string (list
-		prejoin_source_tables
-		prejoin_col_names
+		(sort (map prejoin_source_tables compact-prejoin-source-table-key) assoc_key_less)
+		(sort prejoin_col_names <)
 		prejoin_condition_name))))))
 (define compact-keytable-table-name (lambda (keytable_source_name key_names condition_name)
 	(begin
@@ -3300,12 +3308,13 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 		fk_result
 		(begin
 			(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
+			(define condition_alias_map (set_assoc '() tblvar (concat schema "." keytable_source_name)))
 			(define key_names (map keys (lambda (k)
 				(sanitize_temp_name
 					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar k)) '(list) '(list) alias_map)))))
 			(define condition_name (if (nil? condition_suffix) nil
 				(fnv_hash (concat
-					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar condition_suffix)) '(list) '(list) alias_map)
+					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar condition_suffix)) '(list) '(list) condition_alias_map)
 					(runtime_cache_suffix_from_exprs (list condition_suffix))))))
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth keys i)))
@@ -7670,7 +7679,23 @@ seeing the correctly prefixed outer alias. */
 												_ acc))
 												'())
 											'()))
-									(define mat_fields2 (merge mat_fields2_base scalar_payload_passthrough_fields))
+									(define scalar_key_passthrough_fields
+										(if (scalar_helper_alias? id)
+											(reduce_assoc mat_fields2_base (lambda (acc k v)
+												(if (and
+													(string? k)
+													(not (equal? k "value"))
+													(not (equal? (substr k 0 (min (strlen k) 2)) "__"))
+													(not (has_assoc? mat_fields2_base (concat "__kt_" k)))
+													(not (has_assoc? scalar_payload_passthrough_fields (concat "__kt_" k)))
+													(not (has_assoc? acc (concat "__kt_" k))))
+													(set_assoc acc (concat "__kt_" k) v)
+													acc))
+												'())
+											'()))
+									(define mat_fields2 (merge
+										(merge mat_fields2_base scalar_payload_passthrough_fields)
+										scalar_key_passthrough_fields))
 									(define mat_condition2 (replace_find_column2 (coalesceNil condition2 true)))
 									(define mat_init_stmts (if (or (nil? _init2) (equal? _init2 '())) '() _init2))
 									(define materialized_logical_has_runtime_scalar
@@ -10804,9 +10829,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define expr_name (lambda (expr)
 					(sanitize_temp_name
 						(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar expr)) '(list) '(list) canon_alias_map))))
-				(define group_runtime_terms (runtime_cache_unique_terms (merge
-					(runtime_cache_terms_from_exprs (merge (list condition) ags))
-					(extract_session_lookup_terms (stage_cache_query stage)))))
+					(define group_runtime_terms (runtime_cache_unique_terms (merge
+						(runtime_cache_terms_from_exprs (merge (list condition) ags)))))
 				(define group_runtime_suffix (runtime_cache_suffix_from_terms group_runtime_terms))
 				(define agg_col_name (make_aggregate_cache_col_name expr_name condition group_runtime_suffix))
 				(define rewrite_materialized_source_aggs_single (lambda (expr) (match expr
@@ -11476,11 +11500,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(set filtercols (merge_unique (list
 					(extract_columns_for_tblvar tblvar collect_condition)
 					(extract_outer_columns_for_tblvar tblvar collect_condition))))
-				(define session_sensitive_group_domain (expr_uses_session_state collect_condition))
-				(define group_cache_identity (stage_cache_query stage))
+				(define group_cache_identity
+					(list (quote group-cache) resolved_stage_group collect_condition))
+				(define session_sensitive_group_domain
+					(expr_uses_session_state group_cache_identity))
 				(define keytable_condition_suffix (if (nil? group_cache_identity)
 					collect_condition
-					(list (quote cache-key) collect_condition group_cache_identity)))
+					(list (quote cache-key) collect_condition
+						(extract_session_lookup_terms group_cache_identity))))
 				/* Include condition suffix for keytable naming: dedup stages without
 				session-sensitive domains, scoped stages with a local condition, and
 				session-sensitive group domains. make_keytable folds runtime session
@@ -11489,8 +11516,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define kt_result (make_keytable schema base_tbl resolved_stage_group tblvar
 					(if (or (and is_dedup (not session_sensitive_group_domain))
 						(and (or _scoped_stage session_sensitive_group_domain)
-							(not (or (nil? collect_condition) (equal? collect_condition true))))
-						(not (nil? group_cache_identity)))
+							(not (or (nil? collect_condition) (equal? collect_condition true)))))
 						keytable_condition_suffix nil)))
 				(set grouptbl (car kt_result))
 				(define kt_schema_def (nth kt_result 1))
@@ -13396,15 +13422,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(replace_find_column materialized_where_condition_expr))))
 							prejoin_alias_map))
 					nil))
-				(define prejoin_runtime_terms (runtime_cache_unique_terms (merge
-					(runtime_cache_terms_from_exprs (merge
-						(map prejoin_columns (lambda (mc) (cadr mc)))
-						(list
-							prejoin_row_domain_raw
-							raw_materialize_condition
-							raw_post_group_condition
-							materialized_where_condition_expr)))
-					(extract_session_lookup_terms (stage_cache_query stage)))))
+					(define prejoin_runtime_terms (runtime_cache_unique_terms (merge
+						(runtime_cache_terms_from_exprs (merge
+							(map prejoin_columns (lambda (mc) (cadr mc)))
+							(list
+								prejoin_row_domain_raw
+								raw_materialize_condition
+								raw_post_group_condition
+								materialized_where_condition_expr))))))
 				(define prejoin_runtime_suffix
 					(runtime_cache_suffix_from_terms prejoin_runtime_terms))
 				(define prejoin_condition_name
@@ -14836,12 +14861,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 for tables that have pre-resolved defines. tbl_map is an assoc list of (schema.name . symbol). */
 (define _replace_table_with_sym (lambda (expr tbl_map)
 	(if (not (list? expr)) expr
+		(if (equal? expr '()) expr
+		(if (equal? (car expr) 'createcolumn)
+			expr
 		(if (and (equal? (count expr) 3) (equal? (car expr) 'table) (string? (nth expr 1)) (string? (nth expr 2)))
 			(begin
 				(define key (concat (nth expr 1) ":" (nth expr 2)))
 				(define sym (get_assoc tbl_map key))
 				(if (nil? sym) expr sym))
-			(map expr (lambda (e) (_replace_table_with_sym e tbl_map)))))))
+			(map expr (lambda (e) (_replace_table_with_sym e tbl_map)))))))))
 
 /* build_queryplan: wraps _build_queryplan_inner with table-pointer pre-resolution */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column update_target) (begin

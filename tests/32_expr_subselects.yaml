@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
 # Subselects in expressions (IN/EXISTS/scalar)
 
 metadata:
@@ -269,6 +271,64 @@ test_cases:
       rows: 1
       data:
         - badgeDoc: 1
+
+  - name: "Scalar COUNT nullable column preserves zero for empty correlated group"
+    max_time: 3
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_count_parent"
+      - sql: "DROP TABLE IF EXISTS expr32_count_child"
+      - sql: "CREATE TABLE expr32_count_parent (id INT PRIMARY KEY)"
+      - sql: "CREATE TABLE expr32_count_child (id INT PRIMARY KEY, parent_id INT, optional_value INT)"
+      - sql: "INSERT INTO expr32_count_parent (id) VALUES (1), (2), (3)"
+      - sql: "INSERT INTO expr32_count_child (id, parent_id, optional_value) VALUES (1, 1, 7), (2, 1, NULL), (3, 2, NULL)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_count_child"
+      - sql: "DROP TABLE IF EXISTS expr32_count_parent"
+    sql: >
+      SELECT p.id,
+        (SELECT COUNT(c.optional_value)
+         FROM expr32_count_child c
+         WHERE c.parent_id = p.id
+         LIMIT 1) AS present_values
+      FROM expr32_count_parent p
+      ORDER BY p.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          present_values: 1
+        - id: 2
+          present_values: 0
+        - id: 3
+          present_values: 0
+
+  - name: "Scalar SUM over CASE expression compiles in correlated subselect"
+    max_time: 3
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_case_sum_parent"
+      - sql: "DROP TABLE IF EXISTS expr32_case_sum_child"
+      - sql: "CREATE TABLE expr32_case_sum_parent (id INT PRIMARY KEY)"
+      - sql: "CREATE TABLE expr32_case_sum_child (id INT PRIMARY KEY, parent_id INT, amount INT, is_credit BOOL)"
+      - sql: "INSERT INTO expr32_case_sum_parent (id) VALUES (1), (2)"
+      - sql: "INSERT INTO expr32_case_sum_child (id, parent_id, amount, is_credit) VALUES (1, 1, 10, TRUE), (2, 1, 3, FALSE), (3, 2, 4, FALSE)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_case_sum_child"
+      - sql: "DROP TABLE IF EXISTS expr32_case_sum_parent"
+    sql: >
+      SELECT p.id,
+        (SELECT SUM(CASE WHEN c.is_credit THEN c.amount ELSE (0 - c.amount) END)
+         FROM expr32_case_sum_child c
+         WHERE c.parent_id = p.id
+         LIMIT 1) AS signed_total
+      FROM expr32_case_sum_parent p
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          signed_total: 7
+        - id: 2
+          signed_total: -4
 
   - name: "Sibling scalar subselects in outer projection stay isolated"
     max_time: 10

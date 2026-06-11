@@ -145,3 +145,68 @@ test_cases:
          LIMIT 1) AS account_count
     expect:
       rows: 1
+
+  - name: "sql-no-table-scalar-cache-alias-variant-uses-existing-helpers"
+    session_id: "snts"
+    max_time: 2.5
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM snts_doc doc_alias
+         WHERE (((SELECT default_kind FROM snts_cfg WHERE id = 1 LIMIT 1) IS NULL AND doc_alias.kind IS NULL)
+           OR doc_alias.kind = (SELECT default_kind FROM snts_cfg WHERE id = 1 LIMIT 1))
+           AND NOT doc_alias.archived
+         LIMIT 1) AS doc_count,
+        (SELECT SUM(1) FROM snts_person member_alias
+         WHERE member_alias.start_epoch IS NOT NULL
+           AND member_alias.start_epoch BETWEEN (@now_epoch - (40 * 24 * 3600)) AND (@now_epoch + (3 * 24 * 3600))
+         LIMIT 1) AS start_count,
+        (SELECT SUM(1) FROM snts_person birthday_alias
+         WHERE birthday_alias.birth_epoch IS NOT NULL
+           AND ((((@now_epoch - birthday_alias.birth_epoch) % 31557600) / 86400) BETWEEN 0
+             AND (SELECT days_past FROM snts_cfg WHERE id = 1 LIMIT 1))
+         LIMIT 1) AS birth_count,
+        (SELECT SUM(1) FROM snts_item item_alias WHERE item_alias.state IN (0, 1, 11) LIMIT 1) AS item_count,
+        (SELECT SUM(1) FROM snts_invoice invoice_alias WHERE invoice_alias.paid_epoch IS NULL LIMIT 1) AS unpaid_count,
+        (SELECT SUM(1) FROM snts_account account_alias
+         WHERE account_alias.kind IN (4, 5)
+           AND ((SELECT SUM(entry_alias.amount * (CASE WHEN entry_alias.debit THEN 1 ELSE -1 END))
+                 FROM snts_entry entry_alias
+                 WHERE entry_alias.account = account_alias.number
+                   AND (SELECT journal_period_alias.period_id FROM snts_journal journal_period_alias WHERE journal_period_alias.id = entry_alias.journal_id LIMIT 1) = account_alias.period_id
+                   AND (SELECT journal_status_alias.status FROM snts_journal journal_status_alias WHERE journal_status_alias.id = entry_alias.journal_id LIMIT 1) = 0
+                 LIMIT 1) <> 0)
+           AND (SELECT period_alias.start_epoch <= @now_epoch AND @now_epoch <= period_alias.end_epoch
+                FROM snts_period period_alias WHERE period_alias.id = account_alias.period_id LIMIT 1)
+         LIMIT 1) AS account_count
+    expect:
+      rows: 1
+
+  - name: "sql-no-table-scalar-cache-warm-session-independent-helper"
+    session_id: "snts"
+    max_time: 1
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM snts_person person_alias
+         WHERE UNIX_TIMESTAMP(DATE_ADD(FROM_UNIXTIME(0), INTERVAL person_alias.start_epoch SECOND)) > 0
+         LIMIT 1) AS person_count,
+        (@now_epoch IS NOT NULL) AS has_now
+    expect:
+      rows: 1
+
+  - name: "sql-no-table-scalar-cache-change-session-value"
+    session_id: "snts"
+    sql: "SET @now_epoch = 1780000100"
+    expect:
+      rows_affected: 0
+
+  - name: "sql-no-table-scalar-cache-unrelated-session-value-does-not-rebuild-helper"
+    session_id: "snts"
+    max_time: 0.5
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM snts_person person_alias
+         WHERE UNIX_TIMESTAMP(DATE_ADD(FROM_UNIXTIME(0), INTERVAL person_alias.start_epoch SECOND)) > 0
+         LIMIT 1) AS person_count,
+        (@now_epoch IS NOT NULL) AS has_now
+    expect:
+      rows: 1

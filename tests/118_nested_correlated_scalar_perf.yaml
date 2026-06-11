@@ -20,6 +20,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS ncs_payment"
   - sql: "DROP TABLE IF EXISTS ncs_customer"
   - sql: "DROP TABLE IF EXISTS ncs_invoice"
+  - sql: "DROP TABLE IF EXISTS ncs_bill_line"
+  - sql: "DROP TABLE IF EXISTS ncs_ledger_entry"
+  - sql: "DROP TABLE IF EXISTS ncs_account_holder"
+  - sql: "DROP TABLE IF EXISTS ncs_bill"
   - sql: "CREATE TABLE ncs_acc (nummer INT, year INT, typ INT)"
   - sql: "CREATE TABLE ncs_ent (account INT, jrn INT, amount INT, sh BOOL)"
   - sql: "CREATE TABLE ncs_jrn (id INT, fyear INT, storno INT)"
@@ -36,6 +40,14 @@ setup:
   - sql: "INSERT INTO ncs_invoice VALUES (1, 1, NULL, 10), (2, 1, 50, 20), (3, 2, NULL, 30)"
   - sql: "INSERT INTO ncs_invoice_item VALUES (1, 1, 10, 2), (2, 1, 5, 1), (3, 2, 7, 3), (4, 3, 8, 1)"
   - sql: "INSERT INTO ncs_payment VALUES (1, 100, 0, 0, 70, 25), (2, 100, 0, 0, 80, 5), (3, 200, 0, 0, 90, 8)"
+  - sql: "CREATE TABLE ncs_account_holder (`ID` INT PRIMARY KEY, credit_account INT)"
+  - sql: "CREATE TABLE ncs_bill (`ID` INT PRIMARY KEY, account_holder INT, paid_date INT, due_date INT)"
+  - sql: "CREATE TABLE ncs_bill_line (`ID` INT PRIMARY KEY, bill INT, price INT, qty INT)"
+  - sql: "CREATE TABLE ncs_ledger_entry (`ID` INT PRIMARY KEY, account INT, status INT, direction INT, bookdate INT, amount INT)"
+  - sql: "INSERT INTO ncs_account_holder VALUES (1, 100), (2, 200)"
+  - sql: "INSERT INTO ncs_bill VALUES (1, 1, NULL, 10), (2, 1, 50, 20), (3, 2, NULL, 30)"
+  - sql: "INSERT INTO ncs_bill_line VALUES (1, 1, 10, 2), (2, 1, 5, 1), (3, 2, 7, 3), (4, 3, 8, 1)"
+  - sql: "INSERT INTO ncs_ledger_entry VALUES (1, 100, 0, 0, 70, 25), (2, 100, 0, 0, 80, 5), (3, 200, 0, 0, 90, 8)"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ncs_acc"
@@ -46,6 +58,10 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ncs_payment"
   - sql: "DROP TABLE IF EXISTS ncs_customer"
   - sql: "DROP TABLE IF EXISTS ncs_invoice"
+  - sql: "DROP TABLE IF EXISTS ncs_bill_line"
+  - sql: "DROP TABLE IF EXISTS ncs_ledger_entry"
+  - sql: "DROP TABLE IF EXISTS ncs_account_holder"
+  - sql: "DROP TABLE IF EXISTS ncs_bill"
 
 test_cases:
   # The deterministic gate is max_plan_size, not wall-clock time: the
@@ -105,5 +121,83 @@ test_cases:
       FROM ncs_invoice inv
       WHERE inv.paid_at IS NULL
       ORDER BY inv.due_at ASC
+    expect:
+      rows: 2
+
+  - name: "sql-table-qualified-outer-nested-scalar-aggregates decorrelates"
+    max_plan_size: 100000
+    max_time: 10
+    sql: |
+      SELECT
+        ncs_invoice.id AS id,
+        ncs_invoice.customer_id AS customer_id,
+        COALESCE((SELECT SUM(it.price * it.qty)
+          FROM ncs_invoice_item it
+          WHERE it.invoice_id = ncs_invoice.id
+          LIMIT 1), 0) AS invoice_total,
+        (SELECT SUM(pay.amount)
+          FROM ncs_payment pay
+          WHERE pay.status = 0
+            AND pay.direction = 0
+            AND pay.account = (SELECT ncs_customer.account FROM ncs_customer WHERE id = ncs_invoice.customer_id LIMIT 1)
+        ) AS received_total,
+        (SELECT SUM(COALESCE((SELECT SUM(it2.price * it2.qty)
+          FROM ncs_invoice_item it2
+          WHERE it2.invoice_id = paid_inv.id
+          LIMIT 1), 0))
+          FROM ncs_invoice paid_inv
+          WHERE customer_id = ncs_invoice.customer_id
+            AND paid_at IS NOT NULL
+        ) AS already_paid_total,
+        (SELECT MAX(pay.paydate)
+          FROM ncs_payment pay
+          WHERE pay.status = 0
+            AND pay.direction = 0
+            AND pay.account = (SELECT ncs_customer.account FROM ncs_customer WHERE id = ncs_invoice.customer_id LIMIT 1)
+        ) AS last_payment_at
+      FROM ncs_invoice
+      WHERE paid_at IS NULL
+      ORDER BY due_at ASC
+    expect:
+      rows: 2
+
+  - name: "sql-unaliased-physical-column-nested-scalar-aggregates decorrelates"
+    max_plan_size: 100000
+    max_time: 10
+    sql: |
+      SELECT
+        `ID`,
+        `ncs_bill`.account_holder,
+        COALESCE((SELECT SUM((line_item.price) * (line_item.qty))
+          FROM `ncs_bill_line` line_item
+          WHERE line_item.bill = `ncs_bill`.`ID`
+          LIMIT 1), 0) AS bill_total,
+        (SELECT SUM(amount)
+          FROM `ncs_ledger_entry`
+          WHERE `status` = 0
+            AND direction = 0
+            AND account = (SELECT `ncs_account_holder`.credit_account
+              FROM `ncs_account_holder`
+              WHERE `ID` = `ncs_bill`.account_holder)
+        ) AS received_total,
+        (SELECT SUM(COALESCE((SELECT SUM((line_item.price) * (line_item.qty))
+          FROM `ncs_bill_line` line_item
+          WHERE line_item.bill = `ncs_bill:paid`.`ID`
+          LIMIT 1), 0))
+          FROM `ncs_bill` `ncs_bill:paid`
+          WHERE account_holder = `ncs_bill`.account_holder
+            AND paid_date IS NOT NULL
+        ) AS already_paid_total,
+        (SELECT MAX(bookdate)
+          FROM `ncs_ledger_entry`
+          WHERE `status` = 0
+            AND direction = 0
+            AND account = (SELECT `ncs_account_holder`.credit_account
+              FROM `ncs_account_holder`
+              WHERE `ID` = `ncs_bill`.account_holder)
+        ) AS last_payment_at
+      FROM `ncs_bill`
+      WHERE paid_date IS NULL
+      ORDER BY due_date ASC
     expect:
       rows: 2

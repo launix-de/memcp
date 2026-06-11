@@ -359,10 +359,25 @@ contains a qpir-groupby. */
 			(qpir-groupby-having gb)
 			(qpir-groupby-child gb)))))
 
-(define qpu-scalar-helper-alias? (lambda (alias_)
-	(and (string? alias_)
-		(>= (strlen alias_) 14)
-		(equal? (substr alias_ 0 14) "domain_scalar_"))))
+	(define qpu-scalar-helper-alias? (lambda (alias_)
+		(and (string? alias_)
+			(or
+				(and (>= (strlen alias_) 14)
+					(equal? (substr alias_ 0 14) "domain_scalar_"))
+				(strlike alias_ "%domain_scalar_%")))))
+
+	(define qpu-scalar-helper-visible-ref (lambda (ref)
+		(match ref
+			'(tv col)
+			(if (and
+					(qpu-scalar-helper-alias? tv)
+					(string? col)
+					(not (equal? col "value"))
+					(not (and (>= (strlen col) 5)
+						(equal? (substr col 0 5) "__kt_"))))
+				(list tv (concat "__kt_" col))
+				ref)
+			ref)))
 
 /* qpu-bottom-left-aliases — walk down qpir-dep-join / qpir-join chains in
 the LEFT subtree to find the ORIGINAL outer's provided aliases. For chained
@@ -614,13 +629,13 @@ Returns a session whose "map" key holds an assoc list of (outer-ref . inner-ref)
 		acc)) nil)
 	repr)))
 
-(define qpu-repr-lookup (lambda (repr ref) (begin
-	(define entries (repr "map"))
-	(reduce entries (lambda (found entry)
-		(if (and (nil? found) (equal? (nth entry 0) ref))
-			(nth entry 1)
-			found))
-		nil))))
+	(define qpu-repr-lookup (lambda (repr ref) (begin
+		(define entries (repr "map"))
+		(reduce entries (lambda (found entry)
+			(if (and (nil? found) (equal? (nth entry 0) ref))
+				(qpu-scalar-helper-visible-ref (nth entry 1))
+				found))
+			nil))))
 
 /* qpu-substitute-expr — walk expr, replacing every (get_column tv ti col ci)
 whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
@@ -745,8 +760,14 @@ substitution into outer scope produces dangling refs. */
 					parent dep-join may use THIS helper's own join predicate,
 					but must not recurse into the helper and rediscover
 					skip-level predicates that belong to the helper's
-					domain. */
-					(qpu-cc-add-from-predicate cc raw-pred)
+					domain. Refs provided by the helper's right side are no
+					longer visible as base table aliases outside the derived
+					helper; collect them under the helper's stable __kt_*
+					keys instead. */
+					(qpu-cc-add-from-predicate cc
+						(qpu-rewrite-refs-to-helper-kt raw-pred
+							(qpir-provided-aliases (qpir-join-right node))
+							(qpir-join-rhs-alias node)))
 					(qpu-collect-cclasses (qpir-join-left node) cc))
 				(begin
 					(define provided (qpir-provided-aliases node))
@@ -834,7 +855,8 @@ converted dep-join. */
 				(qpir-groupby-aggs node) repr))
 			(define sub-having (qpu-substitute-expr
 				(coalesceNil (qpir-groupby-having node) true) repr))
-			(define existing-keys (coalesceNil (qpir-groupby-keys node) '()))
+				(define existing-keys (qpu-substitute-exprs
+					(coalesceNil (qpir-groupby-keys node) '()) repr))
 			(define new-keys (reduce sub-outer-refs (lambda (acc k)
 				(if (has? acc k) acc (merge acc (list k))))
 				existing-keys))
