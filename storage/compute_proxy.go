@@ -549,6 +549,16 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 	filterValues := make([]scm.Scmer, len(filterCols))
 	colvalues := make([]scm.Scmer, len(p.inputCols))
 	for i := uint32(0); i < p.count; i++ {
+		// Idempotency: skip rows whose computed value is already cached and
+		// not in delta-mutation state. validMask=true means the row was
+		// computed and stored in p.delta — no need to redo filter+computor.
+		// This makes repeat createcolumn(filtered) calls O(unprocessed-rows)
+		// instead of O(N) per call, which is what the createcolumn contract
+		// requires ("a valid cache is a lookup path, not a suggestion to
+		// recompute").
+		if p.validMask.Get(uint(i)) {
+			continue
+		}
 		for j := range filterReaders {
 			filterValues[j] = filterReaders[j].GetValue(i)
 		}
