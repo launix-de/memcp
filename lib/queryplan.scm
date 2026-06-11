@@ -7285,32 +7285,45 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(extract_outer_columns_for_tblvar tblvar expr)))
 								'())))))))
 						(define merge_fn_local (make_single_pass_merge_fn sp_ags))
-						/* Return: (lambda () (scan ... → dict)) */
+						/* Returns a 0-arg lambda that:
+						1. Allocates a fresh session (acts as a thread-safe mutable dict).
+						2. Scans the base table, on each row calls (dict key) to look up the
+						   existing value-tuple and (dict key new) to store the merged tuple.
+						3. Returns the session, which the agg computors then call as
+						   (dict (list key_vals...)) for O(1) lookup.
+						This bypasses set_assoc's per-call Copy() (O(N) each, total O(N²))
+						by using the session's mutex-protected map (O(1) per call, total
+						O(N)). Sessions stringify their first arg via Scmer.String(), so
+						list keys are consistently hashed across build and lookup paths. */
 						(list (quote lambda) '()
-							(scan_wrapper 'scan schema tbl
-								(cons list sp_input_cols_local)
-								/* filter: WHERE condition AND optionally the key-equality (which we DON'T add — we want ALL rows) */
-								'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
-									(optimize (replace_columns_from_expr (coalesceNil condition true))))
-								(cons list sp_input_cols_local)
-								/* mapfn: per row, emit (cons key-tuple value-tuple).
-								Using cons (not list-of-two-lists) lets the reducer use
-								(car kv) / (cdr kv) — a simpler shape the optimizer is
-								more likely to track for ownership propagation. */
-								'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
-									(list (quote cons)
-										(cons (quote list) (map resolved_stage_group (lambda (e) (replace_columns_from_expr e))))
-										(cons (quote list) (map sp_ags (lambda (ag) (match ag '(e _ _) (replace_columns_from_expr e) nil))))))
-								/* reducer: set_assoc with merge — kv is (key . value) cons */
-								(list (quote lambda) '('acc 'kv)
-									(list (quote set_assoc) (quote acc)
-										(list (quote car) (quote kv))
-										(list (quote cdr) (quote kv))
-										merge_fn_local))
-								'(list)
-								/* finalizer: return the dict as-is, NO side effects */
-								'((quote lambda) '('acc 'sharddict) (quote sharddict))
-								false)))))
+							(list (quote begin)
+								(list (quote define) (quote __dca_dict) (list (quote newsession)))
+								(scan_wrapper 'scan schema tbl
+									(cons list sp_input_cols_local)
+									/* filter: WHERE condition */
+									'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
+										(optimize (replace_columns_from_expr (coalesceNil condition true))))
+									(cons list sp_input_cols_local)
+									/* mapfn: per row, emit (cons key-tuple value-tuple) */
+									'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
+										(list (quote cons)
+											(cons (quote list) (map resolved_stage_group (lambda (e) (replace_columns_from_expr e))))
+											(cons (quote list) (map sp_ags (lambda (ag) (match ag '(e _ _) (replace_columns_from_expr e) nil))))))
+									/* reducer: mutate the session dict in place via (dict key val) */
+									(list (quote lambda) '('acc 'kv)
+										(list (quote begin)
+											(list (quote define) (quote __k) (list (quote car) (quote kv)))
+											(list (quote define) (quote __v) (list (quote cdr) (quote kv)))
+											(list (quote define) (quote __existing) (list (quote __dca_dict) (quote __k)))
+											(list (quote if) (list (quote nil?) (quote __existing))
+												(list (quote __dca_dict) (quote __k) (quote __v))
+												(list (quote __dca_dict) (quote __k) (list merge_fn_local (quote __existing) (quote __v))))
+											(quote acc)))
+									'(list)
+									/* finalizer: ignored (we return __dca_dict, not acc) */
+									'((quote lambda) '('acc 'sharddict) (quote nil))
+									false)
+								(quote __dca_dict))))))
 
 				(if is_dedup (begin
 					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
@@ -7715,7 +7728,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define _dca_key_syms (map (produceN _dca_n) (lambda (i) (symbol (concat "kt_k" i)))))
 									(define _dca_computor_body (list (quote begin)
 										(list (quote define) (quote sess) (list (quote context) "session"))
-										/* Lookup or build dict, then bind dict to the chosen value. */
+										/* Lookup or build dict, then bind dict to the chosen value.
+										dict is a session (callable as a 1-arg lookup that returns
+										the value or nil; see make_build_groupby_dict_fn). */
 										(list (quote define) (quote dict)
 											(list (quote begin)
 												(list (quote define) (quote cached) (list (quote sess) _dca_cache_key))
@@ -7728,7 +7743,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(list (quote define) (quote key_tuple)
 											(cons (quote list) _dca_key_syms))
 										(list (quote define) (quote row)
-											(list (quote get_assoc) (quote dict) (quote key_tuple)))
+											(list (quote dict) (quote key_tuple)))
 										(list (quote if) (list (quote nil?) (quote row))
 											neutral
 											(list (quote nth) (quote row) _dca_idx))))
