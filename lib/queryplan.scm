@@ -1651,6 +1651,28 @@ Currently unused — wiring follows in subsequent commits. */
 				(not (_agg_expr_has_subselect? expr))
 				(equal? (extract_aggregates expr) '()))
 			false))) true))))
+/* Codegen helper for single-pass collect+aggregate (see design doc).
+Given a list of agg tuples (expr reduce neutral) — same shape as the `ags`
+list used by agg_plans — produces a lambda expression that combines two
+value-tuples element-wise via each agg's reducer:
+
+  ((expr1 r1 n1) (expr2 r2 n2)) →
+    ((quote lambda) (old new)
+       (list (r1 (nth old 0) (nth new 0))
+             (r2 (nth old 1) (nth new 1))))
+
+The output is a Scheme expression suitable for embedding in the set_assoc
+merge slot during single-pass collect. Each position in the value tuple
+corresponds to one aggregate column's running state. */
+(define make_single_pass_merge_fn (lambda (ags)
+	(list (quote lambda) '('old 'new)
+		(cons (quote list)
+			(mapIndex ags (lambda (i ag)
+				(match ag
+					'(_ reduce _) (list reduce
+						(list (quote nth) (quote old) i)
+						(list (quote nth) (quote new) i))
+					_ (begin (error "make_single_pass_merge_fn: bad ag shape" ag)))))))))
 (define aggregate_cache_condition_suffix (lambda (expr_name condition_expr runtime_suffix)
 	(fnv_hash (concat (expr_name condition_expr) (coalesceNil runtime_suffix "")))
 ))
