@@ -1653,6 +1653,20 @@ same cache column while different session values get separate temp columns. */
 					(list k)
 					(map (produceN width) (lambda (_) nil))))
 ))))
+/* Building block for single-pass collect+aggregate (FAQ §22 follow-up).
+Converts a dict {key-tuple -> value-tuple} into dataset rows where each row
+is (append key-as-list value-as-list). Used to insert keys + aggregate values
+in a single keytable insert when the GROUP BY collect path also accumulates
+aggregate state per key (eliminating the per-key createcolumn scans).
+Currently unused — wiring lives in single-pass-collect-aggregate-design. */
+(define assoc_kv_as_dataset_rows (lambda (dict key_width)
+	(extract_assoc dict (lambda (k v)
+		(append
+			(if (list? k) k
+				(if (<= key_width 1)
+					(list k)
+					(map (produceN key_width) (lambda (_) nil))))
+			(if (list? v) v (list v)))))))
 /* Column-resolution contract:
 - parser-level get_column markers may still carry ti/ci flags inside untangle_query
 - they must be resolved against schema metadata exactly once before the logical IR
