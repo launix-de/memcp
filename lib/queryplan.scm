@@ -7293,16 +7293,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
 									(optimize (replace_columns_from_expr (coalesceNil condition true))))
 								(cons list sp_input_cols_local)
-								/* mapfn: per row, emit (key-tuple value-tuple) */
+								/* mapfn: per row, emit (cons key-tuple value-tuple).
+								Using cons (not list-of-two-lists) lets the reducer use
+								(car kv) / (cdr kv) — a simpler shape the optimizer is
+								more likely to track for ownership propagation. */
 								'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
-									(list (quote list)
+									(list (quote cons)
 										(cons (quote list) (map resolved_stage_group (lambda (e) (replace_columns_from_expr e))))
 										(cons (quote list) (map sp_ags (lambda (ag) (match ag '(e _ _) (replace_columns_from_expr e) nil))))))
-								/* reducer: set_assoc with merge */
+								/* reducer: set_assoc with merge — kv is (key . value) cons */
 								(list (quote lambda) '('acc 'kv)
 									(list (quote set_assoc) (quote acc)
 										(list (quote car) (quote kv))
-										(list (quote car) (list (quote cdr) (quote kv)))
+										(list (quote cdr) (quote kv))
 										merge_fn_local))
 								'(list)
 								/* finalizer: return the dict as-is, NO side effects */
