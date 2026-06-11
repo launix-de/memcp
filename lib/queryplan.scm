@@ -7726,27 +7726,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define _dca_idx (_dca_ag_index_for ag))
 									(define _dca_n (count resolved_stage_group))
 									(define _dca_key_syms (map (produceN _dca_n) (lambda (i) (symbol (concat "kt_k" i)))))
-									(define _dca_computor_body (list (quote begin)
-										(list (quote define) (quote sess) (list (quote context) "session"))
-										/* Lookup or build dict, then bind dict to the chosen value.
-										dict is a session (callable as a 1-arg lookup that returns
-										the value or nil; see make_build_groupby_dict_fn). */
-										(list (quote define) (quote dict)
-											(list (quote begin)
-												(list (quote define) (quote cached) (list (quote sess) _dca_cache_key))
-												(list (quote if) (list (quote nil?) (quote cached))
-													(list (quote begin)
-														(list (quote define) (quote built) (list _dca_build_fn))
-														(list (quote sess) _dca_cache_key (quote built))
-														(quote built))
-													(quote cached))))
-										(list (quote define) (quote key_tuple)
-											(cons (quote list) _dca_key_syms))
-										(list (quote define) (quote row)
-											(list (quote dict) (quote key_tuple)))
-										(list (quote if) (list (quote nil?) (quote row))
-											neutral
-											(list (quote nth) (quote row) _dca_idx))))
+									/* Compact computor body — minimize per-cell overhead.
+								Each lambda invocation pays for the body's Eval traversal; flatten
+								to fewer forms. coalesce (not or — `or` is boolean in this dialect)
+								returns the first non-nil value: cached dict, or freshly built. */
+								(define _dca_computor_body (list (quote begin)
+									(list (quote define) (quote dict)
+										(list (quote coalesce)
+											(list (list (quote context) "session") _dca_cache_key)
+											(list (list (quote context) "session") _dca_cache_key (list _dca_build_fn))))
+									(list (quote define) (quote row)
+										(list (quote dict) (cons (quote list) _dca_key_syms)))
+									(list (quote if) (list (quote nil?) (quote row))
+										neutral
+										(list (quote nth) (quote row) _dca_idx))))
 									'((quote createcolumn) '('table schema grouptbl) (agg_col_name ag) "any" '(list) this_options
 										(cons list (map resolved_stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 										(list (quote lambda) _dca_key_syms _dca_computor_body)))
