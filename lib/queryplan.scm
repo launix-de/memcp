@@ -7788,12 +7788,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(merge acc (list (nth agg_plans i)))))
 							'()))
 						/* When dict-cached path is eligible, pre-build the shared dict
-						BEFORE the createcolumn proxies fire. The proxies all need the
-						dict; one of them would build it lazily otherwise, blocking the
-						rest while parallel-compute waits. Eager build runs once and is
-						gated by (table_empty?) so it skips when the keytable is warm. */
+						BEFORE the createcolumn proxies fire on COLD. The proxies all
+						need the dict; one of them would build it lazily otherwise,
+						blocking the rest while parallel-compute waits.
+						Gate on keytable_init: TRUE on cold (keytable was just created
+						or is empty) → prebuild fires. FALSE on warm (cached keytable)
+						→ skip; the lazy-build branch inside the computor body covers
+						the warm-with-new-aggs edge case. keytable_init's init_code is
+						idempotent so re-evaluating it is cheap. */
 						(define _dca_prebuild_plan (if _dca_eligible
-							(list (quote if) (list (quote table_empty?) (list (quote table) schema grouptbl))
+							(list (quote if) keytable_init
 								(list (list (quote context) "session") _dca_cache_key (list _dca_build_fn))
 								nil)
 							nil))
