@@ -7304,10 +7304,15 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
 										(optimize (replace_columns_from_expr (coalesceNil condition true))))
 									(cons list sp_input_cols_local)
-									/* mapfn: per row, emit (cons key-tuple value-tuple) */
+									/* mapfn: per row, emit (cons key value-tuple). For single-col
+								GROUP BY, key is the scalar value directly (no per-row list
+								allocation); for multi-col it's a list. Both sides of the
+								build/lookup pair agree on this shape. */
 									'((quote lambda) (map sp_input_cols_local (lambda (col) (symbol (concat tblvar "." col))))
 										(list (quote cons)
-											(cons (quote list) (map resolved_stage_group (lambda (e) (replace_columns_from_expr e))))
+											(if (equal? 1 (count resolved_stage_group))
+												(replace_columns_from_expr (car resolved_stage_group))
+												(cons (quote list) (map resolved_stage_group (lambda (e) (replace_columns_from_expr e)))))
 											(cons (quote list) (map sp_ags (lambda (ag) (match ag '(e _ _) (replace_columns_from_expr e) nil))))))
 									/* reducer: mutate the session dict in place via (dict key val) */
 									(list (quote lambda) '('acc 'kv)
@@ -7736,7 +7741,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											(list (list (quote context) "session") _dca_cache_key)
 											(list (list (quote context) "session") _dca_cache_key (list _dca_build_fn))))
 									(list (quote define) (quote row)
-										(list (quote dict) (cons (quote list) _dca_key_syms)))
+										(list (quote dict)
+											(if (equal? 1 (count _dca_key_syms))
+												(car _dca_key_syms)
+												(cons (quote list) _dca_key_syms))))
 									(list (quote if) (list (quote nil?) (quote row))
 										neutral
 										(list (quote nth) (quote row) _dca_idx))))
