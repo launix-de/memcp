@@ -7787,6 +7787,16 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								acc
 								(merge acc (list (nth agg_plans i)))))
 							'()))
+						/* When dict-cached path is eligible, pre-build the shared dict
+						BEFORE the createcolumn proxies fire. The proxies all need the
+						dict; one of them would build it lazily otherwise, blocking the
+						rest while parallel-compute waits. Eager build runs once and is
+						gated by (table_empty?) so it skips when the keytable is warm. */
+						(define _dca_prebuild_plan (if _dca_eligible
+							(list (quote if) (list (quote table_empty?) (list (quote table) schema grouptbl))
+								(list (list (quote context) "session") _dca_cache_key (list _dca_build_fn))
+								nil)
+							nil))
 						(define compute_plan
 							(if (nil? count_plan)
 								'('time (cons 'parallel agg_plans) "compute")
@@ -7795,6 +7805,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(list 'begin
 										(list 'time count_plan "compute-count")
 										(list 'time (cons 'parallel non_count_agg_plans) "compute")))))
+						(define compute_plan (if (nil? _dca_prebuild_plan) compute_plan
+							(list (quote begin) _dca_prebuild_plan compute_plan)))
 
 						/* invalidation is handled by registerComputeTriggers in ComputeColumn:
 						DML triggers on the base table invalidate computed columns automatically.
