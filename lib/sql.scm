@@ -59,24 +59,51 @@ architecture works end-to-end on parser-shaped inputs. */
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
+(set sql_mutation_epoch (newsession))
+(sql_mutation_epoch "n" 0)
 
 /* cached_parse: wraps a parser with cachemap-based caching.
-cache_key = username:schema:hash(query) — per-user isolation (policy checked at parse time).
-The query is hashed with FNV-1a (fnv_hash) so long SQL strings don't bloat the cache index.
-Session-sensitive plans must not be reused under that key because their lowered
-runtime helper names and cache domains may depend on current session variables.
-On parse error the result is not cached (e.g. table does not exist yet). */
+cache_key = username:schema:hash(query):hash(@session-values) — per-user isolation
+(policy checked at parse time). The query is hashed with FNV-1a (fnv_hash) so long
+SQL strings don't bloat the cache index. `@var` plans are cached value-sensitively:
+planner helper names and cache domains may depend on current session variables.
+`?` placeholders stay uncached because their values are bound outside the SQL text. */
+(define cached_parse_session_vars (lambda (query)
+	(match query
+		(regex "(?s)^.*?@([A-Za-z_][A-Za-z0-9_]*)(.*)$" _ name rest)
+		(append_unique (cached_parse_session_vars rest) name)
+		'())))
+
+(define cached_parse_session_suffix (lambda (query session)
+	(begin
+		(define names (sort (cached_parse_session_vars query) <))
+		(fnv_hash (string (merge
+			(list (list "epoch" (sql_mutation_epoch "n")))
+			(map names (lambda (name)
+				(list name (session name))))))))))
+
+(define sql_mutating_statement? (lambda (query)
+	(match query
+		(regex "^[\\r\\n\\t ]*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|TRUNCATE)\\b(?s:.*)$" _ _) true
+		false)))
+
+(define sql_bump_mutation_epoch_if_needed (lambda (query)
+	(if (sql_mutating_statement? query)
+		(sql_mutation_epoch "n" (+ 1 (coalesceNil (sql_mutation_epoch "n") 0)))
+		nil)))
+
+/* On parse error the result is not cached (e.g. table does not exist yet). */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session)
 	(begin
-		(define query_session_sensitive (or
-			(strlike query "%@%")
-			(strlike query "%?%")))
-		(define cache_key (concat username ":" schema ":" (fnv_hash query)))
-		(define cached (if query_session_sensitive nil (queryplan_cache cache_key)))
+		(define query_has_placeholders (strlike query "%?%"))
+		(define session_suffix (cached_parse_session_suffix query session))
+		(session "__query_cache_suffix" session_suffix)
+		(define cache_key (concat username ":" schema ":" (fnv_hash query) ":" session_suffix))
+		(define cached (if query_has_placeholders nil (queryplan_cache cache_key)))
 		(if cached cached
 			(begin
 				(define formula (with_session session (lambda () (parse_fn schema query policy))))
-				(if (not query_session_sensitive)
+				(if (not query_has_placeholders)
 					(queryplan_cache cache_key formula))
 				formula)))))
 
@@ -272,6 +299,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(original_resultrow row))))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
 					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
+					(sql_bump_mutation_epoch_if_needed query)
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -438,7 +466,9 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(define formula (if (equal? (session "syntax") "postgresql")
 					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username session)
 					(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username session)))
-				(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
+				(define query_result (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))
+				(sql_bump_mutation_epoch_if_needed sql)
+				query_result
 			) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)

@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
 # Session-sensitive reminder/badge repros
 # Models ERP-style badge queries that combine scalar subselects, grouped inner
 # aggregates and permission checks via session variables.
@@ -124,6 +126,54 @@ test_cases:
         - ok: 1
           grouped_due: 2
           reminder_tickets: 2
+
+  - name: "No-table grouped reminder scalar for user 1"
+    session_id: "sgr-reminder-session"
+    sql: |
+      SELECT
+        (SELECT SUM(cnt)
+         FROM (
+           SELECT t.ownerTeam, SUM(1) AS cnt
+           FROM sgr_task t
+           WHERE t.due_at < @fop_time
+             AND EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = t.ownerTeam
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           GROUP BY t.ownerTeam
+         ) g
+         LIMIT 1) AS grouped_due
+    expect:
+      rows: 1
+      data:
+        - grouped_due: 2
+
+  - name: "No-table ticket reminder scalar for user 1"
+    session_id: "sgr-reminder-session"
+    sql: |
+      SELECT
+        (SELECT SUM(1)
+         FROM sgr_ticket x
+         WHERE NOT x.final
+           AND x.due_at < @fop_time
+           AND (
+             (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = x.assigned LIMIT 1)
+             OR EXISTS (
+               SELECT TRUE
+               FROM sgr_team_item ti
+               WHERE ti.list = x.assigned2
+                 AND (SELECT u.ID = @fop_user FROM sgr_user u WHERE u.ID = ti.item LIMIT 1)
+               LIMIT 1
+             )
+           )
+         LIMIT 1) AS reminder_tickets
+    expect:
+      rows: 1
+      data:
+        - reminder_tickets: 2
 
   - name: "Inner grouped reminder source for user 1"
     session_id: "sgr-reminder-session"

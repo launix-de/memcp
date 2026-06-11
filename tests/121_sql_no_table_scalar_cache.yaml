@@ -1,0 +1,147 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# SQL feature regression: no-table SELECT lists with several scalar subqueries
+# must reuse their materialized domain helpers. Rebuilding those helpers on
+# every execution pushes interactive requests into timeout territory.
+
+metadata:
+  version: "1.0"
+  description: "SQL no-table scalar subquery helpers are reused"
+  isolated: true
+  max_plan_size: 100000
+
+setup:
+  - sql: "DROP TABLE IF EXISTS snts_cfg"
+  - sql: "DROP TABLE IF EXISTS snts_doc"
+  - sql: "DROP TABLE IF EXISTS snts_person"
+  - sql: "DROP TABLE IF EXISTS snts_item"
+  - sql: "DROP TABLE IF EXISTS snts_invoice"
+  - sql: "DROP TABLE IF EXISTS snts_account"
+  - sql: "DROP TABLE IF EXISTS snts_entry"
+  - sql: "DROP TABLE IF EXISTS snts_journal"
+  - sql: "DROP TABLE IF EXISTS snts_period"
+  - sql: "CREATE TABLE snts_cfg (id INT PRIMARY KEY, default_kind INT, days_past INT, days_future INT)"
+  - sql: "CREATE TABLE snts_doc (id INT PRIMARY KEY, kind INT, archived BOOL)"
+  - sql: "CREATE TABLE snts_person (id INT PRIMARY KEY, start_epoch INT, birth_epoch INT)"
+  - sql: "CREATE TABLE snts_item (id INT PRIMARY KEY, state INT)"
+  - sql: "CREATE TABLE snts_invoice (id INT PRIMARY KEY, paid_epoch INT)"
+  - sql: "CREATE TABLE snts_account (number INT PRIMARY KEY, period_id INT, kind INT)"
+  - sql: "CREATE TABLE snts_entry (id INT PRIMARY KEY, account INT, journal_id INT, amount INT, debit BOOL)"
+  - sql: "CREATE TABLE snts_journal (id INT PRIMARY KEY, period_id INT, status INT)"
+  - sql: "CREATE TABLE snts_period (id INT PRIMARY KEY, start_epoch INT, end_epoch INT)"
+  - sql: "INSERT INTO snts_cfg VALUES (1, 1, 40, 3)"
+  - sql: "INSERT INTO snts_period VALUES (2024, 1700000000, 1800000000)"
+  - scm: |
+      (begin
+        (set n 1200)
+        (set docs (map (produceN n) (lambda (i)
+          (list i (- i (* 3 (floor (/ i 3)))) false))))
+        (insert (table "memcp-tests" "snts_doc") '("id" "kind" "archived") docs)
+        (set people (map (produceN n) (lambda (i)
+          (list i
+            (- 1780000000 (* 86400 (- i (* 60 (floor (/ i 60))))))
+            (- 1780000000 (* 86400 (- i (* 365 (floor (/ i 365))))))))))
+        (insert (table "memcp-tests" "snts_person") '("id" "start_epoch" "birth_epoch") people)
+        (set items (map (produceN n) (lambda (i)
+          (list i (- i (* 12 (floor (/ i 12))))))))
+        (insert (table "memcp-tests" "snts_item") '("id" "state") items)
+        (set invoices (map (produceN n) (lambda (i)
+          (list i (if (< (- i (* 2 (floor (/ i 2)))) 1) nil 1780000000)))))
+        (insert (table "memcp-tests" "snts_invoice") '("id" "paid_epoch") invoices)
+        (set accounts (map (produceN 80) (lambda (i)
+          (list i 2024 (if (< (- i (* 3 (floor (/ i 3)))) 2) 4 1)))))
+        (insert (table "memcp-tests" "snts_account") '("number" "period_id" "kind") accounts)
+        (set journals (map (produceN 80) (lambda (i) (list i 2024 0))))
+        (insert (table "memcp-tests" "snts_journal") '("id" "period_id" "status") journals)
+        (set entries (map (produceN n) (lambda (i)
+          (list i (- i (* 80 (floor (/ i 80)))) (- i (* 80 (floor (/ i 80)))) 1 true))))
+        (insert (table "memcp-tests" "snts_entry") '("id" "account" "journal_id" "amount" "debit") entries)
+        (rebuild))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS snts_period"
+  - sql: "DROP TABLE IF EXISTS snts_journal"
+  - sql: "DROP TABLE IF EXISTS snts_entry"
+  - sql: "DROP TABLE IF EXISTS snts_account"
+  - sql: "DROP TABLE IF EXISTS snts_invoice"
+  - sql: "DROP TABLE IF EXISTS snts_item"
+  - sql: "DROP TABLE IF EXISTS snts_person"
+  - sql: "DROP TABLE IF EXISTS snts_doc"
+  - sql: "DROP TABLE IF EXISTS snts_cfg"
+
+test_cases:
+  - name: "sql-no-table-scalar-cache-set-session"
+    session_id: "snts"
+    sql: "SET @now_epoch = 1780000000"
+    expect:
+      rows_affected: 0
+
+  - name: "sql-no-table-scalar-cache-warm-materialized-helpers"
+    session_id: "snts"
+    max_time: 10
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM snts_doc d
+         WHERE (((SELECT default_kind FROM snts_cfg WHERE id = 1 LIMIT 1) IS NULL AND d.kind IS NULL)
+           OR d.kind = (SELECT default_kind FROM snts_cfg WHERE id = 1 LIMIT 1))
+           AND NOT d.archived
+         LIMIT 1) AS doc_count,
+        (SELECT SUM(1) FROM snts_person p
+         WHERE p.start_epoch IS NOT NULL
+           AND p.start_epoch BETWEEN (@now_epoch - (40 * 24 * 3600)) AND (@now_epoch + (3 * 24 * 3600))
+         LIMIT 1) AS start_count,
+        (SELECT SUM(1) FROM snts_person p
+         WHERE p.birth_epoch IS NOT NULL
+           AND ((((@now_epoch - p.birth_epoch) % 31557600) / 86400) BETWEEN 0
+             AND (SELECT days_past FROM snts_cfg WHERE id = 1 LIMIT 1))
+         LIMIT 1) AS birth_count,
+        (SELECT SUM(1) FROM snts_item i WHERE i.state IN (0, 1, 11) LIMIT 1) AS item_count,
+        (SELECT SUM(1) FROM snts_invoice inv WHERE inv.paid_epoch IS NULL LIMIT 1) AS unpaid_count,
+        (SELECT SUM(1) FROM snts_account acc
+         WHERE acc.kind IN (4, 5)
+           AND ((SELECT SUM(e.amount * (CASE WHEN e.debit THEN 1 ELSE -1 END))
+                 FROM snts_entry e
+                 WHERE e.account = acc.number
+                   AND (SELECT j.period_id FROM snts_journal j WHERE j.id = e.journal_id LIMIT 1) = acc.period_id
+                   AND (SELECT j.status FROM snts_journal j WHERE j.id = e.journal_id LIMIT 1) = 0
+                 LIMIT 1) <> 0)
+           AND (SELECT per.start_epoch <= @now_epoch AND @now_epoch <= per.end_epoch
+                FROM snts_period per WHERE per.id = acc.period_id LIMIT 1)
+         LIMIT 1) AS account_count
+    expect:
+      rows: 1
+
+  - name: "sql-no-table-scalar-cache-second-run-uses-existing-helpers"
+    session_id: "snts"
+    max_time: 1.5
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM snts_doc d
+         WHERE (((SELECT default_kind FROM snts_cfg WHERE id = 1 LIMIT 1) IS NULL AND d.kind IS NULL)
+           OR d.kind = (SELECT default_kind FROM snts_cfg WHERE id = 1 LIMIT 1))
+           AND NOT d.archived
+         LIMIT 1) AS doc_count,
+        (SELECT SUM(1) FROM snts_person p
+         WHERE p.start_epoch IS NOT NULL
+           AND p.start_epoch BETWEEN (@now_epoch - (40 * 24 * 3600)) AND (@now_epoch + (3 * 24 * 3600))
+         LIMIT 1) AS start_count,
+        (SELECT SUM(1) FROM snts_person p
+         WHERE p.birth_epoch IS NOT NULL
+           AND ((((@now_epoch - p.birth_epoch) % 31557600) / 86400) BETWEEN 0
+             AND (SELECT days_past FROM snts_cfg WHERE id = 1 LIMIT 1))
+         LIMIT 1) AS birth_count,
+        (SELECT SUM(1) FROM snts_item i WHERE i.state IN (0, 1, 11) LIMIT 1) AS item_count,
+        (SELECT SUM(1) FROM snts_invoice inv WHERE inv.paid_epoch IS NULL LIMIT 1) AS unpaid_count,
+        (SELECT SUM(1) FROM snts_account acc
+         WHERE acc.kind IN (4, 5)
+           AND ((SELECT SUM(e.amount * (CASE WHEN e.debit THEN 1 ELSE -1 END))
+                 FROM snts_entry e
+                 WHERE e.account = acc.number
+                   AND (SELECT j.period_id FROM snts_journal j WHERE j.id = e.journal_id LIMIT 1) = acc.period_id
+                   AND (SELECT j.status FROM snts_journal j WHERE j.id = e.journal_id LIMIT 1) = 0
+                 LIMIT 1) <> 0)
+           AND (SELECT per.start_epoch <= @now_epoch AND @now_epoch <= per.end_epoch
+                FROM snts_period per WHERE per.id = acc.period_id LIMIT 1)
+         LIMIT 1) AS account_count
+    expect:
+      rows: 1

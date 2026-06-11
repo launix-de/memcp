@@ -48,6 +48,11 @@ Runs at server startup after queryplan-lift.scm loads.
 
 	(define mk-col (lambda (tv col) (list (quote get_column) tv false col false)))
 	(define mk-tuple (lambda (schema tables fields cond) (list schema tables fields cond '() nil '() nil nil)))
+	(define qpl-count-dep-joins (lambda (node) (begin
+		(define self-count (if (equal? (qpir-kind node) (quote qpir-dep-join)) 1 0))
+		(define child-count (reduce (qpir-children node)
+			(lambda (acc c) (+ acc (qpl-count-dep-joins c))) 0))
+		(+ self-count child-count))))
 
 	/* ==== Marker detection ==== */
 	(define sub-pi (mk-tuple "memcp-tests"
@@ -70,6 +75,11 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (qpl-marker-lhs marker-in) (mk-col "po" "k") "lhs extract in")
 	(qpl-assert (qpl-marker-lhs marker-scalar) nil "lhs scalar returns nil")
 	(qpl-assert (qpl-marker-lhs marker-exists) nil "lhs exists returns nil")
+	(define scalar-canonical-map (build_occurrence_alias_map
+		(list (list "cfg" "memcp-tests" "cd_cfg" false nil))))
+	(qpl-assert (qpl-canonical-scalar-expr (mk-col "cfg" "default_kind") scalar-canonical-map)
+		"memcp-tests.cd_cfg.default_kind"
+		"canonical scalar names use physical source and column names")
 
 	(qpl-assert (count (qpl-collect-markers 42)) 0 "collect: atom yields 0")
 	(qpl-assert (count (qpl-collect-markers (mk-col "po" "k"))) 0 "collect: get_column yields 0")
@@ -170,6 +180,23 @@ Runs at server startup after queryplan-lift.scm loads.
 	(define fv-after-lift (qpir-free-vars lifted-scalar))
 	(qpl-assert (count fv-after-lift) 0
 		"F(lifted dep-join) = ∅ — outer refs in inner are bound by dep-join's left provider")
+
+	/* ==== Duplicate scalar markers share one canonical helper ==== */
+	(define t-duplicate-scalar (mk-tuple "memcp-tests"
+		(list (list "po" "memcp-tests" "po" false nil))
+		(list (list "total_a" marker-scalar)
+			(list "total_b" marker-scalar))
+		true))
+	(define lifted-duplicate-scalar (lift_dep_joins_pass t-duplicate-scalar))
+	(qpl-assert (qpl-count-dep-joins lifted-duplicate-scalar) 1
+		"lift: duplicate canonical scalar markers share one dep-join helper")
+	(define duplicate-outer (qpir-leaf-7tuple (qpir-dep-join-left lifted-duplicate-scalar)))
+	(define duplicate-a-ref (nth (nth (qpp-tuple-fields duplicate-outer) 0) 1))
+	(define duplicate-b-ref (nth (nth (qpp-tuple-fields duplicate-outer) 1) 1))
+	(qpl-assert duplicate-a-ref duplicate-b-ref
+		"lift: duplicate scalar fields reference the same canonical helper alias")
+	(qpl-assert (nth duplicate-a-ref 1) (qpir-dep-join-rhs-alias lifted-duplicate-scalar)
+		"lift: duplicate scalar helper alias is the dep-join rhs alias")
 
 	/* ==== Path (c): scalar WHERE marker → qpir-select(qpir-dep-join …) ==== */
 	(define lifted-where (lift_dep_joins_pass t-where-scalar))
@@ -294,13 +321,8 @@ Runs at server startup after queryplan-lift.scm loads.
 	(qpl-assert (qpir-kind lifted-nested) (quote qpir-dep-join)
 		"nested lift: root is qpir-dep-join (outer's marker)")
 	/* Walk the tree counting qpir-dep-joins (qpu-count-dep-joins isn't
-	loaded yet at this point — define a local counter). */
-	(define qpl-count-djs (lambda (node) (begin
-		(define self-count (if (equal? (qpir-kind node) (quote qpir-dep-join)) 1 0))
-		(define child-count (reduce (qpir-children node)
-			(lambda (acc c) (+ acc (qpl-count-djs c))) 0))
-		(+ self-count child-count))))
-	(define dj-count (qpl-count-djs lifted-nested))
+	loaded yet at this point). */
+	(define dj-count (qpl-count-dep-joins lifted-nested))
 	/* Outer dep-join + inner dep-join from recursive lift = 2 */
 	(qpl-assert dj-count 2
 		"nested lift: exactly 2 qpir-dep-joins total (outer + inner from recursive lift)")
