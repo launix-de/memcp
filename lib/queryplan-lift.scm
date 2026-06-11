@@ -1248,9 +1248,8 @@ return NULL on empty per SQL semantics — those are NOT wrapped. */
 /* qpl-substitute-fields — apply qpl-substitute-markers to every projection
 expression in a fields list, accumulating subqueries into acc. */
 (define qpl-substitute-fields (lambda (fields acc alias-map)
-	(map (coalesceNil fields '()) (lambda (pair) (match pair
-		'(name expr) (list name (qpl-substitute-markers expr acc alias-map))
-		pair)))))
+	(qpp-map-fields fields (lambda (expr)
+		(qpl-substitute-markers expr acc alias-map)))))
 
 /* qpl-substitute-group — apply to every group-by expression.
 Preserves nil as nil — legacy distinguishes nil-group ("no GROUP BY",
@@ -1651,6 +1650,25 @@ projection that COMBINES them. */
 		and the placeholders resolve to the derived's columns. */
 		(qpir-map (list (list "value" final-expr)) groupby)))))
 
+(define qpl-substituted-subquery-for-wrapper (lambda (sub) (begin
+	(define t-lim (qpl-rewrite-redundant-limit-tuple sub))
+	(define t-const (qpl-rewrite-trivial-scalars-tuple t-lim))
+	(define t-prime (qpl-rewrite-in-exists-tuple t-const))
+	(define acc (newsession))
+	(acc "list" '())
+	(define scalar-alias-map (build_occurrence_alias_map (qpp-tuple-tables t-prime)))
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema t-prime)
+		(qpp-tuple-tables t-prime)
+		(qpl-substitute-fields (qpp-tuple-fields t-prime) acc scalar-alias-map)
+		(qpl-substitute-markers (qpp-tuple-condition t-prime) acc scalar-alias-map)
+		(qpl-substitute-group (qpp-tuple-group t-prime) acc scalar-alias-map)
+		(if (nil? (qpp-tuple-having t-prime)) nil
+			(qpl-substitute-markers (qpp-tuple-having t-prime) acc scalar-alias-map))
+		(qpl-substitute-order (qpp-tuple-order t-prime) acc scalar-alias-map)
+		(qpp-tuple-limit t-prime)
+		(qpp-tuple-offset t-prime)))))
+
 /* qpl-build-groupby-wrapped-tree — same aggregate split as
 qpl-build-groupby-wrapped-inner, but the child is already a lifted QPIR tree.
 This is needed for EXISTS/IN/scalar subqueries whose WHERE contains nested
@@ -1658,7 +1676,8 @@ markers: recursive lifting returns a dep-join/select tree, and the outer
 COUNT/SUM/etc. still has to become an operator-level qpir-groupby so unnest
 can push correlation keys through it. */
 (define qpl-build-groupby-wrapped-tree (lambda (sub child) (begin
-	(define fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+	(define substituted-sub (qpl-substituted-subquery-for-wrapper sub))
+	(define fields-pairs (qpp-fields-to-pairs (qpp-tuple-fields substituted-sub)))
 	(if (not (equal? (count fields-pairs) 1))
 		(error (concat "qpl-build-groupby-wrapped-tree: expected 1 field, found "
 			(string (count fields-pairs)) " — multi-field inner subqueries are phase 5+")) nil)
@@ -1670,17 +1689,17 @@ can push correlation keys through it. */
 	(define agg-pairs (agg-acc "list"))
 	(if (equal? (count agg-pairs) 0)
 		(error "qpl-build-groupby-wrapped-tree: no aggregates found — shouldn't reach here") nil)
-	(define group-keys (coalesceNil (qpp-tuple-group sub) '()))
+	(define group-keys (coalesceNil (qpp-tuple-group substituted-sub) '()))
 	(define groupby (qpir-groupby
 		group-keys
 		agg-pairs
-		(qpp-tuple-having sub)
+		(qpp-tuple-having substituted-sub)
 		child))
 	(if (equal? (count agg-pairs) 1)
 		(qpir-groupby
 			group-keys
 			(list (list "value" (nth (nth agg-pairs 0) 1)))
-			(qpp-tuple-having sub)
+			(qpp-tuple-having substituted-sub)
 			child)
 		(qpir-map (list (list "value" final-expr)) groupby)))))
 

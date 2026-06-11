@@ -53,6 +53,17 @@ Runs at server startup after queryplan-lift.scm loads.
 		(define child-count (reduce (qpir-children node)
 			(lambda (acc c) (+ acc (qpl-count-dep-joins c))) 0))
 		(+ self-count child-count))))
+	(define qpl-tree-has-inner-select-marker? (lambda (expr)
+		(match expr
+			'((symbol inner_select) _) true
+			'((quote inner_select) _) true
+			'((symbol inner_select_exists) _) true
+			'((quote inner_select_exists) _) true
+			'((symbol inner_select_in) _ _) true
+			'((quote inner_select_in) _ _) true
+			(cons head args) (reduce (coalesceNil args '()) (lambda (acc a)
+				(or acc (qpl-tree-has-inner-select-marker? a))) false)
+			false)))
 
 	/* ==== Marker detection ==== */
 	(define sub-pi (mk-tuple "memcp-tests"
@@ -326,6 +337,33 @@ Runs at server startup after queryplan-lift.scm loads.
 	/* Outer dep-join + inner dep-join from recursive lift = 2 */
 	(qpl-assert dj-count 2
 		"nested lift: exactly 2 qpir-dep-joins total (outer + inner from recursive lift)")
+
+	/* ==== Nested scalar inside aggregate input remains marker-free ==== */
+	(define item-total-sub (mk-tuple "memcp-tests"
+		(list (list "item" "memcp-tests" "item" false nil))
+		(list (list "total" (list (quote aggregate)
+			(list (quote *) (mk-col "item" "price") (mk-col "item" "qty"))
+			(quote +) 0)))
+		(list (quote equal??) (mk-col "item" "invoice_id") (mk-col "paid" "id"))))
+	(define paid-total-sub (mk-tuple "memcp-tests"
+		(list (list "paid" "memcp-tests" "invoice" false nil))
+		(list (list "total" (list (quote aggregate)
+			(list (quote coalesce) (list (quote inner_select) item-total-sub) 0)
+			(quote +) 0)))
+		(list (quote and)
+			(list (quote equal??) (mk-col "paid" "customer_id") (mk-col "outer" "customer_id"))
+			(list (quote not) (list (quote nil?) (mk-col "paid" "paid_at"))))))
+	(define t-nested-aggregate-input (mk-tuple "memcp-tests"
+		(list (list "outer" "memcp-tests" "invoice" false nil))
+		(list (list "id" (mk-col "outer" "id"))
+			(list "paid_total" (list (quote inner_select) paid-total-sub)))
+		true))
+	(define lifted-nested-aggregate-input (lift_dep_joins_pass t-nested-aggregate-input))
+	(define nested-aggregate-groupby (qpir-dep-join-right lifted-nested-aggregate-input))
+	(qpl-assert (qpir-kind nested-aggregate-groupby) (quote qpir-groupby)
+		"nested aggregate input lift: outer scalar aggregate becomes qpir-groupby")
+	(qpl-assert (qpl-tree-has-inner-select-marker? (qpir-groupby-aggs nested-aggregate-groupby)) false
+		"nested aggregate input lift: groupby aggregate uses substituted scalar helper")
 
 	/* ==== HAVING markers lift through the same dep-join chain ==== */
 
