@@ -2473,9 +2473,17 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 				/* pre-resolve keytable pointer for inner loops */
 				(tbl-define-code schema keytable_name)
 				/* returns true when collect + trigger deploy is needed:
-				createtable=true (new) OR table_empty (restart recovery) */
+				createtable=true (new) OR table_empty (restart recovery).
+				Use (nil? (table ...)) for existence rather than (has? (show ...)) —
+				`show` filters out dot-prefixed internal tables (per
+				isHiddenFromShowTables in storage/table.go:629), so keytables
+				like `.PLZ:((get_column ...))` would never match and the gate
+				would ALWAYS fire warm-runs, re-collecting the keytable from
+				scratch every query. The `(table schema name)` lookup returns
+				nil on absence regardless of visibility, which is exactly
+				what we want for the cache gate. */
 				(list 'or
-					(list 'not (list 'has? (list 'show schema) keytable_name))
+					(list 'nil? (list 'table schema keytable_name))
 					(list 'table_empty? (list 'table schema keytable_name)))))
 			(define kt_schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 			(list keytable_name kt_schema_def init_code nil)))
