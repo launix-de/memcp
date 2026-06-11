@@ -155,6 +155,11 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "Unsupported information_schema table fails clearly"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.UNSUPPORTED_MEMCP_TABLE"
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS is_test_tbl"
   - sql: "DROP TABLE IF EXISTS `.is_hidden_meta`"

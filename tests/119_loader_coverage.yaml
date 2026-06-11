@@ -1,0 +1,79 @@
+# Loader coverage for SQL and PostgreSQL dump import paths.
+
+metadata:
+  version: "1.0"
+  description: "SQL loader and PostgreSQL dump loader coverage"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS loader_sql"
+  - sql: "DROP TABLE IF EXISTS loader_psql"
+  - sql: "DROP TABLE IF EXISTS loader_psql_file"
+  - sql: "CREATE TABLE loader_psql (id INT PRIMARY KEY, flag BOOLEAN, note TEXT)"
+
+test_cases:
+  - name: "load_sql handles comments and custom delimiters"
+    scm: |
+      (load_sql "memcp-tests"
+        (streamString (concat
+          "-- comment ignored by loader\n"
+          "DELIMITER $$\n"
+          "CREATE TABLE loader_sql (id INT, name VARCHAR(20))$$\n"
+          "INSERT INTO loader_sql VALUES (1, 'Ada')$$\n"
+          "DELIMITER ;\n"
+          "INSERT INTO loader_sql VALUES (2, 'Bob');\n")))
+
+  - name: "load_sql custom delimiter data is visible"
+    sql: "SELECT id, name FROM loader_sql ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          name: "Ada"
+        - id: 2
+          name: "Bob"
+
+  - name: "load_psql handles comments backslash commands and function skips"
+    scm: |
+      (load_psql "memcp-tests"
+        (streamString (concat
+          "-- comment ignored by loader\n"
+          "\\connect ignored\n"
+          "CREATE FUNCTION ignored_loader_function()\n"
+          "ignored body line\n"
+          "$$;\n"))
+        (sql_policy "root"))
+
+  - name: "load_psql skipped input leaves target table empty"
+    sql: "SELECT COUNT(*) AS cnt FROM loader_psql"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  - name: "load_psql COPY FROM path without path source fails clearly"
+    scm: |
+      (load_psql "memcp-tests"
+        (streamString "COPY public.loader_psql (id, flag, note) FROM '$$PATH$$/missing.dat';\n")
+        (sql_policy "root"))
+    expect:
+      error: true
+
+  - name: "load_psql imports a plain sql file source"
+    scm: |
+      (load_psql "memcp-tests"
+        (concat __DIR__ "/../tests/fixtures/loader_plain.sql")
+        (sql_policy "root"))
+
+  - name: "load_psql plain sql source imports data"
+    sql: "SELECT id, note FROM loader_psql_file"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          note: "from plain sql"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS loader_sql"
+  - sql: "DROP TABLE IF EXISTS loader_psql"
+  - sql: "DROP TABLE IF EXISTS loader_psql_file"
