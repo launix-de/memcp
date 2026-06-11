@@ -482,6 +482,14 @@ func (p *StorageComputeProxy) Compress() {
 	}
 
 	colvalues := make([]scm.Scmer, len(p.inputCols))
+	// Per-Compress() value cache: the propose/build loops below ask for the
+	// same cell value 2+ times (once per propose iteration plus the final
+	// build pass). For expensive computors (e.g. dict-cached groupby agg
+	// computors that do a session lookup), reusing the result across loop
+	// iterations halves the call count. p.delta is reserved for DML-tracked
+	// updates so we keep an explicit local cache here.
+	computeCache := make([]scm.Scmer, p.count)
+	cacheValid := make([]bool, p.count)
 	getValue := func(idx uint32) scm.Scmer {
 		if val, ok := p.delta[idx]; ok {
 			return val
@@ -489,11 +497,17 @@ func (p *StorageComputeProxy) Compress() {
 		if p.main != nil && p.validMask.Get(uint(idx)) {
 			return p.main.GetValue(idx)
 		}
+		if cacheValid[idx] {
+			return computeCache[idx]
+		}
 		// compute
 		for j := range readers {
 			colvalues[j] = readers[j].GetValue(idx)
 		}
-		return applyWithTx(tx, p.computor, colvalues...)
+		v := applyWithTx(tx, p.computor, colvalues...)
+		computeCache[idx] = v
+		cacheValid[idx] = true
+		return v
 	}
 
 	// Standard proposeCompression loop (same as shard rebuild)
