@@ -307,10 +307,12 @@ func scmerSymbol(v Scmer) (Symbol, bool) {
 func scmerStripSourceInfo(v Scmer) (Scmer, bool) {
 	if v.IsSourceInfo() {
 		si := v.SourceInfo()
+		si.coverage = true
 		return si.value, true
 	}
 	if v.GetTag() == tagAny {
 		if si, ok := v.Any().(SourceInfo); ok {
+			si.coverage = true
 			return si.value, true
 		}
 	}

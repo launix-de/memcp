@@ -1,0 +1,66 @@
+# Direct SCM coverage for RDF parser/planner helper paths.
+
+metadata:
+  version: "1.0"
+  description: "RDF parser helper coverage"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "RDF context and variable helper edge cases"
+    scm: |
+      (begin
+        (define fail (lambda (msg) (error (concat "rdf helper coverage: " msg))))
+        (if (not (equal? (rdf_ctx_lookup '("a" 1 "b" 2) "b") '(true 2))) (fail "ctx lookup flat assoc"))
+        (if (not (equal? (rdf_ctx_lookup '() "missing") '(false nil))) (fail "ctx lookup missing"))
+        (if (not (equal? (rdf_ctx_bound (list "a" (rdf_unbound_expr)) "a") false)) (fail "ctx bound unbound expr"))
+        (if (not (nil? (rdf_ctx_value (list "a" (rdf_unbound_expr)) "a"))) (fail "ctx value unbound expr"))
+        (if (not (equal? (rdf_var_symbol (list (quote get_var) "?x")) "?x")) (fail "var symbol get_var"))
+        true)
+
+  - name: "RDF condition and prefix helper edge cases"
+    scm: |
+      (begin
+        (define fail (lambda (msg) (error (concat "rdf condition coverage: " msg))))
+        (define get_s (list (quote get_var) "?s"))
+        (define get_o (list (quote get_var) "?o"))
+        (define subquery (list "select" (list "?s" get_s) "where" (list) "group" (list) "order" nil "limit" nil "offset" nil "distinct" nil))
+        (define conditions (list
+          (list "__union__" (list (list get_s "p" get_o)))
+          (list "__subquery__" subquery)
+          (list "__filter__" (list (quote equal?) get_s "x"))))
+        (define vars (rdf_condition_vars conditions))
+        (if (not (rdf_key_in_list vars "?s")) (fail "condition vars include subquery alias"))
+        (if (not (equal? (rdf_strip_leading_ws_comments " /* ignored */\n-- line\n# hash\nbody") "body")) (fail "strip comments"))
+        (define defs (newsession))
+        (defs "ex" "http://example/")
+        (if (not (equal? (rdf_resolve_prefixes (list (quote concat) (list (quote definitions) "ex") "item") defs) "http://example/item")) (fail "resolve prefix"))
+        true)
+
+  - name: "RDF row and aggregate helper edge cases"
+    scm: |
+      (begin
+        (define fail (lambda (msg) (error (concat "rdf aggregate coverage: " msg))))
+        (define row (list (list "v" 4) (list "txt" "a")))
+        (if (not (equal? (rdf_row_lookup row "v") 4)) (fail "row lookup pair"))
+        (if (not (equal? (rdf_row_lookup '("v" 5 "txt" "b") "txt") "b")) (fail "row lookup flat assoc"))
+        (define get_v (list (quote get_var) "v"))
+        (define get_txt (list (quote get_var) "txt"))
+        (if (not (nil? (rdf_replace_row (list (quote get_var) "missing") row))) (fail "replace missing"))
+        (if (not (equal? (rdf_row_eval get_v row) 4)) (fail "row eval"))
+        (define count_expr (list "__rdf_agg__" "COUNT" get_v nil))
+        (define sum_expr (list "__rdf_agg__" "SUM" get_v nil))
+        (define avg_expr (list "__rdf_agg__" "AVG" get_v nil))
+        (define min_expr (list "__rdf_agg__" "MIN" get_v nil))
+        (define max_expr (list "__rdf_agg__" "MAX" get_v nil))
+        (define gc_expr (list "__rdf_agg__" "GROUP_CONCAT" get_txt "|"))
+        (if (not (equal? (rdf_agg_step count_expr (rdf_agg_init count_expr) row) 1)) (fail "count step"))
+        (if (not (equal? (rdf_agg_step sum_expr (rdf_agg_init sum_expr) row) 4)) (fail "sum step"))
+        (if (not (equal? (rdf_agg_finalize avg_expr (rdf_agg_step avg_expr (rdf_agg_init avg_expr) row)) 4)) (fail "avg finalize"))
+        (if (not (equal? (rdf_agg_step min_expr nil row) 4)) (fail "min nil step"))
+        (if (not (equal? (rdf_agg_step max_expr 2 row) 4)) (fail "max step"))
+        (if (not (equal? (rdf_agg_step gc_expr "z" row) "z|a")) (fail "group concat step"))
+        true)
+
+cleanup: []

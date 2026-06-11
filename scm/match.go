@@ -43,7 +43,9 @@ func scmerSymbolName(s Scmer) (string, bool) {
 func scmerAsSlice(v Scmer) ([]Scmer, bool) {
 	// Unwrap SourceInfo if present
 	if v.IsSourceInfo() {
-		return scmerAsSlice(v.SourceInfo().value)
+		sourceInfo := v.SourceInfo()
+		sourceInfo.coverage = true
+		return scmerAsSlice(sourceInfo.value)
 	}
 	if v.IsSlice() {
 		return v.Slice(), true
@@ -62,7 +64,9 @@ func scmerAsSlice(v Scmer) ([]Scmer, bool) {
 func scmerAsString(v Scmer) (string, bool) {
 	// Unwrap SourceInfo if present
 	if v.IsSourceInfo() {
-		return scmerAsString(v.SourceInfo().value)
+		sourceInfo := v.SourceInfo()
+		sourceInfo.coverage = true
+		return scmerAsString(sourceInfo.value)
 	}
 	if v.GetTag() == tagString {
 		return v.String(), true
@@ -77,10 +81,14 @@ func scmerAsString(v Scmer) (string, bool) {
 
 func valueFromPattern(pattern Scmer, en *Env) Scmer {
 	if pattern.IsSourceInfo() {
-		return valueFromPattern(pattern.SourceInfo().value, en)
+		sourceInfo := pattern.SourceInfo()
+		sourceInfo.coverage = true
+		return valueFromPattern(sourceInfo.value, en)
 	}
 	if pattern.GetTag() == tagSourceInfo {
-		return valueFromPattern(pattern.SourceInfo().value, en)
+		sourceInfo := pattern.SourceInfo()
+		sourceInfo.coverage = true
+		return valueFromPattern(sourceInfo.value, en)
 	}
 	if pattern.IsSymbol() {
 		sym := Symbol(pattern.String())
@@ -128,7 +136,9 @@ func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 	*/
 	switch pattern.GetTag() {
 	case tagSourceInfo:
-		return match(val, pattern.SourceInfo().value, en, mutable)
+		sourceInfo := pattern.SourceInfo()
+		sourceInfo.coverage = true
+		return match(val, sourceInfo.value, en, mutable)
 	case tagInt, tagFloat, tagString:
 		return Equal(val, pattern)
 	case tagSymbol:

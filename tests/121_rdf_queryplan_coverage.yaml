@@ -1,0 +1,129 @@
+# RDF/SPARQL query planner coverage for less common WHERE and expression forms.
+
+metadata:
+  version: "1.0"
+  description: "RDF/SPARQL query planner coverage"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS rdf"
+
+test_cases:
+  - name: "SPARQL OPTIONAL keeps unmatched left rows"
+    ttl_data: |
+      @prefix ropt: <http://rdfcov/optional/> .
+      ropt:a ropt:name "Ann" .
+      ropt:a ropt:nick "A" .
+      ropt:b ropt:name "Bob" .
+    sparql: |
+      @prefix ropt: <http://rdfcov/optional/> .
+      SELECT DISTINCT ?name, ?nick WHERE { ?s ropt:name ?name . OPTIONAL { ?s ropt:nick ?nick } } ORDER BY ?name
+    expect:
+      rows: 2
+
+  - name: "SPARQL VALUES binds candidate constants"
+    ttl_data: |
+      @prefix rvals: <http://rdfcov/values/> .
+      rvals:a rvals:v "1" .
+      rvals:b rvals:v "2" .
+      rvals:c rvals:v "3" .
+    sparql: |
+      @prefix rvals: <http://rdfcov/values/> .
+      SELECT DISTINCT ?s WHERE { VALUES ?wanted { "1" "3" } ?s rvals:v ?wanted }
+    expect:
+      rows: 2
+
+  - name: "SPARQL FILTER EXISTS and NOT EXISTS"
+    ttl_data: |
+      @prefix rex: <http://rdfcov/exists/> .
+      rex:a rex:type rex:Thing .
+      rex:a rex:flag "yes" .
+      rex:b rex:type rex:Thing .
+      rex:c rex:type rex:Other .
+    sparql: |
+      @prefix rex: <http://rdfcov/exists/> .
+      SELECT ?s WHERE { ?s rex:type rex:Thing . FILTER EXISTS { ?s rex:flag "yes" } . FILTER NOT EXISTS { ?s rex:skip "1" } }
+    expect:
+      rows: 1
+      data:
+        - "?s": "http://rdfcov/exists/a"
+
+  - name: "SPARQL UNION combines alternative groups"
+    ttl_data: |
+      @prefix runi: <http://rdfcov/union/> .
+      runi:a runi:left "L" .
+      runi:b runi:right "R" .
+      runi:c runi:other "O" .
+    sparql: |
+      @prefix runi: <http://rdfcov/union/> .
+      SELECT ?s WHERE { { ?s runi:left "L" } UNION { ?s runi:right "R" } }
+    expect:
+      rows: 2
+
+  - name: "SPARQL BIND and scalar filter functions"
+    ttl_data: |
+      @prefix rbind: <http://rdfcov/bind/> .
+      rbind:a rbind:v "alpha" .
+      rbind:b rbind:v "beta" .
+    sparql: |
+      @prefix rbind: <http://rdfcov/bind/> .
+      SELECT ?out WHERE { ?s rbind:v ?v . BIND(CONCAT(?v, "-x") AS ?out) . FILTER(STRSTARTS(?out, "alpha") && CONTAINS(?out, "-") && STRENDS(?out, "x") && regex(?out, "alpha")) }
+    expect:
+      rows: 1
+      data:
+        - "?out": "alpha-x"
+
+  - name: "SPARQL aggregate grouping"
+    ttl_data: |
+      @prefix ragg: <http://rdfcov/agg/> .
+      ragg:a ragg:g "one" .
+      ragg:a ragg:v "2" .
+      ragg:b ragg:g "one" .
+      ragg:b ragg:v "4" .
+      ragg:c ragg:g "two" .
+      ragg:c ragg:v "5" .
+    sparql: |
+      @prefix ragg: <http://rdfcov/agg/> .
+      SELECT ?g, (COUNT(?v) AS ?cnt), (SUM(?v) AS ?sum), (AVG(?v) AS ?avg), (MIN(?v) AS ?min), (MAX(?v) AS ?max), (GROUP_CONCAT(?v; separator="|") AS ?joined) WHERE { ?s ragg:g ?g . ?s ragg:v ?v } GROUP BY ?g ORDER BY ?g
+    expect:
+      rows: 2
+
+  - name: "SPARQL property path sequence and alternative"
+    ttl_data: |
+      @prefix rpath: <http://rdfcov/path/> .
+      rpath:a rpath:p1 rpath:b .
+      rpath:b rpath:p2 "seq" .
+      rpath:c rpath:left "alt-left" .
+      rpath:d rpath:right "alt-right" .
+    sparql: |
+      @prefix rpath: <http://rdfcov/path/> .
+      SELECT ?o WHERE { rpath:a rpath:p1/rpath:p2 ?o }
+    expect:
+      rows: 1
+      data:
+        - "?o": "seq"
+
+  - name: "SPARQL property path star and plus"
+    ttl_data: |
+      @prefix rwalk: <http://rdfcov/walk/> .
+      rwalk:a rwalk:next rwalk:b .
+      rwalk:b rwalk:next rwalk:c .
+    sparql: |
+      @prefix rwalk: <http://rdfcov/walk/> .
+      SELECT ?o WHERE { rwalk:a rwalk:next+ ?o }
+    expect:
+      rows: 2
+
+  - name: "SPARQL aggregate subquery"
+    ttl_data: |
+      @prefix rsub: <http://rdfcov/subquery/> .
+      rsub:a rsub:v "1" .
+      rsub:b rsub:v "2" .
+    sparql: |
+      @prefix rsub: <http://rdfcov/subquery/> .
+      SELECT ?total WHERE { { SELECT (COUNT(?s) AS ?total) WHERE { ?s rsub:v ?v } } }
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS rdf"
