@@ -72,12 +72,19 @@ func mustNthLocalVar(v Scmer) NthLocalVar {
 	panic("expected numbered local variable")
 }
 
-func evalWithSourceInfo(si SourceInfo, en *Env) (value Scmer) {
+func evalWithSourceInfo(si *SourceInfo, en *Env) (value Scmer) {
+	if si == nil {
+		return NewNil()
+	}
+	si.coverage = true
+	if !SettingsHaveGoodBacktraces {
+		return Eval(si.value, en)
+	}
 	defer func(src SourceInfo) {
 		if err := recover(); err != nil {
 			panic(fmt.Sprintf("%s\nin %s:%d:%d", fmt.Sprint(err), src.source, src.line, src.col))
 		}
-	}(si)
+	}(*si)
 	return Eval(si.value, en)
 }
 
@@ -515,7 +522,7 @@ restart:
 		// Fallback for names not folded to numbered vars/native funcs by the optimizer.
 		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
 	case tagSourceInfo:
-		return evalWithSourceInfo(*expression.SourceInfo(), en)
+		return evalWithSourceInfo(expression.SourceInfo(), en)
 	default:
 		if expression.GetTag() >= 100 {
 			// custom tags (e.g. TagTable) are opaque literals
@@ -1200,10 +1207,10 @@ Patterns can be any of:
 		Desc: "annotates the node with filename and line information for better backtraces",
 		Fn: func(a ...Scmer) Scmer {
 			return NewSourceInfo(SourceInfo{
-				String(a[0]),
-				ToInt(a[1]),
-				ToInt(a[2]),
-				a[3],
+				source: String(a[0]),
+				line:   ToInt(a[1]),
+				col:    ToInt(a[2]),
+				value:  a[3],
 			})
 		},
 		Type: &TypeDescriptor{
@@ -1215,6 +1222,17 @@ Patterns can be any of:
 			},
 			Return: &TypeDescriptor{Kind: "returntype"},
 			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "source_coverage_report",
+		Desc: "returns Scheme source coverage statistics, optionally filtered by source path prefix",
+		Fn:   sourceCoverageReport,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "string", ParamName: "prefix", ParamDesc: "source path prefix", Optional: true},
+			},
+			Return: &TypeDescriptor{Kind: "assoc"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1355,10 +1373,10 @@ func ComputeSize(v Scmer) uint {
 		return base + goAllocOverhead + fastDictPayloadSize(v.FastDict())
 	case tagSourceInfo:
 		si := v.SourceInfo()
-		// SourceInfo struct: source(16) + line(8) + col(8) + value(16) = 48 bytes
+		// SourceInfo struct: source(16) + line(8) + col(8) + value(16) + coverage(1 padded to 8) = 56 bytes
 		// value is an inline Scmer — covered by recursive ComputeSize base.
-		// Non-Scmer fields: source header(16) + line(8) + col(8) = 32 bytes.
-		sz := base + goAllocOverhead + 32
+		// Non-Scmer fields: source header(16) + line(8) + col(8) + coverage padding(8) = 40 bytes.
+		sz := base + goAllocOverhead + 40
 		if si.source != "" {
 			sz += align8(uint(len(si.source)))
 		}
@@ -1417,6 +1435,7 @@ func computeGoPayload(val any) uint {
 		return fastDictPayloadSize(v)
 	case SourceInfo:
 		sz := goAllocOverhead
+		sz += 40
 		if v.source != "" {
 			sz += align8(uint(len(v.source)))
 		}
@@ -1427,6 +1446,7 @@ func computeGoPayload(val any) uint {
 			return 0
 		}
 		sz := goAllocOverhead
+		sz += 40
 		if v.source != "" {
 			sz += align8(uint(len(v.source)))
 		}

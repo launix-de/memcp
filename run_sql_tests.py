@@ -124,7 +124,7 @@ PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test;
 # only meant to catch gross runaways. The default gives a fast query (<100ms
 # here, <1s on a Pi) ample room while still tripping on multi-second runaways.
 # Per-case `max_time` / suite `metadata.max_time` override it.
-DEFAULT_MAX_TIME_SEC = float(os.environ.get("MEMCP_MAX_TIME", "5.0"))
+DEFAULT_MAX_TIME_SEC = 5.0
 # Hard limit on the serialized query-plan size (characters of the EXPLAIN
 # output). THIS is the hardware-independent detector for compile-time
 # blow-ups: a cubic/exponential planner regression produces a cubic/exponential
