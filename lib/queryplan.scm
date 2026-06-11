@@ -7788,16 +7788,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(merge acc (list (nth agg_plans i)))))
 							'()))
 						/* When dict-cached path is eligible, pre-build the shared dict
-						BEFORE the createcolumn proxies fire on COLD. The proxies all
-						need the dict; one of them would build it lazily otherwise,
-						blocking the rest while parallel-compute waits.
-						Gate on keytable_init: TRUE on cold (keytable was just created
-						or is empty) → prebuild fires. FALSE on warm (cached keytable)
-						→ skip; the lazy-build branch inside the computor body covers
-						the warm-with-new-aggs edge case. keytable_init's init_code is
-						idempotent so re-evaluating it is cheap. */
+						BEFORE the createcolumn proxies fire on COLD.
+						keytable_init's init_code re-evaluates each time it's referenced;
+						after collect_plan populates the keytable, re-eval returns false.
+						So we capture the cold flag into a session var BEFORE collect
+						runs (see _dca_capture_cold_plan emitted into the begin block
+						above collect_plan), then check the captured var here. */
+						(define _dca_cache_key_flag (if _dca_eligible (concat "gbd_kti:" grouptbl) nil))
+						(define _dca_capture_cold_plan (if _dca_eligible
+							(list (list (quote context) "session") _dca_cache_key_flag keytable_init)
+							nil))
 						(define _dca_prebuild_plan (if _dca_eligible
-							(list (quote if) keytable_init
+							(list (quote if) (list (list (quote context) "session") _dca_cache_key_flag)
 								(list (list (quote context) "session") _dca_cache_key (list _dca_build_fn))
 								nil)
 							nil))
@@ -7864,6 +7866,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(cons 'begin (merge
 							(if (nil? runtime_local_compute_plan) '() (list runtime_local_compute_plan))
 							(if (nil? group_value_local_compute_plan) '() (list group_value_local_compute_plan))
+							(if (nil? _dca_capture_cold_plan) '() (list _dca_capture_cold_plan))
 							collect_plan
 							(if (nil? invalidation_plan) '() (list invalidation_plan))
 							(list compute_plan)
