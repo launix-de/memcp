@@ -1623,6 +1623,34 @@ same cache column while different session values get separate temp columns. */
 					'(list)))))
 )))
 (define aggregate_count_descriptor '(1 + 0))
+/* Eligibility check for single-pass collect+aggregate (see design doc).
+An aggregate is single-pass eligible when its reducer is associative AND
+its expression doesn't depend on subselects / nested aggregates / DISTINCT.
+Currently unused — wiring follows in subsequent commits. */
+(define _agg_simple_reducer? (lambda (r)
+	(or (equal? r '+) (equal? r (quote +))
+		(equal? r 'min) (equal? r (quote min))
+		(equal? r 'max) (equal? r (quote max))
+		(equal? r '*) (equal? r (quote *)))))
+(define _agg_expr_has_subselect? (lambda (e) (match e
+	(cons (symbol inner_select) _) true
+	(cons '(quote inner_select) _) true
+	(cons (symbol inner_select_in) _) true
+	(cons '(quote inner_select_in) _) true
+	(cons (symbol inner_select_exists) _) true
+	(cons '(quote inner_select_exists) _) true
+	(cons (symbol count_distinct) _) true
+	(cons '(quote count_distinct) _) true
+	(cons _ args) (reduce args (lambda (a x) (or a (_agg_expr_has_subselect? x))) false)
+	false)))
+(define aggregates_eligible_for_single_pass? (lambda (ags)
+	(and (not (equal? ags '()))
+		(reduce ags (lambda (ok ag) (and ok (match ag
+			'(expr reduce neutral) (and
+				(_agg_simple_reducer? reduce)
+				(not (_agg_expr_has_subselect? expr))
+				(equal? (extract_aggregates expr) '()))
+			false))) true))))
 (define aggregate_cache_condition_suffix (lambda (expr_name condition_expr runtime_suffix)
 	(fnv_hash (concat (expr_name condition_expr) (coalesceNil runtime_suffix "")))
 ))
