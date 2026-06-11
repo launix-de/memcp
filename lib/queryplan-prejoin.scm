@@ -38,25 +38,47 @@ of physical prejoin column name -> source expression. make_keytable uses this
 to canonicalize get_column markers on prejoin temps back to their original
 source expressions, instead of baking the prejoin table name into the key name. */
 (define prejoin_canonical_sources (newsession))
+/* prejoin_keytable_domain_sources maps a prejoin table to a row-domain source
+name that ignores projected payload columns. GROUP/keytable domains depend on
+the prejoin source relation and row predicate, not on which aggregate payload
+columns a sibling scalar happened to need. */
+(define prejoin_keytable_domain_sources (newsession))
 /* materialized_source_expr_lookup maps a temp table to an assoc of source-expression
 string -> physical field name. Later GROUP stages can then rewrite both original
 _unn_* get_column terms and their canonicalized forms onto the prejoin's actual
 physical columns without guessing from aliases or suffixes. */
 (define materialized_source_expr_lookup (newsession))
-(define alias_lookup_variants (lambda (alias_)
-	(reduce (filter (list
-		alias_
-		(visible_occurrence_alias alias_)
-		(if (string? alias_) (sanitize_temp_name alias_) nil)
-		(if (string? (visible_occurrence_alias alias_)) (sanitize_temp_name (visible_occurrence_alias alias_)) nil)
-		(if (string? alias_) (symbol alias_) nil)
-		(if (string? (visible_occurrence_alias alias_)) (symbol (visible_occurrence_alias alias_)) nil)
-		(if (string? alias_) nil (string alias_))
-		(if (string? (visible_occurrence_alias alias_)) nil
-			(if (nil? (visible_occurrence_alias alias_)) nil (string (visible_occurrence_alias alias_)))))
-		(lambda (x) (not (nil? x))))
-		(lambda (acc alias_v) (append_unique acc alias_v))
+(define alias_lineage_prefixes (lambda (alias_)
+	(if (string? alias_)
+		(begin
+			(define parts (split alias_ "\0"))
+			(if (> (count parts) 1)
+				(map (produceN (- (count parts) 1)) (lambda (i)
+					(reduce (produceN (+ i 1)) (lambda (prefix j)
+						(if (equal? j 0)
+							(nth parts 0)
+							(concat prefix "\0" (nth parts j))))
+						"")))
+				'()))
 		'())))
+(define alias_lookup_variant_forms (lambda (alias_)
+	(filter (list
+		alias_
+		(if (string? alias_) (sanitize_temp_name alias_) nil)
+		(if (string? alias_) (symbol alias_) nil)
+		(if (or (nil? alias_) (string? alias_)) nil (string alias_)))
+		(lambda (x) (not (nil? x))))))
+(define alias_lookup_variants (lambda (alias_)
+	(begin
+		(define visible_alias (visible_occurrence_alias alias_))
+		(reduce
+			(merge (map
+				(merge (list alias_ visible_alias)
+					(alias_lineage_prefixes alias_)
+					(alias_lineage_prefixes visible_alias))
+				alias_lookup_variant_forms))
+			(lambda (acc alias_v) (append_unique acc alias_v))
+			'()))))
 (define assoc_lookup_variants (lambda (assoc variants)
 	(reduce variants (lambda (found key_v)
 		(if (not (nil? found))
@@ -105,26 +127,48 @@ physical columns without guessing from aliases or suffixes. */
 		acc
 		(merge acc (list dep_entry)))
 ))
-(define collect_materialized_query_dependency_tables (lambda (query)
-	(match query
-		'(_ dep_tables _ _ _ _ _ _ _)
-		(reduce dep_tables (lambda (acc td) (match td
-			'(_ tschema ttbl _ _)
-			(begin
-				(define normalized_tbl (normalize-materialized-subquery-source ttbl))
-				(if (materialized-subquery-source? normalized_tbl)
-					(reduce (coalesceNil (materialized_source_dependency_tables normalized_tbl) '())
-						append_dependency_table_unique
-						acc)
-					(begin
-						(define base_tbl (planner_table_source_base normalized_tbl))
-						(if (or (nil? base_tbl) (not (string? base_tbl)) (strlike base_tbl ".%"))
-							acc
-							(append_dependency_table_unique acc (list tschema base_tbl))))))
-			_ acc))
+(define append_dependency_tables_unique (lambda (acc dep_entries)
+	(reduce dep_entries (lambda (acc2 dep_entry)
+		(append_dependency_table_unique acc2 dep_entry))
+		acc)
+))
+(define collect_materialized_expr_dependency_tables (lambda (expr) (begin
+	(match expr
+		'(inner_select subquery)
+		(collect_materialized_query_dependency_tables subquery)
+		'((symbol inner_select) subquery)
+		(collect_materialized_query_dependency_tables subquery)
+		'((quote inner_select) subquery)
+		(collect_materialized_query_dependency_tables subquery)
+		(cons _ args)
+		(reduce args (lambda (acc arg) (begin
+			(append_dependency_tables_unique acc
+				(collect_materialized_expr_dependency_tables arg))))
 			'())
 		_ '())
-))
+)))
+(define collect_materialized_query_dependency_tables (lambda (query) (begin
+	(if (and (list? query) (equal? (count query) 9))
+		(append_dependency_tables_unique
+			(append_dependency_tables_unique
+				(append_dependency_tables_unique
+					(append_dependency_tables_unique
+						(materialized_dependency_tables_from_sources (nth query 1))
+						(reduce (qpp-fields-to-pairs (nth query 2)) (lambda (acc pair) (begin
+							(append_dependency_tables_unique acc
+								(collect_materialized_expr_dependency_tables (cadr pair)))))
+							'()))
+					(collect_materialized_expr_dependency_tables (nth query 3)))
+				(collect_materialized_expr_dependency_tables (nth query 5)))
+			(reduce (coalesceNil (nth query 6) '()) (lambda (acc order_item) (begin
+				(match order_item
+					'(expr _dir)
+					(append_dependency_tables_unique acc
+						(collect_materialized_expr_dependency_tables expr))
+					_ acc)))
+				'()))
+		'())
+)))
 (define merge_schema_fields_unique (lambda (field_lists)
 	(reduce (merge field_lists) (lambda (acc coldef)
 		(if (reduce acc (lambda (found existing)
@@ -167,7 +211,9 @@ keytables/prejoins may not exist at compile time (runtime-only creation). */
 		(define normalized_ttbl (normalize-materialized-subquery-source ttbl))
 		(define alias_cols_raw (if (or (nil? alias) (not (has_assoc? schemas alias))) nil (schemas alias)))
 		(define alias_cols (if (list? alias_cols_raw) alias_cols_raw '()))
-		(define planned_cols (coalesceNil (planned_materialized_fields normalized_ttbl) '()))
+		(define planned_cols (filter (coalesceNil (planned_materialized_fields normalized_ttbl) '())
+			(lambda (coldef)
+				(not (equal? (coldef "Field") "__qpu_scalar_once_limit")))))
 		(merge_schema_fields_unique (list alias_cols planned_cols)))))
 (define materialized_source_physical_schema (lambda (tschema ttbl alias schemas)
 	(begin
@@ -180,23 +226,36 @@ keytables/prejoins may not exist at compile time (runtime-only creation). */
 		Visible wrappers may still consult materialized_source_schema, but scan-time
 		lowering must stay on stable planned columns only. */
 		(merge_schema_fields_unique (list planned_cols)))))
-(define materialized_field_from_get_column_name (lambda (materialized_cols expr)
-	(match expr
-		'((symbol get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
-		nil
-	)
-))
-(define register_materialized_subquery_metadata (lambda (mat_source fields_assoc preserve_visible_boundary)
-	(begin
-		(define planned_schema_def (extract_assoc fields_assoc (lambda (k v)
-			(list "Field" k "Type" "any" "Expr" v))))
-		(define visible_schema_def (if preserve_visible_boundary
-			(extract_assoc fields_assoc (lambda (k v)
-				(list "Field" k "Type" "any")))
-			planned_schema_def))
-		(planned_materialized_fields mat_source planned_schema_def)
-		(prejoin_canonical_sources mat_source
-			(merge (extract_assoc fields_assoc (lambda (k v)
+	(define materialized_field_from_get_column_name (lambda (materialized_cols expr)
+		(match expr
+			'((symbol get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
+			nil
+		)
+	))
+	(define materialized_expr_has_window_func (lambda (expr)
+		(match expr
+			(cons (symbol window_func) _) true
+			(cons (quote window_func) _) true
+			(cons '(quote window_func) _) true
+			(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+				false
+				(reduce args (lambda (found arg) (or found (materialized_expr_has_window_func arg))) false))
+			false
+		)
+	))
+	(define register_materialized_subquery_metadata (lambda (mat_source fields_assoc preserve_visible_boundary)
+		(begin
+			(define planned_schema_def (extract_assoc fields_assoc (lambda (k v)
+				(list "Field" k "Type" "any" "Expr" v))))
+			/* A materialized subquery exposes physical output columns to its parent.
+			Keep the source Expr only in planned_materialized_fields for lineage/name
+			lookup; visible schema expansion must not re-inline helper/window
+			expressions after the materialization boundary. */
+			(define visible_schema_def (extract_assoc fields_assoc (lambda (k _v)
+				(list "Field" k "Type" "any"))))
+			(planned_materialized_fields mat_source planned_schema_def)
+			(prejoin_canonical_sources mat_source
+				(merge (extract_assoc fields_assoc (lambda (k v)
 				(list
 					(list k v)
 					(list (sanitize_temp_name k) v))))))
@@ -226,13 +285,15 @@ The bare-symbol head is the only get_column IR shape that flows through
 runtime; (list (quote get_column) ...) constructors evaluate (quote
 get_column) to that bare symbol. Below we keep a single (symbol X)
 variant per case instead of duplicating both wrapped forms. */
-(define normalize_visible_aliases (lambda (expr)
-	(match expr
-		'((symbol get_column) alias_ ti col ci)
-		(list (quote get_column) (visible_occurrence_alias alias_) false col false)
-		(cons sym args)
-		(cons sym (map args normalize_visible_aliases))
-		expr
+	(define normalize_visible_aliases (lambda (expr)
+		(match expr
+			'((symbol get_column) alias_ ti col ci)
+			(if (nil? alias_)
+				(list (quote get_column) nil ti col ci)
+				(list (quote get_column) (visible_occurrence_alias alias_) false col false))
+			(cons sym args)
+			(cons sym (map args normalize_visible_aliases))
+			expr
 	)
 ))
 (define normalize_canonical_aliases (lambda (expr)
@@ -264,9 +325,11 @@ createcolumn results bleed across queries. The rows themselves are session-bound
 so stored compute lambdas can still resolve them after the surrounding lexical
 scope is gone. */
 (define materialized-subquery-key (lambda (id subquery)
-	(concat "__mat:" id ":" (sha1 (string (normalize_canonical_aliases subquery))))))
+	(concat "__m:" (sha1 (concat id ":" (string (normalize_canonical_aliases subquery)))))))
 (define make_materialized-subquery-source (lambda (session_key)
 	(list (quote materialized-subquery-source) session_key)))
+(define make_materialized-subquery-source-with-init (lambda (session_key init_code)
+	(list (quote materialized-subquery-source-with-init) session_key init_code)))
 (define legacy-materialized-subquery-source-key (lambda (table-source)
 	(match table-source
 		(cons (cons (symbol context) '("session")) (cons key '())) key
@@ -278,12 +341,18 @@ scope is gone. */
 		'(materialized-subquery-source _) true
 		'((symbol materialized-subquery-source) _) true
 		'((quote materialized-subquery-source) _) true
+		'(materialized-subquery-source-with-init _ _) true
+		'((symbol materialized-subquery-source-with-init) _ _) true
+		'((quote materialized-subquery-source-with-init) _ _) true
 		false
 )))
 (define normalize-materialized-subquery-source (lambda (table-source)
 	(match table-source
 		'((symbol materialized-subquery-source) key) (make_materialized-subquery-source key)
 		'((quote materialized-subquery-source) key) (make_materialized-subquery-source key)
+		'(materialized-subquery-source-with-init key _) (make_materialized-subquery-source key)
+		'((symbol materialized-subquery-source-with-init) key _) (make_materialized-subquery-source key)
+		'((quote materialized-subquery-source-with-init) key _) (make_materialized-subquery-source key)
 		'((symbol materialized-subquery) key) (make_materialized-subquery-source key)
 		'((quote materialized-subquery) key) (make_materialized-subquery-source key)
 		_ (begin
@@ -298,10 +367,31 @@ scope is gone. */
 		'((quote materialized-subquery-source) key) key
 		nil
 )))
+(define materialized-subquery-source-init-code (lambda (table-source)
+	(match table-source
+		'(materialized-subquery-source-with-init _ init_code) init_code
+		'((symbol materialized-subquery-source-with-init) _ init_code) init_code
+		'((quote materialized-subquery-source-with-init) _ init_code) init_code
+		'(scan-tagged-table base_table _ _ _ _ _) (materialized-subquery-source-init-code base_table)
+		'(scan-tagged-table base_table _ _ _ _ _ _) (materialized-subquery-source-init-code base_table)
+		'((symbol scan-tagged-table) base_table _ _ _ _ _) (materialized-subquery-source-init-code base_table)
+		'((symbol scan-tagged-table) base_table _ _ _ _ _ _) (materialized-subquery-source-init-code base_table)
+		'((quote scan-tagged-table) base_table _ _ _ _ _) (materialized-subquery-source-init-code base_table)
+		'((quote scan-tagged-table) base_table _ _ _ _ _ _) (materialized-subquery-source-init-code base_table)
+		nil
+)))
 (define materialized-subquery-source (lambda (id subquery)
 	(make_materialized-subquery-source (materialized-subquery-key id subquery))))
 (define materialized-subquery-init (lambda (id subquery rows_expr)
-	(list (list (quote context) "session") (materialized-subquery-key id subquery) rows_expr)))
+	(begin
+		(define key (materialized-subquery-key id subquery))
+		/* The session setter is eager in its value argument. Guard the generated
+		rows expression explicitly so repeated materialized helpers with the same
+		key do not re-run their full subplan on every occurrence. */
+		(list (quote if)
+			(list (quote nil?) (list (list (quote context) "session") key))
+			(list (list (quote context) "session") key rows_expr)
+			nil))))
 /* planner_collect_rows_ast, legacy_materialized_query_term_binding_ast and
 build_legacy_prejoin_materialize_plan moved to lib/queryplan-legacy-bridges.scm
 (per Reflection 2026-05-04 finding F.1). They remain compat helpers that the
@@ -311,6 +401,32 @@ for prejoin-backed materialized sources. This keeps the prejoin assembly focused
 on plan wiring while preserving the existing materialized-source contracts. The
 caller still owns the prejoin-local canonicalizer that defines the visible
 source-expression namespace for this materialized source. */
+(define hidden_materialized_table_name? (lambda (tbl)
+	(and (string? tbl) (>= (strlen tbl) 1) (equal? (substr tbl 0 1) "."))
+))
+(define materialized_dependency_tables_from_descriptor (lambda (acc td) (begin
+	(if (and (list? td) (equal? (count td) 5))
+		(begin
+			(define tschema (nth td 1))
+			(define ttbl (nth td 2))
+			(define normalized_ttbl (normalize-materialized-subquery-source ttbl))
+			(if (materialized-source? normalized_ttbl)
+				(append_dependency_tables_unique acc
+					(coalesceNil (materialized_source_dependency_tables normalized_ttbl) '()))
+				(begin
+					(define base_tbl (planner_table_source_base normalized_ttbl))
+					(if (or (nil? base_tbl) (list? base_tbl) (hidden_materialized_table_name? base_tbl))
+						acc
+						(append_dependency_table_unique acc (list (string tschema) (string base_tbl)))))))
+		acc)
+)))
+(define materialized_dependency_tables_from_sources (lambda (source_tables) (begin
+	(if (nil? source_tables)
+		'()
+		(if (and (list? source_tables) (equal? (count source_tables) 5))
+			(materialized_dependency_tables_from_descriptor '() source_tables)
+			(reduce source_tables materialized_dependency_tables_from_descriptor '())))
+)))
 (define register_prejoin_materialized_metadata (lambda (canonicalize_prejoin_source_expr prejointbl prejoin_columns prejoin_alias_map prejoin_source_tables prejoin_schema_def) (begin
 	(define td_alias_variants (lambda (tv tschema ttbl) (begin
 		(define raw_aliases (filter (list
@@ -364,8 +480,10 @@ source-expression namespace for this materialized source. */
 				(lambda (acc variant_expr) (append_unique acc variant_expr))
 				'()))
 			(merge (map variant_exprs (lambda (variant_expr)
-				(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
+					(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
 	(planned_materialized_fields prejointbl prejoin_schema_def)
+	(materialized_source_dependency_tables prejointbl
+		(materialized_dependency_tables_from_sources prejoin_source_tables))
 	true
 )))
 (define make_unnest_helper_table (lambda (schema_name base_table helper_kind)

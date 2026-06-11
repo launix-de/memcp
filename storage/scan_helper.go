@@ -236,7 +236,10 @@ func dropDatabaseInternalTempCaches(db *database) {
 func isPlannerInternalTriggerName(name string) bool {
 	return strings.HasPrefix(name, ".pj_incr:") ||
 		strings.HasPrefix(name, ".prejoin:") ||
-		strings.HasPrefix(name, ".kt_cleanup:")
+		strings.HasPrefix(name, ".kt_cleanup:") ||
+		strings.HasPrefix(name, ".cache:.") ||
+		strings.HasPrefix(name, ".orc:.") ||
+		strings.HasPrefix(name, ".orcdep:.")
 }
 
 func dropDatabaseInternalTempTriggers(db *database) {

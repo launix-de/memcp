@@ -18,11 +18,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-parser.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
+(import "queryplan-ir.scm")
 (import "queryplan-tree-ir.scm")
 (import "queryplan-prejoin.scm")
 (import "queryplan-legacy-bridges.scm")
 (import "queryplan.scm")
 (import "queryplan-debug.scm")
+(import "queryplan-passes.scm")
+(import "queryplan-lift.scm")
+(import "queryplan-unnest.scm")
+(import "queryplan-lower.scm")
+(import "queryplan-neumann.scm")
 
 (define sql_statement_starts_with (lambda (query keyword) (begin
 	(define trimmed (toUpper (strltrim query)))
@@ -67,22 +73,28 @@ runtime helper names and cache domains may depend on current session variables.
 On parse error the result is not cached (e.g. table does not exist yet). */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session)
 	(begin
-		(define cache_key (concat username ":" schema ":" (fnv_hash query)))
-		(define session_sensitive_query (strlike query "%@%"))
+			(define session_sensitive_query (strlike query "%@%"))
+			(define session_cache_suffix
+				(if session_sensitive_query
+					(with_session session (lambda ()
+						(concat ":sess:" (planner_current_session_snapshot_suffix))))
+					""))
+		(define cache_key (concat username ":" schema ":" (fnv_hash query) session_cache_suffix))
 		(define cached (queryplan_cache cache_key))
-		(if (and cached (not session_sensitive_query)) cached
+		(if cached cached
 			(begin
 				(define explain_plan_query (sql_explain_plan_query query))
 				(define formula (if (nil? explain_plan_query)
 					(with_session session (lambda () (parse_fn schema query policy)))
 					(begin
-						(define plan_cache_key (concat username ":" schema ":" (fnv_hash explain_plan_query)))
+						(define plan_cache_key (concat username ":" schema ":"
+							(fnv_hash explain_plan_query) session_cache_suffix))
 						(define plan_formula (coalesce
-							(if session_sensitive_query nil (queryplan_cache plan_cache_key))
+							(queryplan_cache plan_cache_key)
 							(with_session session (lambda () (parse_fn schema explain_plan_query policy)))))
-						(if session_sensitive_query nil (queryplan_cache plan_cache_key plan_formula))
+						(queryplan_cache plan_cache_key plan_formula)
 						(list (quote resultrow) (list (quote list) "code" (serialize plan_formula))))))
-				(if session_sensitive_query nil (queryplan_cache cache_key formula))
+				(queryplan_cache cache_key formula)
 				formula)))))
 
 /* helper: build a policy function for table-level access checks
@@ -112,7 +124,7 @@ if the user is not allowed to access this property, the function will throw an e
 							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
 							'() (lambda () 1)
 							+ 0))
-							(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
+						(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
 		)
@@ -283,7 +295,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					for write-like statements only. Empty SELECT-style result sets must stay empty. */
 					(if (and (not (resultrow_state "called")) (number? query_result)
 						(not (sql_statement_returns_rows query))) (begin
-						(original_resultrow '("affected_rows" query_result))
+							(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
 						(error_log (concat e) schema (req "username") query)
@@ -343,7 +355,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					for write-like statements only. Empty SELECT-style result sets must stay empty. */
 					(if (and (not (resultrow_state "called")) (number? query_result)
 						(not (sql_statement_returns_rows query))) (begin
-						(original_resultrow '("affected_rows" query_result))
+							(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
 						(error_log (concat e) schema (req "username") query)

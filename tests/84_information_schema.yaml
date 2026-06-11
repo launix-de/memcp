@@ -80,6 +80,11 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "COLUMNS: uppercase data_type query used by dbcheck migrations"
+    sql: "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'is_test_tbl' AND COLUMN_NAME = 'name' AND TABLE_SCHEMA = 'memcp-tests' LIMIT 1"
+    expect:
+      rows: 1
+
   # --- STATISTICS ---
 
   - name: "STATISTICS: query returns without error"

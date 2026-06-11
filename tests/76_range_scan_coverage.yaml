@@ -229,7 +229,7 @@ test_cases:
           value: false
         - stage: "plan"
           kind: "root"
-          value: "!begin"
+          value: "begin"
 
   - name: "EXPLAIN IR exposes table order"
     sql: "EXPLAIN IR SELECT a.id, b.id FROM rs_data a, rs_data b WHERE a.id = b.id"

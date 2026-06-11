@@ -84,6 +84,125 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 	})
 }
 
+func nestedSumScanAst(schema, table, sourceKeyCol, sourceValueCol, outerParam string) scm.Scmer {
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("scan"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("__memcp_tx")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(schema), scm.NewString(table)}),
+		listAst(scm.NewString(sourceKeyCol)),
+		lambdaAst([]string{"src." + sourceKeyCol}, scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal?"),
+			scm.NewSymbol("src." + sourceKeyCol),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewSymbol(outerParam)}),
+		})),
+		listAst(scm.NewString(sourceValueCol)),
+		lambdaAst([]string{sourceValueCol}, scm.NewSymbol(sourceValueCol)),
+		scm.NewSymbol("+"),
+		scm.NewInt(0),
+	})
+}
+
+func computeProxyForTest(t *testing.T, tbl *table, col string) *StorageComputeProxy {
+	t.Helper()
+	shards := tbl.ActiveShards()
+	if len(shards) == 0 {
+		t.Fatal("table has no active shards")
+	}
+	shard := shards[0]
+	shard.mu.RLock()
+	cs := shard.columns[col]
+	shard.mu.RUnlock()
+	proxy, ok := cs.(*StorageComputeProxy)
+	if !ok {
+		t.Fatalf("column %s is %T, want *StorageComputeProxy", col, cs)
+	}
+	return proxy
+}
+
+func TestComputeProxyIncrementalUpdateUsesCachedDeltaWhenMaskInvalid(t *testing.T) {
+	proxy := &StorageComputeProxy{
+		delta: map[uint32]scm.Scmer{
+			1: scm.NewInt(300),
+		},
+		count: 3,
+	}
+
+	proxy.IncrementalUpdate(1, scm.NewInt(150))
+
+	got := proxy.delta[1]
+	if !got.IsInt() || got.Int() != 450 {
+		t.Fatalf("delta[1] after incremental update = %v, want 450", got)
+	}
+}
+
+func TestComputeTriggerIncrementalSumUpdatesCompressedProxy(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-compute-trigger-sum-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tcomputesumtrigger")
+
+	CreateDatabase("tcomputesumtrigger", false)
+	keytable, _ := CreateTable("tcomputesumtrigger", ".keytable:test", Safe, false)
+	items, _ := CreateTable("tcomputesumtrigger", "items", Safe, false)
+
+	keytable.CreateColumn("order_id", "INT", nil, nil)
+	keytable.CreateColumn("item_total", "INT", nil, nil)
+	items.CreateColumn("id", "INT", nil, nil)
+	items.CreateColumn("order_id", "INT", nil, nil)
+	items.CreateColumn("amount", "INT", nil, nil)
+
+	items.Insert([]string{"id", "order_id", "amount"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(1), scm.NewInt(100)},
+		{scm.NewInt(2), scm.NewInt(1), scm.NewInt(200)},
+		{scm.NewInt(3), scm.NewInt(2), scm.NewInt(300)},
+	}, nil, scm.NewNil(), false, nil)
+	keytable.Insert([]string{"order_id"}, [][]scm.Scmer{
+		{scm.NewInt(1)},
+		{scm.NewInt(2)},
+	}, nil, scm.NewNil(), false, nil)
+
+	computor := scm.Eval(lambdaAst([]string{"order_id"}, nestedSumScanAst("tcomputesumtrigger", "items", "order_id", "amount", "order_id")), &scm.Globalenv)
+	keytable.ComputeColumn("item_total", []string{"order_id"}, computor, nil, scm.NewNil())
+	prefix := ".cache:.keytable:test:item_total|scan0|items|"
+	var triggerPlans []string
+	for _, tr := range items.Triggers {
+		if strings.HasPrefix(tr.Name, prefix) {
+			triggerPlans = append(triggerPlans, tr.Timing.String()+": "+triggerPlanStringForTest(tr))
+		}
+	}
+	if len(triggerPlans) != 3 {
+		t.Fatalf("compute dependency trigger count = %d, want 3:\n%s", len(triggerPlans), strings.Join(triggerPlans, "\n"))
+	}
+
+	proxy := computeProxyForTest(t, keytable, "item_total")
+	reader := proxy.GetCachedReaderTx(CurrentTx())
+	if got := reader.GetValue(1); !got.IsInt() || got.Int() != 300 {
+		t.Fatalf("initial item_total for order 2 = %v, want 300", got)
+	}
+
+	items.Insert([]string{"id", "order_id", "amount"}, [][]scm.Scmer{
+		{scm.NewInt(4), scm.NewInt(2), scm.NewInt(150)},
+	}, nil, scm.NewNil(), false, nil)
+
+	freshProxy := computeProxyForTest(t, keytable, "item_total")
+	freshReader := freshProxy.GetCachedReaderTx(CurrentTx())
+	if got := freshReader.GetValue(1); !got.IsInt() || got.Int() != 450 {
+		freshProxy.mu.RLock()
+		deltaLen := len(freshProxy.delta)
+		deltaVal := freshProxy.delta[1]
+		freshProxy.mu.RUnlock()
+		t.Fatalf("item_total after source insert = %v, want 450 (same proxy=%v deltaLen=%d delta[1]=%v); triggers:\n%s", got, freshProxy == proxy, deltaLen, deltaVal, strings.Join(triggerPlans, "\n"))
+	}
+}
+
 func TestComputeTriggersGuardRelevantSourceColumns(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-compute-trigger-*")
 	if err != nil {

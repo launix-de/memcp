@@ -88,6 +88,147 @@ func pkEqual(a, b []scm.Scmer) bool {
 	return true
 }
 
+func lessScalarValues(av, bv scm.Scmer) (less bool, greater bool) {
+	if av.IsInt() && bv.IsInt() {
+		return av.Int() < bv.Int(), av.Int() > bv.Int()
+	}
+	if av.IsFloat() && bv.IsFloat() {
+		return av.Float() < bv.Float(), av.Float() > bv.Float()
+	}
+	if av.IsInt() && bv.IsFloat() {
+		ai := float64(av.Int())
+		bf := bv.Float()
+		return ai < bf, ai > bf
+	}
+	if av.IsFloat() && bv.IsInt() {
+		af := av.Float()
+		bi := float64(bv.Int())
+		return af < bi, af > bi
+	}
+	if scm.Less(av, bv) {
+		return true, false
+	}
+	if scm.Less(bv, av) {
+		return false, true
+	}
+	return false, false
+}
+
+func lessQueueItems(aq *shardqueue, ai uint32, bq *shardqueue, bi uint32) bool {
+	less, greater := lessScalarValues(aq.scols[0](ai), bq.scols[0](bi))
+	desc := aq.simpleNumericDesc
+	if desc {
+		if greater {
+			return true
+		}
+		if less {
+			return false
+		}
+	} else {
+		if less {
+			return true
+		}
+		if greater {
+			return false
+		}
+	}
+	if aq == bq {
+		return ai < bi
+	}
+	return false
+}
+
+func simpleNumericKey(v scm.Scmer) (float64, bool) {
+	if v.IsInt() {
+		return float64(v.Int()), true
+	}
+	if v.IsFloat() {
+		return v.Float(), true
+	}
+	if v.IsBool() {
+		if v.Bool() {
+			return 1, true
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+func lessQueueHeads(aq *shardqueue, bq *shardqueue) bool {
+	if len(aq.simpleNumericKeys) > 0 && len(bq.simpleNumericKeys) > 0 {
+		ak := aq.simpleNumericKeys[0]
+		bk := bq.simpleNumericKeys[0]
+		if aq.simpleNumericDesc {
+			if ak > bk {
+				return true
+			}
+			if ak < bk {
+				return false
+			}
+		} else {
+			if ak < bk {
+				return true
+			}
+			if ak > bk {
+				return false
+			}
+		}
+		return false
+	}
+	return lessQueueItems(aq, aq.items[0], bq, bq.items[0])
+}
+
+func advanceShardQueue(qx *shardqueue, n int) {
+	if n <= 0 {
+		return
+	}
+	qx.items = qx.items[n:]
+	if len(qx.simpleNumericKeys) >= n {
+		qx.simpleNumericKeys = qx.simpleNumericKeys[n:]
+	}
+}
+
+func numericBulkSkipCount(q *globalqueue, qx *shardqueue, maxSkip int) int {
+	if maxSkip <= 1 || !qx.simpleNumeric || len(qx.simpleNumericKeys) != len(qx.items) {
+		return 1
+	}
+	desc := qx.simpleNumericDesc
+	hasBoundary := false
+	boundary := 0.0
+	for _, other := range q.q {
+		if other == qx || len(other.items) == 0 || !other.simpleNumeric || other.simpleNumericDesc != desc || len(other.simpleNumericKeys) != len(other.items) {
+			continue
+		}
+		key := other.simpleNumericKeys[0]
+		if !hasBoundary || (desc && key > boundary) || (!desc && key < boundary) {
+			boundary = key
+			hasBoundary = true
+		}
+	}
+	n := len(qx.simpleNumericKeys)
+	if hasBoundary {
+		if desc {
+			n = sort.Search(len(qx.simpleNumericKeys), func(i int) bool {
+				return qx.simpleNumericKeys[i] < boundary
+			})
+		} else {
+			n = sort.Search(len(qx.simpleNumericKeys), func(i int) bool {
+				return qx.simpleNumericKeys[i] > boundary
+			})
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > maxSkip {
+		n = maxSkip
+	}
+	if n > len(qx.items) {
+		n = len(qx.items)
+	}
+	return n
+}
+
 // skipPartition uses binary search to skip all remaining items in the current
 // partition of a shardqueue. Since items are sorted by (partition_key, order_key),
 // all items of the same partition are contiguous — sort.Search finds the first
@@ -101,7 +242,7 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 		}
 		return false
 	})
-	qx.items = qx.items[idx:]
+	advanceShardQueue(qx, idx)
 	if len(qx.items) > 0 {
 		heap.Fix(q, 0)
 	} else {
@@ -110,15 +251,18 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 }
 
 type shardqueue struct {
-	shard        *storageShard
-	items        []uint32 // TODO: refactor to chan, so we can block generating too much entries
-	err          scanError
-	scols        []func(uint32) scm.Scmer // sort criteria column reader
-	sortdirs     []func(...scm.Scmer) scm.Scmer
-	mapper       *ShardMapReducer
-	callbackCols []string  // per-table map columns (for multi-table merge)
-	callback     scm.Scmer // per-table map function (for multi-table merge)
-	tableIdx     int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
+	shard             *storageShard
+	items             []uint32 // TODO: refactor to chan, so we can block generating too much entries
+	err               scanError
+	scols             []func(uint32) scm.Scmer // sort criteria column reader
+	sortdirs          []func(...scm.Scmer) scm.Scmer
+	simpleNumeric     bool
+	simpleNumericDesc bool
+	simpleNumericKeys []float64
+	mapper            *ShardMapReducer
+	callbackCols      []string  // per-table map columns (for multi-table merge)
+	callback          scm.Scmer // per-table map function (for multi-table merge)
+	tableIdx          int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
@@ -136,6 +280,9 @@ func (s *shardqueue) Len() int {
 func (s *shardqueue) Less(i, j int) bool {
 	if i >= len(s.items) || j >= len(s.items) {
 		return i < j
+	}
+	if s.simpleNumeric {
+		return lessQueueItems(s, s.items[i], s, s.items[j])
 	}
 	cmpCount := len(s.scols)
 	if len(s.sortdirs) < cmpCount {
@@ -164,6 +311,48 @@ type globalqueue struct {
 type topKHeap struct {
 	items []uint32
 	less  func(a, b uint32) bool
+}
+
+type numericOrderItem struct {
+	id  uint32
+	key float64
+}
+
+func sortNumericItems(items []uint32, getter func(uint32) scm.Scmer, desc bool, keep int) ([]uint32, bool) {
+	pairs := make([]numericOrderItem, len(items))
+	for i, item := range items {
+		key, ok := simpleNumericKey(getter(item))
+		if !ok {
+			return items, false
+		}
+		pairs[i] = numericOrderItem{id: item, key: key}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if desc {
+			if pairs[i].key > pairs[j].key {
+				return true
+			}
+			if pairs[i].key < pairs[j].key {
+				return false
+			}
+		} else {
+			if pairs[i].key < pairs[j].key {
+				return true
+			}
+			if pairs[i].key > pairs[j].key {
+				return false
+			}
+		}
+		return pairs[i].id < pairs[j].id
+	})
+	if keep >= 0 && keep < len(pairs) {
+		pairs = pairs[:keep]
+	}
+	out := make([]uint32, len(pairs))
+	for i, pair := range pairs {
+		out[i] = pair.id
+	}
+	return out, true
 }
 
 func (h *topKHeap) Len() int {
@@ -203,6 +392,9 @@ func (s *globalqueue) Less(i, j int) bool {
 	}
 	if len(s.q[j].items) == 0 {
 		return true
+	}
+	if s.q[i].simpleNumeric && s.q[j].simpleNumeric && s.q[i].simpleNumericDesc == s.q[j].simpleNumericDesc {
+		return lessQueueHeads(s.q[i], s.q[j])
 	}
 	cmpCount := len(s.q[i].scols)
 	if len(s.q[j].scols) < cmpCount {
@@ -267,6 +459,37 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 		return less(out[i], out[j])
 	})
 	return out
+}
+
+func probeSortDirection(dir func(...scm.Scmer) scm.Scmer) (asc bool, desc bool) {
+	if dir == nil {
+		return true, false
+	}
+	probeOK := true
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				probeOK = false
+			}
+		}()
+		asc = scm.ToBool(dir(scm.NewInt(1), scm.NewInt(2))) && !scm.ToBool(dir(scm.NewInt(2), scm.NewInt(1)))
+		desc = scm.ToBool(dir(scm.NewInt(2), scm.NewInt(1))) && !scm.ToBool(dir(scm.NewInt(1), scm.NewInt(2)))
+	}()
+	if !probeOK {
+		return false, false
+	}
+	return asc, desc
+}
+
+func isNumericOrderColumn(t *table, colname string) bool {
+	for _, col := range t.Columns {
+		if col.Name != colname {
+			continue
+		}
+		typ := strings.ToLower(col.Typ)
+		return strings.Contains(typ, "int") || strings.Contains(typ, "float") || strings.Contains(typ, "double") || strings.Contains(typ, "decimal") || strings.Contains(typ, "bool")
+	}
+	return false
 }
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
@@ -591,7 +814,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// Per-table offset skip: consume leading items without emitting.
 		if ti < len(tablePartOffset) && tablePartOffset[ti] > 0 {
 			tablePartOffset[ti]--
-			qx.items = qx.items[1:]
+			advanceShardQueue(qx, 1)
 			if len(qx.items) > 0 {
 				heap.Fix(&q, 0)
 			} else {
@@ -623,8 +846,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		}
 		// Per-partition offset skip
 		if partOffset > 0 {
-			partOffset--
-			qx.items = qx.items[1:]
+			skipN := numericBulkSkipCount(&q, qx, partOffset)
+			partOffset -= skipN
+			advanceShardQueue(qx, skipN)
 			if len(qx.items) > 0 {
 				heap.Fix(&q, 0)
 			} else {
@@ -649,7 +873,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 		// Pop one item from the global merge
 		item := qx.items[0]
-		qx.items = qx.items[1:]
+		advanceShardQueue(qx, 1)
 
 		// If shard changed, flush the buffer to the previous shard's mapper
 		if bufShard != nil && bufShard != qx {
@@ -978,11 +1202,15 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// and now sort result!
 	result.sortdirs = adjustedSortdirs
-	itemPos := make(map[uint32]int, len(result.items))
-	for i, idx := range result.items {
-		itemPos[idx] = i
+	if len(sortcols) == 1 && sortcols[0].IsString() && isNumericOrderColumn(t.t, sortcols[0].String()) {
+		asc, desc := probeSortDirection(result.sortdirs[0])
+		result.simpleNumeric = asc || desc
+		result.simpleNumericDesc = desc
 	}
 	lessByID := func(a, b uint32) bool {
+		if result.simpleNumeric {
+			return lessQueueItems(result, a, result, b)
+		}
 		cmpCount := len(result.scols)
 		if len(result.sortdirs) < cmpCount {
 			cmpCount = len(result.sortdirs)
@@ -997,7 +1225,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				return false
 			}
 		}
-		return itemPos[a] < itemPos[b]
+		return a < b
 	}
 	// TODO: find conditions when exactly we don't need to sort anymore.
 	// The sort can be skipped when ALL of these hold:
@@ -1014,12 +1242,26 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// When these conditions are met, the same knowledge could also be
 	// used to exit early during iterateIndex (stop after OFFSET+LIMIT).
 	if len(sortcols) > 0 {
+		keep := -1
 		if limit >= 0 && limitPartitionCols == 0 {
+			keep = offset + limit
+		}
+		if result.simpleNumeric && limitPartitionCols == 0 && (keep < 0 || keep*2 >= len(result.items)) {
+			if sorted, ok := sortNumericItems(result.items, result.scols[0], result.simpleNumericDesc, keep); ok {
+				result.items = sorted
+			} else if limit >= 0 && limitPartitionCols == 0 {
+				result.items = topKByOrder(result.items, keep, lessByID)
+			} else {
+				hybridsort.Slice(result.items, func(i, j int) bool {
+					return lessByID(result.items[i], result.items[j])
+				})
+			}
+		} else if limit >= 0 && limitPartitionCols == 0 {
 			// ORDER BY ... LIMIT only needs the best k rows from each shard.
 			// Keeping all matching rows and fully sorting them makes small-LIMIT
 			// queries degenerate into an expensive full sort with dynamic Scheme
 			// comparators, which dominated the multishard regression.
-			result.items = topKByOrder(result.items, offset+limit, lessByID)
+			result.items = topKByOrder(result.items, keep, lessByID)
 		} else {
 			hybridsort.Slice(result.items, func(i, j int) bool {
 				return lessByID(result.items[i], result.items[j])
@@ -1052,6 +1294,21 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			partCount++
 		}
 		result.items = pruned
+	}
+	if result.simpleNumeric {
+		keys := make([]float64, len(result.items))
+		keysOK := true
+		for i, idx := range result.items {
+			key, ok := simpleNumericKey(result.scols[0](idx))
+			if !ok {
+				keysOK = false
+				break
+			}
+			keys[i] = key
+		}
+		if keysOK {
+			result.simpleNumericKeys = keys
+		}
 	}
 	return
 }

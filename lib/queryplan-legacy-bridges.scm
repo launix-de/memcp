@@ -39,7 +39,138 @@ through the dedicated keytable / window-stage emitters.
 
 /* planner_collect_rows_ast: execute inner_plan through a sink callback and
 persist produced rows in a session list. */
-(define planner_collect_rows_ast (lambda (rows_sym sink_sym item_sym inner_plan limit_val cnt_sym) (begin
+(define legacy_materialized_scalar_source_id? (lambda (id)
+	(and (string? id)
+		(>= (strlen id) 3)
+		(or
+			(equal? (substr id 0 3) "sq_")
+			(equal? (substr id 0 3) "nq_"))
+		(not (strlike id "%:%")))))
+
+(define legacy_materialized_default_row_for_empty (lambda (id subquery) (match subquery
+	'(schema tables fields condition group having order limit offset)
+	(begin
+		(define synthetic-single-row (and
+			(equal? (count (coalesceNil tables '())) 1)
+			(match (nth tables 0)
+				'(_ _ tname _ _) (equal? tname ".(1)")
+				false)))
+		(define no-filter (or (nil? condition) (equal? condition true) (equal? condition (quote true))))
+		(define no-group (or (nil? group) (equal? group '()) (and (list? group) (equal? (count group) 0))))
+		(define scalar-static-domain (or no-group (equal? group '(1))))
+		(if (or
+			(and (legacy_materialized_scalar_source_id? id) scalar-static-domain)
+			(and synthetic-single-row no-filter no-group (nil? having)))
+			(merge (map (qpp-fields-to-pairs fields) (lambda (pair) (match pair
+				'(name _expr) (list name nil)
+				_ '()))))
+			nil))
+	_ nil)))
+
+(define legacy_materialized_table_backed_id? (lambda (id)
+	(and (string? id)
+		(>= (strlen id) 3)
+		(equal? (substr id 0 3) "nq_"))))
+
+(define legacy_materialized_table_backed_binding_ast (lambda (id subquery sink_sym limit_val) (begin
+	(if (not (nil? limit_val))
+		nil
+		(match subquery
+			'(schema _tables fields _condition _group _having _order _limit _offset)
+			(begin
+				(define field_pairs (qpp-fields-to-pairs fields))
+				(define field_names (map field_pairs car))
+				(if (equal? field_names '())
+					nil
+					(begin
+						(define mat_key_base (string (normalize_canonical_aliases subquery)))
+						(define mat_tbl (concat ".mat:" (fnv_hash (if (expr_uses_session_state subquery)
+							(concat
+								id ":"
+								mat_key_base
+								(user_session_runtime_cache_suffix_from_exprs (list subquery))
+								(planner_current_user_session_snapshot_suffix))
+							mat_key_base))))
+						(define cache_scope (planner_analysis_cache_current))
+						(define cache_key (concat "legacy-table-mat-binding:" schema ":" mat_tbl))
+						(define cached_binding (if (nil? cache_scope) nil (cache_scope cache_key)))
+						(if (not (nil? cached_binding))
+							cached_binding
+							(begin
+								(define item_sym (symbol "__mat_item"))
+								(define row_values
+									(cons (quote list)
+										(map field_names (lambda (col)
+											(list (quote get_assoc) item_sym col)))))
+								(define columns_code
+									(cons (quote list)
+										(map field_names (lambda (col)
+											(list (quote list) "column" col "any" (list (quote list)) (list (quote list)))))))
+								(define insert_row
+									(list (quote insert)
+										(list (quote table) schema mat_tbl)
+										(cons (quote list) field_names)
+										(list (quote list) row_values)
+										(list (quote list))
+										(list (quote lambda) (list) true)
+										true))
+								(define default_row (legacy_materialized_default_row_for_empty id subquery))
+								(define default_insert
+									(if (nil? default_row)
+										nil
+										(begin
+											(define default_values
+												(cons (quote list)
+													(map field_names (lambda (col)
+														(list (quote get_assoc) (list (quote quote) default_row) col)))))
+											(list (quote if)
+												(list (quote table_empty?) (list (quote table) schema mat_tbl))
+												(list (quote insert)
+													(list (quote table) schema mat_tbl)
+													(cons (quote list) field_names)
+													(list (quote list) default_values)
+													(list (quote list))
+													(list (quote lambda) (list) true)
+													true)
+												nil))))
+								(define inner_plan
+									(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym)))
+								(define mat_dependency_tables
+									(collect_materialized_query_dependency_tables subquery))
+								(define mat_dependency_invalidations
+									(filter (map mat_dependency_tables (lambda (dep_td)
+										(match dep_td '(dep_schema dep_tbl)
+											(list (quote register_prejoin_invalidation) dep_schema dep_tbl schema mat_tbl)
+											_ nil)))
+										(lambda (x) (not (nil? x)))))
+								(define init_code
+									(cons (quote begin)
+										(merge
+											(list
+												(list (quote createtable) schema mat_tbl columns_code query_temp_table_options_code true)
+												(tbl-define-code schema mat_tbl))
+											(merge mat_dependency_invalidations
+												(list
+													(list (quote if)
+														(list (quote table_empty?) (list (quote table) schema mat_tbl))
+														(list (quote begin)
+															(list (quote define) sink_sym
+																(list (quote lambda) (list item_sym) insert_row))
+															inner_plan
+															default_insert)
+														nil))))))
+								(planned_materialized_fields mat_tbl
+									(map field_names (lambda (col)
+										(list "Field" col "Type" "any"))))
+								(materialized_source_dependency_tables mat_tbl
+									mat_dependency_tables)
+								(define binding (list mat_tbl init_code))
+								(if (nil? cache_scope) nil (cache_scope cache_key binding))
+								binding)))))
+			_ nil)
+		))))
+
+(define planner_collect_rows_ast (lambda (rows_sym sink_sym item_sym inner_plan limit_val cnt_sym default_row) (begin
 	(define append_row_ast (list rows_sym "rows"
 		(list (quote merge) (list rows_sym "rows") (list (quote list) item_sym))))
 	(list (quote begin)
@@ -59,17 +190,36 @@ persist produced rows in a session list. */
 								append_row_ast)
 							nil)))))
 		inner_plan
+		(if (nil? default_row)
+			nil
+			(list (quote if)
+				(list (quote equal?) (list rows_sym "rows") (list (quote quote) '()))
+				(list rows_sym "rows" (list (quote list) (list (quote quote) default_row)))
+				nil))
 		(list rows_sym "rows")))))
 
 /* legacy_materialized_query_term_binding_ast: centralize the remaining
 session-backed query-term materialization bridge. Callers stay responsible
 for registering visible schema metadata. */
 (define legacy_materialized_query_term_binding_ast (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
+	(if (legacy_materialized_table_backed_id? id)
+		(coalesce
+			(legacy_materialized_table_backed_binding_ast id subquery sink_sym limit_val)
+			(materialized_query_term_binding_ast_from_sink_plan id subquery rows_sym sink_sym limit_val cnt_sym
+				(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))))
+		(materialized_query_term_binding_ast_from_sink_plan id subquery rows_sym sink_sym limit_val cnt_sym
+			(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))))
+)))
+
+/* materialized_query_term_binding_ast_from_sink_plan: session-backed
+materialization when the caller already compiled a callback-sink plan. */
+(define materialized_query_term_binding_ast_from_sink_plan (lambda (id subquery rows_sym sink_sym limit_val cnt_sym sinked_inner_plan) (begin
 	(define materialized_rows
 		(planner_collect_rows_ast rows_sym sink_sym (symbol "item")
-			(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))
+			sinked_inner_plan
 			limit_val
-			cnt_sym))
+			cnt_sym
+			(legacy_materialized_default_row_for_empty id subquery)))
 	(define runtime_id
 		(concat
 			id
@@ -94,10 +244,10 @@ backend; caller falls back to legacy_materialized_query_term_binding_ast.
 
 Multi-session implementation plan (see memory: keytable_refactoring_spec.md (via Claude memory)):
 - Step 1 (this commit): skeleton returns nil unconditionally (pure addition,
-  no behavior change). Ensures the function exists for the call sites to
-  feature-flag against without breakage.
+no behavior change). Ensures the function exists for the call sites to
+feature-flag against without breakage.
 - Step 2: implement simple-value-aggregate case (SUM/COUNT/MAX/MIN with
-  single-column domain D). Behind MEMCP_KEYTABLE_DEP_HELPER env flag.
+single-column domain D). Behind MEMCP_KEYTABLE_DEP_HELPER env flag.
 - Step 3+: extend coverage, then enable by default, then remove legacy.
 
 This is FAQ §32-compliant because the keytable IS a group cache (the
@@ -107,9 +257,57 @@ filter condition — solving the multi-scalar contamination case
 (66_neumann_domain_col "multiple SUM with different domain joins") by
 construction. */
 (define dep_helper_keytable_binding (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
-	/* Step 1: skeleton — always return nil so caller falls back to legacy. */
-	nil
-)))
+	/* Dep-helper materialization must not go through session rows: the helper
+	is a planned relation that the outer query joins repeatedly. Keep the
+	physical representation table-backed so EXPLAIN/SELECT and sibling helpers
+	can share normal table metadata and storage caches. */
+	(if (not (nil? limit_val))
+		nil
+		(match subquery
+			'(schema _tables fields _condition _group _having _order _limit _offset)
+			(begin
+				(define field_pairs (qpp-fields-to-pairs fields))
+				(define field_names (map field_pairs car))
+				(if (equal? field_names '())
+					nil
+					(begin
+						(define helper_tbl (concat ".dephelper:" (fnv_hash id)))
+						(define item_sym (symbol "__dep_helper_item"))
+						(define row_values
+							(cons (quote list)
+								(map field_names (lambda (col)
+									(list (quote get_assoc) item_sym col)))))
+						(define columns_code
+							(cons (quote list)
+								(map field_names (lambda (col)
+									(list (quote list) "column" col "any" (list (quote list)) (list (quote list)))))))
+						(define insert_row
+							(list (quote insert)
+								(list (quote table) schema helper_tbl)
+								(cons (quote list) field_names)
+								(list (quote list) row_values)
+								(list (quote list))
+								(list (quote lambda) (list) true)
+								true))
+						(define inner_plan
+							(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym)))
+						(define init_code
+							(list (quote begin)
+								(list (quote createtable) schema helper_tbl columns_code query_temp_table_options_code true)
+								(tbl-define-code schema helper_tbl)
+								(list (quote if)
+									(list (quote table_empty?) (list (quote table) schema helper_tbl))
+									(list (quote begin)
+										(list (quote define) sink_sym
+											(list (quote lambda) (list item_sym) insert_row))
+										inner_plan)
+									nil)))
+						(planned_materialized_fields helper_tbl
+							(map field_names (lambda (col)
+								(list "Field" col "Type" "any"))))
+						(list helper_tbl init_code))))
+			_ nil)
+		))))
 
 /* build_legacy_prejoin_materialize_plan: isolate the remaining
 session/resultrow-backed prejoin filler used by trigger backfill paths.

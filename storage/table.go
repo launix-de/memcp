@@ -206,18 +206,28 @@ func (m *ShardMode) MarshalJSON() ([]byte, error) {
 func (m *ShardMode) UnmarshalJSON(data []byte) error {
 	var str string
 	err := json.Unmarshal(data, &str)
-	if err != nil {
-		return err
+	if err == nil {
+		if str == "partition" {
+			*m = ShardModePartition
+			return nil
+		}
+		if str == "freeshard" {
+			*m = ShardModeFree
+			return nil
+		}
+		return errors.New("unknown shard mode: " + str)
 	}
-	if str == "partition" {
-		*m = ShardModePartition
+	var n int
+	if err := json.Unmarshal(data, &n); err != nil {
+		return errors.New("shard mode must be string or number")
+	}
+	switch ShardMode(n) {
+	case ShardModeFree, ShardModePartition:
+		*m = ShardMode(n)
 		return nil
+	default:
+		return fmt.Errorf("unknown shard mode number: %d", n)
 	}
-	if str == "freeshard" {
-		*m = ShardModeFree
-		return nil
-	}
-	return errors.New("unknown shard mode: " + str)
 }
 
 type uniqueKey struct {
@@ -354,6 +364,23 @@ type table struct {
 	repartitionPendingMu         sync.Mutex
 	repartitionPendingDels       []translatedRecid
 	repartitionPendingSourceDels []pendingSourceDelete
+}
+
+func persistentTriggerSnapshot(triggers []TriggerDescription) []TriggerDescription {
+	if len(triggers) == 0 {
+		return triggers
+	}
+	persist := make([]TriggerDescription, 0, len(triggers))
+	for _, tr := range triggers {
+		// Planner/cache helper triggers target process-local dot-prefixed cache
+		// relations. Persisting them leaves stale triggers after restart because
+		// the helper tables themselves are deliberately not persisted.
+		if tr.IsSystem && isPlannerInternalTriggerName(tr.Name) {
+			continue
+		}
+		persist = append(persist, tr)
+	}
+	return persist
 }
 
 func (t *table) enterMutationOwner() {
@@ -621,6 +648,35 @@ func (t *table) finishSchemaMutationLocked() {
 	t.schema.saveLockedWithDurabilityAndUnlock(t.schemaWriteDurable())
 }
 
+func (t *table) rebuildActiveShardsForSchemaChange() {
+	t.maintenanceMu.Lock()
+	defer t.maintenanceMu.Unlock()
+
+	t.mu.Lock()
+	targetIsP := t.ShardMode == ShardModePartition
+	oldShards := append([]*storageShard(nil), t.ActiveShards()...)
+	t.maintenanceKind = 1
+	t.mu.Unlock()
+
+	newShards := make([]*storageShard, len(oldShards))
+	for i, shard := range oldShards {
+		if shard != nil {
+			newShards[i] = shard.rebuild(true)
+		}
+	}
+
+	t.mu.Lock()
+	if targetIsP {
+		t.PShards = newShards
+	} else {
+		t.Shards = newShards
+	}
+	t.maintenanceKind = 0
+	t.mu.Unlock()
+
+	t.schema.save()
+}
+
 // isHiddenFromShowTables implements the SQL metadata contract for internal
 // helper tables. Dot-prefixed tables are planner/storage internals and must not
 // leak through SHOW TABLES / INFORMATION_SCHEMA.TABLES listings, otherwise a
@@ -760,30 +816,40 @@ func (m *PersistencyMode) MarshalJSON() ([]byte, error) {
 func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 	var str string
 	err := json.Unmarshal(data, &str)
-	if err != nil {
-		return err
+	if err == nil {
+		if str == "memory" {
+			*m = Memory
+			return nil
+		}
+		if str == "sloppy" {
+			*m = Sloppy
+			return nil
+		}
+		if str == "logged" {
+			*m = Logged
+			return nil
+		}
+		if str == "safe" {
+			*m = Safe
+			return nil
+		}
+		if str == "cache" {
+			*m = Cache
+			return nil
+		}
+		return errors.New("unknown persistency mode: " + str)
 	}
-	if str == "memory" {
-		*m = Memory
+	var n int
+	if err := json.Unmarshal(data, &n); err != nil {
+		return errors.New("persistency mode must be string or number")
+	}
+	switch PersistencyMode(n) {
+	case Safe, Logged, Sloppy, Memory, Cache:
+		*m = PersistencyMode(n)
 		return nil
+	default:
+		return fmt.Errorf("unknown persistency mode number: %d", n)
 	}
-	if str == "sloppy" {
-		*m = Sloppy
-		return nil
-	}
-	if str == "logged" {
-		*m = Logged
-		return nil
-	}
-	if str == "safe" {
-		*m = Safe
-		return nil
-	}
-	if str == "cache" {
-		*m = Cache
-		return nil
-	}
-	return errors.New("unknown persistency mode: " + str)
 }
 
 func getForeignKeyMode(val scm.Scmer) foreignKeyMode {

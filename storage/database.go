@@ -80,13 +80,28 @@ func normalizeTempLookupName(dbName string, name string) string {
 	return replacer.Replace(name)
 }
 
-// Custom JSON to persist private tables field
+func (d *database) persistentTablesSnapshot() NonLockingReadMap.NonLockingReadMap[table, string] {
+	tables := NonLockingReadMap.New[table, string]()
+	for _, t := range d.tables.GetAll() {
+		if t == nil || t.isEphemeralQueryTable() {
+			continue
+		}
+		persist := *t
+		persist.Triggers = persistentTriggerSnapshot(t.Triggers)
+		tables.Set(&persist)
+	}
+	return tables
+}
+
+// Custom JSON to persist private tables field. Planner-owned cache helpers are
+// intentionally omitted: they are process-local query accelerators and must not
+// turn every query into persistent schema churn.
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
 		Name   string                                             `json:"name"`
 		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
 	}
-	return json.Marshal(persist{Name: d.Name, Tables: d.tables})
+	return json.Marshal(persist{Name: d.Name, Tables: d.persistentTablesSnapshot()})
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {

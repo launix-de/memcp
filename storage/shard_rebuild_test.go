@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,88 @@ func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
 	)
 	if scm.ToBool(second) {
 		t.Fatal("second createtable should report created=false")
+	}
+}
+
+func TestEphemeralCacheTableCreateDoesNotPersistSchema(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-ephemeral-createtable-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tephemeralcreate")
+
+	CreateDatabase("tephemeralcreate", false)
+	cols := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{
+			scm.NewString("column"),
+			scm.NewString("id"),
+			scm.NewString("int"),
+			scm.NewSlice(nil),
+			scm.NewSlice(nil),
+		}),
+	})
+	options := scm.NewSlice([]scm.Scmer{scm.NewString("engine"), scm.NewString("cache")})
+
+	created := callBuiltin(t, "createtable",
+		scm.NewString("tephemeralcreate"),
+		scm.NewString(".helper"),
+		cols,
+		options,
+		scm.NewBool(true),
+	)
+	if !scm.ToBool(created) {
+		t.Fatal("ephemeral cache createtable should report created=true")
+	}
+	if GetDatabase("tephemeralcreate").GetTable(".helper") == nil {
+		t.Fatal("ephemeral helper table should exist in memory")
+	}
+
+	schemaPath := Basepath + "/tephemeralcreate/schema.json"
+	data, err := os.ReadFile(schemaPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), ".helper") {
+		t.Fatalf("ephemeral helper table leaked into schema.json: %s", data)
+	}
+
+	tbl, _ := CreateTable("tephemeralcreate", "real_table", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.AddTrigger(TriggerDescription{
+		Name:     ".cache:.helper:computed|scan0|real_table|AFTER DELETE",
+		Timing:   AfterDelete,
+		IsSystem: true,
+		Func:     scm.NewNil(),
+	})
+	tbl.AddTrigger(TriggerDescription{
+		Name:     ".cache:real_table:computed|scan0|real_table|AFTER DELETE",
+		Timing:   AfterDelete,
+		IsSystem: true,
+		Func:     scm.NewNil(),
+	})
+	GetDatabase("tephemeralcreate").save()
+	data, err = os.ReadFile(schemaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), ".helper") {
+		t.Fatalf("later schema save persisted ephemeral helper table: %s", data)
+	}
+	if !strings.Contains(string(data), "real_table") {
+		t.Fatalf("persistent table missing from schema.json: %s", data)
+	}
+	if strings.Contains(string(data), ".cache:.helper") {
+		t.Fatalf("runtime-only helper trigger leaked into schema.json: %s", data)
+	}
+	if !strings.Contains(string(data), ".cache:real_table") {
+		t.Fatalf("persistent computed-column trigger should still be saved: %s", data)
 	}
 }
 

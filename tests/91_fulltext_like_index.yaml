@@ -163,29 +163,29 @@ test_cases:
       rows: 1
 
   - name: "LIKE run 1"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
   - name: "LIKE run 2"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
   - name: "LIKE run 3"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
   - name: "LIKE run 4"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
   - name: "LIKE run 5"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
   - name: "LIKE run 6"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
   - name: "LIKE run 7"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
   - name: "LIKE run 8"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect: { rows: 1, data: [{ cnt: 5 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect: { rows: 5, data: [{ id: 42 }, { id: 1337 }, { id: 15000 }, { id: 22777 }, { id: 29999 }] }
 
   - name: "Wait for LIKE scan logs"
     setup:
@@ -199,17 +199,22 @@ test_cases:
         CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
-          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
-          SUM(CASE WHEN rn >= 5 THEN exec_ns ELSE 0 END) AS late_ns
-        FROM (
-          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
-          FROM `system_statistic`.`scans`
-          WHERE `table` = 'ft_large'
-        ) t WHERE rn <= 8
+          (SELECT SUM(exec_ns) FROM (
+            SELECT exec_ns
+            FROM `system_statistic`.`scans`
+            WHERE `table` = 'ft_large'
+            ORDER BY timestamp LIMIT 2
+          ) first_scans) AS early_ns,
+          (SELECT SUM(exec_ns) FROM (
+            SELECT exec_ns
+            FROM `system_statistic`.`scans`
+            WHERE `table` = 'ft_large'
+            ORDER BY timestamp DESC LIMIT 4
+          ) last_scans) AS late_ns
       ) s
     expect: { rows: 1, data: [{ result: "ok" }] }
     on_fail:
-      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
+      - sql: "SELECT exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
 
   # -- Test 2: Equal id=42 (regression test, must not be slower) --
   - name: "Clear log for Equal test"
@@ -256,17 +261,22 @@ test_cases:
         CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
-          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
-          SUM(CASE WHEN rn >= 5 THEN exec_ns ELSE 0 END) AS late_ns
-        FROM (
-          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
-          FROM `system_statistic`.`scans`
-          WHERE `table` = 'ft_large'
-        ) t WHERE rn <= 8
+          (SELECT SUM(exec_ns) FROM (
+            SELECT exec_ns
+            FROM `system_statistic`.`scans`
+            WHERE `table` = 'ft_large'
+            ORDER BY timestamp LIMIT 2
+          ) first_scans) AS early_ns,
+          (SELECT SUM(exec_ns) FROM (
+            SELECT exec_ns
+            FROM `system_statistic`.`scans`
+            WHERE `table` = 'ft_large'
+            ORDER BY timestamp DESC LIMIT 4
+          ) last_scans) AS late_ns
       ) s
     expect: { rows: 1, data: [{ result: "ok" }] }
     on_fail:
-      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
+      - sql: "SELECT exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
 
   # -- Test 3: LIKE + Range (must be >= 3x faster) --
   - name: "Clear log for LIKE+Range test"
@@ -277,29 +287,29 @@ test_cases:
     expect: { rows: 1 }
 
   - name: "LIKE+Range run 1"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
   - name: "LIKE+Range run 2"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
   - name: "LIKE+Range run 3"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
   - name: "LIKE+Range run 4"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
   - name: "LIKE+Range run 5"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
   - name: "LIKE+Range run 6"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
   - name: "LIKE+Range run 7"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
   - name: "LIKE+Range run 8"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
 
   - name: "Wait for LIKE+Range scan logs"
     setup:
@@ -313,17 +323,22 @@ test_cases:
         CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
-          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
-          SUM(CASE WHEN rn >= 5 AND rn <= 8 THEN exec_ns ELSE 0 END) AS late_ns
-        FROM (
-          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
-          FROM `system_statistic`.`scans`
-          WHERE `table` = 'ft_large'
-        ) t WHERE rn <= 8
+          (SELECT SUM(exec_ns) FROM (
+            SELECT exec_ns
+            FROM `system_statistic`.`scans`
+            WHERE `table` = 'ft_large'
+            ORDER BY timestamp LIMIT 2
+          ) first_scans) AS early_ns,
+          (SELECT SUM(exec_ns) FROM (
+            SELECT exec_ns
+            FROM `system_statistic`.`scans`
+            WHERE `table` = 'ft_large'
+            ORDER BY timestamp DESC LIMIT 4
+          ) last_scans) AS late_ns
       ) s
     expect: { rows: 1, data: [{ result: "ok" }] }
     on_fail:
-      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
+      - sql: "SELECT exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
 
   - name: "Disable scan debugging"
     setup:
@@ -334,8 +349,8 @@ test_cases:
   # --- Range operator corner cases (>, >=, <, <=) with LIKE ---
   # Needles at id: 42, 1337, 15000, 22777, 29999
   - name: "LIKE + id > 15000 (strict, excludes boundary)"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 2 }] }
+    sql: "SELECT id FROM ft_large WHERE name LIKE '%laus%' AND id > 15000 ORDER BY id"
+    expect: { rows: 2, data: [{ id: 22777 }, { id: 29999 }] }
 
   - name: "LIKE + id >= 15000 (inclusive, includes boundary)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id >= 15000"

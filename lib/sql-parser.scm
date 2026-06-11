@@ -262,17 +262,20 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 						(transform_new_old_shallow condition)
 						group having order limit offset)
 					(transform_new_old_shallow subquery)))
-				(define _hash (fnv_hash (concat transformed_subquery)))
-				(define _psym (symbol (concat "__trig_scalar_promise_" _hash)))
-				(define _rrsym (symbol (concat "__trig_scalar_rr_" _hash)))
-				(list (symbol "!begin")
-					(list (symbol "set") _psym (list (symbol "newpromise")))
-					(list (symbol "set") _rrsym
-						(list (symbol "lambda") (list (symbol "row"))
-							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
-					(list (symbol "set") (symbol "resultrow") _rrsym)
-					(build_queryplan_term transformed_subquery)
-					(list _psym "value")))
+					(define _hash (fnv_hash (concat transformed_subquery)))
+					(define _psym (symbol (concat "__trig_scalar_promise_" _hash)))
+					(define _rrsym (symbol (concat "__trig_scalar_rr_" _hash)))
+					(define _prevrrsym (symbol (concat "__trig_scalar_prev_rr_" _hash)))
+					(list (symbol "!begin")
+						(list (symbol "set") _prevrrsym (symbol "resultrow"))
+						(list (symbol "set") _psym (list (symbol "newpromise")))
+						(list (symbol "set") _rrsym
+							(list (symbol "lambda") (list (symbol "row"))
+								(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
+						(list (symbol "set") (symbol "resultrow") _rrsym)
+						(build_queryplan_term transformed_subquery)
+						(list (symbol "set") (symbol "resultrow") _prevrrsym)
+						(list _psym "value")))
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
 				(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
@@ -394,21 +397,24 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 												limit offset)
 											inner))
 										/* Extract SELECT field names from the 9-tuple (fields is a flat assoc list) */
-										(define select_fields (match inner_t '(_ _ fields _ _ _ _ _ _) fields '()))
-										(define select_names (extract_assoc select_fields (lambda (k v) k)))
-										/* Generate code: set resultrow + build_queryplan_term */
-										(list (list (symbol "begin")
-											(list (symbol "set") (symbol "resultrow")
-												(list (symbol "lambda") (list (symbol "item"))
-													(list (symbol "insert") (list (symbol "table") schema tbl)
-														(cons (symbol "list") cols)
+											(define select_fields (match inner_t '(_ _ fields _ _ _ _ _ _) fields '()))
+											(define select_names (extract_assoc select_fields (lambda (k v) k)))
+											(define prev_resultrow_sym (symbol (concat "__trig_insert_select_prev_rr_" (fnv_hash (concat inner_t)))))
+											/* Generate code: set resultrow + build_queryplan_term */
+											(list (list (symbol "begin")
+												(list (symbol "set") prev_resultrow_sym (symbol "resultrow"))
+												(list (symbol "set") (symbol "resultrow")
+													(list (symbol "lambda") (list (symbol "item"))
+														(list (symbol "insert") (list (symbol "table") schema tbl)
+															(cons (symbol "list") cols)
 														(list (symbol "list")
 															(cons (symbol "list")
 																(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
-														(list (symbol "list"))
-														(if ignore (list (symbol "lambda") '() 0) nil)
-														false nil)))
-											(build_queryplan_term inner_t))))
+															(list (symbol "list"))
+															(if ignore (list (symbol "lambda") '() 0) nil)
+															false nil)))
+												(build_queryplan_term inner_t)
+												(list (symbol "set") (symbol "resultrow") prev_resultrow_sym))))
 									(if (equal? tag '!update)
 										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin
@@ -1115,12 +1121,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 								(list (quote not) (list (quote inner_select_in) target_expr subquery))))
 					(if (and (not (nil? union_parts)) (nil? target_expr))
 						count_expr
-							(if (nil? target_expr)
-							/* EXISTS / NOT EXISTS: no LHS, no NULL semantics needed */
-							(list
-								(if negated (quote equal?) (quote >))
-								(list (quote coalesceNil) count_expr 0)
-								0)
+						(if (nil? target_expr)
+							/* EXISTS / NOT EXISTS: keep semantic markers for the
+							top-down compiler. Parser-side COUNT lowering loses
+							grandparent correlations inside scalar-subquery
+							chains and can turn FALSE into NULL. */
+							(if negated
+								(list (quote not) (list (quote inner_select_exists) subquery))
+								(list (quote inner_select_exists) subquery))
 						/* IN / NOT IN: SQL tri-valued — match wins TRUE for IN /
 						FALSE for NOT IN; otherwise if any RHS row is NULL the
 						answer is UNKNOWN (NULL); otherwise NOT-match.

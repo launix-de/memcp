@@ -21,6 +21,20 @@ import "github.com/launix-de/memcp/scm"
 func extractSessionKeys(expr scm.Scmer) []string {
 	seen := make(map[string]bool)
 	var out []string
+	isSessionFn := func(node scm.Scmer) bool {
+		if node.IsSymbol() && node.String() == "session" {
+			return true
+		}
+		if !node.IsSlice() {
+			return false
+		}
+		items := node.Slice()
+		return len(items) == 2 &&
+			items[0].IsSymbol() &&
+			items[0].String() == "context" &&
+			items[1].IsString() &&
+			items[1].String() == "session"
+	}
 	var walk func(scm.Scmer)
 	walk = func(node scm.Scmer) {
 		if node.IsProc() {
@@ -34,7 +48,7 @@ func extractSessionKeys(expr scm.Scmer) []string {
 		if len(items) == 0 {
 			return
 		}
-		if items[0].IsSymbol() && items[0].String() == "session" {
+		if isSessionFn(items[0]) {
 			if len(items) >= 2 && items[1].IsString() {
 				key := items[1].String()
 				if !seen[key] {

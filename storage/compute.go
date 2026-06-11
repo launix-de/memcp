@@ -804,8 +804,33 @@ func (t *table) registerORCTriggers(name string) {
 
 type tableRef struct{ schema, table string }
 
+func tableRefFromScanArg(expr scm.Scmer) (tableRef, bool) {
+	expr = stripSourceInfo(expr)
+	if expr.IsCustom(TagTable) {
+		t := TableFromScmer(expr)
+		return tableRef{schema: t.schema.Name, table: t.Name}, true
+	}
+	if expr.IsSlice() {
+		sl := expr.Slice()
+		if len(sl) == 3 && callHeadIs(sl[0], "table") {
+			return tableRef{schema: scm.String(sl[1]), table: scm.String(sl[2])}, true
+		}
+		return tableRef{}, false
+	}
+	if expr.IsSymbol() {
+		symStr := scm.String(expr)
+		if strings.HasPrefix(symStr, "tbl:") {
+			parts := strings.SplitN(symStr[4:], ":", 2)
+			if len(parts) == 2 {
+				return tableRef{schema: parts[0], table: parts[1]}, true
+			}
+		}
+	}
+	return tableRef{}, false
+}
+
 // extractScannedTables walks a Scheme expression tree and returns all
-// (schema, table) pairs referenced by scan/scan_order/scalar_scan/scalar_scan_order.
+// (schema, table) pairs referenced by scan/scan_batch/scan_order/scalar_scan/scalar_scan_order.
 func extractScannedTables(expr scm.Scmer) []tableRef {
 	expr = stripSourceInfo(expr)
 	if expr.IsProc() {
@@ -815,8 +840,11 @@ func extractScannedTables(expr scm.Scmer) []tableRef {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) >= 3 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
-		result := []tableRef{{scm.String(items[1]), scm.String(items[2])}}
+	if len(items) >= 3 && callHeadIs(items[0], "scan", "scan_batch", "scan_order", "scalar_scan", "scalar_scan_order") {
+		result := []tableRef{}
+		if ref, ok := tableRefFromScanArg(items[2]); ok {
+			result = append(result, ref)
+		}
 		for _, item := range items[3:] {
 			result = append(result, extractScannedTables(item)...)
 		}
@@ -857,36 +885,16 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) >= 5 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+	if len(items) >= 5 && callHeadIs(items[0], "scan", "scan_batch", "scan_order", "scalar_scan", "scalar_scan_order") {
 		tableIdx := 2
 		condColsIdx, filterIdx := 3, 4
 		if len(items) <= filterIdx {
 			return nil
 		}
 		var info scanJoinInfo
-		tableExpr := stripSourceInfo(items[tableIdx])
-		if tableExpr.IsCustom(TagTable) {
-			t := TableFromScmer(tableExpr)
-			info.schema = t.schema.Name
-			info.table = t.Name
-		} else if tableExpr.IsSlice() {
-			sl := tableExpr.Slice()
-			if len(sl) == 3 && callHeadIs(sl[0], "table") {
-				info.schema = scm.String(sl[1])
-				info.table = scm.String(sl[2])
-			}
-		} else if tableExpr.IsSymbol() {
-			symStr := scm.String(tableExpr)
-			if strings.HasPrefix(symStr, "tbl:") {
-				parts := strings.SplitN(symStr[4:], ":", 2)
-				if len(parts) == 2 {
-					info.schema = parts[0]
-					info.table = parts[1]
-				}
-			}
-		} else {
-			info.schema = ""
-			info.table = scm.String(tableExpr)
+		if ref, ok := tableRefFromScanArg(items[tableIdx]); ok {
+			info.schema = ref.schema
+			info.table = ref.table
 		}
 		condCols := extractStringListFromAST(items[condColsIdx])
 		info.condCols = condCols
@@ -1075,26 +1083,9 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 	items := expr.Slice()
 	if len(items) >= 4 {
 		tableIdx := 2
-		if callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
-			var tSchema, tName string
-			if len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
-				t := TableFromScmer(items[tableIdx])
-				tSchema, tName = t.schema.Name, t.Name
-			} else if len(items) > tableIdx && items[tableIdx].IsSlice() {
-				sl := items[tableIdx].Slice()
-				if len(sl) == 3 && scm.String(sl[0]) == "table" {
-					tSchema, tName = scm.String(sl[1]), scm.String(sl[2])
-				}
-			} else if len(items) > tableIdx && items[tableIdx].IsSymbol() {
-				symStr := scm.String(items[tableIdx])
-				if strings.HasPrefix(symStr, "tbl:") {
-					parts := strings.SplitN(symStr[4:], ":", 2)
-					if len(parts) == 2 {
-						tSchema, tName = parts[0], parts[1]
-					}
-				}
-			}
-			if tSchema == schema && tName == table {
+		if callHeadIs(items[0], "scan", "scan_batch", "scan_order", "scalar_scan", "scalar_scan_order") {
+			ref, ok := tableRefFromScanArg(items[tableIdx])
+			if ok && ref.schema == schema && ref.table == table {
 				return items
 			}
 		}
@@ -1179,7 +1170,7 @@ func containsScan(expr scm.Scmer) bool {
 		return false
 	}
 	items := expr.Slice()
-	if len(items) >= 1 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+	if len(items) >= 1 && callHeadIs(items[0], "scan", "scan_batch", "scan_order", "scalar_scan", "scalar_scan_order") {
 		return true
 	}
 	for _, item := range items {

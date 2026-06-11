@@ -743,7 +743,14 @@ ports the actual operator rules to the tree representation. */
 										(cons first_col _) (first_col "Field")
 										nil))))
 							(define us_subst_raw (us_ria (us_rewrite_map_expr us_value_expr)))
-							(define us_subst (if (nil? us_presence_col)
+							/* A direct scalar column result is already NULL on a LEFT miss, so
+							guarding it through an arbitrary base-table presence column can
+							prune the projected result column and turn real matches into NULL. */
+							(define us_direct_helper_value (match us_subst_raw
+								'((symbol get_column) alias_ _ _ _) (equal?? alias_ us_sq_prefix)
+								'((quote get_column) alias_ _ _ _) (equal?? alias_ us_sq_prefix)
+								_ false))
+							(define us_subst (if (or (nil? us_presence_col) us_direct_helper_value)
 								us_subst_raw
 								(list (quote if)
 									(list (quote nil?) (list (quote get_column) us_sq_prefix false us_presence_col false))

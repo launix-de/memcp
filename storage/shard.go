@@ -396,6 +396,20 @@ func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
 	return cs
 }
 
+func (u *storageShard) resolveColumnNameCaseInsensitiveLocked(colName string) (string, bool) {
+	for existing := range u.columns {
+		if strings.EqualFold(existing, colName) {
+			return existing, true
+		}
+	}
+	for _, col := range u.t.Columns {
+		if strings.EqualFold(col.Name, colName) {
+			return col.Name, true
+		}
+	}
+	return "", false
+}
+
 // getColumnStorageOrPanic returns a stable pointer to a column's storage.
 // It never reads u.columns without holding the shard lock and loads on demand.
 func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
@@ -408,6 +422,12 @@ func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 	// try under read lock
 	u.mu.RLock()
 	cs, present := u.columns[colName]
+	if !present {
+		if canonical, ok := u.resolveColumnNameCaseInsensitiveLocked(colName); ok {
+			colName = canonical
+			cs, present = u.columns[colName]
+		}
+	}
 	u.mu.RUnlock()
 	if !present {
 		// The column may be missing from this shard's map because it was created
@@ -437,6 +457,12 @@ func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked bool) ColumnStorage {
 	if alreadyLocked {
 		cs, present := u.columns[colName]
+		if !present {
+			if canonical, ok := u.resolveColumnNameCaseInsensitiveLocked(colName); ok {
+				colName = canonical
+				cs, present = u.columns[colName]
+			}
+		}
 		if !present {
 			// Shards can lag behind table schema changes (for example when a
 			// column was added after the shard was created and the old shard was
@@ -468,6 +494,12 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 	}
 	u.mu.RLock()
 	cs, present := u.columns[colName]
+	if !present {
+		if canonical, ok := u.resolveColumnNameCaseInsensitiveLocked(colName); ok {
+			colName = canonical
+			cs, present = u.columns[colName]
+		}
+	}
 	u.mu.RUnlock()
 	if !present {
 		if col := u.schemaColumn(colName); col != nil {
@@ -2223,6 +2255,12 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 	item := t.inserts[idx]
 	colidx, ok := t.deltaColumns[col]
+	if !ok {
+		if canonical, found := t.resolveColumnNameCaseInsensitiveLocked(col); found {
+			col = canonical
+			colidx, ok = t.deltaColumns[col]
+		}
+	}
 	if ok {
 		if colidx < len(item) {
 			return item[colidx]

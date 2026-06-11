@@ -81,6 +81,31 @@ test_cases:
       data:
         - reminderOpos: 50
 
+  - name: "dashboard scalar siblings keep nested aggregate domains isolated"
+    max_plan_size: 90000
+    sql: |
+      SELECT 1,
+        (SELECT SUM(1)
+         FROM ncs_invoice inv
+         WHERE inv.paid_date IS NULL
+         LIMIT 1) AS unpaidInvoices,
+        (SELECT SUM(1)
+         FROM ncs_acc OBJ
+         WHERE OBJ.typ IN (4, 5)
+           AND ((SELECT SUM(e.amount * (CASE WHEN e.sh THEN 1 ELSE -1 END))
+                 FROM ncs_ent e
+                 WHERE e.account = OBJ.nummer
+                   AND (SELECT j.fyear FROM ncs_jrn j WHERE j.id = e.jrn LIMIT 1) = OBJ.year
+                   AND (SELECT j.storno FROM ncs_jrn j WHERE j.id = e.jrn LIMIT 1) = 0
+                 LIMIT 1) <> 0)
+         LIMIT 1) AS reminderOpos
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          unpaidInvoices: 2
+          reminderOpos: 50
+
   - name: "incoming invoice settlement scalar bundle stays decorrelated"
     max_plan_size: 80000
     sql: |

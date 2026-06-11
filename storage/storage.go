@@ -766,12 +766,37 @@ func Init(en scm.Env) {
 				limit := int(scm.ToInt(a[layout.limitIdx]))
 				hadValue := false
 				count := 0
+				partOffset := offset
+				partLimit := limit
+				var prevPK []scm.Scmer
 				for idx, val := range filtered {
-					if idx < offset {
-						continue
-					}
-					if limit >= 0 && count >= limit {
-						break
+					if limitPartitionCols > 0 {
+						curPK := make([]scm.Scmer, limitPartitionCols)
+						for c := 0; c < limitPartitionCols && c < len(scols); c++ {
+							curPK[c] = scols[c](uint32(idx))
+						}
+						if prevPK == nil || !pkEqual(prevPK, curPK) {
+							partOffset = offset
+							partLimit = limit
+							prevPK = curPK
+						}
+						if partOffset > 0 {
+							partOffset--
+							continue
+						}
+						if partLimit == 0 {
+							continue
+						}
+						if partLimit > 0 {
+							partLimit--
+						}
+					} else {
+						if idx < offset {
+							continue
+						}
+						if limit >= 0 && count >= limit {
+							break
+						}
 					}
 					row := mustScmerSlice(val, "scan_order row")
 					ds := dataset(row)
@@ -1105,7 +1130,11 @@ func Init(en scm.Env) {
 					}
 				}
 			}
-			db.saveLockedWithDurabilityAndUnlock(newTable.PersistencyMode == Safe)
+			if newTable.isEphemeralQueryTable() {
+				db.schemalock.Unlock()
+			} else {
+				db.saveLockedWithDurabilityAndUnlock(newTable.PersistencyMode == Safe)
+			}
 			registerCreatedTable(newTable)
 			executeRegisteredCreateTableTriggers(newTable)
 			// Run the optional initializer thunk synchronously so the caller never
@@ -1514,8 +1543,13 @@ func Init(en scm.Env) {
 						db.save()
 						return scm.NewBool(true)
 					default:
-						ok := t.Columns[i].Alter(scm.String(a[2]), a[3])
-						db.save()
+						op := scm.String(a[2])
+						ok := t.Columns[i].Alter(op, a[3])
+						if op == "type" || op == "dimensions" {
+							t.rebuildActiveShardsForSchemaChange()
+						} else {
+							db.save()
+						}
 						return scm.NewBool(scm.ToBool(ok))
 					}
 				}
@@ -2133,6 +2167,22 @@ func Init(en scm.Env) {
 					for _, uk := range t.Unique {
 						for seq, col := range uk.Cols {
 							result = append(result, scm.NewSlice([]scm.Scmer{
+								scm.NewString("TABLE_CATALOG"), scm.NewString("def"),
+								scm.NewString("TABLE_SCHEMA"), scm.NewString(db.Name),
+								scm.NewString("TABLE_NAME"), scm.NewString(t.Name),
+								scm.NewString("NON_UNIQUE"), scm.NewInt(0),
+								scm.NewString("INDEX_SCHEMA"), scm.NewString(db.Name),
+								scm.NewString("INDEX_NAME"), scm.NewString(uk.Id),
+								scm.NewString("SEQ_IN_INDEX"), scm.NewInt(int64(seq + 1)),
+								scm.NewString("COLUMN_NAME"), scm.NewString(col),
+								scm.NewString("COLLATION"), scm.NewString("A"),
+								scm.NewString("CARDINALITY"), scm.NewNil(),
+								scm.NewString("SUB_PART"), scm.NewNil(),
+								scm.NewString("PACKED"), scm.NewNil(),
+								scm.NewString("NULLABLE"), scm.NewString(""),
+								scm.NewString("INDEX_TYPE"), scm.NewString("BTREE"),
+								scm.NewString("COMMENT"), scm.NewString(""),
+								scm.NewString("INDEX_COMMENT"), scm.NewString(""),
 								scm.NewString("table_catalog"), scm.NewString("def"),
 								scm.NewString("table_schema"), scm.NewString(db.Name),
 								scm.NewString("table_name"), scm.NewString(t.Name),

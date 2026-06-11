@@ -41,129 +41,63 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 )))
 
+/* INFORMATION_SCHEMA queries from MySQL clients use canonical upper-case
+column names, while existing MemCP tests and some generated SQL use lower-case
+unquoted names. Until the top-down pipeline canonicalizes these projections
+reliably, expose both row keys to keep metadata lookups non-fatal. */
+(define info_schema_dual_row (lambda (upper_row)
+	(merge upper_row
+		(reduce_assoc upper_row (lambda (acc key value)
+			(merge acc (list (toLower key) value)))
+			'()))))
+
+(define info_schema_dual_columns (lambda (cols)
+	(merge
+		(map cols (lambda (col) (list "Field" col)))
+		(map cols (lambda (col) (list "Field" (toLower col)))))))
+
 /* build one INFORMATION_SCHEMA.TABLES row for (schema, tbl) */
 (define info_schema_table_row (lambda (schema tbl) (begin
 	(define tblinfo (show schema tbl true))
 	(define meta (tblinfo "meta"))
 	(define shards (tblinfo "shards"))
-	(list
-		"table_catalog" "def"
-		"table_schema" schema
-		"table_name" tbl
-		"table_type" "BASE TABLE"
-		"engine" (meta "Engine")
-		"table_rows" (reduce shards (lambda (acc s) (+ acc (+ (s "main_count") (s "delta")) (- 0 (s "deletions")))) 0)
-		"data_length" (reduce shards (lambda (acc s) (+ acc (s "size_bytes"))) 0)
-		"table_collation" (meta "Collation")
-		"table_comment" (meta "Comment")
-	)
+	(info_schema_dual_row (list
+		"TABLE_CATALOG" "def"
+		"TABLE_SCHEMA" schema
+		"TABLE_NAME" tbl
+		"TABLE_TYPE" "BASE TABLE"
+		"ENGINE" (meta "Engine")
+		"TABLE_ROWS" (reduce shards (lambda (acc s) (+ acc (+ (s "main_count") (s "delta")) (- 0 (s "deletions")))) 0)
+		"DATA_LENGTH" (reduce shards (lambda (acc s) (+ acc (s "size_bytes"))) 0)
+		"TABLE_COLLATION" (meta "Collation")
+		"TABLE_COMMENT" (meta "Comment")
+	))
 )))
 
 /* emulate metadata tables */
 (define get_schema (lambda (schema tbl) (match '(schema tbl)
 	/* special tables */
-	'((ignorecase "information_schema") (ignorecase "schemata")) '(
-		'("Field" "catalog_name")
-		'("Field" "schema_name")
-		'("Field" "default_character_set_name")
-		'("Field" "default_collation_name")
-		'("Field" "sql_path")
-		'("Field" "schema_comment")
-	)
+	'((ignorecase "information_schema") (ignorecase "schemata"))
+	(info_schema_dual_columns '("CATALOG_NAME" "SCHEMA_NAME" "DEFAULT_CHARACTER_SET_NAME" "DEFAULT_COLLATION_NAME" "SQL_PATH" "SCHEMA_COMMENT"))
 
-	'((ignorecase "information_schema") (ignorecase "tables")) '(
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "table_type")
-		'("Field" "engine")
-		'("Field" "table_rows" "Type" "bigint")
-		'("Field" "data_length" "Type" "bigint")
-		'("Field" "table_collation")
-		'("Field" "table_comment")
-	)
-	'((ignorecase "information_schema") (ignorecase "columns")) '(
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "column_name")
-		'("Field" "ordinal_position")
-		'("Field" "column_default")
-		'("Field" "is_nullable")
-		'("Field" "data_type")
-		/* TODO: CHARACTER_MAXIMUM_LENGTH CHARACTER_OCTET_LENGTH NUMERIC_PRECISION NUMERIC_SCALE DATETIME_PRECISION CHARACTER_SET_NAME COLLATION_NAME  */
-		'("Field" "column_type")
-		'("Field" "column_key")
-		'("Field" "extra")
-		'("Field" "privileges")
-		'("Field" "column_comment")
-		'("Field" "is_generated")
-		'("Field" "generation_expression")
-	)
-	'((ignorecase "information_schema") (ignorecase "key_column_usage")) '(
-		'("Field" "constraint_catalog")
-		'("Field" "constraint_schema")
-		'("Field" "constraint_name")
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "column_name")
-		'("Field" "ordinal_position")
-		'("Field" "position_in_unique_constraint")
-		'("Field" "referenced_table_schema")
-		'("Field" "referenced_table_name")
-		'("Field" "referenced_column_name")
-	)
-	'((ignorecase "information_schema") (ignorecase "referential_constraints")) '(
-		'("Field" "constraint_catalog")
-		'("Field" "constraint_schema")
-		'("Field" "constraint_name")
-		'("Field" "unique_constraint_catalog")
-		'("Field" "unique_constraint_schema")
-		'("Field" "unique_constraint_name")
-		'("Field" "match_option")
-		'("Field" "update_rule")
-		'("Field" "delete_rule")
-		'("Field" "table_name")
-		'("Field" "referenced_table_name")
-	)
+	'((ignorecase "information_schema") (ignorecase "tables"))
+	(info_schema_dual_columns '("TABLE_CATALOG" "TABLE_SCHEMA" "TABLE_NAME" "TABLE_TYPE" "ENGINE" "TABLE_ROWS" "DATA_LENGTH" "TABLE_COLLATION" "TABLE_COMMENT"))
+	'((ignorecase "information_schema") (ignorecase "columns"))
+	/* TODO: CHARACTER_MAXIMUM_LENGTH CHARACTER_OCTET_LENGTH NUMERIC_PRECISION NUMERIC_SCALE DATETIME_PRECISION CHARACTER_SET_NAME COLLATION_NAME  */
+	(info_schema_dual_columns '("TABLE_CATALOG" "TABLE_SCHEMA" "TABLE_NAME" "COLUMN_NAME" "ORDINAL_POSITION" "COLUMN_DEFAULT" "IS_NULLABLE" "DATA_TYPE" "COLUMN_TYPE" "COLUMN_KEY" "EXTRA" "PRIVILEGES" "COLUMN_COMMENT" "IS_GENERATED" "GENERATION_EXPRESSION"))
+	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
+	(info_schema_dual_columns '("CONSTRAINT_CATALOG" "CONSTRAINT_SCHEMA" "CONSTRAINT_NAME" "TABLE_CATALOG" "TABLE_SCHEMA" "TABLE_NAME" "COLUMN_NAME" "ORDINAL_POSITION" "POSITION_IN_UNIQUE_CONSTRAINT" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME" "REFERENCED_COLUMN_NAME"))
+	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
+	(info_schema_dual_columns '("CONSTRAINT_CATALOG" "CONSTRAINT_SCHEMA" "CONSTRAINT_NAME" "UNIQUE_CONSTRAINT_CATALOG" "UNIQUE_CONSTRAINT_SCHEMA" "UNIQUE_CONSTRAINT_NAME" "MATCH_OPTION" "UPDATE_RULE" "DELETE_RULE" "TABLE_NAME" "REFERENCED_TABLE_NAME"))
 
 	/* Minimal compatibility for mysqldump probes */
-	'((ignorecase "information_schema") (ignorecase "files")) '(
-		'("Field" "file_name")
-		'("Field" "file_type")
-		'("Field" "tablespace_name")
-		'("Field" "logfile_group_name")
-		'("Field" "total_extents")
-		'("Field" "initial_size")
-		'("Field" "engine")
-		'("Field" "extra")
-	)
-	'((ignorecase "information_schema") (ignorecase "partitions")) '(
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "partition_name")
-		'("Field" "tablespace_name")
-	)
+	'((ignorecase "information_schema") (ignorecase "files"))
+	(info_schema_dual_columns '("FILE_NAME" "FILE_TYPE" "TABLESPACE_NAME" "LOGFILE_GROUP_NAME" "TOTAL_EXTENTS" "INITIAL_SIZE" "ENGINE" "EXTRA"))
+	'((ignorecase "information_schema") (ignorecase "partitions"))
+	(info_schema_dual_columns '("TABLE_SCHEMA" "TABLE_NAME" "PARTITION_NAME" "TABLESPACE_NAME"))
 
-	'((ignorecase "information_schema") (ignorecase "statistics")) '(
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "non_unique")
-		'("Field" "index_schema")
-		'("Field" "index_name")
-		'("Field" "seq_in_index")
-		'("Field" "column_name")
-		'("Field" "collation")
-		'("Field" "cardinality")
-		'("Field" "sub_part")
-		'("Field" "packed")
-		'("Field" "nullable")
-		'("Field" "index_type")
-		'("Field" "comment")
-		'("Field" "index_comment")
-	)
+	'((ignorecase "information_schema") (ignorecase "statistics"))
+	(info_schema_dual_columns '("TABLE_CATALOG" "TABLE_SCHEMA" "TABLE_NAME" "NON_UNIQUE" "INDEX_SCHEMA" "INDEX_NAME" "SEQ_IN_INDEX" "COLUMN_NAME" "COLLATION" "CARDINALITY" "SUB_PART" "PACKED" "NULLABLE" "INDEX_TYPE" "COMMENT" "INDEX_COMMENT"))
 
 	/* Unknown INFORMATION_SCHEMA table → clear SCM-side error */
 	'((ignorecase "information_schema") _)
@@ -173,7 +107,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "schemata"))
 	(merge '(scanfn '(session "__memcp_tx")
-		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
+		'('map '('show) '('lambda '('schema) '('info_schema_dual_row '('list "CATALOG_NAME" "def" "SCHEMA_NAME" 'schema "DEFAULT_CHARACTER_SET_NAME" "utf8mb4" "DEFAULT_COLLATION_NAME" "utf8mb3_general_ci" "SQL_PATH" NULL "SCHEMA_COMMENT" ""))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
 	(list 'begin
@@ -184,7 +118,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(merge '(scanfn '(session "__memcp_tx") '__info_tables_data) rest))
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge '(scanfn '(session "__memcp_tx")
-		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "Field") "data_type" '((quote col) "RawType") "column_type" '((quote concat) '((quote col) "Type") '((quote col) "Dimensions")))))))))))
+		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote info_schema_dual_row) '((quote list) "TABLE_CATALOG" "def" "TABLE_SCHEMA" (quote schema) "TABLE_NAME" (quote tbl) "COLUMN_NAME" '((quote col) "Field") "DATA_TYPE" '((quote col) "RawType") "COLUMN_TYPE" '((quote concat) '((quote col) "Type") '((quote col) "Dimensions"))))))))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
 	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* TODO: list constraints */

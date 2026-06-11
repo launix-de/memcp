@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "strings"
 import "github.com/launix-de/memcp/scm"
 
 const batchCapacityRows = 128
@@ -92,6 +93,28 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 		return scm.NewNil()
 	}
 	if len(innerScanSlice) > 6 && astContainsHead(innerScanSlice[6], "scan_order") {
+		return scm.NewNil()
+	}
+	// Synthetic top-down boundary keys must stay in the original lexical scan
+	// chain. The batch peephole currently rewrites those map outputs to nil,
+	// which breaks per-domain LIMIT partitioning.
+	if len(innerScanSlice) > 6 && astContainsTextPrefix(innerScanSlice[6], "__kt_") {
+		return scm.NewNil()
+	}
+	// The rewrite wraps the inner scan in an extra __inner_flush lambda. If the
+	// inner scan itself contains another scan, that deeper scan may rely on the
+	// original lexical parent chain and read the wrong row values after the
+	// wrapper is inserted. Keep multi-level nested scans unbatched until the
+	// rewriter can adjust outer-depths structurally.
+	if (len(innerScanSlice) > 4 && astContainsAnyHead(innerScanSlice[4], map[string]bool{"scan": true, "scan_batch": true})) ||
+		(len(innerScanSlice) > 6 && astContainsAnyHead(innerScanSlice[6], map[string]bool{"scan": true, "scan_batch": true})) {
+		return scm.NewNil()
+	}
+	// Deeper subscans that already use (outer ...) have the same issue even if
+	// the scan call is hidden behind a construct the shallow finder does not
+	// enter.
+	if (len(innerScanSlice) > 4 && astContainsHead(innerScanSlice[4], "outer")) ||
+		(len(innerScanSlice) > 6 && astContainsHead(innerScanSlice[6], "outer")) {
 		return scm.NewNil()
 	}
 
@@ -353,7 +376,26 @@ func astContainsSymbol(expr scm.Scmer, symbols map[string]bool) bool {
 	return false
 }
 
+func astContainsTextPrefix(expr scm.Scmer, prefix string) bool {
+	if expr.IsSymbol() && strings.HasPrefix(expr.String(), prefix) {
+		return true
+	}
+	if !expr.IsSlice() {
+		return strings.HasPrefix(scm.String(expr), prefix)
+	}
+	for _, child := range expr.Slice() {
+		if astContainsTextPrefix(child, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func astContainsHead(expr scm.Scmer, headName string) bool {
+	return astContainsAnyHead(expr, map[string]bool{headName: true})
+}
+
+func astContainsAnyHead(expr scm.Scmer, headNames map[string]bool) bool {
 	if !expr.IsSlice() {
 		return false
 	}
@@ -361,11 +403,11 @@ func astContainsHead(expr scm.Scmer, headName string) bool {
 	if len(sl) == 0 {
 		return false
 	}
-	if scmerHeadString(sl[0]) == headName {
+	if headNames[scmerHeadString(sl[0])] {
 		return true
 	}
 	for _, child := range sl {
-		if astContainsHead(child, headName) {
+		if astContainsAnyHead(child, headNames) {
 			return true
 		}
 	}

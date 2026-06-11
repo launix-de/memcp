@@ -615,7 +615,8 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 	if p.hasSessionVariants() {
 		p.forEachVariant(func(v *storageComputeVariant) {
 			v.mu.Lock()
-			if !v.compressed && !v.validMask.Get(uint(idx)) {
+			_, hasDelta := v.delta[idx]
+			if !v.compressed && !hasDelta && !v.validMask.Get(uint(idx)) {
 				v.mu.Unlock()
 				p.GetValue(idx)
 				return
@@ -649,7 +650,8 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 		return
 	}
 	p.mu.Lock()
-	if !p.compressed && !p.validMask.Get(uint(idx)) {
+	_, hasDelta := p.delta[idx]
+	if !p.compressed && !hasDelta && !p.validMask.Get(uint(idx)) {
 		p.mu.Unlock()
 		// Recompute the affected row from the already-mutated source state so the
 		// cache converges immediately even when this row had never been
