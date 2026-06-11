@@ -7830,11 +7830,21 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						computor with a dict-lookup over a shared lazily-built dict.
 						Cold cost drops from O(N*K*M) to ~O(N + K*M). Eligibility:
 						associative reducers, no nested aggs / subselects, FK-reuse and
-						global-group already optimal; scoped stages keep legacy. */
+						global-group already optimal; scoped stages keep legacy.
+						EXCLUDE session-sensitive queries — our cache key is just
+						gbd:<grouptbl> without the session var values, so different
+						session values would share the same stale dict. Legacy createcolumn
+						handles session via hasSessionVariants(); we defer to it. */
 						(define _single_pass_eligible (and
 							(not is_fk_reuse)
 							(not (equal? resolved_stage_group '(1)))
 							(nil? _stage_scope)
+							/* Inline the session-state check so the optimizer keeps it
+							observable inside the &-chain instead of folding it via a
+							separate _dca_uses_session binding. */
+							(not (expr_uses_session_state condition))
+							(not (reduce ags (lambda (acc ag)
+								(or acc (match ag '(e _ _) (expr_uses_session_state e) false))) false))
 							(aggregates_eligible_for_single_pass? ags)))
 						/* collect + trigger deploy on first keytable creation only.
 						createtable inside init_code returns true on first creation.
