@@ -21,6 +21,12 @@
 
 echo "🔍 Running MemCP pre-commit tests..."
 
+echo "⏱️  Checking SQL hard time-limit guard..."
+if ! python3 tools/check_sql_time_limit.py; then
+    echo "❌ SQL time-limit guard failed, commit aborted"
+    exit 1
+fi
+
 fail_fast_mode="${MEMCP_FAIL_FAST:-1}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -318,6 +324,83 @@ run_one() {
   } 9>>"$lockfile"
 }
 
+print_scm_coverage_report() {
+  if [ "${MEMCP_COVERAGE:-}" != "1" ]; then
+    return
+  fi
+  echo ""
+  echo "📊 Generating SCM coverage report..."
+  if ! wait_for_sql_ready 15 1; then
+    echo "   ⚠️  MemCP is not SQL-ready; SCM coverage unavailable"
+    return
+  fi
+  local scm_coverage_json
+  scm_coverage_json="$(curl -sS -f -u root:admin "http://localhost:$test_port/scm" -d '(source_coverage_report "lib/")' 2>/dev/null || true)"
+  if [ -z "$scm_coverage_json" ]; then
+    echo "   ⚠️  No SCM coverage data collected"
+    return
+  fi
+  local scm_coverage_file
+  if [ -n "${GOCOVERDIR:-}" ] && [ -d "$GOCOVERDIR" ]; then
+    scm_coverage_file="$GOCOVERDIR/scm-coverage.json"
+  else
+    scm_coverage_file="$tmpdir/scm-coverage.json"
+  fi
+  printf '%s\n' "$scm_coverage_json" > "$scm_coverage_file"
+  python3 - "$scm_coverage_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        report = json.load(f)
+except json.JSONDecodeError as exc:
+    print(f"   ⚠️  Could not parse SCM coverage JSON: {exc}")
+    raise SystemExit(0)
+
+def assoc_to_dict(value):
+    if isinstance(value, list):
+        if len(value) % 2 == 0 and all(isinstance(value[i], str) for i in range(0, len(value), 2)):
+            return {value[i]: assoc_to_dict(value[i + 1]) for i in range(0, len(value), 2)}
+        return [assoc_to_dict(item) for item in value]
+    return value
+
+report = assoc_to_dict(report)
+
+total = int(report.get("total", 0) or 0)
+covered = int(report.get("covered", 0) or 0)
+percent = float(report.get("percent", 100.0) or 0.0)
+print(f"   total: {covered}/{total} source nodes covered ({percent:.1f}%)")
+
+files = report.get("files", [])
+gaps = [
+    f for f in files
+    if isinstance(f, dict) and f.get("uncovered_lines")
+]
+gaps.sort(key=lambda f: (float(f.get("percent", 100.0) or 0.0), str(f.get("source", ""))))
+if not gaps:
+    print("   No SCM coverage gaps in lib/")
+else:
+    print("   Largest SCM coverage gaps in lib/:")
+    for f in gaps[:20]:
+        uncovered_lines = sorted(int(line) for line in f.get("uncovered_lines", []))
+        lines = [str(line) for line in uncovered_lines[:24]]
+        suffix = ""
+        if len(uncovered_lines) > 24:
+            suffix = ", ..."
+        print(
+            "   "
+            + f"{f.get('source')}: {int(f.get('covered', 0) or 0)}/{int(f.get('total', 0) or 0)} "
+            + f"({float(f.get('percent', 0.0) or 0.0):.1f}%), uncovered lines: "
+            + ", ".join(lines)
+            + suffix
+        )
+PY
+  if [ -n "${GOCOVERDIR:-}" ] && [ -d "$GOCOVERDIR" ]; then
+    echo "   Full report: $GOCOVERDIR/scm-coverage.json"
+  fi
+}
+
 if [ "$fail_fast_mode" -eq 1 ]; then
   for idx in "${!test_files_arr[@]}"; do
     tf="${test_files_arr[$idx]}"
@@ -360,6 +443,7 @@ else
   done
 fi
 
+print_scm_coverage_report
 stop_supervisor
 
 for tf in "${test_files_arr[@]}"; do

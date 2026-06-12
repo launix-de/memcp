@@ -43,6 +43,47 @@ test_cases:
     expect:
       data: ["value"]
 
+  - name: "SourceInfo coverage marks executed runtime nodes"
+    scm: |
+      (begin
+        (define fail (lambda (msg) (error (concat "source coverage runtime: " msg))))
+        (define src (concat "coverage-runtime-" (uuid) ".scm"))
+        (define ast (source src 1 1 '(+ 1 2)))
+        (define before (source_coverage_report src))
+        (if (not (equal? (get_assoc before "total") 1)) (fail "registered node missing"))
+        (if (not (equal? (get_assoc before "covered") 0)) (fail "node covered before eval"))
+        (if (not (equal? (eval ast) 3)) (fail "eval result mismatch"))
+        (define after (source_coverage_report src))
+        (if (not (equal? (get_assoc after "total") 1)) (fail "registered node changed"))
+        (if (not (equal? (get_assoc after "covered") 1)) (fail "node not covered after eval"))
+        true)
+
+  - name: "SourceInfo coverage marks parser grammar nodes"
+    scm: |
+      (begin
+        (define fail (lambda (msg) (error (concat "source coverage parser syntax: " msg))))
+        (define src (concat "coverage-parser-syntax-" (uuid) ".scm"))
+        (define syntax (source src 1 1 '"abc"))
+        (define parser_instance (eval (list 'parser syntax)))
+        (if (not (equal? (parser_instance "abc") "abc")) (fail "parser result mismatch"))
+        (define report (source_coverage_report src))
+        (if (not (equal? (get_assoc report "total") 1)) (fail "registered grammar node missing"))
+        (if (not (equal? (get_assoc report "covered") 1)) (fail "grammar node not covered by parser construction"))
+        true)
+
+  - name: "SourceInfo coverage marks parser result generators"
+    scm: |
+      (begin
+        (define fail (lambda (msg) (error (concat "source coverage parser generator: " msg))))
+        (define src (concat "coverage-parser-generator-" (uuid) ".scm"))
+        (define generator (source src 1 1 '(+ 2 3)))
+        (define parser_instance (eval (list 'parser "abc" generator)))
+        (if (not (equal? (parser_instance "abc") 5)) (fail "parser generator result mismatch"))
+        (define report (source_coverage_report src))
+        (if (not (equal? (get_assoc report "total") 1)) (fail "registered generator node missing"))
+        (if (not (equal? (get_assoc report "covered") 1)) (fail "generator node not covered by parse"))
+        true)
+
   - name: "Drop roundtrip table"
     sql: "DROP TABLE IF EXISTS ser_test"
     expect:

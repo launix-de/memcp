@@ -309,6 +309,7 @@ func NewNthLocalVar(idx NthLocalVar) Scmer {
 func NewSourceInfo(si SourceInfo) Scmer {
 	ptr := new(SourceInfo)
 	*ptr = si
+	sourceCoverageInfos = append(sourceCoverageInfos, ptr)
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagSourceInfo, 0)}
 }
 

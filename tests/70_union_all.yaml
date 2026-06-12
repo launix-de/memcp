@@ -277,6 +277,22 @@ test_cases:
         - '"stage": "term", "kind": "root", "value": "union_all"'
         - '"kind": "branches", "value": 2'
 
+  - name: "EXPLAIN IR top-level UNION ALL includes ordering metadata"
+    sql: |
+      EXPLAIN IR
+      SELECT ID FROM fop_files WHERE ID <= 2
+      UNION ALL
+      SELECT ID FROM fop_files WHERE ID >= 4
+      ORDER BY ID
+      LIMIT 2
+      OFFSET 1
+    expect:
+      contains:
+        - '"stage": "term", "kind": "root", "value": "union_all"'
+        - '"kind": "branches", "value": 2'
+        - '"kind": "limit", "value": 2'
+        - '"kind": "offset", "value": 1'
+
   - name: "UNION ALL with simple derived branch"
     sql: |
       SELECT ID FROM fop_files WHERE ID = 1

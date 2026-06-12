@@ -307,10 +307,12 @@ func scmerSymbol(v Scmer) (Symbol, bool) {
 func scmerStripSourceInfo(v Scmer) (Scmer, bool) {
 	if v.IsSourceInfo() {
 		si := v.SourceInfo()
+		si.coverage = true
 		return si.value, true
 	}
 	if v.GetTag() == tagAny {
 		if si, ok := v.Any().(SourceInfo); ok {
+			si.coverage = true
 			return si.value, true
 		}
 	}
@@ -419,19 +421,22 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 	case tagSlice:
 		return optimizeList(val.Slice(), env, ome, useResult)
 	case tagSourceInfo:
-		si := *val.SourceInfo()
+		siPtr := val.SourceInfo()
+		siPtr.coverage = true
 		if SettingsHaveGoodBacktraces {
-			result, ti := OptimizeEx(si.value, env, ome, useResult)
+			result, ti := OptimizeEx(siPtr.value, env, ome, useResult)
 			if ti.Const() {
 				return result, ti
 			}
+			si := *siPtr
 			si.value = result
 			return NewSourceInfo(si), ti.WithoutTransfer()
 		}
-		return OptimizeEx(si.value, env, ome, useResult)
+		return OptimizeEx(siPtr.value, env, ome, useResult)
 	case tagAny:
 		payload := val.Any()
 		if pv, ok := payload.(SourceInfo); ok {
+			pv.coverage = true
 			if SettingsHaveGoodBacktraces {
 				result, ti := OptimizeEx(pv.value, env, ome, useResult)
 				if ti.Const() {
@@ -1315,8 +1320,15 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 }
 
 func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
-	if stripped, ok := scmerStripSourceInfo(val); ok {
-		val = stripped
+	if val.IsSourceInfo() {
+		sourceInfo := val.SourceInfo()
+		sourceInfo.coverage = true
+		val = sourceInfo.value
+	} else if val.GetTag() == tagAny {
+		if sourceInfo, ok := val.Any().(SourceInfo); ok {
+			sourceInfo.coverage = true
+			val = sourceInfo.value
+		}
 	}
 
 	slice, ok := scmerSlice(val)

@@ -189,7 +189,9 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 	}
 	switch syntax.GetTag() {
 	case tagSourceInfo:
-		return parseSyntax(syntax.SourceInfo().value, en, ome, ignoreResult)
+		sourceInfo := syntax.SourceInfo()
+		sourceInfo.coverage = true
+		return parseSyntax(sourceInfo.value, en, ome, ignoreResult)
 	case tagFastDict:
 		fd := syntax.FastDict()
 		if fd == nil {
@@ -403,7 +405,7 @@ func NewParser(syntax, generator, whitespace Scmer, en *Env, ignoreResult bool) 
 
 func init_parser() {
 	DeclareTitle("Parsers")
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "parser",
 		Desc: `creates a parser
 	

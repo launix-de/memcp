@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -25,10 +25,11 @@ import (
 )
 
 type SourceInfo struct {
-	source string
-	line   int
-	col    int
-	value  Scmer
+	source   string
+	line     int
+	col      int
+	value    Scmer
+	coverage bool
 }
 
 func (source_info SourceInfo) String() string {
@@ -214,7 +215,7 @@ func tokenize(source, s string) []Scmer {
 			// now detect what to parse next
 			startToken = i
 			if ch == '(' {
-				result = append(result, NewSourceInfo(SourceInfo{source, line, col, NewSymbol("(")}))
+				result = append(result, NewSourceInfo(SourceInfo{source: source, line: line, col: col, value: NewSymbol("(")}))
 				state = 0
 			} else if ch == ')' {
 				result = append(result, NewSymbol(")"))
