@@ -1,0 +1,113 @@
+# Regression repro: WHERE col IN (<single-value>) combined with a
+# correlated scalar subquery in SELECT list panics with
+# "contains? expects a list, got <scalar>".
+#
+# Cause: between untangle's replace_inner_selects exit and the final IR
+# serialization, the IN's (list 1) literal is reduced to just 1. The
+# contains? then sees scalar 1 (not a list) and the scan filter panics
+# at runtime when contains? tries to call asSlice on the scalar.
+#
+# Verified:
+# - failure shape: `IN ('1')` or `IN (1)` with a correlated scalar
+#   subselect (MIN/MAX/COUNT/etc.) referencing the OUTER row in SELECT
+# - works:        `IN ('1', '2')` (multi-element list keeps wrapping),
+#                 `IN ('1')` without subselect, `doc.ID = 1`,
+#                 `IN ('xyz')` where no doc row matches (filter folds to false)
+# - pre-existing: also fails with `_single_pass_eligible false`
+#   (so it is NOT caused by the dict-cached agg computor path)
+
+metadata:
+  version: "1.0"
+  description: "IN with single-element list + correlated scalar subquery in SELECT — contains? regression"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS in1_doc"
+  - sql: "DROP TABLE IF EXISTS in1_doc_revision"
+  - sql: |
+      CREATE TABLE in1_doc (
+        ID INT PRIMARY KEY,
+        date INT
+      )
+  - sql: |
+      CREATE TABLE in1_doc_revision (
+        ID INT PRIMARY KEY,
+        doc INT,
+        created INT
+      )
+  - sql: "INSERT INTO in1_doc VALUES (1, 100), (2, 200)"
+  - sql: "INSERT INTO in1_doc_revision VALUES (1, 1, 200), (2, 2, 300)"
+
+test_cases:
+
+  - name: "IN ('1') + correlated MIN subquery in SELECT"
+    sql: |
+      SELECT in1_doc.ID,
+        (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev
+      FROM in1_doc
+      WHERE in1_doc.ID IN ('1')
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          first_rev: 200
+
+  - name: "IN (1) + correlated MIN subquery in SELECT (integer form)"
+    sql: |
+      SELECT in1_doc.ID,
+        (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev
+      FROM in1_doc
+      WHERE in1_doc.ID IN (1)
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          first_rev: 200
+
+  - name: "IN ('1') + correlated SELECT 1 subquery in SELECT"
+    sql: |
+      SELECT in1_doc.ID,
+        (SELECT 1 FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS has_rev
+      FROM in1_doc
+      WHERE in1_doc.ID IN ('1')
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          has_rev: 1
+
+  - name: "IN ('1', '2') + correlated MIN subquery (multi-element baseline — passes)"
+    sql: |
+      SELECT in1_doc.ID,
+        (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev
+      FROM in1_doc
+      WHERE in1_doc.ID IN ('1', '2')
+      ORDER BY in1_doc.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          first_rev: 200
+        - ID: 2
+          first_rev: 300
+
+  - name: "IN ('1') without subquery in SELECT (baseline — passes)"
+    sql: |
+      SELECT in1_doc.ID
+      FROM in1_doc
+      WHERE in1_doc.ID IN ('1')
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+
+  - name: "doc.ID = 1 + correlated MIN subquery (= baseline — passes)"
+    sql: |
+      SELECT in1_doc.ID,
+        (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev
+      FROM in1_doc
+      WHERE in1_doc.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          first_rev: 200
