@@ -1191,13 +1191,28 @@ class SQLTestRunner:
                 test_cases.append(tc)
 
         if self.fail_fast:
-            for i, tc in enumerate(test_cases):
+            i = 0
+            while i < len(test_cases):
+                tc = test_cases[i]
                 if '_delay_ms' in tc:
                     time.sleep(tc['_delay_ms'] / 1000.0)
+                    i += 1
                     continue
-                self.run_test_case(tc, database)
+                group = tc.get('parallel')
+                if group:
+                    group_tests = [tc]
+                    j = i + 1
+                    while j < len(test_cases) and test_cases[j].get('parallel') == group:
+                        group_tests.append(test_cases[j])
+                        j += 1
+                    print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
+                    self._run_parallel_group(group_tests, database)
+                    i = j
+                else:
+                    self.run_test_case(tc, database)
+                    i += 1
                 if self.failed_critical > 0:
-                    remaining_tests = sum(1 for pending in test_cases[i + 1:] if '_delay_ms' not in pending)
+                    remaining_tests = sum(1 for pending in test_cases[i:] if '_delay_ms' not in pending)
                     if remaining_tests > 0:
                         print(f"⏭️  Fail-fast skipped {remaining_tests} tests after the first failure")
                     break
