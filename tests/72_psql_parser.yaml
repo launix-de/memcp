@@ -198,5 +198,36 @@ test_cases:
       data:
         - v: 123
 
+  # === UNION ALL ordering metadata ===
+  - name: "UNION ALL carries ORDER LIMIT OFFSET from right branch"
+    sql: |
+      SELECT id, name FROM psql_data WHERE id = 1
+      UNION ALL
+      SELECT id, name FROM psql_data WHERE id > 1
+      ORDER BY id LIMIT 2 OFFSET 1
+    expect:
+      rows: 2
+      data:
+        - id: 2
+          name: "Bob"
+        - id: 3
+          name: "Charlie"
+
+  - name: "UNION ALL chained right branch preserves final ORDER"
+    sql: |
+      SELECT id, name FROM psql_data WHERE id = 1
+      UNION ALL
+      SELECT id, name FROM psql_data WHERE id = 2
+      UNION ALL
+      SELECT id, name FROM psql_data WHERE id = 3
+      ORDER BY id DESC LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 3
+          name: "Charlie"
+        - id: 2
+          name: "Bob"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS psql_data"

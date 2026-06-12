@@ -37,7 +37,9 @@ import (
 
 func symbolName(v Scmer) (string, bool) {
 	if v.IsSourceInfo() {
-		return symbolName(v.SourceInfo().value)
+		sourceInfo := v.SourceInfo()
+		sourceInfo.coverage = true
+		return symbolName(sourceInfo.value)
 	}
 	if v.GetTag() == tagSymbol {
 		return v.String(), true
@@ -59,7 +61,9 @@ func mustSymbol(v Scmer) Symbol {
 
 func mustNthLocalVar(v Scmer) NthLocalVar {
 	if v.IsSourceInfo() {
-		return mustNthLocalVar(v.SourceInfo().value)
+		sourceInfo := v.SourceInfo()
+		sourceInfo.coverage = true
+		return mustNthLocalVar(sourceInfo.value)
 	}
 	if v.GetTag() == tagNthLocalVar {
 		return v.NthLocalVar()
