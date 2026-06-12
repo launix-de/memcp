@@ -78,7 +78,15 @@ persist produced rows in a session list. */
 		(match subquery
 			'(schema _tables fields _condition _group _having _order _limit _offset)
 			(begin
-				(define field_pairs (qpp-fields-to-pairs fields))
+				(define field_pairs (reduce (qpp-fields-to-pairs fields) (lambda (acc pair) (match pair
+					'(name _expr)
+					(if (reduce acc (lambda (found existing_pair)
+						(or found (equal?? (nth existing_pair 0) name)))
+						false)
+						acc
+						(merge acc (list pair)))
+					_ acc))
+					'()))
 				(define field_names (map field_pairs car))
 				(if (equal? field_names '())
 					nil
@@ -266,7 +274,15 @@ construction. */
 		(match subquery
 			'(schema _tables fields _condition _group _having _order _limit _offset)
 			(begin
-				(define field_pairs (qpp-fields-to-pairs fields))
+				(define field_pairs (reduce (qpp-fields-to-pairs fields) (lambda (acc pair) (match pair
+					'(name _expr)
+					(if (reduce acc (lambda (found existing_pair)
+						(or found (equal?? (nth existing_pair 0) name)))
+						false)
+						acc
+						(merge acc (list pair)))
+					_ acc))
+					'()))
 				(define field_names (map field_pairs car))
 				(if (equal? field_names '())
 					nil

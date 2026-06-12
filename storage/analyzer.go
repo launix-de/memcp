@@ -379,6 +379,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 		return 0, false
 	}
+	computedMapColsArePhysical := func(cols []string) bool {
+		for _, col := range cols {
+			if _, isBatch := parseBatchPseudoColName(col); isBatch {
+				// #N names address per-query batch slots, not physical ColumnStorage.
+				return false
+			}
+		}
+		return cols != nil
+	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
 		if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() {
@@ -460,7 +469,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -468,7 +477,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if subidx, ok := resolveBatchSubidx(v[2]); ok {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -479,7 +488,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -487,7 +496,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if subidx, ok := resolveBatchSubidx(v[1]); ok {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -519,7 +528,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -527,7 +536,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if subidx, ok := resolveBatchSubidx(v[2]); ok {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -539,7 +548,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -547,7 +556,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if subidx, ok := resolveBatchSubidx(v[1]); ok {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -579,7 +588,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -587,7 +596,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if subidx, ok := resolveBatchSubidx(v[2]); ok {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -599,7 +608,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -607,7 +616,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if subidx, ok := resolveBatchSubidx(v[1]); ok {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
-						if !mf.IsNil() && mc != nil {
+						if !mf.IsNil() && computedMapColsArePhysical(mc) {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
@@ -660,7 +669,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			if len(params) > 0 && isRawDataset(params, node) {
 				canon := canonicalColName(node, params, conditionCols)
 				mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
-				if !mf.IsNil() && mc != nil {
+				if !mf.IsNil() && computedMapColsArePhysical(mc) {
 					return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
 				}
 			}
@@ -687,7 +696,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		if len(params) > 0 && isRawDataset(params, node) {
 			canon := canonicalColName(node, params, conditionCols)
 			mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
-			if !mf.IsNil() && mc != nil {
+			if !mf.IsNil() && computedMapColsArePhysical(mc) {
 				return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
 			}
 		}

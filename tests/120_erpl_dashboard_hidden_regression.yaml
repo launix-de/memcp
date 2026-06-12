@@ -10,10 +10,34 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS customerEmailAddress"
+  - sql: "DROP TABLE IF EXISTS customer"
+  - sql: "DROP TABLE IF EXISTS doc"
+  - sql: "DROP TABLE IF EXISTS userconfig"
+  - sql: "DROP TABLE IF EXISTS login"
+  - sql: "DROP TABLE IF EXISTS offer"
+  - sql: "DROP TABLE IF EXISTS incomingInvoice"
+  - sql: "DROP TABLE IF EXISTS bill"
   - sql: "DROP TABLE IF EXISTS fop_journal_year_account"
   - sql: "DROP TABLE IF EXISTS fop_journalEntry"
   - sql: "DROP TABLE IF EXISTS fop_journal"
   - sql: "DROP TABLE IF EXISTS fop_journal_year"
+  - sql: "CREATE TABLE customer (ID INT PRIMARY KEY, typ INT, vorname VARCHAR(64), name VARCHAR(64), firma VARCHAR(64), entrydate INT, birthdate INT)"
+  - sql: "CREATE TABLE customerEmailAddress (ID INT PRIMARY KEY, parent INT, email VARCHAR(128), sortableOrder INT)"
+  - sql: "CREATE TABLE doc (ID INT PRIMARY KEY, type INT, archive BOOL)"
+  - sql: "CREATE TABLE userconfig (ID INT PRIMARY KEY, Tables_Doc_defaultDoctype INT, Configuration_Stammdaten_durationPast INT, Configuration_Stammdaten_durationFuture INT)"
+  - sql: "CREATE TABLE login (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE offer (ID INT PRIMARY KEY, state INT)"
+  - sql: "CREATE TABLE incomingInvoice (ID INT PRIMARY KEY, paid_date INT)"
+  - sql: "CREATE TABLE bill (ID INT PRIMARY KEY, paid_date INT)"
+  - sql: "INSERT INTO customer VALUES (1, 4, 'Ada', 'Lovelace', 'Analytical', 1699000000, 1699900000), (2, 1, 'Grace', 'Hopper', 'Compiler', 1698000000, 1600000000)"
+  - sql: "INSERT INTO customerEmailAddress VALUES (1, 1, 'ada@example.test', 2), (2, 1, 'first@example.test', 1), (3, 2, 'grace@example.test', 1)"
+  - sql: "INSERT INTO doc VALUES (1, NULL, FALSE), (2, 99, TRUE)"
+  - sql: "INSERT INTO userconfig VALUES (1, NULL, 30, 30)"
+  - sql: "INSERT INTO login VALUES (1)"
+  - sql: "INSERT INTO offer VALUES (1, 0), (2, 8)"
+  - sql: "INSERT INTO incomingInvoice VALUES (1, NULL), (2, 1700000001)"
+  - sql: "INSERT INTO bill VALUES (1, NULL), (2, 1700000001)"
   - sql: "CREATE TABLE fop_journal_year_account (ID INT PRIMARY KEY, typ VARCHAR(8), nummer INT, year INT)"
   - sql: "CREATE TABLE fop_journalEntry (ID INT PRIMARY KEY, account INT, amount INT, sh BOOL, fop_journal INT)"
   - sql: "CREATE TABLE fop_journal (ID INT PRIMARY KEY, fyear INT, stornoStatus INT)"
@@ -24,17 +48,113 @@ setup:
   - sql: "INSERT INTO fop_journal_year VALUES (2024, 0, 2147483647)"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS customerEmailAddress"
+  - sql: "DROP TABLE IF EXISTS customer"
+  - sql: "DROP TABLE IF EXISTS doc"
+  - sql: "DROP TABLE IF EXISTS userconfig"
+  - sql: "DROP TABLE IF EXISTS login"
+  - sql: "DROP TABLE IF EXISTS offer"
+  - sql: "DROP TABLE IF EXISTS incomingInvoice"
+  - sql: "DROP TABLE IF EXISTS bill"
   - sql: "DROP TABLE IF EXISTS fop_journal_year_account"
   - sql: "DROP TABLE IF EXISTS fop_journalEntry"
   - sql: "DROP TABLE IF EXISTS fop_journal"
   - sql: "DROP TABLE IF EXISTS fop_journal_year"
 
 test_cases:
+  - name: "derived-table scalar keeps inner child alias when lowering"
+    sql: |
+      SELECT ref.`to-customer:ID`, ref.`to-customer:description`
+      FROM (
+        SELECT `ID` AS `to-customer:ID`,
+          CONCAT(
+            CASE WHEN (`customer`.`typ`) = (4)
+              THEN (SELECT (`mail`.`email`) FROM `customerEmailAddress` `mail`
+                    WHERE `mail`.`parent` = `customer`.`ID`
+                    ORDER BY `mail`.`sortableOrder` ASC LIMIT 1)
+              ELSE CONCAT(`customer`.`vorname`, ' ', `customer`.`name`)
+            END,
+            COALESCE((SELECT (CONCAT(' (', `mail2`.`email`, ')'))
+                      FROM `customerEmailAddress` `mail2`
+                      WHERE `mail2`.`parent` = `customer`.`ID`
+                      LIMIT 1), '')
+          ) AS `to-customer:description`
+        FROM `customer`
+      ) `ref`
+      ORDER BY ref.`to-customer:ID`
+    expect:
+      rows: 2
+      data:
+        - to-customer:ID: 1
+          to-customer:description: "first@example.test (ada@example.test)"
+        - to-customer:ID: 2
+          to-customer:description: "Grace Hopper (grace@example.test)"
+
   - name: "set dashboard time"
     session_id: "erpl_dashboard_trace"
     sql: "SET @fop_time = 1700000000"
     expect:
       rows_affected: 0
+
+  - name: "full dashboard scalar shape compiles under the strict query budget"
+    session_id: "erpl_dashboard_trace"
+    max_plan_size: 120000
+    sql: |
+      SELECT 1,
+        (SELECT COUNT(1) FROM `doc` `Oxiee09T`
+         WHERE TRUE
+           AND (((((SELECT `Tables_Doc_defaultDoctype` FROM `userconfig` WHERE `userconfig`.`ID` = 1 LIMIT 1)) IS NULL)
+             AND ((`Oxiee09T`.`type`) IS NULL))
+             OR ((`Oxiee09T`.`type`) = ((SELECT `Tables_Doc_defaultDoctype` FROM `userconfig` WHERE `userconfig`.`ID` = 1 LIMIT 1))))
+           AND (NOT (`Oxiee09T`.`archive`))
+         LIMIT 1) AS `badgeDoc`,
+        (SELECT SUM(1) FROM `customer` `x4JUWRYk`
+         WHERE TRUE
+           AND ((entrydate IS NOT NULL
+             AND (UNIX_TIMESTAMP((DATE_ADD(DATE_ADD(FROM_UNIXTIME((0)), INTERVAL entrydate SECOND),
+               INTERVAL (GREATEST(0, (YEAR((FROM_UNIXTIME((@fop_time)))) - YEAR((DATE_ADD(FROM_UNIXTIME((0)), INTERVAL entrydate SECOND)))))) YEAR))))
+               BETWEEN (@fop_time-((40)*24*3600)) AND (@fop_time+((3)*24*3600)))
+             AND (((TIMESTAMPDIFF(YEAR, FROM_UNIXTIME(0)+INTERVAL (`x4JUWRYk`.`entrydate`) SECOND, FROM_UNIXTIME(0) + INTERVAL (@fop_time) SECOND)) % (5)) = (0)))
+           AND (TRUE)
+         LIMIT 1) AS `reminderCustomerMitglied-jlu`,
+        (SELECT SUM(1) FROM `customer` `sxaouv4r`
+         WHERE TRUE
+           AND (((`sxaouv4r`.`birthdate`) IS NOT NULL)
+             AND ((((((@fop_time) - (`sxaouv4r`.`birthdate`)) % (31557600)) / (86400)) BETWEEN (0)
+               AND ((SELECT `Configuration_Stammdaten_durationPast` FROM `userconfig` WHERE `userconfig`.`ID` = 1 LIMIT 1)))
+              OR (((((@fop_time) - (`sxaouv4r`.`birthdate`)) % (31557600)) / (86400)) BETWEEN ((365.25) - ((SELECT `Configuration_Stammdaten_durationFuture` FROM `userconfig` WHERE `userconfig`.`ID` = 1 LIMIT 1))) AND (365.25))))
+           AND (TRUE)
+         LIMIT 1) AS `reminderCustomerGebtag`,
+        (SELECT SUM(1) FROM `offer` `TeKNiPkw` WHERE TRUE AND (`TeKNiPkw`.`state` IN ('0', '1', '11')) AND (TRUE) LIMIT 1) AS `reminderOfferOffen`,
+        (SELECT SUM(1) FROM `incomingInvoice` `4cUw7OUk` WHERE TRUE AND ((`4cUw7OUk`.`paid_date`) IS NULL) AND (TRUE) LIMIT 1) AS `reminderIncomingInvoiceUnbezahlt`,
+        (SELECT SUM(1) FROM `bill` `WEOl3sXk` WHERE TRUE AND ((`WEOl3sXk`.`paid_date`) IS NULL) AND (TRUE) LIMIT 1) AS `reminderBillUnbezahlt`,
+        (SELECT SUM(1) FROM `fop_journal_year_account` `OBJzQ7Q4`
+         WHERE TRUE
+           AND ((`OBJzQ7Q4`.`typ` IN ('4', '5'))
+             AND (((SELECT SUM((`pzEK3Dgw`.`amount`) * (CASE WHEN `pzEK3Dgw`.`sh` THEN 1 ELSE - (1) END))
+                   FROM `fop_journalEntry` `pzEK3Dgw`
+                   WHERE `pzEK3Dgw`.`account` = `OBJzQ7Q4`.`nummer`
+                     AND (((SELECT (`pcgPoxRE`.`fyear`) FROM `fop_journal` `pcgPoxRE` WHERE `pcgPoxRE`.`ID` = `pzEK3Dgw`.`fop_journal` LIMIT 1)) = (`OBJzQ7Q4`.`year`))
+                     AND (((SELECT (`ppsiXrsc`.`stornoStatus`) FROM `fop_journal` `ppsiXrsc` WHERE `ppsiXrsc`.`ID` = `pzEK3Dgw`.`fop_journal` LIMIT 1)) = (0))
+                   LIMIT 1)) <> (0))
+             AND ((SELECT (((`MqEMw1bO`.`xstart`) <= (@fop_time)) AND ((@fop_time) <= (`MqEMw1bO`.`xend`)))
+                   FROM `fop_journal_year` `MqEMw1bO`
+                   WHERE `MqEMw1bO`.`ID` = `OBJzQ7Q4`.`year`
+                   LIMIT 1)))
+           AND (TRUE)
+         LIMIT 1) AS `reminderFop_journal_year_accountOpos`
+      FROM `login` WHERE `ID` = '1'
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          badgeDoc: 1
+          reminderCustomerMitglied-jlu: 2
+          reminderCustomerGebtag: 1
+          reminderOfferOffen: 1
+          reminderIncomingInvoiceUnbezahlt: 1
+          reminderBillUnbezahlt: 1
+          reminderFop_journal_year_accountOpos: 2
 
   - name: "no-FROM nested aggregate scalar keeps dependency aliases isolated"
     session_id: "erpl_dashboard_trace"

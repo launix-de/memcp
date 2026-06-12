@@ -313,3 +313,41 @@ test_cases:
         - ok: 1
           grouped_due: 1
           reminder_tickets: 1
+
+  - name: "Plan cache setup: set first threshold"
+    session_id: "sgr-cache-a"
+    sql: "SELECT @cutoff := 80"
+    expect:
+      rows: 1
+
+  - name: "Plan cache setup: set second threshold"
+    session_id: "sgr-cache-b"
+    sql: "SELECT @cutoff := 90"
+    expect:
+      rows: 1
+
+  - name: "Session-sensitive cached plan uses first session value"
+    session_id: "sgr-cache-a"
+    sql: |
+      SELECT
+        (SELECT SUM(1)
+         FROM sgr_task t
+         WHERE t.due_at < @cutoff
+         LIMIT 1) AS due_count
+    expect:
+      rows: 1
+      data:
+        - due_count: 1
+
+  - name: "Session-sensitive cached plan uses second session value"
+    session_id: "sgr-cache-b"
+    sql: |
+      SELECT
+        (SELECT SUM(1)
+         FROM sgr_task t
+         WHERE t.due_at < @cutoff
+         LIMIT 1) AS due_count
+    expect:
+      rows: 1
+      data:
+        - due_count: 3
