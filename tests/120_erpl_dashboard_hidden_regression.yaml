@@ -1,0 +1,63 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Minimal regression coverage extracted from the ERPL dashboard query observed
+# in the hidden real-test trace. The failure mode was a planner exception:
+# "ambiguous column __dep_d0 in subquery". The reduced trigger is the
+# fop_journal_year_account reminder scalar in a no-FROM SELECT list.
+
+metadata:
+  version: "1.0"
+  description: "ERPL dashboard no-FROM nested aggregate scalar from hidden trace"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS fop_journal_year_account"
+  - sql: "DROP TABLE IF EXISTS fop_journalEntry"
+  - sql: "DROP TABLE IF EXISTS fop_journal"
+  - sql: "DROP TABLE IF EXISTS fop_journal_year"
+  - sql: "CREATE TABLE fop_journal_year_account (ID INT PRIMARY KEY, typ VARCHAR(8), nummer INT, year INT)"
+  - sql: "CREATE TABLE fop_journalEntry (ID INT PRIMARY KEY, account INT, amount INT, sh BOOL, fop_journal INT)"
+  - sql: "CREATE TABLE fop_journal (ID INT PRIMARY KEY, fyear INT, stornoStatus INT)"
+  - sql: "CREATE TABLE fop_journal_year (ID INT PRIMARY KEY, xstart INT, xend INT)"
+  - sql: "INSERT INTO fop_journal_year_account VALUES (1, '4', 1000, 2024), (2, '5', 2000, 2024)"
+  - sql: "INSERT INTO fop_journalEntry VALUES (1, 1000, 25, true, 1), (2, 2000, 5, true, 2)"
+  - sql: "INSERT INTO fop_journal VALUES (1, 2024, 0), (2, 2024, 0)"
+  - sql: "INSERT INTO fop_journal_year VALUES (2024, 0, 2147483647)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fop_journal_year_account"
+  - sql: "DROP TABLE IF EXISTS fop_journalEntry"
+  - sql: "DROP TABLE IF EXISTS fop_journal"
+  - sql: "DROP TABLE IF EXISTS fop_journal_year"
+
+test_cases:
+  - name: "set dashboard time"
+    session_id: "erpl_dashboard_trace"
+    sql: "SET @fop_time = 1700000000"
+    expect:
+      rows_affected: 0
+
+  - name: "no-FROM nested aggregate scalar keeps dependency aliases isolated"
+    session_id: "erpl_dashboard_trace"
+    max_plan_size: 90000
+    sql: |
+      SELECT 1,
+        (SELECT SUM(1) FROM `fop_journal_year_account` `OBJzQ7Q4`
+         WHERE TRUE
+           AND ((`OBJzQ7Q4`.`typ` IN ('4', '5'))
+             AND (((SELECT SUM((`pzEK3Dgw`.`amount`) * (CASE WHEN `pzEK3Dgw`.`sh` THEN 1 ELSE - (1) END))
+                   FROM `fop_journalEntry` `pzEK3Dgw`
+                   WHERE `pzEK3Dgw`.`account` = `OBJzQ7Q4`.`nummer`
+                     AND (((SELECT (`pcgPoxRE`.`fyear`) FROM `fop_journal` `pcgPoxRE` WHERE `pcgPoxRE`.`ID` = `pzEK3Dgw`.`fop_journal` LIMIT 1)) = (`OBJzQ7Q4`.`year`))
+                     AND (((SELECT (`ppsiXrsc`.`stornoStatus`) FROM `fop_journal` `ppsiXrsc` WHERE `ppsiXrsc`.`ID` = `pzEK3Dgw`.`fop_journal` LIMIT 1)) = (0))
+                   LIMIT 1)) <> (0))
+             AND ((SELECT (((`MqEMw1bO`.`xstart`) <= (@fop_time)) AND ((@fop_time) <= (`MqEMw1bO`.`xend`)))
+                   FROM `fop_journal_year` `MqEMw1bO`
+                   WHERE `MqEMw1bO`.`ID` = `OBJzQ7Q4`.`year`
+                   LIMIT 1)))
+           AND (TRUE)
+         LIMIT 1) AS `reminderFop_journal_year_accountOpos`
+    expect:
+      rows: 1
+      data:
+        - "1": 1
+          reminderFop_journal_year_accountOpos: 2

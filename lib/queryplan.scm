@@ -445,11 +445,11 @@ runtime materialization paths that still operate outside the logical IR. */
 			(list (quote equal?) (list rows_sym "rows") '())
 			default_rows_expr
 			(list rows_sym "rows"))))))
-/* legacy_materialized_query_term_binding_ast: centralize the remaining
-session-backed query-term materialization bridge. This is intentionally a
-legacy fallback wrapper around planner_collect_rows_ast, not a new planner
-primitive: callers stay responsible for registering visible schema metadata. */
-(define legacy_materialized_query_term_binding_ast (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
+/* materialized_query_term_binding_ast: centralize the remaining
+session-backed query-term materialization bridge. This is a physical row
+collection adapter; logical subquery decorrelation belongs to the Neumann
+pipeline before this point. */
+(define materialized_query_term_binding_ast (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
 	(define mat_source (materialized-subquery-source id subquery))
 	(define materialized_rows
 		(planner_collect_rows_ast rows_sym sink_sym (symbol "item")
@@ -461,11 +461,10 @@ primitive: callers stay responsible for registering visible schema metadata. */
 		mat_source
 		(materialized-subquery-init id subquery materialized_rows))
 )))
-/* build_legacy_prejoin_materialize_plan: isolate the remaining session/resultrow-
-backed prejoin filler used by trigger backfill paths. This is intentionally a
-legacy fallback wrapper; query-time prejoin filling stays on the canonical
-build_queryplan row stream. */
-(define build_legacy_prejoin_materialize_plan (lambda (schema prejoin_schema prejointbl prejoin_columns prejoin_column_names prejoin_source_tables raw_condition covered_partition_stages schemas replace_find_column) (begin
+/* build_prejoin_trigger_materialize_plan: isolate the remaining
+session/resultrow-backed prejoin filler used by trigger backfill paths.
+Query-time prejoin filling stays on the canonical build_queryplan row stream. */
+(define build_prejoin_trigger_materialize_plan (lambda (schema prejoin_schema prejointbl prejoin_columns prejoin_column_names prejoin_source_tables raw_condition covered_partition_stages schemas replace_find_column) (begin
 	(define build_materialize_scan (lambda (scan_tables scan_condition is_outermost)
 		(match scan_tables
 			(cons '(tblvar schema tbl isOuter joinexpr) rest) (begin
@@ -840,21 +839,21 @@ layout. */
 	(pretty_print plan (size plan)))))
 (define scalar_subselect_inline_reason (lambda (_agg_args direct_agg_stages_simple raw_contains_skip_level_nested_outer_ref scalar_uses_session_state stage2_post_group_condition stage2_group tables2 scalar_has_outer_ref)
 	(if (nil? _agg_args)
-		(quote legacy-fallback-non-aggregate)
+		(quote materialize-non-aggregate)
 		(if (not (equal? (count _agg_args) 3))
-			(quote legacy-fallback-non-trivial-aggregate)
+			(quote materialize-non-trivial-aggregate)
 			(if (not direct_agg_stages_simple)
-				(quote legacy-fallback-complex-group-stage)
+				(quote materialize-complex-group-stage)
 				(if (and raw_contains_skip_level_nested_outer_ref (not scalar_uses_session_state))
-					(quote legacy-fallback-skip-level-outer-ref)
+					(quote materialize-skip-level-outer-ref)
 					(if (not (nil? stage2_post_group_condition))
-						(quote legacy-fallback-post-group-filter)
+						(quote materialize-post-group-filter)
 						(if (not (or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1))))
-							(quote legacy-fallback-explicit-group-keys)
+							(quote materialize-explicit-group-keys)
 							(if (or (nil? tables2) (equal? tables2 '()))
-								(quote legacy-fallback-no-inner-tables)
+								(quote materialize-no-inner-tables)
 								(if (not (or scalar_has_outer_ref scalar_uses_session_state))
-									(quote legacy-fallback-uncorrelated-aggregate)
+									(quote materialize-uncorrelated-aggregate)
 									(quote inline-direct-agg-scan))))))))))))
 (define scalar_subselect_inline_strategy scalar_subselect_inline_reason)
 (define scalar_subselect_lowering_reason_from_facts (lambda (_has_outer _has_agg_or_stage _outer_refs_are_direct_columns _outer_has_group _contains_inner_select_marker _value_expr _value_expr_is_direct_column _domain_preserving_outer_refs _allow_grouped_direct_non_equality_outer)
@@ -4298,7 +4297,7 @@ seeing the correctly prefixed outer alias. */
 										(<= raw_limit 1)
 										(or (nil? raw_offset) (equal? raw_offset 0))
 										(equal? (coalesceNil raw_order '()) '()))))
-								(define build_scalar_subselect_via_legacy_fallback (lambda () (begin
+								(define build_scalar_subselect_via_materialized_scan (lambda () (begin
 									(define scalar_subquery_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
 									(define scalar_subquery_idx (coalesceNil (scalar_subquery_cache "idx") 0))
 									(scalar_subquery_cache "idx" (+ scalar_subquery_idx 1))
@@ -4488,7 +4487,7 @@ seeing the correctly prefixed outer alias. */
 								(list scalar_strategy
 									(if (equal? scalar_strategy (quote inline-direct-agg-scan))
 										(build_scalar_subselect_via_direct_agg_scan)
-										(build_scalar_subselect_via_legacy_fallback)))
+										(build_scalar_subselect_via_materialized_scan)))
 							)
 						)
 				))
@@ -6009,7 +6008,7 @@ seeing the correctly prefixed outer alias. */
 									(define _count_rows_sym (symbol (concat "__uncorr_count_rows:" _count_idx)))
 									(define _count_sink_sym (symbol (concat "__uncorr_count_sink:" _count_idx)))
 									(define _count_materialized
-										(legacy_materialized_query_term_binding_ast
+										(materialized_query_term_binding_ast
 											_count_alias _count_sq _count_rows_sym _count_sink_sym nil nil))
 									(define mat_source (nth _count_materialized 0))
 									(define mat_init (nth _count_materialized 1))
@@ -6600,7 +6599,7 @@ seeing the correctly prefixed outer alias. */
 							(define rows_sym (symbol (concat "__from_union_rows:" id)))
 							(define row_sink_sym (symbol (concat "__from_union_sink:" id)))
 							(define materialized_binding
-								(legacy_materialized_query_term_binding_ast
+								(materialized_query_term_binding_ast
 									id subquery rows_sym row_sink_sym nil nil))
 							(define mat_source (nth materialized_binding 0))
 							(define mat_init (nth materialized_binding 1))
@@ -13462,7 +13461,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(reduce (coalesceNil (stage_partition_aliases ps) '()) (lambda (acc a)
 						(or acc (has? known_table_aliases a))) false))))
 				(define prejoin_materialize_plan
-					(build_legacy_prejoin_materialize_plan
+					(build_prejoin_trigger_materialize_plan
 						schema
 						prejoin_schema
 						prejointbl

@@ -1,0 +1,133 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Minimal anonymized regressions for production failures seen in the dashboard
+# and in correlated scalar unnesting with session-based self checks.
+
+metadata:
+  version: "1.0"
+  description: "Dashboard old-scan and duplicate-helper unnesting regressions"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS u3_main"
+  - sql: "DROP TABLE IF EXISTS u3_dyn"
+  - sql: |
+      CREATE TABLE u3_main (
+        ID INT PRIMARY KEY,
+        superadmin INT,
+        archive INT,
+        entered INT,
+        left_at INT,
+        assigned INT
+      )
+  - sql: |
+      CREATE TABLE u3_dyn (
+        ID INT PRIMARY KEY,
+        `dynamic:parent` INT,
+        `dynamic:time` INT,
+        v0 INT
+      )
+  - sql: |
+      INSERT INTO u3_main VALUES
+        (1, 0, 0, 100, 999999, 1),
+        (2, 1, 0, 100, 999999, 2)
+  - sql: |
+      INSERT INTO u3_dyn VALUES
+        (1, 1, 10, 1),
+        (2, 1, 20, 5),
+        (3, 2, 10, 9)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS u3_dyn"
+  - sql: "DROP TABLE IF EXISTS u3_main"
+
+test_cases:
+  - name: "legacy system-table scan shape stays accepted"
+    scm: |
+      (scan nil (table "system" "user")
+        '() (lambda () true)
+        '("username") (lambda (u) u)
+        (lambda (a b) b) "")
+
+  - name: "set session variables for duplicate-helper regression"
+    session_id: "u3_sess"
+    sql: "SET @fop_user = 1, @fop_time = 15"
+    expect:
+      rows_affected: 15
+
+  - name: "EXPLAIN IR does not emit bogus helper call inside ordered scalar"
+    session_id: "u3_sess"
+    sql: |
+      EXPLAIN IR
+      SELECT ID,
+        COALESCE((
+          SELECT d.v0
+          FROM u3_dyn d
+          WHERE d.`dynamic:parent` = u3_main.ID
+            AND d.`dynamic:time` <= @fop_time
+          ORDER BY d.`dynamic:time` DESC
+          LIMIT 1
+        ), 0) AS v0,
+        (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p1,
+        (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p2
+      FROM u3_main
+      WHERE ID = 1
+    expect:
+      rows: 8
+      not_contains:
+        - "(\"_unn_u3_main_0\" \"_unn_u3_main_1\")"
+
+  - name: "ordered scalar with duplicate self helper returns one row"
+    session_id: "u3_sess"
+    sql: |
+      SELECT ID,
+        COALESCE((
+          SELECT d.v0
+          FROM u3_dyn d
+          WHERE d.`dynamic:parent` = u3_main.ID
+            AND d.`dynamic:time` <= @fop_time
+          ORDER BY d.`dynamic:time` DESC
+          LIMIT 1
+        ), 0) AS v0,
+        (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p1,
+        (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p2
+      FROM u3_main
+      WHERE ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          v0: 1
+          p1: true
+          p2: true
+    on_fail:
+      - sql: |
+          EXPLAIN
+          SELECT ID,
+            COALESCE((
+              SELECT d.v0
+              FROM u3_dyn d
+              WHERE d.`dynamic:parent` = u3_main.ID
+                AND d.`dynamic:time` <= @fop_time
+              ORDER BY d.`dynamic:time` DESC
+              LIMIT 1
+            ), 0) AS v0,
+            (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p1,
+            (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p2
+          FROM u3_main
+          WHERE ID = 1
+      - sql: |
+          EXPLAIN IR
+          SELECT ID,
+            COALESCE((
+              SELECT d.v0
+              FROM u3_dyn d
+              WHERE d.`dynamic:parent` = u3_main.ID
+                AND d.`dynamic:time` <= @fop_time
+              ORDER BY d.`dynamic:time` DESC
+              LIMIT 1
+            ), 0) AS v0,
+            (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p1,
+            (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p2
+          FROM u3_main
+          WHERE ID = 1
