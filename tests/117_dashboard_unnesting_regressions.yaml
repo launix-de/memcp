@@ -43,6 +43,8 @@ cleanup:
 
 test_cases:
   - name: "legacy system-table scan shape stays accepted"
+    max_time: 0.5
+    timeout: 2
     scm: |
       (scan nil (table "system" "user")
         '() (lambda () true)
@@ -57,6 +59,8 @@ test_cases:
 
   - name: "EXPLAIN IR does not emit bogus helper call inside ordered scalar"
     session_id: "u3_sess"
+    max_time: 1
+    timeout: 3
     sql: |
       EXPLAIN IR
       SELECT ID,
@@ -79,6 +83,8 @@ test_cases:
 
   - name: "ordered scalar with duplicate self helper returns one row"
     session_id: "u3_sess"
+    max_time: 1
+    timeout: 3
     sql: |
       SELECT ID,
         COALESCE((

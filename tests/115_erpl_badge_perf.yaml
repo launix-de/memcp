@@ -54,6 +54,8 @@ test_cases:
       rows_affected: 0
 
   - name: "session literal SUM plan is keytable-cache-free"
+    max_time: 1
+    timeout: 3
     steps:
       - session_id: "bp_sess"
         sql: |
@@ -70,6 +72,8 @@ test_cases:
 
   - name: "session literal SUM uses current row stream"
     session_id: "bp_sess"
+    max_time: 1
+    timeout: 3
     sql: |
       SELECT
         (SELECT SUM(1)
@@ -85,6 +89,8 @@ test_cases:
 
   - name: "badge count with correlated session subselect"
     session_id: "bp_sess"
+    max_time: 1
+    timeout: 3
     sql: |
       SELECT 1,
         (SELECT COUNT(1) FROM bp_doc d
@@ -101,6 +107,8 @@ test_cases:
 
   - name: "badge count with nested config scalar is keytable-cache-free"
     session_id: "bp_sess"
+    max_time: 1
+    timeout: 3
     sql: |
       EXPLAIN IR
       SELECT 1,
@@ -116,6 +124,8 @@ test_cases:
 
   - name: "docType list with permission subselects"
     session_id: "bp_sess"
+    max_time: 1
+    timeout: 3
     sql: |
       SELECT dt.ID, dt.name,
         (SELECT COUNT(*) FROM bp_doc WHERE type = dt.ID AND NOT archive) AS doc_count
@@ -131,6 +141,8 @@ test_cases:
 
   - name: "badge count warm (second run, must be fast)"
     session_id: "bp_sess"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT 1,
         (SELECT COUNT(1) FROM bp_doc d

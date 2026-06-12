@@ -41,6 +41,8 @@ setup:
 test_cases:
 
   - name: "IN ('1') + correlated MIN subquery in SELECT"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT in1_doc.ID,
         (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev
@@ -53,6 +55,8 @@ test_cases:
           first_rev: 200
 
   - name: "IN (1) + correlated MIN subquery in SELECT (integer form)"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT in1_doc.ID,
         (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev
@@ -65,6 +69,8 @@ test_cases:
           first_rev: 200
 
   - name: "IN ('1') + correlated SELECT 1 subquery in SELECT"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT in1_doc.ID,
         (SELECT 1 FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS has_rev
@@ -77,6 +83,8 @@ test_cases:
           has_rev: 1
 
   - name: "IN ('1', '2') + correlated MIN subquery (multi-element baseline — passes)"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT in1_doc.ID,
         (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev
@@ -92,6 +100,8 @@ test_cases:
           first_rev: 300
 
   - name: "IN ('1') without subquery in SELECT (baseline — passes)"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT in1_doc.ID
       FROM in1_doc
@@ -102,6 +112,8 @@ test_cases:
         - ID: 1
 
   - name: "doc.ID = 1 + correlated MIN subquery (= baseline — passes)"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT in1_doc.ID,
         (SELECT MIN(r.created) FROM in1_doc_revision r WHERE r.doc = in1_doc.ID LIMIT 1) AS first_rev

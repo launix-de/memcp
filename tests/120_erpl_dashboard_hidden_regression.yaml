@@ -38,6 +38,8 @@ test_cases:
 
   - name: "no-FROM nested aggregate scalar keeps dependency aliases isolated"
     session_id: "erpl_dashboard_trace"
+    max_time: 2
+    timeout: 4
     max_plan_size: 90000
     sql: |
       SELECT 1,

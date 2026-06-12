@@ -78,6 +78,8 @@ cleanup:
 
 test_cases:
   - name: "single-column IN subquery must bind marked outer alias back to the outer table"
+    max_time: 0.5
+    timeout: 2
     sql: |
       SELECT
         tdr_docbox.ID AS ID,
@@ -94,6 +96,8 @@ test_cases:
           mailbox: 30
 
   - name: "HAVING EXISTS must filter grouped rows by correlated group key"
+    max_time: 1
+    timeout: 3
     sql: |
       SELECT e.did, COUNT(*) AS cnt
       FROM tdr_emp e
@@ -119,6 +123,8 @@ test_cases:
 
   - name: "session-filtered group cache baseline for user 1"
     session_id: "tdr_sgc_session"
+    max_time: 1
+    timeout: 3
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM tdr_sgc_data
@@ -147,6 +153,8 @@ test_cases:
 
   - name: "session-filtered group cache must not reuse user 1 rows for user 2"
     session_id: "tdr_sgc_session"
+    max_time: 1
+    timeout: 3
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM tdr_sgc_data
