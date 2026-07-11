@@ -18,6 +18,11 @@ setup:
       (1, 'Alice', 10), (2, 'Bob', 30), (3, 'Charlie', 50), (4, 'Alice', 20)
 
 test_cases:
+  # === pg_dump compatibility no-ops ===
+  - name: "ALTER STATISTICS is ignored"
+    sql: "ALTER STATISTICS public.psql_data_stats OWNER TO postgres"
+    expect: {}
+
   # === BETWEEN / NOT BETWEEN ===
   - name: "BETWEEN filter"
     sql: |
