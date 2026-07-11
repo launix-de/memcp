@@ -41,7 +41,8 @@ type storageShard struct {
 	// internals guarded by mu. Code outside this file
 	// must treat s.mu as the only authority for shard-local state and must not
 	// read Go maps here lock-free.
-	columns map[string]ColumnStorage
+	columns      map[string]ColumnStorage
+	columnCounts map[string]uint32
 	// delta storage
 	deltaColumns map[string]int
 	inserts      [][]scm.Scmer                       // items added to storage
@@ -180,6 +181,7 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 	u.uuid.UnmarshalText(data)
 	// do not load heavy fields here; delay until first access
 	u.columns = make(map[string]ColumnStorage)
+	u.columnCounts = make(map[string]uint32)
 	u.deltaColumns = make(map[string]int)
 	u.deletions.Reset()
 	u.srState = COLD
@@ -188,6 +190,9 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 }
 func (u *storageShard) load(t *table) {
 	u.t = t
+	if u.columnCounts == nil {
+		u.columnCounts = make(map[string]uint32)
+	}
 	// mark columns for lazy loading (caller must hold u.mu.Lock)
 	for _, col := range u.t.Columns {
 		u.columns[col.Name] = nil
@@ -258,6 +263,41 @@ func (u *storageShard) makeComputedColumnProxy(colName string, col *column) Colu
 		count:     u.main_count,
 		isOrdered: true,
 	}
+}
+
+func (u *storageShard) rememberColumnCountLocked(colName string, columnstorage ColumnStorage, cnt uint32) ColumnStorage {
+	if u.columnCounts == nil {
+		u.columnCounts = make(map[string]uint32)
+	}
+	u.columnCounts[colName] = cnt
+	if cnt > u.main_count {
+		u.main_count = cnt
+		for loadedCol, loadedStorage := range u.columns {
+			if loadedStorage == nil {
+				continue
+			}
+			loadedCount, ok := u.columnCounts[loadedCol]
+			if ok && loadedCount < u.main_count {
+				u.columns[loadedCol] = newNullPaddedColumnStorage(loadedStorage, loadedCount)
+			}
+		}
+	}
+	if cnt < u.main_count {
+		return newNullPaddedColumnStorage(columnstorage, cnt)
+	}
+	return columnstorage
+}
+
+func (u *storageShard) countedColumnReaderLocked(colName string, columnstorage ColumnStorage, tx *TxContext) ColumnReader {
+	reader := newCachedColumnReaderTx(columnstorage, tx)
+	if u.columnCounts == nil {
+		return reader
+	}
+	cnt, ok := u.columnCounts[colName]
+	if !ok {
+		return reader
+	}
+	return &nullPaddedColumnReader{base: reader, count: cnt}
 }
 
 func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnStorage) ColumnStorage {
@@ -341,10 +381,8 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 		cnt := columnstorage.Deserialize(f)
 		f.Close()
-		if uint32(cnt) > u.main_count {
-			u.main_count = uint32(cnt)
-		}
 		columnstorage = u.attachColumnRuntime(colName, columnstorage)
+		columnstorage = u.rememberColumnCountLocked(colName, columnstorage, uint32(cnt))
 		u.columns[colName] = columnstorage
 		return columnstorage
 	}
@@ -651,6 +689,7 @@ func NewShard(t *table) *storageShard {
 	result.uuid, _ = uuid.NewRandom()
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
+	result.columnCounts = make(map[string]uint32)
 	result.deltaColumns = make(map[string]int)
 	result.deletions.Reset()
 	for _, column := range t.Columns {

@@ -91,7 +91,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
 			for j, mc := range s.ColMapCols[i] {
 				cs := s.t.getColumnStorageRLocked(mc)
-				mapColReaders[j] = newCachedColumnReaderTx(cs, tx)
+				mapColReaders[j] = s.t.countedColumnReaderLocked(mc, cs, tx)
 				if proxy, ok := cs.(*StorageComputeProxy); ok {
 					sessionKeys = mergeSessionKeys(sessionKeys, proxy.sessionKeys)
 				}
@@ -100,7 +100,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 			getters[i] = colGetter{mapCols: mapColReaders, mapFn: fn}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx)}
+			getters[i] = colGetter{raw: s.t.countedColumnReaderLocked(col, cs, tx)}
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				sessionKeys = mergeSessionKeys(sessionKeys, proxy.sessionKeys)
 			}

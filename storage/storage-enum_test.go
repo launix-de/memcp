@@ -1,3 +1,19 @@
+/*
+Copyright (C) 2026  Carl-Philip Hänsch
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
 package storage
 
 import (
@@ -128,6 +144,31 @@ func TestEnumGetCachedReader(t *testing.T) {
 		if !scm.Equal(got, want) {
 			t.Fatalf("cachedReader.GetValue(%d) = %v, want %v", i, got, want)
 		}
+	}
+}
+
+func TestEnumNullPaddedReader(t *testing.T) {
+	s := buildEnum(2, func(i int) scm.Scmer {
+		return scm.NewString([]string{"a", "b"}[i])
+	})
+	padded := newNullPaddedColumnStorage(s, 2)
+
+	if got := s.GetValue(2); !got.IsNil() {
+		t.Fatalf("raw enum GetValue beyond persisted count = %v, want nil", got)
+	}
+	var cache EnumDecodeCache
+	if got := s.GetValueCached(2, &cache); !got.IsNil() {
+		t.Fatalf("raw enum cached GetValue beyond persisted count = %v, want nil", got)
+	}
+	if got := padded.GetValue(2); !got.IsNil() {
+		t.Fatalf("GetValue beyond persisted count = %v, want nil", got)
+	}
+	reader := padded.GetCachedReader()
+	if got := reader.GetValue(2); !got.IsNil() {
+		t.Fatalf("cached GetValue beyond persisted count = %v, want nil", got)
+	}
+	if got := reader.GetValue(1); !scm.Equal(got, scm.NewString("b")) {
+		t.Fatalf("cached GetValue(1) = %v, want b", got)
 	}
 }
 

@@ -50,6 +50,75 @@ type TxColumnReaderProvider interface {
 	GetCachedReaderTx(*TxContext) ColumnReader
 }
 
+type nullPaddedColumnStorage struct {
+	base  ColumnStorage
+	count uint32
+}
+
+type nullPaddedColumnReader struct {
+	base  ColumnReader
+	count uint32
+}
+
+func newNullPaddedColumnStorage(base ColumnStorage, count uint32) ColumnStorage {
+	if padded, ok := base.(*nullPaddedColumnStorage); ok {
+		padded.count = count
+		return padded
+	}
+	return &nullPaddedColumnStorage{base: base, count: count}
+}
+
+func (r *nullPaddedColumnReader) GetValue(i uint32) scm.Scmer {
+	if i >= r.count {
+		return scm.NewNil()
+	}
+	return r.base.GetValue(i)
+}
+
+func (s *nullPaddedColumnStorage) GetValue(i uint32) scm.Scmer {
+	if i >= s.count {
+		return scm.NewNil()
+	}
+	return s.base.GetValue(i)
+}
+
+func (s *nullPaddedColumnStorage) GetCachedReader() ColumnReader {
+	return &nullPaddedColumnReader{base: s.base.GetCachedReader(), count: s.count}
+}
+
+func (s *nullPaddedColumnStorage) GetCachedReaderTx(tx *TxContext) ColumnReader {
+	return &nullPaddedColumnReader{base: newCachedColumnReaderTx(s.base, tx), count: s.count}
+}
+
+func (s *nullPaddedColumnStorage) String() string { return s.base.String() }
+func (s *nullPaddedColumnStorage) ComputeSize() uint {
+	return s.base.ComputeSize() + 16
+}
+func (s *nullPaddedColumnStorage) prepare() { s.base.prepare() }
+func (s *nullPaddedColumnStorage) scan(i uint32, value scm.Scmer) {
+	s.base.scan(i, value)
+}
+func (s *nullPaddedColumnStorage) proposeCompression(i uint32) ColumnStorage {
+	return s.base.proposeCompression(i)
+}
+func (s *nullPaddedColumnStorage) init(i uint32) {
+	s.count = i
+	s.base.init(i)
+}
+func (s *nullPaddedColumnStorage) build(i uint32, value scm.Scmer) {
+	s.base.build(i, value)
+}
+func (s *nullPaddedColumnStorage) finish() { s.base.finish() }
+func (s *nullPaddedColumnStorage) DistinctCount() uint {
+	return s.base.DistinctCount()
+}
+func (s *nullPaddedColumnStorage) Serialize(w io.Writer) { s.base.Serialize(w) }
+func (s *nullPaddedColumnStorage) Deserialize(r io.Reader) uint {
+	cnt := s.base.Deserialize(r)
+	s.count = uint32(cnt)
+	return cnt
+}
+
 func scmerToTxContext(v scm.Scmer) *TxContext {
 	if v.IsNil() {
 		return nil
