@@ -784,6 +784,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE UNIQUE INDEX (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE STATISTICS (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER STATISTICS (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE TRIGGER (?s:.*)\\z") true)
 
 		/* CREATE USER/ROLE: support both MySQL (IDENTIFIED BY) and PostgreSQL (WITH PASSWORD / PASSWORD) syntax */
