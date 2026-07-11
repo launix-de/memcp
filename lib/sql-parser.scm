@@ -597,6 +597,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	)))
 
 	(define sql_expression2 (parser (or
+		(parser '((atom "MATCH" true) "(" (define cols (+ sql_expression ",")) ")" (atom "AGAINST" true) "(" (define needle sql_expression) (? (atom "IN" true) (atom "NATURAL" true) (atom "LANGUAGE" true) (atom "MODE" true)) ")")
+			(begin
+				(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
+				(if (equal? (count terms) 1) (car terms) (cons (quote or) terms))))
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
