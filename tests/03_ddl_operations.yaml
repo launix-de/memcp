@@ -111,6 +111,33 @@ test_cases:
     sql: "SET @text = 'hello'"
     expect: {}  # Just check it runs successfully
 
+  - name: "MATCH AGAINST compatibility"
+    setup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat"
+      - sql: "CREATE TABLE match_against_compat (id INT PRIMARY KEY, title TEXT, body TEXT)"
+      - sql: "INSERT INTO match_against_compat (id, title, body) VALUES (1, 'Alpha title', 'middle'), (2, 'Beta title', 'Alpha body'), (3, 'Beta only', 'none')"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat"
+    sql: "SELECT id FROM match_against_compat WHERE MATCH (body) AGAINST ('Alpha' IN NATURAL LANGUAGE MODE)"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "MATCH AGAINST checks multiple columns"
+    setup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat_multi"
+      - sql: "CREATE TABLE match_against_compat_multi (id INT PRIMARY KEY, title TEXT, body TEXT)"
+      - sql: "INSERT INTO match_against_compat_multi (id, title, body) VALUES (1, 'Alpha title', 'middle'), (2, 'Beta title', 'Alpha body'), (3, 'Beta only', 'none')"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat_multi"
+    sql: "SELECT id FROM match_against_compat_multi WHERE MATCH (title, body) AGAINST ('Alpha') ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
+
   # TODO: DROP TABLE operations (when DROP functionality is stable)
   # - name: "DROP TABLE with IF EXISTS"
   #   sql: "DROP TABLE IF EXISTS test_drop"
