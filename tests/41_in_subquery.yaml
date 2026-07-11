@@ -277,7 +277,7 @@ test_cases:
     expect:
       error: true
 
-  - name: "IN with UNION DISTINCT not supported yet"
+  - name: "IN with UNION without ALL compatibility"
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID IN (
@@ -287,7 +287,12 @@ test_cases:
       )
       ORDER BY ID
     expect:
-      error: true
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS in_renderjob"

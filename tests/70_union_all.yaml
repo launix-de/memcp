@@ -397,13 +397,18 @@ test_cases:
     expect:
       error: true
 
-  - name: "UNION DISTINCT not supported yet"
+  - name: "UNION without ALL compatibility"
     sql: |
       SELECT ID FROM fop_files WHERE ID <= 2
       UNION
       SELECT ID FROM fop_files WHERE ID >= 4
     expect:
-      error: true
+      rows: 4
+      data:
+        - ID: 1
+        - ID: 2
+        - ID: 4
+        - ID: 5
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS renderjob"
