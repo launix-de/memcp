@@ -98,6 +98,19 @@ test_cases:
     sql: "SET @calculated = 5 + 3 * 2"
     expect: {}  # Session variables return assigned value
 
+  - name: "SET session variable with MySQL assignment operator"
+    session_id: "mysql-set-assign"
+    sql: "SET @mysql_assign := 105"
+    expect: {}
+
+  - name: "Read variable assigned with MySQL assignment operator"
+    session_id: "mysql-set-assign"
+    sql: "SELECT @mysql_assign AS assigned_value"
+    expect:
+      rows: 1
+      data:
+        - assigned_value: 105
+
   - name: "SET multiple session variables"
     sql: "SET @var1 = 'test', @var2 = 123"
     expect: {}  # Multiple session variables
