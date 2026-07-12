@@ -477,6 +477,18 @@ test_cases:
       data:
         - file_id: 1
 
+  - name: "EXPLAIN IR top-level UNION without ALL keeps distinct semantics"
+    steps:
+      - sql: |
+          EXPLAIN IR
+          SELECT result AS ID FROM renderjob WHERE ID <= 102
+          UNION
+          SELECT result AS ID FROM renderjob WHERE ID >= 102
+        expect:
+          contains:
+            - "union_distinct"
+            - "branches"
+
   - name: "UNION without ALL column count mismatch"
     sql: |
       SELECT ID FROM fop_files
