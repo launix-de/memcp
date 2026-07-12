@@ -4349,41 +4349,10 @@ seeing the correctly prefixed outer alias. */
 					nil)))
 				(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
 					(begin
-						(define _count_sq (match subquery
-							'(s t f c g h o l off) (list s t
-								(list "__cnt" (list (quote aggregate) 1 (symbol "+") 0))
-								c
-								nil nil nil nil nil)
-							nil))
-						(if (nil? _count_sq)
-							nil
-							(begin
-								(define _count_idx (coalesceNil (sq_cache "idx") 0))
-								(sq_cache "idx" (+ _count_idx 1))
-								(define _count_alias (concat "_uncorr_cnt_" _count_idx))
-								(define _count_rows_sym (symbol (concat "__uncorr_count_rows:" _count_idx)))
-								(define _count_sink_sym (symbol (concat "__uncorr_count_sink:" _count_idx)))
-								(define _count_materialized
-									(legacy_materialized_query_term_binding_ast
-										_count_alias _count_sq _count_rows_sym _count_sink_sym nil nil))
-								(define mat_source (nth _count_materialized 0))
-								(define mat_init (nth _count_materialized 1))
-								/* D = ∅: materialize the helper once and expose it as a normal
-								one-row relation with visible column __cnt. The outer query still
-								sees a regular table input, not a nested runtime subquery. */
-								(sq_cache "init" (merge (coalesceNil (sq_cache "init") '())
-									(list mat_init)))
-								(sq_cache "tables" (merge
-									(list (list _count_alias schema mat_source false nil))
-									(coalesceNil (sq_cache "tables") '())))
-								(sq_cache "schemas" (merge
-									(list _count_alias (list (list "Field" "__cnt" "Type" "any")))
-									(coalesceNil (sq_cache "schemas") '())))
-								(list comparison
-									(list (quote coalesceNil)
-										(list (quote get_column) _count_alias false "__cnt" false)
-										0)
-									0))))
+						(define _exists_expr (build_exists_subselect subquery outer_schemas))
+						(if (equal?? comparison (quote >))
+							_exists_expr
+							(list (quote not) _exists_expr)))
 					(if (and (not (nil? target_expr)) (nil? _first_field))
 						nil
 						(begin

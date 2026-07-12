@@ -933,7 +933,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(list 'list
 							(list 'map (list 'produceN 3) (list 'lambda (list 'i) 'i))
 							(list 'reverse (list 'list 'a 'b 'c))))))))
-		 10 20 30)
+			10 20 30)
 		3
 		"length hook: zip preserves exact producer length")
 	(assert
