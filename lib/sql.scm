@@ -24,21 +24,78 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
 
+/* sql_parameterize_select_like_strings: query-plan-cache helper for ad-hoc
+fulltext-ish SELECTs. It replaces string literals directly following LIKE or
+inside MATCH...AGAINST(...) with ? placeholders and returns (normalized-query bindings). Other string
+literals, DDL/DML and already-parameterized statements keep exact cache keys. */
+(define sql_parameterize_select_like_strings (lambda (query enabled) (begin
+	(define starts_like_select (lambda (q)
+		(or
+			(match q (regex "^\\s*SELECT\\b" _) true false)
+			(match q (regex "^\\s*EXPLAIN\\s+(?:IR\\s+)?SELECT\\b" _) true false))))
+	(define parameterized_rhs_literal? (lambda (q pos) (begin
+		(define prefix (toUpper (strrtrim (substr q 0 pos))))
+		(or
+			(match prefix (regex "(?s:.*)\\bLIKE$" _) true false)
+			(match prefix (regex "(?s:.*)\\bAGAINST\\s*\\($" _) true false)))))
+	(define read_string_literal (lambda (q start quote_ch) (begin
+		(define len (strlen q))
+		(for (list (+ start 1) "" false)
+			(lambda (i value done) (and (not done) (< i len)))
+			(lambda (i value done) (begin
+				(define ch (substr q i 1))
+				(if (equal? ch "\\")
+					(if (< (+ i 1) len)
+						(list (+ i 2) (concat value (substr q (+ i 1) 1)) false)
+						(list (+ i 1) value false))
+					(if (equal? ch quote_ch)
+						(list (+ i 1) value true)
+						(list (+ i 1) (concat value ch) false)))))))))
+	(if (or
+		(not enabled)
+		(not (starts_like_select query))
+		(not (or
+			(match (toUpper query) (regex "\\bLIKE\\b" _) true false)
+			(match (toUpper query) (regex "\\bAGAINST\\b" _) true false)))
+		(match query (regex "\\?" _) true false))
+		(list query '())
+		(begin
+			(define len (strlen query))
+			(define state (for (list 0 "" '() false)
+				(lambda (i out bindings invalid) (and (not invalid) (< i len)))
+				(lambda (i out bindings invalid) (begin
+					(define ch (substr query i 1))
+					(if (and (or (equal? ch "'") (equal? ch "\"")) (parameterized_rhs_literal? query i))
+						(match (read_string_literal query i ch) '(next_i value done)
+							(if done
+								(list next_i (concat out "?") (merge bindings (list value)) false)
+								(list len query '() true)))
+						(list (+ i 1) (concat out ch) bindings false))))))
+			(match state '(end_i normalized bindings invalid)
+				(if (or invalid (equal? bindings '()))
+					(list query '())
+					(list normalized bindings))))))))
+
 /* cached_parse: wraps a parser with cachemap-based caching.
 cache_key = username:schema:hash(query) — per-user isolation (policy checked at parse time).
 The query is hashed with FNV-1a (fnv_hash) so long SQL strings don't bloat the cache index.
 Session-sensitive plans must not be reused under that key because their lowered
 runtime helper names and cache domains may depend on current session variables.
 On parse error the result is not cached (e.g. table does not exist yet). */
-(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session)
+(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_like_strings)
 	(begin
-		(define cache_key (concat username ":" schema ":" (fnv_hash query)))
-		(define cached (queryplan_cache cache_key))
-		(if cached cached
-			(begin
-				(define formula (with_session session (lambda () (parse_fn schema query policy))))
-				(queryplan_cache cache_key formula)
-				formula)))))
+		(match (sql_parameterize_select_like_strings query parameterize_like_strings) '(parse_query bindings) (begin
+			(if (not (equal? bindings '()))
+				(reduce (produceN (count bindings)) (lambda (_ idx)
+					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
+				nil)
+			(define cache_key (concat username ":" schema ":" (fnv_hash parse_query)))
+			(define cached (queryplan_cache cache_key))
+			(if cached cached
+				(begin
+					(define formula (with_session session (lambda () (parse_fn schema parse_query policy))))
+					(queryplan_cache cache_key formula)
+					formula)))))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),
@@ -67,7 +124,7 @@ if the user is not allowed to access this property, the function will throw an e
 							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
 							'() (lambda () 1)
 							+ 0))
-							(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
+						(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
 		)
@@ -216,7 +273,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
-					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username") session))
+					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username") session true))
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
@@ -278,7 +335,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 						before parse/build so session-sensitive planner rewrites see the right values. */
 						(extract_assoc (req "query") (lambda (k v) (session k v)))
-						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username") session))
+						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username") session false))
 						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -388,8 +445,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
 				(define mysql_username (coalesce (session "username") "root"))
 				(define formula (if (equal? (session "syntax") "postgresql")
-					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username session)
-					(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username session)))
+					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username session false)
+					(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username session true)))
 				(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 			) sql))
 	)) (lambda (e) (begin
