@@ -376,18 +376,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
-	(define psql_union_all_parts (lambda (query) (match query
-		'(union_all branches order limit offset) (list branches order limit offset)
-		'((symbol union_all) branches order limit offset) (list branches order limit offset)
-		'((quote union_all) branches order limit offset) (list branches order limit offset)
-		_ nil
-	)))
-	(define psql_union_distinct_parts (lambda (query) (match query
-		'(union_distinct branches order limit offset) (list branches order limit offset)
-		'((symbol union_distinct) branches order limit offset) (list branches order limit offset)
-		'((quote union_distinct) branches order limit offset) (list branches order limit offset)
-		_ nil
-	)))
+	(define psql_union_all_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
+			(cdr query)
+			nil)))
+	(define psql_union_distinct_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
+			(cdr query)
+			nil)))
 	(define psql_union_all_query (lambda (left right) (begin
 		(define right_parts (psql_union_all_parts right))
 		(if (nil? right_parts)
