@@ -42,6 +42,14 @@ test_cases:
       data:
         - {name: "alice"}
 
+  - name: "SELECT with ? LIKE placeholder"
+    sql: "SELECT id FROM ps_test WHERE name LIKE ?"
+    params: ["ali%"]
+    expect:
+      rows: 1
+      data:
+        - {id: 1}
+
   - name: "? with string value"
     sql: "SELECT id FROM ps_test WHERE name = ?"
     params: ["bob"]
