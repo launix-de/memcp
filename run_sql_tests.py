@@ -984,7 +984,20 @@ class SQLTestRunner:
             return True
 
         if expect.get("error"):
-            return response.status_code != 200 or "Error" in response.text
+            has_error = response.status_code != 200 or "Error" in response.text
+            if not has_error:
+                return False
+            if "contains" in expect:
+                needles = expect["contains"] if isinstance(expect["contains"], list) else [expect["contains"]]
+                for needle in needles:
+                    if str(needle) not in response.text:
+                        return False
+            if "not_contains" in expect:
+                needles = expect["not_contains"] if isinstance(expect["not_contains"], list) else [expect["not_contains"]]
+                for needle in needles:
+                    if str(needle) in response.text:
+                        return False
+            return True
 
         if "Error" in response.text or response.status_code != 200:
             return False

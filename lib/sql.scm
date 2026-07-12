@@ -67,7 +67,7 @@ if the user is not allowed to access this property, the function will throw an e
 							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
 							'() (lambda () 1)
 							+ 0))
-						(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." table)))
+							(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
 		)
