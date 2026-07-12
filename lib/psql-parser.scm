@@ -1168,6 +1168,7 @@ substring replace (which is the historical behaviour). */
 )))
 
 (define psql_eval_import_command (lambda (schema source_dir dump_schema command policy) (begin
+	(define resultrow (lambda (row) true))
 	(match command
 		(regex "^[\\r\\n\\t ]*COPY (.*) FROM '([^']+)'\\z" _ def path)
 		(begin
