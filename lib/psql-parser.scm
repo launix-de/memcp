@@ -376,12 +376,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
-	(define psql_union_all_parts (lambda (query) (match query
-		'(union_all branches order limit offset) (list branches order limit offset)
-		'((symbol union_all) branches order limit offset) (list branches order limit offset)
-		'((quote union_all) branches order limit offset) (list branches order limit offset)
-		_ nil
-	)))
+	(define psql_union_all_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
+			(cdr query)
+			nil)))
+	(define psql_union_distinct_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
+			(cdr query)
+			nil)))
 	(define psql_union_all_query (lambda (left right) (begin
 		(define right_parts (psql_union_all_parts right))
 		(if (nil? right_parts)
@@ -392,6 +394,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(psql_select_offset right))
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
+	)))
+	(define psql_union_distinct_query (lambda (left right) (begin
+		(define right_parts (psql_union_distinct_parts right))
+		(if (nil? right_parts)
+			(list (quote union_distinct)
+				(list left (psql_select_clear_stage right))
+				(psql_select_order right)
+				(psql_select_limit right)
+				(psql_select_offset right))
+			(match right_parts '(branches order limit offset)
+				(list (quote union_distinct) (cons left branches) order limit offset)))
 	)))
 	(define psql_select_core (parser '(
 		(atom "SELECT" true)
@@ -459,6 +472,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(atom "ALL" true)
 			(define right psql_select)
 		) (psql_union_all_query left right))
+		(parser '(
+			(define left psql_select_core)
+			(atom "UNION" true)
+			(define right psql_select)
+		) (psql_union_distinct_query left right))
 		psql_select_core
 	)))
 
@@ -730,7 +748,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		/* Bare `SELECT pg_catalog.setval(...)` from pg_dump must execute as DDL
-		   (alter auto_increment), not be wrapped as a SELECT projection. */
+		(alter auto_increment), not be wrapped as a SELECT projection. */
 		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
 		(parser (define query psql_select) (build_queryplan_term query))

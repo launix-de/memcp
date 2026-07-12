@@ -859,12 +859,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
-	(define sql_union_all_parts (lambda (query) (match query
-		'(union_all branches order limit offset) (list branches order limit offset)
-		'((symbol union_all) branches order limit offset) (list branches order limit offset)
-		'((quote union_all) branches order limit offset) (list branches order limit offset)
-		_ nil
-	)))
+	(define sql_union_all_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
+			(cdr query)
+			nil)))
+	(define sql_union_distinct_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
+			(cdr query)
+			nil)))
 	(define sql_union_all_query (lambda (left right) (begin
 		(define right_parts (sql_union_all_parts right))
 		(if (nil? right_parts)
@@ -875,6 +877,17 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(sql_select_offset right))
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
+	)))
+	(define sql_union_distinct_query (lambda (left right) (begin
+		(define right_parts (sql_union_distinct_parts right))
+		(if (nil? right_parts)
+			(list (quote union_distinct)
+				(list left (sql_select_clear_stage right))
+				(sql_select_order right)
+				(sql_select_limit right)
+				(sql_select_offset right))
+			(match right_parts '(branches order limit offset)
+				(list (quote union_distinct) (cons left branches) order limit offset)))
 	)))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
@@ -998,6 +1011,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(atom "ALL" true)
 			(define right sql_select)
 		) (sql_union_all_query left right))
+		(parser '(
+			(define left sql_select_core)
+			(atom "UNION" true)
+			(define right sql_select)
+		) (sql_union_distinct_query left right))
 		sql_select_core
 	)))
 

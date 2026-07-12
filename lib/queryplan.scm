@@ -195,7 +195,7 @@ builds, because their truth value depends on current session state. */
 			(define latest_def (_latest_schema_for_alias tblvar ignorecase))
 			(if (nil? latest_def) '() (_expand_alias_cols tblvar latest_def)))
 		(list col expr)
-	)))))))
+)))))))
 /* materialized_source_schema: resolve schema for a materialized temp source
 (keytable, prejoin) using planner-internal metadata only. No storage access --
 keytables/prejoins may not exist at compile time (runtime-only creation). */
@@ -665,6 +665,15 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 				(list "stage" "plan" "kind" "root" "value" (explain_plan_root_with_scalar_debug _plan))))
 			(planner_debug_settings "scalar-trace" false)
 			(explain_emit_rows _rows))
+		'(union_all_term branches order limit offset distinct)
+		(begin
+			(planner_debug_settings "scalar-trace" false)
+			(explain_emit_rows (list
+				(list "stage" "term" "kind" "root" "value" (if distinct "union_distinct" "union_all"))
+				(list "stage" "term" "kind" "branches" "value" (count branches))
+				(list "stage" "term" "kind" "order" "value" (serialize (coalesceNil order '())))
+				(list "stage" "term" "kind" "limit" "value" (serialize limit))
+				(list "stage" "term" "kind" "offset" "value" (serialize offset)))))
 		'(union_all_term branches order limit offset)
 		(begin
 			(planner_debug_settings "scalar-trace" false)
@@ -1943,7 +1952,7 @@ condition leakage. Uses canonical column names for keytable cache reuse. */
 				(if (> (count item) 1) (nth item 1) default)
 				nil)
 			acc)
-		) nil)
+	) nil)
 ))
 (define stage_get_rest (lambda (stage key default)
 	(reduce stage (lambda (acc item)
@@ -1952,7 +1961,7 @@ condition leakage. Uses canonical column names for keytable cache reuse. */
 				(cdr item)
 				nil)
 			acc)
-		) default)
+	) default)
 ))
 (define stage_without_key (lambda (stage key)
 	(filter stage (lambda (item)
@@ -2199,12 +2208,23 @@ carrier until session domains are modeled explicitly. */
 )
 
 /* query term helpers */
-(define query_union_all_parts (lambda (query) (match query
-	'(union_all branches order limit offset) (list branches order limit offset)
-	'((symbol union_all) branches order limit offset) (list branches order limit offset)
-	'((quote union_all) branches order limit offset) (list branches order limit offset)
-	_ nil
-)))
+(define query_union_all_parts (lambda (query)
+	(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
+		(cdr query)
+		nil)))
+(define query_union_distinct_parts (lambda (query)
+	(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
+		(cdr query)
+		nil)))
+(define query_union_parts (lambda (query) (begin
+	(define all_parts (query_union_all_parts query))
+	(if (not (nil? all_parts))
+		(merge all_parts (list false))
+		(begin
+			(define distinct_parts (query_union_distinct_parts query))
+			(if (nil? distinct_parts)
+				nil
+				(merge distinct_parts (list true))))))))
 (define query_is_select_core (lambda (query) (and (list? query) (>= (count query) 9))))
 (define query_branch_field_names (lambda (query) (match query
 	'(schema tables fields condition group having order limit offset) (extract_assoc fields (lambda (k v) k))
@@ -2229,6 +2249,7 @@ carrier until session domains are modeled explicitly. */
 )))
 (define logical_query_term_is_union_all (lambda (term) (match term
 	'(union_all_term _ _ _ _) true
+	'(union_all_term _ _ _ _ _) true
 	false
 )))
 (define expr_has_any_wildcard_ref (lambda (expr) (match expr
@@ -2314,10 +2335,12 @@ carrier until session domains are modeled explicitly. */
 										order limit offset)))))
 					query2))
 			query2))))
-	(define top_union_parts (query_union_all_parts query))
+	(define top_union_parts (query_union_parts query))
 	(if (not (nil? top_union_parts))
-		(match top_union_parts '(branches order limit offset)
-			(list (quote union_all) (map branches rewrite_query_term) order limit offset))
+		(match top_union_parts '(branches order limit offset distinct)
+			(if distinct
+				(list (quote union_distinct) (map branches rewrite_query_term) order limit offset)
+				(list (quote union_all) (map branches rewrite_query_term) order limit offset)))
 		(if (not (select_has_from_subquery query))
 			query
 			(rewrite_select_core_over_union_from (match query
@@ -2332,6 +2355,9 @@ carrier until session domains are modeled explicitly. */
 )))
 (define logical_query_term_output_cols (lambda (term) (match term
 	'(select_core_term _ _ fields _ _ _ _ _) (extract_assoc fields (lambda (k v) k))
+	'(union_all_term branches _ _ _ _) (if (or (nil? branches) (equal? branches '()))
+		'()
+		(logical_query_term_output_cols (car branches)))
 	'(union_all_term branches _ _ _) (if (or (nil? branches) (equal? branches '()))
 		'()
 		(logical_query_term_output_cols (car branches)))
@@ -2339,19 +2365,19 @@ carrier until session domains are modeled explicitly. */
 )))
 (define untangle_query_term (lambda (query outer_schemas) (begin
 	(define rewritten_query (rewrite_query_term query))
-	(define union_parts (query_union_all_parts rewritten_query))
+	(define union_parts (query_union_parts rewritten_query))
 	(if (nil? union_parts)
 		(if (query_is_select_core rewritten_query)
 			(begin
 				(define uq_result (apply untangle_query (merge rewritten_query (list outer_schemas))))
 				(make_select_core_term uq_result))
 			(error "invalid SELECT query term"))
-		(match union_parts '(branches order limit offset) (begin
+		(match union_parts '(branches order limit offset distinct) (begin
 			(if (or (nil? branches) (equal? branches '()))
 				(error "UNION ALL requires at least one branch"))
 			(list (quote union_all_term)
 				(map branches (lambda (branch) (untangle_query_term branch outer_schemas)))
-				order limit offset)
+				order limit offset distinct)
 ))))
 )))
 (define query_has_from_subquery (lambda (query) (match query
@@ -3541,8 +3567,8 @@ seeing the correctly prefixed outer alias. */
 				Use the shared logical scope preparation so inline and unnest paths stay on
 				the same recursive normalization boundary. */
 				(match (untangle_scalar_subquery_scope
-						subquery outer_schemas
-						raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
+					subquery outer_schemas
+					raw_group_us raw_having_us raw_order_us raw_limit_us raw_offset_us)
 					'(schema2_us tables2_us fields2_us condition2_us groups2_us schemas2_us rfcol2_us _init2_us) (begin
 						(if (and (not (nil? _init2_us)) (not (equal? _init2_us '())))
 							(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) _init2_us)))
@@ -3930,7 +3956,7 @@ seeing the correctly prefixed outer alias. */
 	groups, so subsequent queries skip recomputation for unchanged partitions.
 	Caching policy roadmap for session-sensitive predicates:
 	1. First iteration: if the COUNT/EXISTS condition depends on volatile session
-	state (for example @current_user, @fop_time, Betrachtungszeit, username),
+	state (for example @current_user, @current_time, username),
 	build_queryplan must prefer a cache-free execution path where GROUP ==
 	current subselect domain and the predicate is evaluated on the current row
 	stream instead of a reusable keytable cache.
@@ -4139,8 +4165,12 @@ seeing the correctly prefixed outer alias. */
 			(cons sym args) (cons (_resolve_outer sym) (map args _resolve_outer))
 			expr)))
 		(define resolved_target_expr (if (nil? target_expr) nil (_resolve_outer target_expr)))
-		/* UNION ALL: recurse into each branch, combine with OR (positive) or AND (negated) */
-		(define _union_parts (query_union_all_parts subquery))
+		/* UNION in IN/EXISTS context is duplicate-insensitive; plain UNION can share the UNION ALL lowering here. */
+		(define _union_parts (coalesce (query_union_all_parts subquery) (match subquery
+			'(union_distinct branches order limit offset) (list branches order limit offset)
+			'((symbol union_distinct) branches order limit offset) (list branches order limit offset)
+			'((quote union_distinct) branches order limit offset) (list branches order limit offset)
+			_ nil)))
 		(if (not (nil? _union_parts))
 			(match _union_parts '(branches order limit offset)
 				(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
@@ -4153,30 +4183,90 @@ seeing the correctly prefixed outer alias. */
 							(and acc (equal? (count (query_branch_field_names branch)) (count _first_cols)))) true))
 							(error "UNION ALL branches must project the same number of columns")
 							nil)
-						(define _branch_exists_expr (lambda (branch) (match branch
-							'(s t f c g h o l off) (begin
-								(define _first_field (if (nil? resolved_target_expr) nil
-									(match f (cons _ (cons v _)) v nil)))
-								(if (and (not (nil? resolved_target_expr)) (nil? _first_field))
+						(define _merge_membership_union_branches (lambda (branches2) (begin
+							(define first_branch (if (equal? branches2 '()) nil (car branches2)))
+							(match first_branch
+								'(base_schema base_tables base_fields base_condition base_group base_having base_order base_limit base_offset)
+								(if (or
+									(not (or (nil? base_group) (equal? base_group '())))
+									(not (nil? base_having))
+									(not (nil? base_order))
+									(not (nil? base_limit))
+									(not (nil? base_offset)))
 									nil
 									(begin
-										(define _branch_condition (if (nil? resolved_target_expr) c
-											(if (or (nil? c) (equal? c true))
-												(list (quote equal??) _first_field resolved_target_expr)
-												(list (quote and) c (list (quote equal??) _first_field resolved_target_expr)))))
-										(define _exists_expr (build_exists_subselect
-											(list s t f _branch_condition g h o l off)
-											outer_schemas))
-										(if (equal?? comparison (quote >))
-											_exists_expr
-											(list (quote not) _exists_expr)))))
-							nil)))
-						(define _branch_results (filter (map branches _branch_exists_expr)
-							(lambda (r) (not (nil? r)))))
-						(if (or (equal? _branch_results '()) (not (equal? (count _branch_results) (count branches))))
-							nil
-							(if (equal? 1 (count _branch_results)) (car _branch_results)
-								(cons (if (equal?? comparison (quote >)) (quote or) (quote and)) _branch_results))))))
+										(define base_field_expr (match base_fields (cons _ (cons v _)) v nil))
+										(if (nil? base_field_expr)
+											nil
+											(begin
+												(define merged_condition_true false)
+												(define ok (reduce branches2 (lambda (acc branch)
+													(and acc (match branch
+														'(b_schema b_tables b_fields b_condition b_group b_having b_order b_limit b_offset)
+														(begin
+															(define b_field_expr (match b_fields (cons _ (cons v _)) v nil))
+															(if (and
+																(equal? b_schema base_schema)
+																(equal? b_tables base_tables)
+																(equal? b_field_expr base_field_expr)
+																(or (nil? b_group) (equal? b_group '()))
+																(nil? b_having)
+																(nil? b_order)
+																(nil? b_limit)
+																(nil? b_offset))
+																(begin
+																	(if (nil? b_condition) (set merged_condition_true true) nil)
+																	true)
+																false))
+														false)))
+													true))
+												(if (not ok)
+													nil
+													(begin
+														(define merged_conditions (filter (map branches2 (lambda (branch)
+															(match branch
+																'(_ _ _ b_condition _ _ _ _ _) b_condition
+																nil)))
+															(lambda (cond_expr) (not (nil? cond_expr)))))
+														(define merged_condition (if merged_condition_true
+															true
+															(if (equal? 0 (count merged_conditions))
+																true
+																(if (equal? 1 (count merged_conditions))
+																	(car merged_conditions)
+																	(cons (quote or) merged_conditions)))))
+														(list base_schema base_tables base_fields merged_condition nil nil nil nil nil)))))))
+								nil))))
+						(define _merged_union_branch (_merge_membership_union_branches branches))
+						(if (not (nil? _merged_union_branch))
+							(begin
+								(sq_cache "allow_unique_id_semijoin" true)
+								(_unnest_count_subselect _merged_union_branch outer_schemas resolved_target_expr comparison))
+							(begin
+								(define _branch_exists_expr (lambda (branch) (match branch
+									'(s t f c g h o l off) (begin
+										(define _first_field (if (nil? resolved_target_expr) nil
+											(match f (cons _ (cons v _)) v nil)))
+										(if (and (not (nil? resolved_target_expr)) (nil? _first_field))
+											nil
+											(begin
+												(define _branch_condition (if (nil? resolved_target_expr) c
+													(if (or (nil? c) (equal? c true))
+														(list (quote equal??) _first_field resolved_target_expr)
+														(list (quote and) c (list (quote equal??) _first_field resolved_target_expr)))))
+												(define _exists_expr (build_exists_subselect
+													(list s t f _branch_condition g h o l off)
+													outer_schemas))
+												(if (equal?? comparison (quote >))
+													_exists_expr
+													(list (quote not) _exists_expr)))))
+									nil)))
+								(define _branch_results (filter (map branches _branch_exists_expr)
+									(lambda (r) (not (nil? r)))))
+								(if (or (equal? _branch_results '()) (not (equal? (count _branch_results) (count branches))))
+									nil
+									(if (equal? 1 (count _branch_results)) (car _branch_results)
+										(cons (if (equal?? comparison (quote >)) (quote or) (quote and)) _branch_results))))))))
 			/* single subquery (non-UNION) path */
 			(begin
 				(define count-map-expr-for (lambda (cond-expr)
@@ -4186,6 +4276,77 @@ seeing the correctly prefixed outer alias. */
 				(define _first_field (if (nil? target_expr) nil
 					(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons _ (cons v _)) v nil) nil)))
 				(define target_expr resolved_target_expr)
+				(define unique_id_semijoin_expr (lambda () (match subquery
+					'(s (cons tbl_desc '()) flds c g h o l off)
+					(if (or
+						(not (equal?? comparison (quote >)))
+						(not (sq_cache "allow_unique_id_semijoin"))
+						(nil? target_expr)
+						(not (or (nil? g) (equal? g '())))
+						(not (nil? h))
+						(not (nil? o))
+						(not (nil? l))
+						(not (nil? off)))
+						nil
+						(match tbl_desc
+							'(src_alias src_schema src_tbl src_outer src_joinexpr)
+							(begin
+								(define src_visible_alias (if (nil? src_alias) src_tbl src_alias))
+								(define first_field_expr (match flds (cons _ (cons v _)) v nil))
+								(match first_field_expr
+									'((symbol get_column) field_alias _ col _)
+									(if (and (equal?? col "ID") (equal?? (if (nil? field_alias) src_visible_alias field_alias) src_visible_alias))
+										(begin
+											(define semi_idx (coalesceNil (sq_cache "idx") 0))
+											(sq_cache "idx" (+ semi_idx 1))
+											(define semi_alias (concat "_semi_" src_tbl "_" semi_idx))
+											(define alias_map (list (list src_visible_alias semi_alias) (list src_tbl semi_alias)))
+											(define rewrite_semi_expr (lambda (expr) (match (normalize_canonical_aliases expr)
+												'((symbol get_column) alias_ ti col ci)
+												(list (quote get_column) (if (nil? alias_) semi_alias (resolve_source_alias alias_map alias_)) false col false)
+												'((quote get_column) alias_ ti col ci)
+												(list (quote get_column) (if (nil? alias_) semi_alias (resolve_source_alias alias_map alias_)) false col false)
+												(cons sym args)
+												(cons sym (map args rewrite_semi_expr))
+												expr)))
+											(define semi_condition (rewrite_semi_expr (coalesceNil c true)))
+											(define semi_joinexpr (rewrite_semi_expr (coalesceNil src_joinexpr true)))
+											(define semi_id (list (quote get_column) semi_alias false col false))
+											(define semi_eq (list (quote equal??) semi_id target_expr))
+											(define semi_join (combine_and_terms (list semi_joinexpr semi_condition semi_eq)))
+											(sq_cache "scalar_tables" (merge
+												(list (list semi_alias src_schema src_tbl false semi_join))
+												(coalesceNil (sq_cache "scalar_tables") '())))
+											(list (quote not) (list (quote nil?) semi_id)))
+										nil)
+									'((quote get_column) field_alias _ col _)
+									(if (and (equal?? col "ID") (equal?? (if (nil? field_alias) src_visible_alias field_alias) src_visible_alias))
+										(begin
+											(define semi_idx (coalesceNil (sq_cache "idx") 0))
+											(sq_cache "idx" (+ semi_idx 1))
+											(define semi_alias (concat "_semi_" src_tbl "_" semi_idx))
+											(define alias_map (list (list src_visible_alias semi_alias) (list src_tbl semi_alias)))
+											(define rewrite_semi_expr (lambda (expr) (match (normalize_canonical_aliases expr)
+												'((symbol get_column) alias_ ti col ci)
+												(list (quote get_column) (if (nil? alias_) semi_alias (resolve_source_alias alias_map alias_)) false col false)
+												'((quote get_column) alias_ ti col ci)
+												(list (quote get_column) (if (nil? alias_) semi_alias (resolve_source_alias alias_map alias_)) false col false)
+												(cons sym args)
+												(cons sym (map args rewrite_semi_expr))
+												expr)))
+											(define semi_condition (rewrite_semi_expr (coalesceNil c true)))
+											(define semi_joinexpr (rewrite_semi_expr (coalesceNil src_joinexpr true)))
+											(define semi_id (list (quote get_column) semi_alias false col false))
+											(define semi_eq (list (quote equal??) semi_id target_expr))
+											(define semi_join (combine_and_terms (list semi_joinexpr semi_condition semi_eq)))
+											(sq_cache "scalar_tables" (merge
+												(list (list semi_alias src_schema src_tbl false semi_join))
+												(coalesceNil (sq_cache "scalar_tables") '())))
+											(list (quote not) (list (quote nil?) semi_id)))
+										nil)
+									nil))
+							nil))
+					nil)))
 				(if (and (nil? target_expr) (not (_subquery_has_outer_refs subquery outer_schemas)))
 					(begin
 						(define _count_sq (match subquery
@@ -4226,24 +4387,28 @@ seeing the correctly prefixed outer alias. */
 					(if (and (not (nil? target_expr)) (nil? _first_field))
 						nil
 						(begin
-							(define _count_sq (match subquery
-								'(s t f c g h o l off) (list s t
-									(list "__cnt" (list (quote aggregate) (count-map-expr-for c) (symbol "+") 0))
-									(if (nil? target_expr) c
-										(if (or (nil? c) (equal? c true))
-											(list (quote equal??) _first_field target_expr)
-											(list (quote and) c (list (quote equal??) _first_field target_expr))))
-									(list 1) nil nil nil nil)
-								nil))
-							(if (nil? _count_sq)
-								nil
+							(define _semi_expr (unique_id_semijoin_expr))
+							(if (not (nil? _semi_expr))
+								_semi_expr
 								(begin
-									(define _result (unnest_subselect _count_sq outer_schemas))
-									(if (nil? _result)
+									(define _count_sq (match subquery
+										'(s t f c g h o l off) (list s t
+											(list "__cnt" (list (quote aggregate) (count-map-expr-for c) (symbol "+") 0))
+											(if (nil? target_expr) c
+												(if (or (nil? c) (equal? c true))
+													(list (quote equal??) _first_field target_expr)
+													(list (quote and) c (list (quote equal??) _first_field target_expr))))
+											(list 1) nil nil nil nil)
+										nil))
+									(if (nil? _count_sq)
 										nil
-										(match _result '(_subst _tbls) (begin
-											(sq_cache "tables" (merge _tbls (coalesceNil (sq_cache "tables") '())))
-											(list comparison (list (quote coalesceNil) _subst 0) 0)))))))))))
+										(begin
+											(define _result (unnest_subselect _count_sq outer_schemas))
+											(if (nil? _result)
+												nil
+												(match _result '(_subst _tbls) (begin
+													(sq_cache "tables" (merge _tbls (coalesceNil (sq_cache "tables") '())))
+													(list comparison (list (quote coalesceNil) _subst 0) 0)))))))))))))
 	)))
 	/* replace_inner_selects: walks an expression tree and replaces inner_select markers
 	with their Neumann-decorrelated equivalents. Scalar subselects go through
@@ -4255,7 +4420,11 @@ seeing the correctly prefixed outer alias. */
 		(cons sym args) (begin
 			(define kind (inner_select_kind sym))
 			(define union_exists_expr (lambda (subquery negated) (begin
-				(define union_parts (query_union_all_parts subquery))
+				(define union_parts (coalesce (query_union_all_parts subquery) (match subquery
+					'(union_distinct branches order limit offset) (list branches order limit offset)
+					'((symbol union_distinct) branches order limit offset) (list branches order limit offset)
+					'((quote union_distinct) branches order limit offset) (list branches order limit offset)
+					_ nil)))
 				(if (nil? union_parts)
 					nil
 					(match union_parts '(branches union_order union_limit union_offset)
@@ -4286,6 +4455,69 @@ seeing the correctly prefixed outer alias. */
 									true))
 									(error "UNION ALL subquery must project exactly one column for IN")
 									nil)
+								(define condition_literal_true (lambda (cond_expr)
+									(match cond_expr
+										(cons _ _) false
+										_ (equal?? cond_expr true))))
+								(define merge_union_in_branches (lambda (branches2) (begin
+									(define first_branch (if (equal? branches2 '()) nil (car branches2)))
+									(match first_branch
+										'(base_schema base_tables base_fields base_condition base_group base_having base_order base_limit base_offset)
+										(if (or
+											(not (or (nil? base_group) (equal? base_group '())))
+											(not (nil? base_having))
+											(not (nil? base_order))
+											(not (nil? base_limit))
+											(not (nil? base_offset)))
+											nil
+											(begin
+												(define base_field_expr (match base_fields (cons _ (cons v _)) v nil))
+												(if (nil? base_field_expr)
+													nil
+													(begin
+														(define merged_conditions '())
+														(define merged_condition_true false)
+														(define ok (reduce branches2 (lambda (acc branch)
+															(and acc (match branch
+																'(b_schema b_tables b_fields b_condition b_group b_having b_order b_limit b_offset)
+																(begin
+																	(define b_field_expr (match b_fields (cons _ (cons v _)) v nil))
+																	(if (and
+																		(equal? b_schema base_schema)
+																		(equal? b_tables base_tables)
+																		(equal? b_field_expr base_field_expr)
+																		(or (nil? b_group) (equal? b_group '()))
+																		(nil? b_having)
+																		(nil? b_order)
+																		(nil? b_limit)
+																		(nil? b_offset))
+																		(begin
+																			(if (nil? b_condition)
+																				(set merged_condition_true true)
+																				(if (not merged_condition_true)
+																					(set merged_conditions (merge merged_conditions (list b_condition)))
+																					nil))
+																			true)
+																		false))
+																false)))
+															true))
+														(if (not ok)
+															nil
+															(begin
+																(define merged_conditions2 (filter (map branches2 (lambda (branch)
+																	(match branch
+																		'(_ _ _ b_condition _ _ _ _ _) b_condition
+																		nil)))
+																	(lambda (cond_expr) (not (nil? cond_expr)))))
+																(define merged_condition (if merged_condition_true
+																	true
+																	(if (equal? 0 (count merged_conditions2))
+																		true
+																		(if (equal? 1 (count merged_conditions2))
+																			(car merged_conditions2)
+																			(cons (quote or) merged_conditions2)))))
+																(list base_schema base_tables base_fields merged_condition nil nil nil nil nil)))))))
+										nil))))
 								(define normalize_union_in_branch (lambda (branch)
 									(match branch
 										'(b_schema b_tables b_fields b_condition b_group b_having b_order b_limit b_offset)
@@ -4293,22 +4525,29 @@ seeing the correctly prefixed outer alias. */
 											(define first_field_expr (match b_fields
 												(cons _ (cons v _)) v
 												nil))
-											(if (or (nil? first_field_expr) (not (or (nil? b_condition) (equal? b_condition true))))
+											(if (or (nil? first_field_expr) (not (nil? b_condition)))
 												branch
 												(list b_schema b_tables b_fields
 													(list (quote equal??) first_field_expr first_field_expr)
 													b_group b_having b_order b_limit b_offset)))
 										branch)))
+								(define merged_union_in_branch (merge_union_in_branches branches))
 								(define rewritten_expr
-									(if (equal? (count branches) 1)
-										(if negated
-											(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
-											(list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
-										(cons (if negated (quote and) (quote or))
-											(map branches (lambda (branch)
-												(if negated
-													(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch branch)))
-													(list (quote inner_select_in) target_expr (normalize_union_in_branch branch))))))))
+									(if (not (nil? merged_union_in_branch))
+										(begin
+											(sq_cache "allow_unique_id_semijoin" true)
+											(if negated
+												(list (quote not) (list (quote inner_select_in) target_expr merged_union_in_branch))
+												(list (quote inner_select_in) target_expr merged_union_in_branch)))
+										(if (equal? (count branches) 1)
+											(if negated
+												(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
+												(list (quote inner_select_in) target_expr (normalize_union_in_branch (car branches))))
+											(cons (if negated (quote and) (quote or))
+												(map branches (lambda (branch)
+													(if negated
+														(list (quote not) (list (quote inner_select_in) target_expr (normalize_union_in_branch branch)))
+														(list (quote inner_select_in) target_expr (normalize_union_in_branch branch)))))))))
 								(replace_inner_selects rewritten_expr outer_schemas))))))))
 			(define not_expr (if (not_symbol sym)
 				(match args
@@ -4372,15 +4611,15 @@ seeing the correctly prefixed outer alias. */
 	_sq_* helper integration. */
 	(define nil_test_of_inner_select (lambda (expr) (match expr
 		(cons nil_sym (cons inner_expr '()))
-			(and
-				(or
-					(equal?? nil_sym (symbol nil?))
-					(equal?? nil_sym (quote nil?))
-					(equal?? nil_sym (quote (quote nil?))))
-				(match inner_expr
-					(cons inner_sym (cons _ '()))
-						(equal?? (inner_select_kind inner_sym) (quote inner_select))
-					_ false))
+		(and
+			(or
+				(equal?? nil_sym (symbol nil?))
+				(equal?? nil_sym (quote nil?))
+				(equal?? nil_sym (quote (quote nil?))))
+			(match inner_expr
+				(cons inner_sym (cons _ '()))
+				(equal?? (inner_select_kind inner_sym) (quote inner_select))
+				_ false))
 		_ false)))
 	(define collect_dependent_scalar_compile_markers (lambda (expr outer_schemas)
 		(if (nil_test_of_inner_select expr)
@@ -4942,7 +5181,7 @@ seeing the correctly prefixed outer alias. */
 	(define _ris_schemas (merge schemas outer_schemas_chain))
 	(set tables (map tables (lambda (td) (match td
 		'(tv tschema ttbl toisOuter tje)
-			(list tv tschema ttbl toisOuter
+		(list tv tschema ttbl toisOuter
 			(if (nil? tje) nil (replace_inner_selects tje _ris_schemas)))
 		td))))
 	(set fields (map_assoc fields (lambda (k v) (collect_dependent_scalar_compile_markers v _ris_schemas))))
@@ -5653,165 +5892,280 @@ lambda params, other refs become (outer alias.col) closure captures. */
 					(list (quote set) (symbol "resultrow") (symbol "__term_prev_resultrow")))
 				_ _full_plan)))
 		(if (logical_query_term_is_union_all logical_term)
-			(match logical_term '(union_all_term branches order limit offset) (begin
-				(if (or (nil? branches) (equal? branches '()))
-					(error "UNION ALL requires at least one branch"))
-				(define branch_meta (map branches (lambda (branch) (begin
-					(define branch_cols (logical_query_term_output_cols branch))
-					(list branch branch_cols (count branch_cols))
-				))))
-				(define expected_cols (match branch_meta
-					(cons first_meta _) (nth first_meta 2)
-					_ 0))
-				(define output_cols (match branch_meta
-					(cons first_meta _) (nth first_meta 1)
-					_ '()))
-				(if (not (reduce branch_meta (lambda (ok meta) (and ok (equal? (nth meta 2) expected_cols))) true))
-					(error "UNION ALL branches must project the same number of columns"))
-				(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
-					/* === UNION ALL with ORDER BY / LIMIT / OFFSET ===
-					Emit scan_order_multi for materialization-free sorted merge across tables. */
-					(begin
-						/* Resolve each branch through join_reorder on the already logical select_core. */
-						(define resolved_branches (map branches (lambda (branch) (begin
-							(if (not (logical_query_term_is_select_core branch))
-								(error "UNION ALL ORDER BY requires SELECT branches"))
-							(match branch '(select_core_term schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 init2) (begin
-								(if (not (equal? (coalesceNil groups2 '()) '()))
-									(error "UNION ALL ORDER BY with staged branches not yet supported"))
-								(if (not (equal? (coalesceNil init2 '()) '()))
-									(error "UNION ALL ORDER BY with initialized branches not yet supported"))
-								(define _uq7 (list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2))
-								(define _jr (apply join_reorder _uq7))
-								(define jr_tables (nth _jr 1))
-								(if (not (equal? (count jr_tables) 1))
-									(error "UNION ALL ORDER BY requires single-table branches (no joins)"))
-								(define tbldef (car jr_tables))
-								(define jr_fields (nth _jr 2))
-								(define jr_condition ((nth _jr 6) (coalesceNil (nth _jr 3) true)))
-								(list tbldef jr_fields jr_condition))
-								_ (error "UNION ALL ORDER BY requires SELECT branches"))
-						))))
+			(match (match logical_term
+				'(union_all_term branches order limit offset distinct) (list branches order limit offset distinct)
+				'(union_all_term branches order limit offset) (list branches order limit offset false))
+				'(branches order limit offset distinct) (begin
+					(if (or (nil? branches) (equal? branches '()))
+						(error "UNION ALL requires at least one branch"))
+					(define branch_meta (map branches (lambda (branch) (begin
+						(define branch_cols (logical_query_term_output_cols branch))
+						(list branch branch_cols (count branch_cols))
+					))))
+					(define union_seen_sym (symbol "__union_distinct_seen"))
+					(define union_emit_row (lambda (row_expr)
+						(if (not distinct)
+							(term_sink_emit_row row_expr)
+							(begin
+								(define row_sym (symbol "__union_distinct_row"))
+								(define key_sym (symbol "__union_distinct_key"))
+								(list
+									(list (quote lambda) (list row_sym)
+										(list (quote begin)
+											(list (quote define) key_sym (list (quote serialize) row_sym))
+											(list (quote if)
+												(list union_seen_sym key_sym)
+												nil
+												(list (quote begin)
+													(list union_seen_sym key_sym true)
+													(term_sink_emit_row row_sym)))))
+									row_expr)))))
+					(define expected_cols (match branch_meta
+						(cons first_meta _) (nth first_meta 2)
+						_ 0))
+					(define output_cols (match branch_meta
+						(cons first_meta _) (nth first_meta 1)
+						_ '()))
+					(if (not (reduce branch_meta (lambda (ok meta) (and ok (equal? (nth meta 2) expected_cols))) true))
+						(error "UNION ALL branches must project the same number of columns"))
+					(if (and distinct (or (not (nil? order)) (not (nil? limit)) (not (nil? offset))))
+						(begin
+							(define union_rows_sym (symbol "__union_distinct_rows"))
+							(define union_collect_row (lambda (row_expr)
+								(begin
+									(define row_sym (symbol "__union_distinct_row"))
+									(define key_sym (symbol "__union_distinct_key"))
+									(list
+										(list (quote lambda) (list row_sym)
+											(list (quote begin)
+												(list (quote define) key_sym (list (quote serialize) row_sym))
+												(list (quote if)
+													(list union_seen_sym key_sym)
+													nil
+													(list (quote begin)
+														(list union_seen_sym key_sym true)
+														(list union_rows_sym "rows"
+															(list (quote cons) row_sym
+																(list (quote coalesceNil) (list union_rows_sym "rows") (list (quote quote) (list)))))))))
+										row_expr))))
+							(define branch_plans (map (produceN (count branch_meta)) (lambda (branch_idx) (begin
+								(define meta (nth branch_meta branch_idx))
+								(define branch (nth meta 0))
+								(define branch_sink_sym (symbol (concat "__union_branch_sink:" branch_idx)))
+								(define branch_plan (build_queryplan_term_from_logical_with_sink branch (list (quote callback) branch_sink_sym)))
+								(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
+									(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
+								)))))
+								(list (quote begin)
+									(list (quote define) branch_sink_sym
+										(list (quote lambda) (list (symbol "row"))
+											(union_collect_row normalized_row)))
+									branch_plan)
+							))))
+							(define order_items (map (coalesceNil order '()) (lambda (item) (match item '(col dir) (begin
+								(define col_name (match col
+									'((symbol get_column) _ _ cn _) cn
+									'((quote get_column) _ _ cn _) cn
+									_ (if (number? col) nil (to_string col))))
+								(define pos (reduce (produceN expected_cols (lambda (i) i)) (lambda (found i)
+									(if (not (nil? found)) found
+										(if (equal?? col_name (nth output_cols i)) i nil))) nil))
+								(set pos (if (nil? pos)
+									(if (and (number? col) (> col 0) (<= col expected_cols))
+										(- col 1)
+										nil)
+									pos))
+								(if (nil? pos) (error (concat "UNION ORDER BY: column not found: " col)))
+								(list pos dir))
+							))))
+							(define sort_cols (map order_items (lambda (oi) (match oi '(pos _dir) (nth output_cols pos)))))
+							(define sort_dirs (map order_items (lambda (oi) (match oi '(_pos dir) dir))))
+							(define limit_val (if (nil? limit) -1 limit))
+							(define offset_val (if (nil? offset) 0 offset))
+							(define ordered_rows_expr
+								(list (quote reduce)
+									(list (quote coalesceNil) (list union_rows_sym "rows") (list (quote quote) (list)))
+									(list (quote lambda) (list (symbol "acc") (symbol "item"))
+										(list (quote cons) (symbol "item") (symbol "acc")))
+									(list (quote quote) (list))))
+							(define ordered_map_ast (list (quote lambda)
+								(map output_cols (lambda (col) (symbol col)))
+								(term_sink_emit_row
+									(cons (symbol "list") (merge (map (produceN expected_cols) (lambda (idx)
+										(list (nth output_cols idx) (symbol (nth output_cols idx))))))))))
+							(cons (quote begin)
+								(merge
+									(list
+										(list (quote define) union_seen_sym (list (quote newsession)))
+										(list (quote define) union_rows_sym (list (quote newsession))))
+									branch_plans
+									(list
+										(list (symbol "scan_order")
+											'(session "__memcp_tx")
+											ordered_rows_expr
+											(list (symbol "list"))
+											(list (quote lambda) (list) true)
+											(cons (symbol "list") sort_cols)
+											(cons (symbol "list") sort_dirs)
+											0
+											offset_val
+											limit_val
+											(cons (symbol "list") output_cols)
+											ordered_map_ast)))))
+						(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+							/* === UNION ALL with ORDER BY / LIMIT / OFFSET ===
+							Emit scan_order_multi for materialization-free sorted merge across tables. */
+							(begin
+								/* Resolve each branch through join_reorder on the already logical select_core. */
+								(define resolved_branches (map branches (lambda (branch) (begin
+									(if (not (logical_query_term_is_select_core branch))
+										(error "UNION ALL ORDER BY requires SELECT branches"))
+									(match branch '(select_core_term schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 init2) (begin
+										(if (not (equal? (coalesceNil groups2 '()) '()))
+											(error "UNION ALL ORDER BY with staged branches not yet supported"))
+										(if (not (equal? (coalesceNil init2 '()) '()))
+											(error "UNION ALL ORDER BY with initialized branches not yet supported"))
+										(define _uq7 (list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2))
+										(define _jr (apply join_reorder _uq7))
+										(define jr_tables (nth _jr 1))
+										(if (not (equal? (count jr_tables) 1))
+											(error "UNION ALL ORDER BY requires single-table branches (no joins)"))
+										(define tbldef (car jr_tables))
+										(define jr_fields (nth _jr 2))
+										(define jr_condition ((nth _jr 6) (coalesceNil (nth _jr 3) true)))
+										(list tbldef jr_fields jr_condition))
+										_ (error "UNION ALL ORDER BY requires SELECT branches"))
+								))))
 
-						/* Parse ORDER BY: resolve each item to position in output_cols */
-						(define order_items (map order (lambda (item) (match item '(col dir) (begin
-							(define col_name (match col
-								'((symbol get_column) _ _ cn _) cn
-								'((quote get_column) _ _ cn _) cn
-								_ (if (number? col) nil (to_string col))))
-							/* Try name match first, then positional */
-							(define pos (reduce (produceN expected_cols (lambda (i) i)) (lambda (found i)
-								(if (not (nil? found)) found
-									(if (equal?? col_name (nth output_cols i)) i nil))) nil))
-							(set pos (if (nil? pos)
-								(if (and (number? col) (> col 0) (<= col expected_cols))
-									(- col 1)
-									nil)
-								pos))
-							(if (nil? pos) (error (concat "UNION ALL ORDER BY: column not found: " col)))
-							(list pos dir))
-						))))
+								/* Parse ORDER BY: resolve each item to position in output_cols */
+								(define order_items (map order (lambda (item) (match item '(col dir) (begin
+									(define col_name (match col
+										'((symbol get_column) _ _ cn _) cn
+										'((quote get_column) _ _ cn _) cn
+										_ (if (number? col) nil (to_string col))))
+									/* Try name match first, then positional */
+									(define pos (reduce (produceN expected_cols (lambda (i) i)) (lambda (found i)
+										(if (not (nil? found)) found
+											(if (equal?? col_name (nth output_cols i)) i nil))) nil))
+									(set pos (if (nil? pos)
+										(if (and (number? col) (> col 0) (<= col expected_cols))
+											(- col 1)
+											nil)
+										pos))
+									(if (nil? pos) (error (concat "UNION ALL ORDER BY: column not found: " col)))
+									(list pos dir))
+								))))
 
-						/* Build per-branch scan parameters */
-						(define scan_specs (map resolved_branches (lambda (rb) (begin
-							(define tbldef (nth rb 0))
-							(define fields (nth rb 1))
-							(define condition (nth rb 2))
-							(match tbldef '(tblvar tbl_schema tbl isOuter joinexpr) (begin
-								/* filter: columns from condition */
-								(define filtercols (merge_unique (list
-									(extract_columns_for_tblvar tblvar condition)
-									(extract_outer_columns_for_tblvar tblvar condition))))
-								(define filter_ast (list (quote lambda)
-									(map filtercols (lambda (c) (symbol (concat tblvar "." c))))
-									(optimize (replace_columns_from_expr condition))))
+								/* Build per-branch scan parameters */
+								(define scan_specs (map resolved_branches (lambda (rb) (begin
+									(define tbldef (nth rb 0))
+									(define fields (nth rb 1))
+									(define condition (nth rb 2))
+									(match tbldef '(tblvar tbl_schema tbl isOuter joinexpr) (begin
+										/* filter: columns from condition */
+										(define filtercols (merge_unique (list
+											(extract_columns_for_tblvar tblvar condition)
+											(extract_outer_columns_for_tblvar tblvar condition))))
+										(define filter_ast (list (quote lambda)
+											(map filtercols (lambda (c) (symbol (concat tblvar "." c))))
+											(optimize (replace_columns_from_expr condition))))
 
-								/* fields by position */
-								(define field_names (extract_assoc fields (lambda (k v) k)))
-								(define field_exprs (extract_assoc fields (lambda (k v) v)))
+										/* fields by position */
+										(define field_names (extract_assoc fields (lambda (k v) k)))
+										(define field_exprs (extract_assoc fields (lambda (k v) v)))
 
-								/* sort columns for this branch: map ORDER BY positions to physical columns */
-								(define sortcols (map order_items (lambda (oi) (match oi '(pos _dir) (begin
-									(define expr (nth field_exprs pos))
-									(match expr
-										'((symbol get_column) (eval tblvar) _ col _) col
-										'((quote get_column) (eval tblvar) _ col _) col
-										_ (begin
-											/* complex expression: emit lambda-based sort column */
-											(define sort_expr_cols (extract_columns_for_tblvar tblvar expr))
-											(list (quote lambda)
-												(map sort_expr_cols (lambda (c) (symbol (concat tblvar "." c))))
-												(replace_columns_from_expr expr)))))))))
+										/* sort columns for this branch: map ORDER BY positions to physical columns */
+										(define sortcols (map order_items (lambda (oi) (match oi '(pos _dir) (begin
+											(define expr (nth field_exprs pos))
+											(match expr
+												'((symbol get_column) (eval tblvar) _ col _) col
+												'((quote get_column) (eval tblvar) _ col _) col
+												_ (begin
+													/* complex expression: emit lambda-based sort column */
+													(define sort_expr_cols (extract_columns_for_tblvar tblvar expr))
+													(list (quote lambda)
+														(map sort_expr_cols (lambda (c) (symbol (concat tblvar "." c))))
+														(replace_columns_from_expr expr)))))))))
 
-								/* map: all columns needed for output field expressions + sort cols */
-								(define all_output_cols (merge_unique (extract_assoc fields (lambda (k v)
-									(extract_columns_for_tblvar tblvar v)))))
-								(define sort_phys_cols (merge_unique (map sortcols (lambda (sc)
-									(if (string? sc) (list sc)
-										(match sc
-											'((quote lambda) params body) (extract_columns_for_tblvar tblvar body)
-											'((symbol lambda) params body) (extract_columns_for_tblvar tblvar body)
-											'()))))))
-								(define mapcols (merge_unique (list all_output_cols sort_phys_cols)))
+										/* map: all columns needed for output field expressions + sort cols */
+										(define all_output_cols (merge_unique (extract_assoc fields (lambda (k v)
+											(extract_columns_for_tblvar tblvar v)))))
+										(define sort_phys_cols (merge_unique (map sortcols (lambda (sc)
+											(if (string? sc) (list sc)
+												(match sc
+													'((quote lambda) params body) (extract_columns_for_tblvar tblvar body)
+													'((symbol lambda) params body) (extract_columns_for_tblvar tblvar body)
+													'()))))))
+										(define mapcols (merge_unique (list all_output_cols sort_phys_cols)))
 
-								/* map lambda: emit rows with normalized output aliases */
-								(define map_ast (list (quote lambda)
-									(map mapcols (lambda (c) (symbol (concat tblvar "." c))))
-									(term_sink_emit_row
-										(cons (symbol "list")
-											(merge (map (produceN expected_cols (lambda (i) i)) (lambda (i)
-												(list (nth output_cols i) (replace_columns_from_expr (nth field_exprs i))))))))))
+										/* map lambda: emit rows with normalized output aliases */
+										(define map_ast (list (quote lambda)
+											(map mapcols (lambda (c) (symbol (concat tblvar "." c))))
+											(union_emit_row
+												(cons (symbol "list")
+													(merge (map (produceN expected_cols (lambda (i) i)) (lambda (i)
+														(list (nth output_cols i) (replace_columns_from_expr (nth field_exprs i))))))))))
 
-								(list tbl_schema tbl filtercols filter_ast sortcols mapcols map_ast))
-								_ (error "invalid table definition in UNION ALL branch"))
-						))))
+										(list tbl_schema tbl filtercols filter_ast sortcols mapcols map_ast))
+										_ (error "invalid table definition in UNION ALL branch"))
+								))))
 
-						/* Sort directions (shared): extract from order_items */
-						(define sort_dirs (map order_items (lambda (oi) (match oi '(_pos dir) dir))))
+								/* Sort directions (shared): extract from order_items */
+								(define sort_dirs (map order_items (lambda (oi) (match oi '(_pos dir) dir))))
 
-						(define limit_val (if (nil? limit) -1 limit))
-						(define offset_val (if (nil? offset) 0 offset))
+								(define limit_val (if (nil? limit) -1 limit))
+								(define offset_val (if (nil? offset) 0 offset))
 
-						/* Emit scan_order_multi call. Per-table offset/limit are nil here
-						(no per-branch ORDER+LIMIT in this codepath); if a branch ever carries
-						its own order+limit, populate the nil lists with per-branch ints. */
-						(merge (list (symbol "scan_order_multi") '(session "__memcp_tx"))
-							(list
-								(cons (symbol "list") (map scan_specs (lambda (s) (list (symbol "table") (nth s 0) (nth s 1)))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 2)))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (nth s 3))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 4)))))
-								(cons (symbol "list") sort_dirs)
-								nil
-								nil
-								0
-								offset_val
-								limit_val
-								(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 5)))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (nth s 6))))
-						))
-					)
-					/* === UNION ALL without ORDER BY === */
-					(begin
-						(define branch_plans (map (produceN (count branch_meta)) (lambda (branch_idx) (begin
-							(define meta (nth branch_meta branch_idx))
-							(define branch (nth meta 0))
-							(define branch_sink_sym (symbol (concat "__union_branch_sink:" branch_idx)))
-							(define branch_plan (build_queryplan_term_from_logical_with_sink branch (list (quote callback) branch_sink_sym)))
-							(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
-								(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
-							)))))
-							(list (quote begin)
-								(list (quote define) branch_sink_sym
-									(list (quote lambda) (list (symbol "row"))
-										(term_sink_emit_row normalized_row)))
-								branch_plan)
-						))))
-						(cons (quote begin) branch_plans))
-				)
-			))
-			(error "invalid logical query term"))
-	)
+								/* Emit scan_order_multi call. Per-table offset/limit are nil here
+								(no per-branch ORDER+LIMIT in this codepath); if a branch ever carries
+								its own order+limit, populate the nil lists with per-branch ints. */
+								(define ordered_union_plan (merge (list (symbol "scan_order_multi") '(session "__memcp_tx"))
+									(list
+										(cons (symbol "list") (map scan_specs (lambda (s) (list (symbol "table") (nth s 0) (nth s 1)))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 2)))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (nth s 3))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 4)))))
+										(cons (symbol "list") sort_dirs)
+										nil
+										nil
+										0
+										offset_val
+										limit_val
+										(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 5)))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (nth s 6))))
+								)))
+								(if distinct
+									(list (quote begin)
+										(list (quote define) union_seen_sym (list (quote newsession)))
+										ordered_union_plan)
+									ordered_union_plan)
+							)
+							/* === UNION ALL without ORDER BY === */
+							(begin
+								(define branch_plans (map (produceN (count branch_meta)) (lambda (branch_idx) (begin
+									(define meta (nth branch_meta branch_idx))
+									(define branch (nth meta 0))
+									(define branch_sink_sym (symbol (concat "__union_branch_sink:" branch_idx)))
+									(define branch_plan (build_queryplan_term_from_logical_with_sink branch (list (quote callback) branch_sink_sym)))
+									(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
+										(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
+									)))))
+									(list (quote begin)
+										(list (quote define) branch_sink_sym
+											(list (quote lambda) (list (symbol "row"))
+												(union_emit_row normalized_row)))
+										branch_plan)
+								))))
+								(cons (quote begin)
+									(merge
+										(if distinct
+											(list (list (quote define) union_seen_sym (list (quote newsession))))
+											'())
+										branch_plans)))
+						)
+				))
+				(error "invalid logical query term"))
+		)
 ))))
 (define build_queryplan_term_with_sink (lambda (query sink_mode)
 	(build_queryplan_term_from_logical_with_sink (untangle_query_term query nil) sink_mode)
@@ -8486,17 +8840,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									/* check partition_stages for this table. Tagged scans still override the
 									local stage config, but scoped partition stages must now also work when
 									this helper is the driver after join_reorder. */
-										(define _ps_ord (if (not (nil? tbl_once_limit)) nil
-											(find_partition_stage_for_alias partition_stages tblvar)))
-										(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
+									(define _ps_ord (if (not (nil? tbl_once_limit)) nil
+										(find_partition_stage_for_alias partition_stages tblvar)))
+									(define _ps_once_limit (if (nil? _ps_ord) nil (stage_once_limit _ps_ord)))
 									/* tagged helper scans override the local scan config; otherwise use
 									partition-stage order first and the outer ORDER only on the driver scan. */
 									(define _eff_order (if (not (nil? tbl_once_limit))
 										tbl_scan_order
 										(if (nil? _ps_ord) stage_order (coalesceNil (stage_order_list _ps_ord) '()))))
 									/* extract order cols for this tblvar */
-										(set ordercols (extract_scan_order_cols_for_tblvar _eff_order tblvar))
-										(set dirs (extract_scan_order_dirs_for_tblvar _eff_order tblvar))
+									(set ordercols (extract_scan_order_cols_for_tblvar _eff_order tblvar))
+									(set dirs (extract_scan_order_dirs_for_tblvar _eff_order tblvar))
 
 									/* offset/limit: tagged helper scans carry their own local limits. */
 									(define ord_raw_scan_offset (if (not (nil? tbl_once_limit))
@@ -8630,9 +8984,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 													(if (nil? bound_update_expr) child_scan
 														(list (list (symbol "lambda") (list (symbol "__dml_update_bound")) child_scan) bound_update_expr))))
 												/* check partition_stages: does this table have a per-table partition limit? */
-													(define _ps (if (not (nil? tbl_once_limit))
-														nil
-														(find_partition_stage_for_alias partition_stages tblvar)))
+												(define _ps (if (not (nil? tbl_once_limit))
+													nil
+													(find_partition_stage_for_alias partition_stages tblvar)))
 												(define _ps_once_limit (if (nil? _ps) nil (stage_once_limit _ps)))
 												(define _tagged_scan (scan_tagged_table_needs_scan_order tbl))
 												(define scan_raw_partcols (if _tagged_scan
@@ -8664,8 +9018,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 														(define _ps_offset (if (nil? scan_once_contract)
 															(if _tagged_scan (coalesceNil tbl_scan_offset 0) (coalesceNil (stage_offset_val _ps) 0))
 															(once_limit_scan_contract_offset scan_once_contract)))
-															(define _ps_ordercols (extract_scan_order_cols_for_tblvar _ps_order tblvar))
-															(define _ps_dirs (extract_scan_order_dirs_for_tblvar _ps_order tblvar))
+														(define _ps_ordercols (extract_scan_order_cols_for_tblvar _ps_order tblvar))
+														(define _ps_dirs (extract_scan_order_dirs_for_tblvar _ps_order tblvar))
 														/* emit init code from partition stage if present */
 														(define _ps_init2 (if _tagged_scan nil (stage_init_code _ps)))
 														(define _ps_scan_core (scan_wrapper 'scan_order schema base_tbl
