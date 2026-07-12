@@ -159,6 +159,8 @@ test_cases:
   # --- Triggers ---
   - name: "DROP TRIGGER IF EXISTS"
     sql: "DROP TRIGGER IF EXISTS `dbc_t.ib`"
+  - name: "DROP missing schema-like trigger is fast no-op"
+    sql: "DROP TRIGGER IF EXISTS `cron.ib`"
   - name: "CREATE TRIGGER"
     sql: "CREATE TRIGGER `dbc_t.ib` BEFORE INSERT ON dbc_t FOR EACH ROW BEGIN SET NEW.status = COALESCE(NEW.status, 'new'); END"
   - name: "DROP TRIGGER IF EXISTS after create"

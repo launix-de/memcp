@@ -2570,20 +2570,40 @@ func Init(en scm.Env) {
 			}
 
 			name := scm.String(a[1])
+			if scm.ToBool(a[2]) {
+				db.schemalock.RLock()
+				found := false
+				for _, t := range db.tables.GetAll() {
+					t.mu.Lock()
+					for _, tr := range t.Triggers {
+						if tr.Name == name {
+							found = true
+							break
+						}
+					}
+					t.mu.Unlock()
+					if found {
+						break
+					}
+				}
+				db.schemalock.RUnlock()
+				if !found {
+					return scm.NewBool(false)
+				}
+			}
+
+			db.schemalock.Lock()
 			tables := db.tables.GetAll()
-			// Search all tables for the trigger. Take the table-local DDL lock
-			// before the database schemalock to keep the DDL lock order stable.
 			for _, t := range tables {
 				t.ddlMu.Lock()
-				db.schemalock.Lock()
 				if t.RemoveTrigger(name) {
 					db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
 					t.ddlMu.Unlock()
 					return scm.NewBool(true)
 				}
-				db.schemalock.Unlock()
 				t.ddlMu.Unlock()
 			}
+			db.schemalock.Unlock()
 
 			if scm.ToBool(a[2]) {
 				return scm.NewBool(false)
