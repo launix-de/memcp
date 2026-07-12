@@ -9,6 +9,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS pgdump_people"
 
 test_cases:
+  - name: "Import command eval has local resultrow callback"
+    scm: |
+      (psql_eval_import_command "memcp-tests" "" nil "SELECT 1" (sql_policy "root"))
+
   - name: "Import minimal pg_dump archive into target schema"
     scm: |
       (load_psql "memcp-tests" (concat __DIR__ "/../tests/fixtures/mini_pgdump.pg_dump.gz") (sql_policy "root"))
