@@ -67,6 +67,19 @@ test_cases:
       data:
         - cnt: 999
 
+  - name: "Set session variable for parallel shard scan"
+    session_id: "ms_parallel_session"
+    sql: "SET @ms_min = 60000"
+    expect: {}
+
+  - name: "Session variable is visible in parallel shard scan"
+    session_id: "ms_parallel_session"
+    sql: "SELECT COUNT(*) AS cnt FROM ms_data WHERE val > @ms_min"
+    expect:
+      rows: 1
+      data:
+        - cnt: 999
+
   - name: "COUNT with BETWEEN filter across shards"
     sql: "SELECT COUNT(*) AS cnt FROM ms_data WHERE val BETWEEN 30000 AND 30009"
     expect:
