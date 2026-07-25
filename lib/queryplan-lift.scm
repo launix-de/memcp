@@ -613,22 +613,53 @@ column in the sub's WHERE, use the inner column in PARTITION BY. This
 turns a correlated window (outer-ref in PARTITION BY) into an uncorrelated
 window over the inner table alone — which legacy's window-function path
 handles correctly inside derived sub-tuples. */
-(define qpl-build-rownumber-window (lambda (outer-refs order-items where inner-aliases)
-	(begin
-		(define partition-exprs (map outer-refs (lambda (rp) (match rp
-			'(tv col) (begin
-				(define inner-equiv (qpl-find-equibind-inner-col where rp inner-aliases))
+	(define qpl-build-rownumber-window (lambda (outer-refs order-items where inner-aliases)
+		(begin
+			(define partition-exprs (map outer-refs (lambda (rp) (match rp
+				'(tv col) (begin
+					(define inner-equiv (qpl-find-equibind-inner-col where rp inner-aliases))
 				(if (not (nil? inner-equiv))
 					(list (quote get_column) (nth inner-equiv 0) false
 						(nth inner-equiv 1) false)
 					(list (quote get_column) tv false col false)))
 			rp))))
 		(define order-list (if (nil? order-items) '() order-items))
-		(list (quote window_func) "ROW_NUMBER" '()
-			(list partition-exprs order-list)))))
+			(list (quote window_func) "ROW_NUMBER" '()
+				(list partition-exprs order-list)))))
 
-/* qpl-split-where-by-correlation — split a WHERE expression into
-(correlated-conjuncts, uncorrelated-conjuncts). A conjunct is "correlated"
+	(define qpl-limit-equibind-inner-cols (lambda (outer-refs where inner-aliases)
+		(reduce outer-refs (lambda (acc rp)
+			(match rp
+				'(tv _col)
+				(if (has? inner-aliases tv) acc
+					(begin
+						(define inner-equiv (qpl-find-equibind-inner-col where rp inner-aliases))
+						(if (or (nil? inner-equiv) (has? acc inner-equiv))
+							acc
+							(merge acc (list inner-equiv)))))
+				acc))
+			'())))
+
+	(define qpl-limit-equibind-wrapper-condition (lambda (outer-refs where inner-aliases wrap-alias)
+		(reduce outer-refs (lambda (acc rp) (match rp
+			'(outer-tv outer-col)
+			(if (has? inner-aliases outer-tv) acc
+				(begin
+					(define inner-equiv (qpl-find-equibind-inner-col where rp inner-aliases))
+					(if (nil? inner-equiv) acc
+						(qpl-and-cond acc
+							(list (quote equal??)
+								(list (quote get_column) wrap-alias false (nth inner-equiv 1) false)
+								(list (quote get_column) outer-tv false outer-col false))))))
+			acc))
+			nil)))
+
+	(define qpl-limit-wrapper-correlation-filter (lambda (expr)
+		(if (nil? expr) nil
+			(list (quote if) expr true false))))
+
+	/* qpl-split-where-by-correlation — split a WHERE expression into
+	(correlated-conjuncts, uncorrelated-conjuncts). A conjunct is "correlated"
 when it references any outer-ref (passed in). Used by the FAQ §43 rewrite
 to keep the correlation filter at the WRAPPER level (outside the window-
 computing inner sub) — legacy's window-function path handles uncorrelated
@@ -687,16 +718,25 @@ derived. */
 							wrapper preserves semantics. Also project the inner
 							equi-bound cols as passthrough so the wrapper's
 							correlation conjunct can reference them. */
-							(define split (qpl-split-where-by-correlation
-								(qpp-tuple-condition sub) outer-refs))
-							(define corr-where (nth split 0))
-							(define uncorr-where (nth split 1))
-							(if (not (nil? uncorr-where))
+								(define split (qpl-split-where-by-correlation
+									(qpp-tuple-condition sub) outer-refs))
+								(define corr-where (nth split 0))
+								(define uncorr-where (nth split 1))
+								(if (not (nil? uncorr-where))
 								sub
 								(begin
-									/* Collect inner-equibound passthroughs needed by corr-where. */
-									(define passthrough-cols
-										(qpl-collect-corr-passthroughs corr-where sub-inner-aliases))
+										/* Collect inner-equibound passthroughs needed by corr-where,
+										plus equi-binding keys whose original outer predicate may
+										have been absorbed by earlier cclass rewrites. The wrapper
+										still needs those keys to constrain the per-domain LIMIT
+										consumer instead of scanning every partition row. */
+										(define passthrough-cols
+											(merge_unique
+												(qpl-collect-corr-passthroughs corr-where sub-inner-aliases)
+												(qpl-limit-equibind-inner-cols
+													outer-refs
+													(qpp-tuple-condition sub)
+													sub-inner-aliases)))
 									(define passthrough-pairs (reduce passthrough-cols
 										(lambda (acc col-ref) (match col-ref
 											'(tv col) (merge acc (list col
@@ -742,12 +782,20 @@ derived. */
 											(list (quote and)
 												(list (quote >) rn-ref offset-val)
 												(list (quote <=) rn-ref (list (quote +) lim offset-val)))))
-									(define retargeted-corr
-										(if (nil? corr-where) nil
-											(qpl-retarget-refs corr-where sub-inner-aliases wrap-alias)))
-									(define wrapper-where
-										(if (nil? retargeted-corr) rn-condition
-											(list (quote and) rn-condition retargeted-corr)))
+										(define retargeted-corr
+											(if (nil? corr-where) nil
+												(qpl-retarget-refs corr-where sub-inner-aliases wrap-alias)))
+										(define equibind-corr
+											(qpl-limit-equibind-wrapper-condition
+												outer-refs
+												(qpp-tuple-condition sub)
+												sub-inner-aliases
+												wrap-alias))
+										(define wrapper-where
+											(qpl-and-cond
+												(qpl-and-cond rn-condition
+													(qpl-limit-wrapper-correlation-filter retargeted-corr))
+												(qpl-limit-wrapper-correlation-filter equibind-corr)))
 									(qpp-rebuild-tuple
 										schema
 										(list (list wrap-alias schema inner-sub-lowered false nil))

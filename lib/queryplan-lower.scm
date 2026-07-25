@@ -1270,9 +1270,9 @@ anyway, and helper scans for aggregates break the simple tag) */
 (define qpu-low-tag-inner-once-limit (lambda (sub-tuple)
 	(qpu-low-tag-inner-limit-contract sub-tuple 2 2)))
 
-(define qpu-low-add-scalar-once-marker (lambda (sub-tuple)
-	(begin
-		(define user-limit (qpp-tuple-limit sub-tuple))
+	(define qpu-low-add-scalar-once-marker (lambda (sub-tuple)
+		(begin
+			(define user-limit (qpp-tuple-limit sub-tuple))
 		(define once-limit (if (and (not (nil? user-limit)) (<= user-limit 1)) 1 2))
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema sub-tuple)
@@ -1285,8 +1285,8 @@ anyway, and helper scans for aggregates break the simple tag) */
 			(qpp-tuple-group sub-tuple)
 			(qpp-tuple-having sub-tuple)
 			(qpp-tuple-order sub-tuple)
-			(qpp-tuple-limit sub-tuple)
-			(qpp-tuple-offset sub-tuple)))))
+				(qpp-tuple-limit sub-tuple)
+				(qpp-tuple-offset sub-tuple)))))
 
 (define qpu-low-tag-expr-has-aggregate? (lambda (expr) (match expr
 	'((symbol aggregate) . _) true
@@ -1833,6 +1833,9 @@ attached to the wrapper join instead. */
 (define qpu-low-domain-alias (lambda (alias)
 	(concat "dom_" alias)))
 
+(define qpu-low-domain-source-alias (lambda (alias)
+	(concat "domainSource" (fnv_hash alias))))
+
 (define qpu-low-find-table-entry (lambda (tables alias)
 	(reduce (coalesceNil tables '()) (lambda (acc td)
 		(if (not (nil? acc)) acc
@@ -1855,9 +1858,38 @@ attached to the wrapper join instead. */
 					(coalesceNil td-joinExpr true) alias-map)))
 		td)))
 
-(define qpu-low-rewrite-domain-tuple (lambda (tuple alias-map)
-	(qpp-rebuild-tuple
-		(qpp-tuple-schema tuple)
+(define qpu-low-domain-ref-cols-for-alias (lambda (external-refs alias)
+	(reduce external-refs (lambda (acc ref)
+		(match ref
+			'(tv col) (if (and (equal? tv alias) (not (has? acc col)))
+				(merge acc (list col)) acc)
+			acc))
+		'())))
+
+(define qpu-low-domain-table-for-alias (lambda (td alias cols)
+	(match td
+		'(td-alias td-schema _td-tname _td-isOuter _td-joinExpr)
+		(begin
+			(define domain-alias (qpu-low-domain-alias alias))
+			(define source-alias (qpu-low-domain-source-alias alias))
+			(define source-map (list (list td-alias source-alias)))
+			(define source-table (qpu-low-rewrite-domain-table td source-map))
+			(define field-pairs (map cols (lambda (col)
+				(list col (list (quote get_column) source-alias false col false)))))
+			(define group-exprs (map field-pairs (lambda (pair) (nth pair 1))))
+			(define domain-tuple (qpp-rebuild-tuple
+				td-schema
+				(list source-table)
+				(qpp-fields-to-flat field-pairs)
+				true
+				group-exprs
+				nil nil nil nil))
+			(list domain-alias td-schema domain-tuple false nil))
+		td)))
+
+	(define qpu-low-rewrite-domain-tuple (lambda (tuple alias-map)
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema tuple)
 		(map (coalesceNil (qpp-tuple-tables tuple) '())
 			(lambda (td) (qpu-low-rewrite-domain-table td alias-map)))
 		(qpu-low-rewrite-alias-map-fields (qpp-tuple-fields tuple) alias-map)
@@ -1870,12 +1902,12 @@ attached to the wrapper join instead. */
 		(map (coalesceNil (qpp-tuple-order tuple) '()) (lambda (item) (match item
 			'(expr dir) (list (qpu-low-rewrite-alias-map-expr expr alias-map) dir)
 			item)))
-		(qpp-tuple-limit tuple)
-		(qpp-tuple-offset tuple))))
+			(qpp-tuple-limit tuple)
+			(qpp-tuple-offset tuple))))
 
-(define qpu-low-domain-equality-predicate (lambda (external-refs alias-map)
-	(qpu-low-conjuncts-to-and (map external-refs (lambda (ref) (match ref
-		'(tv col) (list (quote equal??)
+	(define qpu-low-domain-equality-predicate (lambda (external-refs alias-map)
+		(qpu-low-conjuncts-to-and (map external-refs (lambda (ref) (match ref
+			'(tv col) (list (quote equal??)
 			(list (quote get_column) tv false col false)
 			(list (quote get_column)
 				(qpu-low-alias-map-lookup alias-map tv) false col false))
@@ -1899,25 +1931,34 @@ attached to the wrapper join instead. */
 						acc)) '()))
 				(define alias-map (map external-aliases (lambda (a)
 					(list a (qpu-low-domain-alias a)))))
-				(define domain-tables (reduce external-aliases (lambda (acc a)
-					(begin
-						(define td (qpu-low-find-table-entry
-							(qpp-tuple-tables left-tuple) a))
-						(if (nil? td) acc
-							(merge acc (list (qpu-low-rewrite-domain-table td alias-map))))))
-					'()))
-				(define rewritten-right
-					(qpu-low-rewrite-domain-tuple right-tuple alias-map))
-				(define new-right (qpp-rebuild-tuple
-					(qpp-tuple-schema rewritten-right)
-					(merge domain-tables (qpp-tuple-tables rewritten-right))
-					(qpp-tuple-fields rewritten-right)
-					(qpp-tuple-condition rewritten-right)
-					(qpp-tuple-group rewritten-right)
-					(qpp-tuple-having rewritten-right)
-					(qpp-tuple-order rewritten-right)
-					(qpp-tuple-limit rewritten-right)
-					(qpp-tuple-offset rewritten-right)))
+					(define domain-tables (reduce external-aliases (lambda (acc a)
+						(begin
+							(define td (qpu-low-find-table-entry
+								(qpp-tuple-tables left-tuple) a))
+							(if (nil? td) acc
+								(begin
+									(define cols (qpu-low-domain-ref-cols-for-alias external-refs a))
+									(if (equal? (count cols) 0) acc
+										(merge acc (list
+											(qpu-low-domain-table-for-alias td a cols))))))))
+						'()))
+					(define rewritten-right
+						(qpu-low-rewrite-domain-tuple right-tuple alias-map))
+					(define rewritten-join-pred
+						(qpu-low-rewrite-alias-map-expr
+							(coalesceNil join-pred true) alias-map))
+					(define new-right (qpp-rebuild-tuple
+						(qpp-tuple-schema rewritten-right)
+						(merge domain-tables (qpp-tuple-tables rewritten-right))
+						(qpp-tuple-fields rewritten-right)
+						(qpu-low-and-cond
+							(qpp-tuple-condition rewritten-right)
+							rewritten-join-pred)
+						(qpp-tuple-group rewritten-right)
+						(qpp-tuple-having rewritten-right)
+						(qpp-tuple-order rewritten-right)
+						(qpp-tuple-limit rewritten-right)
+						(qpp-tuple-offset rewritten-right)))
 				(list new-right
 					(qpu-low-and-cond join-pred
 						(qpu-low-domain-equality-predicate external-refs alias-map))))))))
@@ -2593,7 +2634,7 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 						1 1))
 				(if scalar-no-limit-candidate
 					(if (> (count right-kt-inner-cols) 0)
-						(qpu-low-add-scalar-once-marker
+							(qpu-low-add-scalar-once-marker
 							(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
 						(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
 					right-tuple-keys-limited)))
