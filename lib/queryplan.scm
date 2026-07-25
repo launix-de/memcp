@@ -52,7 +52,9 @@ Every query must compile within the context budget of 1000ms.
 			(if (not (nil? found))
 				found
 				(match entry
-					'(k value) (if (equal? k key) value nil)
+					(cons k rest) (if (equal? k key)
+						(if (equal? (count rest) 1) (car rest) rest)
+						nil)
 					nil)))
 			nil)
 		default)))
@@ -60,7 +62,7 @@ Every query must compile within the context budget of 1000ms.
 (define qassoc_set (lambda (xs key value)
 	(cons (list key value)
 		(filter (coalesceNil xs '()) (lambda (entry) (match entry
-			'(k _) (not (equal? k key))
+			(cons k _) (not (equal? k key))
 			true))))))
 
 (define qnode (lambda (op id attrs children facts)
@@ -359,9 +361,35 @@ the compile-budget-ms requirement.
 /* ------------------------------------------------------------------------- */
 /* build_queryplan                                                            */
 
-(define build_queryplan (lambda (ir)
+(define build_resultrow_expr (lambda (fields)
+	(list (quote resultrow)
+		(cons (quote list)
+			(reduce_assoc (coalesceNil fields '()) (lambda (acc key expr)
+				(merge acc (list key expr)))
+				'())))))
+
+(define lower_project_empty_row (lambda (project_node child)
+	(match (qop child)
+		(quote empty-row) (build_resultrow_expr (qattr project_node (quote output-fields) '()))
+		(quote select) (begin
+			(define grandchild (car (qchildren child)))
+			(if (equal? (qop grandchild) (quote empty-row))
+				(list (quote if)
+					(qattr child (quote predicate) true)
+					(build_resultrow_expr (qattr project_node (quote output-fields) '()))
+					nil)
+				(neumann_fail "build_queryplan" "project/select lowerer only supports empty-row input yet")))
+		_ (neumann_fail "build_queryplan" "project lowerer only supports empty-row input yet"))))
+
+(define lower_qnode (lambda (node) (match (qop node)
+	(quote project) (match (qchildren node)
+		(cons child '()) (lower_project_empty_row node child)
+		_ (neumann_fail "build_queryplan" "project expects one child"))
+	_ (neumann_fail "build_queryplan" (concat "operator not ported yet: " (qop node))))))
+
+(define build_queryplan (lambda (ir) (begin
 	(require_unnested_ir "build_queryplan input" ir)
-	(neumann_fail "build_queryplan" "physical lowering not ported yet")))
+	(lower_qnode (ir_root ir)))))
 
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan

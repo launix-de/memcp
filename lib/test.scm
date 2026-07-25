@@ -180,6 +180,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (ir_hidden_fields simple_ir) '()) true "untangle_query keeps hidden/domain fields separate")
 	(assert (equal? (ir_context_get (ir_context_of simple_ir) 'compile-budget-ms nil) 1000) true "untangle_query carries compile budget in context")
 	(assert (equal? (join_reorder simple_ir) simple_ir) true "join_reorder is an IR-only phase")
+	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
+	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
+		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
 	(define subquery_contract (newsession))
 	(try (lambda () (untangle_query_term
 		(list "memcp-tests" '()
