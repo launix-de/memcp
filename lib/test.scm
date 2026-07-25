@@ -183,6 +183,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
+	(define scalar_no_from_ast (list "memcp-tests" '()
+		(list "x" (list 'inner_select no_from_select_ast)
+			"in_ok" (list 'inner_select_in 8 no_from_select_ast)
+			"exists_ok" (list 'inner_select_exists no_from_select_ast))
+		true nil nil nil nil nil))
+	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
+	(assert (equal? (serialize (build_queryplan_term scalar_no_from_ast))
+		"(resultrow '(\"x\" 8 \"in_ok\" (and true (equal?? 8 8)) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
 	(define subquery_contract (newsession))
 	(try (lambda () (untangle_query_term
 		(list "memcp-tests" '()
@@ -190,7 +198,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			true nil nil nil nil nil)
 		nil))
 		(lambda (e) (subquery_contract "blocked" true)))
-	(assert (subquery_contract "blocked") true "untangle_query rejects subqueries until Neumann unnesting is ported")
+	(assert (subquery_contract "blocked") true "untangle_query keeps table-backed scalar subqueries fail-fast until depjoin unnesting is ported")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))

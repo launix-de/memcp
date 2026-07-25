@@ -334,13 +334,92 @@ the compile-budget-ms requirement.
 /* ------------------------------------------------------------------------- */
 /* untangle_query                                                             */
 
+(define select_ast_zero_domain? (lambda (subquery) (match subquery
+	'(_schema tables _fields _condition group having order _limit _offset)
+	(and
+		(equal? (coalesceNil tables '()) '())
+		(equal? (coalesceNil group '()) '())
+		(nil? having)
+		(equal? (coalesceNil order '()) '()))
+	false)))
+
+(define select_ast_single_expr (lambda (subquery) (match subquery
+	'(_schema _tables fields _condition _group _having _order _limit _offset)
+	(match fields
+		(cons _key (cons expr '())) expr
+		_ (neumann_fail "untangle_query" "scalar subquery must project exactly one field"))
+	_ (neumann_fail "untangle_query" "malformed scalar subquery"))))
+
+(define select_ast_condition (lambda (subquery) (match subquery
+	'(_schema _tables _fields condition _group _having _order _limit _offset)
+	(coalesceNil condition true)
+	_ (neumann_fail "untangle_query" "malformed scalar subquery"))))
+
+(define untangle_zero_domain_scalar (lambda (subquery)
+	(if (select_ast_zero_domain? subquery)
+		(begin
+			(define condition (untangle_expr_subqueries (select_ast_condition subquery)))
+			(define expr (untangle_expr_subqueries (select_ast_single_expr subquery)))
+			(if (equal? condition true)
+				expr
+				(list (quote if) condition expr nil)))
+		(neumann_fail "untangle_query" "correlated scalar subquery unnesting not ported yet"))))
+
+(define untangle_zero_domain_exists (lambda (subquery)
+	(if (select_ast_zero_domain? subquery)
+		(untangle_expr_subqueries (select_ast_condition subquery))
+		(neumann_fail "untangle_query" "correlated EXISTS unnesting not ported yet"))))
+
+(define untangle_zero_domain_in (lambda (value subquery)
+	(if (select_ast_zero_domain? subquery)
+		(begin
+			(define condition (untangle_expr_subqueries (select_ast_condition subquery)))
+			(define expr (untangle_expr_subqueries (select_ast_single_expr subquery)))
+			(list (quote and)
+				condition
+				(list (quote equal??)
+					(untangle_expr_subqueries value)
+					expr)))
+		(neumann_fail "untangle_query" "correlated IN subquery unnesting not ported yet"))))
+
+(define untangle_expr_subqueries (lambda (expr) (match expr
+	(cons sym args)
+	(if (inner_select_head? sym)
+		(match sym
+			(quote inner_select) (match args
+				(cons subquery '()) (untangle_zero_domain_scalar subquery)
+				_ (neumann_fail "untangle_query" "malformed scalar subquery"))
+			(quote inner_select_exists) (match args
+				(cons subquery '()) (untangle_zero_domain_exists subquery)
+				_ (neumann_fail "untangle_query" "malformed EXISTS subquery"))
+			(quote inner_select_in) (match args
+				'(value subquery) (untangle_zero_domain_in value subquery)
+				_ (neumann_fail "untangle_query" "malformed IN subquery"))
+			_ (neumann_fail "untangle_query" "unknown expression subquery form"))
+		(cons (untangle_expr_subqueries sym)
+			(map args untangle_expr_subqueries)))
+	expr)))
+
+(define untangle_fields_subqueries (lambda (fields)
+	(map_assoc (coalesceNil fields '()) (lambda (_key expr)
+		(untangle_expr_subqueries expr)))))
+
+(define untangle_order_subqueries (lambda (order)
+	(map (coalesceNil order '()) (lambda (item) (match item
+		'(expr dir) (list (untangle_expr_subqueries expr) dir)
+		item)))))
+
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas) (begin
 	(define ctx (initial_uctx outer_schemas))
-	(define root (parser_select_to_initial_dag schema tables fields condition group having order limit offset))
+	(define root (parser_select_to_initial_dag schema tables
+		(untangle_fields_subqueries fields)
+		(untangle_expr_subqueries (coalesceNil condition true))
+		(map (coalesceNil group '()) untangle_expr_subqueries)
+		(if (nil? having) nil (untangle_expr_subqueries having))
+		(untangle_order_subqueries order)
+		limit offset))
 	(define ir (qir (quote select) schema root (quote rows) ctx '()))
-	(if (expr_contains_subquery? ir)
-		(neumann_fail "untangle_query" "expression subquery unnesting not ported yet")
-		(require_unnested_ir "untangle_query" ir)))))
+	(require_unnested_ir "untangle_query" ir))))
 
 (define untangle_dml (lambda (kind schema target_table target_alias tables fields condition order limit offset)
 	(ir_with_return
