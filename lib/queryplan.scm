@@ -23,92 +23,154 @@ The only legal planner pipeline is:
 
 	parser AST -> untangle_query -> join_reorder -> build_queryplan
 
-untangle_query is the Neumann/Kemper unnesting compiler.  It owns arbitrary
-subqueries, including scalar subqueries, IN/EXISTS, nested dependent joins and
-FROM (SELECT ...).  Its result must be a flat relational IR.  It must never emit
-physical runtime scans, promises, materialized subquery sources, or scalar
-fallback code.
+The compiler IR is structured, not flat, but deliberately compact:
 
-join_reorder may only reorder an already-flat IR.
+	(qnode op id attrs children facts)
 
-build_queryplan may only lower an already-flat, ordered IR to executable Scheme.
-If build_queryplan ever sees subquery semantics, untangle_query is incomplete.
+The operator tree/DAG keeps the semantic boundaries needed by Neumann/BTW2025
+without copying whole query states through every pass.  Children are shared.
+Passes must return the same node when nothing changed and allocate only along
+the modified path.  A later physical emitter may produce a flat low-allocation
+execution plan; the logical compiler must not flatten away the algebra.
 
-The previous master planner and the topdown-cleanup worktree remain quarry via
-git/worktree history.  No legacy implementation is kept in this file.
+untangle_query owns arbitrary subqueries, including scalar subqueries,
+IN/EXISTS, nested dependent joins and FROM (SELECT ...).  During untangling the
+DAG may contain depjoin and derived nodes; before it leaves untangle_query all
+dependent joins and derived-table boundaries must be eliminated or made
+relational.  It must never emit runtime scans, promises, materialized subquery
+sources, or scalar fallback code.
+
+Every query must compile within the context budget of 1000ms.
 */
 
 /* ------------------------------------------------------------------------- */
-/* IR                                                                         */
+/* Assoc and compact node helpers                                             */
+
+(define qassoc_get (lambda (xs key default)
+	(coalesceNil
+		(reduce (coalesceNil xs '()) (lambda (found entry)
+			(if (not (nil? found))
+				found
+				(match entry
+					'(k value) (if (equal? k key) value nil)
+					nil)))
+			nil)
+		default)))
+
+(define qassoc_set (lambda (xs key value)
+	(cons (list key value)
+		(filter (coalesceNil xs '()) (lambda (entry) (match entry
+			'(k _) (not (equal? k key))
+			true))))))
+
+(define qnode (lambda (op id attrs children facts)
+	(list (quote qnode)
+		op
+		id
+		(coalesceNil attrs '())
+		(coalesceNil children '())
+		(coalesceNil facts '()))))
+
+(define qop (lambda (node) (nth node 1)))
+(define qid (lambda (node) (nth node 2)))
+(define qattrs (lambda (node) (nth node 3)))
+(define qchildren (lambda (node) (nth node 4)))
+(define qfacts (lambda (node) (nth node 5)))
+(define qattr (lambda (node key default) (qassoc_get (qattrs node) key default)))
+(define qfact (lambda (node key default) (qassoc_get (qfacts node) key default)))
+
+(define qnode_with_attrs (lambda (node attrs)
+	(if (equal? attrs (qattrs node))
+		node
+		(qnode (qop node) (qid node) attrs (qchildren node) (qfacts node)))))
+
+(define qnode_with_children (lambda (node children)
+	(if (equal? children (qchildren node))
+		node
+		(qnode (qop node) (qid node) (qattrs node) children (qfacts node)))))
+
+(define qnode_with_facts (lambda (node facts)
+	(if (equal? facts (qfacts node))
+		node
+		(qnode (qop node) (qid node) (qattrs node) (qchildren node) facts))))
+
+/* ------------------------------------------------------------------------- */
+/* Query and unnesting context                                                */
 
 /*
-Canonical query IR:
+Query:
+	(qir kind schema root return context facts)
 
-(neumann-query
-	(kind select|update|delete|insert)
-	(schema schema-name)
-	(sources ((alias schema source join-kind join-condition) ...))
-	(fields ("name" expr ...))
-	(predicate expr)
-	(stages (stage ...))
-	(return return-mode)
-	(metadata assoc))
+Context is a shared chain.  Scope changes cons a new context node instead of
+copying all maps:
+	(uctx parent attrs)
 
-source is either a physical table name or a future logical operator produced by
-FROM-subquery flattening.  It is never a runtime materialized-subquery handle.
-
-Subquery unnesting adds relational sources/stages:
-- dependent joins become ordinary joins plus domain columns D
-- scalar cardinality becomes a relational cardinality stage, not a promise
-- IN/EXISTS become semi/anti relational operators or aggregate stages
-- GROUP/HAVING/ORDER/LIMIT become explicit stages
+attrs contains deltas for outer-refs, cclasses, repr, domain, shared-roots and
+the compile-budget-ms requirement.
 */
 
-(define ir_query (lambda (kind schema sources fields predicate stages return metadata)
-	(list (quote neumann-query)
-		(list (quote kind) kind)
-		(list (quote schema) schema)
-		(list (quote sources) (coalesceNil sources '()))
-		(list (quote fields) (coalesceNil fields '()))
-		(list (quote predicate) (coalesceNil predicate true))
-		(list (quote stages) (coalesceNil stages '()))
-		(list (quote return) return)
-		(list (quote metadata) (coalesceNil metadata '())))))
+(define uctx (lambda (parent attrs)
+	(list (quote uctx) parent (coalesceNil attrs '()))))
+(define uctx_parent (lambda (ctx) (nth ctx 1)))
+(define uctx_attrs (lambda (ctx) (nth ctx 2)))
+(define uctx_attr (lambda (ctx key default)
+	(coalesceNil
+		(qassoc_get (uctx_attrs ctx) key nil)
+		(if (nil? (uctx_parent ctx))
+			default
+			(uctx_attr (uctx_parent ctx) key default)))))
+(define initial_uctx (lambda (outer_schemas)
+	(uctx nil
+		(list
+			(list (quote outer-refs) (coalesceNil outer_schemas '()))
+			(list (quote cclasses) '())
+			(list (quote repr) '())
+			(list (quote domain) '())
+			(list (quote shared-roots) '())
+			(list (quote compile-budget-ms) 1000)))))
 
-(define ir_get (lambda (ir key default)
-	(coalesceNil (get_assoc (cdr ir) key) default)))
+(define qir (lambda (kind schema root return context facts)
+	(list (quote qir)
+		kind
+		schema
+		root
+		return
+		context
+		(coalesceNil facts '()))))
+(define ir_kind (lambda (ir) (nth ir 1)))
+(define ir_schema (lambda (ir) (nth ir 2)))
+(define ir_root (lambda (ir) (nth ir 3)))
+(define ir_return (lambda (ir) (nth ir 4)))
+(define ir_context_of (lambda (ir) (nth ir 5)))
+(define ir_facts (lambda (ir) (nth ir 6)))
+(define ir_with_return (lambda (ir return)
+	(if (equal? return (ir_return ir))
+		ir
+		(qir (ir_kind ir) (ir_schema ir) (ir_root ir) return (ir_context_of ir) (ir_facts ir)))))
 
-(define ir_with (lambda (ir key value)
-	(cons (car ir)
-		(cons (list key value)
-			(filter (cdr ir) (lambda (entry) (match entry
-				'(k _) (not (equal? k key))
-				true)))))))
-
-(define ir_kind (lambda (ir) (ir_get ir (quote kind) nil)))
-(define ir_schema (lambda (ir) (ir_get ir (quote schema) nil)))
-(define ir_sources (lambda (ir) (ir_get ir (quote sources) '())))
-(define ir_fields (lambda (ir) (ir_get ir (quote fields) '())))
-(define ir_predicate (lambda (ir) (ir_get ir (quote predicate) true)))
-(define ir_stages (lambda (ir) (ir_get ir (quote stages) '())))
-(define ir_return (lambda (ir) (ir_get ir (quote return) nil)))
-(define ir_metadata (lambda (ir) (ir_get ir (quote metadata) '())))
-
-(define ir_stage (lambda (kind keys payload metadata)
-	(list (quote neumann-stage)
-		(list (quote kind) kind)
-		(list (quote keys) (coalesceNil keys '()))
-		(list (quote payload) (coalesceNil payload '()))
-		(list (quote metadata) (coalesceNil metadata '())))))
-
-(define ir_source (lambda (alias schema source join_kind join_condition)
-	(list alias schema source join_kind (coalesceNil join_condition true))))
+/* Compatibility accessors used only by rebuild tests. */
+(define ir_sources (lambda (ir) (collect_qnodes_by_op (ir_root ir) (quote scan))))
+(define ir_output_fields (lambda (ir) (qattr (ir_root ir) (quote output-fields) '())))
+(define ir_hidden_fields (lambda (ir) (qattr (ir_root ir) (quote hidden-fields) '())))
+(define ir_context_get (lambda (ctx key default) (uctx_attr ctx key default)))
 
 /* ------------------------------------------------------------------------- */
-/* Subquery/fallback guards                                                   */
+/* Traversal and invariants                                                   */
 
-(define neumann_fail (lambda (where detail)
-	(error (concat "NEUMANN_REBUILD_UNIMPLEMENTED: " where ": " detail))))
+(define collect_qnodes_by_op (lambda (node op)
+	(if (nil? node)
+		'()
+		(merge
+			(if (equal? (qop node) op) (list node) '())
+			(merge (map (qchildren node) (lambda (child)
+				(collect_qnodes_by_op child op))))))))
+
+(define qnode_has_op? (lambda (node ops)
+	(or
+		(has? ops (qop node))
+		(reduce (qchildren node) (lambda (found child)
+			(or found (qnode_has_op? child ops)))
+			false))))
 
 (define inner_select_head? (lambda (sym)
 	(or
@@ -132,94 +194,156 @@ Subquery unnesting adds relational sources/stages:
 			false))
 	false)))
 
-(define table_desc_contains_from_subquery? (lambda (td) (match td
-	'(_ _ (string? _) _ _) false
-	'(_ _ _ _ _) true
-	false)))
-
-(define select_ast_contains_subquery? (lambda (tables fields condition group having order)
+(define qnode_contains_subquery_expr? (lambda (node)
 	(or
-		(reduce (coalesceNil tables '()) (lambda (found td)
-			(or found (table_desc_contains_from_subquery? td)))
-			false)
-		(reduce_assoc (coalesceNil fields '()) (lambda (found _key expr)
-			(or found (expr_contains_subquery? expr)))
-			false)
-		(expr_contains_subquery? condition)
-		(reduce (coalesceNil group '()) (lambda (found expr)
-			(or found (expr_contains_subquery? expr)))
-			false)
-		(expr_contains_subquery? having)
-		(reduce (coalesceNil order '()) (lambda (found item)
-			(or found (expr_contains_subquery? item)))
+		(expr_contains_subquery? (qattrs node))
+		(expr_contains_subquery? (qfacts node))
+		(reduce (qchildren node) (lambda (found child)
+			(or found (qnode_contains_subquery_expr? child)))
 			false))))
 
-(define ir_contains_forbidden_subquery? (lambda (ir)
-	(or
-		(reduce (ir_sources ir) (lambda (found source)
-			(or found (table_desc_contains_from_subquery? source)))
-			false)
-		(reduce_assoc (ir_fields ir) (lambda (found _key expr)
-			(or found (expr_contains_subquery? expr)))
-			false)
-		(expr_contains_subquery? (ir_predicate ir))
-		(reduce (ir_stages ir) (lambda (found stage)
-			(or found (expr_contains_subquery? stage)))
-			false))))
-
-(define require_flat_ir (lambda (where ir)
-	(if (ir_contains_forbidden_subquery? ir)
-		(error (concat "NEUMANN_INVARIANT_BROKEN: " where " produced subquery-bearing IR"))
+(define require_unnested_ir (lambda (where ir)
+	(if (or
+		(qnode_has_op? (ir_root ir) '(depjoin derived))
+		(qnode_contains_subquery_expr? (ir_root ir)))
+		(error (concat "NEUMANN_INVARIANT_BROKEN: " where " produced non-unnested IR"))
 		ir)))
+
+(define neumann_fail (lambda (where detail)
+	(error (concat "NEUMANN_REBUILD_UNIMPLEMENTED: " where ": " detail))))
+
+/* ------------------------------------------------------------------------- */
+/* Parser AST -> initial operator DAG                                         */
+
+(define ast_scan_node (lambda (alias schema tbl is_outer join_expr)
+	(qnode (quote scan) alias
+		(list
+			(list (quote schema) schema)
+			(list (quote table) tbl)
+			(list (quote join-predicate) (coalesceNil join_expr true)))
+		'()
+		(list
+			(list (quote aliases) (list alias))
+			(list (quote null-preserving) is_outer)
+			(list (quote projected-columns) '())
+			(list (quote hidden-domain-columns) '())
+			(list (quote unique-keys) '())
+			(list (quote cardinality) (quote unknown))
+			(list (quote lineage) (list schema tbl))))))
+
+(define ast_derived_node (lambda (alias schema subquery is_outer join_expr)
+	(qnode (quote derived) alias
+		(list
+			(list (quote schema) schema)
+			(list (quote subquery-ast) subquery)
+			(list (quote join-predicate) (coalesceNil join_expr true)))
+		'()
+		(list
+			(list (quote aliases) (list alias))
+			(list (quote null-preserving) is_outer)
+			(list (quote projected-columns) '())
+			(list (quote hidden-domain-columns) '())
+			(list (quote unique-keys) '())
+			(list (quote cardinality) (quote unknown))
+			(list (quote lineage) (list (quote derived) alias))))))
+
+(define ast_table_node (lambda (td) (match td
+	'(alias schema (string? tbl) is_outer join_expr)
+	(ast_scan_node alias schema tbl is_outer join_expr)
+	'(alias schema subquery is_outer join_expr)
+	(ast_derived_node alias schema subquery is_outer join_expr)
+	_ (neumann_fail "untangle_query" "unknown parser table descriptor"))))
+
+(define join_two_nodes (lambda (left right) (begin
+	(define right_attrs (qattrs right))
+	(define right_facts (qfacts right))
+	(define is_outer (qassoc_get right_facts (quote null-preserving) false))
+	(qnode (quote join)
+		(concat "join:" (qid left) ":" (qid right))
+		(list
+			(list (quote join-kind) (if is_outer (quote left) (quote inner)))
+			(list (quote predicate) (qassoc_get right_attrs (quote join-predicate) true))
+			(list (quote preserves) (if is_outer (list (qid left)) '())))
+		(list left right)
+		(list
+			(list (quote aliases) (merge (qfact left (quote aliases) '()) (qfact right (quote aliases) '())))
+			(list (quote hidden-domain-columns) '())
+			(list (quote unique-keys) '())
+			(list (quote cardinality) (quote unknown)))))))
+
+(define join_table_nodes (lambda (nodes)
+	(match nodes
+		'() (qnode (quote empty-row) "empty-row" '() '()
+			(list
+				(list (quote aliases) '())
+				(list (quote cardinality) 1)
+				(list (quote unique-keys) '())))
+		(cons first rest)
+		(reduce rest (lambda (left right) (join_two_nodes left right)) first))))
+
+(define attach_select_node (lambda (root predicate)
+	(if (or (nil? predicate) (equal? predicate true))
+		root
+		(qnode (quote select) (concat "select:" (qid root))
+			(list (list (quote predicate) predicate))
+			(list root)
+			(qfacts root)))))
+
+(define attach_group_node (lambda (root group having)
+	(if (and (equal? (coalesceNil group '()) '()) (nil? having))
+		root
+		(qnode (quote group) (concat "group:" (qid root))
+			(list
+				(list (quote keys) (coalesceNil group '()))
+				(list (quote having) having))
+			(list root)
+			(qassoc_set (qfacts root) (quote cardinality) (quote unknown))))))
+
+(define attach_order_limit_node (lambda (root order limit offset)
+	(if (and (equal? (coalesceNil order '()) '()) (nil? limit) (nil? offset))
+		root
+		(qnode (quote order_limit) (concat "order_limit:" (qid root))
+			(list
+				(list (quote order) (coalesceNil order '()))
+				(list (quote limit) limit)
+				(list (quote offset) offset))
+			(list root)
+			(qfacts root)))))
+
+(define attach_project_node (lambda (root fields hidden_fields)
+	(qnode (quote project) (concat "project:" (qid root))
+		(list
+			(list (quote output-fields) (coalesceNil fields '()))
+			(list (quote hidden-fields) (coalesceNil hidden_fields '())))
+		(list root)
+		(qfacts root))))
+
+(define parser_select_to_initial_dag (lambda (schema tables fields condition group having order limit offset)
+	(attach_project_node
+		(attach_order_limit_node
+			(attach_group_node
+				(attach_select_node
+					(join_table_nodes (map (coalesceNil tables '()) ast_table_node))
+					(coalesceNil condition true))
+				group having)
+			order limit offset)
+		fields '())))
 
 /* ------------------------------------------------------------------------- */
 /* untangle_query                                                             */
 
-(define select_sources_from_parser_tables (lambda (tables)
-	(map (coalesceNil tables '()) (lambda (td) (match td
-		'(alias schema (string? tbl) is_outer join_expr)
-		(ir_source alias schema tbl
-			(if is_outer (quote left) (quote inner))
-			join_expr)
-		_ (neumann_fail "untangle_query" "FROM-subquery flattening not ported yet"))))))
-
-(define select_stages_from_parser_clauses (lambda (group having order limit offset)
-	(if (or
-		(not (equal? (coalesceNil group '()) '()))
-		(not (nil? having))
-		(not (equal? (coalesceNil order '()) '()))
-		(not (nil? limit))
-		(not (nil? offset)))
-		(list (ir_stage (quote select-stage) (coalesceNil group '())
-			(list
-				(list (quote having) having)
-				(list (quote order) (coalesceNil order '()))
-				(list (quote limit) limit)
-				(list (quote offset) offset))
-			'()))
-		'())))
-
-(define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas)
-	(if (select_ast_contains_subquery? tables fields condition group having order)
-		(neumann_fail "untangle_query" "Neumann arbitrary-query unnesting not ported yet")
-		(require_flat_ir "untangle_query"
-			(ir_query
-				(quote select)
-				schema
-				(select_sources_from_parser_tables tables)
-				fields
-				(coalesceNil condition true)
-				(select_stages_from_parser_clauses group having order limit offset)
-				(quote rows)
-				(list
-					(list (quote outer-schemas) (coalesceNil outer_schemas '()))))))))
+(define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas) (begin
+	(define ctx (initial_uctx outer_schemas))
+	(define root (parser_select_to_initial_dag schema tables fields condition group having order limit offset))
+	(define ir (qir (quote select) schema root (quote rows) ctx '()))
+	(if (expr_contains_subquery? ir)
+		(neumann_fail "untangle_query" "expression subquery unnesting not ported yet")
+		(require_unnested_ir "untangle_query" ir)))))
 
 (define untangle_dml (lambda (kind schema target_table target_alias tables fields condition order limit offset)
-	(require_flat_ir "untangle_dml"
-		(ir_with
-			(untangle_query schema tables fields condition nil nil order limit offset nil)
-			(quote return)
-			(list kind target_table target_alias fields)))))
+	(ir_with_return
+		(untangle_query schema tables fields condition nil nil order limit offset nil)
+		(list kind target_table target_alias fields))))
 
 (define untangle_query_term (lambda (query outer_schemas) (match query
 	'(schema tables fields condition group having order limit offset)
@@ -230,13 +354,13 @@ Subquery unnesting adds relational sources/stages:
 /* reorder                                                                    */
 
 (define join_reorder (lambda (ir)
-	(require_flat_ir "join_reorder" ir)))
+	(require_unnested_ir "join_reorder" ir)))
 
 /* ------------------------------------------------------------------------- */
 /* build_queryplan                                                            */
 
 (define build_queryplan (lambda (ir)
-	(require_flat_ir "build_queryplan input" ir)
+	(require_unnested_ir "build_queryplan input" ir)
 	(neumann_fail "build_queryplan" "physical lowering not ported yet")))
 
 (define neumann_compile_pipeline (lambda (ast)
@@ -256,14 +380,14 @@ Subquery unnesting adds relational sources/stages:
 
 (define build_queryplan_term_with_sink (lambda (query sink_mode)
 	(neumann_compile_ir_pipeline
-		(ir_with (untangle_query_term query nil) (quote return) sink_mode))))
+		(ir_with_return (untangle_query_term query nil) sink_mode))))
 
 (define build_queryplan_term_from_logical (lambda (logical_ir)
 	(neumann_compile_ir_pipeline logical_ir)))
 
 (define build_queryplan_term_from_logical_with_sink (lambda (logical_ir sink_mode)
 	(neumann_compile_ir_pipeline
-		(ir_with logical_ir (quote return) sink_mode))))
+		(ir_with_return logical_ir sink_mode))))
 
 (define build_dml_plan (lambda (schema tbl tblalias all_defs cols condition order limit offset)
 	(neumann_compile_ir_pipeline
