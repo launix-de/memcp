@@ -2107,6 +2107,22 @@ func Init(en scm.Env) {
 					for _, uk := range t.Unique {
 						for seq, col := range uk.Cols {
 							result = append(result, scm.NewSlice([]scm.Scmer{
+								scm.NewString("TABLE_CATALOG"), scm.NewString("def"),
+								scm.NewString("TABLE_SCHEMA"), scm.NewString(db.Name),
+								scm.NewString("TABLE_NAME"), scm.NewString(t.Name),
+								scm.NewString("NON_UNIQUE"), scm.NewInt(0),
+								scm.NewString("INDEX_SCHEMA"), scm.NewString(db.Name),
+								scm.NewString("INDEX_NAME"), scm.NewString(uk.Id),
+								scm.NewString("SEQ_IN_INDEX"), scm.NewInt(int64(seq + 1)),
+								scm.NewString("COLUMN_NAME"), scm.NewString(col),
+								scm.NewString("COLLATION"), scm.NewString("A"),
+								scm.NewString("CARDINALITY"), scm.NewNil(),
+								scm.NewString("SUB_PART"), scm.NewNil(),
+								scm.NewString("PACKED"), scm.NewNil(),
+								scm.NewString("NULLABLE"), scm.NewString(""),
+								scm.NewString("INDEX_TYPE"), scm.NewString("BTREE"),
+								scm.NewString("COMMENT"), scm.NewString(""),
+								scm.NewString("INDEX_COMMENT"), scm.NewString(""),
 								scm.NewString("table_catalog"), scm.NewString("def"),
 								scm.NewString("table_schema"), scm.NewString(db.Name),
 								scm.NewString("table_name"), scm.NewString(t.Name),

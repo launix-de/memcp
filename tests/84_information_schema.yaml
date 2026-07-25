@@ -87,6 +87,11 @@ test_cases:
     expect:
       min_rows: 0
 
+  - name: "STATISTICS: uppercase index columns used by dbcheck migrations"
+    sql: "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = 'memcp-tests' AND TABLE_NAME = 'is_test_tbl' ORDER BY INDEX_NAME, COLUMN_NAME LIMIT 5"
+    expect:
+      min_rows: 1
+
   # --- KEY_COLUMN_USAGE ---
 
   - name: "KEY_COLUMN_USAGE: query returns without error"
