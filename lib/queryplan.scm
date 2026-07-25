@@ -86,15 +86,27 @@ Every query must compile within the context budget of 1000ms.
 		node
 		(qnode (qop node) (qid node) attrs (qchildren node) (qfacts node)))))
 
+(define qnode_with_attr (lambda (node key value)
+	(qnode_with_attrs node (qassoc_set (qattrs node) key value))))
+
 (define qnode_with_children (lambda (node children)
 	(if (equal? children (qchildren node))
 		node
 		(qnode (qop node) (qid node) (qattrs node) children (qfacts node)))))
 
+(define qnode_map_children (lambda (node fn)
+	(begin
+		(define children (qchildren node))
+		(define rewritten (map children fn))
+		(qnode_with_children node rewritten))))
+
 (define qnode_with_facts (lambda (node facts)
 	(if (equal? facts (qfacts node))
 		node
 		(qnode (qop node) (qid node) (qattrs node) (qchildren node) facts))))
+
+(define qnode_with_fact (lambda (node key value)
+	(qnode_with_facts node (qassoc_set (qfacts node) key value))))
 
 /* ------------------------------------------------------------------------- */
 /* Query and unnesting context                                                */
@@ -385,17 +397,28 @@ the compile-budget-ms requirement.
 		(nil? offset))
 	false)))
 
+(define field_lookup (lambda (fields col ignorecase)
+	(begin
+		(define exact (get_assoc fields col))
+		(if (or (not (nil? exact)) (not ignorecase))
+			exact
+			(reduce_assoc (coalesceNil fields '()) (lambda (found key expr)
+				(if (not (nil? found))
+					found
+					(if (equal?? key col) expr nil)))
+				nil)))))
+
 (define rewrite_derived_expr (lambda (expr derived_aliases) (match expr
 	'((symbol get_column) tbl ti col ci) (begin
 		(define fields (if (nil? tbl)
 			(if (equal? (count derived_aliases) 1) (cadr (car derived_aliases)) nil)
 			(qassoc_get derived_aliases tbl nil)))
-		(coalesceNil (get_assoc fields col) expr))
+		(coalesceNil (field_lookup fields col ci) expr))
 	'((quote get_column) tbl ti col ci) (begin
 		(define fields (if (nil? tbl)
 			(if (equal? (count derived_aliases) 1) (cadr (car derived_aliases)) nil)
 			(qassoc_get derived_aliases tbl nil)))
-		(coalesceNil (get_assoc fields col) expr))
+		(coalesceNil (field_lookup fields col ci) expr))
 	(cons sym args)
 	(cons (rewrite_derived_expr sym derived_aliases)
 		(map args (lambda (arg) (rewrite_derived_expr arg derived_aliases))))
@@ -723,76 +746,104 @@ the compile-budget-ms requirement.
 (define dedupe_list (lambda (xs)
 	(reduce (coalesceNil xs '()) (lambda (acc item)
 		(append_unique acc item))
-		'())))
-
-(define scan_expr_columns (lambda (expr alias) (match expr
-	'((symbol get_column) tbl _ col _) (if (or (nil? tbl) (equal?? tbl alias)) (list col) '())
-	'((quote get_column) tbl _ col _) (if (or (nil? tbl) (equal?? tbl alias)) (list col) '())
-	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (scan_expr_columns arg alias)))))
 	'())))
 
-(define scan_fields_columns (lambda (fields alias)
-	(dedupe_list (merge (extract_assoc (coalesceNil fields '()) (lambda (_key expr)
-		(scan_expr_columns expr alias)))))))
+(define scan_schema_columns (lambda (scan_node)
+	(coalesceNil
+		(qfact scan_node (quote schema-columns) nil)
+		(map (show (qattr scan_node (quote schema) nil) (qattr scan_node (quote table) nil))
+			(lambda (coldef) (coldef "Field"))))))
 
-(define lower_scan_expr (lambda (expr alias) (match expr
-	'((symbol get_column) tbl _ col _) (if (or (nil? tbl) (equal?? tbl alias))
-		(symbol (concat alias "." col))
+(define canonical_scan_col (lambda (scan_node col ignorecase)
+	(if (or (nil? col) (not ignorecase))
+		col
+		(coalesceNil
+			(reduce (scan_schema_columns scan_node) (lambda (found candidate)
+				(if (not (nil? found))
+					found
+					(if (equal?? candidate col) candidate nil)))
+				nil)
+			col))))
+
+(define scan_expr_columns (lambda (expr scan_node) (match expr
+	'((symbol get_column) tbl _ col ci) (if (or (nil? tbl) (equal?? tbl (qid scan_node)))
+		(list (canonical_scan_col scan_node col ci))
+		'())
+	'((quote get_column) tbl _ col ci) (if (or (nil? tbl) (equal?? tbl (qid scan_node)))
+		(list (canonical_scan_col scan_node col ci))
+		'())
+	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (scan_expr_columns arg scan_node)))))
+	'())))
+
+(define scan_fields_columns (lambda (fields scan_node)
+	(dedupe_list (merge (extract_assoc (coalesceNil fields '()) (lambda (_key expr)
+		(scan_expr_columns expr scan_node)))))))
+
+(define lower_scan_expr (lambda (expr scan_node) (match expr
+	'((symbol get_column) tbl _ col ci) (if (or (nil? tbl) (equal?? tbl (qid scan_node)))
+		(symbol (concat (qid scan_node) "." (canonical_scan_col scan_node col ci)))
 		expr)
-	'((quote get_column) tbl _ col _) (if (or (nil? tbl) (equal?? tbl alias))
-		(symbol (concat alias "." col))
+	'((quote get_column) tbl _ col ci) (if (or (nil? tbl) (equal?? tbl (qid scan_node)))
+		(symbol (concat (qid scan_node) "." (canonical_scan_col scan_node col ci)))
 		expr)
-	(cons sym args) (cons sym (map args (lambda (arg) (lower_scan_expr arg alias))))
+	(cons sym args) (cons sym (map args (lambda (arg) (lower_scan_expr arg scan_node))))
 	expr)))
 
-(define lower_scan_fields (lambda (fields alias)
+(define lower_scan_fields (lambda (fields scan_node)
 	(map_assoc (coalesceNil fields '()) (lambda (key expr)
-		(lower_scan_expr expr alias)))))
+		(lower_scan_expr expr scan_node)))))
 
-(define lower_expr_for_aliases (lambda (expr aliases) (match expr
-	'((symbol get_column) tbl _ col _) (if (nil? tbl)
-		(if (equal? (count aliases) 1)
-			(symbol (concat (car aliases) "." col))
-			(symbol (concat (car aliases) "." col)))
-		(if (contains? aliases tbl)
-			(symbol (concat tbl "." col))
-			expr))
-	'((quote get_column) tbl _ col _) (if (nil? tbl)
-		(if (equal? (count aliases) 1)
-			(symbol (concat (car aliases) "." col))
-			(symbol (concat (car aliases) "." col)))
-		(if (contains? aliases tbl)
-			(symbol (concat tbl "." col))
-			expr))
-	(cons sym args) (cons sym (map args (lambda (arg) (lower_expr_for_aliases arg aliases))))
+(define specs_find_node (lambda (specs alias)
+	(reduce specs (lambda (found spec)
+		(if (not (nil? found))
+			found
+			(if (equal?? (qid (spec_node spec)) alias) (spec_node spec) nil)))
+		nil)))
+
+(define lower_expr_for_specs (lambda (expr specs) (match expr
+	'((symbol get_column) tbl _ col ci) (begin
+		(define aliases (specs_aliases specs))
+		(define target_alias (if (nil? tbl) (car aliases) tbl))
+		(define target_node (specs_find_node specs target_alias))
+		(if (nil? target_node)
+			expr
+			(symbol (concat (qid target_node) "." (canonical_scan_col target_node col ci)))))
+	'((quote get_column) tbl _ col ci) (begin
+		(define aliases (specs_aliases specs))
+		(define target_alias (if (nil? tbl) (car aliases) tbl))
+		(define target_node (specs_find_node specs target_alias))
+		(if (nil? target_node)
+			expr
+			(symbol (concat (qid target_node) "." (canonical_scan_col target_node col ci)))))
+	(cons sym args) (cons sym (map args (lambda (arg) (lower_expr_for_specs arg specs))))
 	expr)))
 
-(define fields_columns_for_alias (lambda (fields alias)
-	(dedupe_list (merge (extract_assoc (coalesceNil fields '()) (lambda (_key expr)
-		(scan_expr_columns expr alias)))))))
+(define get_column_columns_for_spec (lambda (tbl col ci spec specs)
+	(begin
+		(define alias (qid (spec_node spec)))
+		(define aliases (specs_aliases specs))
+		(if (nil? tbl)
+			(if (equal? alias (car aliases)) (list (canonical_scan_col (spec_node spec) col ci)) '())
+			(if (equal?? tbl alias) (list (canonical_scan_col (spec_node spec) col ci)) '())))))
 
-(define expr_columns_for_aliases (lambda (expr alias aliases) (match expr
-	'((symbol get_column) tbl _ col _) (if (nil? tbl)
-		(if (equal? alias (car aliases)) (list col) '())
-		(if (equal?? tbl alias) (list col) '()))
-	'((quote get_column) tbl _ col _) (if (nil? tbl)
-		(if (equal? alias (car aliases)) (list col) '())
-		(if (equal?? tbl alias) (list col) '()))
-	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (expr_columns_for_aliases arg alias aliases)))))
+(define expr_columns_for_spec (lambda (expr spec specs) (match expr
+	'((symbol get_column) tbl _ col ci) (get_column_columns_for_spec tbl col ci spec specs)
+	'((quote get_column) tbl _ col ci) (get_column_columns_for_spec tbl col ci spec specs)
+	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (expr_columns_for_spec arg spec specs)))))
 	'())))
 
-(define fields_columns_for_aliases (lambda (fields alias aliases)
+(define fields_columns_for_spec_in_join (lambda (fields spec specs)
 	(dedupe_list (merge (extract_assoc (coalesceNil fields '()) (lambda (_key expr)
-		(expr_columns_for_aliases expr alias aliases)))))))
+		(expr_columns_for_spec expr spec specs)))))))
 
-(define scan_order_columns (lambda (order alias)
+(define scan_order_columns (lambda (order scan_node)
 	(dedupe_list (merge (map (coalesceNil order '()) (lambda (item) (match item
-		'(expr _dir) (scan_expr_columns expr alias)
+		'(expr _dir) (scan_expr_columns expr scan_node)
 		_ '())))))))
 
-(define scan_order_columns_for_aliases (lambda (order alias aliases)
+(define scan_order_columns_for_spec (lambda (order spec specs)
 	(dedupe_list (merge (map (coalesceNil order '()) (lambda (item) (match item
-		'(expr _dir) (expr_columns_for_aliases expr alias aliases)
+		'(expr _dir) (expr_columns_for_spec expr spec specs)
 		_ '())))))))
 
 (define scan_order_dirs (lambda (order)
@@ -819,10 +870,10 @@ the compile-budget-ms requirement.
 		(define schema (qattr scan_node (quote schema) nil))
 		(define tbl (qattr scan_node (quote table) nil))
 		(define fields (qattr project_node (quote output-fields) '()))
-		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) alias))
-		(define lowered_fields (lower_scan_fields fields alias))
-		(define filtercols (scan_expr_columns predicate alias))
-		(define mapcols (dedupe_list (merge (list filtercols (scan_fields_columns fields alias)))))
+		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) scan_node))
+		(define lowered_fields (lower_scan_fields fields scan_node))
+		(define filtercols (scan_expr_columns predicate scan_node))
+		(define mapcols (dedupe_list (merge (list filtercols (scan_fields_columns fields scan_node)))))
 		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
 		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 		(list (quote scan)
@@ -841,11 +892,11 @@ the compile-budget-ms requirement.
 		(define tbl (qattr scan_node (quote table) nil))
 		(define fields (qattr project_node (quote output-fields) '()))
 		(define order (qattr order_node (quote order) '()))
-		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) alias))
-		(define lowered_fields (lower_scan_fields fields alias))
-		(define filtercols (scan_expr_columns predicate alias))
-		(define ordercols (scan_order_columns order alias))
-		(define mapcols (dedupe_list (merge (list filtercols ordercols (scan_fields_columns fields alias)))))
+		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) scan_node))
+		(define lowered_fields (lower_scan_fields fields scan_node))
+		(define filtercols (scan_expr_columns predicate scan_node))
+		(define ordercols (scan_order_columns order scan_node))
+		(define mapcols (dedupe_list (merge (list filtercols ordercols (scan_fields_columns fields scan_node)))))
 		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
 		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 		(list (quote scan_order)
@@ -870,10 +921,10 @@ the compile-budget-ms requirement.
 		(define fields (qattr project_node (quote output-fields) '()))
 		(define aggs (collect_field_aggregates fields))
 		(define inputs (map aggs aggregate_input_expr))
-		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) alias))
-		(define lowered_inputs (map inputs (lambda (expr) (lower_scan_expr expr alias))))
-		(define filtercols (scan_expr_columns predicate alias))
-		(define mapcols (dedupe_list (merge (list filtercols (dedupe_list (merge (map inputs (lambda (expr) (scan_expr_columns expr alias)))))))))
+		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) scan_node))
+		(define lowered_inputs (map inputs (lambda (expr) (lower_scan_expr expr scan_node))))
+		(define filtercols (scan_expr_columns predicate scan_node))
+		(define mapcols (dedupe_list (merge (list filtercols (dedupe_list (merge (map inputs (lambda (expr) (scan_expr_columns expr scan_node)))))))))
 		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
 		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 		(define agg_sym (symbol "__neumann_agg"))
@@ -905,14 +956,14 @@ the compile-budget-ms requirement.
 		(define having (qattr group_node (quote having) nil))
 		(define aggs (collect_field_aggregates fields))
 		(define inputs (map aggs aggregate_input_expr))
-		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) alias))
-		(define lowered_groups (map groups (lambda (expr) (lower_scan_expr expr alias))))
-		(define lowered_inputs (map inputs (lambda (expr) (lower_scan_expr expr alias))))
-		(define filtercols (scan_expr_columns predicate alias))
+		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) scan_node))
+		(define lowered_groups (map groups (lambda (expr) (lower_scan_expr expr scan_node))))
+		(define lowered_inputs (map inputs (lambda (expr) (lower_scan_expr expr scan_node))))
+		(define filtercols (scan_expr_columns predicate scan_node))
 		(define mapcols (dedupe_list (merge (list
 			filtercols
-			(dedupe_list (merge (map groups (lambda (expr) (scan_expr_columns expr alias)))))
-			(dedupe_list (merge (map inputs (lambda (expr) (scan_expr_columns expr alias)))))))))
+			(dedupe_list (merge (map groups (lambda (expr) (scan_expr_columns expr scan_node)))))
+			(dedupe_list (merge (map inputs (lambda (expr) (scan_expr_columns expr scan_node)))))))))
 		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
 		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 		(define groups_sym (symbol "__neumann_groups"))
@@ -1001,7 +1052,7 @@ the compile-budget-ms requirement.
 				(list (quote table) schema tbl)
 				(cons (quote list) filtercols)
 				(list (quote lambda) filter_params filter_expr)
-				(cons (quote list) (scan_order_columns (qattr order_node (quote order) '()) alias))
+				(cons (quote list) (scan_order_columns (qattr order_node (quote order) '()) scan_node))
 				(cons (quote list) (scan_order_dirs (qattr order_node (quote order) '())))
 				0
 				(coalesceNil (qattr order_node (quote offset) nil) 0)
@@ -1041,11 +1092,11 @@ the compile-budget-ms requirement.
 (define specs_predicates (lambda (specs)
 	(map specs spec_predicate)))
 
-(define scan_cols_for_alias (lambda (fields predicates order alias aliases)
+(define scan_cols_for_spec (lambda (fields predicates order spec specs)
 	(dedupe_list (merge (list
-		(fields_columns_for_aliases fields alias aliases)
-		(dedupe_list (merge (map predicates (lambda (predicate) (expr_columns_for_aliases predicate alias aliases)))))
-		(scan_order_columns_for_aliases order alias aliases))))))
+		(fields_columns_for_spec_in_join fields spec specs)
+		(dedupe_list (merge (map predicates (lambda (predicate) (expr_columns_for_spec predicate spec specs)))))
+		(scan_order_columns_for_spec order spec specs))))))
 
 (define lower_scan_specs (lambda (specs all_specs fields order_node final_predicate prefix_aliases use_order)
 	(match specs
@@ -1056,18 +1107,19 @@ the compile-budget-ms requirement.
 			(define all_aliases (specs_aliases all_specs))
 			(define order (if (nil? order_node) '() (qattr order_node (quote order) '())))
 			(define predicates (merge (specs_predicates all_specs) (list (coalesceNil final_predicate true))))
-			(define mapcols (scan_cols_for_alias fields predicates order alias all_aliases))
+			(define mapcols (scan_cols_for_spec fields predicates order spec all_specs))
 			(define filter_predicate (if (equal? rest '())
 				(combine_and (spec_predicate spec) (coalesceNil final_predicate true))
 				(spec_predicate spec)))
-			(define lowered_filter (lower_expr_for_aliases filter_predicate aliases_now))
+			(define lowered_filter (lower_expr_for_specs filter_predicate (filter all_specs (lambda (s)
+				(contains? aliases_now (qid (spec_node s)))))))
 			(define map_expr (if (equal? rest '())
 				(build_resultrow_expr (map_assoc fields (lambda (_key expr)
-					(lower_expr_for_aliases expr all_aliases))))
+					(lower_expr_for_specs expr all_specs))))
 				(lower_scan_specs rest all_specs fields order_node final_predicate aliases_now false)))
 			(scan_call (if (and use_order (not (nil? order_node))) (quote scan_order) (quote scan))
 				node
-				(expr_columns_for_aliases filter_predicate alias all_aliases)
+				(expr_columns_for_spec filter_predicate spec all_specs)
 				lowered_filter
 				mapcols
 				map_expr
