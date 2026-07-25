@@ -64,6 +64,7 @@ test_cases:
       SELECT 1 WHERE 0
     expect:
       rows: 0
+      not_contains: "affected_rows"
 
   - name: "NULL truthiness (WHERE filters out)"
     # Avoids aggregate over derived table; checks filter semantics directly
@@ -71,6 +72,14 @@ test_cases:
       SELECT 1 WHERE NULL
     expect:
       rows: 0
+      not_contains: "affected_rows"
+
+  - name: "Empty table SELECT returns empty result, not affected_rows"
+    sql: |
+      SELECT id FROM compat_users WHERE id = 99
+    expect:
+      rows: 0
+      not_contains: "affected_rows"
 
   - name: "String escape single quote"
     sql: |
