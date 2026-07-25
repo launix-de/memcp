@@ -297,6 +297,69 @@ projection at the outer level. */
 					nil)))
 			nil))))
 
+(define qpu-low-local-equivalent-for-boundary-ref (lambda (right-tuple join-pred tables source-alias source-col derived-alias projected-name)
+	(begin
+		(define domain-local-equivalent (lambda (expr)
+			(match (qpu-low-col-ref-info expr)
+				'(tv col)
+				(begin
+					(define domain-tv (qpu-low-domain-alias tv))
+					(if (nil? (qpu-low-find-table-entry tables domain-tv))
+						expr
+						(list (quote get_column) domain-tv false col false)))
+				expr)))
+		(define boundary-ref-matches? (lambda (expr)
+			(match (qpu-low-col-ref-info expr)
+				'(tv col)
+				(or
+					(and (equal? tv source-alias) (equal? col source-col))
+					(and (equal? tv derived-alias)
+						(qpu-low-boundary-name-equivalent? col projected-name)))
+				false)))
+		(define usable-equivalent? (lambda (expr)
+			(match (qpu-low-col-ref-info expr)
+				'(tv _col)
+				(and
+					(not (equal? tv source-alias))
+					(not (equal? tv derived-alias)))
+				false)))
+		(define find-in-eq (lambda (lhs rhs)
+			(if (and (boundary-ref-matches? lhs) (usable-equivalent? rhs))
+				(domain-local-equivalent rhs)
+				(if (and (boundary-ref-matches? rhs) (usable-equivalent? lhs))
+					(domain-local-equivalent lhs)
+					nil))))
+		(coalesce
+			(domain-local-equivalent
+				(qpu-low-derived-local-equivalent-from-joinexpr tables derived-alias projected-name))
+			(reduce (qpu-and-conjuncts
+				(qpu-low-and-cond
+					(coalesceNil (qpp-tuple-condition right-tuple) true)
+					(coalesceNil join-pred true))) (lambda (acc c)
+				(if (not (nil? acc)) acc
+					(match c
+						'((symbol equal??) lhs rhs) (find-in-eq lhs rhs)
+						'((quote equal??)  lhs rhs) (find-in-eq lhs rhs)
+						'((symbol =)       lhs rhs) (find-in-eq lhs rhs)
+						'((quote =)        lhs rhs) (find-in-eq lhs rhs)
+						nil)))
+				nil)))))
+
+(define qpu-low-add-derived-domain-joinexpr (lambda (tables derived-alias projected-name local-equivalent)
+	(if (nil? local-equivalent)
+		tables
+		(map (coalesceNil tables '()) (lambda (td) (match td
+			'(td-alias td-schema td-tname td-isOuter td-jE)
+			(if (equal? td-alias derived-alias)
+				(list td-alias td-schema td-tname td-isOuter
+					(qpu-low-and-cond
+						(coalesceNil td-jE true)
+						(list (quote equal??)
+							(list (quote get_column) derived-alias false projected-name false)
+							local-equivalent)))
+				td)
+			td))))))
+
 /* qpu-low-ensure-join-key-fields — for every `(tv col)` referenced by
 `join-pred`, ensure the right-tuple's fields list projects it under SOME
 name. Returns a pair (updated-right-tuple, rename-map) where rename-map is
@@ -367,14 +430,17 @@ Naming: synthesized name `__kt_<col>` (suffixed if collision). */
 							(define updated-tables (nth ensure-result 0))
 							(define name-in-derived (nth ensure-result 1))
 							(define local-equivalent
-								(qpu-low-derived-local-equivalent-from-joinexpr
-									updated-tables deep-derived name-in-derived))
+								(qpu-low-local-equivalent-for-boundary-ref
+									right-tuple join-pred updated-tables tv col deep-derived name-in-derived))
+							(define updated-tables2
+								(qpu-low-add-derived-domain-joinexpr
+									updated-tables deep-derived name-in-derived local-equivalent))
 							/* Add passthrough projection at top level. */
 							(define synthesized (concat "__kt_" col))
 							(define unique-name (qpu-low-unique-projection-name
 								synthesized (merge existing-fields (nth acc 1))))
 							(list
-								updated-tables
+								updated-tables2
 								(merge (nth acc 1)
 									(list (list unique-name
 										(if (nil? local-equivalent)
@@ -1651,10 +1717,10 @@ attached to the wrapper join instead. */
 			(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
 		(define left-aliases (map (coalesceNil (qpp-tuple-tables left-tuple) '())
 			(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
-		(define external-refs (qpu-low-tuple-external-refs
-			right-tuple right-aliases left-aliases))
-		(if (or (equal? (count external-refs) 0)
-			(< (count (coalesceNil (qpp-tuple-tables right-tuple) '())) 3))
+		(define external-refs (merge_unique
+			(qpu-low-tuple-external-refs right-tuple right-aliases left-aliases)
+			(qpu-low-expr-external-refs join-pred right-aliases left-aliases)))
+		(if (equal? (count external-refs) 0)
 			(list right-tuple join-pred)
 			(begin
 				(define external-aliases (reduce external-refs (lambda (acc ref)
