@@ -169,7 +169,7 @@ the compile-budget-ms requirement.
 
 (define qnode_has_op? (lambda (node ops)
 	(or
-		(has? ops (qop node))
+		(contains? ops (qop node))
 		(reduce (qchildren node) (lambda (found child)
 			(or found (qnode_has_op? child ops)))
 			false))))
@@ -334,6 +334,13 @@ the compile-budget-ms requirement.
 /* ------------------------------------------------------------------------- */
 /* untangle_query                                                             */
 
+(define combine_and (lambda (left right)
+	(if (or (nil? left) (equal? left true))
+		(coalesceNil right true)
+		(if (or (nil? right) (equal? right true))
+			left
+			(list (quote and) left right)))))
+
 (define select_ast_zero_domain? (lambda (subquery) (match subquery
 	'(_schema tables _fields _condition group having order _limit _offset)
 	(and
@@ -354,6 +361,124 @@ the compile-budget-ms requirement.
 	'(_schema _tables _fields condition _group _having _order _limit _offset)
 	(coalesceNil condition true)
 	_ (neumann_fail "untangle_query" "malformed scalar subquery"))))
+
+(define select_ast_fields (lambda (subquery) (match subquery
+	'(_schema _tables fields _condition _group _having _order _limit _offset)
+	fields
+	_ (neumann_fail "untangle_query" "malformed derived subquery"))))
+
+(define select_ast_tables (lambda (subquery) (match subquery
+	'(_schema tables _fields _condition _group _having _order _limit _offset)
+	(coalesceNil tables '())
+	_ (neumann_fail "untangle_query" "malformed derived subquery"))))
+
+(define select_ast_simple_from_flattenable? (lambda (subquery) (match subquery
+	'(_schema tables _fields condition group having _order limit offset)
+	(and
+		(or (equal? (coalesceNil tables '()) '()) (equal? (count tables) 1))
+		(or (nil? condition) (equal? condition true))
+		(equal? (coalesceNil group '()) '())
+		(nil? having)
+		(nil? limit)
+		(nil? offset))
+	false)))
+
+(define rewrite_derived_expr (lambda (expr derived_aliases) (match expr
+	'((symbol get_column) tbl ti col ci) (begin
+		(define fields (if (nil? tbl)
+			(if (equal? (count derived_aliases) 1) (cadr (car derived_aliases)) nil)
+			(qassoc_get derived_aliases tbl nil)))
+		(coalesceNil (get_assoc fields col) expr))
+	'((quote get_column) tbl ti col ci) (begin
+		(define fields (if (nil? tbl)
+			(if (equal? (count derived_aliases) 1) (cadr (car derived_aliases)) nil)
+			(qassoc_get derived_aliases tbl nil)))
+		(coalesceNil (get_assoc fields col) expr))
+	(cons sym args)
+	(cons (rewrite_derived_expr sym derived_aliases)
+		(map args (lambda (arg) (rewrite_derived_expr arg derived_aliases))))
+	expr)))
+
+(define derived_star_fields (lambda (tbl derived_aliases)
+	(if (nil? tbl)
+		(merge (map derived_aliases (lambda (entry) (match entry
+			'(alias fields) (merge (extract_assoc fields (lambda (key expr)
+				(list key (rewrite_derived_expr expr derived_aliases)))))
+			'()))))
+		(begin
+			(define fields (qassoc_get derived_aliases tbl nil))
+			(if (nil? fields)
+				nil
+				(merge (extract_assoc fields (lambda (key expr)
+					(list key (rewrite_derived_expr expr derived_aliases))))))))))
+
+(define expand_and_rewrite_fields (lambda (fields derived_aliases)
+	(merge (extract_assoc (coalesceNil fields '()) (lambda (key expr) (match expr
+		'((symbol get_column) tbl _ "*" _) (derived_star_fields tbl derived_aliases)
+		'((quote get_column) tbl _ "*" _) (derived_star_fields tbl derived_aliases)
+		(list key (rewrite_derived_expr expr derived_aliases))))))))
+
+(define retarget_expr_alias (lambda (expr old_alias new_alias) (match expr
+	'((symbol get_column) tbl ti col ci) (if (or (nil? tbl) (equal?? tbl old_alias))
+		(list (quote get_column) new_alias false col ci)
+		expr)
+	'((quote get_column) tbl ti col ci) (if (or (nil? tbl) (equal?? tbl old_alias))
+		(list (quote get_column) new_alias false col ci)
+		expr)
+	(cons sym args)
+	(cons (retarget_expr_alias sym old_alias new_alias)
+		(map args (lambda (arg) (retarget_expr_alias arg old_alias new_alias))))
+	expr)))
+
+(define retarget_fields_alias (lambda (fields old_alias new_alias)
+	(map_assoc (coalesceNil fields '()) (lambda (_key expr)
+		(retarget_expr_alias expr old_alias new_alias)))))
+
+(define retarget_table_alias (lambda (td new_alias) (match td
+	'(old_alias schema tbl is_outer join_expr)
+	(list new_alias schema tbl is_outer (retarget_expr_alias join_expr old_alias new_alias))
+	_ td)))
+
+(define table_with_join (lambda (td is_outer join_expr) (match td
+	'(alias schema tbl _old_outer _old_join)
+	(list alias schema tbl is_outer join_expr)
+	_ td)))
+
+(define flatten_table_descriptor (lambda (td) (match td
+	'(alias schema (string? tbl) is_outer join_expr)
+	(list (list td) '())
+	'(alias schema subquery is_outer join_expr)
+	(if (and
+		(select_ast_simple_from_flattenable? subquery))
+		(begin
+			(define inner_tables (select_ast_tables subquery))
+			(define inner_fields_raw (untangle_fields_subqueries (select_ast_fields subquery)))
+			(define retargeted (if (equal? (count inner_tables) 1)
+				(begin
+					(define inner_alias (car (car inner_tables)))
+					(list
+						(list (retarget_table_alias (car inner_tables) alias))
+						(retarget_fields_alias inner_fields_raw inner_alias alias)))
+				(list inner_tables inner_fields_raw)))
+			(define inner_fields (cadr retargeted))
+			(define derived_aliases (list (list alias inner_fields)))
+			(define inner_with_join (if (equal? (count (car retargeted)) 1)
+				(list (table_with_join (car (car retargeted)) is_outer (rewrite_derived_expr (coalesceNil join_expr true) derived_aliases)))
+				(car retargeted)))
+			(define flattened_inner (flatten_query_tables inner_with_join))
+			(list (car flattened_inner)
+				(merge (cadr flattened_inner) (list (list alias inner_fields)))))
+		(list (list td) '()))
+	_ (neumann_fail "untangle_query" "unknown parser table descriptor"))))
+
+(define flatten_query_tables (lambda (tables)
+	(reduce (coalesceNil tables '()) (lambda (acc td)
+		(begin
+			(define flat (flatten_table_descriptor td))
+			(list
+				(merge (car acc) (car flat))
+				(merge (cadr acc) (cadr flat)))))
+		(list '() '()))))
 
 (define untangle_zero_domain_scalar (lambda (subquery)
 	(if (select_ast_zero_domain? subquery)
@@ -411,12 +536,17 @@ the compile-budget-ms requirement.
 
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas) (begin
 	(define ctx (initial_uctx outer_schemas))
-	(define root (parser_select_to_initial_dag schema tables
-		(untangle_fields_subqueries fields)
-		(untangle_expr_subqueries (coalesceNil condition true))
+	(define flattened (flatten_query_tables tables))
+	(define flat_tables (car flattened))
+	(define derived_aliases (cadr flattened))
+	(define root (parser_select_to_initial_dag schema flat_tables
+		(expand_and_rewrite_fields (untangle_fields_subqueries fields) derived_aliases)
+		(rewrite_derived_expr (untangle_expr_subqueries (coalesceNil condition true)) derived_aliases)
 		(map (coalesceNil group '()) untangle_expr_subqueries)
-		(if (nil? having) nil (untangle_expr_subqueries having))
-		(untangle_order_subqueries order)
+		(if (nil? having) nil (rewrite_derived_expr (untangle_expr_subqueries having) derived_aliases))
+		(untangle_order_subqueries (map (coalesceNil order '()) (lambda (item) (match item
+			'(expr dir) (list (rewrite_derived_expr expr derived_aliases) dir)
+			item))))
 		limit offset))
 	(define ir (qir (quote select) schema root (quote rows) ctx '()))
 	(require_unnested_ir "untangle_query" ir))))
@@ -475,6 +605,28 @@ the compile-budget-ms requirement.
 (define lower_scan_fields (lambda (fields alias)
 	(map_assoc (coalesceNil fields '()) (lambda (key expr)
 		(lower_scan_expr expr alias)))))
+
+(define lower_expr_for_aliases (lambda (expr aliases) (match expr
+	'((symbol get_column) tbl _ col _) (if (nil? tbl)
+		(if (equal? (count aliases) 1)
+			(symbol (concat (car aliases) "." col))
+			expr)
+		(if (contains? aliases tbl)
+			(symbol (concat tbl "." col))
+			expr))
+	'((quote get_column) tbl _ col _) (if (nil? tbl)
+		(if (equal? (count aliases) 1)
+			(symbol (concat (car aliases) "." col))
+			expr)
+		(if (contains? aliases tbl)
+			(symbol (concat tbl "." col))
+			expr))
+	(cons sym args) (cons sym (map args (lambda (arg) (lower_expr_for_aliases arg aliases))))
+	expr)))
+
+(define fields_columns_for_alias (lambda (fields alias)
+	(dedupe_list (merge (extract_assoc (coalesceNil fields '()) (lambda (_key expr)
+		(scan_expr_columns expr alias)))))))
 
 (define scan_order_columns (lambda (order alias)
 	(dedupe_list (merge (map (coalesceNil order '()) (lambda (item) (match item
@@ -548,6 +700,71 @@ the compile-budget-ms requirement.
 			(list (quote lambda) map_params (build_resultrow_expr lowered_fields))
 			nil nil false))))
 
+(define scan_call (lambda (op scan_node filtercols filter_expr mapcols map_expr is_outer order_node)
+	(begin
+		(define alias (qid scan_node))
+		(define schema (qattr scan_node (quote schema) nil))
+		(define tbl (qattr scan_node (quote table) nil))
+		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
+		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
+		(if (equal? op (quote scan_order))
+			(list (quote scan_order)
+				'(session "__memcp_tx")
+				(list (quote table) schema tbl)
+				(cons (quote list) filtercols)
+				(list (quote lambda) filter_params filter_expr)
+				(cons (quote list) (scan_order_columns (qattr order_node (quote order) '()) alias))
+				(cons (quote list) (scan_order_dirs (qattr order_node (quote order) '())))
+				0
+				(coalesceNil (qattr order_node (quote offset) nil) 0)
+				(coalesceNil (qattr order_node (quote limit) nil) -1)
+				(cons (quote list) mapcols)
+				(list (quote lambda) map_params map_expr)
+				nil nil is_outer)
+			(list (quote scan)
+				'(session "__memcp_tx")
+				(list (quote table) schema tbl)
+				(cons (quote list) filtercols)
+				(list (quote lambda) filter_params filter_expr)
+				(cons (quote list) mapcols)
+				(list (quote lambda) map_params map_expr)
+				nil nil nil is_outer)))))
+
+(define lower_project_join (lambda (project_node join_node order_node final_predicate)
+	(match (qchildren join_node)
+		'(left right) (if (and (equal? (qop left) (quote scan)) (equal? (qop right) (quote scan)))
+			(begin
+				(define left_alias (qid left))
+				(define right_alias (qid right))
+				(define aliases (list left_alias right_alias))
+				(define fields (qattr project_node (quote output-fields) '()))
+				(define join_predicate (combine_and
+					(qattr join_node (quote predicate) true)
+					(coalesceNil final_predicate true)))
+				(define order (if (nil? order_node) '() (qattr order_node (quote order) '())))
+				(define right_order_cols (scan_order_columns order right_alias))
+				(if (not (equal? right_order_cols '()))
+					(neumann_fail "build_queryplan" "join order by right side not ported yet")
+					(begin
+						(define left_cols (dedupe_list (merge (list
+							(fields_columns_for_alias fields left_alias)
+							(scan_expr_columns join_predicate left_alias)
+							(scan_order_columns order left_alias)))))
+						(define right_cols (dedupe_list (merge (list
+							(fields_columns_for_alias fields right_alias)
+							(scan_expr_columns join_predicate right_alias)))))
+						(define lowered_predicate (lower_expr_for_aliases join_predicate aliases))
+						(define lowered_fields (map_assoc fields (lambda (_key expr)
+							(lower_expr_for_aliases expr aliases))))
+						(define right_plan (scan_call (quote scan) right right_cols lowered_predicate right_cols
+							(build_resultrow_expr lowered_fields)
+							(equal? (qattr join_node (quote join-kind) (quote inner)) (quote left))
+							nil))
+						(scan_call (if (nil? order_node) (quote scan) (quote scan_order))
+							left '() true left_cols right_plan false order_node))))
+			(neumann_fail "build_queryplan" "join lowerer only supports scan/scan input yet"))
+		_ (neumann_fail "build_queryplan" "join expects two children"))))
+
 (define lower_qnode (lambda (node) (match (qop node)
 	(quote project) (match (qchildren node)
 		(cons child '()) (match (qop child)
@@ -567,8 +784,10 @@ the compile-budget-ms requirement.
 							(lower_project_scan_order node child scan_child (qattr grandchild (quote predicate) true))
 							(neumann_fail "build_queryplan" "order_limit/select lowerer only supports scan input yet"))
 						_ (neumann_fail "build_queryplan" "select expects one child"))
+					(quote join) (lower_project_join node grandchild child true)
 					_ (neumann_fail "build_queryplan" "order_limit lowerer only supports scan input yet"))
 				_ (neumann_fail "build_queryplan" "order_limit expects one child"))
+			(quote join) (lower_project_join node child nil true)
 			_ (neumann_fail "build_queryplan" "project lowerer only supports empty-row or scan input yet"))
 		_ (neumann_fail "build_queryplan" "project expects one child"))
 	_ (neumann_fail "build_queryplan" (concat "operator not ported yet: " (qop node))))))
