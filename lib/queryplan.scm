@@ -590,6 +590,71 @@ the compile-budget-ms requirement.
 				(merge acc (list key expr)))
 				'())))))
 
+(define aggregate_expr? (lambda (expr) (match expr
+	'((symbol aggregate) _ _ _) true
+	'((quote aggregate) _ _ _) true
+	'((symbol count_distinct) _) true
+	'((quote count_distinct) _) true
+	_ false)))
+
+(define collect_aggregates (lambda (expr) (match expr
+	(cons sym args) (if (aggregate_expr? expr)
+		(list expr)
+		(dedupe_list (merge (map args collect_aggregates))))
+	'())))
+
+(define collect_field_aggregates (lambda (fields)
+	(dedupe_list (merge (extract_assoc (coalesceNil fields '()) (lambda (_key expr)
+		(collect_aggregates expr)))))))
+
+(define has_aggregates? (lambda (fields)
+	(not (equal? (collect_field_aggregates fields) '()))))
+
+(define aggregate_input_expr (lambda (agg) (match agg
+	'((symbol aggregate) value _reducer _neutral) value
+	'((quote aggregate) value _reducer _neutral) value
+	'((symbol count_distinct) value) value
+	'((quote count_distinct) value) value
+	_ (neumann_fail "build_queryplan" "malformed aggregate expression"))))
+
+(define aggregate_neutral_expr (lambda (agg) (match agg
+	'((symbol aggregate) _value _reducer neutral) neutral
+	'((quote aggregate) _value _reducer neutral) neutral
+	'((symbol count_distinct) _value) '()
+	'((quote count_distinct) _value) '()
+	_ (neumann_fail "build_queryplan" "malformed aggregate expression"))))
+
+(define aggregate_reducer_expr (lambda (agg acc_expr val_expr) (match agg
+	'((symbol aggregate) _value reducer _neutral) (list reducer acc_expr val_expr)
+	'((quote aggregate) _value reducer _neutral) (list reducer acc_expr val_expr)
+	'((symbol count_distinct) _value) (list (quote append_unique) acc_expr val_expr)
+	'((quote count_distinct) _value) (list (quote append_unique) acc_expr val_expr)
+	_ (neumann_fail "build_queryplan" "malformed aggregate expression"))))
+
+(define aggregate_index (lambda (aggs target idx)
+	(match aggs
+		(cons agg rest) (if (equal? agg target)
+			idx
+			(aggregate_index rest target (+ idx 1)))
+		'() nil)))
+
+(define replace_aggregate_refs (lambda (expr aggs agg_sym) (match expr
+	(cons sym args) (if (aggregate_expr? expr)
+		(begin
+			(define idx (aggregate_index aggs expr 0))
+			(if (nil? idx)
+				expr
+				(if (or (equal? sym (quote count_distinct)) (equal? sym '(quote count_distinct)) (equal? sym '(symbol count_distinct)))
+					(list (quote count) (list (quote nth) agg_sym idx))
+					(list (quote nth) agg_sym idx))))
+		(cons (replace_aggregate_refs sym aggs agg_sym)
+			(map args (lambda (arg) (replace_aggregate_refs arg aggs agg_sym)))))
+	expr)))
+
+(define replace_field_aggregates (lambda (fields aggs agg_sym)
+	(map_assoc (coalesceNil fields '()) (lambda (_key expr)
+		(replace_aggregate_refs expr aggs agg_sym)))))
+
 (define dedupe_list (lambda (xs)
 	(reduce (coalesceNil xs '()) (lambda (acc item)
 		(append_unique acc item))
@@ -732,6 +797,39 @@ the compile-budget-ms requirement.
 			(list (quote lambda) map_params (build_resultrow_expr lowered_fields))
 			nil nil false))))
 
+(define lower_project_global_aggregate_scan (lambda (project_node scan_node predicate)
+	(begin
+		(define alias (qid scan_node))
+		(define schema (qattr scan_node (quote schema) nil))
+		(define tbl (qattr scan_node (quote table) nil))
+		(define fields (qattr project_node (quote output-fields) '()))
+		(define aggs (collect_field_aggregates fields))
+		(define inputs (map aggs aggregate_input_expr))
+		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) alias))
+		(define lowered_inputs (map inputs (lambda (expr) (lower_scan_expr expr alias))))
+		(define filtercols (scan_expr_columns predicate alias))
+		(define mapcols (dedupe_list (merge (list filtercols (dedupe_list (merge (map inputs (lambda (expr) (scan_expr_columns expr alias)))))))))
+		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
+		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
+		(define agg_sym (symbol "__neumann_agg"))
+		(list (quote begin)
+			(list (quote define) agg_sym
+				(list (quote scan)
+					'(session "__memcp_tx")
+					(list (quote table) schema tbl)
+					(cons (quote list) filtercols)
+					(list (quote lambda) filter_params lowered_predicate)
+					(cons (quote list) mapcols)
+					(list (quote lambda) map_params (cons (quote list) lowered_inputs))
+					(list (quote lambda) (list (quote acc) (quote rowvals))
+						(cons (quote list) (map (produceN (count aggs)) (lambda (i)
+							(aggregate_reducer_expr (nth aggs i)
+								(list (quote nth) (quote acc) i)
+								(list (quote nth) (quote rowvals) i))))))
+					(cons (quote list) (map aggs aggregate_neutral_expr))
+					nil false))
+			(build_resultrow_expr (replace_field_aggregates fields aggs agg_sym))))))
+
 (define scan_call (lambda (op scan_node filtercols filter_expr mapcols map_expr is_outer order_node)
 	(begin
 		(define alias (qid scan_node))
@@ -833,10 +931,14 @@ the compile-budget-ms requirement.
 			(quote select) (match (qchildren child)
 				(cons grandchild '()) (match (qop grandchild)
 					(quote empty-row) (lower_project_empty_row node child)
-					(quote scan) (lower_project_scan node grandchild (qattr child (quote predicate) true))
+					(quote scan) (if (has_aggregates? (qattr node (quote output-fields) '()))
+						(lower_project_global_aggregate_scan node grandchild (qattr child (quote predicate) true))
+						(lower_project_scan node grandchild (qattr child (quote predicate) true)))
 					_ (neumann_fail "build_queryplan" "select lowerer only supports empty-row or scan input yet"))
 				_ (neumann_fail "build_queryplan" "select expects one child"))
-			(quote scan) (lower_project_scan node child true)
+			(quote scan) (if (has_aggregates? (qattr node (quote output-fields) '()))
+				(lower_project_global_aggregate_scan node child true)
+				(lower_project_scan node child true))
 			(quote order_limit) (match (qchildren child)
 				(cons grandchild '()) (match (qop grandchild)
 					(quote scan) (lower_project_scan_order node child grandchild true)
