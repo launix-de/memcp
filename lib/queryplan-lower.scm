@@ -1830,6 +1830,57 @@ attached to the wrapper join instead. */
 			(merge acc (list ref)) acc)
 		acc)) '())))
 
+(define qpu-low-col-ref-side (lambda (expr right-aliases left-aliases)
+	(match expr
+		'((symbol get_column) tv _ col _)
+		(if (has? left-aliases tv)
+			(list (quote left) tv col)
+			(if (has? right-aliases tv)
+				(list (quote right) tv col)
+				nil))
+		'((quote get_column) tv _ col _)
+		(if (has? left-aliases tv)
+			(list (quote left) tv col)
+			(if (has? right-aliases tv)
+				(list (quote right) tv col)
+				nil))
+		nil)))
+
+(define qpu-low-equibound-external-refs (lambda (expr right-aliases left-aliases)
+	(match expr
+		'((symbol equal??) lhs rhs)
+		(begin
+			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+			(if (and (not (nil? lside)) (not (nil? rside))
+					(equal? (car lside) (quote left))
+					(equal? (car rside) (quote right)))
+				(list (list (nth lside 1) (nth lside 2)))
+				(if (and (not (nil? lside)) (not (nil? rside))
+					(equal? (car lside) (quote right))
+					(equal? (car rside) (quote left)))
+					(list (list (nth rside 1) (nth rside 2)))
+					'())))
+		'((quote equal??) lhs rhs)
+		(begin
+			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+			(if (and (not (nil? lside)) (not (nil? rside))
+					(equal? (car lside) (quote left))
+					(equal? (car rside) (quote right)))
+				(list (list (nth lside 1) (nth lside 2)))
+				(if (and (not (nil? lside)) (not (nil? rside))
+					(equal? (car lside) (quote right))
+					(equal? (car rside) (quote left)))
+					(list (list (nth rside 1) (nth rside 2)))
+					'())))
+		(cons sym args)
+		(if (or (is_opaque_scope_sym sym) (not (list? args)))
+			'()
+			(merge_unique (map args (lambda (arg)
+				(qpu-low-equibound-external-refs arg right-aliases left-aliases)))))
+		'())))
+
 (define qpu-low-domain-alias (lambda (alias)
 	(concat "dom_" alias)))
 
@@ -1922,6 +1973,8 @@ attached to the wrapper join instead. */
 		(define external-refs (merge_unique
 			(qpu-low-tuple-external-refs right-tuple right-aliases left-aliases)
 			(qpu-low-expr-external-refs join-pred right-aliases left-aliases)))
+		(define equibound-external-refs
+			(qpu-low-equibound-external-refs join-pred right-aliases left-aliases))
 		(if (equal? (count external-refs) 0)
 			(list right-tuple join-pred)
 			(begin
@@ -1961,7 +2014,10 @@ attached to the wrapper join instead. */
 						(qpp-tuple-offset rewritten-right)))
 				(list new-right
 					(qpu-low-and-cond join-pred
-						(qpu-low-domain-equality-predicate external-refs alias-map))))))))
+						(qpu-low-domain-equality-predicate
+							(filter external-refs (lambda (ref)
+								(not (has? equibound-external-refs ref))))
+							alias-map))))))))
 
 /* qpu-low-rewrite-sq-refs-to-inner — rewrite refs to sq_Y.col where col is a
 projection name in sq_Y, replacing with the underlying expression from sq_Y's
