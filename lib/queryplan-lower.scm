@@ -195,6 +195,11 @@ for `(get_column tv ti col ci)` where tv ∈ aliases. */
 				acc))
 		acc)) nil)))
 
+(define qpu-low-fields-expr-by-name (lambda (fields name)
+	(reduce (coalesceNil fields '()) (lambda (acc pair) (match pair
+		'(n e) (if (and (nil? acc) (equal? n name)) e acc)
+		acc)) nil)))
+
 /* qpu-low-find-deep-alias-in-tables — for an alias name NOT in the top-level
 table aliases, find which top-level DERIVED table's sub-tuple contains it.
 Returns the derived-alias name, or nil if alias isn't reachable through any
@@ -253,6 +258,40 @@ projection at the outer level. */
 			td)
 		td))))
 	(list updated-tables (result-name "n")))))
+
+(define qpu-low-ensure-direct-derived-boundary-field (lambda (tables derived-alias col) (begin
+	(map (coalesceNil tables '()) (lambda (td) (match td
+		'(td-alias td-schema td-tname td-isOuter td-jE)
+		(if (and (equal? td-alias derived-alias) (qpp-tuple? td-tname))
+			(begin
+				(define sub td-tname)
+				(define sub-fields (qpp-fields-to-pairs (qpp-tuple-fields sub)))
+				(define existing (qpu-low-fields-expr-by-name sub-fields col))
+				(if (not (nil? existing))
+					td
+					(begin
+						(define base-col (if (and (string? col) (> (strlen col) 5)
+							(equal? (substr col 0 5) "__kt_"))
+							(substr col 5 (- (strlen col) 5))
+							col))
+						(define base-expr (qpu-low-fields-expr-by-name sub-fields base-col))
+						(if (nil? base-expr)
+							td
+							(begin
+								(define new-sub (qpp-rebuild-tuple
+									(qpp-tuple-schema sub)
+									(qpp-tuple-tables sub)
+									(merge sub-fields (list (list col base-expr)))
+									(qpp-tuple-condition sub)
+									(qpp-tuple-group sub)
+									(qpp-tuple-having sub)
+									(qpp-tuple-order sub)
+									(qpp-tuple-limit sub)
+									(qpp-tuple-offset sub)))
+								(list td-alias td-schema new-sub td-isOuter td-jE))))))
+			td)
+		td))))
+)))
 
 (define qpu-low-boundary-name-equivalent? (lambda (a b)
 	(or
@@ -336,13 +375,13 @@ projection at the outer level. */
 				(qpu-low-and-cond
 					(coalesceNil (qpp-tuple-condition right-tuple) true)
 					(coalesceNil join-pred true))) (lambda (acc c)
-				(if (not (nil? acc)) acc
-					(match c
-						'((symbol equal??) lhs rhs) (find-in-eq lhs rhs)
-						'((quote equal??)  lhs rhs) (find-in-eq lhs rhs)
-						'((symbol =)       lhs rhs) (find-in-eq lhs rhs)
-						'((quote =)        lhs rhs) (find-in-eq lhs rhs)
-						nil)))
+					(if (not (nil? acc)) acc
+						(match c
+							'((symbol equal??) lhs rhs) (find-in-eq lhs rhs)
+							'((quote equal??)  lhs rhs) (find-in-eq lhs rhs)
+							'((symbol =)       lhs rhs) (find-in-eq lhs rhs)
+							'((quote =)        lhs rhs) (find-in-eq lhs rhs)
+							nil)))
 				nil)))))
 
 (define qpu-low-add-derived-domain-joinexpr (lambda (tables derived-alias projected-name local-equivalent)
@@ -357,8 +396,22 @@ projection at the outer level. */
 						(list (quote equal??)
 							(list (quote get_column) derived-alias false projected-name false)
 							local-equivalent)))
-				td)
-			td))))))
+					td)
+				td))))))
+
+(define qpu-low-left-join-boundary-key-expr (lambda (name expr tables)
+	(match name
+		(regex "__kt_.*" _)
+		(match (qpu-low-col-ref-info expr)
+			'(tv col)
+			(begin
+				(define local-equivalent
+					(qpu-low-derived-local-equivalent-from-joinexpr tables tv col))
+				(if (nil? local-equivalent)
+					expr
+					(list (quote coalesceNil) expr local-equivalent)))
+			expr)
+		_ expr)))
 
 /* qpu-low-ensure-join-key-fields — for every `(tv col)` referenced by
 `join-pred`, ensure the right-tuple's fields list projects it under SOME
@@ -395,27 +448,32 @@ Naming: synthesized name `__kt_<col>` (suffixed if collision). */
 			(if (has? right-source-aliases tv)
 				/* Direct case: always expose a stable __kt_* boundary key.
 				qpu-collect-cclasses predicts those names for sq-derived refs. */
-				(begin
-					(define existing-key-name (reduce (nth acc 2)
-						(lambda (found entry) (match entry
-							'(refpair newname) (if (and (nil? found)
+					(begin
+						(define direct-tables
+							(qpu-low-ensure-direct-derived-boundary-field (nth acc 0) tv col))
+						(define direct-local-equivalent
+							(qpu-low-derived-local-equivalent-from-joinexpr direct-tables tv col))
+						(define existing-key-name (reduce (nth acc 2)
+							(lambda (found entry) (match entry
+								'(refpair newname) (if (and (nil? found)
 								(equal? refpair (list tv col))) newname found)
 							found))
 						nil))
 					(if (not (nil? existing-key-name))
-						(list (nth acc 0) (nth acc 1) (merge (nth acc 2)
+						(list direct-tables (nth acc 1) (merge (nth acc 2)
 							(list (list (list tv col) existing-key-name))))
 						(begin
 							(define synthesized (concat "__kt_" col))
 							(define unique-name (qpu-low-unique-projection-name
 								synthesized (merge existing-fields (nth acc 1))))
-							(list
-								(nth acc 0)
-								(merge (nth acc 1)
-									(list (list unique-name
-										(list (quote get_column) tv false col false))))
-								(merge (nth acc 2)
-									(list (list (list tv col) unique-name)))))))
+								(list
+									direct-tables
+									(merge (nth acc 1)
+										(list (list unique-name
+											(coalesce direct-local-equivalent
+												(list (quote get_column) tv false col false)))))
+									(merge (nth acc 2)
+										(list (list (list tv col) unique-name)))))))
 				/* Not a direct ref — check if tv is inside a top-level derived
 				(FAQ §42 cascade case). */
 				(begin
@@ -717,6 +775,104 @@ or pairs (pipeline). */
 			false))
 	false)))
 
+(define qpu-low-count-zero-default-expr? (lambda (expr) (match expr
+	'((symbol aggregate) _ reducer neutral)
+	(and (equal? reducer +) (equal? neutral 0))
+	'((quote aggregate) _ reducer neutral)
+	(and (equal? reducer +) (equal? neutral 0))
+	false)))
+
+(define qpu-low-derived-subtuple-for-alias (lambda (tables alias)
+	(reduce (coalesceNil tables '()) (lambda (acc td) (match td
+		'(td-alias _ td-tname _ _)
+		(if (not (nil? acc)) acc
+			(if (and (equal? td-alias alias) (qpp-tuple? td-tname))
+				td-tname
+				nil))
+		acc)) nil)))
+
+(define qpu-low-exists-bool-default-field? (lambda (expr tables) (begin
+	(if (qpu-low-exists-bool-default-expr? expr)
+			true
+			(match expr
+				'((symbol coalesceNil) _ false) true
+				'((quote coalesceNil) _ false) true
+				'((symbol get_column) alias_ _ col _)
+				(begin
+					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+					(if (nil? sub)
+						(qpu-low-false-default-rewrite? alias_ col)
+						(qpu-low-exists-bool-default-field?
+							(qpu-low-fields-expr-by-name
+								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+						(qpp-tuple-tables sub))))
+				'((quote get_column) alias_ _ col _)
+				(begin
+					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+					(if (nil? sub)
+						(qpu-low-false-default-rewrite? alias_ col)
+						(qpu-low-exists-bool-default-field?
+							(qpu-low-fields-expr-by-name
+								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+						(qpp-tuple-tables sub))))
+			false)))))
+
+(define qpu-low-count-zero-default-field? (lambda (expr tables) (begin
+	(if (qpu-low-count-zero-default-expr? expr)
+		true
+		(match expr
+			'((symbol get_column) alias_ _ col _)
+				(begin
+					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+					(if (nil? sub)
+						(qpu-low-zero-default-rewrite? alias_ col)
+						(qpu-low-count-zero-default-field?
+							(qpu-low-fields-expr-by-name
+								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+						(qpp-tuple-tables sub))))
+			'((quote get_column) alias_ _ col _)
+				(begin
+					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+					(if (nil? sub)
+						(qpu-low-zero-default-rewrite? alias_ col)
+						(qpu-low-count-zero-default-field?
+							(qpu-low-fields-expr-by-name
+								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+						(qpp-tuple-tables sub))))
+			false)))))
+
+(define qpu-low-exists-default-refs-for-tables (lambda (tables)
+	(merge (map (coalesceNil tables '()) (lambda (td) (match td
+		'(alias _ tname _ _)
+		(if (and (string? alias) (qpp-tuple? tname))
+			(filter (map (qpp-fields-to-pairs (qpp-tuple-fields tname)) (lambda (pair) (match pair
+				'(name expr)
+				(if (qpu-low-exists-bool-default-field? expr
+					(qpp-tuple-tables tname))
+					(list alias name)
+					nil)
+				_ nil)))
+				(lambda (x) (not (nil? x))))
+			'())
+		'()))))))
+
+(define qpu-low-rewrite-exists-default-refs (lambda (expr default-refs)
+	(match expr
+		'((symbol get_column) alias_ ti col ci)
+		(if (has? default-refs (list alias_ col))
+			(list (quote coalesceNil) expr false)
+			expr)
+		'((quote get_column) alias_ ti col ci)
+		(if (has? default-refs (list alias_ col))
+			(list (quote coalesceNil) expr false)
+			expr)
+		(cons sym args)
+		(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+			expr
+			(cons sym (map args
+				(lambda (a) (qpu-low-rewrite-exists-default-refs a default-refs)))))
+		expr)))
+
 (define qpu-low-preserve-derived-exists-defaults (lambda (tuple)
 	(if (not (qpp-tuple? tuple))
 		tuple
@@ -729,18 +885,7 @@ or pairs (pipeline). */
 						tname)
 					isOuter joinExpr)
 				td))))
-			(define default-refs (merge (map normalized-tables (lambda (td) (match td
-				'(alias _ tname _ _)
-				(if (and (string? alias) (qpp-tuple? tname))
-					(filter (map (qpp-fields-to-pairs (qpp-tuple-fields tname)) (lambda (pair) (match pair
-						'(name expr)
-						(if (qpu-low-exists-bool-default-expr? expr)
-							(list alias name)
-							nil)
-						_ nil)))
-						(lambda (x) (not (nil? x))))
-					'())
-				'())))))
+			(define default-refs (qpu-low-exists-default-refs-for-tables normalized-tables))
 			(define rewrite-default-ref (lambda (expr) (match expr
 				'((symbol get_column) alias_ ti col ci)
 				(if (has? default-refs (list alias_ col))
@@ -882,12 +1027,15 @@ or pairs (pipeline). */
 	these rewrites across a GROUP boundary: aggregate inputs must remain
 	get_column refs so dependency tables stay visible to the group domain. */
 	(define raw-projections (qpir-map-projections node))
+	(define projection-default-refs
+		(qpu-low-exists-default-refs-for-tables (qpp-tuple-tables child-tuple)))
 	(define projections
 		(map (coalesceNil raw-projections '()) (lambda (pair) (match pair
-			'(n e) (list n (if needs-wrap
-				e
-				(qpu-low-sq-rewrites-apply-expr-scoped e
-					(qpp-tuple-tables child-tuple))))
+			'(n e) (begin
+				(define e1 (qpu-low-sq-rewrites-apply-expr-scoped e
+					(qpp-tuple-tables child-tuple)))
+				(list n (qpu-low-rewrite-exists-default-refs
+					e1 projection-default-refs)))
 			pair))))
 	(if needs-wrap
 		/* Child has aggregation (qpir-groupby below): the GROUP BY must
@@ -1405,6 +1553,28 @@ query state doesn't leak. */
 	(qpu-low-sq-rewrites "list"
 		(merge (coalesceNil (qpu-low-sq-rewrites "list") '())
 			(list (list rhs-alias field-name target-expr))))))
+
+(define qpu-low-sq-rewrites-lookup (lambda (rhs-alias field-name)
+	(reduce (coalesceNil (qpu-low-sq-rewrites "list") '())
+		(lambda (found entry) (match entry
+			'(ra fn tgt)
+			(if (and (nil? found) (equal? ra rhs-alias) (equal? fn field-name))
+				tgt
+				found)
+			found))
+		nil)))
+
+(define qpu-low-zero-default-rewrite? (lambda (rhs-alias field-name)
+	(match (qpu-low-sq-rewrites-lookup rhs-alias field-name)
+		'((symbol coalesceNil) _ default-value) (equal? default-value 0)
+		'((quote coalesceNil) _ default-value) (equal? default-value 0)
+		false)))
+
+(define qpu-low-false-default-rewrite? (lambda (rhs-alias field-name)
+	(match (qpu-low-sq-rewrites-lookup rhs-alias field-name)
+		'((symbol coalesceNil) _ default-value) (equal? default-value false)
+		'((quote coalesceNil) _ default-value) (equal? default-value false)
+		false)))
 
 (define qpu-low-sq-rewrites-apply-expr (lambda (expr)
 	(reduce (coalesceNil (qpu-low-sq-rewrites "list") '())
@@ -2024,15 +2194,25 @@ __kt_* boundary columns as partition keys. */
 		(define mat-tbls (map tbls (lambda (td) (match td
 			'(a s t io je) (list a s t io je)
 			_ td))))
-		(define fields-pairs (qpp-fields-to-pairs
-			(coalesceNil (qpp-tuple-fields right-tuple) '())))
-		(define mat-tuple (qpp-rebuild-tuple
-			(qpp-tuple-schema right-tuple)
-			mat-tbls
-			(qpp-fields-to-flat fields-pairs)
-			(qpp-tuple-condition right-tuple)
-			(qpp-tuple-group right-tuple)
-			(qpp-tuple-having right-tuple)
+			(define fields-pairs (qpp-fields-to-pairs
+				(coalesceNil (qpp-tuple-fields right-tuple) '())))
+			(define materialized-fields-pairs
+				(map fields-pairs (lambda (pair) (match pair
+					'(name expr)
+					(begin
+						(define rewritten-expr
+							(qpu-low-sq-rewrites-apply-expr-scoped expr
+								(qpp-tuple-tables right-tuple)))
+						(list name (qpu-low-left-join-boundary-key-expr
+							name rewritten-expr (qpp-tuple-tables right-tuple))))
+					pair))))
+			(define mat-tuple (qpp-rebuild-tuple
+				(qpp-tuple-schema right-tuple)
+				mat-tbls
+				(qpp-fields-to-flat materialized-fields-pairs)
+				(qpp-tuple-condition right-tuple)
+				(qpp-tuple-group right-tuple)
+				(qpp-tuple-having right-tuple)
 			nil
 			nil
 			nil))
@@ -2055,10 +2235,32 @@ __kt_* boundary columns as partition keys. */
 				(make_materialized-subquery-source-with-init
 					(materialized-subquery-source-key mat-source)
 					mat-init)))
-		(planned_materialized_fields mat-source
-			(map fields-pairs (lambda (pair) (match pair
-				'(name _expr) (list "Field" name "Type" "any")
-				_ nil))))
+			(planned_materialized_fields mat-source
+				(map fields-pairs (lambda (pair) (match pair
+					'(name _expr) (list "Field" name "Type" "any")
+					_ nil))))
+			(reduce materialized-fields-pairs (lambda (acc pair) (match pair
+				'(name expr)
+				(if (qpu-low-exists-bool-default-field? expr
+					(qpp-tuple-tables right-tuple))
+					(qpu-low-sq-rewrites-add wrap-alias name
+						(list (quote coalesceNil)
+							(list (quote get_column) wrap-alias false name false)
+							false))
+					nil)
+				acc))
+				nil)
+			(reduce materialized-fields-pairs (lambda (acc pair) (match pair
+				'(name expr)
+				(if (qpu-low-count-zero-default-field? expr
+					(qpp-tuple-tables right-tuple))
+				(qpu-low-sq-rewrites-add wrap-alias name
+					(list (quote coalesceNil)
+						(list (quote get_column) wrap-alias false name false)
+						0))
+				nil)
+			acc))
+			nil)
 		(define kt-fields (filter (map fields-pairs (lambda (pair) (match pair
 			'(name _expr)
 			(match name
@@ -2406,6 +2608,60 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 			(qpu-low-rewrite-by-renames join-pred key-rename-map rhs-alias)
 			right-source-aliases rhs-alias))
 		(define is-left (equal? join-type (quote left)))
+		(define rhs-default-cols
+			(if is-left
+				(filter (map (qpp-fields-to-pairs
+					(coalesceNil (qpp-tuple-fields right-tuple-keys) '()))
+					(lambda (pair) (match pair
+						'(name expr)
+						(if (qpu-low-exists-bool-default-field? expr
+							(qpp-tuple-tables right-tuple-keys))
+							name nil)
+						nil)))
+					(lambda (x) (not (nil? x))))
+				'()))
+		(define rhs-zero-default-cols
+			(if is-left
+				(filter (map (qpp-fields-to-pairs
+					(coalesceNil (qpp-tuple-fields right-tuple-keys) '()))
+					(lambda (pair) (match pair
+						'(name expr)
+						(if (qpu-low-count-zero-default-field? expr
+							(qpp-tuple-tables right-tuple-keys))
+							name nil)
+						nil)))
+					(lambda (x) (not (nil? x))))
+				'()))
+		(define rewrite-rhs-default-ref (lambda (expr) (match expr
+			'((symbol get_column) alias_ ti col ci)
+			(if (and (equal? alias_ rhs-alias) (has? rhs-default-cols col))
+				(list (quote coalesceNil) expr false)
+				expr)
+			'((quote get_column) alias_ ti col ci)
+			(if (and (equal? alias_ rhs-alias) (has? rhs-default-cols col))
+				(list (quote coalesceNil) expr false)
+				expr)
+			(cons sym args)
+			(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+				expr
+				(cons sym (map args rewrite-rhs-default-ref)))
+			expr)))
+			(define final-fields
+				(if (> (count rhs-default-cols) 0)
+					(qpp-map-fields rewritten-fields rewrite-rhs-default-ref)
+					rewritten-fields))
+			(reduce rhs-default-cols (lambda (acc col) (begin
+			(qpu-low-sq-rewrites-add rhs-alias col
+				(list (quote coalesceNil)
+					(list (quote get_column) rhs-alias false col false)
+					false))
+			acc)) nil)
+		(reduce rhs-zero-default-cols (lambda (acc col) (begin
+			(qpu-low-sq-rewrites-add rhs-alias col
+				(list (quote coalesceNil)
+					(list (quote get_column) rhs-alias false col false)
+					0))
+			acc)) nil)
 		(define derived-entry
 			(if is-left
 				/* LEFT join: derived table is isOuter=true with joinExpr = pred.
@@ -2424,7 +2680,7 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema left-tuple)
 			(merge (qpp-tuple-tables left-tuple) (list derived-entry))
-			rewritten-fields
+			final-fields
 			final-cond
 			(qpp-tuple-group left-tuple)
 			(qpp-tuple-having left-tuple)

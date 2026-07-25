@@ -656,9 +656,9 @@ inside sq_X's derived (FAQ §38 scope graph).
 
 Returns a session whose "map" key holds an assoc list of (outer-ref . inner-ref). */
 (define qpu-cc-pick-inner-ref (lambda (inners) (begin
-	/* Prefer real inner table refs. Choosing the current sq/nq helper alias
-	as its own representative later lowers predicates like
-	nq_X.__kt_col = nq_X.__kt_col and loses the outer binding. */
+	/* Prefer real inner table refs for local substitution. The final join
+	condition may still switch to a helper boundary ref when that base ref is
+	not visible at the current parent boundary. */
 	(define base-refs (filter inners (lambda (ref) (match ref
 		'(tv col) (not (qpu-is-subquery-alias? tv))
 		false))))
@@ -715,6 +715,23 @@ whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
 
 (define qpu-substitute-exprs (lambda (exprs repr)
 	(map (coalesceNil exprs (list)) (lambda (e) (qpu-substitute-expr e repr)))))
+
+(define qpu-outer-equality-covered-by-repr? (lambda (expr outer-aliases repr)
+	(begin
+		(define refs (qpu-cc-equality-refs expr))
+		(if (nil? refs)
+			false
+			(reduce refs (lambda (acc ref) (match ref
+				'(tv col) (or acc
+					(and (has? outer-aliases tv)
+						(not (nil? (qpu-repr-lookup repr ref)))))
+				acc))
+				false)))))
+
+(define qpu-drop-repr-covered-outer-equalities (lambda (pred outer-aliases repr)
+	(qpu-and-from-conjuncts
+		(filter (qpu-and-conjuncts pred) (lambda (c)
+			(not (qpu-outer-equality-covered-by-repr? c outer-aliases repr)))))))
 
 (define qpu-expr-refs-provided-by? (lambda (expr provided-aliases)
 	(reduce (qpir-expr-column-refs expr) (lambda (acc ref) (match ref
@@ -780,7 +797,14 @@ projection in the same scope. */
 		(quote qpir-groupby) (qpu-collect-cclasses (qpir-groupby-child node) cc)
 		(quote qpir-window)  (qpu-collect-cclasses (qpir-window-child node) cc)
 		(quote qpir-join)    (begin
-			(qpu-cc-add-from-predicate cc (qpir-join-predicate node))
+			(define rhs-alias (qpir-join-rhs-alias node))
+			(define join-pred (if (nil? rhs-alias)
+				(qpir-join-predicate node)
+				(qpu-rewrite-refs-to-sq-kt
+					(qpir-join-predicate node)
+					(qpir-provided-aliases (qpir-join-right node))
+					rhs-alias)))
+			(qpu-cc-add-from-predicate cc join-pred)
 			(qpu-collect-cclasses (qpir-join-left node) cc)
 			(qpu-collect-cclasses (qpir-join-right node) cc))
 		nil)))
@@ -875,11 +899,13 @@ converted dep-join. */
 		and then the real alias is the only visible key source. */
 		(quote qpir-join) (begin
 			(define raw-pred (qpu-simplify-predicate (qpir-join-predicate node)))
-			(define split (qpu-split-predicate raw-pred outer-aliases))
+			(define sub-pred (qpu-substitute-expr raw-pred repr))
+			(define split (qpu-split-predicate sub-pred outer-aliases))
 			(define raw-outer-pred (nth split 0))
 			(define pure-pred (qpu-simplify-predicate (nth split 1)))
 			(define rhs-alias (qpir-join-rhs-alias node))
-			(define outer-pred raw-outer-pred)
+			(define outer-pred (qpu-drop-repr-covered-outer-equalities
+				raw-outer-pred outer-aliases repr))
 			(define left-result (qpu-unnest-right (qpir-join-left node)
 				outer-aliases outer-ref-exprs repr))
 			(define right-result (qpu-unnest-right (qpir-join-right node)
@@ -959,6 +985,39 @@ the original conjuncts (handled by combined-join). */
 				(list (quote get_column) (nth replacement 0) false (nth replacement 1) false)))))))
 		(list)))))
 
+(define qpu-ref-visible? (lambda (ref visible-aliases) (match ref
+	'(tv col) (has? visible-aliases tv)
+	false)))
+
+(define qpu-visible-replacement-for-outer-ref (lambda (cc outer-ref repr outer-aliases visible-aliases)
+	(begin
+		(define replacement (qpu-repr-lookup repr outer-ref))
+		(if (and (not (nil? replacement))
+			(qpu-ref-visible? replacement visible-aliases))
+			replacement
+			(begin
+				(define cls (qpu-cc-find-class cc outer-ref))
+				(define visible-inners (filter (coalesceNil cls '()) (lambda (ref) (match ref
+					'(tv col) (and (not (has? outer-aliases tv))
+						(has? visible-aliases tv))
+					false))))
+				(if (> (count visible-inners) 0)
+					(qpu-cc-pick-inner-ref visible-inners)
+					replacement))))))
+
+(define qpu-build-visible-join-condition-from-cclasses
+	(lambda (outer-refs cc repr outer-aliases visible-aliases)
+		(qpu-and-from-conjuncts (reduce outer-refs (lambda (acc ref) (begin
+			(define replacement
+				(qpu-visible-replacement-for-outer-ref cc ref repr
+					outer-aliases visible-aliases))
+			(if (nil? replacement) acc
+				(merge acc (list (list (quote equal??)
+					(list (quote get_column) (nth ref 0) false (nth ref 1) false)
+					(list (quote get_column) (nth replacement 0) false
+						(nth replacement 1) false)))))))
+			(list)))))
+
 /* qpu-equate-conjuncts — for each (get_column tv col) in outer-ref-exprs,
 produce a tautology-free predicate that asserts the outer ref equals its
 "natural binding" in the unnested tree. With the simple algorithm we don't
@@ -1021,8 +1080,9 @@ Pre-condition: dj is a qpir-dep-join. */
 					extracted outer-correlation (for non-equality correlations not in
 					cclasses), and IS-NOT-DISTINCT-FROM conjuncts for the cclass-bound
 					outer refs (FAQ §41 — NULL-safe equality). */
-					(define cc-join-cond (qpu-build-join-condition-from-cclasses
-						outer-refs-as-pairs repr))
+					(define cc-join-cond (qpu-build-visible-join-condition-from-cclasses
+						outer-refs-as-pairs cc repr outer-aliases
+						(qpir-provided-aliases new-right)))
 					(define combined-pred (qpu-and-from-conjuncts
 						(merge
 							(merge (qpu-and-conjuncts (qpir-dep-join-predicate dj))
@@ -1062,8 +1122,9 @@ qpu-unnest-dep-join exactly — only the outer-aliases derivation differs. */
 						outer-ref-exprs repr))
 					(define new-right (nth right-result 0))
 					(define extracted-join-pred (nth right-result 1))
-					(define cc-join-cond (qpu-build-join-condition-from-cclasses
-						outer-refs-as-pairs repr))
+					(define cc-join-cond (qpu-build-visible-join-condition-from-cclasses
+						outer-refs-as-pairs cc repr outer-aliases
+						(qpir-provided-aliases new-right)))
 					(define combined-pred (qpu-and-from-conjuncts
 						(merge
 							(merge (qpu-and-conjuncts (qpir-dep-join-predicate dj))
