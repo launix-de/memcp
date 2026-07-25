@@ -466,14 +466,14 @@ Naming: synthesized name `__kt_<col>` (suffixed if collision). */
 							(define synthesized (concat "__kt_" col))
 							(define unique-name (qpu-low-unique-projection-name
 								synthesized (merge existing-fields (nth acc 1))))
-								(list
-									direct-tables
-									(merge (nth acc 1)
-										(list (list unique-name
-											(coalesce direct-local-equivalent
-												(list (quote get_column) tv false col false)))))
-									(merge (nth acc 2)
-										(list (list (list tv col) unique-name)))))))
+							(list
+								direct-tables
+								(merge (nth acc 1)
+									(list (list unique-name
+										(coalesce direct-local-equivalent
+											(list (quote get_column) tv false col false)))))
+								(merge (nth acc 2)
+									(list (list (list tv col) unique-name)))))))
 				/* Not a direct ref — check if tv is inside a top-level derived
 				(FAQ §42 cascade case). */
 				(begin

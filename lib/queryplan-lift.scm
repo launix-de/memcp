@@ -314,6 +314,7 @@ subquery. */
 			rewrite (qpl-rewrite-correlated-limit-with-rownumber) handles
 			the ordered case correctly. */
 			(if (or (nil? lim) (not (nil? off))
+				(> (count (qpl-collect-markers (qpp-tuple-condition sub))) 0)
 				(and (not (nil? ord)) (> (count ord) 0))) sub
 				(begin
 					(define inner-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
