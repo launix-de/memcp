@@ -262,20 +262,20 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 						(transform_new_old_shallow condition)
 						group having order limit offset)
 					(transform_new_old_shallow subquery)))
-					(define _hash (fnv_hash (concat transformed_subquery)))
-					(define _psym (symbol (concat "__trig_scalar_promise_" _hash)))
-					(define _rrsym (symbol (concat "__trig_scalar_rr_" _hash)))
-					(define _prevrrsym (symbol (concat "__trig_scalar_prev_rr_" _hash)))
-					(list (symbol "!begin")
-						(list (symbol "set") _prevrrsym (symbol "resultrow"))
-						(list (symbol "set") _psym (list (symbol "newpromise")))
-						(list (symbol "set") _rrsym
-							(list (symbol "lambda") (list (symbol "row"))
-								(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
-						(list (symbol "set") (symbol "resultrow") _rrsym)
-						(build_queryplan_term transformed_subquery)
-						(list (symbol "set") (symbol "resultrow") _prevrrsym)
-						(list _psym "value")))
+				(define _hash (fnv_hash (concat transformed_subquery)))
+				(define _psym (symbol (concat "__trig_scalar_promise_" _hash)))
+				(define _rrsym (symbol (concat "__trig_scalar_rr_" _hash)))
+				(define _prevrrsym (symbol (concat "__trig_scalar_prev_rr_" _hash)))
+				(list (symbol "!begin")
+					(list (symbol "set") _prevrrsym (symbol "resultrow"))
+					(list (symbol "set") _psym (list (symbol "newpromise")))
+					(list (symbol "set") _rrsym
+						(list (symbol "lambda") (list (symbol "row"))
+							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
+					(list (symbol "set") (symbol "resultrow") _rrsym)
+					(build_queryplan_term transformed_subquery)
+					(list (symbol "set") (symbol "resultrow") _prevrrsym)
+					(list _psym "value")))
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
 				(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
@@ -397,24 +397,24 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 												limit offset)
 											inner))
 										/* Extract SELECT field names from the 9-tuple (fields is a flat assoc list) */
-											(define select_fields (match inner_t '(_ _ fields _ _ _ _ _ _) fields '()))
-											(define select_names (extract_assoc select_fields (lambda (k v) k)))
-											(define prev_resultrow_sym (symbol (concat "__trig_insert_select_prev_rr_" (fnv_hash (concat inner_t)))))
-											/* Generate code: set resultrow + build_queryplan_term */
-											(list (list (symbol "begin")
-												(list (symbol "set") prev_resultrow_sym (symbol "resultrow"))
-												(list (symbol "set") (symbol "resultrow")
-													(list (symbol "lambda") (list (symbol "item"))
-														(list (symbol "insert") (list (symbol "table") schema tbl)
-															(cons (symbol "list") cols)
+										(define select_fields (match inner_t '(_ _ fields _ _ _ _ _ _) fields '()))
+										(define select_names (extract_assoc select_fields (lambda (k v) k)))
+										(define prev_resultrow_sym (symbol (concat "__trig_insert_select_prev_rr_" (fnv_hash (concat inner_t)))))
+										/* Generate code: set resultrow + build_queryplan_term */
+										(list (list (symbol "begin")
+											(list (symbol "set") prev_resultrow_sym (symbol "resultrow"))
+											(list (symbol "set") (symbol "resultrow")
+												(list (symbol "lambda") (list (symbol "item"))
+													(list (symbol "insert") (list (symbol "table") schema tbl)
+														(cons (symbol "list") cols)
 														(list (symbol "list")
 															(cons (symbol "list")
 																(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
-															(list (symbol "list"))
-															(if ignore (list (symbol "lambda") '() 0) nil)
-															false nil)))
-												(build_queryplan_term inner_t)
-												(list (symbol "set") (symbol "resultrow") prev_resultrow_sym))))
+														(list (symbol "list"))
+														(if ignore (list (symbol "lambda") '() 0) nil)
+														false nil)))
+											(build_queryplan_term inner_t)
+											(list (symbol "set") (symbol "resultrow") prev_resultrow_sym))))
 									(if (equal? tag '!update)
 										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin
@@ -683,6 +683,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	)))
 
 	(define sql_expression2 (parser (or
+		(parser '((atom "MATCH" true) "(" (define cols (+ sql_expression ",")) ")" (atom "AGAINST" true) "(" (define needle sql_expression) (? (atom "IN" true) (atom "NATURAL" true) (atom "LANGUAGE" true) (atom "MODE" true)) ")")
+			(begin
+				(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
+				(if (equal? (count terms) 1) (car terms) (cons (quote or) terms))))
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub a false))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub a true))
@@ -947,6 +951,17 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'((quote union_all) branches order limit offset) (list branches order limit offset)
 		_ nil
 	)))
+	(define sql_union_distinct_parts (lambda (query)
+		(match query
+			'(union_distinct branches order limit offset) (list branches order limit offset)
+			'((symbol union_distinct) branches order limit offset) (list branches order limit offset)
+			'((quote union_distinct) branches order limit offset) (list branches order limit offset)
+			_ nil)))
+	(define sql_union_membership_parts (lambda (query) (begin
+		(define all_parts (sql_union_all_parts query))
+		(if (not (nil? all_parts))
+			all_parts
+			(sql_union_distinct_parts query)))))
 	(define sql_union_all_query (lambda (left right) (begin
 		(define right_parts (sql_union_all_parts right))
 		(if (nil? right_parts)
@@ -957,6 +972,17 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(sql_select_offset right))
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
+	)))
+	(define sql_union_distinct_query (lambda (left right) (begin
+		(define right_parts (sql_union_distinct_parts right))
+		(if (nil? right_parts)
+			(list (quote union_distinct)
+				(list left (sql_select_clear_stage right))
+				(sql_select_order right)
+				(sql_select_limit right)
+				(sql_select_offset right))
+			(match right_parts '(branches order limit offset)
+				(list (quote union_distinct) (cons left branches) order limit offset)))
 	)))
 	(define sql_semijoin_mark_outer_expr (lambda (expr) (match expr
 		'((symbol get_column) nil ti col ci) (list (quote get_column) "__semijoin_outer" ti col ci)
@@ -1041,31 +1067,31 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 							nil
 							nil)))
 				_ (error (concat "sql_semijoin_null_count_query requires a select_core query: " (serialize subquery))))))))
-		(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
-			(begin
-				(define subquery_has_outer_column_ref (lambda (query) (match query
-					'(_ tables fields condition group having order _ _)
-					(begin
-						(define aliases (map tables (lambda (td) (match td
-							'(alias _ tbl _ _) (if (nil? alias) tbl alias)
-							""))))
-						(define expr_has_outer_ref (lambda (expr) (match expr
-							'((symbol get_column) alias _ _ _) (and (not (nil? alias)) (not (has? aliases alias)))
-							'((quote get_column) alias _ _ _) (and (not (nil? alias)) (not (has? aliases alias)))
-							(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_outer_ref arg))) false)
-							false)))
-						(or
-							(reduce_assoc fields (lambda (found _k v) (or found (expr_has_outer_ref v))) false)
-							(expr_has_outer_ref condition)
-							(reduce (coalesceNil group '()) (lambda (found expr) (or found (expr_has_outer_ref expr))) false)
-							(expr_has_outer_ref having)
-							(reduce (coalesceNil order '()) (lambda (found item) (or found (match item
-								'(col _dir) (expr_has_outer_ref col)
-								false))) false)))
-					false)))
-				(define contains_inner_select_expr (lambda (expr) (match expr
-					(cons sym args) (or
-						(not (nil? (sql_inner_select_kind sym)))
+	(define sql_semijoin_count_expr (lambda (subquery target_expr negated)
+		(begin
+			(define subquery_has_outer_column_ref (lambda (query) (match query
+				'(_ tables fields condition group having order _ _)
+				(begin
+					(define aliases (map tables (lambda (td) (match td
+						'(alias _ tbl _ _) (if (nil? alias) tbl alias)
+						""))))
+					(define expr_has_outer_ref (lambda (expr) (match expr
+						'((symbol get_column) alias _ _ _) (and (not (nil? alias)) (not (has? aliases alias)))
+						'((quote get_column) alias _ _ _) (and (not (nil? alias)) (not (has? aliases alias)))
+						(cons sym args) (reduce args (lambda (found arg) (or found (expr_has_outer_ref arg))) false)
+						false)))
+					(or
+						(reduce_assoc fields (lambda (found _k v) (or found (expr_has_outer_ref v))) false)
+						(expr_has_outer_ref condition)
+						(reduce (coalesceNil group '()) (lambda (found expr) (or found (expr_has_outer_ref expr))) false)
+						(expr_has_outer_ref having)
+						(reduce (coalesceNil order '()) (lambda (found item) (or found (match item
+							'(col _dir) (expr_has_outer_ref col)
+							false))) false)))
+				false)))
+			(define contains_inner_select_expr (lambda (expr) (match expr
+				(cons sym args) (or
+					(not (nil? (sql_inner_select_kind sym)))
 					(reduce args (lambda (a b) (or a (contains_inner_select_expr b))) false))
 				_ false)))
 			(define contains_inner_select_order_item (lambda (order_item) (match order_item
@@ -1081,7 +1107,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 						(contains_inner_select_expr having)
 						(reduce (coalesceNil order '()) (lambda (a b) (or a (contains_inner_select_order_item b))) false)))
 				_ true))
-			(define union_parts (sql_union_all_parts subquery))
+			(define union_parts (sql_union_membership_parts subquery))
 			(define count_expr
 				(if (nil? union_parts)
 					(list (quote inner_select) (sql_semijoin_count_query subquery target_expr))
@@ -1102,23 +1128,23 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 									(reduce branches
 										(lambda (acc branch) (list (quote +) acc (list (quote inner_select) (sql_semijoin_count_query branch target_expr))))
 										0)))))))
-				(if (not count_rewrite_safe)
-					(if (nil? target_expr)
-						(if negated
+			(if (not count_rewrite_safe)
+				(if (nil? target_expr)
+					(if negated
 						(list (quote not) (list (quote inner_select_exists) subquery))
 						(list (quote inner_select_exists) subquery))
-						(if negated
-							(list (quote not) (list (quote inner_select_in) target_expr subquery))
-							(list (quote inner_select_in) target_expr subquery)))
-					(if (and negated (not (nil? target_expr)) (nil? union_parts) (subquery_has_outer_column_ref subquery))
-						(begin
-							(define anti_exists_query (sql_semijoin_count_query subquery target_expr))
-							(match anti_exists_query
-								'(ae_s ae_t _ae_f ae_c _ae_g _ae_h _ae_o _ae_l _ae_off)
-								(list (quote not)
-									(list (quote inner_select_exists)
-										(list ae_s ae_t (list "__exists" true) ae_c nil nil nil nil nil)))
-								(list (quote not) (list (quote inner_select_in) target_expr subquery))))
+					(if negated
+						(list (quote not) (list (quote inner_select_in) target_expr subquery))
+						(list (quote inner_select_in) target_expr subquery)))
+				(if (and negated (not (nil? target_expr)) (nil? union_parts) (subquery_has_outer_column_ref subquery))
+					(begin
+						(define anti_exists_query (sql_semijoin_count_query subquery target_expr))
+						(match anti_exists_query
+							'(ae_s ae_t _ae_f ae_c _ae_g _ae_h _ae_o _ae_l _ae_off)
+							(list (quote not)
+								(list (quote inner_select_exists)
+									(list ae_s ae_t (list "__exists" true) ae_c nil nil nil nil nil)))
+							(list (quote not) (list (quote inner_select_in) target_expr subquery))))
 					(if (and (not (nil? union_parts)) (nil? target_expr))
 						count_expr
 						(if (nil? target_expr)
@@ -1129,38 +1155,38 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 							(if negated
 								(list (quote not) (list (quote inner_select_exists) subquery))
 								(list (quote inner_select_exists) subquery))
-						/* IN / NOT IN: SQL tri-valued — match wins TRUE for IN /
-						FALSE for NOT IN; otherwise if any RHS row is NULL the
-						answer is UNKNOWN (NULL); otherwise NOT-match.
-						LHS itself NULL also yields UNKNOWN. */
-						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
-							/* UNION ALL IN/NOT IN keeps the semantic marker so
-							queryplan can lower each branch with the normal
-							top-down IN decorrelator instead of relying on a
-							branch-count sum. */
-							(match union_parts '(branches _ _ _)
-								(cons (if negated (quote and) (quote or))
-									(map branches (lambda (branch)
-										(sql_semijoin_count_expr branch target_expr negated)))))
-							(begin
-								(define null_count_expr
-									(list (quote inner_select)
-										(sql_semijoin_null_count_query subquery)))
-								(if negated
-									(list (quote if) (list (quote nil?) target_expr)
-										nil
-										(list (quote if) (list (quote >) count_expr 0)
-											false
-											(list (quote if) (list (quote >) null_count_expr 0)
-												nil
-												true)))
-									(list (quote if) (list (quote nil?) target_expr)
-										nil
-										(list (quote if) (list (quote >) count_expr 0)
-											true
-											(list (quote if) (list (quote >) null_count_expr 0)
-												nil
-												false)))))))))))))
+							/* IN / NOT IN: SQL tri-valued — match wins TRUE for IN /
+							FALSE for NOT IN; otherwise if any RHS row is NULL the
+							answer is UNKNOWN (NULL); otherwise NOT-match.
+							LHS itself NULL also yields UNKNOWN. */
+							(if (and (not (nil? union_parts)) (not (nil? target_expr)))
+								/* UNION ALL IN/NOT IN keeps the semantic marker so
+								queryplan can lower each branch with the normal
+								top-down IN decorrelator instead of relying on a
+								branch-count sum. */
+								(match union_parts '(branches _ _ _)
+									(cons (if negated (quote and) (quote or))
+										(map branches (lambda (branch)
+											(sql_semijoin_count_expr branch target_expr negated)))))
+								(begin
+									(define null_count_expr
+										(list (quote inner_select)
+											(sql_semijoin_null_count_query subquery)))
+									(if negated
+										(list (quote if) (list (quote nil?) target_expr)
+											nil
+											(list (quote if) (list (quote >) count_expr 0)
+												false
+												(list (quote if) (list (quote >) null_count_expr 0)
+													nil
+													true)))
+										(list (quote if) (list (quote nil?) target_expr)
+											nil
+											(list (quote if) (list (quote >) count_expr 0)
+												true
+												(list (quote if) (list (quote >) null_count_expr 0)
+													nil
+													false)))))))))))))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
 			(quote inner_select)
@@ -1320,6 +1346,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(atom "ALL" true)
 			(define right sql_select)
 		) (sql_union_all_query left right))
+		(parser '(
+			(define left sql_select_core)
+			(atom "UNION" true)
+			(define right sql_select)
+		) (sql_union_distinct_query left right))
 		sql_select_core
 	)))
 
@@ -1727,13 +1758,31 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
+	(define sql_text_has_plain_union (lambda (query_text) (begin
+		(define upper_query (toUpper query_text))
+		(and
+			(match upper_query (regex "\\bUNION\\b" _) true false)
+			(not (match upper_query (regex "\\bUNION\\s+ALL\\b" _) true false))))))
+	(define sql_mark_plain_union_distinct (lambda (query) (match query
+		'(union_all branches order limit offset) (list (quote union_distinct) branches order limit offset)
+		'((symbol union_all) branches order limit offset) (list (quote union_distinct) branches order limit offset)
+		'((quote union_all) branches order limit offset) (list (quote union_distinct) branches order limit offset)
+		(cons head rest) (if (equal?? head "union_all")
+			(cons (quote union_distinct) rest)
+			query)
+		_ query)))
+	(define sql_select_for_text (lambda (query)
+		(if (sql_text_has_plain_union s)
+			(sql_mark_plain_union_distinct query)
+			query)))
+
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-		(parser (define query sql_select) (build_queryplan_term query))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir query))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term query)))))
+		(parser (define query sql_select) (build_queryplan_term (sql_select_for_text query)))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_select_for_text query)))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_select_for_text query)))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term (sql_select_for_text query))))))
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
@@ -1946,7 +1995,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))

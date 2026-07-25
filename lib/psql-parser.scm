@@ -250,12 +250,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(list (quote inner_select_in) target_expr subquery)))
 				(if (and (not (nil? union_parts)) (nil? target_expr))
 					count_expr
-						(if (nil? target_expr)
-							/* EXISTS / NOT EXISTS: no LHS, no NULL tri-valued shape */
-							(list
-								(if negated (quote equal?) (quote >))
-								(list (quote coalesceNil) count_expr 0)
-								0)
+					(if (nil? target_expr)
+						/* EXISTS / NOT EXISTS: no LHS, no NULL tri-valued shape */
+						(list
+							(if negated (quote equal?) (quote >))
+							(list (quote coalesceNil) count_expr 0)
+							0)
 						/* IN / NOT IN: SQL tri-valued NULL handling. See
 						sql_semijoin_count_expr in sql-parser.scm for full rationale. */
 						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
@@ -538,12 +538,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
-	(define psql_union_all_parts (lambda (query) (match query
-		'(union_all branches order limit offset) (list branches order limit offset)
-		'((symbol union_all) branches order limit offset) (list branches order limit offset)
-		'((quote union_all) branches order limit offset) (list branches order limit offset)
-		_ nil
-	)))
+	(define psql_union_all_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
+			(cdr query)
+			nil)))
+	(define psql_union_distinct_parts (lambda (query)
+		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
+			(cdr query)
+			nil)))
 	(define psql_union_all_query (lambda (left right) (begin
 		(define right_parts (psql_union_all_parts right))
 		(if (nil? right_parts)
@@ -554,6 +556,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(psql_select_offset right))
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
+	)))
+	(define psql_union_distinct_query (lambda (left right) (begin
+		(define right_parts (psql_union_distinct_parts right))
+		(if (nil? right_parts)
+			(list (quote union_distinct)
+				(list left (psql_select_clear_stage right))
+				(psql_select_order right)
+				(psql_select_limit right)
+				(psql_select_offset right))
+			(match right_parts '(branches order limit offset)
+				(list (quote union_distinct) (cons left branches) order limit offset)))
 	)))
 	(define psql_select_core (parser '(
 		(atom "SELECT" true)
@@ -629,6 +642,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(atom "ALL" true)
 			(define right psql_select)
 		) (psql_union_all_query left right))
+		(parser '(
+			(define left psql_select_core)
+			(atom "UNION" true)
+			(define right psql_select)
+		) (psql_union_distinct_query left right))
 		psql_select_core
 	)))
 
@@ -900,7 +918,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		/* Bare `SELECT pg_catalog.setval(...)` from pg_dump must execute as DDL
-		   (alter auto_increment), not be wrapped as a SELECT projection. */
+		(alter auto_increment), not be wrapped as a SELECT projection. */
 		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
 		(parser (define query psql_select) (build_queryplan_term query))
@@ -954,6 +972,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE UNIQUE INDEX (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE STATISTICS (?s:.*)\\z") true)
+		(parser (regex "^[\\r\\n\\t ]*ALTER STATISTICS (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE TRIGGER (?s:.*)\\z") true)
 
 		/* CREATE USER/ROLE: support both MySQL (IDENTIFIED BY) and PostgreSQL (WITH PASSWORD / PASSWORD) syntax */
@@ -1149,7 +1168,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) "=" (define value (or
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) (or "=" (atom ":=" true)) (define value (or
 			(parser (atom "content" true) "content") /* quirks for SET xmloption = content */
 			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */
 			(parser (atom "heap" true) "heap") /* quirks for SET default_table_access_method = heap */
@@ -1319,6 +1338,7 @@ substring replace (which is the historical behaviour). */
 )))
 
 (define psql_eval_import_command (lambda (schema source_dir dump_schema command policy) (begin
+	(define resultrow (lambda (row) true))
 	(match command
 		(regex "^[\\r\\n\\t ]*COPY (.*) FROM '([^']+)'\\z" _ def path)
 		(begin

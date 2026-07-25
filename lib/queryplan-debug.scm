@@ -86,8 +86,16 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 (define explain_queryplan_ir (lambda (query) (begin
 	(planner_debug_settings "scalar-trace" true)
 	(planner_debug_reset_scalar_events)
-	(define logical_term (untangle_query_term query nil))
-	(if (strlike (serialize logical_term) "%inner_select_kind%")
+	(define explain_input (if (qpp-tuple? query)
+		(neumann_compile_select query)
+		query))
+	(define neumann_old_stack (coalesceNil (planner_neumann_lowered_scope_stack "stack") '()))
+	(if (qpp-tuple? query)
+		(planner_neumann_lowered_scope_stack "stack" (cons true neumann_old_stack))
+		nil)
+	(define logical_term (untangle_query_term explain_input nil))
+	(define logical_serialized (serialize logical_term))
+	(if (strlike logical_serialized "%inner_select_kind%")
 		(error (concat "EXPLAIN_IR_LOGICAL_LEAK " (serialize logical_term)))
 		nil)
 	(match logical_term
@@ -95,7 +103,8 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 			(define uq_7tuple (list schema tables fields condition groups schemas replace_find_column))
 			(define jr_result (apply join_reorder uq_7tuple))
 			(define plan_result (apply build_queryplan (merge jr_result (list nil))))
-			(if (strlike (serialize plan_result) "%inner_select_kind%")
+			(define plan_serialized (serialize plan_result))
+			(if (strlike plan_serialized "%inner_select_kind%")
 				(error (concat "EXPLAIN_IR_PLAN_LEAK " (serialize plan_result)))
 				nil)
 			(define explain_rows (list
@@ -108,12 +117,24 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 				(list "stage" "reorder" "kind" "changed" "value" (not (equal? tables (nth jr_result 1))))
 				(list "stage" "plan" "kind" "root" "value" (explain_plan_root_with_scalar_debug plan_result))))
 			(planner_debug_settings "scalar-trace" false)
+			(if (qpp-tuple? query) (planner_neumann_lowered_scope_stack "stack" neumann_old_stack) nil)
 			(explain_emit_rows explain_rows))
 		'(union_all_term branches order limit offset)
 		(begin
 			(planner_debug_settings "scalar-trace" false)
+			(if (qpp-tuple? query) (planner_neumann_lowered_scope_stack "stack" neumann_old_stack) nil)
 			(explain_emit_rows (list
 				(list "stage" "term" "kind" "root" "value" "union_all")
+				(list "stage" "term" "kind" "branches" "value" (count branches))
+				(list "stage" "term" "kind" "order" "value" (serialize (coalesceNil order '())))
+				(list "stage" "term" "kind" "limit" "value" (serialize limit))
+				(list "stage" "term" "kind" "offset" "value" (serialize offset)))))
+		'(union_all_term branches order limit offset distinct)
+		(begin
+			(planner_debug_settings "scalar-trace" false)
+			(if (qpp-tuple? query) (planner_neumann_lowered_scope_stack "stack" neumann_old_stack) nil)
+			(explain_emit_rows (list
+				(list "stage" "term" "kind" "root" "value" (if distinct "union_distinct" "union_all"))
 				(list "stage" "term" "kind" "branches" "value" (count branches))
 				(list "stage" "term" "kind" "order" "value" (serialize (coalesceNil order '())))
 				(list "stage" "term" "kind" "limit" "value" (serialize limit))

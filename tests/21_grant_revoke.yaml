@@ -23,6 +23,10 @@ setup:
     expect: {}
   - sql: "DELETE FROM `system`.`user` WHERE username='hostalice'"
     expect: {}
+  - sql: "DELETE FROM `system`.`access` WHERE username='restartalice'"
+    expect: {}
+  - sql: "DELETE FROM `system`.`user` WHERE username='restartalice'"
+    expect: {}
 
 test_cases:
   - name: "CREATE USER alice"
@@ -111,6 +115,8 @@ test_cases:
     sql: "SELECT * FROM grant_t"
     expect:
       error: true
+      contains: "access denied: user 'alice' may not read memcp-tests.grant_t"
+      not_contains: "[native func]"
 
   - name: "grant db access to alice"
     sql: "GRANT SELECT ON `memcp-tests`.* TO alice"
@@ -124,6 +130,44 @@ test_cases:
       rows: 1
       data:
         - { id: 1, name: "x" }
+
+  - name: "create restart user"
+    sql: "CREATE USER restartalice IDENTIFIED BY 'pw'"
+    expect:
+      affected_rows: 1
+
+  - name: "grant db access to restart user"
+    sql: "GRANT SELECT ON `memcp-tests`.* TO restartalice"
+    expect: {}
+
+  - name: "restart user can read before restart"
+    username: "restartalice"
+    password: "pw"
+    sql: "SELECT COUNT(*) AS cnt FROM grant_t"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 1 }
+
+  - name: "restart server after grant"
+    action: restart
+    restart_timeout: 120
+
+  - name: "grant entry survives restart"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='restartalice' AND database='memcp-tests'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 1 }
+
+  - name: "restart user can read after restart"
+    username: "restartalice"
+    password: "pw"
+    sql: "SELECT COUNT(*) AS cnt FROM grant_t"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 1 }
 
   - name: "revoke db access from alice"
     sql: "REVOKE SELECT ON `memcp-tests`.* FROM alice"
@@ -348,6 +392,7 @@ cleanup:
   - sql: "DROP USER IF EXISTS alice"
   - sql: "DROP USER IF EXISTS bob"
   - sql: "DROP USER IF EXISTS hostalice"
+  - sql: "DROP USER IF EXISTS restartalice"
   - sql: "DROP USER IF EXISTS psqlalice"
   - sql: "DROP USER IF EXISTS psqlrole"
   - sql: "DROP DATABASE IF EXISTS drop_test_db"

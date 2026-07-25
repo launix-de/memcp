@@ -362,10 +362,10 @@ chain. */
 		(quote qpir-window)   (qpu-bottom-left-aliases (qpir-window-child node))
 		(qpir-provided-aliases node))))
 
-	/* qpu-boundary-free-vars — free vars visible at the current dep-join
-	boundary. Stop at already-decorrelated rhs-aliased qpir-join nodes: their
-	domain predicates are local to that helper and must not be promoted to the
-	parent dep-join, otherwise LEFT miss rows get filtered by the parent. */
+/* qpu-boundary-free-vars — free vars visible at the current dep-join
+boundary. Stop at already-decorrelated rhs-aliased qpir-join nodes: their
+domain predicates are local to that helper and must not be promoted to the
+parent dep-join, otherwise LEFT miss rows get filtered by the parent. */
 (define qpu-boundary-free-vars (lambda (node)
 	(match (qpir-kind node)
 		(quote qpir-leaf) (qpir-free-vars node)
@@ -387,13 +387,13 @@ chain. */
 			(merge
 				(qpir-order-list-refs (qpir-window-order node))
 				(qpu-boundary-free-vars (qpir-window-child node))))
-			(quote qpir-join) (if (not (nil? (qpir-join-rhs-alias node)))
-				'()
+		(quote qpir-join) (if (not (nil? (qpir-join-rhs-alias node)))
+			'()
+			(merge
+				(qpir-expr-column-refs (qpir-join-predicate node))
 				(merge
-					(qpir-expr-column-refs (qpir-join-predicate node))
-					(merge
-						(qpu-boundary-free-vars (qpir-join-left node))
-						(qpu-boundary-free-vars (qpir-join-right node)))))
+					(qpu-boundary-free-vars (qpir-join-left node))
+					(qpu-boundary-free-vars (qpir-join-right node)))))
 		(qpir-free-vars node))))
 
 /* qpu-boundary-outer-vars — boundary refs relevant for a concrete dep-join
@@ -432,18 +432,18 @@ its local inner refs. */
 			(qpu-boundary-outer-vars (qpir-map-child node) outer-aliases))
 		(quote qpir-groupby) (merge
 			(filter (merge
-					(qpir-expr-list-refs (qpir-groupby-keys node))
-					(merge
-						(qpir-assoc-list-refs (qpir-groupby-aggs node))
-						(qpir-expr-column-refs (coalesceNil (qpir-groupby-having node) true))))
+				(qpir-expr-list-refs (qpir-groupby-keys node))
+				(merge
+					(qpir-assoc-list-refs (qpir-groupby-aggs node))
+					(qpir-expr-column-refs (coalesceNil (qpir-groupby-having node) true))))
 				(lambda (ref) (match ref
 					'(tv col) (has? outer-aliases tv)
 					false)))
 			(qpu-boundary-outer-vars (qpir-groupby-child node) outer-aliases))
 		(quote qpir-window) (merge
 			(filter (merge
-					(qpir-expr-list-refs (qpir-window-partition node))
-					(qpir-order-list-refs (qpir-window-order node)))
+				(qpir-expr-list-refs (qpir-window-partition node))
+				(qpir-order-list-refs (qpir-window-order node)))
 				(lambda (ref) (match ref
 					'(tv col) (has? outer-aliases tv)
 					false)))
@@ -846,18 +846,18 @@ converted dep-join. */
 			`WHERE d.did=e.did AND d.did=e.eid` → both project d.did);
 			without dedupe the keytable build fails with
 			"column ... already exists". */
-				(define sub-outer-refs (qpu-substitute-exprs outer-ref-exprs repr))
-				(define sub-aggs (qpu-substitute-map-projections
-					(qpir-groupby-aggs node) repr))
-				(define sub-having (qpu-substitute-expr
-					(coalesceNil (qpir-groupby-having node) true) repr))
-				(define child-provided (qpir-provided-aliases child-new))
-				(define groupable-outer-refs (filter sub-outer-refs
-					(lambda (k) (qpu-expr-refs-provided-by? k child-provided))))
-				(define existing-keys (coalesceNil (qpir-groupby-keys node) '()))
-				(define new-keys (reduce groupable-outer-refs (lambda (acc k)
-					(if (has? acc k) acc (merge acc (list k))))
-					existing-keys))
+			(define sub-outer-refs (qpu-substitute-exprs outer-ref-exprs repr))
+			(define sub-aggs (qpu-substitute-map-projections
+				(qpir-groupby-aggs node) repr))
+			(define sub-having (qpu-substitute-expr
+				(coalesceNil (qpir-groupby-having node) true) repr))
+			(define child-provided (qpir-provided-aliases child-new))
+			(define groupable-outer-refs (filter sub-outer-refs
+				(lambda (k) (qpu-expr-refs-provided-by? k child-provided))))
+			(define existing-keys (coalesceNil (qpir-groupby-keys node) '()))
+			(define new-keys (reduce groupable-outer-refs (lambda (acc k)
+				(if (has? acc k) acc (merge acc (list k))))
+				existing-keys))
 			(define final-having (if (equal? sub-having true) nil sub-having))
 			(list (qpir-groupby new-keys sub-aggs final-having child-new) child-join))
 
@@ -873,26 +873,26 @@ converted dep-join. */
 		extracted predicate on the real inner aliases: lower_to_scans may
 		inline-merge the nested helper before wrapping the parent aggregate,
 		and then the real alias is the only visible key source. */
-			(quote qpir-join) (begin
-				(define raw-pred (qpu-simplify-predicate (qpir-join-predicate node)))
-				(define split (qpu-split-predicate raw-pred outer-aliases))
-				(define raw-outer-pred (nth split 0))
-				(define pure-pred (qpu-simplify-predicate (nth split 1)))
-				(define rhs-alias (qpir-join-rhs-alias node))
-				(define outer-pred raw-outer-pred)
-				(define left-result (qpu-unnest-right (qpir-join-left node)
-					outer-aliases outer-ref-exprs repr))
-				(define right-result (qpu-unnest-right (qpir-join-right node)
-					outer-aliases outer-ref-exprs repr))
-				(define left-new (nth left-result 0))
-				(define right-new (nth right-result 0))
-				(define combined-join (qpu-and-from-conjuncts
-					(merge
-						(merge (qpu-and-conjuncts (nth left-result 1))
-							(qpu-and-conjuncts (nth right-result 1)))
-						(qpu-and-conjuncts outer-pred))))
-				(list (qpir-join (qpir-join-type node) pure-pred left-new right-new
-					rhs-alias) combined-join))
+		(quote qpir-join) (begin
+			(define raw-pred (qpu-simplify-predicate (qpir-join-predicate node)))
+			(define split (qpu-split-predicate raw-pred outer-aliases))
+			(define raw-outer-pred (nth split 0))
+			(define pure-pred (qpu-simplify-predicate (nth split 1)))
+			(define rhs-alias (qpir-join-rhs-alias node))
+			(define outer-pred raw-outer-pred)
+			(define left-result (qpu-unnest-right (qpir-join-left node)
+				outer-aliases outer-ref-exprs repr))
+			(define right-result (qpu-unnest-right (qpir-join-right node)
+				outer-aliases outer-ref-exprs repr))
+			(define left-new (nth left-result 0))
+			(define right-new (nth right-result 0))
+			(define combined-join (qpu-and-from-conjuncts
+				(merge
+					(merge (qpu-and-conjuncts (nth left-result 1))
+						(qpu-and-conjuncts (nth right-result 1)))
+					(qpu-and-conjuncts outer-pred))))
+			(list (qpir-join (qpir-join-type node) pure-pred left-new right-new
+				rhs-alias) combined-join))
 
 		(error (concat "qpu-unnest-right: operator " (string (qpir-kind node))
 			" not yet supported in right-side walker (phase 3)")))))
@@ -994,14 +994,14 @@ Pre-condition: dj is a qpir-dep-join. */
 			would silently vanish — wrong for NOT EXISTS, COALESCE-default
 			scalar subselects, and other LEFT-tolerant patterns.
 
-				Trivial case (no outer refs in right): INNER join is correct
-				here because uncorrelated scalar helpers are lowered so they
-				produce their scalar row independently of the outer domain. INNER
-				also avoids the legacy `LEFT JOIN ON TRUE` degeneracy inside nested
-				scalar materializations. */
-				(if (equal? (count outer-ref-exprs) 0)
-					(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
-						(qpir-dep-join-rhs-alias dj))
+			Trivial case (no outer refs in right): INNER join is correct
+			here because uncorrelated scalar helpers are lowered so they
+			produce their scalar row independently of the outer domain. INNER
+			also avoids the legacy `LEFT JOIN ON TRUE` degeneracy inside nested
+			scalar materializations. */
+			(if (equal? (count outer-ref-exprs) 0)
+				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
+					(qpir-dep-join-rhs-alias dj))
 				(begin
 					/* Pass 1: collect cclasses from select equalities in the right. */
 					(define cc (qpu-make-cclasses))
@@ -1044,12 +1044,12 @@ qpu-unnest-dep-join exactly — only the outer-aliases derivation differs. */
 		(begin
 			(define left (qpir-dep-join-left dj))
 			(define right (qpir-dep-join-right dj))
-				(define outer-ref-exprs
-					(qpu-collect-outer-refs-with-aliases dj outer-aliases))
-				(if (equal? (count outer-ref-exprs) 0)
-					/* Trivial case: see qpu-unnest-dep-join above. */
-					(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
-						(qpir-dep-join-rhs-alias dj))
+			(define outer-ref-exprs
+				(qpu-collect-outer-refs-with-aliases dj outer-aliases))
+			(if (equal? (count outer-ref-exprs) 0)
+				/* Trivial case: see qpu-unnest-dep-join above. */
+				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
+					(qpir-dep-join-rhs-alias dj))
 				(begin
 					(define cc (qpu-make-cclasses))
 					(qpu-collect-cclasses right cc)

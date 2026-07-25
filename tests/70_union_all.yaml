@@ -397,11 +397,103 @@ test_cases:
     expect:
       error: true
 
-  - name: "UNION DISTINCT not supported yet"
+  - name: "UNION without ALL compatibility"
     sql: |
       SELECT ID FROM fop_files WHERE ID <= 2
       UNION
       SELECT ID FROM fop_files WHERE ID >= 4
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+        - ID: 2
+        - ID: 4
+        - ID: 5
+
+  - name: "UNION without ALL deduplicates literal rows"
+    sql: "SELECT 1 AS x UNION SELECT 1 AS x"
+    expect:
+      rows: 1
+      data:
+        - x: 1
+
+  - name: "UNION without ALL deduplicates overlapping table rows"
+    sql: |
+      SELECT result AS ID FROM renderjob WHERE ID <= 102
+      UNION
+      SELECT result AS ID FROM renderjob WHERE ID >= 102
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+        - ID: 3
+
+  - name: "UNION without ALL deduplicates complete multi-column rows"
+    sql: |
+      SELECT result AS ID, CAST(result AS VARCHAR) AS label FROM renderjob WHERE ID <= 102
+      UNION
+      SELECT result AS ID, CAST(result AS VARCHAR) AS label FROM renderjob WHERE ID >= 102
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          label: "1"
+        - ID: 3
+          label: "3"
+
+  - name: "UNION without ALL keeps rows distinct when any output column differs"
+    sql: |
+      SELECT result AS ID, CAST(ID AS VARCHAR) AS label FROM renderjob WHERE ID = 102
+      UNION
+      SELECT result AS ID, CAST(ID AS VARCHAR) AS label FROM renderjob WHERE ID = 103
+      ORDER BY label
+    expect:
+      rows: 2
+      data:
+        - ID: 3
+          label: "102"
+        - ID: 3
+          label: "103"
+
+  - name: "UNION without ALL deduplicates NULL rows"
+    sql: |
+      SELECT NULL AS v
+      UNION
+      SELECT NULL AS v
+    expect:
+      rows: 1
+      data:
+        - v: null
+
+  - name: "UNION without ALL keeps first-branch aliases"
+    sql: |
+      SELECT ID AS file_id FROM fop_files WHERE ID = 1
+      UNION
+      SELECT result AS ignored_alias FROM renderjob WHERE ID = 101
+    expect:
+      rows: 1
+      data:
+        - file_id: 1
+
+  - name: "EXPLAIN IR top-level UNION without ALL keeps distinct semantics"
+    steps:
+      - sql: |
+          EXPLAIN IR
+          SELECT result AS ID FROM renderjob WHERE ID <= 102
+          UNION
+          SELECT result AS ID FROM renderjob WHERE ID >= 102
+        expect:
+          contains:
+            - "union_distinct"
+            - "branches"
+
+  - name: "UNION without ALL column count mismatch"
+    sql: |
+      SELECT ID FROM fop_files
+      UNION
+      SELECT ID, name FROM fop_files
     expect:
       error: true
 

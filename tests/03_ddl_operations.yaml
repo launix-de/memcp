@@ -98,6 +98,19 @@ test_cases:
     sql: "SET @calculated = 5 + 3 * 2"
     expect: {}  # Session variables return assigned value
 
+  - name: "SET session variable with MySQL assignment operator"
+    session_id: "mysql-set-assign"
+    sql: "SET @mysql_assign := 105"
+    expect: {}
+
+  - name: "Read variable assigned with MySQL assignment operator"
+    session_id: "mysql-set-assign"
+    sql: "SELECT @mysql_assign AS assigned_value"
+    expect:
+      rows: 1
+      data:
+        - assigned_value: 105
+
   - name: "SET multiple session variables"
     sql: "SET @var1 = 'test', @var2 = 123"
     expect: {}  # Multiple session variables
@@ -110,6 +123,33 @@ test_cases:
   - name: "SET string concatenation"
     sql: "SET @text = 'hello'"
     expect: {}  # Just check it runs successfully
+
+  - name: "MATCH AGAINST compatibility"
+    setup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat"
+      - sql: "CREATE TABLE match_against_compat (id INT PRIMARY KEY, title TEXT, body TEXT)"
+      - sql: "INSERT INTO match_against_compat (id, title, body) VALUES (1, 'Alpha title', 'middle'), (2, 'Beta title', 'Alpha body'), (3, 'Beta only', 'none')"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat"
+    sql: "SELECT id FROM match_against_compat WHERE MATCH (body) AGAINST ('Alpha' IN NATURAL LANGUAGE MODE)"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "MATCH AGAINST checks multiple columns"
+    setup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat_multi"
+      - sql: "CREATE TABLE match_against_compat_multi (id INT PRIMARY KEY, title TEXT, body TEXT)"
+      - sql: "INSERT INTO match_against_compat_multi (id, title, body) VALUES (1, 'Alpha title', 'middle'), (2, 'Beta title', 'Alpha body'), (3, 'Beta only', 'none')"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS match_against_compat_multi"
+    sql: "SELECT id FROM match_against_compat_multi WHERE MATCH (title, body) AGAINST ('Alpha') ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
 
   # TODO: DROP TABLE operations (when DROP functionality is stable)
   # - name: "DROP TABLE with IF EXISTS"

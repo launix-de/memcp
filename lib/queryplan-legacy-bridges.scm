@@ -176,7 +176,7 @@ persist produced rows in a session list. */
 								(if (nil? cache_scope) nil (cache_scope cache_key binding))
 								binding)))))
 			_ nil)
-		))))
+))))
 
 (define planner_collect_rows_ast (lambda (rows_sym sink_sym item_sym inner_plan limit_val cnt_sym default_row) (begin
 	(define append_row_ast (list rows_sym "rows"
@@ -323,7 +323,7 @@ construction. */
 								(list "Field" col "Type" "any"))))
 						(list helper_tbl init_code))))
 			_ nil)
-		))))
+))))
 
 /* build_legacy_prejoin_materialize_plan: isolate the remaining
 session/resultrow-backed prejoin filler used by trigger backfill paths.

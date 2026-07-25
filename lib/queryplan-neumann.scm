@@ -98,28 +98,28 @@ callers supply the real schemas list. */
 	sql-parser.scm sql_select_core's (merge cols). My pipeline operates
 	on list-of-pairs ((name1 expr1) (name2 expr2) …) for clarity.
 	Convert at entry; convert back at exit. */
-		(define tuple-pairs (qpp-rebuild-tuple
-			(qpp-tuple-schema tuple)
-			(qpp-tuple-tables tuple)
-			(qpp-fields-to-pairs (qpp-tuple-fields tuple))
-			(qpp-tuple-condition tuple)
+	(define tuple-pairs (qpp-rebuild-tuple
+		(qpp-tuple-schema tuple)
+		(qpp-tuple-tables tuple)
+		(qpp-fields-to-pairs (qpp-tuple-fields tuple))
+		(qpp-tuple-condition tuple)
 		(qpp-tuple-group tuple)
 		(qpp-tuple-having tuple)
-			(qpp-tuple-order tuple)
-			(qpp-tuple-limit tuple)
-			(qpp-tuple-offset tuple)))
-		(if neumann_pipeline_trace (print (concat "[neumann] tuple_pairs: " (serialize tuple-pairs))) nil)
-		/* Parser-level IN/EXISTS count rewrites mark moved outer references as
-		__semijoin_outer(:alias). Keep those markers until scoped column
-		resolution enters the subquery that owns them; unmarking here would make
-		the LHS resolve against the inner table when names collide. */
-		/* Pre-pass: disambiguate alias collisions across SQL scopes (FAQ §35).
-		   v2 preserves field-shape per sub-tuple to avoid corrupting downstream
-		   legacy consumers that expect flat form (e.g. derived sub-tuples
-		   carrying window_func expressions). */
-			(define t0 (alias_disambiguate_pass tuple-pairs))
+		(qpp-tuple-order tuple)
+		(qpp-tuple-limit tuple)
+		(qpp-tuple-offset tuple)))
+	(if neumann_pipeline_trace (print (concat "[neumann] tuple_pairs: " (serialize tuple-pairs))) nil)
+	/* Parser-level IN/EXISTS count rewrites mark moved outer references as
+	__semijoin_outer(:alias). Keep those markers until scoped column
+	resolution enters the subquery that owns them; unmarking here would make
+	the LHS resolve against the inner table when names collide. */
+	/* Pre-pass: disambiguate alias collisions across SQL scopes (FAQ §35).
+	v2 preserves field-shape per sub-tuple to avoid corrupting downstream
+	legacy consumers that expect flat form (e.g. derived sub-tuples
+	carrying window_func expressions). */
+	(define t0 (alias_disambiguate_pass tuple-pairs))
 	(if neumann_pipeline_trace (print (concat "[neumann] after alias_disambiguate: " (serialize t0))) nil)
-		(define t1 (alias_normalize_pass t0))
+	(define t1 (alias_normalize_pass t0))
 	(if neumann_pipeline_trace (print (concat "[neumann] after alias_normalize: " (serialize t1))) nil)
 	/* Use scope-aware column resolution: recurses into inner_select / _in /
 	_exists markers with the sub-tuple's own local schemas, so nil-tv refs
@@ -127,23 +127,23 @@ callers supply the real schemas list. */
 	come from the live storage via `(show schema table)` per
 	qpp-schemas-from-tables — derived sub-tuples expose their projection
 	names as columns. */
-				(define t2 (column_resolve_scoped_pass t1 (list)))
-			(if neumann_pipeline_trace (print (concat "[neumann] after column_resolve 1: " (serialize t2))) nil)
-				(define t3 (derived_table_inline_pass t2))
-			(if neumann_pipeline_trace (print (concat "[neumann] after derived_inline: " (serialize t3))) nil)
+	(define t2 (column_resolve_scoped_pass t1 (list)))
+	(if neumann_pipeline_trace (print (concat "[neumann] after column_resolve 1: " (serialize t2))) nil)
+	(define t3 (derived_table_inline_pass t2))
+	(if neumann_pipeline_trace (print (concat "[neumann] after derived_inline: " (serialize t3))) nil)
 	/* Re-resolve after inlining: derived-table inlining can introduce refs
 	to the now-directly-visible underlying tables that were nil-tv inside
 	the derived sub-tuple. A second scoped resolve binds them with the new
 	table set visible. Idempotent for already-resolved refs (no false=false
 	markers to resolve). */
-		(define t3b (column_resolve_scoped_pass t3 (list)))
+	(define t3b (column_resolve_scoped_pass t3 (list)))
 	(if neumann_pipeline_trace (print (concat "[neumann] after column_resolve 2: " (serialize t3b))) nil)
-		(define t4 (lift_dep_joins_pass t3b))
+	(define t4 (lift_dep_joins_pass t3b))
 	(if neumann_pipeline_trace (print (concat "[neumann] after lift_dep_joins: " (serialize t4))) nil)
-				(define t5 (unnest_pass t4))
-			(if neumann_pipeline_trace (print (concat "[neumann] after unnest: " (serialize t5))) nil)
-				(define t6 (lower_to_scans_pass t5))
-		(if neumann_pipeline_trace (print (concat "[neumann] after lower_to_scans: " (serialize t6))) nil)
+	(define t5 (unnest_pass t4))
+	(if neumann_pipeline_trace (print (concat "[neumann] after unnest: " (serialize t5))) nil)
+	(define t6 (lower_to_scans_pass t5))
+	(if neumann_pipeline_trace (print (concat "[neumann] after lower_to_scans: " (serialize t6))) nil)
 	(if (not (qpp-tuple? t6))
 		(error "neumann_compile_select: pipeline did not produce a 7-tuple")
 		/* Re-flatten fields recursively (including derived sub-tuples) to

@@ -226,36 +226,36 @@ keytables/prejoins may not exist at compile time (runtime-only creation). */
 		Visible wrappers may still consult materialized_source_schema, but scan-time
 		lowering must stay on stable planned columns only. */
 		(merge_schema_fields_unique (list planned_cols)))))
-	(define materialized_field_from_get_column_name (lambda (materialized_cols expr)
-		(match expr
-			'((symbol get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
-			nil
-		)
-	))
-	(define materialized_expr_has_window_func (lambda (expr)
-		(match expr
-			(cons (symbol window_func) _) true
-			(cons (quote window_func) _) true
-			(cons '(quote window_func) _) true
-			(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-				false
-				(reduce args (lambda (found arg) (or found (materialized_expr_has_window_func arg))) false))
+(define materialized_field_from_get_column_name (lambda (materialized_cols expr)
+	(match expr
+		'((symbol get_column) _ _ col _) (find_materialized_field_by_name materialized_cols col)
+		nil
+	)
+))
+(define materialized_expr_has_window_func (lambda (expr)
+	(match expr
+		(cons (symbol window_func) _) true
+		(cons (quote window_func) _) true
+		(cons '(quote window_func) _) true
+		(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
 			false
-		)
-	))
-	(define register_materialized_subquery_metadata (lambda (mat_source fields_assoc preserve_visible_boundary)
-		(begin
-			(define planned_schema_def (extract_assoc fields_assoc (lambda (k v)
-				(list "Field" k "Type" "any" "Expr" v))))
-			/* A materialized subquery exposes physical output columns to its parent.
-			Keep the source Expr only in planned_materialized_fields for lineage/name
-			lookup; visible schema expansion must not re-inline helper/window
-			expressions after the materialization boundary. */
-			(define visible_schema_def (extract_assoc fields_assoc (lambda (k _v)
-				(list "Field" k "Type" "any"))))
-			(planned_materialized_fields mat_source planned_schema_def)
-			(prejoin_canonical_sources mat_source
-				(merge (extract_assoc fields_assoc (lambda (k v)
+			(reduce args (lambda (found arg) (or found (materialized_expr_has_window_func arg))) false))
+		false
+	)
+))
+(define register_materialized_subquery_metadata (lambda (mat_source fields_assoc preserve_visible_boundary)
+	(begin
+		(define planned_schema_def (extract_assoc fields_assoc (lambda (k v)
+			(list "Field" k "Type" "any" "Expr" v))))
+		/* A materialized subquery exposes physical output columns to its parent.
+		Keep the source Expr only in planned_materialized_fields for lineage/name
+		lookup; visible schema expansion must not re-inline helper/window
+		expressions after the materialization boundary. */
+		(define visible_schema_def (extract_assoc fields_assoc (lambda (k _v)
+			(list "Field" k "Type" "any"))))
+		(planned_materialized_fields mat_source planned_schema_def)
+		(prejoin_canonical_sources mat_source
+			(merge (extract_assoc fields_assoc (lambda (k v)
 				(list
 					(list k v)
 					(list (sanitize_temp_name k) v))))))
@@ -285,15 +285,15 @@ The bare-symbol head is the only get_column IR shape that flows through
 runtime; (list (quote get_column) ...) constructors evaluate (quote
 get_column) to that bare symbol. Below we keep a single (symbol X)
 variant per case instead of duplicating both wrapped forms. */
-	(define normalize_visible_aliases (lambda (expr)
-		(match expr
-			'((symbol get_column) alias_ ti col ci)
-			(if (nil? alias_)
-				(list (quote get_column) nil ti col ci)
-				(list (quote get_column) (visible_occurrence_alias alias_) false col false))
-			(cons sym args)
-			(cons sym (map args normalize_visible_aliases))
-			expr
+(define normalize_visible_aliases (lambda (expr)
+	(match expr
+		'((symbol get_column) alias_ ti col ci)
+		(if (nil? alias_)
+			(list (quote get_column) nil ti col ci)
+			(list (quote get_column) (visible_occurrence_alias alias_) false col false))
+		(cons sym args)
+		(cons sym (map args normalize_visible_aliases))
+		expr
 	)
 ))
 (define normalize_canonical_aliases (lambda (expr)
@@ -480,7 +480,7 @@ source-expression namespace for this materialized source. */
 				(lambda (acc variant_expr) (append_unique acc variant_expr))
 				'()))
 			(merge (map variant_exprs (lambda (variant_expr)
-					(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
+				(map (materialized_source_expr_keys variant_expr) (lambda (k) (list k (car mc))))))))))))
 	(planned_materialized_fields prejointbl prejoin_schema_def)
 	(materialized_source_dependency_tables prejointbl
 		(materialized_dependency_tables_from_sources prejoin_source_tables))

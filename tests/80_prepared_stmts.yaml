@@ -42,6 +42,14 @@ test_cases:
       data:
         - {name: "alice"}
 
+  - name: "SELECT with ? LIKE placeholder"
+    sql: "SELECT id FROM ps_test WHERE name LIKE ?"
+    params: ["ali%"]
+    expect:
+      rows: 1
+      data:
+        - {id: 1}
+
   - name: "? with string value"
     sql: "SELECT id FROM ps_test WHERE name = ?"
     params: ["bob"]
@@ -49,6 +57,69 @@ test_cases:
       rows: 1
       data:
         - {id: 2}
+
+  - name: "Literal LIKE cache first value"
+    sql: "SELECT id FROM ps_test WHERE name LIKE 'ali%'"
+    expect:
+      rows: 1
+      data:
+        - {id: 1}
+
+  - name: "Literal LIKE cache second value"
+    sql: "SELECT id FROM ps_test WHERE name LIKE 'bo%'"
+    expect:
+      rows: 1
+      data:
+        - {id: 2}
+
+  - name: "Literal LIKE cache keeps string projection literal"
+    sql: "SELECT 'fixed' AS label, id FROM ps_test WHERE name LIKE 'ali%'"
+    expect:
+      rows: 1
+      data:
+        - {label: "fixed", id: 1}
+
+  - name: "Literal LIKE cache normalization"
+    scm: |
+      (match (sql_parameterize_select_like_strings
+        "SELECT id FROM ps_test WHERE name LIKE 'ali%'"
+        true)
+        '(normalized bindings)
+        (if (and
+          (equal? normalized "SELECT id FROM ps_test WHERE name LIKE ?")
+          (equal? bindings '("ali%")))
+          "ok"
+          (error (concat "unexpected normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Non-LIKE string literal cache key stays exact"
+    scm: |
+      (match (sql_parameterize_select_like_strings
+        "SELECT 'fixed' AS label, id FROM ps_test WHERE name = 'alice'"
+        true)
+        '(normalized bindings)
+        (if (and
+          (equal? normalized "SELECT 'fixed' AS label, id FROM ps_test WHERE name = 'alice'")
+          (equal? bindings '()))
+          "ok"
+          (error (concat "unexpected normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Already parameterized LIKE cache key stays exact"
+    scm: |
+      (match (sql_parameterize_select_like_strings
+        "SELECT id FROM ps_test WHERE name LIKE ?"
+        true)
+        '(normalized bindings)
+        (if (and
+          (equal? normalized "SELECT id FROM ps_test WHERE name LIKE ?")
+          (equal? bindings '()))
+          "ok"
+          (error (concat "unexpected normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
 
   - name: "? placeholder: no match returns 0 rows"
     sql: "SELECT id FROM ps_test WHERE id = ?"

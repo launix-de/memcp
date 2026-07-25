@@ -337,7 +337,7 @@ test_cases:
     expect:
       error: true
 
-  - name: "IN with UNION DISTINCT not supported yet"
+  - name: "IN with UNION without ALL compatibility"
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID IN (
@@ -347,7 +347,149 @@ test_cases:
       )
       ORDER BY ID
     expect:
-      error: true
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "IN with UNION without ALL overlapping branches"
+    sql: |
+      SELECT ID, name FROM in_fop_files
+      WHERE ID IN (
+        SELECT result FROM in_renderjob WHERE ID <= 102
+        UNION
+        SELECT result FROM in_renderjob WHERE ID >= 102
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "NOT IN with UNION without ALL overlapping branches"
+    sql: |
+      SELECT ID, name FROM in_fop_files
+      WHERE ID NOT IN (
+        SELECT result FROM in_renderjob WHERE ID <= 102
+        UNION
+        SELECT result FROM in_renderjob WHERE ID >= 102
+      )
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 2
+          name: "image2.png"
+        - ID: 4
+          name: "image4.png"
+        - ID: 5
+          name: "image5.png"
+
+  - name: "EXPLAIN IN with UNION without ALL skips duplicate materialization"
+    steps:
+      - sql: |
+          EXPLAIN IR
+          SELECT ID, name FROM in_fop_files
+          WHERE ID IN (
+            SELECT result FROM in_renderjob WHERE ID <= 102
+            UNION
+            SELECT result FROM in_renderjob WHERE ID >= 102
+          )
+          ORDER BY ID
+        expect:
+          not_contains:
+            - "union_distinct"
+      - sql: |
+          EXPLAIN
+          SELECT ID, name FROM in_fop_files
+          WHERE ID IN (
+            SELECT result FROM in_renderjob WHERE ID <= 102
+            UNION
+            SELECT result FROM in_renderjob WHERE ID >= 102
+          )
+          ORDER BY ID
+        expect:
+          not_contains:
+            - "__union_distinct_rows"
+            - "__union_distinct_seen"
+
+  - name: "EXPLAIN NOT IN with UNION without ALL skips duplicate materialization"
+    steps:
+      - sql: |
+          EXPLAIN IR
+          SELECT ID, name FROM in_fop_files
+          WHERE ID NOT IN (
+            SELECT result FROM in_renderjob WHERE ID <= 102
+            UNION
+            SELECT result FROM in_renderjob WHERE ID >= 102
+          )
+          ORDER BY ID
+        expect:
+          not_contains:
+            - "union_distinct"
+      - sql: |
+          EXPLAIN
+          SELECT ID, name FROM in_fop_files
+          WHERE ID NOT IN (
+            SELECT result FROM in_renderjob WHERE ID <= 102
+            UNION
+            SELECT result FROM in_renderjob WHERE ID >= 102
+          )
+          ORDER BY ID
+        expect:
+          not_contains:
+            - "__union_distinct_rows"
+            - "__union_distinct_seen"
+
+  - name: "EXISTS with UNION without ALL overlapping branches"
+    sql: |
+      SELECT ID, name FROM in_fop_files f
+      WHERE EXISTS (
+        SELECT result FROM in_renderjob WHERE result = f.ID AND ID <= 102
+        UNION
+        SELECT result FROM in_renderjob WHERE result = f.ID AND ID >= 102
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "EXPLAIN EXISTS with UNION without ALL skips duplicate materialization"
+    steps:
+      - sql: |
+          EXPLAIN IR
+          SELECT ID, name FROM in_fop_files f
+          WHERE EXISTS (
+            SELECT result FROM in_renderjob WHERE result = f.ID AND ID <= 102
+            UNION
+            SELECT result FROM in_renderjob WHERE result = f.ID AND ID >= 102
+          )
+          ORDER BY ID
+        expect:
+          not_contains:
+            - "union_distinct"
+      - sql: |
+          EXPLAIN
+          SELECT ID, name FROM in_fop_files f
+          WHERE EXISTS (
+            SELECT result FROM in_renderjob WHERE result = f.ID AND ID <= 102
+            UNION
+            SELECT result FROM in_renderjob WHERE result = f.ID AND ID >= 102
+          )
+          ORDER BY ID
+        expect:
+          not_contains:
+            - "__union_distinct_rows"
+            - "__union_distinct_seen"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS in_renderjob"

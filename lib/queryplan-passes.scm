@@ -393,35 +393,35 @@ after a local-only resolution attempt. */
 				(equal?? sym name))
 			false))))
 
-	(define qpp-resolve-expr-scoped (lambda (expr local-schemas visible-schemas) (begin
-		(match expr
-			(cons sym args)
-			(if (not (list? args)) expr
-				(begin
-					(if (qpp-head-eq? sym "get_column")
-						/* Atomic — resolve the WHOLE get_column expression in one shot.
-						Fallback to visible-schemas only when the local scope cannot
-						bind an unqualified ref, preserving SQL local shadowing. */
-						(begin
-							(define first-try
-								(canonicalize_columns_scoped expr local-schemas visible-schemas '()))
-							(if (qpp-unresolved-nil-ref? first-try)
-								(canonicalize_columns_scoped first-try visible-schemas visible-schemas '())
-								first-try))
-						(if (and (qpp-head-eq? sym "inner_select")
+(define qpp-resolve-expr-scoped (lambda (expr local-schemas visible-schemas) (begin
+	(match expr
+		(cons sym args)
+		(if (not (list? args)) expr
+			(begin
+				(if (qpp-head-eq? sym "get_column")
+					/* Atomic — resolve the WHOLE get_column expression in one shot.
+					Fallback to visible-schemas only when the local scope cannot
+					bind an unqualified ref, preserving SQL local shadowing. */
+					(begin
+						(define first-try
+							(canonicalize_columns_scoped expr local-schemas visible-schemas '()))
+						(if (qpp-unresolved-nil-ref? first-try)
+							(canonicalize_columns_scoped first-try visible-schemas visible-schemas '())
+							first-try))
+					(if (and (qpp-head-eq? sym "inner_select")
+						(>= (count args) 1))
+						(list sym (qpp-resolve-tuple-scoped (nth args 0) visible-schemas))
+						(if (and (qpp-head-eq? sym "inner_select_in")
+							(>= (count args) 2))
+							(list sym
+								(qpp-resolve-expr-scoped (nth args 0) local-schemas visible-schemas)
+								(qpp-resolve-tuple-scoped (nth args 1) visible-schemas))
+							(if (and (qpp-head-eq? sym "inner_select_exists")
 								(>= (count args) 1))
-							(list sym (qpp-resolve-tuple-scoped (nth args 0) visible-schemas))
-							(if (and (qpp-head-eq? sym "inner_select_in")
-									(>= (count args) 2))
-								(list sym
-									(qpp-resolve-expr-scoped (nth args 0) local-schemas visible-schemas)
-									(qpp-resolve-tuple-scoped (nth args 1) visible-schemas))
-								(if (and (qpp-head-eq? sym "inner_select_exists")
-										(>= (count args) 1))
-									(list sym (qpp-resolve-tuple-scoped (nth args 0) visible-schemas))
-									(cons sym (map args
-										(lambda (a) (qpp-resolve-expr-scoped a local-schemas visible-schemas))))))))))
-			_ expr))))
+								(list sym (qpp-resolve-tuple-scoped (nth args 0) visible-schemas))
+								(cons sym (map args
+									(lambda (a) (qpp-resolve-expr-scoped a local-schemas visible-schemas))))))))))
+		_ expr))))
 
 /* qpp-resolve-tuple-scoped — recursive scope-aware column resolution for a
 sub 7-tuple. Builds the sub's local schemas, merges with the caller's
@@ -431,13 +431,13 @@ schemas first). */
 (define qpp-resolve-tuple-scoped (lambda (t outer-schemas)
 	(if (not (qpp-tuple? t)) t
 		(begin
-		(define local-schemas (qpp-schemas-from-tables (qpp-tuple-tables t)))
-		(define visible-schemas (merge outer-schemas local-schemas))
-		(qpp-apply-to-tuple t (lambda (expr)
-			(qpp-resolve-expr-scoped
-				(rewrite_semijoin_outer_markers_scoped expr outer-schemas '())
-				local-schemas
-				visible-schemas)))))))
+			(define local-schemas (qpp-schemas-from-tables (qpp-tuple-tables t)))
+			(define visible-schemas (merge outer-schemas local-schemas))
+			(qpp-apply-to-tuple t (lambda (expr)
+				(qpp-resolve-expr-scoped
+					(rewrite_semijoin_outer_markers_scoped expr outer-schemas '())
+					local-schemas
+					visible-schemas)))))))
 
 /* column_resolve_scoped_pass — the architecturally-correct column resolver.
 Drop-in replacement for column_resolve_pass that recurses into inner_select*
@@ -478,18 +478,18 @@ matches. For now this pass refuses to inline isOuter=true derived tables —
 they stay as derived entries (build_queryplan_inner handles the materialization
 + outer-join semantics natively). */
 
-	(define qpp-expr-has-local-window? (lambda (expr)
-		(match expr
-			(cons (symbol window_func) _) true
-			(cons (quote window_func) _) true
-			(cons '(quote window_func) _) true
-			'((symbol window_func) . _) true
-			'((quote window_func) . _) true
-			(cons head args)
+(define qpp-expr-has-local-window? (lambda (expr)
+	(match expr
+		(cons (symbol window_func) _) true
+		(cons (quote window_func) _) true
+		(cons '(quote window_func) _) true
+		'((symbol window_func) . _) true
+		'((quote window_func) . _) true
+		(cons head args)
 		(if (or (not (list? args))
-				(qpp-head-eq? head "inner_select")
-				(qpp-head-eq? head "inner_select_in")
-				(qpp-head-eq? head "inner_select_exists"))
+			(qpp-head-eq? head "inner_select")
+			(qpp-head-eq? head "inner_select_in")
+			(qpp-head-eq? head "inner_select_exists"))
 			false
 			(reduce args (lambda (acc arg)
 				(or acc (qpp-expr-has-local-window? arg))) false))
@@ -732,13 +732,13 @@ where a local column shadows an outer derived projection. */
 					(coalesceNil (qpp-rename-lookup-unqualified ren col) expr)
 					expr)
 				mapped))
-			(cons head args)
-			(if (list? args)
-					(begin
-						(define is-scalar (qpp-head-eq? head "inner_select"))
-						(define is-in (qpp-head-eq? head "inner_select_in"))
-						(define is-exists (qpp-head-eq? head "inner_select_exists"))
-					(if (and is-scalar (>= (count args) 1))
+		(cons head args)
+		(if (list? args)
+			(begin
+				(define is-scalar (qpp-head-eq? head "inner_select"))
+				(define is-in (qpp-head-eq? head "inner_select_in"))
+				(define is-exists (qpp-head-eq? head "inner_select_exists"))
+				(if (and is-scalar (>= (count args) 1))
 					(begin
 						(define sub0 (nth args 0))
 						(if (not (qpp-tuple? sub0))

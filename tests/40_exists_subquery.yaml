@@ -73,18 +73,20 @@ test_cases:
     expect:
       rows: 0
 
-  - name: "EXPLAIN uncorrelated EXISTS uses materialized count cache"
-    sql: |
-      EXPLAIN SELECT ID, name FROM exists_customers
-      WHERE EXISTS (SELECT 1 FROM exists_orders WHERE total > 50)
-      ORDER BY ID
-    expect:
-      rows: 1
-      contains:
-        - "createcolumn"
-        - "touch_keytable"
-        - ".exists_orders:(1)"
-        - "\"__cnt\""
+  - name: "EXPLAIN uncorrelated EXISTS avoids materialized count cache"
+    steps:
+      - sql: |
+          EXPLAIN IR SELECT ID, name FROM exists_customers
+          WHERE EXISTS (SELECT 1 FROM exists_orders WHERE total > 50)
+          ORDER BY ID
+        expect:
+          contains:
+            - "plan"
+            - "__scalar_"
+          not_contains:
+            - "__mat:_uncorr_cnt_"
+            - "touch_keytable"
+            - "\"__cnt\""
 
   - name: "EXISTS with session-backed scalar predicate is true"
     sql: |
@@ -132,18 +134,20 @@ test_cases:
         - ID: 3
           name: "Charlie"
 
-  - name: "EXPLAIN EXISTS ignores session state in projection and keeps count cache rewrite"
-    sql: |
-      EXPLAIN SELECT ID, name FROM exists_customers
-      WHERE EXISTS (SELECT LAST_INSERT_ID() FROM exists_orders WHERE total > 50)
-      ORDER BY ID
-    expect:
-      rows: 1
-      contains:
-        - "createcolumn"
-        - "touch_keytable"
-        - ".exists_orders:(1)"
-        - "\"__cnt\""
+  - name: "EXPLAIN EXISTS ignores session state in projection without count materialization"
+    steps:
+      - sql: |
+          EXPLAIN IR SELECT ID, name FROM exists_customers
+          WHERE EXISTS (SELECT LAST_INSERT_ID() FROM exists_orders WHERE total > 50)
+          ORDER BY ID
+        expect:
+          contains:
+            - "plan"
+            - "__scalar_"
+          not_contains:
+            - "__mat:_uncorr_cnt_"
+            - "touch_keytable"
+            - "\"__cnt\""
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS exists_orders"

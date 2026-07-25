@@ -322,12 +322,12 @@ subquery. */
 					/* All column refs in the WHERE that are NOT bound by an inner
 					alias are outer-refs. We require EVERY such outer-ref to be
 					equi-bound to an inner column. */
-						/* Only inspect refs owned by this subquery level. Nested
-						inner_select / IN / EXISTS markers have their own LIMIT
-						semantics; including their refs here falsely prevents the
-						equi-bound LIMIT drop and routes simple LIMIT 1 chains into
-						the ROW_NUMBER window fallback. */
-						(define all-refs (qpl-extract-col-refs-skip-nested cond))
+					/* Only inspect refs owned by this subquery level. Nested
+					inner_select / IN / EXISTS markers have their own LIMIT
+					semantics; including their refs here falsely prevents the
+					equi-bound LIMIT drop and routes simple LIMIT 1 chains into
+					the ROW_NUMBER window fallback. */
+					(define all-refs (qpl-extract-col-refs-skip-nested cond))
 					(define outer-refs (filter all-refs (lambda (rp) (match rp
 						'(tv col) (and (not (nil? tv)) (not (has? inner-aliases tv)))
 						false))))
@@ -687,75 +687,75 @@ derived. */
 							wrapper preserves semantics. Also project the inner
 							equi-bound cols as passthrough so the wrapper's
 							correlation conjunct can reference them. */
-								(define split (qpl-split-where-by-correlation
-									(qpp-tuple-condition sub) outer-refs))
-								(define corr-where (nth split 0))
-								(define uncorr-where (nth split 1))
-								(if (not (nil? uncorr-where))
-									sub
-									(begin
-										/* Collect inner-equibound passthroughs needed by corr-where. */
-										(define passthrough-cols
-											(qpl-collect-corr-passthroughs corr-where sub-inner-aliases))
-										(define passthrough-pairs (reduce passthrough-cols
-											(lambda (acc col-ref) (match col-ref
-												'(tv col) (merge acc (list col
-													(list (quote get_column) tv false col false)))
-												acc)) '()))
-										/* FLAT fields: __value, __rn, plus passthrough cols. */
-										(define inner-sub-fields (merge
-											(list "__value" orig-field-expr
-												"__rn" window-expr)
-											passthrough-pairs))
-										(define inner-sub (qpp-rebuild-tuple
-											(qpp-tuple-schema sub)
-											(qpp-tuple-tables sub)
-											inner-sub-fields
-											uncorr-where   /* only uncorrelated WHERE inside */
-											(qpp-tuple-group sub)
-											(qpp-tuple-having sub)
-											nil    /* ORDER moved into window */
-											nil    /* LIMIT moved up */
-											nil))  /* OFFSET moved up */
-										/* The LIMIT rewrite synthesizes a derived table. Its
-										uncorrelated WHERE can still contain inner_select
-										markers that are local to this derived scope. Do
-										not leak those markers to legacy untangle_query:
-										immediately run the relational pipeline on the
-										synthesized sub-tuple. */
-										(define inner-sub-lowered
-											(if (qpl-tuple-has-markers? inner-sub)
-												(lower_to_scans_pass
-													(unnest_pass_allow_free
-														(lift_dep_joins_pass inner-sub)))
-												inner-sub))
-										(define wrap-alias (qpl-fresh-limwrap-alias))
-										(define schema (qpp-tuple-schema sub))
-										(define offset-val (if (nil? off) 0 off))
-										/* Wrapper WHERE: rn-filter AND retargeted corr-where.
-										Retarget refs to inner cols → wrap-alias (since they're
-										now projected via the wrapper's __limit_wrap). */
-										(define rn-ref (list (quote get_column) wrap-alias false "__rn" false))
-										(define rn-condition
-											(if (nil? off)
-												(list (quote <=) rn-ref lim)
-												(list (quote and)
-													(list (quote >) rn-ref offset-val)
-													(list (quote <=) rn-ref (list (quote +) lim offset-val)))))
-										(define retargeted-corr
-											(if (nil? corr-where) nil
-												(qpl-retarget-refs corr-where sub-inner-aliases wrap-alias)))
-										(define wrapper-where
-											(if (nil? retargeted-corr) rn-condition
-												(list (quote and) rn-condition retargeted-corr)))
-										(qpp-rebuild-tuple
-											schema
-											(list (list wrap-alias schema inner-sub-lowered false nil))
-											/* FLAT fields for wrapper too. */
-											(list orig-field-name
-												(list (quote get_column) wrap-alias false "__value" false))
-											wrapper-where
-											nil nil nil nil nil))))))))))))
+							(define split (qpl-split-where-by-correlation
+								(qpp-tuple-condition sub) outer-refs))
+							(define corr-where (nth split 0))
+							(define uncorr-where (nth split 1))
+							(if (not (nil? uncorr-where))
+								sub
+								(begin
+									/* Collect inner-equibound passthroughs needed by corr-where. */
+									(define passthrough-cols
+										(qpl-collect-corr-passthroughs corr-where sub-inner-aliases))
+									(define passthrough-pairs (reduce passthrough-cols
+										(lambda (acc col-ref) (match col-ref
+											'(tv col) (merge acc (list col
+												(list (quote get_column) tv false col false)))
+											acc)) '()))
+									/* FLAT fields: __value, __rn, plus passthrough cols. */
+									(define inner-sub-fields (merge
+										(list "__value" orig-field-expr
+											"__rn" window-expr)
+										passthrough-pairs))
+									(define inner-sub (qpp-rebuild-tuple
+										(qpp-tuple-schema sub)
+										(qpp-tuple-tables sub)
+										inner-sub-fields
+										uncorr-where   /* only uncorrelated WHERE inside */
+										(qpp-tuple-group sub)
+										(qpp-tuple-having sub)
+										nil    /* ORDER moved into window */
+										nil    /* LIMIT moved up */
+										nil))  /* OFFSET moved up */
+									/* The LIMIT rewrite synthesizes a derived table. Its
+									uncorrelated WHERE can still contain inner_select
+									markers that are local to this derived scope. Do
+									not leak those markers to legacy untangle_query:
+									immediately run the relational pipeline on the
+									synthesized sub-tuple. */
+									(define inner-sub-lowered
+										(if (qpl-tuple-has-markers? inner-sub)
+											(lower_to_scans_pass
+												(unnest_pass_allow_free
+													(lift_dep_joins_pass inner-sub)))
+											inner-sub))
+									(define wrap-alias (qpl-fresh-limwrap-alias))
+									(define schema (qpp-tuple-schema sub))
+									(define offset-val (if (nil? off) 0 off))
+									/* Wrapper WHERE: rn-filter AND retargeted corr-where.
+									Retarget refs to inner cols → wrap-alias (since they're
+									now projected via the wrapper's __limit_wrap). */
+									(define rn-ref (list (quote get_column) wrap-alias false "__rn" false))
+									(define rn-condition
+										(if (nil? off)
+											(list (quote <=) rn-ref lim)
+											(list (quote and)
+												(list (quote >) rn-ref offset-val)
+												(list (quote <=) rn-ref (list (quote +) lim offset-val)))))
+									(define retargeted-corr
+										(if (nil? corr-where) nil
+											(qpl-retarget-refs corr-where sub-inner-aliases wrap-alias)))
+									(define wrapper-where
+										(if (nil? retargeted-corr) rn-condition
+											(list (quote and) rn-condition retargeted-corr)))
+									(qpp-rebuild-tuple
+										schema
+										(list (list wrap-alias schema inner-sub-lowered false nil))
+										/* FLAT fields for wrapper too. */
+										(list orig-field-name
+											(list (quote get_column) wrap-alias false "__value" false))
+										wrapper-where
+										nil nil nil nil nil))))))))))))
 
 /* qpl-collect-corr-passthroughs — find inner-side col refs in a correlated
 WHERE expression, return the list of (tv col) pairs that need to be projected
@@ -1160,9 +1160,9 @@ treated as SUM-like and yield NULL on empty input per SQL semantics. */
 (define qpl-is-count-like-inner? (lambda (inner)
 	(if (equal? inner 1) true
 		(if (and (list? inner) (equal? (count inner) 4)
-				(qpl-marker-head-eq? (nth inner 0) "if")
-				(equal? (nth inner 2) 0)
-				(equal? (nth inner 3) 1))
+			(qpl-marker-head-eq? (nth inner 0) "if")
+			(equal? (nth inner 2) 0)
+			(equal? (nth inner 3) 1))
 			(begin
 				(define nil-check (nth inner 1))
 				(and (list? nil-check)
@@ -1248,46 +1248,46 @@ logic: (if lhs-is-null nil (if match true (if rhs-has-null nil false))).
 Inside WHERE, nil/UNKNOWN and false both reject the row, so the RHS NULL branch
 is equivalent to false and the predicate reduces to the match test. This keeps
 decorrelation to one COUNT helper instead of materializing an unused null-count
-	helper for positive IN predicates. */
-	(define qpl-if-head? (lambda (head) (match head
-		(symbol if) true
-		(quote if) true
-		'(quote if) true
-		'if true
-		false)))
+helper for positive IN predicates. */
+(define qpl-if-head? (lambda (head) (match head
+	(symbol if) true
+	(quote if) true
+	'(quote if) true
+	'if true
+	false)))
 
-	(define qpl-simplify-where-in-null-branch (lambda (expr)
-		(match expr
-			(cons head args)
-			(if (and (qpl-if-head? head) (list? args) (equal? (count args) 3))
-				(begin
-					(define lhs-null-then (nth args 1))
-					(define match-branch (nth args 2))
-					(match match-branch
-						(cons match-head match-args)
-						(if (and (qpl-if-head? match-head) (list? match-args)
-								(equal? (count match-args) 3))
-							(begin
-								(define match-expr (nth match-args 0))
-								(define match-then (nth match-args 1))
-								(define rhs-null-branch (nth match-args 2))
-								(match rhs-null-branch
-									(cons rhs-head rhs-args)
-									(if (and (qpl-if-head? rhs-head) (list? rhs-args)
-											(equal? (count rhs-args) 3)
-											(nil? lhs-null-then)
-											(equal? match-then true)
-											(nil? (nth rhs-args 1))
-											(equal? (nth rhs-args 2) false))
-										(qpl-simplify-where-in-null-branch match-expr)
-										(cons head (map args qpl-simplify-where-in-null-branch)))
-									(cons head (map args qpl-simplify-where-in-null-branch))))
-							(cons head (map args qpl-simplify-where-in-null-branch)))
-						(cons head (map args qpl-simplify-where-in-null-branch))))
-				(if (list? args)
-					(cons head (map args qpl-simplify-where-in-null-branch))
-					expr))
-			_ expr)))
+(define qpl-simplify-where-in-null-branch (lambda (expr)
+	(match expr
+		(cons head args)
+		(if (and (qpl-if-head? head) (list? args) (equal? (count args) 3))
+			(begin
+				(define lhs-null-then (nth args 1))
+				(define match-branch (nth args 2))
+				(match match-branch
+					(cons match-head match-args)
+					(if (and (qpl-if-head? match-head) (list? match-args)
+						(equal? (count match-args) 3))
+						(begin
+							(define match-expr (nth match-args 0))
+							(define match-then (nth match-args 1))
+							(define rhs-null-branch (nth match-args 2))
+							(match rhs-null-branch
+								(cons rhs-head rhs-args)
+								(if (and (qpl-if-head? rhs-head) (list? rhs-args)
+									(equal? (count rhs-args) 3)
+									(nil? lhs-null-then)
+									(equal? match-then true)
+									(nil? (nth rhs-args 1))
+									(equal? (nth rhs-args 2) false))
+									(qpl-simplify-where-in-null-branch match-expr)
+									(cons head (map args qpl-simplify-where-in-null-branch)))
+								(cons head (map args qpl-simplify-where-in-null-branch))))
+						(cons head (map args qpl-simplify-where-in-null-branch)))
+					(cons head (map args qpl-simplify-where-in-null-branch))))
+			(if (list? args)
+				(cons head (map args qpl-simplify-where-in-null-branch))
+				expr))
+		_ expr)))
 
 /* qpl-substitute-group — apply to every group-by expression.
 Preserves nil as nil — legacy distinguishes nil-group ("no GROUP BY",
@@ -1369,9 +1369,9 @@ handle those. */
 							"' contains a nested aggregate inside a compound expression. "
 							"Phase 4 only decomposes BARE aggregate fields; mixed "
 							"shapes like AVG, SUM(x)+1 are Phase 5+."))
-							nil)
-						(merge acc (list pair)))))
-			acc)) '())))
+						nil)
+					(merge acc (list pair)))))
+		acc)) '())))
 
 /* qpl-first-row-identity-expr — pick a stable row identity from the first real
 table in a tuple, preferring PRIMARY KEY. Used when WHERE-subquery lifting
@@ -1417,13 +1417,13 @@ not the deduplicated prejoin domain. */
 qpir-leaf must expose so the qpir-groupby above can compute its aggregates.
 
 For an aggregate (aggregate inner reducer init):
-	- The leaf must retain the `inner` expression's dependencies.
-	- The qpir-groupby's aggregate uses the real `inner` expression directly.
+- The leaf must retain the `inner` expression's dependencies.
+- The qpir-groupby's aggregate uses the real `inner` expression directly.
 
-	This avoids resolving the aggregate input through the output alias. In
-	materialized grouped derived tables, that alias belongs to the grouped output
-	and may otherwise become a nil-valued group helper instead of the row-local
-	source expression.
+This avoids resolving the aggregate input through the output alias. In
+materialized grouped derived tables, that alias belongs to the grouped output
+and may otherwise become a nil-valued group helper instead of the row-local
+source expression.
 
 Returns: (list-of-leaf-fields  list-of-rewritten-groupby-aggs). */
 (define qpl-leaf-and-agg-projections (lambda (agg-fields)
@@ -1434,12 +1434,12 @@ Returns: (list-of-leaf-fields  list-of-rewritten-groupby-aggs). */
 			(define agg-inner (nth agg-args 0))
 			(define agg-reducer (nth agg-args 1))
 			(define agg-init (nth agg-args 2))
-				/* The leaf projects the aggregate's inner expression under `name`. */
-				(define leaf-field (list name agg-inner))
-					(define agg-after (list name
-						(list (quote aggregate)
-							agg-inner
-							agg-reducer agg-init)))
+			/* The leaf projects the aggregate's inner expression under `name`. */
+			(define leaf-field (list name agg-inner))
+			(define agg-after (list name
+				(list (quote aggregate)
+					agg-inner
+					agg-reducer agg-init)))
 			(list
 				(merge (nth acc 0) (list leaf-field))
 				(merge (nth acc 1) (list agg-after))))
@@ -1521,10 +1521,10 @@ original SQL alias. */
 		(qpp-tuple-limit sub)
 		(qpp-tuple-offset sub)))))
 
-	(define qpl-wrap-inner-subquery (lambda (sub)
-		(if (not (qpp-tuple? sub))
-			(error (concat "qpl-wrap-inner-subquery: sub is not a 7-tuple: " (serialize sub)))
-			(begin
+(define qpl-wrap-inner-subquery (lambda (sub)
+	(if (not (qpp-tuple? sub))
+		(error (concat "qpl-wrap-inner-subquery: sub is not a 7-tuple: " (serialize sub)))
+		(begin
 			(define sub (qpl-qualify-local-nil-refs-tuple sub))
 			/* Normalize to pairs — sub may be parser-flat or pipeline-pairs. */
 			(define fields (qpl-visible-scalar-fields (qpp-tuple-fields sub)))
@@ -1566,28 +1566,28 @@ original SQL alias. */
 					scalar subqueries that decompose would error on
 					("no aggregates found" when fields are pure
 					group-key projections). */
-						(define can-decompose-uncorrelated-count
-							(and
-								(not (nil? (qpl-sub-aggregate-neutral leaf-tuple)))
-								(equal? (count (coalesceNil (qpp-tuple-group leaf-tuple) '())) 0)
-								(or (nil? (qpp-tuple-having leaf-tuple)) (equal? (qpp-tuple-having leaf-tuple) true))
-								(equal? (count (coalesceNil (qpp-tuple-order leaf-tuple) '())) 0)
-								(nil? (qpp-tuple-limit leaf-tuple))
-								(nil? (qpp-tuple-offset leaf-tuple))))
-						(if (qpl-tuple-has-outer-refs? leaf-tuple)
-							/* Correlated: existing decompose-or-hoist logic */
-							(if (qpl-needs-decompose? leaf-tuple)
-								(qpl-build-groupby-wrapped-inner leaf-tuple)
-								(qpl-build-simple-leaf-inner leaf-tuple))
-							/* Uncorrelated: plain scalar subqueries pass through as-is.
-							COUNT-like aggregates are decomposed too, because their empty
-							input must still provide the neutral 0 via the scalar
-							COALESCE contract; a materialized empty leaf would otherwise
-							filter the outer row in legacy lowering. */
-							(if can-decompose-uncorrelated-count
-								(qpl-build-groupby-wrapped-inner leaf-tuple)
-								(qpir-leaf leaf-tuple))))
-					lifted)))))
+					(define can-decompose-uncorrelated-count
+						(and
+							(not (nil? (qpl-sub-aggregate-neutral leaf-tuple)))
+							(equal? (count (coalesceNil (qpp-tuple-group leaf-tuple) '())) 0)
+							(or (nil? (qpp-tuple-having leaf-tuple)) (equal? (qpp-tuple-having leaf-tuple) true))
+							(equal? (count (coalesceNil (qpp-tuple-order leaf-tuple) '())) 0)
+							(nil? (qpp-tuple-limit leaf-tuple))
+							(nil? (qpp-tuple-offset leaf-tuple))))
+					(if (qpl-tuple-has-outer-refs? leaf-tuple)
+						/* Correlated: existing decompose-or-hoist logic */
+						(if (qpl-needs-decompose? leaf-tuple)
+							(qpl-build-groupby-wrapped-inner leaf-tuple)
+							(qpl-build-simple-leaf-inner leaf-tuple))
+						/* Uncorrelated: plain scalar subqueries pass through as-is.
+						COUNT-like aggregates are decomposed too, because their empty
+						input must still provide the neutral 0 via the scalar
+						COALESCE contract; a materialized empty leaf would otherwise
+						filter the outer row in legacy lowering. */
+						(if can-decompose-uncorrelated-count
+							(qpl-build-groupby-wrapped-inner leaf-tuple)
+							(qpir-leaf leaf-tuple))))
+				lifted)))))
 
 /* qpl-tuple-own-aliases — return the list of table aliases the tuple itself
 introduces (its tables list). Used by qpl-tuple-has-outer-refs?. */
@@ -1767,68 +1767,68 @@ projection that COMBINES them. */
 		(if (has? acc ref) acc (merge acc (list ref))))
 		'())))
 
-	/* ==================== Lift driver ==================== */
+/* ==================== Lift driver ==================== */
 
-	(define qpl-table-joinexpr-marker-count (lambda (td)
-		(if (or (nil? td) (not (list? td)) (< (count td) 5))
-			0
-			(count (qpl-collect-markers (nth td 4))))))
+(define qpl-table-joinexpr-marker-count (lambda (td)
+	(if (or (nil? td) (not (list? td)) (< (count td) 5))
+		0
+		(count (qpl-collect-markers (nth td 4))))))
 
-	(define qpl-tuple-joinexpr-has-markers? (lambda (t)
-		(> (reduce (coalesceNil (qpp-tuple-tables t) '()) (lambda (acc td)
-			(+ acc (qpl-table-joinexpr-marker-count td))) 0) 0)))
+(define qpl-tuple-joinexpr-has-markers? (lambda (t)
+	(> (reduce (coalesceNil (qpp-tuple-tables t) '()) (lambda (acc td)
+		(+ acc (qpl-table-joinexpr-marker-count td))) 0) 0)))
 
-	(define qpl-empty-chain-leaf (lambda (schema tables)
-		(qpir-leaf (qpp-rebuild-tuple
-			schema
-			tables
-			'()
-			true
-			nil
-			nil
-			nil
-			nil
+(define qpl-empty-chain-leaf (lambda (schema tables)
+	(qpir-leaf (qpp-rebuild-tuple
+		schema
+		tables
+		'()
+		true
+		nil
+		nil
+		nil
+		nil
+		nil))))
+
+(define qpl-chain-dep-markers (lambda (left markers)
+	(reduce markers (lambda (left-acc pair) (match pair
+		'(sq-alias sub)
+		(qpir-dep-join true left-acc (qpl-wrap-inner-subquery sub) '() sq-alias)
+		left-acc))
+		left)))
+
+(define qpl-append-table-to-chain (lambda (schema left td)
+	(if (nil? left)
+		(qpl-empty-chain-leaf schema (list td))
+		(qpir-join (quote inner) true left
+			(qpl-empty-chain-leaf schema (list td)) nil))))
+
+(define qpl-build-table-chain-with-join-markers (lambda (t acc)
+	(begin
+		(define schema (qpp-tuple-schema t))
+		(reduce (coalesceNil (qpp-tuple-tables t) '()) (lambda (left td) (match td
+			'(alias tschema ttbl isOuter joinexpr)
+			(begin
+				(define before-list (coalesceNil (acc "list") '()))
+				(define sub-joinexpr
+					(if (nil? joinexpr) nil
+						(qpl-substitute-markers joinexpr acc)))
+				(define after-list (acc "list"))
+				(define new-markers
+					(filter after-list (lambda (entry)
+						(not (has? before-list entry)))))
+				(define left-with-deps
+					(if (equal? (count new-markers) 0)
+						left
+						(if (nil? left)
+							(error "lift_dep_joins_pass: JOIN ON marker on first table has no left domain")
+							(qpl-chain-dep-markers left new-markers))))
+				(qpl-append-table-to-chain schema left-with-deps
+					(list alias tschema ttbl isOuter sub-joinexpr)))
+			(qpl-append-table-to-chain schema left td)))
 			nil))))
 
-	(define qpl-chain-dep-markers (lambda (left markers)
-		(reduce markers (lambda (left-acc pair) (match pair
-			'(sq-alias sub)
-			(qpir-dep-join true left-acc (qpl-wrap-inner-subquery sub) '() sq-alias)
-			left-acc))
-			left)))
-
-	(define qpl-append-table-to-chain (lambda (schema left td)
-		(if (nil? left)
-			(qpl-empty-chain-leaf schema (list td))
-			(qpir-join (quote inner) true left
-				(qpl-empty-chain-leaf schema (list td)) nil))))
-
-	(define qpl-build-table-chain-with-join-markers (lambda (t acc)
-		(begin
-			(define schema (qpp-tuple-schema t))
-			(reduce (coalesceNil (qpp-tuple-tables t) '()) (lambda (left td) (match td
-				'(alias tschema ttbl isOuter joinexpr)
-				(begin
-					(define before-list (coalesceNil (acc "list") '()))
-					(define sub-joinexpr
-						(if (nil? joinexpr) nil
-							(qpl-substitute-markers joinexpr acc)))
-					(define after-list (acc "list"))
-					(define new-markers
-						(filter after-list (lambda (entry)
-							(not (has? before-list entry)))))
-					(define left-with-deps
-						(if (equal? (count new-markers) 0)
-							left
-							(if (nil? left)
-								(error "lift_dep_joins_pass: JOIN ON marker on first table has no left domain")
-								(qpl-chain-dep-markers left new-markers))))
-					(qpl-append-table-to-chain schema left-with-deps
-						(list alias tschema ttbl isOuter sub-joinexpr)))
-				(qpl-append-table-to-chain schema left td)))
-				nil))))
-
-	/* lift_dep_joins_pass — the L2 → L1 transformation.
+/* lift_dep_joins_pass — the L2 → L1 transformation.
 Step 1 — pre-rewrite IN/EXISTS markers into the FAQ §11 COALESCE-COUNT > 0
 shape; this turns them into scalar inner_selects so step 2 (substitution)
 handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers. */
@@ -1869,25 +1869,25 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 		acc)) 0) 0)
 		(error "lift_dep_joins_pass: ORDER-BY-level marker not yet supported (Phase 3+)") nil)
 
-		/* JOIN ON markers must be introduced before the table whose ON-clause
-		reads them. Treat them separately from projection/WHERE/HAVING markers,
-		which can be applied above the finished table chain. */
-		(define has-joinexpr-markers (qpl-tuple-joinexpr-has-markers? t))
-		(define join-acc (newsession))
-		(join-acc "list" '())
-		(define join-chain
-			(if has-joinexpr-markers
-				(qpl-build-table-chain-with-join-markers t join-acc)
-				nil))
+	/* JOIN ON markers must be introduced before the table whose ON-clause
+	reads them. Treat them separately from projection/WHERE/HAVING markers,
+	which can be applied above the finished table chain. */
+	(define has-joinexpr-markers (qpl-tuple-joinexpr-has-markers? t))
+	(define join-acc (newsession))
+	(join-acc "list" '())
+	(define join-chain
+		(if has-joinexpr-markers
+			(qpl-build-table-chain-with-join-markers t join-acc)
+			nil))
 
-		/* Collect + substitute all scalar markers from fields, condition, and
-		HAVING. Order matters: fields → condition → having for deterministic
-		sq_N numbering. */
-		(define acc (newsession))
-		(acc "list" '())
-		(define orig-fields (qpp-tuple-fields t))
-		(define sub-fields (qpl-substitute-fields orig-fields acc))
-		(define orig-cond (qpl-simplify-where-in-null-branch (qpp-tuple-condition t)))
+	/* Collect + substitute all scalar markers from fields, condition, and
+	HAVING. Order matters: fields → condition → having for deterministic
+	sq_N numbering. */
+	(define acc (newsession))
+	(acc "list" '())
+	(define orig-fields (qpp-tuple-fields t))
+	(define sub-fields (qpl-substitute-fields orig-fields acc))
+	(define orig-cond (qpl-simplify-where-in-null-branch (qpp-tuple-condition t)))
 	(define sub-cond (qpl-substitute-markers orig-cond acc))
 	(define orig-having (qpp-tuple-having t))
 	(define sub-having
@@ -1898,84 +1898,84 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			(> (count (qpl-collect-markers orig-having)) 0)))
 	(define markers (acc "list"))
 
-		(if (and (not has-joinexpr-markers) (equal? (count markers) 0))
-			/* Nothing actually got lifted (defensive: should not happen because
-			qpl-tuple-has-markers? said yes). Fall back to leaf wrap. */
-			(qpir-leaf t)
-			(begin
+	(if (and (not has-joinexpr-markers) (equal? (count markers) 0))
+		/* Nothing actually got lifted (defensive: should not happen because
+		qpl-tuple-has-markers? said yes). Fall back to leaf wrap. */
+		(qpir-leaf t)
+		(begin
 			/* Build outer leaf: local fields only, WHERE replaced by true
 			(real condition is re-applied above the dep-join chain so its
 			sq.value references can resolve to the dep-join's right side).
 			HAVING follows the same rule when it contains markers.
 			Projection expressions that reference sq.value are applied as a
 			qpir-map after the chain; the leaf cannot see sq aliases yet. */
-					(define cond-has-markers (> (count (qpl-collect-markers orig-cond)) 0))
-					(define group-keys (coalesceNil (qpp-tuple-group t) '()))
-					(define operator-group-needed
-						(and (> (count group-keys) 0)
-							(or cond-has-markers has-joinexpr-markers)))
-					(define agg-fields (if operator-group-needed
-						(qpl-collect-aggregates-in-fields orig-fields) '()))
-					(define count-star-agg-field? (lambda (pair) (match pair
-						'(_name (cons _head rest))
-						(equal? (nth rest 0) 1)
-						false)))
-					(define direct-agg-fields (if operator-group-needed
-						(filter agg-fields count-star-agg-field?)
-						'()))
-					(define decomposed-agg-fields (if operator-group-needed
-						(filter agg-fields (lambda (pair) (not (count-star-agg-field? pair))))
-						'()))
-						(define rewritten-direct-agg-fields (if operator-group-needed
-							(if cond-has-markers
-								(qpl-rewrite-count-star-aggs-with-rowid direct-agg-fields
-									(qpl-first-row-identity-expr (qpp-tuple-tables t)))
-								direct-agg-fields)
-							'()))
-					(define agg-projection-parts (if operator-group-needed
-						(qpl-leaf-and-agg-projections decomposed-agg-fields)
-						(list '() '())))
-					(define non-agg-fields (if operator-group-needed
-						(qpl-collect-non-aggregate-fields orig-fields) '()))
-					(define sub-non-agg-fields (if operator-group-needed
-						(qpl-collect-non-aggregate-fields sub-fields) '()))
-					(define leaf-fields (if operator-group-needed
-						(merge non-agg-fields (nth agg-projection-parts 0))
-						(qpl-strip-marker-dependent-fields orig-fields)))
-					(define field-is-group-key? (lambda (expr)
-						(reduce group-keys (lambda (found key-expr)
-							(or found (equal? expr key-expr)))
-							false)))
-					(define group-value-aggs (if operator-group-needed
-						(filter
-							(map sub-non-agg-fields (lambda (pair) (match pair
-								'(name expr)
-								(if (field-is-group-key? expr)
-								nil
-								(list name (list (quote aggregate) expr (quote group_any_value_reduce) nil)))
-							nil)))
-							(lambda (pair) (not (nil? pair))))
-						'()))
-						(define group-aggs (if operator-group-needed
-							(merge
-								rewritten-direct-agg-fields
-								(nth agg-projection-parts 1)
-								group-value-aggs)
-						'()))
-					(define leaf-having (if having-has-markers nil orig-having))
-					(define outer-leaf
-						(if has-joinexpr-markers
-							join-chain
-							(qpir-leaf (qpp-rebuild-tuple
-								(qpp-tuple-schema t)
-									(qpp-tuple-tables t)
-									leaf-fields
-									true
-									(if operator-group-needed nil (qpp-tuple-group t))
-									(if operator-group-needed nil leaf-having)
-									(qpp-tuple-order t)
-									(qpp-tuple-limit t)
-									(qpp-tuple-offset t)))))
+			(define cond-has-markers (> (count (qpl-collect-markers orig-cond)) 0))
+			(define group-keys (coalesceNil (qpp-tuple-group t) '()))
+			(define operator-group-needed
+				(and (> (count group-keys) 0)
+					(or cond-has-markers has-joinexpr-markers)))
+			(define agg-fields (if operator-group-needed
+				(qpl-collect-aggregates-in-fields orig-fields) '()))
+			(define count-star-agg-field? (lambda (pair) (match pair
+				'(_name (cons _head rest))
+				(equal? (nth rest 0) 1)
+				false)))
+			(define direct-agg-fields (if operator-group-needed
+				(filter agg-fields count-star-agg-field?)
+				'()))
+			(define decomposed-agg-fields (if operator-group-needed
+				(filter agg-fields (lambda (pair) (not (count-star-agg-field? pair))))
+				'()))
+			(define rewritten-direct-agg-fields (if operator-group-needed
+				(if cond-has-markers
+					(qpl-rewrite-count-star-aggs-with-rowid direct-agg-fields
+						(qpl-first-row-identity-expr (qpp-tuple-tables t)))
+					direct-agg-fields)
+				'()))
+			(define agg-projection-parts (if operator-group-needed
+				(qpl-leaf-and-agg-projections decomposed-agg-fields)
+				(list '() '())))
+			(define non-agg-fields (if operator-group-needed
+				(qpl-collect-non-aggregate-fields orig-fields) '()))
+			(define sub-non-agg-fields (if operator-group-needed
+				(qpl-collect-non-aggregate-fields sub-fields) '()))
+			(define leaf-fields (if operator-group-needed
+				(merge non-agg-fields (nth agg-projection-parts 0))
+				(qpl-strip-marker-dependent-fields orig-fields)))
+			(define field-is-group-key? (lambda (expr)
+				(reduce group-keys (lambda (found key-expr)
+					(or found (equal? expr key-expr)))
+					false)))
+			(define group-value-aggs (if operator-group-needed
+				(filter
+					(map sub-non-agg-fields (lambda (pair) (match pair
+						'(name expr)
+						(if (field-is-group-key? expr)
+							nil
+							(list name (list (quote aggregate) expr (quote group_any_value_reduce) nil)))
+						nil)))
+					(lambda (pair) (not (nil? pair))))
+				'()))
+			(define group-aggs (if operator-group-needed
+				(merge
+					rewritten-direct-agg-fields
+					(nth agg-projection-parts 1)
+					group-value-aggs)
+				'()))
+			(define leaf-having (if having-has-markers nil orig-having))
+			(define outer-leaf
+				(if has-joinexpr-markers
+					join-chain
+					(qpir-leaf (qpp-rebuild-tuple
+						(qpp-tuple-schema t)
+						(qpp-tuple-tables t)
+						leaf-fields
+						true
+						(if operator-group-needed nil (qpp-tuple-group t))
+						(if operator-group-needed nil leaf-having)
+						(qpp-tuple-order t)
+						(qpp-tuple-limit t)
+						(qpp-tuple-offset t)))))
 
 			/* Chain qpir-dep-joins, one per marker. Bottom dep-join has outer-leaf
 			on the left; each subsequent dep-join's left is the previous chain
@@ -1989,19 +1989,19 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			/* Wrap with qpir-select if the original WHERE was non-trivial.
 			Comparing to `true` covers both literal-true and the parser's
 			default condition shape. */
-				(define after-where
-					(if (or (equal? sub-cond true) (equal? sub-cond (quote true)))
-						chained
-						(qpir-select sub-cond chained)))
-					(define after-group
-						(if operator-group-needed
-							(qpir-groupby group-keys group-aggs leaf-having after-where)
-							after-where))
-				(define after-having
-					(if having-has-markers
-						(qpir-select sub-having after-group)
-						after-group))
+			(define after-where
+				(if (or (equal? sub-cond true) (equal? sub-cond (quote true)))
+					chained
+					(qpir-select sub-cond chained)))
+			(define after-group
+				(if operator-group-needed
+					(qpir-groupby group-keys group-aggs leaf-having after-where)
+					after-where))
+			(define after-having
+				(if having-has-markers
+					(qpir-select sub-having after-group)
+					after-group))
 
-					(if (or has-joinexpr-markers (qpl-fields-touched? orig-fields sub-fields))
-						(qpir-map sub-fields after-having)
-						after-having))))))
+			(if (or has-joinexpr-markers (qpl-fields-touched? orig-fields sub-fields))
+				(qpir-map sub-fields after-having)
+				after-having))))))

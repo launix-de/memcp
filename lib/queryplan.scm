@@ -209,68 +209,68 @@ raw unn_* occurrence aliases into physical temp column names. */
 	(begin
 		(define normalized_tbl (normalize-materialized-subquery-source tbl))
 		(define expr_lookup (materialized_source_expr_lookup normalized_tbl))
-			(define source_alias_map (prejoin_canonical_sources normalized_tbl))
-			(define planned_cols (coalesceNil (planned_materialized_fields normalized_tbl) '()))
-			(define lower_node (lambda (node) (begin
-				(define normalized_node (normalize_canonical_aliases node))
-				(define node_keys (materialized_source_expr_keys node))
-				(define node_refs_current_source (match node
-					'((symbol get_column) alias_ _ _ _)
-					(has? (alias_lookup_variants tblvar) alias_)
-					'((quote get_column) alias_ _ _ _)
-					(has? (alias_lookup_variants tblvar) alias_)
-					false))
-				(define planned_source_expr
-					(if node_refs_current_source
-						(match node
-							'((symbol get_column) _ _ col _)
-							(reduce planned_cols (lambda (found coldef)
-								(if (not (nil? found))
-									found
-									(if (equal? (coldef "Field") col)
-										(coalesceNil (coldef "Expr") nil)
-										nil)))
-								nil)
-							'((quote get_column) _ _ col _)
-							(reduce planned_cols (lambda (found coldef)
-								(if (not (nil? found))
-									found
-									(if (equal? (coldef "Field") col)
-										(coalesceNil (coldef "Expr") nil)
-										nil)))
-								nil)
-							nil)
-						nil))
-				(define planned_field
-					(if node_refs_current_source
+		(define source_alias_map (prejoin_canonical_sources normalized_tbl))
+		(define planned_cols (coalesceNil (planned_materialized_fields normalized_tbl) '()))
+		(define lower_node (lambda (node) (begin
+			(define normalized_node (normalize_canonical_aliases node))
+			(define node_keys (materialized_source_expr_keys node))
+			(define node_refs_current_source (match node
+				'((symbol get_column) alias_ _ _ _)
+				(has? (alias_lookup_variants tblvar) alias_)
+				'((quote get_column) alias_ _ _ _)
+				(has? (alias_lookup_variants tblvar) alias_)
+				false))
+			(define planned_source_expr
+				(if node_refs_current_source
+					(match node
+						'((symbol get_column) _ _ col _)
 						(reduce planned_cols (lambda (found coldef)
 							(if (not (nil? found))
 								found
-								(begin
-									(define source_expr (coalesceNil (coldef "Expr") nil))
-										(if (and (not (nil? source_expr))
-											(equal? (normalize_canonical_aliases source_expr) normalized_node))
-											(coldef "Field")
-											nil))))
+								(if (equal? (coldef "Field") col)
+									(coalesceNil (coldef "Expr") nil)
+									nil)))
 							nil)
-						nil))
-				(define direct_source_expr
-					(if node_refs_current_source
-						(match node
-							'((symbol get_column) _ _ col _)
-							(coalesce planned_source_expr
-								(if (nil? source_alias_map) nil (source_alias_map col)))
-							'((quote get_column) _ _ col _)
-							(coalesce planned_source_expr
-								(if (nil? source_alias_map) nil (source_alias_map col)))
+						'((quote get_column) _ _ col _)
+						(reduce planned_cols (lambda (found coldef)
+							(if (not (nil? found))
+								found
+								(if (equal? (coldef "Field") col)
+									(coalesceNil (coldef "Expr") nil)
+									nil)))
 							nil)
-						nil))
-				(define direct_field
-					(coalesce planned_field
-						(if (or (nil? expr_lookup) (not node_refs_current_source))
-							nil
-							(reduce (materialized_source_expr_keys node) (lambda (found key)
-								(if (not (nil? found))
+						nil)
+					nil))
+			(define planned_field
+				(if node_refs_current_source
+					(reduce planned_cols (lambda (found coldef)
+						(if (not (nil? found))
+							found
+							(begin
+								(define source_expr (coalesceNil (coldef "Expr") nil))
+								(if (and (not (nil? source_expr))
+									(equal? (normalize_canonical_aliases source_expr) normalized_node))
+									(coldef "Field")
+									nil))))
+						nil)
+					nil))
+			(define direct_source_expr
+				(if node_refs_current_source
+					(match node
+						'((symbol get_column) _ _ col _)
+						(coalesce planned_source_expr
+							(if (nil? source_alias_map) nil (source_alias_map col)))
+						'((quote get_column) _ _ col _)
+						(coalesce planned_source_expr
+							(if (nil? source_alias_map) nil (source_alias_map col)))
+						nil)
+					nil))
+			(define direct_field
+				(coalesce planned_field
+					(if (or (nil? expr_lookup) (not node_refs_current_source))
+						nil
+						(reduce (materialized_source_expr_keys node) (lambda (found key)
+							(if (not (nil? found))
 								found
 								(coalesce (expr_lookup key) nil)))
 							nil))))
@@ -754,13 +754,13 @@ runtime promise name is created during unnesting anymore. */
 			1
 			2)
 		once_limit))
-		(define contract_limit (if (nil? once_limit)
-			(if (nil? limit_value)
-				2
-				(if (<= limit_value 1) limit_value 2))
-			(if (nil? limit_value)
-				contract_once_limit
-				(coalesceNil limit_value -1))))
+	(define contract_limit (if (nil? once_limit)
+		(if (nil? limit_value)
+			2
+			(if (<= limit_value 1) limit_value 2))
+		(if (nil? limit_value)
+			contract_once_limit
+			(coalesceNil limit_value -1))))
 	(define contract_offset (coalesceNil offset_value 0))
 	(define contract_partition_cols (coalesceNil partition_cols 0))
 	(define contract_promise_name (if (and (not (nil? tblvar)) (not (nil? tbl)) (>= contract_once_limit 2))
@@ -1328,22 +1328,22 @@ Enables index-based filtering in scan/scan_order by pushing predicates down. */
 	_ (if (or (nil? expr) (equal? expr true)) '() (list expr))
 )))
 
-	(define combine_and_terms (lambda (parts) (begin
-		(define _parts_raw (filter parts (lambda (x) (and (not (nil? x)) (not (equal? x true))))))
-		(define _deduped (reduce _parts_raw (lambda (state part)
-			(match state
-				'(kept keys)
-				(begin
-					(define key (serialize (normalize_canonical_aliases part)))
-					(if (has? keys key)
-						state
-						(list (merge kept (list part)) (merge keys (list key)))))
-				state))
-			(list '() '())))
-		(define _parts (car _deduped))
-		(if (equal? _parts '()) true
-			(if (equal? 1 (count _parts)) (car _parts)
-				(cons (quote and) _parts)))
+(define combine_and_terms (lambda (parts) (begin
+	(define _parts_raw (filter parts (lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+	(define _deduped (reduce _parts_raw (lambda (state part)
+		(match state
+			'(kept keys)
+			(begin
+				(define key (serialize (normalize_canonical_aliases part)))
+				(if (has? keys key)
+					state
+					(list (merge kept (list part)) (merge keys (list key)))))
+			state))
+		(list '() '())))
+	(define _parts (car _deduped))
+	(if (equal? _parts '()) true
+		(if (equal? 1 (count _parts)) (car _parts)
+			(cons (quote and) _parts)))
 )))
 (define remove_duplicate_and_terms (lambda (parts duplicates) (begin
 	(define duplicate_keys
@@ -1545,9 +1545,9 @@ helper filters can close over them at runtime. */
 		(and
 			(materialized-source? tbl)
 			(reduce (materialized_source_physical_schema schema tbl tblvar schemas)
-			(lambda (found coldef)
-				(or found (equal? (coldef "Field") "__qpu_scalar_once_limit")))
-			false)))))
+				(lambda (found coldef)
+					(or found (equal? (coldef "Field") "__qpu_scalar_once_limit")))
+				false)))))
 (define synthetic_unnest_alias_matches_scan_alias? (lambda (stage_alias tblvar)
 	(and
 		(string? stage_alias)
@@ -1679,16 +1679,16 @@ same cache column while different session values get separate temp columns. */
 				node)))
 			(eval (bind_context_session expr))))
 )))
-	(define runtime_cache_suffix_from_exprs (lambda (exprs) (begin
-		(define terms (merge_unique (map exprs extract_runtime_cache_terms)))
-		(if (equal? terms '())
-			""
-			(concat "|rt:"
-				(serialize_canonical_expr
-					(canonicalize_expr
-						(map terms (lambda (term) (list term (planner_eval_runtime_term term))))
-						'(list)))))
-	)))
+(define runtime_cache_suffix_from_exprs (lambda (exprs) (begin
+	(define terms (merge_unique (map exprs extract_runtime_cache_terms)))
+	(if (equal? terms '())
+		""
+		(concat "|rt:"
+			(serialize_canonical_expr
+				(canonicalize_expr
+					(map terms (lambda (term) (list term (planner_eval_runtime_term term))))
+					'(list)))))
+)))
 (define planner_current_session_snapshot_suffix (lambda () (begin
 	(try
 		(lambda () (begin
@@ -1710,10 +1710,10 @@ same cache column while different session values get separate temp columns. */
 				(concat "|usersess:" (fnv_hash (serialize (map keys (lambda (key)
 					(list key (sess key))))))))))
 		(lambda (err) "")))))
-	(define user_session_runtime_cache_suffix_from_exprs (lambda (exprs) (begin
-		(define user_session_cache_key? (lambda (key)
-			(and
-				(string? key)
+(define user_session_runtime_cache_suffix_from_exprs (lambda (exprs) (begin
+	(define user_session_cache_key? (lambda (key)
+		(and
+			(string? key)
 			(not (strlike key "__%")))))
 	(define user_session_term? (lambda (term) (match term
 		(cons sym (cons key '()))
@@ -1740,14 +1740,14 @@ same cache column while different session values get separate temp columns. */
 							(extract_user_session_terms sym)
 							(merge_unique (map args extract_user_session_terms)))))
 				'())))))
-		(define terms (merge_unique (map exprs extract_user_session_terms)))
-		(if (equal? terms '())
-			""
-			(concat "|rt:"
-				(serialize_canonical_expr
-					(canonicalize_expr
-						(map terms (lambda (term) (list term (planner_eval_runtime_term term))))
-						'(list))))))))
+	(define terms (merge_unique (map exprs extract_user_session_terms)))
+	(if (equal? terms '())
+		""
+		(concat "|rt:"
+			(serialize_canonical_expr
+				(canonicalize_expr
+					(map terms (lambda (term) (list term (planner_eval_runtime_term term))))
+					'(list))))))))
 (define aggregate_count_descriptor '(1 + 0))
 (define aggregate_count_literal_expr? (lambda (expr)
 	(or
@@ -1948,46 +1948,46 @@ cross a scope boundary. */
 
 (define rewrite_semijoin_outer_markers_scoped (lambda (expr outer_schemas helper_aliases) (begin
 	(match expr
-	'((quote get_column) alias_ ti col ci) (begin
-		(define marker_alias (semijoin_outer_marker_alias alias_))
-		(if (nil? marker_alias)
+		'((quote get_column) alias_ ti col ci) (begin
+			(define marker_alias (semijoin_outer_marker_alias alias_))
+			(if (nil? marker_alias)
+				expr
+				(begin
+					(define resolved
+						(resolve_schema_column_expr_scoped
+							outer_schemas
+							outer_schemas
+							helper_aliases
+							(if (equal? marker_alias "") nil marker_alias)
+							true
+							col
+							ci))
+					(if (nil? resolved)
+						(semijoin_outer_marker_fallback_expr expr outer_schemas marker_alias ti col ci)
+						resolved))))
+		'((symbol get_column) alias_ ti col ci) (begin
+			(define marker_alias (semijoin_outer_marker_alias alias_))
+			(if (nil? marker_alias)
+				expr
+				(begin
+					(define resolved
+						(resolve_schema_column_expr_scoped
+							outer_schemas
+							outer_schemas
+							helper_aliases
+							(if (equal? marker_alias "") nil marker_alias)
+							true
+							col
+							ci))
+					(if (nil? resolved)
+						(semijoin_outer_marker_fallback_expr expr outer_schemas marker_alias ti col ci)
+						resolved))))
+		(cons sym args) (if (or (is_opaque_scope_sym sym) (not (list? args)))
 			expr
-			(begin
-				(define resolved
-					(resolve_schema_column_expr_scoped
-					outer_schemas
-					outer_schemas
-					helper_aliases
-					(if (equal? marker_alias "") nil marker_alias)
-					true
-					col
-					ci))
-				(if (nil? resolved)
-					(semijoin_outer_marker_fallback_expr expr outer_schemas marker_alias ti col ci)
-					resolved))))
-	'((symbol get_column) alias_ ti col ci) (begin
-		(define marker_alias (semijoin_outer_marker_alias alias_))
-		(if (nil? marker_alias)
-			expr
-			(begin
-				(define resolved
-					(resolve_schema_column_expr_scoped
-					outer_schemas
-					outer_schemas
-					helper_aliases
-					(if (equal? marker_alias "") nil marker_alias)
-					true
-					col
-					ci))
-				(if (nil? resolved)
-					(semijoin_outer_marker_fallback_expr expr outer_schemas marker_alias ti col ci)
-					resolved))))
-	(cons sym args) (if (or (is_opaque_scope_sym sym) (not (list? args)))
+			(cons (rewrite_semijoin_outer_markers_scoped sym outer_schemas helper_aliases)
+				(map args (lambda (arg)
+					(rewrite_semijoin_outer_markers_scoped arg outer_schemas helper_aliases)))))
 		expr
-		(cons (rewrite_semijoin_outer_markers_scoped sym outer_schemas helper_aliases)
-			(map args (lambda (arg)
-				(rewrite_semijoin_outer_markers_scoped arg outer_schemas helper_aliases)))))
-	expr
 ))))
 (define flatten_plus_terms (lambda (expr) (match expr
 	(cons add_sym add_args) (if (or
@@ -2036,20 +2036,20 @@ cross a scope boundary. */
 		(begin
 			(define cond_terms (flatten_and_terms (coalesceNil sub_condition true)))
 			(define eq_info (parser_semijoin_count_eq_info cond_terms outer_schemas))
-				(match eq_info
-					'(matched_term field_expr target_expr)
-					(list
-						target_expr
-						(list sub_schema
-							sub_tables
-							(list "__semijoin_value" field_expr)
+			(match eq_info
+				'(matched_term field_expr target_expr)
+				(list
+					target_expr
+					(list sub_schema
+						sub_tables
+						(list "__semijoin_value" field_expr)
 						(combine_and_terms (filter cond_terms (lambda (term) (not (equal? term matched_term)))))
 						sub_group
-							sub_having
-							sub_order
-							sub_limit
-							sub_offset))
-					_ nil))
+						sub_having
+						sub_order
+						sub_limit
+						sub_offset))
+				_ nil))
 		nil)
 	_ nil
 )))
@@ -2552,6 +2552,27 @@ carrier until session domains are modeled explicitly. */
 	'((quote union_all) branches order limit offset) (list branches order limit offset)
 	_ nil
 )))
+(define query_union_distinct_parts (lambda (query) (match query
+	'(union_distinct branches order limit offset) (list branches order limit offset)
+	'((symbol union_distinct) branches order limit offset) (list branches order limit offset)
+	'((quote union_distinct) branches order limit offset) (list branches order limit offset)
+	_ nil
+)))
+(define query_union_parts (lambda (query) (begin
+	(define all_parts (query_union_all_parts query))
+	(if (not (nil? all_parts))
+		(merge all_parts (list (equal? ((context "session") "__plain_union_distinct") true)))
+		(begin
+			(define distinct_parts (query_union_distinct_parts query))
+			(if (not (nil? distinct_parts))
+				(merge distinct_parts (list true))
+				nil))))))
+(define query_union_membership_parts (lambda (query) (begin
+	(define union_parts (query_union_parts query))
+	(if (nil? union_parts)
+		nil
+		(match union_parts '(branches order limit offset _distinct)
+			(list branches order limit offset))))))
 (define query_is_select_core (lambda (query) (and (list? query) (>= (count query) 9))))
 (define query_branch_field_names (lambda (query) (match query
 	'(schema tables fields condition group having order limit offset) (extract_assoc fields (lambda (k v) k))
@@ -2576,6 +2597,7 @@ carrier until session domains are modeled explicitly. */
 )))
 (define logical_query_term_is_union_all (lambda (term) (match term
 	'(union_all_term _ _ _ _) true
+	'(union_all_term _ _ _ _ _) true
 	false
 )))
 (define expr_has_any_wildcard_ref (lambda (expr) (match expr
@@ -2665,10 +2687,11 @@ carrier until session domains are modeled explicitly. */
 										order limit offset)))))
 					query2))
 			query2))))
-	(define top_union_parts (query_union_all_parts query))
+	(define top_union_parts (query_union_parts query))
 	(if (not (nil? top_union_parts))
-		(match top_union_parts '(branches order limit offset)
-			(list (quote union_all) (map branches rewrite_query_term) order limit offset))
+		(match top_union_parts '(branches order limit offset distinct)
+			(list (if distinct (quote union_distinct) (quote union_all))
+				(map branches rewrite_query_term) order limit offset))
 		(if (not (select_has_from_subquery query))
 			query
 			(rewrite_select_core_over_union_from (match query
@@ -2686,13 +2709,16 @@ carrier until session domains are modeled explicitly. */
 	'(union_all_term branches _ _ _) (if (or (nil? branches) (equal? branches '()))
 		'()
 		(logical_query_term_output_cols (car branches)))
+	'(union_all_term branches _ _ _ _) (if (or (nil? branches) (equal? branches '()))
+		'()
+		(logical_query_term_output_cols (car branches)))
 	_ (error "invalid logical query term")
 )))
 (define untangle_query_term (lambda (query outer_schemas) (begin
 	(if neumann_pipeline_trace (print "[neumann] term: before rewrite_query_term") nil)
 	(define rewritten_query (rewrite_query_term query))
 	(if neumann_pipeline_trace (print "[neumann] term: after rewrite_query_term") nil)
-	(define union_parts (query_union_all_parts rewritten_query))
+	(define union_parts (query_union_parts rewritten_query))
 	(if neumann_pipeline_trace (print "[neumann] term: after union check") nil)
 	(if (nil? union_parts)
 		(if (query_is_select_core rewritten_query)
@@ -2700,7 +2726,7 @@ carrier until session domains are modeled explicitly. */
 				(if (or (nil? rewritten_query) (< (count rewritten_query) 1) (not (string? (nth rewritten_query 0))))
 					(error (concat "UNTANGLE_QUERY_TERM_NONSTRING_SCHEMA " (serialize rewritten_query)))
 					nil)
-					(define uq_result (apply untangle_query (merge rewritten_query (list outer_schemas))))
+				(define uq_result (apply untangle_query (merge rewritten_query (list outer_schemas))))
 				(if neumann_pipeline_trace (print "[neumann] term: after apply untangle_query") nil)
 				(if (not (equal? (count uq_result) 8))
 					(error (concat "UNTANGLE_QUERY_TERM_UQ_RESULT " (serialize uq_result)))
@@ -2709,12 +2735,12 @@ carrier until session domains are modeled explicitly. */
 				(if neumann_pipeline_trace (print "[neumann] term: after make_select_core_term") nil)
 				select_term)
 			(error "invalid SELECT query term"))
-		(match union_parts '(branches order limit offset) (begin
+		(match union_parts '(branches order limit offset distinct) (begin
 			(if (or (nil? branches) (equal? branches '()))
 				(error "UNION ALL requires at least one branch"))
 			(list (quote union_all_term)
 				(map branches (lambda (branch) (untangle_query_term branch outer_schemas)))
-				order limit offset)
+				order limit offset distinct)
 ))))
 )))
 
@@ -2725,12 +2751,12 @@ column descriptors suitable for the schemas assoc in untangle_query.
 Does NOT handle FK→PK reuse (returns nil for that case — caller must check). */
 (define make_keytable_schema (lambda (schema tbl keys tblvar) (begin
 	(define keytable_source_name_raw (planner-temp-source-name tbl tblvar))
-		(define keytable_source_name
-			(coalesce (prejoin_keytable_domain_sources (normalize-materialized-subquery-source tbl))
-				keytable_source_name_raw))
-		(if (equal? keytable_source_name "")
-			(error (concat "make_keytable_schema: empty source name for tbl=" tbl " tblvar=" tblvar)))
-		(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
+	(define keytable_source_name
+		(coalesce (prejoin_keytable_domain_sources (normalize-materialized-subquery-source tbl))
+			keytable_source_name_raw))
+	(if (equal? keytable_source_name "")
+		(error (concat "make_keytable_schema: empty source name for tbl=" tbl " tblvar=" tblvar)))
+	(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
 	(define key_pairs_sorted (sort (map keys (lambda (k)
 		(begin
 			(define key_name (sanitize_temp_name
@@ -2745,7 +2771,7 @@ Does NOT handle FK→PK reuse (returns nil for that case — caller must check).
 			(merge acc (list pair))))
 		'()))
 	(define key_names (map key_pairs car))
-		(define keytable_name (concat ".keytable:" (fnv_hash (concat keytable_source_name ":" key_names))))
+	(define keytable_name (concat ".keytable:" (fnv_hash (concat keytable_source_name ":" key_names))))
 	(define schema_def (map key_names (lambda (colname) (list "Field" colname "Type" "any"))))
 	(list keytable_name key_names schema_def)
 )))
@@ -2770,8 +2796,8 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 	(define physical_tbl (and (string? tbl) (> (strlen tbl) 0) (not (equal? (substr tbl 0 1) "."))))
 	(define keytable_source_name_raw (planner-temp-source-name tbl tblvar))
 	(define keytable_source_name
-				(coalesce (prejoin_keytable_domain_sources (normalize-materialized-subquery-source tbl))
-					keytable_source_name_raw))
+		(coalesce (prejoin_keytable_domain_sources (normalize-materialized-subquery-source tbl))
+			keytable_source_name_raw))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
 	reuse the parent (referenced) table instead of creating a temp keytable. */
 	(define fk_result (if (and physical_tbl (nil? condition_suffix) (equal? 1 (count keys)))
@@ -2805,37 +2831,37 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 					nil))
 			nil)
 		nil))
-		(if (not (nil? fk_result))
-			fk_result
-			(begin
-					(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
-				(define key_pairs_sorted (sort (map keys (lambda (k)
-					(begin
-						(define key_name (sanitize_temp_name
-							(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar k)) '(list) '(list) alias_map)))
-						(list key_name k))))
-					(lambda (a b) (< (car a) (car b)))))
-				(define key_pairs (reduce key_pairs_sorted (lambda (acc pair)
-					(if (reduce acc (lambda (found existing_pair)
-						(or found (equal?? (nth existing_pair 0) (nth pair 0))))
-						false)
-						acc
-						(merge acc (list pair))))
-					'()))
-				(define key_names (map key_pairs car))
-				(define key_exprs (map key_pairs cadr))
-					(define condition_name (if (nil? condition_suffix) nil
-						(fnv_hash (concat
-							(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar condition_suffix)) '(list) '(list) alias_map)
-							(runtime_cache_suffix_from_exprs (list condition_suffix))
-							(user_session_runtime_cache_suffix_from_exprs (list condition_suffix))))))
-				(define key_name_at (lambda (i) (nth key_names i)))
-				(define key_at (lambda (i) (nth key_exprs i)))
+	(if (not (nil? fk_result))
+		fk_result
+		(begin
+			(define alias_map (list (list tblvar (concat schema "." keytable_source_name))))
+			(define key_pairs_sorted (sort (map keys (lambda (k)
+				(begin
+					(define key_name (sanitize_temp_name
+						(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar k)) '(list) '(list) alias_map)))
+					(list key_name k))))
+				(lambda (a b) (< (car a) (car b)))))
+			(define key_pairs (reduce key_pairs_sorted (lambda (acc pair)
+				(if (reduce acc (lambda (found existing_pair)
+					(or found (equal?? (nth existing_pair 0) (nth pair 0))))
+					false)
+					acc
+					(merge acc (list pair))))
+				'()))
+			(define key_names (map key_pairs car))
+			(define key_exprs (map key_pairs cadr))
+			(define condition_name (if (nil? condition_suffix) nil
+				(fnv_hash (concat
+					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar condition_suffix)) '(list) '(list) alias_map)
+					(runtime_cache_suffix_from_exprs (list condition_suffix))
+					(user_session_runtime_cache_suffix_from_exprs (list condition_suffix))))))
+			(define key_name_at (lambda (i) (nth key_names i)))
+			(define key_at (lambda (i) (nth key_exprs i)))
 			(define keytable_name (concat ".keytable:"
 				(fnv_hash
-							(if (nil? condition_suffix)
-								(concat keytable_source_name ":" key_names)
-								(concat keytable_source_name ":" key_names "|" condition_name)))))
+					(if (nil? condition_suffix)
+						(concat keytable_source_name ":" key_names)
+						(concat keytable_source_name ":" key_names "|" condition_name)))))
 			(define keytable_dependency_tables
 				(if (materialized-source? tbl)
 					(coalesceNil (materialized_source_dependency_tables (normalize-materialized-subquery-source tbl)) '())
@@ -3386,13 +3412,13 @@ seeing the correctly prefixed outer alias. */
 					(begin
 						(sq_cache "init_keys" (merge init_keys (list init_key)))
 						(sq_cache "init" (merge (coalesceNil (sq_cache "init") '()) (list init_code))))))))))
-		(define sq_cache_add_init_list (lambda (init_codes)
-			(reduce (coalesceNil init_codes '()) (lambda (acc init_code) (begin
-				(sq_cache_add_init_once init_code init_code)
-				acc)) nil)))
-		(define qpu_low_initial_extra_inits (qpu-low-drain-extra-inits))
-		(sq_cache_add_init_list qpu_low_initial_extra_inits)
-		(define dep_scalar_cache (newsession))
+	(define sq_cache_add_init_list (lambda (init_codes)
+		(reduce (coalesceNil init_codes '()) (lambda (acc init_code) (begin
+			(sq_cache_add_init_once init_code init_code)
+			acc)) nil)))
+	(define qpu_low_initial_extra_inits (qpu-low-drain-extra-inits))
+	(sq_cache_add_init_list qpu_low_initial_extra_inits)
+	(define dep_scalar_cache (newsession))
 	(define analysis_cache (coalesce (planner_analysis_cache_current) (newsession)))
 	(define analysis_cache_key (lambda (kind query outer_schemas)
 		(concat kind ":" (fnv_hash (serialize (list query outer_schemas))))))
@@ -3672,7 +3698,6 @@ seeing the correctly prefixed outer alias. */
 					(not (nil? value_expr))
 					(not (expr_has_direct_aggregate value_expr))
 					(not (expr_has_direct_unqualified_column value_expr))
-					(not (contains_inner_select_marker value_expr))
 					(not (expr_uses_any_alias value_expr local_aliases))
 					(not (contains_inner_select_marker q_condition))
 					(not (expr_uses_any_alias q_group local_aliases))
@@ -3753,9 +3778,9 @@ seeing the correctly prefixed outer alias. */
 								false)))
 							false)))
 				false)))))
-		(define raw_query_contains_skip_level_nested_outer_ref (lambda (query current_aliases)
-			(analysis_cache_get_or_compute "raw-skip-level" query current_aliases
-				(lambda () (match query
+	(define raw_query_contains_skip_level_nested_outer_ref (lambda (query current_aliases)
+		(analysis_cache_get_or_compute "raw-skip-level" query current_aliases
+			(lambda () (match query
 				'(_ _ raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
 					(define nested_current_aliases (append_unique current_aliases (raw_query_local_aliases query)))
 					(define raw_expr_contains_skip_level_nested_outer_ref (lambda (expr) (match expr
@@ -3802,66 +3827,66 @@ seeing the correctly prefixed outer alias. */
 								'(col _dir) (raw_expr_contains_skip_level_nested_outer_ref col)
 								false)))
 							false)))
-					false)))))
-		(define raw_query_inner_selects_use_aliases (lambda (query aliases)
-			(analysis_cache_get_or_compute "raw-inner-selects-use-aliases" query aliases
-				(lambda () (match query
-					'(_ _ raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
-						(define local_aliases (raw_query_local_aliases query))
-						(define raw_expr_uses_alias (lambda (expr) (match expr
-							'((symbol get_column) alias_ _ _ _) (and
-								(not (nil? alias_))
+				false)))))
+	(define raw_query_inner_selects_use_aliases (lambda (query aliases)
+		(analysis_cache_get_or_compute "raw-inner-selects-use-aliases" query aliases
+			(lambda () (match query
+				'(_ _ raw_fields raw_condition raw_group raw_having raw_order _ _) (begin
+					(define local_aliases (raw_query_local_aliases query))
+					(define raw_expr_uses_alias (lambda (expr) (match expr
+						'((symbol get_column) alias_ _ _ _) (and
+							(not (nil? alias_))
+							(alias_in_list aliases alias_)
+							(not (alias_in_list local_aliases alias_)))
+						'((quote get_column) alias_ _ _ _) (and
+							(not (nil? alias_))
+							(alias_in_list aliases alias_)
+							(not (alias_in_list local_aliases alias_)))
+						'((symbol outer) outer_sym)
+						(match (split (string outer_sym) ".")
+							(list alias_ _col)
+							(and
 								(alias_in_list aliases alias_)
 								(not (alias_in_list local_aliases alias_)))
-							'((quote get_column) alias_ _ _ _) (and
-								(not (nil? alias_))
+							_ false)
+						'((quote outer) outer_sym)
+						(match (split (string outer_sym) ".")
+							(list alias_ _col)
+							(and
 								(alias_in_list aliases alias_)
 								(not (alias_in_list local_aliases alias_)))
-							'((symbol outer) outer_sym)
-							(match (split (string outer_sym) ".")
-								(list alias_ _col)
-								(and
-									(alias_in_list aliases alias_)
-									(not (alias_in_list local_aliases alias_)))
-								_ false)
-							'((quote outer) outer_sym)
-							(match (split (string outer_sym) ".")
-								(list alias_ _col)
-								(and
-									(alias_in_list aliases alias_)
-									(not (alias_in_list local_aliases alias_)))
-								_ false)
-							(cons sym args) (begin
-								(define kind (subquery_marker_kind sym))
-								(define nested_subquery (if (nil? kind) nil
-									(match kind
-										(quote inner_select) (match args
-											(cons inner_subquery '()) inner_subquery
-											nil)
-										(quote inner_select_in) (match args
-											(cons _target_expr (cons inner_subquery '())) inner_subquery
-											nil)
-										(quote inner_select_exists) (match args
-											(cons inner_subquery '()) inner_subquery
-											nil)
-										nil)))
-								(if (not (nil? nested_subquery))
-									(raw_query_inner_selects_use_aliases nested_subquery aliases)
-									(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-										false
-										(reduce args (lambda (acc arg) (or acc (raw_expr_uses_alias arg))) false))))
-							false)))
-						(or
-							(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_uses_alias v))) false)
-							(raw_expr_uses_alias (coalesceNil raw_condition true))
-							(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_uses_alias gexpr))) false)
-							(raw_expr_uses_alias (coalesceNil raw_having true))
-							(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
-								(or acc (match order_item
-									'(col _dir) (raw_expr_uses_alias col)
-									false)))
+							_ false)
+						(cons sym args) (begin
+							(define kind (subquery_marker_kind sym))
+							(define nested_subquery (if (nil? kind) nil
+								(match kind
+									(quote inner_select) (match args
+										(cons inner_subquery '()) inner_subquery
+										nil)
+									(quote inner_select_in) (match args
+										(cons _target_expr (cons inner_subquery '())) inner_subquery
+										nil)
+									(quote inner_select_exists) (match args
+										(cons inner_subquery '()) inner_subquery
+										nil)
+									nil)))
+							(if (not (nil? nested_subquery))
+								(raw_query_inner_selects_use_aliases nested_subquery aliases)
+								(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+									false
+									(reduce args (lambda (acc arg) (or acc (raw_expr_uses_alias arg))) false))))
+						false)))
+					(or
+						(reduce_assoc raw_fields (lambda (acc _k v) (or acc (raw_expr_uses_alias v))) false)
+						(raw_expr_uses_alias (coalesceNil raw_condition true))
+						(reduce (coalesceNil raw_group '()) (lambda (acc gexpr) (or acc (raw_expr_uses_alias gexpr))) false)
+						(raw_expr_uses_alias (coalesceNil raw_having true))
+						(reduce (coalesceNil raw_order '()) (lambda (acc order_item)
+							(or acc (match order_item
+								'(col _dir) (raw_expr_uses_alias col)
 								false)))
-					false)))))
+							false)))
+				false)))))
 	(define scalar_subselect_shape_facts (lambda (subquery outer_schemas)
 		(analysis_cache_get_or_compute "scalar-shape" subquery outer_schemas
 			(lambda () (match subquery
@@ -4710,17 +4735,17 @@ seeing the correctly prefixed outer alias. */
 				(list (quote aggregate) 1 (quote +) 0)
 				field_expr))))
 	(define materialize_uncorrelated_scalar_subselect (lambda (subquery outer_schemas) (begin
-			(define shape_facts (scalar_subselect_shape_facts subquery outer_schemas))
-			(match shape_facts
-				'(g h _o _l _off _value_expr has_outer outer_refs_are_direct contains_inner_select has_value_agg session_sensitive skip_level)
-				(begin
-					(define local_aliases (raw_query_local_aliases subquery))
-					(define direct_outer_schemas
-						(if contains_inner_select
-							(match (subquery_resolved_scope subquery outer_schemas)
-								'(_ _ _ _ _ resolved_schemas _ _) resolved_schemas
-								_ outer_schemas)
-							outer_schemas))
+		(define shape_facts (scalar_subselect_shape_facts subquery outer_schemas))
+		(match shape_facts
+			'(g h _o _l _off _value_expr has_outer outer_refs_are_direct contains_inner_select has_value_agg session_sensitive skip_level)
+			(begin
+				(define local_aliases (raw_query_local_aliases subquery))
+				(define direct_outer_schemas
+					(if contains_inner_select
+						(match (subquery_resolved_scope subquery outer_schemas)
+							'(_ _ _ _ _ resolved_schemas _ _) resolved_schemas
+							_ outer_schemas)
+						outer_schemas))
 					(define replace_independent_inner_selects (and
 						has_outer
 						contains_inner_select
@@ -4728,18 +4753,18 @@ seeing the correctly prefixed outer alias. */
 						(not (raw_query_uses_alias_outside_current subquery local_aliases))
 						(not (raw_query_inner_selects_use_aliases subquery local_aliases))))
 					(if (or
-					(and has_outer (not replace_independent_inner_selects))
-					(and contains_inner_select skip_level)
-					(scalar_inner_select_is_presence_query subquery))
+						(and has_outer (not replace_independent_inner_selects))
+						(and contains_inner_select skip_level)
+						(scalar_inner_select_is_presence_query subquery))
 					nil
-				(match subquery
-					'(sub_schema _sub_tables sub_fields _sub_condition _sub_group _sub_having _sub_order _sub_limit _sub_offset) (begin
-						(define first_field_name (match sub_fields
-							(cons k (cons _ _)) k
-							nil))
-						(if (nil? first_field_name)
-							nil
-							(begin
+					(match subquery
+						'(sub_schema _sub_tables sub_fields _sub_condition _sub_group _sub_having _sub_order _sub_limit _sub_offset) (begin
+							(define first_field_name (match sub_fields
+								(cons k (cons _ _)) k
+								nil))
+							(if (nil? first_field_name)
+								nil
+								(begin
 									(define direct_subquery (if contains_inner_select
 										(match subquery
 											'(direct_schema direct_tables direct_fields direct_condition direct_group direct_having direct_order direct_limit direct_offset)
@@ -4759,17 +4784,17 @@ seeing the correctly prefixed outer alias. */
 												direct_offset)
 											_ subquery)
 										subquery))
-								(define direct_fields (match direct_subquery
-									'(_ _ direct_fields_list _ _ _ _ _ _) direct_fields_list
-									_ sub_fields))
-								(define first_field_expr (uncorrelated_literal_sum_count_value_expr first_field_name (nth direct_fields 1)))
-								(define direct_expr (uncorrelated_session_aggregate_direct_expr direct_subquery first_field_expr))
-								(if (nil? direct_expr)
-									(materialize_uncorrelated_promise_value
-										"scalar"
-										subquery
-										(list (quote nth) (symbol "row") 1)
-										"scalar subselect returned more than one row")
+									(define direct_fields (match direct_subquery
+										'(_ _ direct_fields_list _ _ _ _ _ _) direct_fields_list
+										_ sub_fields))
+									(define first_field_expr (uncorrelated_literal_sum_count_value_expr first_field_name (nth direct_fields 1)))
+									(define direct_expr (uncorrelated_session_aggregate_direct_expr direct_subquery first_field_expr))
+									(if (nil? direct_expr)
+										(materialize_uncorrelated_promise_value
+											"scalar"
+											subquery
+											(list (quote nth) (symbol "row") 1)
+											"scalar subselect returned more than one row")
 										(materialize_uncorrelated_direct_promise_value
 											"scalar-direct"
 											subquery
@@ -4816,8 +4841,9 @@ seeing the correctly prefixed outer alias. */
 				(cons (resolve_outer sym) (map args resolve_outer)))
 			expr)))
 		(define resolved_target_expr (if (nil? target_expr) nil (resolve_outer target_expr)))
-		/* UNION ALL: recurse into each branch, combine with OR (positive) or AND (negated) */
-		(define _union_parts (query_union_all_parts subquery))
+		/* UNION inside membership predicates is duplicate-insensitive: recurse into
+		each branch and skip the top-level UNION DISTINCT materialization step. */
+		(define _union_parts (query_union_membership_parts subquery))
 		(if (not (nil? _union_parts))
 			(match _union_parts '(branches order limit offset)
 				(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
@@ -4869,11 +4895,11 @@ seeing the correctly prefixed outer alias. */
 									nil
 									(if (equal? 1 (count branch_results)) (car branch_results)
 										(cons (if (equal?? comparison (quote >)) (quote or) (quote and)) branch_results))))))))
-				/* single subquery (non-UNION) path */
-				(begin
-					(define count-map-expr-for (lambda (cond-expr)
-						(if (or (nil? cond-expr) (equal? cond-expr true))
-							1
+			/* single subquery (non-UNION) path */
+			(begin
+				(define count-map-expr-for (lambda (cond-expr)
+					(if (or (nil? cond-expr) (equal? cond-expr true))
+						1
 						(list (quote if) cond-expr 1 0))))
 				(define _first_field (if (nil? target_expr) nil
 					(match subquery '(_ _ flds _ _ _ _ _ _) (match flds (cons _ (cons v _)) v nil) nil)))
@@ -4900,32 +4926,35 @@ seeing the correctly prefixed outer alias. */
 					(if (and (not (nil? target_expr)) (nil? _first_field))
 						nil
 						(begin
+							(define match_condition
+								(if (nil? target_expr)
+									c
+									(if (or (nil? c) (equal? c true))
+										(list (quote equal??) _first_field target_expr)
+										(list (quote and) c (list (quote equal??) _first_field target_expr)))))
 							(define count_sq (match subquery
 								'(s t f c g h o l off) (list s t
-									(list "__cnt" (list (quote aggregate) (count-map-expr-for c) (symbol "+") 0))
-									(if (nil? target_expr) c
-										(if (or (nil? c) (equal? c true))
-											(list (quote equal??) _first_field target_expr)
-											(list (quote and) c (list (quote equal??) _first_field target_expr))))
+									(list "__cnt" (list (quote aggregate) (count-map-expr-for match_condition) (symbol "+") 0))
+									true
 									(list 1) nil nil nil nil)
 								nil))
 							(if (nil? count_sq)
 								nil
 								(begin
 									(define _result (unnest_subselect count_sq outer_schemas))
-										(if (nil? _result)
-												nil
-												(match _result '(_subst _tbls) (begin
-													/* COUNT-based EXISTS/IN lowering is an expression:
-													missing helper rows must survive so COALESCE(count,0)
-													can implement per-domain false/anti semantics. */
-													(sq_cache "scalar_tables" (merge
-														(map _tbls (lambda (td) (match td
-															'(tv tschema ttbl _isOuter tje)
-															(list tv tschema ttbl true tje)
-															_ td)))
-														(coalesceNil (sq_cache "scalar_tables") '())))
-													(list comparison (list (quote coalesceNil) _subst 0) 0)))))))))))
+									(if (nil? _result)
+										nil
+										(match _result '(_subst _tbls) (begin
+											/* COUNT-based EXISTS/IN lowering is an expression:
+											missing helper rows must survive so COALESCE(count,0)
+											can implement per-domain false/anti semantics. */
+											(sq_cache "scalar_tables" (merge
+												(map _tbls (lambda (td) (match td
+													'(tv tschema ttbl _isOuter tje)
+													(list tv tschema ttbl true tje)
+													_ td)))
+												(coalesceNil (sq_cache "scalar_tables") '())))
+											(list comparison (list (quote coalesceNil) _subst 0) 0)))))))))))
 	)))
 	/* replace_inner_selects: walks an expression tree and replaces inner_select markers
 	with their Neumann-decorrelated equivalents. Scalar subselects go through
@@ -4947,7 +4976,7 @@ seeing the correctly prefixed outer alias. */
 				'(quote inner_select_exists) (quote inner_select_exists)
 				_ nil))
 			(define union_exists_expr (lambda (subquery negated) (begin
-				(define union_parts (query_union_all_parts subquery))
+				(define union_parts (query_union_membership_parts subquery))
 				(if (nil? union_parts)
 					nil
 					(match union_parts '(branches union_order union_limit union_offset)
@@ -4966,7 +4995,7 @@ seeing the correctly prefixed outer alias. */
 										(car branch_exprs)
 										(cons (if negated (quote and) (quote or)) branch_exprs))))))))))
 			(define union_in_expr (lambda (target_expr subquery negated) (begin
-				(define union_parts (query_union_all_parts subquery))
+				(define union_parts (query_union_membership_parts subquery))
 				(if (nil? union_parts)
 					nil
 					(match union_parts '(branches union_order union_limit union_offset)
@@ -5042,25 +5071,25 @@ seeing the correctly prefixed outer alias. */
 									_ nil)
 								(if (equal?? inner_kind (quote inner_select_exists))
 									(match inner_args
-											(cons subquery '()) (begin
-												(define visible_subquery
-													(rewrite_dependent_scalar_visible_outer_refs subquery outer_schemas))
-												(coalesce
-													(union_exists_expr subquery true)
-													(unnest_count_subselect visible_subquery outer_schemas nil (quote equal?))
-													(if (dependent_marker_required_subquery subquery outer_schemas)
-														(begin
-															(define dep_expr
-																(build_dependent_scalar_via_marker
+										(cons subquery '()) (begin
+											(define visible_subquery
+												(rewrite_dependent_scalar_visible_outer_refs subquery outer_schemas))
+											(coalesce
+												(union_exists_expr subquery true)
+												(unnest_count_subselect visible_subquery outer_schemas nil (quote equal?))
+												(if (dependent_marker_required_subquery subquery outer_schemas)
+													(begin
+														(define dep_expr
+															(build_dependent_scalar_via_marker
 																(quote inner_select_exists)
 																subquery
 																nil
 																outer_schemas))
-															(list (quote or)
-																(list (quote nil?) dep_expr)
-																(list (quote not) dep_expr)))
-														nil)
-											))
+														(list (quote or)
+															(list (quote nil?) dep_expr)
+															(list (quote not) dep_expr)))
+													nil)
+										))
 										_ nil)
 									nil)))
 						_ nil)
@@ -5077,70 +5106,74 @@ seeing the correctly prefixed outer alias. */
 						dependent_not_in_expr
 						(if (nil? not_expr)
 							(match kind
-									(quote inner_select) (match args
-										(cons subquery '())
-										(begin
-											(define local_aliases (raw_query_local_aliases subquery))
-											(define replace_independent_inner_selects (and
-												(contains_inner_select_marker subquery)
-												(subquery_has_outer_refs subquery outer_schemas)
-												(not (raw_query_contains_skip_level_nested_outer_ref subquery local_aliases))
-												(not (raw_query_uses_alias_outside_current subquery local_aliases))
-												(not (raw_query_inner_selects_use_aliases subquery local_aliases))))
-											(coalesce
-												(if (scalar_inner_select_is_presence_query subquery)
-													(replace_inner_selects
-														(list (quote inner_select_exists) subquery)
-														outer_schemas)
-													nil)
-												(scalar_independent_limited_subquery_expr subquery outer_schemas)
-												(if (or
-													(dependent_marker_required_subquery subquery outer_schemas)
-													(and
-														(contains_inner_select_marker subquery)
-														(subquery_has_outer_refs subquery outer_schemas)
-														(not replace_independent_inner_selects)))
-													(build_dependent_scalar_via_marker
-														(quote inner_select)
-														subquery
-														nil
-														outer_schemas)
-													nil)
-												(match (build_scalar_subselect_with_strategy subquery outer_schemas)
-													'(_ lowered_expr) lowered_expr
-													nil)))
-										_ (if (list? args)
-											(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
-											expr))
+								(quote inner_select) (match args
+									(cons subquery '())
+									(begin
+										(define local_aliases (raw_query_local_aliases subquery))
+										(define replace_independent_inner_selects (and
+											(contains_inner_select_marker subquery)
+											(subquery_has_outer_refs subquery outer_schemas)
+											(not (raw_query_contains_skip_level_nested_outer_ref subquery local_aliases))
+											(not (raw_query_uses_alias_outside_current subquery local_aliases))
+											(not (raw_query_inner_selects_use_aliases subquery local_aliases))))
+										(coalesce
+											(if (scalar_inner_select_is_presence_query subquery)
+												(replace_inner_selects
+													(list (quote inner_select_exists) subquery)
+													outer_schemas)
+												nil)
+											(scalar_independent_limited_subquery_expr subquery outer_schemas)
+											(if (or
+												(dependent_marker_required_subquery subquery outer_schemas)
+												(and
+													(contains_inner_select_marker subquery)
+													(subquery_has_outer_refs subquery outer_schemas)
+													(not replace_independent_inner_selects)))
+												(build_dependent_scalar_via_marker
+													(quote inner_select)
+													subquery
+													nil
+													outer_schemas)
+												nil)
+											(match (build_scalar_subselect_with_strategy subquery outer_schemas)
+												'(_ lowered_expr) lowered_expr
+												nil)))
+									_ (if (list? args)
+										(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
+										expr))
 								(quote inner_select_in) (match args
 									(cons target_expr (cons subquery '()))
 									(coalesce
-										(unnest_count_subselect subquery outer_schemas target_expr (quote >))
-										(union_in_expr target_expr subquery false)
-										(if (dependent_marker_required_subquery subquery outer_schemas)
+										(if (or
+											(dependent_marker_required_subquery subquery outer_schemas)
+											(subquery_has_outer_refs subquery outer_schemas))
 											(build_dependent_scalar_via_marker
 												(quote inner_select_in)
 												subquery
 												target_expr
 												outer_schemas)
 											nil)
+										(unnest_count_subselect subquery outer_schemas target_expr (quote >))
+										(union_in_expr target_expr subquery false)
 										expr)
 									_ (if (list? args)
 										(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 										expr))
-									(quote inner_select_exists) (match args
-										(cons subquery '())
-										(coalesce
-											(union_exists_expr subquery false)
-											(unnest_count_subselect subquery outer_schemas nil (quote >))
-											(if (dependent_marker_required_subquery subquery outer_schemas)
-												(build_dependent_scalar_via_marker
-													(quote inner_select_exists)
-													subquery
-													nil
-													outer_schemas)
-												nil)
-											(build_exists_subselect subquery outer_schemas))
+								(quote inner_select_exists) (match args
+									(cons subquery '())
+									(coalesce
+										(union_exists_expr subquery false)
+										(if (or
+											(dependent_marker_required_subquery subquery outer_schemas)
+											(subquery_has_outer_refs subquery outer_schemas))
+											(build_dependent_scalar_via_marker
+												(quote inner_select_exists)
+												subquery
+												nil
+												outer_schemas)
+											nil)
+										(unnest_count_subselect subquery outer_schemas nil (quote >))
+										(build_exists_subselect subquery outer_schemas))
 									_ (if (list? args)
 										(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 										expr))
@@ -5268,7 +5301,7 @@ seeing the correctly prefixed outer alias. */
 								(equal?? dep_kind (quote inner_select))
 								(subquery_outer_refs_are_direct_columns normalized_subquery outer_schemas)
 								(not (raw_subquery_has_non_equality_outer_condition normalized_subquery outer_schemas)))
-							(query_union_all_parts normalized_subquery)
+							(query_union_membership_parts normalized_subquery)
 							(expr_uses_session_state normalized_subquery)))
 						(define dep_alias (concat "dep_scalar_" dep_id))
 						(define dep_result_col "__result")
@@ -5759,17 +5792,17 @@ seeing the correctly prefixed outer alias. */
 			(if (equal? (count join_parts) 1)
 				(car join_parts)
 				(cons (quote and) join_parts))))))
-		(define dependent_join_helper_rewrite_expr_for_domain_source (lambda (dep_info expr domain_cols) (begin
-			(define domain_alias (dependent_join_helper_domain_source_alias))
-			(define dep_nested_outer_schemas
-				(match (subquery_resolved_scope
-					(dependent_expr_compile_info_subquery dep_info)
-					outer_schemas_chain)
-					'(_ _ _ _ _ resolved_schemas _ _) resolved_schemas
-					_ outer_schemas_chain))
-			(define rewrite_independent_inner_selects (lambda (node) (match node
-				(cons sym args)
-				(begin
+	(define dependent_join_helper_rewrite_expr_for_domain_source (lambda (dep_info expr domain_cols) (begin
+		(define domain_alias (dependent_join_helper_domain_source_alias))
+		(define dep_nested_outer_schemas
+			(match (subquery_resolved_scope
+				(dependent_expr_compile_info_subquery dep_info)
+				outer_schemas_chain)
+				'(_ _ _ _ _ resolved_schemas _ _) resolved_schemas
+				_ outer_schemas_chain))
+		(define rewrite_independent_inner_selects (lambda (node) (match node
+			(cons sym args)
+			(begin
 				(define kind (inner_select_kind sym))
 				(define subquery_has_local_ordering (lambda (query) (match query
 					'(_ _ _ _ _ _ q_order q_limit q_offset)
@@ -5784,48 +5817,48 @@ seeing the correctly prefixed outer alias. */
 						(cons (rewrite_independent_inner_selects sym)
 							(map args rewrite_independent_inner_selects)))
 					(match kind
-								(quote inner_select)
-								(match args
-									(cons subquery '())
-									(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
-										(if (subquery_has_local_ordering subquery)
-											(list sym
-												(dependent_join_helper_rewrite_query_for_domain_source
-													dep_info
-													subquery
-													domain_cols))
-											(cons sym (map args rewrite_independent_inner_selects)))
-										(replace_inner_selects node dep_nested_outer_schemas))
-									_ node)
-								(quote inner_select_exists)
-								(match args
-									(cons subquery '())
-									(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
-										(if (subquery_has_local_ordering subquery)
-											(list sym
-												(dependent_join_helper_rewrite_query_for_domain_source
-													dep_info
-													subquery
-													domain_cols))
-											(cons sym (map args rewrite_independent_inner_selects)))
-										(replace_inner_selects node dep_nested_outer_schemas))
-									_ node)
-								(quote inner_select_in)
-								(match args
-									(cons target_expr (cons subquery '()))
-									(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
-										(if (subquery_has_local_ordering subquery)
-											(list sym
-												(rewrite_independent_inner_selects target_expr)
-												(dependent_join_helper_rewrite_query_for_domain_source
-												dep_info
-												subquery
-												domain_cols))
-											(cons sym (map args rewrite_independent_inner_selects)))
-										(replace_inner_selects
-											(list sym (rewrite_independent_inner_selects target_expr) subquery)
-										dep_nested_outer_schemas))
-									_ node)
+						(quote inner_select)
+						(match args
+							(cons subquery '())
+							(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
+								(if (subquery_has_local_ordering subquery)
+									(list sym
+										(dependent_join_helper_rewrite_query_for_domain_source
+											dep_info
+											subquery
+											domain_cols))
+									(cons sym (map args rewrite_independent_inner_selects)))
+								(replace_inner_selects node dep_nested_outer_schemas))
+							_ node)
+						(quote inner_select_exists)
+						(match args
+							(cons subquery '())
+							(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
+								(if (subquery_has_local_ordering subquery)
+									(list sym
+										(dependent_join_helper_rewrite_query_for_domain_source
+											dep_info
+											subquery
+											domain_cols))
+									(cons sym (map args rewrite_independent_inner_selects)))
+								(replace_inner_selects node dep_nested_outer_schemas))
+							_ node)
+						(quote inner_select_in)
+						(match args
+							(cons target_expr (cons subquery '()))
+							(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
+								(if (subquery_has_local_ordering subquery)
+									(list sym
+										(rewrite_independent_inner_selects target_expr)
+										(dependent_join_helper_rewrite_query_for_domain_source
+											dep_info
+											subquery
+											domain_cols))
+									(cons sym (map args rewrite_independent_inner_selects)))
+								(replace_inner_selects
+									(list sym (rewrite_independent_inner_selects target_expr) subquery)
+									dep_nested_outer_schemas))
+							_ node)
 						node)))
 			_ node)))
 		(define ref_to_domain_col (lambda (ref_expr)
@@ -6035,10 +6068,10 @@ seeing the correctly prefixed outer alias. */
 					nil
 					nil)
 				_ nil)))))
-	(define dependent_join_helper_wrap_grouped_presence_source_query (lambda (source_alias source_query result_col domain_cols) (begin
-		(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
-		(match source_query
-			'(src_schema _ _ _ _ _ _ _ _)
+		(define dependent_join_helper_wrap_grouped_presence_source_query (lambda (source_alias source_query result_col domain_cols) (begin
+			(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
+			(match source_query
+				'(src_schema _ _ _ _ _ _ _ _)
 			(list src_schema
 				(list (list source_alias src_schema source_query false nil))
 				(merge
@@ -6049,51 +6082,86 @@ seeing the correctly prefixed outer alias. */
 				nil
 				'()
 				nil
-				nil)
-			_ source_query))))
-	(define dependent_join_helper_build_simple_exists_source_query (lambda (dep_info result_col domain_cols)
-		(begin
-			(define source_alias (dependent_join_helper_match_source_alias dep_info))
+					nil)
+				_ source_query))))
+		(define dependent_join_helper_wrap_full_presence_source_query (lambda (source_alias source_query result_col domain_cols) (begin
+			(define domain_alias (dependent_join_helper_domain_source_alias))
+			(define norm_domain_cols (dependent_join_helper_normalize_domain_cols domain_cols))
+			(match source_query
+				'(src_schema _ _ _ _ _ _ _ _)
+				(list src_schema
+					(list
+						(list domain_alias src_schema (make_dependent_domain_table_spec norm_domain_cols) false nil)
+						(list source_alias src_schema source_query true
+							(dependent_join_helper_domain_joinexpr source_alias norm_domain_cols)))
+					(merge
+						(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
+						(list result_col
+							(list (quote if)
+								(list (quote nil?)
+									(list (quote get_column) source_alias false result_col false))
+								false
+								(list (quote get_column) source_alias false result_col false))))
+					true
+					'()
+					nil
+					'()
+					nil
+					nil)
+				_ source_query))))
+		(define dependent_join_helper_build_simple_exists_source_query (lambda (dep_info result_col domain_cols)
+			(begin
+				(define source_alias (dependent_join_helper_match_source_alias dep_info))
+				(define match_alias (concat source_alias "_match"))
 				(define exists_source_query
 					(dependent_join_helper_build_source_query dep_info "__dep_match_result" domain_cols true))
 				(coalesce
 					(dependent_join_helper_build_direct_exists_source_query dep_info result_col domain_cols)
-					(dependent_join_helper_wrap_grouped_presence_source_query
+					(dependent_join_helper_wrap_full_presence_source_query
 						source_alias
-						(match exists_source_query
-							'(src_schema src_tables src_fields src_condition src_group src_having src_order src_limit src_offset)
-						(if (and
-							(or (nil? src_offset) (equal? src_offset 0))
-							(or (nil? src_limit) (equal? src_limit 1)))
-							(list src_schema src_tables src_fields src_condition src_group src_having '() nil nil)
-							exists_source_query)
-							_ exists_source_query)
+						(dependent_join_helper_wrap_grouped_presence_source_query
+							match_alias
+							(match exists_source_query
+								'(src_schema src_tables src_fields src_condition src_group src_having src_order src_limit src_offset)
+								(if (and
+									(or (nil? src_offset) (equal? src_offset 0))
+									(or (nil? src_limit) (equal? src_limit 1)))
+									(list src_schema src_tables src_fields src_condition src_group src_having '() nil nil)
+									exists_source_query)
+								_ exists_source_query)
+							result_col
+							domain_cols)
 						result_col
 						domain_cols)))))
-	(define dependent_join_helper_build_simple_in_source_query (lambda (dep_info result_col domain_cols) (begin
-		(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
-		(define target_expr (dependent_expr_compile_info_target_expr dep_info))
-		(define source_alias (dependent_join_helper_match_source_alias dep_info))
-		(define rewritten_target_expr
-			(dependent_join_helper_rewrite_expr_for_domain_source dep_info target_expr domain_cols))
-		(match dep_subquery
-			'(_ _ dep_fields _ _ _ _ _ _)
-			(begin
+		(define dependent_join_helper_build_simple_in_source_query (lambda (dep_info result_col domain_cols) (begin
+			(define dep_subquery (dependent_expr_compile_info_subquery dep_info))
+			(define target_expr (dependent_expr_compile_info_target_expr dep_info))
+			(define source_alias (dependent_join_helper_match_source_alias dep_info))
+			(define match_alias (concat source_alias "_match"))
+			(define rewritten_target_expr
+				(dependent_join_helper_rewrite_expr_for_domain_source dep_info target_expr domain_cols))
+			(match dep_subquery
+				'(_ _ dep_fields _ _ _ _ _ _)
+				(begin
 				(define first_field_expr (match dep_fields
 					(cons _ (cons v _)) v
 					nil))
-				(if (nil? first_field_expr)
-					nil
-					(dependent_join_helper_wrap_grouped_presence_source_query
-						source_alias
-						(dependent_join_helper_build_source_query_with_extra_condition
-							dep_info "__dep_match_result" domain_cols true
-							(list (quote equal??)
-								(dependent_join_helper_rewrite_expr_for_domain_source dep_info first_field_expr domain_cols)
-								rewritten_target_expr))
-						result_col
-						domain_cols)))
-			_ nil))))
+					(if (nil? first_field_expr)
+						nil
+						(dependent_join_helper_wrap_full_presence_source_query
+							source_alias
+							(dependent_join_helper_wrap_grouped_presence_source_query
+								match_alias
+								(dependent_join_helper_build_source_query_with_extra_condition
+									dep_info "__dep_match_result" domain_cols true
+									(list (quote equal??)
+										(dependent_join_helper_rewrite_expr_for_domain_source dep_info first_field_expr domain_cols)
+										rewritten_target_expr))
+								result_col
+								domain_cols)
+							result_col
+							domain_cols)))
+				_ nil))))
 	(define dependent_join_helper_table_aliases (lambda (tables_)
 		(filter (map (coalesceNil tables_ '()) (lambda (td) (match td
 			'(alias _ _ _ _) alias
@@ -6169,15 +6237,15 @@ seeing the correctly prefixed outer alias. */
 							(if (and
 								(not (equal? sj_tables '()))
 								(dependent_join_helper_aliases_disjoint current_aliases sj_aliases)
-									(or (nil? sj_group) (equal? sj_group '()))
-									(or (nil? sj_having) (equal? sj_having true))
-									(or (nil? sj_order) (equal? sj_order '()))
-									(or
-										(nil? sj_limit)
-										(and (equal?? kind (quote inner_select_exists))
-											(<= sj_limit 1)))
-									(or (nil? sj_offset) (equal? sj_offset 0))
-									(or (equal?? kind (quote inner_select_exists)) (not (nil? first_field_expr))))
+								(or (nil? sj_group) (equal? sj_group '()))
+								(or (nil? sj_having) (equal? sj_having true))
+								(or (nil? sj_order) (equal? sj_order '()))
+								(or
+									(nil? sj_limit)
+									(and (equal?? kind (quote inner_select_exists))
+										(<= sj_limit 1)))
+								(or (nil? sj_offset) (equal? sj_offset 0))
+								(or (equal?? kind (quote inner_select_exists)) (not (nil? first_field_expr))))
 								(list
 									sj_tables
 									(if (equal?? kind (quote inner_select_in))
@@ -6315,14 +6383,22 @@ seeing the correctly prefixed outer alias. */
 				'((symbol aggregate) agg_expr agg_reduce agg_neutral)
 				(equal? (list agg_expr agg_reduce agg_neutral) aggregate_count_descriptor)
 				_ false)))
-	(define dependent_join_helper_scalar_presence_value?
-		(lambda (dep_info)
-			(match (dependent_join_helper_scalar_aggregate_expr dep_info)
-				'((quote >) ((quote coalesceNil) _count_expr 0) 0) true
-				'((symbol >) ((quote coalesceNil) _count_expr 0) 0) true
-				'((quote >) ((symbol coalesceNil) _count_expr 0) 0) true
-				'((symbol >) ((symbol coalesceNil) _count_expr 0) 0) true
-				_ false)))
+		(define dependent_join_helper_scalar_presence_value?
+			(lambda (dep_info)
+				(match (dependent_join_helper_scalar_aggregate_expr dep_info)
+					'((quote >) ((quote coalesceNil) _count_expr 0) 0) true
+					'((symbol >) ((quote coalesceNil) _count_expr 0) 0) true
+					'((quote >) ((symbol coalesceNil) _count_expr 0) 0) true
+					'((symbol >) ((symbol coalesceNil) _count_expr 0) 0) true
+					_ false)))
+		(define dependent_join_helper_scalar_presence_subquery_field?
+			(lambda (dep_info)
+				(match (dependent_join_helper_scalar_aggregate_expr dep_info)
+					(cons sym _args)
+					(or
+						(equal?? (inner_select_kind sym) (quote inner_select_exists))
+						(equal?? (inner_select_kind sym) (quote inner_select_in)))
+					_ false)))
 	(define dependent_join_helper_build_simple_scalar_aggregate_source_query
 		(lambda (dep_info result_col domain_cols)
 			(begin
@@ -6510,26 +6586,26 @@ seeing the correctly prefixed outer alias. */
 										dir)
 									_ nil)
 								(build_dep_order_cols rest (+ idx 1))))))
-							(define dep_order_cols
-								(build_dep_order_cols dep_order_items 0))
-							(define dep_scan_alias "__dep_scalar")
-							(define pulled_semijoin
-								(dependent_join_helper_pull_simple_semijoins dep_tables dep_condition))
-							(define effective_dep_tables (match pulled_semijoin
-								'(tables_acc _terms_acc) tables_acc
-								_ dep_tables))
-							(define effective_dep_condition (match pulled_semijoin
-								'(_tables_acc terms_acc) (combine_and_terms terms_acc)
-								_ dep_condition))
-							(define dep_inner_query
-								(list dep_schema
-									(merge
-										(list (list domain_alias dep_schema (make_dependent_domain_table_spec norm_domain_cols) false nil))
-										(map effective_dep_tables (lambda (td) (match td
-											'(tv tschema ttbl toisOuter tje)
-											(list tv tschema ttbl toisOuter
-												(if (nil? tje) nil
-													(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
+						(define dep_order_cols
+							(build_dep_order_cols dep_order_items 0))
+						(define dep_scan_alias "__dep_scalar")
+						(define pulled_semijoin
+							(dependent_join_helper_pull_simple_semijoins dep_tables dep_condition))
+						(define effective_dep_tables (match pulled_semijoin
+							'(tables_acc _terms_acc) tables_acc
+							_ dep_tables))
+						(define effective_dep_condition (match pulled_semijoin
+							'(_tables_acc terms_acc) (combine_and_terms terms_acc)
+							_ dep_condition))
+						(define dep_inner_query
+							(list dep_schema
+								(merge
+									(list (list domain_alias dep_schema (make_dependent_domain_table_spec norm_domain_cols) false nil))
+									(map effective_dep_tables (lambda (td) (match td
+										'(tv tschema ttbl toisOuter tje)
+										(list tv tschema ttbl toisOuter
+											(if (nil? tje) nil
+												(dependent_join_helper_rewrite_expr_for_domain_source dep_info tje domain_cols)))
 										_ td))))
 								(merge
 									(dependent_join_helper_domain_field_assoc norm_domain_cols domain_alias)
@@ -6539,12 +6615,12 @@ seeing the correctly prefixed outer alias. */
 										_ nil)))
 										(lambda (x) (not (nil? x))))
 										(lambda (acc oc) (match oc
-												'(ord_col ord_expr) (merge acc (list ord_col ord_expr))
-												_ acc))
-											'()))
-									(dependent_join_helper_rewrite_expr_for_domain_source dep_info effective_dep_condition domain_cols)
-									(map (coalesceNil dep_group '()) (lambda (expr)
-										(dependent_join_helper_rewrite_expr_for_domain_source dep_info expr domain_cols)))
+											'(ord_col ord_expr) (merge acc (list ord_col ord_expr))
+											_ acc))
+										'()))
+								(dependent_join_helper_rewrite_expr_for_domain_source dep_info effective_dep_condition domain_cols)
+								(map (coalesceNil dep_group '()) (lambda (expr)
+									(dependent_join_helper_rewrite_expr_for_domain_source dep_info expr domain_cols)))
 								(dependent_join_helper_rewrite_expr_for_domain_source dep_info dep_having domain_cols)
 								'()
 								nil
@@ -7021,23 +7097,23 @@ seeing the correctly prefixed outer alias. */
 			'(alias schema (string? tbl) _ _) (list (list tbldesc) '() true (list alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 			'(alias schema '(scan-tagged-table (string? base_tbl) _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
 			'(alias schema '((quote scan-tagged-table) (string? base_tbl) _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
-				'(alias schema '((symbol scan-tagged-table) (string? base_tbl) _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
-				'(alias schema '(scan-tagged-table (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
-				'(alias schema '((quote scan-tagged-table) (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
-				'(alias schema '((symbol scan-tagged-table) (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
-				'(alias schema '((quote scan-tagged-table) base_tbl _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
-					(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
-					(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
-				'(alias schema '((symbol scan-tagged-table) base_tbl _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
-					(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
-					(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
-				'(alias schema '((quote scan-tagged-table) base_tbl _ _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
-					(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
-					(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
-				'(alias schema '((symbol scan-tagged-table) base_tbl _ _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
-					(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
-					(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
-				/* Pattern heads (quote X) / (symbol X) literally match a bare-symbol head.
+			'(alias schema '((symbol scan-tagged-table) (string? base_tbl) _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
+			'(alias schema '(scan-tagged-table (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
+			'(alias schema '((quote scan-tagged-table) (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
+			'(alias schema '((symbol scan-tagged-table) (string? base_tbl) _ _ _ _ _ _) _ _) (list (list tbldesc) '() true (list alias (get_schema schema base_tbl)))
+			'(alias schema '((quote scan-tagged-table) base_tbl _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
+				(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
+				(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
+			'(alias schema '((symbol scan-tagged-table) base_tbl _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
+				(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
+				(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
+			'(alias schema '((quote scan-tagged-table) base_tbl _ _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
+				(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
+				(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
+			'(alias schema '((symbol scan-tagged-table) base_tbl _ _ _ _ _ _) _ _) (if (materialized-subquery-source? base_tbl)
+				(list (list tbldesc) '() true (list alias (materialized_source_schema schema base_tbl alias schemas)))
+				(error (concat "ZIP_TABLEDESC_NONSTRING_SUBQUERY_SCHEMA " (serialize (nth tbldesc 2)))))
+			/* Pattern heads (quote X) / (symbol X) literally match a bare-symbol head.
 			Bare '(X ...) variants would bind X as a variable and match ANY list of
 			the same arity (parser emits '(X ...) as (list X ...); match.go case
 			"list" treats the first element as a binding when it is not a
@@ -7118,9 +7194,9 @@ seeing the correctly prefixed outer alias. */
 							_ nil)))
 							(lambda (x) (not (nil? x)))))))
 			'(id schemax subquery isOuter joinexpr) (begin
-				(define union_parts_from (query_union_all_parts subquery))
+				(define union_parts_from (query_union_parts subquery))
 				(if (not (nil? union_parts_from))
-					(match union_parts_from '(branches union_order union_limit union_offset) (begin
+					(match union_parts_from '(branches union_order union_limit union_offset _distinct) (begin
 						(define output_cols (match branches
 							(cons first_branch _) (query_branch_field_names first_branch)
 							_ '()))
@@ -7185,33 +7261,33 @@ seeing the correctly prefixed outer alias. */
 							hoisting _init2 as well creates duplicate scalar-helper caches that
 							share inner session keys but write to different temp tables. */
 							(if neumann_pipeline_trace (print (concat "[neumann] legacy derived " id ": after init defer")) nil)
-								(define tables2_aliases (map tables2 (lambda (td) (match td
-									'(alias _ _ _ _) alias
-									_ nil))))
-								(define tables2_has_alias? (lambda (alias_)
-									(reduce tables2_aliases (lambda (found table_alias)
-										(or found (equal?? table_alias alias_)))
-										false)))
-								(define derived_schema_field_expr (lambda (alias_ col ci)
-									(if (or (nil? alias_) (not (has_assoc? schemas2 alias_)))
-										nil
-										(reduce (schema_assoc_cols schemas2 alias_) (lambda (found coldef)
-											(if (not (nil? found))
-												found
-												(if ((if ci equal?? equal?) (coldef "Field") col)
-													(coalesceNil (coldef "Expr") nil)
-													nil)))
-											nil))))
-									/* helper function add prefix to tblalias of every expression */
-								(define replace_column_alias (lambda (expr) (match expr
-									'((symbol get_column) nil ti col ci) (begin
-										/* resolve unqualified column against inner schemas2; must match exactly one table.
-										Skip aliases that contain \0 (null byte) — those are prefixed from flattened derived tables
-										and should not participate in unqualified column resolution. */
-										(if (not (nil? (fields2 col)))
-											(replace_column_alias (fields2 col))
-											(begin
-												(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
+							(define tables2_aliases (map tables2 (lambda (td) (match td
+								'(alias _ _ _ _) alias
+								_ nil))))
+							(define tables2_has_alias? (lambda (alias_)
+								(reduce tables2_aliases (lambda (found table_alias)
+									(or found (equal?? table_alias alias_)))
+									false)))
+							(define derived_schema_field_expr (lambda (alias_ col ci)
+								(if (or (nil? alias_) (not (has_assoc? schemas2 alias_)))
+									nil
+									(reduce (schema_assoc_cols schemas2 alias_) (lambda (found coldef)
+										(if (not (nil? found))
+											found
+											(if ((if ci equal?? equal?) (coldef "Field") col)
+												(coalesceNil (coldef "Expr") nil)
+												nil)))
+										nil))))
+							/* helper function add prefix to tblalias of every expression */
+							(define replace_column_alias (lambda (expr) (match expr
+								'((symbol get_column) nil ti col ci) (begin
+									/* resolve unqualified column against inner schemas2; must match exactly one table.
+									Skip aliases that contain \0 (null byte) — those are prefixed from flattened derived tables
+									and should not participate in unqualified column resolution. */
+									(if (not (nil? (fields2 col)))
+										(replace_column_alias (fields2 col))
+										(begin
+											(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
 												(begin
 													(define norm_cols (schema_assoc_cols schemas2 alias))
 													(if (and (equal? (replace alias "\0" "") alias)
@@ -7348,66 +7424,66 @@ seeing the correctly prefixed outer alias. */
 								(error (concat "FLATTEN_EMPTY_TABLES_WITH_JOINEXPR "
 									(serialize (list id subquery tables2 fields2 condition2 groups2 schemas2 joinexpr joinexpr2))))
 								nil)
-								(set tablesPrefixed
-									(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
-										(begin
-											(define prefixed_aliases (map tablesPrefixed (lambda (td) (match td
-												'(a _ _ _ _) a
-												_ nil))))
-											(define join_term_owner (lambda (term) (begin
-												(define refs (filter (extract_tblvars term) (lambda (ref_alias)
-													(has? prefixed_aliases ref_alias))))
-												(if (equal? refs '())
-													(car prefixed_aliases)
-													(reduce prefixed_aliases (lambda (owner alias_name)
-														(if (has? refs alias_name) alias_name owner))
-														(car prefixed_aliases))))))
-												(define join_terms_by_alias
-													(reduce (flatten_and_terms joinexpr2) (lambda (acc term) (begin
-														(define owner (join_term_owner term))
-														(set_assoc acc owner (merge (coalesceNil (get_assoc acc owner) '()) (list term)))))
-														'()))
-												(define join_term_has_null_default (lambda (expr) (match expr
-													(cons sym args)
-													(if (or
-														(equal?? sym (quote coalesce))
-														(equal?? sym (quote (quote coalesce)))
-														(equal?? sym (symbol coalesce))
-														(equal?? sym (quote coalesceNil))
-														(equal?? sym (quote (quote coalesceNil)))
-														(equal?? sym (symbol coalesceNil)))
-														true
-														(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-															false
-															(reduce args (lambda (found arg)
-																(or found (join_term_has_null_default arg)))
-																false)))
-													false)))
-												(map tablesPrefixed (lambda (td) (match td
-													'(a s t io je)
-													(begin
-														(define assigned_terms_raw (coalesceNil (get_assoc join_terms_by_alias a) '()))
-														(define assigned_terms (if io
-															(filter assigned_terms_raw (lambda (term)
-																(not (join_term_has_null_default term))))
-															assigned_terms_raw))
-														/* The derived LEFT-join ON predicate belongs to the inner alias that can
-														evaluate each conjunct. Keeping all conjuncts on the first table lets
-													join_reorder move scalar helpers ahead of their domain filter, producing
-													duplicate NULL rows for nested EXISTS/scalar helpers. */
-													(list a s t
-														(if (equal?? a (car prefixed_aliases)) isOuter io)
-														(combine_and_terms (merge (flatten_and_terms (coalesceNil je true)) assigned_terms))))
-												td))))
-										tablesPrefixed))
-									(define outer_has_group_stage (or
-										(not (nil? group))
-										(not (nil? having))
-										(reduce (coalesceNil groups '()) (lambda (acc stage)
-											(or acc (stage_has_group_boundary stage)))
-											false)
-										(reduce_assoc fields (lambda (acc _k v) (or acc (not (equal? (extract_aggregates v) '())))) false)))
-									(define flatten_referenced_cols (merge_unique (list
+							(set tablesPrefixed
+								(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
+									(begin
+										(define prefixed_aliases (map tablesPrefixed (lambda (td) (match td
+											'(a _ _ _ _) a
+											_ nil))))
+										(define join_term_owner (lambda (term) (begin
+											(define refs (filter (extract_tblvars term) (lambda (ref_alias)
+												(has? prefixed_aliases ref_alias))))
+											(if (equal? refs '())
+												(car prefixed_aliases)
+												(reduce prefixed_aliases (lambda (owner alias_name)
+													(if (has? refs alias_name) alias_name owner))
+													(car prefixed_aliases))))))
+										(define join_terms_by_alias
+											(reduce (flatten_and_terms joinexpr2) (lambda (acc term) (begin
+												(define owner (join_term_owner term))
+												(set_assoc acc owner (merge (coalesceNil (get_assoc acc owner) '()) (list term)))))
+												'()))
+										(define join_term_has_null_default (lambda (expr) (match expr
+											(cons sym args)
+											(if (or
+												(equal?? sym (quote coalesce))
+												(equal?? sym (quote (quote coalesce)))
+												(equal?? sym (symbol coalesce))
+												(equal?? sym (quote coalesceNil))
+												(equal?? sym (quote (quote coalesceNil)))
+												(equal?? sym (symbol coalesceNil)))
+												true
+												(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+													false
+													(reduce args (lambda (found arg)
+														(or found (join_term_has_null_default arg)))
+														false)))
+											false)))
+										(map tablesPrefixed (lambda (td) (match td
+											'(a s t io je)
+											(begin
+												(define assigned_terms_raw (coalesceNil (get_assoc join_terms_by_alias a) '()))
+												(define assigned_terms (if io
+													(filter assigned_terms_raw (lambda (term)
+														(not (join_term_has_null_default term))))
+													assigned_terms_raw))
+												/* The derived LEFT-join ON predicate belongs to the inner alias that can
+												evaluate each conjunct. Keeping all conjuncts on the first table lets
+												join_reorder move scalar helpers ahead of their domain filter, producing
+												duplicate NULL rows for nested EXISTS/scalar helpers. */
+												(list a s t
+													(if (equal?? a (car prefixed_aliases)) isOuter io)
+													(combine_and_terms (merge (flatten_and_terms (coalesceNil je true)) assigned_terms))))
+											td))))
+									tablesPrefixed))
+							(define outer_has_group_stage (or
+								(not (nil? group))
+								(not (nil? having))
+								(reduce (coalesceNil groups '()) (lambda (acc stage)
+									(or acc (stage_has_group_boundary stage)))
+									false)
+								(reduce_assoc fields (lambda (acc _k v) (or acc (not (equal? (extract_aggregates v) '())))) false)))
+							(define flatten_referenced_cols (merge_unique (list
 								/* Parent output aliases are required columns too. Row-domain
 								subselect rewrites can hide a pass-through field behind helper
 								markers before expression-based extraction sees it. Keep matching
@@ -7503,19 +7579,21 @@ seeing the correctly prefixed outer alias. */
 								(reduce (coalesceNil order '()) (lambda (acc o) (or acc (match o
 									'(col _dir) (expr_refs_subquery_alias col)
 									false))) false)))
-							(define outer_plain_projection_only (and
-								(equal? (flatten_and_terms (coalesceNil condition true)) '())
-								(or (nil? group) (equal? group '()))
-								(equal? (flatten_and_terms (coalesceNil having true)) '())
-								(or (nil? order) (equal? order '()))
-								(nil? limit)
-								(nil? offset)
-								(reduce_assoc fields (lambda (ok _k v)
-									(and ok (match v
-										'((symbol get_column) alias_ _ _ _) (equal?? alias_ id)
-										'((quote get_column) alias_ _ _ _) (equal?? alias_ id)
-										_ false)))
-									true)))
+								(define outer_plain_projection_only (and
+									(equal? (flatten_and_terms (coalesceNil condition true)) '())
+									(or (nil? group) (equal? group '()))
+									(equal? (flatten_and_terms (coalesceNil having true)) '())
+									(nil? limit)
+									(nil? offset)
+									(reduce_assoc fields (lambda (ok _k v)
+										(and ok
+											(or
+												(not (expr_refs_subquery_alias v))
+												(match v
+													'((symbol get_column) alias_ _ _ _) (equal?? alias_ id)
+													'((quote get_column) alias_ _ _ _) (equal?? alias_ id)
+													_ false))))
+										true)))
 							(define grouped_or_helper_boundary
 								(or groups2_present flatten_has_helper_backed_projection))
 							(define outer_uses_subquery_group_boundary (or
@@ -7536,10 +7614,10 @@ seeing the correctly prefixed outer alias. */
 								(or
 									(aggregate_refs_subquery_alias (coalesceNil having true))
 									(and grouped_or_helper_boundary (correlated_inner_select_refs_subquery_alias (coalesceNil having true))))))
-								(if neumann_pipeline_trace (print (concat "[neumann] legacy derived " id ": after boundary check")) nil)
-								/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
-								(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
-								/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
+							(if neumann_pipeline_trace (print (concat "[neumann] legacy derived " id ": after boundary check")) nil)
+							/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
+							(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
+							/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 							/* Note: flat defines avoid nested begin scopes — (set) only updates the innermost Nodefine=false env */
 							(define flatten_groups2 (if groups2_present
 								(filter groups2 (lambda (stage)
@@ -7575,17 +7653,17 @@ seeing the correctly prefixed outer alias. */
 								false)))
 							(define outer_post_filter_needs_boundary
 								(and isOuter (condition2_has_null_default condition2_transformed)))
-							(define use_materialize (or
-								subquery_has_window
-								unsupported_groups
-								outer_post_filter_needs_boundary
-								(and (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
-								(and (not (equal? flatten_groups2 '())) outer_has_group_stage)
-								(and (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))
-								(and
-									flatten_has_helper_backed_projection
-									outer_uses_subquery_group_boundary
-									(not outer_plain_projection_only))))
+								(define use_materialize (or
+									subquery_has_window
+									unsupported_groups
+									outer_post_filter_needs_boundary
+									(and (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
+									(and (not (equal? flatten_groups2 '())) outer_has_group_stage)
+									(and (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))
+									(and
+										flatten_has_helper_backed_projection
+										outer_uses_subquery_group_boundary
+										(not outer_plain_projection_only))))
 							(if (and
 								(not use_materialize)
 								(not (nil? _init2))
@@ -7678,60 +7756,60 @@ seeing the correctly prefixed outer alias. */
 											(list id (merge_schema_fields_unique (list mat_schema_def)))
 										)
 									)
-										(begin
-											/* For LEFT JOIN, most condition2 terms were integrated into joinexpr
-											to preserve ON semantics. Terms with NULL-default wrappers (COALESCE/
-											COALESCE_NIL) are deliberately not attached to the nullable helper's
-											ON clause above; they are post-join filters such as EXISTS/NOT EXISTS
-											tests over a NULL-extended aggregate helper. Keep those terms here
-											instead of dropping them via globalFilter=true. */
-											(define condition_term_has_null_default (lambda (expr) (match expr
-												(cons sym args)
-												(if (or
-													(equal?? sym (quote coalesce))
-													(equal?? sym (quote (quote coalesce)))
-													(equal?? sym (symbol coalesce))
-													(equal?? sym (quote coalesceNil))
-													(equal?? sym (quote (quote coalesceNil)))
-													(equal?? sym (symbol coalesceNil)))
-													true
-													(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-														false
-														(reduce args (lambda (found arg)
-															(or found (condition_term_has_null_default arg)))
-															false)))
-												false)))
-											(define outer_post_filter
-												(combine_and_terms (filter
-													(flatten_and_terms (coalesceNil condition2_transformed true))
-													condition_term_has_null_default)))
-											/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
-											(set globalFilter (if isOuter outer_post_filter (replace_column_alias condition2)))
-											(define projection_prefixed_aliases (map tablesPrefixed (lambda (td) (match td
-												'(a _ _ _ _) a
-												_ nil))))
-											(define projection_alias_rank (lambda (alias_name)
-												(match (reduce projection_prefixed_aliases (lambda (state current_alias) (match state
-													'(idx found)
-													(list (+ idx 1)
-														(if (or (not (nil? found)) (not (equal?? current_alias alias_name)))
-															found
-															idx))
-													_ state))
-													(list 0 nil))
-													'(_ found) found
-													_ nil)))
-											(define projection_expr_rank (lambda (expr)
-												(reduce (extract_tblvars expr) (lambda (rank alias_name)
-													(begin
-														(define alias_rank (projection_alias_rank alias_name))
-														(if (nil? alias_rank)
-															rank
-															(if (> alias_rank rank) alias_rank rank))))
-													-1)))
-											(define check_inner_select (lambda (expr) (match expr
-												(cons sym args) (if (or
-													(equal?? sym (quote inner_select))
+									(begin
+										/* For LEFT JOIN, most condition2 terms were integrated into joinexpr
+										to preserve ON semantics. Terms with NULL-default wrappers (COALESCE/
+										COALESCE_NIL) are deliberately not attached to the nullable helper's
+										ON clause above; they are post-join filters such as EXISTS/NOT EXISTS
+										tests over a NULL-extended aggregate helper. Keep those terms here
+										instead of dropping them via globalFilter=true. */
+										(define condition_term_has_null_default (lambda (expr) (match expr
+											(cons sym args)
+											(if (or
+												(equal?? sym (quote coalesce))
+												(equal?? sym (quote (quote coalesce)))
+												(equal?? sym (symbol coalesce))
+												(equal?? sym (quote coalesceNil))
+												(equal?? sym (quote (quote coalesceNil)))
+												(equal?? sym (symbol coalesceNil)))
+												true
+												(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+													false
+													(reduce args (lambda (found arg)
+														(or found (condition_term_has_null_default arg)))
+														false)))
+											false)))
+										(define outer_post_filter
+											(combine_and_terms (filter
+												(flatten_and_terms (coalesceNil condition2_transformed true))
+												condition_term_has_null_default)))
+										/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
+										(set globalFilter (if isOuter outer_post_filter (replace_column_alias condition2)))
+										(define projection_prefixed_aliases (map tablesPrefixed (lambda (td) (match td
+											'(a _ _ _ _) a
+											_ nil))))
+										(define projection_alias_rank (lambda (alias_name)
+											(match (reduce projection_prefixed_aliases (lambda (state current_alias) (match state
+												'(idx found)
+												(list (+ idx 1)
+													(if (or (not (nil? found)) (not (equal?? current_alias alias_name)))
+														found
+														idx))
+												_ state))
+												(list 0 nil))
+												'(_ found) found
+												_ nil)))
+										(define projection_expr_rank (lambda (expr)
+											(reduce (extract_tblvars expr) (lambda (rank alias_name)
+												(begin
+													(define alias_rank (projection_alias_rank alias_name))
+													(if (nil? alias_rank)
+														rank
+														(if (> alias_rank rank) alias_rank rank))))
+												-1)))
+										(define check_inner_select (lambda (expr) (match expr
+											(cons sym args) (if (or
+												(equal?? sym (quote inner_select))
 												(equal?? sym (quote (quote inner_select)))
 												(equal?? sym (symbol inner_select))
 												(equal?? sym (quote inner_select_in))
@@ -7746,66 +7824,66 @@ seeing the correctly prefixed outer alias. */
 													(reduce args (lambda (a b) (or a (check_inner_select b))) false)))
 											false)))
 										(define projection_joinexpr_unqualified_cols (extract_unqualified_columns joinexpr2))
-											(define projection_joinexpr_resolvable (reduce projection_joinexpr_unqualified_cols (lambda (ok col)
-												(and ok
-													(reduce_assoc schemas2 (lambda (found _alias cols)
+										(define projection_joinexpr_resolvable (reduce projection_joinexpr_unqualified_cols (lambda (ok col)
+											(and ok
+												(reduce_assoc schemas2 (lambda (found _alias cols)
 													(or found
 														(reduce cols (lambda (col_found coldef)
 															(or col_found (equal?? (coldef "Field") col)))
 															false)))
 													false)))
 											true))
-												(define projection_joinexpr (if (and (not (nil? joinexpr2)) projection_joinexpr_resolvable)
-													(replace_column_alias joinexpr2)
-													joinexpr2))
-												(define projection_joinexpr_resolved (and projection_joinexpr_resolvable (equal? (extract_unqualified_columns projection_joinexpr) '())))
-												(define projection_expr_has_null_default (lambda (expr) (match expr
-												(cons sym args)
-												(if (or
-													(equal?? sym (quote coalesce))
-													(equal?? sym (quote (quote coalesce)))
-													(equal?? sym (symbol coalesce))
-													(equal?? sym (quote coalesceNil))
-													(equal?? sym (quote (quote coalesceNil)))
-													(equal?? sym (symbol coalesceNil)))
-													true
-													(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-														false
-															(reduce args (lambda (found arg)
-																(or found (projection_expr_has_null_default arg)))
-																false)))
-													false)))
-												(define projection_guard_for_expr (lambda (expr)
+										(define projection_joinexpr (if (and (not (nil? joinexpr2)) projection_joinexpr_resolvable)
+											(replace_column_alias joinexpr2)
+											joinexpr2))
+										(define projection_joinexpr_resolved (and projection_joinexpr_resolvable (equal? (extract_unqualified_columns projection_joinexpr) '())))
+										(define projection_expr_has_null_default (lambda (expr) (match expr
+											(cons sym args)
+											(if (or
+												(equal?? sym (quote coalesce))
+												(equal?? sym (quote (quote coalesce)))
+												(equal?? sym (symbol coalesce))
+												(equal?? sym (quote coalesceNil))
+												(equal?? sym (quote (quote coalesceNil)))
+												(equal?? sym (symbol coalesceNil)))
+												true
+												(if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+													false
+													(reduce args (lambda (found arg)
+														(or found (projection_expr_has_null_default arg)))
+														false)))
+											false)))
+										(define projection_guard_for_expr (lambda (expr)
+											(begin
+												(define expr_rank (projection_expr_rank expr))
+												(define effective_rank (if (< expr_rank 0)
+													(- (count projection_prefixed_aliases) 1)
+													expr_rank))
+												(combine_and_terms (filter (flatten_and_terms (coalesceNil projection_joinexpr true)) (lambda (term)
 													(begin
-														(define expr_rank (projection_expr_rank expr))
-														(define effective_rank (if (< expr_rank 0)
-															(- (count projection_prefixed_aliases) 1)
-															expr_rank))
-														(combine_and_terms (filter (flatten_and_terms (coalesceNil projection_joinexpr true)) (lambda (term)
-															(begin
-																(define term_rank (projection_expr_rank term))
-																(or
-																	(< term_rank 0)
-																	(<= term_rank effective_rank)
-																	(projection_expr_has_null_default term)))))))))
-												(define wrap_outer_join_projection (lambda (expr)
-													(begin
-														(define projection_guard (projection_guard_for_expr expr))
-														(if (and
-															isOuter
-															(not (equal? joinexpr true))
-															projection_joinexpr_resolved
-															(not (nil? projection_guard))
-															(not (equal? projection_guard true))
-															(not (check_inner_select projection_guard))
-															(not (projection_expr_has_null_default expr))
-															/* Column-backed projections are already NULL-extended by the
-															LEFT scan itself. Guard only closed expressions such as constants;
-															otherwise sibling scalar helpers in JOIN ON can leak as dangling
-															alias refs into the projection guard. */
-															(equal? (extract_tblvars expr) '()))
-															(list (quote if) projection_guard expr nil)
-															expr))))
+														(define term_rank (projection_expr_rank term))
+														(or
+															(< term_rank 0)
+															(<= term_rank effective_rank)
+															(projection_expr_has_null_default term)))))))))
+										(define wrap_outer_join_projection (lambda (expr)
+											(begin
+												(define projection_guard (projection_guard_for_expr expr))
+												(if (and
+													isOuter
+													(not (equal? joinexpr true))
+													projection_joinexpr_resolved
+													(not (nil? projection_guard))
+													(not (equal? projection_guard true))
+													(not (check_inner_select projection_guard))
+													(not (projection_expr_has_null_default expr))
+													/* Column-backed projections are already NULL-extended by the
+													LEFT scan itself. Guard only closed expressions such as constants;
+													otherwise sibling scalar helpers in JOIN ON can leak as dangling
+													alias refs into the projection guard. */
+													(equal? (extract_tblvars expr) '()))
+													(list (quote if) projection_guard expr nil)
+													expr))))
 										(define flattened_result
 											(list
 												tablesPrefixed
@@ -7905,8 +7983,8 @@ seeing the correctly prefixed outer alias. */
 		false
 	)))
 
-		/* set group to 1 if fields contain aggregates even if not */
-			(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
+	/* set group to 1 if fields contain aggregates even if not */
+	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
 
 	/* find those columns that have no table */
 	(define schema_alias_variants (lambda (alias)
@@ -8076,34 +8154,34 @@ seeing the correctly prefixed outer alias. */
 		expr
 	)))
 
-		/* pass full schema chain (current + ancestors) so nested subselects can resolve grandparent refs */
-		(define ris_schemas (merge schemas outer_schemas_chain))
-		(if neumann_pipeline_trace (print "[neumann] legacy untangle: before collect markers") nil)
-		(if neumann_pipeline_trace (print (concat "[neumann] legacy untangle: neumann_lowered=" (string (planner_neumann_lowered_current)))) nil)
-		(define table_joinexpr_has_inner_select
-			(reduce tables (lambda (found td) (or found (match td
-				'(_tv _tschema _ttbl _toisOuter tje)
-				(contains_inner_select_marker (coalesceNil tje true))
-				false)))
-				false))
-		(define fields_have_inner_select
-			(reduce_assoc fields (lambda (found _k v)
-				(or found (contains_inner_select_marker v)))
-				false))
-		(if (or
-			(not (planner_neumann_lowered_current))
-			table_joinexpr_has_inner_select
-			fields_have_inner_select)
-			(begin
-				(set tables (map tables (lambda (td) (match td
-					'(tv tschema ttbl toisOuter tje)
-					(list tv tschema ttbl toisOuter
-						(if (nil? tje) nil (collect_row_domain_subselects tje ris_schemas)))
-					td))))
-				(if (or (not (planner_neumann_lowered_current)) fields_have_inner_select)
-					(set fields (map_assoc fields (lambda (k v) (collect_dependent_scalar_compile_markers v ris_schemas))))
-					nil))
-			nil)
+	/* pass full schema chain (current + ancestors) so nested subselects can resolve grandparent refs */
+	(define ris_schemas (merge schemas outer_schemas_chain))
+	(if neumann_pipeline_trace (print "[neumann] legacy untangle: before collect markers") nil)
+	(if neumann_pipeline_trace (print (concat "[neumann] legacy untangle: neumann_lowered=" (string (planner_neumann_lowered_current)))) nil)
+	(define table_joinexpr_has_inner_select
+		(reduce tables (lambda (found td) (or found (match td
+			'(_tv _tschema _ttbl _toisOuter tje)
+			(contains_inner_select_marker (coalesceNil tje true))
+			false)))
+			false))
+	(define fields_have_inner_select
+		(reduce_assoc fields (lambda (found _k v)
+			(or found (contains_inner_select_marker v)))
+			false))
+	(if (or
+		(not (planner_neumann_lowered_current))
+		table_joinexpr_has_inner_select
+		fields_have_inner_select)
+		(begin
+			(set tables (map tables (lambda (td) (match td
+				'(tv tschema ttbl toisOuter tje)
+				(list tv tschema ttbl toisOuter
+					(if (nil? tje) nil (collect_row_domain_subselects tje ris_schemas)))
+				td))))
+			(if (or (not (planner_neumann_lowered_current)) fields_have_inner_select)
+				(set fields (map_assoc fields (lambda (k v) (collect_dependent_scalar_compile_markers v ris_schemas))))
+				nil))
+		nil)
 	(if neumann_pipeline_trace (print "[neumann] legacy untangle: after field marker collect") nil)
 	/* Correlated scalar subselects inside WHERE must survive until helper tables
 	are integrated into the visible schema. Lowering them eagerly to aggregate
@@ -8356,14 +8434,17 @@ seeing the correctly prefixed outer alias. */
 					(dependent_join_helper_spec_result_col ttbl))
 				(define dep_info
 					(dependent_join_helper_spec_dep_info ttbl))
-					(define dep_source_preserves_full_domain
-						(dependent_join_helper_source_preserves_full_domain dep_source_query dep_result_col))
+				(define dep_source_preserves_full_domain
+					(dependent_join_helper_source_preserves_full_domain dep_source_query dep_result_col))
 					(define dep_preserve_full_domain
 						(and
 							(not dep_source_preserves_full_domain)
 							(and
 								(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
-								(dependent_join_helper_scalar_count_aggregate? dep_info))))
+								(or
+									(dependent_join_helper_scalar_count_aggregate? dep_info)
+									(dependent_join_helper_scalar_presence_value? dep_info)
+									(dependent_join_helper_scalar_presence_subquery_field? dep_info)))))
 				(define dep_materialize_source_query
 					(if dep_preserve_full_domain
 						(begin
@@ -8374,10 +8455,10 @@ seeing the correctly prefixed outer alias. */
 									"__dep_full_domain"
 									(concat "__dep_full_domain_" (fnv_hash dep_domain_runtime_suffix))))
 							(define dep_match_alias "__dep_full_match")
-								(define dep_empty_result
-									(if (and
-										(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
-										(dependent_join_helper_scalar_count_aggregate? dep_info))
+							(define dep_empty_result
+								(if (and
+									(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
+									(dependent_join_helper_scalar_count_aggregate? dep_info))
 									0
 									false))
 							(define dep_full_domain_cols
@@ -8418,11 +8499,11 @@ seeing the correctly prefixed outer alias. */
 									nil)
 								_ dep_source_query))
 						dep_source_query))
-					(define dep_domain_joinexpr
-						(dependent_join_helper_domain_joinexpr tv dep_active_domain_cols))
-					(define dep_same_scope_joinexpr
-						(rewrite_outer_refs_as_columns dep_domain_joinexpr))
-					(define dep_rows_sym (symbol (concat "__dhr:" tv)))
+				(define dep_domain_joinexpr
+					(dependent_join_helper_domain_joinexpr tv dep_active_domain_cols))
+				(define dep_same_scope_joinexpr
+					(rewrite_outer_refs_as_columns dep_domain_joinexpr))
+				(define dep_rows_sym (symbol (concat "__dhr:" tv)))
 				(define dep_sink_sym (symbol (concat "__dhs:" tv)))
 				/* Phase B Schritt 1 — try keytable backend first (FAQ §32 compliant).
 				When implemented for the input subquery shape, returns a binding that
@@ -8485,10 +8566,10 @@ seeing the correctly prefixed outer alias. */
 							(not (equal? (extract_aggregates dep_first_expr) '())))))
 				(define dep_subquery_for_contract
 					(dependent_expr_compile_info_subquery dep_info))
-					(define dep_user_limit
-						(match dep_subquery_for_contract
-							'(_ _ _ _ _ _ _ user_limit _) user_limit
-							_ nil))
+				(define dep_user_limit
+					(match dep_subquery_for_contract
+						'(_ _ _ _ _ _ _ user_limit _) user_limit
+						_ nil))
 				(define dep_user_offset
 					(match dep_subquery_for_contract
 						'(_ _ _ _ _ _ _ _ user_offset) user_offset
@@ -8507,18 +8588,18 @@ seeing the correctly prefixed outer alias. */
 							(filter (build_user_order (coalesceNil user_order '()) 0)
 								(lambda (oi) (not (nil? oi)))))
 						_ '()))
-					(define dep_apply_once_limit_wrap
-						(and
-							(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
-							(not dep_scalar_first_field_is_aggregate)
-							(not dep_preserve_full_domain)))
-					(define dep_helper_source
+				(define dep_apply_once_limit_wrap
+					(and
+						(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
+						(not dep_scalar_first_field_is_aggregate)
+						(not dep_preserve_full_domain)))
+				(define dep_helper_source
 					(if dep_apply_once_limit_wrap
 						(begin
-								(define dep_once_limit
-									(if (and (not (nil? dep_user_limit)) (<= dep_user_limit 1))
-										1
-										2))
+							(define dep_once_limit
+								(if (and (not (nil? dep_user_limit)) (<= dep_user_limit 1))
+									1
+									2))
 							(define dep_norm_domain_cols
 								(dependent_join_helper_normalize_domain_cols dep_active_domain_cols))
 							(define dep_partition_count (count dep_norm_domain_cols))
@@ -8532,20 +8613,20 @@ seeing the correctly prefixed outer alias. */
 								(merge
 									(filter dep_partition_order (lambda (oi) (not (nil? oi))))
 									dep_user_order))
-								(make_scan_tagged_table
-									dep_mat_source
-									dep_scan_order
-									dep_user_limit
-									dep_user_offset
-									dep_partition_count
-									dep_once_limit))
+							(make_scan_tagged_table
+								dep_mat_source
+								dep_scan_order
+								dep_user_limit
+								dep_user_offset
+								dep_partition_count
+								dep_once_limit))
 						dep_mat_source))
-					(list tv tschema dep_helper_source true
-						(if (or (nil? dep_same_scope_joinexpr) (equal? dep_same_scope_joinexpr true))
-							nil
-							dep_same_scope_joinexpr)))
-				td)
-			_ td))))
+				(list tv tschema dep_helper_source true
+					(if (or (nil? dep_same_scope_joinexpr) (equal? dep_same_scope_joinexpr true))
+						nil
+						dep_same_scope_joinexpr)))
+			td)
+		_ td))))
 	(define sq_tbl_alias (lambda (td) (match td
 		'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)
 		nil)))
@@ -8569,56 +8650,56 @@ seeing the correctly prefixed outer alias. */
 					(filter remaining (lambda (td)
 						(not (has? (map ready sq_tbl_alias) (sq_tbl_alias td))))))))))
 		(order_step '() helper_tables))))
-		(define sq_tbls (sq_tbl_dependency_order sq_tbls))
-		(define sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
-		/* Deduplication is only sound while the query still carries purely logical
-		scalar expressions. Legacy inline fallbacks embed physical runtime code
-		(scan, scan_order, !begin, promises) directly into field expressions; alias
-		rewrite across those opaque subplans is not semantics-preserving yet. Keep
-		those queries on the undeduped helper path until the fallback code is gone. */
-		(define scalar_query_has_opaque_runtime (or
-			(reduce_assoc fields (lambda (found _k v) (or found (expr_has_opaque_scope v))) false)
-			(expr_has_opaque_scope condition)
-			(reduce (coalesceNil group '()) (lambda (found expr) (or found (expr_has_opaque_scope expr))) false)
-			(expr_has_opaque_scope having)
-			(reduce (coalesceNil order '()) (lambda (found order_item) (or found (expr_has_opaque_scope order_item))) false)))
-		/* Deduplicate identical scalar projection LEFT JOIN helpers before they
-		enter the normal table pipeline. join_reorder can move helpers, but it cannot
-		recognize that two unn_ aliases describe the same LEFT JOIN relation once
-		they have already been materialized as distinct table entries. */
-		(define scalar_left_join_dedup_key (lambda (td) (match td
-			'(tv tschema ttbl isOuter joinexpr) (begin
-				(define dedup_alias_map
-					(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
-						(set_assoc acc (string alias_v) "__scalar_left_join__"))
-						'()))
-				(serialize (list
-					tschema
-					(rewrite_source_aliases dedup_alias_map ttbl)
-					isOuter
-					(rewrite_source_aliases dedup_alias_map (coalesceNil joinexpr true)))))
-			nil)))
-		(define sq_scalar_dedup_state (if scalar_query_has_opaque_runtime
-			(list sq_scalar_tbls '() '())
-			(reduce sq_scalar_tbls (lambda (state td) (match state
-				'(kept key_map alias_map) (match td
-					'(tv _ _ _ _) (begin
-						(define dedup_key (scalar_left_join_dedup_key td))
-							(define canonical_alias (get_assoc key_map dedup_key))
-							(if (nil? canonical_alias)
-								(list
-									(merge kept (list td))
-									(set_assoc key_map dedup_key tv)
-									alias_map)
-								(list
-									kept
-									key_map
-									(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+	(define sq_tbls (sq_tbl_dependency_order sq_tbls))
+	(define sq_scalar_tbls (coalesceNil (sq_cache "scalar_tables") '()))
+	/* Deduplication is only sound while the query still carries purely logical
+	scalar expressions. Legacy inline fallbacks embed physical runtime code
+	(scan, scan_order, !begin, promises) directly into field expressions; alias
+	rewrite across those opaque subplans is not semantics-preserving yet. Keep
+	those queries on the undeduped helper path until the fallback code is gone. */
+	(define scalar_query_has_opaque_runtime (or
+		(reduce_assoc fields (lambda (found _k v) (or found (expr_has_opaque_scope v))) false)
+		(expr_has_opaque_scope condition)
+		(reduce (coalesceNil group '()) (lambda (found expr) (or found (expr_has_opaque_scope expr))) false)
+		(expr_has_opaque_scope having)
+		(reduce (coalesceNil order '()) (lambda (found order_item) (or found (expr_has_opaque_scope order_item))) false)))
+	/* Deduplicate identical scalar projection LEFT JOIN helpers before they
+	enter the normal table pipeline. join_reorder can move helpers, but it cannot
+	recognize that two unn_ aliases describe the same LEFT JOIN relation once
+	they have already been materialized as distinct table entries. */
+	(define scalar_left_join_dedup_key (lambda (td) (match td
+		'(tv tschema ttbl isOuter joinexpr) (begin
+			(define dedup_alias_map
+				(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
+					(set_assoc acc (string alias_v) "__scalar_left_join__"))
+					'()))
+			(serialize (list
+				tschema
+				(rewrite_source_aliases dedup_alias_map ttbl)
+				isOuter
+				(rewrite_source_aliases dedup_alias_map (coalesceNil joinexpr true)))))
+		nil)))
+	(define sq_scalar_dedup_state (if scalar_query_has_opaque_runtime
+		(list sq_scalar_tbls '() '())
+		(reduce sq_scalar_tbls (lambda (state td) (match state
+			'(kept key_map alias_map) (match td
+				'(tv _ _ _ _) (begin
+					(define dedup_key (scalar_left_join_dedup_key td))
+					(define canonical_alias (get_assoc key_map dedup_key))
+					(if (nil? canonical_alias)
+						(list
+							(merge kept (list td))
+							(set_assoc key_map dedup_key tv)
+							alias_map)
+						(list
+							kept
+							key_map
+							(reduce (alias_lookup_variants tv) (lambda (acc alias_v)
 								(set_assoc acc (string alias_v) canonical_alias))
 								alias_map))))
-					_ td)
-				_ state))
-				(list '() '() '()))))
+				_ td)
+			_ state))
+			(list '() '() '()))))
 	(define sq_scalar_tbls (nth sq_scalar_dedup_state 0))
 	(define sq_scalar_alias_map (nth sq_scalar_dedup_state 2))
 	(define rewrite_scalar_left_join_alias (lambda (alias_)
@@ -8710,8 +8791,8 @@ seeing the correctly prefixed outer alias. */
 			(list '() sq_scalar_joinexpr_tbls))
 			'(ordered remaining) (merge ordered remaining)
 			tables))
-	(set tables (merge tables_with_joinexpr_scalar_helpers sq_scalar_condition_tbls sq_tbls sq_scalar_tail_projection_tbls))
-	(if neumann_pipeline_trace (print "[neumann] legacy untangle: after sq table merge") nil)
+		(set tables (merge tables_with_joinexpr_scalar_helpers sq_scalar_condition_tbls sq_tbls sq_scalar_tail_projection_tbls))
+		(if neumann_pipeline_trace (print "[neumann] legacy untangle: after sq table merge") nil)
 	(define sq_helper_output_fields (lambda (alias)
 		(reduce sq_helper_specs (lambda (found td) (match td
 			'(tv _ ttbl _ _)
@@ -8993,18 +9074,18 @@ seeing the correctly prefixed outer alias. */
 		'(alias _ _ _ je) (filter (if (nil? je) '() (extract_tblvars je)) (lambda (ref_alias)
 			(not (equal?? ref_alias alias))))
 		'())))))
-		(define used_tvs (merge_unique
-			unnested_aliases
-			joinexpr_dependency_aliases
-			(merge (extract_assoc canon_fields (lambda (k v) (extract_tblvars v))))
-			(extract_tblvars canon_condition)
-			(merge (map canon_groups (lambda (stage)
-				(merge_unique
-					(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
-					(extract_tblvars (coalesceNil (stage_having_expr stage) true))
-					(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))
-					(coalesceNil (stage_partition_aliases stage) '())))))))
-		(if neumann_pipeline_trace (print "[neumann] legacy untangle: after used tv collect") nil)
+	(define used_tvs (merge_unique
+		unnested_aliases
+		joinexpr_dependency_aliases
+		(merge (extract_assoc canon_fields (lambda (k v) (extract_tblvars v))))
+		(extract_tblvars canon_condition)
+		(merge (map canon_groups (lambda (stage)
+			(merge_unique
+				(merge (map (coalesceNil (stage_group_cols stage) '()) extract_tblvars))
+				(extract_tblvars (coalesceNil (stage_having_expr stage) true))
+				(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_tblvars col) (extract_tblvars o)))))
+				(coalesceNil (stage_partition_aliases stage) '())))))))
+	(if neumann_pipeline_trace (print "[neumann] legacy untangle: after used tv collect") nil)
 	/* prune unused LEFT JOINs and unreferenced .(1) DUAL tables.
 	.(1) is only pruned if other tables remain (it's the scan driver otherwise). */
 	(define has_non_dual (reduce tables (lambda (a t) (or a (match t '(_ _ tbl _ _) (not (equal? tbl ".(1)")) true))) false))
@@ -9035,20 +9116,20 @@ seeing the correctly prefixed outer alias. */
 				(if (equal? 1 (count _kept_parts)) (car _kept_parts)
 					(cons 'and _kept_parts))))))
 	(if neumann_pipeline_trace (print "[neumann] legacy untangle: return select core") nil)
-		(define parallel_inits (merge
-			(coalesceNil (sq_cache "parallel_inits") '())
-			(coalesceNil (sq_cache "direct_parallel_inits") '())))
-		(define parallel_init_code
-			(if (equal? parallel_inits '())
-				'()
-				(if (equal? (count parallel_inits) 1)
-					parallel_inits
-					(list (cons (quote parallel) parallel_inits)))))
-		(list schema pruned_tables canon_fields canon_condition canon_groups schemas replace_find_column
-			(merge
-				(coalesceNil (sq_cache "init") '())
-				parallel_init_code
-				(qpu-low-drain-extra-inits)))
+	(define parallel_inits (merge
+		(coalesceNil (sq_cache "parallel_inits") '())
+		(coalesceNil (sq_cache "direct_parallel_inits") '())))
+	(define parallel_init_code
+		(if (equal? parallel_inits '())
+			'()
+			(if (equal? (count parallel_inits) 1)
+				parallel_inits
+				(list (cons (quote parallel) parallel_inits)))))
+	(list schema pruned_tables canon_fields canon_condition canon_groups schemas replace_find_column
+		(merge
+			(coalesceNil (sq_cache "init") '())
+			parallel_init_code
+			(qpu-low-drain-extra-inits)))
 )
 )
 )
@@ -9387,7 +9468,7 @@ lambda params, other refs become (outer alias.col) closure captures. */
 			(define uq_7tuple (list schema tables fields condition groups schemas replace_find_column))
 			(define _reorder (apply join_reorder uq_7tuple))
 			(if neumann_pipeline_trace (print "[neumann] after join_reorder") nil)
-				(define _plan (apply build_queryplan (merge _reorder (list nil))))
+			(define _plan (apply build_queryplan (merge _reorder (list nil))))
 			(if neumann_pipeline_trace (print "[neumann] after build_queryplan") nil)
 			(define _plan (match _reorder
 				'(r_schema r_tables r_fields r_condition r_groups r_schemas r_rfcol) (begin
@@ -9434,169 +9515,284 @@ lambda params, other refs become (outer alias.col) closure captures. */
 					(list (quote set) (symbol "resultrow") (symbol "__tpr")))
 				_ full_plan)))
 		(if (logical_query_term_is_union_all logical_term)
-			(match logical_term '(union_all_term branches order limit offset) (begin
-				(if (or (nil? branches) (equal? branches '()))
-					(error "UNION ALL requires at least one branch"))
-				(define branch_meta (map branches (lambda (branch) (begin
-					(define branch_cols (logical_query_term_output_cols branch))
-					(list branch branch_cols (count branch_cols))
-				))))
-				(define expected_cols (match branch_meta
-					(cons first_meta _) (nth first_meta 2)
-					_ 0))
-				(define output_cols (match branch_meta
-					(cons first_meta _) (nth first_meta 1)
-					_ '()))
-				(if (not (reduce branch_meta (lambda (ok meta) (and ok (equal? (nth meta 2) expected_cols))) true))
-					(error "UNION ALL branches must project the same number of columns"))
-				(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
-					/* === UNION ALL with ORDER BY / LIMIT / OFFSET ===
-					Emit scan_order_multi for materialization-free sorted merge across tables. */
-					(begin
-						/* Resolve each branch through join_reorder on the already logical select_core. */
-						(define resolved_branches (map branches (lambda (branch) (begin
-							(if (not (logical_query_term_is_select_core branch))
-								(error "UNION ALL ORDER BY requires SELECT branches"))
-							(match branch '(select_core_term schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 init2) (begin
-								(if (not (equal? (coalesceNil groups2 '()) '()))
-									(error "UNION ALL ORDER BY with staged branches not yet supported"))
-								(if (not (equal? (coalesceNil init2 '()) '()))
-									(error "UNION ALL ORDER BY with initialized branches not yet supported"))
-								(define uq7 (list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2))
-								(define jr (apply join_reorder uq7))
-								(define jr_tables (nth jr 1))
-								(if (not (equal? (count jr_tables) 1))
-									(error "UNION ALL ORDER BY requires single-table branches (no joins)"))
-								(define tbldef (car jr_tables))
-								(define jr_fields (nth jr 2))
-								(define jr_condition ((nth jr 6) (coalesceNil (nth jr 3) true)))
-								(list tbldef jr_fields jr_condition))
-								_ (error "UNION ALL ORDER BY requires SELECT branches"))
-						))))
+			(match (match logical_term
+				'(union_all_term branches order limit offset distinct) (list branches order limit offset distinct)
+				'(union_all_term branches order limit offset) (list branches order limit offset false))
+				'(branches order limit offset distinct) (begin
+					(if (or (nil? branches) (equal? branches '()))
+						(error "UNION ALL requires at least one branch"))
+					(define branch_meta (map branches (lambda (branch) (begin
+						(define branch_cols (logical_query_term_output_cols branch))
+						(list branch branch_cols (count branch_cols))
+					))))
+					(define union_seen_sym (symbol "__union_distinct_seen"))
+					(define union_emit_row (lambda (row_expr)
+						(if (not distinct)
+							(term_sink_emit_row row_expr)
+							(begin
+								(define row_sym (symbol "__union_distinct_row"))
+								(define key_sym (symbol "__union_distinct_key"))
+								(list
+									(list (quote lambda) (list row_sym)
+										(list (quote begin)
+											(list (quote define) key_sym (list (quote serialize) row_sym))
+											(list (quote if)
+												(list union_seen_sym key_sym)
+												nil
+												(list (quote begin)
+													(list union_seen_sym key_sym true)
+													(term_sink_emit_row row_sym)))))
+									row_expr)))))
+					(define expected_cols (match branch_meta
+						(cons first_meta _) (nth first_meta 2)
+						_ 0))
+					(define output_cols (match branch_meta
+						(cons first_meta _) (nth first_meta 1)
+						_ '()))
+					(if (not (reduce branch_meta (lambda (ok meta) (and ok (equal? (nth meta 2) expected_cols))) true))
+						(error "UNION ALL branches must project the same number of columns"))
+					(if (and distinct (or (not (nil? order)) (not (nil? limit)) (not (nil? offset))))
+						(begin
+							(define union_rows_sym (symbol "__union_distinct_rows"))
+							(define union_collect_row (lambda (row_expr)
+								(begin
+									(define row_sym (symbol "__union_distinct_row"))
+									(define key_sym (symbol "__union_distinct_key"))
+									(list
+										(list (quote lambda) (list row_sym)
+											(list (quote begin)
+												(list (quote define) key_sym (list (quote serialize) row_sym))
+												(list (quote if)
+													(list union_seen_sym key_sym)
+													nil
+													(list (quote begin)
+														(list union_seen_sym key_sym true)
+														(list union_rows_sym "rows"
+															(list (quote cons) row_sym
+																(list (quote coalesceNil) (list union_rows_sym "rows") (list (quote quote) (list)))))))))
+										row_expr))))
+							(define branch_plans (map (produceN (count branch_meta)) (lambda (branch_idx) (begin
+								(define meta (nth branch_meta branch_idx))
+								(define branch (nth meta 0))
+								(define branch_sink_sym (symbol (concat "__union_branch_sink:" branch_idx)))
+								(define branch_plan (build_queryplan_term_from_logical_with_sink branch (list (quote callback) branch_sink_sym)))
+								(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
+									(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
+								)))))
+								(list (quote begin)
+									(list (quote define) branch_sink_sym
+										(list (quote lambda) (list (symbol "row"))
+											(union_collect_row normalized_row)))
+									branch_plan)
+							))))
+							(define order_items (map (coalesceNil order '()) (lambda (item) (match item '(col dir) (begin
+								(define col_name (match col
+									'((symbol get_column) _ _ cn _) cn
+									'((quote get_column) _ _ cn _) cn
+									_ (if (number? col) nil (to_string col))))
+								(define pos (reduce (produceN expected_cols (lambda (i) i)) (lambda (found i)
+									(if (not (nil? found)) found
+										(if (equal?? col_name (nth output_cols i)) i nil))) nil))
+								(set pos (if (nil? pos)
+									(if (and (number? col) (> col 0) (<= col expected_cols))
+										(- col 1)
+										nil)
+									pos))
+								(if (nil? pos) (error (concat "UNION ORDER BY: column not found: " col)))
+								(list pos dir))
+							))))
+							(define sort_cols (map order_items (lambda (oi) (match oi '(pos _dir) (nth output_cols pos)))))
+							(define sort_dirs (map order_items (lambda (oi) (match oi '(_pos dir) dir))))
+							(define limit_val (if (nil? limit) -1 limit))
+							(define offset_val (if (nil? offset) 0 offset))
+							(define ordered_rows_expr
+								(list (quote reduce)
+									(list (quote coalesceNil) (list union_rows_sym "rows") (list (quote quote) (list)))
+									(list (quote lambda) (list (symbol "acc") (symbol "item"))
+										(list (quote cons) (symbol "item") (symbol "acc")))
+									(list (quote quote) (list))))
+							(define ordered_map_ast (list (quote lambda)
+								(map output_cols (lambda (col) (symbol col)))
+								(term_sink_emit_row
+									(cons (symbol "list") (merge (map (produceN expected_cols) (lambda (idx)
+										(list (nth output_cols idx) (symbol (nth output_cols idx))))))))))
+							(cons (quote begin)
+								(merge
+									(list
+										(list (quote define) union_seen_sym (list (quote newsession)))
+										(list (quote define) union_rows_sym (list (quote newsession))))
+									branch_plans
+									(list
+										(list (symbol "scan_order")
+											'(session "__memcp_tx")
+											ordered_rows_expr
+											(list (symbol "list"))
+											(list (quote lambda) (list) true)
+											(cons (symbol "list") sort_cols)
+											(cons (symbol "list") sort_dirs)
+											0
+											offset_val
+											limit_val
+											(cons (symbol "list") output_cols)
+											ordered_map_ast)))))
+						(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+							/* === UNION ALL with ORDER BY / LIMIT / OFFSET ===
+							Emit scan_order_multi for materialization-free sorted merge across tables. */
+							(begin
+								/* Resolve each branch through join_reorder on the already logical select_core. */
+								(define resolved_branches (map branches (lambda (branch) (begin
+									(if (not (logical_query_term_is_select_core branch))
+										(error "UNION ALL ORDER BY requires SELECT branches"))
+									(match branch '(select_core_term schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2 init2) (begin
+										(if (not (equal? (coalesceNil groups2 '()) '()))
+											(error "UNION ALL ORDER BY with staged branches not yet supported"))
+										(if (not (equal? (coalesceNil init2 '()) '()))
+											(error "UNION ALL ORDER BY with initialized branches not yet supported"))
+										(define uq7 (list schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2))
+										(define jr (apply join_reorder uq7))
+										(define jr_tables (nth jr 1))
+										(if (not (equal? (count jr_tables) 1))
+											(error "UNION ALL ORDER BY requires single-table branches (no joins)"))
+										(define tbldef (car jr_tables))
+										(define jr_fields (nth jr 2))
+										(define jr_condition ((nth jr 6) (coalesceNil (nth jr 3) true)))
+										(list tbldef jr_fields jr_condition))
+										_ (error "UNION ALL ORDER BY requires SELECT branches"))
+								))))
 
-						/* Parse ORDER BY: resolve each item to position in output_cols */
-						(define order_items (map order (lambda (item) (match item '(col dir) (begin
-							(define col_name (match col
-								'((symbol get_column) _ _ cn _) cn
-								'((quote get_column) _ _ cn _) cn
-								_ (if (number? col) nil (to_string col))))
-							/* Try name match first, then positional */
-							(define pos (reduce (produceN expected_cols (lambda (i) i)) (lambda (found i)
-								(if (not (nil? found)) found
-									(if (equal?? col_name (nth output_cols i)) i nil))) nil))
-							(set pos (if (nil? pos)
-								(if (and (number? col) (> col 0) (<= col expected_cols))
-									(- col 1)
-									nil)
-								pos))
-							(if (nil? pos) (error (concat "UNION ALL ORDER BY: column not found: " col)))
-							(list pos dir))
-						))))
+								/* Parse ORDER BY: resolve each item to position in output_cols */
+								(define order_items (map order (lambda (item) (match item '(col dir) (begin
+									(define col_name (match col
+										'((symbol get_column) _ _ cn _) cn
+										'((quote get_column) _ _ cn _) cn
+										_ (if (number? col) nil (to_string col))))
+									/* Try name match first, then positional */
+									(define pos (reduce (produceN expected_cols (lambda (i) i)) (lambda (found i)
+										(if (not (nil? found)) found
+											(if (equal?? col_name (nth output_cols i)) i nil))) nil))
+									(set pos (if (nil? pos)
+										(if (and (number? col) (> col 0) (<= col expected_cols))
+											(- col 1)
+											nil)
+										pos))
+									(if (nil? pos) (error (concat "UNION ALL ORDER BY: column not found: " col)))
+									(list pos dir))
+								))))
 
-						/* Build per-branch scan parameters */
-						(define scan_specs (map resolved_branches (lambda (rb) (begin
-							(define tbldef (nth rb 0))
-							(define fields (nth rb 1))
-							(define condition (nth rb 2))
-							(match tbldef '(tblvar tbl_schema tbl isOuter joinexpr) (begin
-								/* filter: columns from condition */
-								(define filtercols (merge_unique (list
-									(extract_columns_for_tblvar tblvar condition)
-									(extract_outer_columns_for_tblvar tblvar condition))))
-								(define filter_ast (list (quote lambda)
-									(map filtercols (lambda (c) (symbol (concat tblvar "." c))))
-									(optimize (replace_columns_from_expr condition))))
+								/* Build per-branch scan parameters */
+								(define scan_specs (map resolved_branches (lambda (rb) (begin
+									(define tbldef (nth rb 0))
+									(define fields (nth rb 1))
+									(define condition (nth rb 2))
+									(match tbldef '(tblvar tbl_schema tbl isOuter joinexpr) (begin
+										/* filter: columns from condition */
+										(define filtercols (merge_unique (list
+											(extract_columns_for_tblvar tblvar condition)
+											(extract_outer_columns_for_tblvar tblvar condition))))
+										(define filter_ast (list (quote lambda)
+											(map filtercols (lambda (c) (symbol (concat tblvar "." c))))
+											(optimize (replace_columns_from_expr condition))))
 
-								/* fields by position */
-								(define field_names (extract_assoc fields (lambda (k v) k)))
-								(define field_exprs (extract_assoc fields (lambda (k v) v)))
+										/* fields by position */
+										(define field_names (extract_assoc fields (lambda (k v) k)))
+										(define field_exprs (extract_assoc fields (lambda (k v) v)))
 
-								/* sort columns for this branch: map ORDER BY positions to physical columns */
-								(define sortcols (map order_items (lambda (oi) (match oi '(pos _dir) (begin
-									(define expr (nth field_exprs pos))
-									(match expr
-										'((symbol get_column) (eval tblvar) _ col _) col
-										'((quote get_column) (eval tblvar) _ col _) col
-										_ (begin
-											/* complex expression: emit lambda-based sort column */
-											(define sort_expr_cols (extract_columns_for_tblvar tblvar expr))
-											(list (quote lambda)
-												(map sort_expr_cols (lambda (c) (symbol (concat tblvar "." c))))
-												(replace_columns_from_expr expr)))))))))
+										/* sort columns for this branch: map ORDER BY positions to physical columns */
+										(define sortcols (map order_items (lambda (oi) (match oi '(pos _dir) (begin
+											(define expr (nth field_exprs pos))
+											(match expr
+												'((symbol get_column) (eval tblvar) _ col _) col
+												'((quote get_column) (eval tblvar) _ col _) col
+												_ (begin
+													/* complex expression: emit lambda-based sort column */
+													(define sort_expr_cols (extract_columns_for_tblvar tblvar expr))
+													(list (quote lambda)
+														(map sort_expr_cols (lambda (c) (symbol (concat tblvar "." c))))
+														(replace_columns_from_expr expr)))))))))
 
-								/* map: all columns needed for output field expressions + sort cols */
-								(define all_output_cols (merge_unique (extract_assoc fields (lambda (k v)
-									(extract_columns_for_tblvar tblvar v)))))
-								(define sort_phys_cols (merge_unique (map sortcols (lambda (sc)
-									(if (string? sc) (list sc)
-										(match sc
-											'((quote lambda) params body) (extract_columns_for_tblvar tblvar body)
-											'((symbol lambda) params body) (extract_columns_for_tblvar tblvar body)
-											'()))))))
-								(define mapcols (merge_unique (list all_output_cols sort_phys_cols)))
+										/* map: all columns needed for output field expressions + sort cols */
+										(define all_output_cols (merge_unique (extract_assoc fields (lambda (k v)
+											(extract_columns_for_tblvar tblvar v)))))
+										(define sort_phys_cols (merge_unique (map sortcols (lambda (sc)
+											(if (string? sc) (list sc)
+												(match sc
+													'((quote lambda) params body) (extract_columns_for_tblvar tblvar body)
+													'((symbol lambda) params body) (extract_columns_for_tblvar tblvar body)
+													'()))))))
+										(define mapcols (merge_unique (list all_output_cols sort_phys_cols)))
 
-								/* map lambda: emit rows with normalized output aliases */
-								(define map_ast (list (quote lambda)
-									(map mapcols (lambda (c) (symbol (concat tblvar "." c))))
-									(term_sink_emit_row
-										(cons (symbol "list")
-											(merge (map (produceN expected_cols (lambda (i) i)) (lambda (i)
-												(list (nth output_cols i) (replace_columns_from_expr (nth field_exprs i))))))))))
+										/* map lambda: emit rows with normalized output aliases */
+										(define map_ast (list (quote lambda)
+											(map mapcols (lambda (c) (symbol (concat tblvar "." c))))
+											(term_sink_emit_row
+												(cons (symbol "list")
+													(merge (map (produceN expected_cols (lambda (i) i)) (lambda (i)
+														(list (nth output_cols i) (replace_columns_from_expr (nth field_exprs i))))))))))
 
-								(list tbl_schema tbl filtercols filter_ast sortcols mapcols map_ast))
-								_ (error "invalid table definition in UNION ALL branch"))
-						))))
+										(list tbl_schema tbl filtercols filter_ast sortcols mapcols map_ast))
+										_ (error "invalid table definition in UNION ALL branch"))
+								))))
 
-						/* Sort directions (shared): extract from order_items */
-						(define sort_dirs (map order_items (lambda (oi) (match oi '(_pos dir) dir))))
+								/* Sort directions (shared): extract from order_items */
+								(define sort_dirs (map order_items (lambda (oi) (match oi '(_pos dir) dir))))
 
-						(define limit_val (if (nil? limit) -1 limit))
-						(define offset_val (if (nil? offset) 0 offset))
+								(define limit_val (if (nil? limit) -1 limit))
+								(define offset_val (if (nil? offset) 0 offset))
 
-						/* Emit scan_order_multi call. Per-table offset/limit are nil here
-						(no per-branch ORDER+LIMIT in this codepath); if a branch ever carries
-						its own order+limit, populate the nil lists with per-branch ints. */
-						(merge (list (symbol "scan_order_multi") '(session "__memcp_tx"))
-							(list
-								(cons (symbol "list") (map scan_specs (lambda (s) (list (symbol "table") (nth s 0) (nth s 1)))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 2)))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (nth s 3))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 4)))))
-								(cons (symbol "list") sort_dirs)
-								nil
-								nil
-								0
-								offset_val
-								limit_val
-								(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 5)))))
-								(cons (symbol "list") (map scan_specs (lambda (s) (nth s 6))))
-						))
-					)
-					/* === UNION ALL without ORDER BY === */
-					(begin
-						(define branch_plans (map (produceN (count branch_meta)) (lambda (branch_idx) (begin
-							(define meta (nth branch_meta branch_idx))
-							(define branch (nth meta 0))
-							(define branch_sink_sym (symbol (concat "__union_branch_sink:" branch_idx)))
-							(define branch_plan (build_queryplan_term_from_logical_with_sink branch (list (quote callback) branch_sink_sym)))
-							(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
-								(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
-							)))))
-							(list (quote begin)
-								(list (quote define) branch_sink_sym
-									(list (quote lambda) (list (symbol "row"))
-										(term_sink_emit_row normalized_row)))
-								branch_plan)
-						))))
-						(cons (quote begin) branch_plans))
-				)
-			))
+								/* Emit scan_order_multi call. Per-table offset/limit are nil here
+								(no per-branch ORDER+LIMIT in this codepath); if a branch ever carries
+								its own order+limit, populate the nil lists with per-branch ints. */
+								(define ordered_union_plan (merge (list (symbol "scan_order_multi") '(session "__memcp_tx"))
+									(list
+										(cons (symbol "list") (map scan_specs (lambda (s) (list (symbol "table") (nth s 0) (nth s 1)))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 2)))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (nth s 3))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 4)))))
+										(cons (symbol "list") sort_dirs)
+										nil
+										nil
+										0
+										offset_val
+										limit_val
+										(cons (symbol "list") (map scan_specs (lambda (s) (cons (symbol "list") (nth s 5)))))
+										(cons (symbol "list") (map scan_specs (lambda (s) (nth s 6))))
+								)))
+								(if distinct
+									(list (quote begin)
+										(list (quote define) union_seen_sym (list (quote newsession)))
+										ordered_union_plan)
+									ordered_union_plan)
+							)
+							/* === UNION ALL without ORDER BY === */
+							(begin
+								(define branch_plans (map (produceN (count branch_meta)) (lambda (branch_idx) (begin
+									(define meta (nth branch_meta branch_idx))
+									(define branch (nth meta 0))
+									(define branch_sink_sym (symbol (concat "__union_branch_sink:" branch_idx)))
+									(define branch_plan (build_queryplan_term_from_logical_with_sink branch (list (quote callback) branch_sink_sym)))
+									(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
+										(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
+									)))))
+									(list (quote begin)
+										(list (quote define) branch_sink_sym
+											(list (quote lambda) (list (symbol "row"))
+												(union_emit_row normalized_row)))
+										branch_plan)
+								))))
+								(cons (quote begin)
+									(merge
+										(if distinct
+											(list (list (quote define) union_seen_sym (list (quote newsession))))
+											'())
+										branch_plans)))
+						)
+			)))
 			(error "invalid logical query term"))
-		)
-	))))
-	(define build_queryplan_term_with_sink (lambda (query sink_mode)
-		(planner_with_compile_scope (lambda () (begin
-			(define logical_term (untangle_query_term query nil))
+	)
+))))
+(define build_queryplan_term_with_sink (lambda (query sink_mode)
+	(planner_with_compile_scope (lambda () (begin
+		(define logical_term (untangle_query_term query nil))
 		(if neumann_pipeline_trace (print "[neumann] after legacy untangle term") nil)
 		(build_queryplan_term_from_logical_with_sink logical_term sink_mode))
 ))))
@@ -9606,7 +9802,7 @@ lambda params, other refs become (outer alias.col) closure captures. */
 		(planner_neumann_lowered_scope_stack "stack" (cons true neumann_old_stack))
 		(if neumann_pipeline_trace (print (concat "[neumann] sink: flag after set="
 			(string (planner_neumann_lowered_current)))) nil)
-			(define logical_term (untangle_query_term query nil))
+		(define logical_term (untangle_query_term query nil))
 		(planner_neumann_lowered_scope_stack "stack" neumann_old_stack)
 		(if neumann_pipeline_trace (print "[neumann] after legacy untangle term") nil)
 		(build_queryplan_term_from_logical_with_sink logical_term sink_mode))
@@ -9644,12 +9840,12 @@ lambda params, other refs become (outer alias.col) closure captures. */
 				(qpp-tuple-offset query)
 				nil nil))
 			'())
-			(qpp-schemas-from-tables (qpp-tuple-tables query))
-			neumann_exact_replace_find_column
-			'())))
-	(define build_queryplan_term_from_logical (lambda (logical_term)
-		(planner_with_compile_scope (lambda ()
-			(build_queryplan_term_from_logical_with_sink logical_term '(resultrow))))
+		(qpp-schemas-from-tables (qpp-tuple-tables query))
+		neumann_exact_replace_find_column
+		'())))
+(define build_queryplan_term_from_logical (lambda (logical_term)
+	(planner_with_compile_scope (lambda ()
+		(build_queryplan_term_from_logical_with_sink logical_term '(resultrow))))
 ))
 (define build_queryplan_term (lambda (query) (begin
 	/* BTW2025 top-down pipeline is mandatory for SELECT tuples on this branch:
@@ -9658,16 +9854,16 @@ lambda params, other refs become (outer alias.col) closure captures. */
 	with scalar fallback paths; performance regressions must surface as compiler
 	errors or failing tests. */
 	(if (qpp-tuple? query)
-				(begin
-					(define neu (neumann_compile_select query))
-					(if neumann_pipeline_trace (begin
+		(begin
+			(define neu (neumann_compile_select query))
+			(if neumann_pipeline_trace (begin
 				(print "[neumann] input:   " query)
 				(print "[neumann] lowered: " neu)) nil)
 			(define neumann_old_stack (coalesceNil (planner_neumann_lowered_scope_stack "stack") '()))
 			(planner_neumann_lowered_scope_stack "stack" (cons true neumann_old_stack))
 			(if neumann_pipeline_trace (print (concat "[neumann] build_term: flag after set="
 				(string (planner_neumann_lowered_current)))) nil)
-				(define neumann_plan (build_queryplan_term_with_sink_neumann_lowered neu '(resultrow)))
+			(define neumann_plan (build_queryplan_term_with_sink_neumann_lowered neu '(resultrow)))
 			(planner_neumann_lowered_scope_stack "stack" neumann_old_stack)
 			neumann_plan)
 		(build_queryplan_term_with_sink query '(resultrow)))
@@ -9917,9 +10113,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	(define stage_cfg (stage_ordering_config stage))
 	(define stage_order (stage_ordering_config_order stage_cfg))
 	(define stage_partcols (stage_ordering_config_partcols stage_cfg))
-			(define stage_limit (stage_ordering_config_limit stage_cfg))
-			(define stage_offset (stage_ordering_config_offset stage_cfg))
-			(if neumann_pipeline_trace (print (concat "[neumann] build_inner: after stage setup has_stage=" (string (not (nil? stage))))) nil)
+	(define stage_limit (stage_ordering_config_limit stage_cfg))
+	(define stage_offset (stage_ordering_config_offset stage_cfg))
+	(if neumann_pipeline_trace (print (concat "[neumann] build_inner: after stage setup has_stage=" (string (not (nil? stage))))) nil)
 
 	/* window function detection */
 	(define window_funcs_all (merge (extract_assoc fields (lambda (k v) (extract_window_funcs v)))))
@@ -9959,10 +10155,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									found
 									(begin
 										(define source_expr (coalesceNil (coldef "Expr") nil))
-											(if (and (not (nil? source_expr))
-												(equal? (normalize_canonical_aliases source_expr) normalized_expr))
-												(coldef "Field")
-												nil))))
+										(if (and (not (nil? source_expr))
+											(equal? (normalize_canonical_aliases source_expr) normalized_expr))
+											(coldef "Field")
+											nil))))
 								nil))))))
 				(define current_scan_agg_field (lambda (expr agg_args) (begin
 					(define target_col (agg_col_name agg_args))
@@ -10026,43 +10222,43 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	/* window functions with GROUP BY: strip window expressions to inner
 	aggregates so the normal GROUP BY path processes them. Save original
 	fields so we can inject promise values after compute_plan. */
-		(define wg_store (newsession))
-		(wg_store "fields" nil)
-		(define grouped_laglead_window
-			(and has_window stage_group
-				(reduce window_funcs_all (lambda (found wf)
-					(or found (match wf
-						'(fn _args _over)
-						(or (equal? fn "LAG") (equal? fn "LEAD"))
-						false)))
+	(define wg_store (newsession))
+	(wg_store "fields" nil)
+	(define grouped_laglead_window
+		(and has_window stage_group
+			(reduce window_funcs_all (lambda (found wf)
+				(or found (match wf
+					'(fn _args _over)
+					(or (equal? fn "LAG") (equal? fn "LEAD"))
 					false)))
-		(if grouped_laglead_window
-			(error "LAG/LEAD window functions over GROUP BY are not yet supported")
-			nil)
-		(define strip_window_inner (lambda (expr) (match expr
-				(cons (symbol window_func) wf_rest)
-			(match wf_rest
-				'(_fn args _over)
-				(if (and (list? args) (> (count args) 0)) (car args) 1)
-				_ expr)
-			(cons (quote window_func) wf_rest)
-			(match wf_rest
-				'(_fn args _over)
-				(if (and (list? args) (> (count args) 0)) (car args) 1)
-				_ expr)
-			(cons '(quote window_func) wf_rest)
-			(match wf_rest
-				'(_fn args _over)
-				(if (and (list? args) (> (count args) 0)) (car args) 1)
-				_ expr)
+				false)))
+	(if grouped_laglead_window
+		(error "LAG/LEAD window functions over GROUP BY are not yet supported")
+		nil)
+	(define strip_window_inner (lambda (expr) (match expr
+		(cons (symbol window_func) wf_rest)
+		(match wf_rest
+			'(_fn args _over)
+			(if (and (list? args) (> (count args) 0)) (car args) 1)
+			_ expr)
+		(cons (quote window_func) wf_rest)
+		(match wf_rest
+			'(_fn args _over)
+			(if (and (list? args) (> (count args) 0)) (car args) 1)
+			_ expr)
+		(cons '(quote window_func) wf_rest)
+		(match wf_rest
+			'(_fn args _over)
+			(if (and (list? args) (> (count args) 0)) (car args) 1)
+			_ expr)
 		(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-				expr
-				(cons sym (map args strip_window_inner)))
-			_ expr)))
-		(define strip_window_group_stage (and has_window stage_group))
-		(if strip_window_group_stage
-			(wg_store "fields" fields)
-			nil) /* save original fields with window_func */
+			expr
+			(cons sym (map args strip_window_inner)))
+		_ expr)))
+	(define strip_window_group_stage (and has_window stage_group))
+	(if strip_window_group_stage
+		(wg_store "fields" fields)
+		nil) /* save original fields with window_func */
 	(set fields (if strip_window_group_stage
 		(map_assoc fields (lambda (k v) (strip_window_inner v)))
 		fields))
@@ -10243,10 +10439,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		/* collect all unique aggregate tuples (expr reduce neutral) from fields, ORDER BY, and HAVING.
 		Each tuple becomes a computed column on the keytable, e.g. SUM(amount) -> ((get_column t amount) + 0).
 		ORDER BY SUM(x) requires SUM(x) to be pre-computed here even if not in SELECT. */
-					(define ags_raw (if is_dedup '() (extract_assoc fields (lambda (key expr) (extract_stage_field_aggregates expr false)))))
-					(define ags (if is_dedup '() (merge_unique ags_raw))) /* aggregates in fields */
-					(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
-					(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_having true))))) /* aggregates in having */
+		(define ags_raw (if is_dedup '() (extract_assoc fields (lambda (key expr) (extract_stage_field_aggregates expr false)))))
+		(define ags (if is_dedup '() (merge_unique ags_raw))) /* aggregates in fields */
+		(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
+		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_having true))))) /* aggregates in having */
 		/* TODO: replace (get_column nil ti col ci) in group, having and order with (coalesce (fields col) '('get_column nil false col false)) */
 
 		/* determine which tables the GROUP BY applies to:
@@ -10263,19 +10459,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 			(and (not (has? (coalesceNil stage_scope '()) tv))
 				(or (has? _grp_ps_aliases tv) (not (nil? stage_scope))))
 			false))))
-			(define grp_table_alias (lambda (td) (match td
-				'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)
-				nil)))
-			(define grp_tblvar_owns_ref? (lambda (tblvar ref) (begin
-				(define tbl_aliases (alias_lookup_variants tblvar))
-				(or
-					(has? tbl_aliases ref)
-					(if (string? ref)
-						(begin
-							(define parts (split ref "\0"))
-							(and (> (count parts) 1)
-								(has? tbl_aliases (car parts))))
-						false)))))
+		(define grp_table_alias (lambda (td) (match td
+			'(tv _ ttbl _ _) (if (nil? tv) ttbl tv)
+			nil)))
+		(define grp_tblvar_owns_ref? (lambda (tblvar ref) (begin
+			(define tbl_aliases (alias_lookup_variants tblvar))
+			(or
+				(has? tbl_aliases ref)
+				(if (string? ref)
+					(begin
+						(define parts (split ref "\0"))
+						(and (> (count parts) 1)
+							(has? tbl_aliases (car parts))))
+					false)))))
 		(define grp_table_depends_on_alias (lambda (td alias_name) (match td
 			'(_ _ _ _ je) (and
 				(not (nil? je))
@@ -10319,19 +10515,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				false)))
 		(define resolved_expr_refs_grp_ps_table (lambda (expr)
 			(expr_refs_grp_ps_table (replace_find_column expr))))
-			(define must_prejoin_outer_group_tables (and
-				(not (equal? grp_ps_outer_tables_raw '()))
-				(or
-					(and (not (equal? ags '()))
-						(nil? stage_scope)
+		(define must_prejoin_outer_group_tables (and
+			(not (equal? grp_ps_outer_tables_raw '()))
+			(or
+				(and (not (equal? ags '()))
+					(nil? stage_scope)
 					(reduce_assoc fields (lambda (acc _k expr) (or acc (resolved_expr_refs_grp_ps_table expr))) false))
 				(reduce stage_group (lambda (acc expr) (or acc (resolved_expr_refs_grp_ps_table expr))) false)
-					(reduce ags (lambda (acc ag) (or acc (resolved_expr_refs_grp_ps_table ag))) false)
-					(resolved_expr_refs_grp_ps_table (coalesce stage_having true))
-					(reduce (coalesce stage_order '()) (lambda (acc o) (or acc (match o '(col _dir) (resolved_expr_refs_grp_ps_table col) false))) false))))
-			(define grp_tables (if must_prejoin_outer_group_tables
-				(merge grp_tables_raw grp_ps_helper_tables_raw grp_ps_outer_tables_raw)
-				(merge grp_tables_raw grp_ps_helper_tables_raw)))
+				(reduce ags (lambda (acc ag) (or acc (resolved_expr_refs_grp_ps_table ag))) false)
+				(resolved_expr_refs_grp_ps_table (coalesce stage_having true))
+				(reduce (coalesce stage_order '()) (lambda (acc o) (or acc (match o '(col _dir) (resolved_expr_refs_grp_ps_table col) false))) false))))
+		(define grp_tables (if must_prejoin_outer_group_tables
+			(merge grp_tables_raw grp_ps_helper_tables_raw grp_ps_outer_tables_raw)
+			(merge grp_tables_raw grp_ps_helper_tables_raw)))
 		(define grp_ps_tables (if must_prejoin_outer_group_tables
 			'()
 			grp_ps_outer_tables_raw))
@@ -10345,38 +10541,38 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 		joinexprs because the multi-table prejoin path may recursively
 		re-enter this stage compiler with the relevant tables in either bucket. */
 		(define grp_table_aliases_for_owned_agg (map grp_tables (lambda (t) (match t '(tv _ _ _ _) tv ""))))
-			(define agg_input_owned_by_current_stage (lambda (agg_args) (match agg_args
-				'(agg_expr _ _)
-				(begin
-					(define refs (extract_tblvars agg_expr))
-					(or (equal? refs '())
-						(reduce refs (lambda (acc tv) (and acc
-							(reduce grp_table_aliases_for_owned_agg (lambda (found grp_alias)
-								(or found (grp_tblvar_owns_ref? grp_alias tv)))
-								false))) true)))
-				false)))
-			(define joinexpr_owned_aggs (merge (map (merge grp_ps_tables grp_tables) (lambda (td) (match td
-				'(_ _ _ _ tje)
-				(if (nil? tje) '()
-					(filter (extract_aggregates tje) agg_input_owned_by_current_stage))
-				'())))))
-			(define ags (if is_dedup ags (merge_unique ags joinexpr_owned_aggs)))
-			(match grp_tables
+		(define agg_input_owned_by_current_stage (lambda (agg_args) (match agg_args
+			'(agg_expr _ _)
+			(begin
+				(define refs (extract_tblvars agg_expr))
+				(or (equal? refs '())
+					(reduce refs (lambda (acc tv) (and acc
+						(reduce grp_table_aliases_for_owned_agg (lambda (found grp_alias)
+							(or found (grp_tblvar_owns_ref? grp_alias tv)))
+							false))) true)))
+			false)))
+		(define joinexpr_owned_aggs (merge (map (merge grp_ps_tables grp_tables) (lambda (td) (match td
+			'(_ _ _ _ tje)
+			(if (nil? tje) '()
+				(filter (extract_aggregates tje) agg_input_owned_by_current_stage))
+			'())))))
+		(define ags (if is_dedup ags (merge_unique ags joinexpr_owned_aggs)))
+		(match grp_tables
 			/* TODO: allow for more than just group by single table */
 			/* TODO: outer tables that only join on group */
 			'('(tblvar schema tbl isOuter _)) (begin
-					(define ags (filter ags (lambda (ag) (match ag
-						'(agg_expr _ _)
-						(begin
-							(define ownership_expr (if (materialized-source? tbl)
-								(lower_materialized_source_expr tbl tblvar agg_expr)
-								agg_expr))
-							(define refs (extract_tblvars ownership_expr))
-							(or (equal? refs '())
-								(reduce refs (lambda (acc tv)
-									(and acc (grp_tblvar_owns_ref? tblvar tv)))
-									true)))
-						false))))
+				(define ags (filter ags (lambda (ag) (match ag
+					'(agg_expr _ _)
+					(begin
+						(define ownership_expr (if (materialized-source? tbl)
+							(lower_materialized_source_expr tbl tblvar agg_expr)
+							agg_expr))
+						(define refs (extract_tblvars ownership_expr))
+						(or (equal? refs '())
+							(reduce refs (lambda (acc tv)
+								(and acc (grp_tblvar_owns_ref? tblvar tv)))
+								true)))
+					false))))
 				/* prepare preaggregate */
 				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
 				(define materialized_source (materialized-source? tbl))
@@ -10394,10 +10590,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(if (nil? match_col)
 							marker_expr
 							(list (quote get_column) tblvar false match_col false)))))))
-					(define rewrite_materialized_source_cols_single (lambda (expr) (match expr
-						'((symbol get_column) _ _ _ _) (begin
-							(define expr_lookup (materialized_source_expr_lookup tbl))
-							(define visible_field_expr (match expr
+				(define rewrite_materialized_source_cols_single (lambda (expr) (match expr
+					'((symbol get_column) _ _ _ _) (begin
+						(define expr_lookup (materialized_source_expr_lookup tbl))
+						(define visible_field_expr (match expr
 							'((symbol get_column) alias_ _ col _)
 							(if (or (nil? alias_) (not (has_assoc? schemas alias_))) nil
 								(reduce (schema_assoc_cols schemas alias_) (lambda (found coldef)
@@ -10406,51 +10602,51 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(if (and (equal? (coldef "Field") col) (has_assoc? coldef "Expr"))
 											(coalesceNil (coldef "Expr") nil)
 											nil)))
-										nil))
-								nil))
-							(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
-							(define normalized_expr (normalize_canonical_aliases expr))
-							(define source_alias_map (prejoin_canonical_sources tbl))
-							(define source_alias_field (if (nil? source_alias_map) nil
-								(reduce source_alias_map (lambda (found pair)
-									(if (not (nil? found))
-										found
-										(match pair
-											'(key source_expr)
-											(if (and
-												(not (nil? (find_materialized_field_by_name materialized_cols key)))
-												(equal? (normalize_canonical_aliases source_expr) normalized_expr))
-												key
-												nil)
-											nil)))
-									nil)))
-							(define exact_field (reduce materialized_cols (lambda (found coldef)
+									nil))
+							nil))
+						(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
+						(define normalized_expr (normalize_canonical_aliases expr))
+						(define source_alias_map (prejoin_canonical_sources tbl))
+						(define source_alias_field (if (nil? source_alias_map) nil
+							(reduce source_alias_map (lambda (found pair)
 								(if (not (nil? found))
 									found
-									(begin
-										(define source_expr (coalesceNil (coldef "Expr") nil))
-										(if (and (not (nil? source_expr))
+									(match pair
+										'(key source_expr)
+										(if (and
+											(not (nil? (find_materialized_field_by_name materialized_cols key)))
 											(equal? (normalize_canonical_aliases source_expr) normalized_expr))
-											(coldef "Field")
-											nil))))
-								nil))
-							(define direct_field (if (nil? expr_lookup) nil
-								(reduce (materialized_source_expr_keys expr) (lambda (found key)
-									(if (not (nil? found)) found
-										(coalesce (expr_lookup key) nil)))
-									nil)))
-								(define direct_field (coalesce exact_field
-									(materialized_field_from_get_column_name
-										(materialized_source_physical_schema schema tbl tblvar schemas)
-										expr)
-									source_alias_field
-									direct_field))
-							(if (not (nil? direct_field))
-								(list (quote get_column) tblvar false direct_field false)
+											key
+											nil)
+										nil)))
+								nil)))
+						(define exact_field (reduce materialized_cols (lambda (found coldef)
+							(if (not (nil? found))
+								found
 								(begin
-									(define match_col (reduce materialized_cols (lambda (found coldef)
-										(if (not (nil? found))
-											found
+									(define source_expr (coalesceNil (coldef "Expr") nil))
+									(if (and (not (nil? source_expr))
+										(equal? (normalize_canonical_aliases source_expr) normalized_expr))
+										(coldef "Field")
+										nil))))
+							nil))
+						(define direct_field (if (nil? expr_lookup) nil
+							(reduce (materialized_source_expr_keys expr) (lambda (found key)
+								(if (not (nil? found)) found
+									(coalesce (expr_lookup key) nil)))
+								nil)))
+						(define direct_field (coalesce exact_field
+							(materialized_field_from_get_column_name
+								(materialized_source_physical_schema schema tbl tblvar schemas)
+								expr)
+							source_alias_field
+							direct_field))
+						(if (not (nil? direct_field))
+							(list (quote get_column) tblvar false direct_field false)
+							(begin
+								(define match_col (reduce materialized_cols (lambda (found coldef)
+									(if (not (nil? found))
+										found
 										(begin
 											(define source_expr (coalesceNil (coldef "Expr") nil))
 											(if (and (not (nil? source_expr))
@@ -10463,9 +10659,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										expr
 										(rewrite_materialized_source_cols_single visible_field_expr))
 									(list (quote get_column) tblvar false match_col false)))))
-						'((quote get_column) _ _ _ _) (begin
-							(define expr_lookup (materialized_source_expr_lookup tbl))
-							(define visible_field_expr (match expr
+					'((quote get_column) _ _ _ _) (begin
+						(define expr_lookup (materialized_source_expr_lookup tbl))
+						(define visible_field_expr (match expr
 							'((quote get_column) alias_ _ col _)
 							(if (or (nil? alias_) (not (has_assoc? schemas alias_))) nil
 								(reduce (schema_assoc_cols schemas alias_) (lambda (found coldef)
@@ -10474,49 +10670,49 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(if (and (equal? (coldef "Field") col) (has_assoc? coldef "Expr"))
 											(coalesceNil (coldef "Expr") nil)
 											nil)))
-										nil))
-								nil))
-							(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
-							(define normalized_expr (normalize_canonical_aliases expr))
-							(define source_alias_map (prejoin_canonical_sources tbl))
-							(define source_alias_field (if (nil? source_alias_map) nil
-								(reduce source_alias_map (lambda (found pair)
-									(if (not (nil? found))
-										found
-										(match pair
-											'(key source_expr)
-											(if (and
-												(not (nil? (find_materialized_field_by_name materialized_cols key)))
-												(equal? (normalize_canonical_aliases source_expr) normalized_expr))
-												key
-												nil)
-											nil)))
-									nil)))
-							(define exact_field (reduce materialized_cols (lambda (found coldef)
+									nil))
+							nil))
+						(define materialized_cols (materialized_source_physical_schema schema tbl tblvar schemas))
+						(define normalized_expr (normalize_canonical_aliases expr))
+						(define source_alias_map (prejoin_canonical_sources tbl))
+						(define source_alias_field (if (nil? source_alias_map) nil
+							(reduce source_alias_map (lambda (found pair)
 								(if (not (nil? found))
 									found
-									(begin
-										(define source_expr (coalesceNil (coldef "Expr") nil))
-										(if (and (not (nil? source_expr))
+									(match pair
+										'(key source_expr)
+										(if (and
+											(not (nil? (find_materialized_field_by_name materialized_cols key)))
 											(equal? (normalize_canonical_aliases source_expr) normalized_expr))
-											(coldef "Field")
-											nil))))
-								nil))
-							(define direct_field (if (nil? expr_lookup) nil
-								(reduce (materialized_source_expr_keys expr) (lambda (found key)
-									(if (not (nil? found)) found
-										(coalesce (expr_lookup key) nil)))
-									nil)))
-								(define direct_field (coalesce exact_field
-									(materialized_field_from_get_column_name
-										(materialized_source_physical_schema schema tbl tblvar schemas)
-										expr)
-									source_alias_field
-									direct_field))
-							(if (not (nil? direct_field))
-								(list (quote get_column) tblvar false direct_field false)
+											key
+											nil)
+										nil)))
+								nil)))
+						(define exact_field (reduce materialized_cols (lambda (found coldef)
+							(if (not (nil? found))
+								found
 								(begin
-									(define match_col (reduce materialized_cols (lambda (found coldef)
+									(define source_expr (coalesceNil (coldef "Expr") nil))
+									(if (and (not (nil? source_expr))
+										(equal? (normalize_canonical_aliases source_expr) normalized_expr))
+										(coldef "Field")
+										nil))))
+							nil))
+						(define direct_field (if (nil? expr_lookup) nil
+							(reduce (materialized_source_expr_keys expr) (lambda (found key)
+								(if (not (nil? found)) found
+									(coalesce (expr_lookup key) nil)))
+								nil)))
+						(define direct_field (coalesce exact_field
+							(materialized_field_from_get_column_name
+								(materialized_source_physical_schema schema tbl tblvar schemas)
+								expr)
+							source_alias_field
+							direct_field))
+						(if (not (nil? direct_field))
+							(list (quote get_column) tblvar false direct_field false)
+							(begin
+								(define match_col (reduce materialized_cols (lambda (found coldef)
 									(if (not (nil? found))
 										found
 										(begin
@@ -10593,12 +10789,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* Preserve GROUP BY key cardinality here. append_unique/equal? can
 				collapse distinct SQL builtin proc applications such as YEAR(dt) and
 				MONTH(dt), which then creates a keytable missing later ORDER BY keys. */
-							(define resolved_stage_group (if materialized_source
-								(map stage_group rewrite_materialized_source_cols_single)
-								stage_group))
-							(if materialized_source
-								(set ags (map ags rewrite_materialized_source_cols_single)))
-					/* MySQL-style grouped projections may still contain row-local expressions
+				(define resolved_stage_group (if materialized_source
+					(map stage_group rewrite_materialized_source_cols_single)
+					stage_group))
+				(if materialized_source
+					(set ags (map ags rewrite_materialized_source_cols_single)))
+				/* MySQL-style grouped projections may still contain row-local expressions
 				that are neither GROUP keys nor explicit aggregates. Those expressions must
 				not be rewritten into fictitious keytable columns by recursively replacing
 				their inner get_column markers. Instead, synthesize a stable "pick any
@@ -10707,26 +10903,26 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(cons (quote list) cols)
 						(list (quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col))))
 							(replace_columns_from_expr lowered_expr))))))
-					(define collect_group_value_local_exprs (lambda (expr) (match expr
-						(cons (symbol aggregate) agg_rest) '()
-						(cons '(quote aggregate) agg_rest) '()
-						(cons sym args)
-						(if (field_needs_group_value_agg expr)
-							(list expr)
+				(define collect_group_value_local_exprs (lambda (expr) (match expr
+					(cons (symbol aggregate) agg_rest) '()
+					(cons '(quote aggregate) agg_rest) '()
+					(cons sym args)
+					(if (field_needs_group_value_agg expr)
+						(list expr)
 						(merge (map args collect_group_value_local_exprs)))
 					_ '())))
-					(define lower_materialized_agg_tuple (lambda (ag) (match ag
+				(define lower_materialized_agg_tuple (lambda (ag) (match ag
 					'(ag_expr ag_reduce ag_neutral)
 					(list
 						(rewrite_materialized_source_cols_single
 							(rewrite_materialized_source_aggs_single ag_expr))
 						ag_reduce
 						ag_neutral)
-						_ ag)))
-						(if materialized_source
-							(set ags (map ags lower_materialized_agg_tuple)))
+					_ ag)))
+				(if materialized_source
+					(set ags (map ags lower_materialized_agg_tuple)))
 
-					/* preparation */
+				/* preparation */
 				(define tblvar_cols (merge_unique (map resolved_stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
 				(set condition (replace_find_column (coalesceNil condition true)))
 				(set condition (lower_visible_materialized_aggs_single condition))
@@ -10972,13 +11168,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define session_sensitive_group_domain
 					(or (expr_uses_session_state collect_condition)
 						(expr_uses_dependent_helper_result collect_condition)))
-					(define group_runtime_suffix (if session_sensitive_group_domain
-							(if (expr_uses_session_state collect_condition)
-								(concat
-									(runtime_cache_suffix_from_exprs (list collect_condition))
-									(user_session_runtime_cache_suffix_from_exprs (list collect_condition)))
-								(planner_dependent_group_suffix collect_condition))
-							nil))
+				(define group_runtime_suffix (if session_sensitive_group_domain
+					(if (expr_uses_session_state collect_condition)
+						(concat
+							(runtime_cache_suffix_from_exprs (list collect_condition))
+							(user_session_runtime_cache_suffix_from_exprs (list collect_condition)))
+						(planner_dependent_group_suffix collect_condition))
+					nil))
 			/* Session-sensitive groups use a GLOBAL keytable domain (no condition suffix)
 				so all group keys are present regardless of session. The per-session filtering
 				happens in createcolumn via StorageComputeProxy session variants. */
@@ -11110,18 +11306,18 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(reduce ags (lambda (acc ag)
 								(or acc (equal? (agg_col_name ag) (agg_col_name agg_desc))))
 								false)))
-							(define stage_fetch_owned_agg (lambda (expr agg_desc)
-								(if (stage_has_agg_descriptor agg_desc)
-									(replace_group_key_or_fetch expr)
-									nil)))
-							(define replace_count_agg_with_fetch (lambda (agg_desc)
-								(if (equal? (normalize_count_literal_aggregate_args agg_desc) aggregate_count_descriptor)
-									(list (quote get_column) grouptbl false (agg_col_name aggregate_count_descriptor) false)
-									nil)))
-							(define replace_group_agg_input_expr (lambda (expr)
-								(if (and (not (nil? stage_scope)) (refs_only_outer_stage expr) (not (field_has_agg_expr expr)))
-									expr
-									(match expr
+						(define stage_fetch_owned_agg (lambda (expr agg_desc)
+							(if (stage_has_agg_descriptor agg_desc)
+								(replace_group_key_or_fetch expr)
+								nil)))
+						(define replace_count_agg_with_fetch (lambda (agg_desc)
+							(if (equal? (normalize_count_literal_aggregate_args agg_desc) aggregate_count_descriptor)
+								(list (quote get_column) grouptbl false (agg_col_name aggregate_count_descriptor) false)
+								nil)))
+						(define replace_group_agg_input_expr (lambda (expr)
+							(if (and (not (nil? stage_scope)) (refs_only_outer_stage expr) (not (field_has_agg_expr expr)))
+								expr
+								(match expr
 									'((symbol get_column) _ _ _ _)
 									(if (matches_group_expr expr)
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr))
@@ -11130,22 +11326,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(if (matches_group_expr expr)
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr))
 										(rewrite_materialized_source_cols_single expr))
-										(cons (symbol aggregate) agg_rest)
-										(match agg_rest
-											'(agg_expr agg_reduce agg_neutral)
-											(coalesce
-												(replace_count_agg_with_fetch agg_rest)
-												(stage_fetch_owned_agg expr agg_rest)
-												(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral))
-											_ expr)
-										(cons '(quote aggregate) agg_rest)
-										(match agg_rest
-											'(agg_expr agg_reduce agg_neutral)
-											(coalesce
-												(replace_count_agg_with_fetch agg_rest)
-												(stage_fetch_owned_agg expr agg_rest)
-												(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral))
-											_ expr)
+									(cons (symbol aggregate) agg_rest)
+									(match agg_rest
+										'(agg_expr agg_reduce agg_neutral)
+										(coalesce
+											(replace_count_agg_with_fetch agg_rest)
+											(stage_fetch_owned_agg expr agg_rest)
+											(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral))
+										_ expr)
+									(cons '(quote aggregate) agg_rest)
+									(match agg_rest
+										'(agg_expr agg_reduce agg_neutral)
+										(coalesce
+											(replace_count_agg_with_fetch agg_rest)
+											(stage_fetch_owned_agg expr agg_rest)
+											(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral))
+										_ expr)
 									(cons sym args)
 									(if (is_opaque_scope_sym sym)
 										expr
@@ -11169,26 +11365,26 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									'((quote get_column) _ _ _ _) (if (field_needs_group_value_agg expr)
 										(replace_group_key_or_fetch (group_value_ag_expr (group_value_local_expr expr)))
 										(replace_group_key_or_fetch (rewrite_materialized_source_cols_single expr)))
-										(cons (symbol aggregate) agg_rest)
-										(coalesce
-											(replace_count_agg_with_fetch agg_rest)
-											(if (or (and (not (nil? stage_scope)) has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
-												(and (field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
-												(match agg_rest
-													'(agg_expr agg_reduce agg_neutral)
-													(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
-													_ expr)
-												(replace_group_key_or_fetch expr)))
-										(cons '(quote aggregate) agg_rest)
-										(coalesce
-											(replace_count_agg_with_fetch agg_rest)
-											(if (or (and (not (nil? stage_scope)) has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
-												(and (field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
-												(match agg_rest
-													'(agg_expr agg_reduce agg_neutral)
-													(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
-													_ expr)
-												(replace_group_key_or_fetch expr)))
+									(cons (symbol aggregate) agg_rest)
+									(coalesce
+										(replace_count_agg_with_fetch agg_rest)
+										(if (or (and (not (nil? stage_scope)) has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
+											(and (field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
+											(match agg_rest
+												'(agg_expr agg_reduce agg_neutral)
+												(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
+												_ expr)
+											(replace_group_key_or_fetch expr)))
+									(cons '(quote aggregate) agg_rest)
+									(coalesce
+										(replace_count_agg_with_fetch agg_rest)
+										(if (or (and (not (nil? stage_scope)) has_later_group_stage (equal? (extract_tblvars expr) '()) (not (equal? agg_rest aggregate_count_descriptor)))
+											(and (field_agg_has_nested_agg agg_rest) (equal? (extract_tblvars expr) '())))
+											(match agg_rest
+												'(agg_expr agg_reduce agg_neutral)
+												(list (quote aggregate) (replace_group_agg_input_expr agg_expr) agg_reduce agg_neutral)
+												_ expr)
+											(replace_group_key_or_fetch expr)))
 									(cons sym args)
 									(if (field_needs_group_value_agg expr)
 										(replace_group_key_or_fetch (group_value_ag_expr (group_value_local_expr expr)))
@@ -11310,12 +11506,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(not marker_in_fields)
 									(not marker_in_having)
 									(not marker_in_order)))))
-							(define ags (if needs_count (merge_unique ags (list aggregate_count_descriptor)) ags))
-							(define count_col_name (if needs_count (agg_col_name aggregate_count_descriptor) nil))
-							(define keytable_schema_def (merge
+						(define ags (if needs_count (merge_unique ags (list aggregate_count_descriptor)) ags))
+						(define count_col_name (if needs_count (agg_col_name aggregate_count_descriptor) nil))
+						(define keytable_schema_def (merge
 							(map resolved_stage_group (lambda (expr)
 								(list "Field" (if is_fk_reuse fk_pk_col (expr_name expr)) "Type" "any")))
-						(map ags (lambda (ag)
+							(map ags (lambda (ag)
 								(list "Field" (agg_col_name ag) "Type" "any")))))
 						(planned_materialized_fields grouptbl keytable_schema_def)
 						/* AND count>0 into HAVING so empty/non-matching groups are excluded */
@@ -11535,28 +11731,28 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(rewrite_materialized_source_cols_single
 									(rewrite_materialized_source_aggs_single
 										(lower_runtime_materialized_aggs_single expr))))
-								(define runtime_condition_expr
-									(rewrite_materialized_source_cols_single
-										(rewrite_materialized_source_aggs_single
-											(lower_runtime_materialized_aggs_single condition))))
-								(define runtime_group_filter_parts
-									(if (equal? resolved_stage_group '(1))
-										'()
-										(map resolved_stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))
-								(set cols (merge_unique (list
-									(extract_columns_for_tblvar tblvar runtime_expr)
-									(extract_outer_columns_for_tblvar tblvar runtime_expr)
-								)))
+							(define runtime_condition_expr
+								(rewrite_materialized_source_cols_single
+									(rewrite_materialized_source_aggs_single
+										(lower_runtime_materialized_aggs_single condition))))
+							(define runtime_group_filter_parts
+								(if (equal? resolved_stage_group '(1))
+									'()
+									(map resolved_stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))
+							(set cols (merge_unique (list
+								(extract_columns_for_tblvar tblvar runtime_expr)
+								(extract_outer_columns_for_tblvar tblvar runtime_expr)
+							)))
 							/* COUNT column itself must not filter by itself (circular); all others filter by COUNT>0 */
 							(define this_options (if (and needs_count (equal? (agg_col_name ag) count_col_name)) '(list "temp" true) createcol_options))
 							'((quote createcolumn) '('table schema grouptbl) (agg_col_name ag) "any" '(list) this_options
 								(cons list (map resolved_stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 								'((quote lambda) (map resolved_stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
-										(scan_wrapper 'scan schema tbl
-											(cons list (merge tblvar_cols filtercols))
-											/* check group equality AND WHERE-condition */
-											'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (merge (list (replace_columns_from_expr runtime_condition_expr)) runtime_group_filter_parts))))
-											(cons list cols)
+									(scan_wrapper 'scan schema tbl
+										(cons list (merge tblvar_cols filtercols))
+										/* check group equality AND WHERE-condition */
+										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (merge (list (replace_columns_from_expr runtime_condition_expr)) runtime_group_filter_parts))))
+										(cons list cols)
 										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr runtime_expr))
 										reduce
 										neutral
@@ -11669,13 +11865,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(define wg_emit_window_expr (lambda (expr) (begin
 											(define has_nested_window (not (equal? (extract_window_funcs expr) '())))
 											(if has_nested_window
-													(match expr
-														(cons (symbol window_func) _) (wg_window_value expr)
-														(cons (quote window_func) _) (wg_window_value expr)
-														(cons '(quote window_func) _) (wg_window_value expr)
-														(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-															expr
-															(cons sym (map args wg_emit_window_expr)))
+												(match expr
+													(cons (symbol window_func) _) (wg_window_value expr)
+													(cons (quote window_func) _) (wg_window_value expr)
+													(cons '(quote window_func) _) (wg_window_value expr)
+													(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+														expr
+														(cons sym (map args wg_emit_window_expr)))
 													expr)
 												(begin
 													(define row_field (wg_find_row_field expr))
@@ -11840,9 +12036,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								expr
 								(cons sym (map args (lambda (arg) (rewrite_materialized_source_aggs arg false)))))
 							expr))))
-					(define rewrite_materialized_source_runtime_markers (lambda (expr) (begin
-						(define match_materialized_runtime_agg (lambda (agg_args)
-							(begin
+				(define rewrite_materialized_source_runtime_markers (lambda (expr) (begin
+					(define match_materialized_runtime_agg (lambda (agg_args)
+						(begin
 							(define canonical_agg_args (canonicalize_expr agg_args prejoin_alias_map))
 							(define agg_name (serialize_canonical_expr canonical_agg_args))
 							(define agg_prefix (if (equal? agg_args aggregate_count_descriptor) "COUNT(*)" agg_name))
@@ -11862,12 +12058,12 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															(list tv field_name)
 															nil))))
 												nil)))))
-									nil))))
-						(match expr
-							(cons (symbol aggregate) agg_args)
-							(if (equal? (extract_tblvars expr) '())
-								expr
-								(begin
+								nil))))
+					(match expr
+						(cons (symbol aggregate) agg_args)
+						(if (equal? (extract_tblvars expr) '())
+							expr
+							(begin
 								(define match_col (match_materialized_runtime_agg agg_args))
 								(if (nil? match_col)
 									(match agg_args
@@ -11875,10 +12071,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(list (quote aggregate) (rewrite_materialized_source_runtime_markers agg_expr) agg_reduce agg_neutral)
 										_ expr)
 									(list (quote get_column) (car match_col) false (cadr match_col) false))))
-							(cons '(quote aggregate) agg_args)
-							(if (equal? (extract_tblvars expr) '())
-								expr
-								(begin
+						(cons '(quote aggregate) agg_args)
+						(if (equal? (extract_tblvars expr) '())
+							expr
+							(begin
 								(define match_col (match_materialized_runtime_agg agg_args))
 								(if (nil? match_col)
 									(match agg_args
@@ -11988,13 +12184,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				106 HAVING. Use the in-scope `stage_having` (already replace_find_column
 				resolved) instead. */
 				(define all_referenced_columns (merge
-						(merge (map stage_group extract_all_get_columns))
-						(merge (extract_assoc fields (lambda (k v) (extract_all_get_columns v))))
-						(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
-						(merge (map ags (lambda (ag) (match ag
-							'(agg_expr _ _) (extract_all_get_columns agg_expr)
-							'()))))
-						(if (nil? stage_having) '() (extract_all_get_columns stage_having))
+					(merge (map stage_group extract_all_get_columns))
+					(merge (extract_assoc fields (lambda (k v) (extract_all_get_columns v))))
+					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
+					(merge (map ags (lambda (ag) (match ag
+						'(agg_expr _ _) (extract_all_get_columns agg_expr)
+						'()))))
+					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
 					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
 					(extract_all_get_columns (coalesceNil raw_condition true))
 					(extract_all_get_columns (coalesceNil raw_post_group_condition true))
@@ -12007,8 +12203,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					'(name '((symbol get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
 					'(name '((quote get_column) alias_ _ _ _)) (has? known_table_aliases alias_)
 					true))))
-					/* compute prejoin table name and alias */
-					(define prejoin_alias ".pj")
+				/* compute prejoin table name and alias */
+				(define prejoin_alias ".pj")
 				(define lower_prejoin_lineage_expr (lambda (expr) (begin
 					(define lower_once (lambda (cur)
 						(reduce prejoin_source_tables (lambda (inner td) (match td
@@ -12032,11 +12228,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(canonicalize_expr
 						(normalize_canonical_aliases (canonicalize_prejoin_source_expr expr))
 						prejoin_alias_map)))
-					(define prejoin_physical_column_name (lambda (expr)
-						(concat "p" (substr
-							(fnv_hash (serialize_canonical_expr (prejoin_canonical_column_expr expr)))
-							0 8))))
-					(define prejoin_canonicalize_source_columns (lambda (expr) (match expr
+				(define prejoin_physical_column_name (lambda (expr)
+					(concat "p" (substr
+						(fnv_hash (serialize_canonical_expr (prejoin_canonical_column_expr expr)))
+						0 8))))
+				(define prejoin_canonicalize_source_columns (lambda (expr) (match expr
 					'((symbol get_column) alias_ ti col ci)
 					(begin
 						/* Virtual schema fields are aliases for expressions. Canonical
@@ -12103,26 +12299,26 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						expr
 						(cons sym (map args prejoin_canonicalize_source_columns)))
 					expr)))
-					(define prejoin_row_independent_scalar? (lambda (expr)
-						(and
-							(equal? (extract_all_get_columns expr) '())
-							(equal? (extract_aggregates expr) '())
-							(equal? (extract_window_funcs expr) '()))))
-					/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
-						(define prejoin_columns_base (reduce all_referenced_columns (lambda (acc mc)
-							(begin
-								(define prejoin_source_expr (prejoin_canonicalize_source_columns (replace_find_column (cadr mc))))
-								(define canon_name (prejoin_physical_column_name prejoin_source_expr))
-								/* Literal exports, e.g. SELECT true AS can_view, are row-independent.
-								Do not materialize them as payload columns: true/1 equality would
-								let them collide with count-like literals in grouped caches. Logical
-								aggregate/window sentinels are not scalar literals and must stay materialized. */
-								(if (or
-									(prejoin_row_independent_scalar? prejoin_source_expr)
-									(reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false))
-									acc
-									(merge acc (list (list canon_name prejoin_source_expr)))))) '()))
-					/* Later wrapper groups must be able to reuse derived output fields by their
+				(define prejoin_row_independent_scalar? (lambda (expr)
+					(and
+						(equal? (extract_all_get_columns expr) '())
+						(equal? (extract_aggregates expr) '())
+						(equal? (extract_window_funcs expr) '()))))
+				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
+				(define prejoin_columns_base (reduce all_referenced_columns (lambda (acc mc)
+					(begin
+						(define prejoin_source_expr (prejoin_canonicalize_source_columns (replace_find_column (cadr mc))))
+						(define canon_name (prejoin_physical_column_name prejoin_source_expr))
+						/* Literal exports, e.g. SELECT true AS can_view, are row-independent.
+						Do not materialize them as payload columns: true/1 equality would
+						let them collide with count-like literals in grouped caches. Logical
+						aggregate/window sentinels are not scalar literals and must stay materialized. */
+						(if (or
+							(prejoin_row_independent_scalar? prejoin_source_expr)
+							(reduce acc (lambda (found mc2) (or found (equal? (car mc2) canon_name))) false))
+							acc
+							(merge acc (list (list canon_name prejoin_source_expr)))))) '()))
+				/* Later wrapper groups must be able to reuse derived output fields by their
 				stable alias instead of re-serializing nested scalar/window expressions into
 				prejoin/keytable column names. Materialize only row-local projected fields on
 				the prejoin. Logical aggregate/window sentinels must stay deferred until the
@@ -12161,8 +12357,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							acc
 							(merge acc (list mc))))
 					prejoin_columns_base))
-					(define prejoin_columns prejoin_columns_projected)
-					(define prejoin_column_names (map prejoin_columns car))
+				(define prejoin_columns prejoin_columns_projected)
+				(define prejoin_column_names (map prejoin_columns car))
 				(define prejoin_col_names prejoin_column_names)
 				(define prejoin_schema_def (map prejoin_columns (lambda (mc)
 					(list "Field" (car mc) "Type" "any" "Expr" (cadr mc)))))
@@ -12289,9 +12485,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list (quote get_column) prejoin_alias false direct_field false)
 							(if constant_source_expr
 								canonical_source_expr
-							(if scope_match
-								(list (quote get_column) prejoin_alias false (prejoin_physical_column_name canonical_source_expr) false)
-								expr))))
+								(if scope_match
+									(list (quote get_column) prejoin_alias false (prejoin_physical_column_name canonical_source_expr) false)
+									expr))))
 					'((quote get_column) src_alias ti col ci) (begin
 						(define _visible_alias (visible_occurrence_alias src_alias))
 						(define scope_match (or (has? known_table_aliases src_alias)
@@ -12348,9 +12544,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(list (quote get_column) prejoin_alias false direct_field false)
 							(if constant_source_expr
 								canonical_source_expr
-							(if scope_match
-								(list (quote get_column) prejoin_alias false (prejoin_physical_column_name canonical_source_expr) false)
-								expr))))
+								(if scope_match
+									(list (quote get_column) prejoin_alias false (prejoin_physical_column_name canonical_source_expr) false)
+									expr))))
 					(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
 						expr
 						(cons sym (map args rewrite_as_prejoin_column)))
@@ -12358,52 +12554,52 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				/* Preserve logical lineage into the recursive stage.
 				Do not carry physical .prejoin/.cache column names forward; instead lower
 				the raw stage expressions back onto their logical source lineage first.
-					build_scan stays the only place that finally substitutes onto the current
-					stage's physical scan symbols. */
-					(define prejoin_projected_field_ref (lambda (expr) (match expr
-						'((symbol get_column) src_alias _ col _)
-						(if (has? known_table_aliases src_alias)
-							nil
-							(reduce prejoin_columns (lambda (found mc)
-								(if (not (nil? found))
-									found
-									(if (equal? (car mc) col)
-										(list (quote get_column) prejoin_alias false col false)
-										nil)))
-								nil))
-						'((quote get_column) src_alias _ col _)
-						(if (has? known_table_aliases src_alias)
-							nil
-							(reduce prejoin_columns (lambda (found mc)
-								(if (not (nil? found))
-									found
-									(if (equal? (car mc) col)
-										(list (quote get_column) prejoin_alias false col false)
-										nil)))
-								nil))
-						nil)))
-					(define lower_prejoin_direct_ref (lambda (expr) (begin
-						(define rewritten (rewrite_as_prejoin_column expr))
-						(if (equal? rewritten expr)
-							(coalesce (prejoin_projected_field_ref expr) rewritten)
-							rewritten))))
-						(define lower_prejoin_group_expr (lambda (expr) (begin
-							(match expr
-							'((symbol get_column) _ _ _ _)
-							(lower_prejoin_direct_ref expr)
-							'((quote get_column) _ _ _ _)
-							(lower_prejoin_direct_ref expr)
-							(cons (symbol aggregate) agg_args)
-							(match agg_args
-								'(agg_expr agg_reduce agg_neutral)
-								(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral)
-								expr)
-							(cons '(quote aggregate) agg_args)
-							(match agg_args
-								'(agg_expr agg_reduce agg_neutral)
-								(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral)
-								expr)
-							_ (begin
+				build_scan stays the only place that finally substitutes onto the current
+				stage's physical scan symbols. */
+				(define prejoin_projected_field_ref (lambda (expr) (match expr
+					'((symbol get_column) src_alias _ col _)
+					(if (has? known_table_aliases src_alias)
+						nil
+						(reduce prejoin_columns (lambda (found mc)
+							(if (not (nil? found))
+								found
+								(if (equal? (car mc) col)
+									(list (quote get_column) prejoin_alias false col false)
+									nil)))
+							nil))
+					'((quote get_column) src_alias _ col _)
+					(if (has? known_table_aliases src_alias)
+						nil
+						(reduce prejoin_columns (lambda (found mc)
+							(if (not (nil? found))
+								found
+								(if (equal? (car mc) col)
+									(list (quote get_column) prejoin_alias false col false)
+									nil)))
+							nil))
+					nil)))
+				(define lower_prejoin_direct_ref (lambda (expr) (begin
+					(define rewritten (rewrite_as_prejoin_column expr))
+					(if (equal? rewritten expr)
+						(coalesce (prejoin_projected_field_ref expr) rewritten)
+						rewritten))))
+				(define lower_prejoin_group_expr (lambda (expr) (begin
+					(match expr
+						'((symbol get_column) _ _ _ _)
+						(lower_prejoin_direct_ref expr)
+						'((quote get_column) _ _ _ _)
+						(lower_prejoin_direct_ref expr)
+						(cons (symbol aggregate) agg_args)
+						(match agg_args
+							'(agg_expr agg_reduce agg_neutral)
+							(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral)
+							expr)
+						(cons '(quote aggregate) agg_args)
+						(match agg_args
+							'(agg_expr agg_reduce agg_neutral)
+							(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral)
+							expr)
+						_ (begin
 							(define lowered (lower_prejoin_lineage_expr expr))
 							(define canonical_lowered (prejoin_canonical_column_expr expr))
 							(define projected_field
@@ -12417,52 +12613,52 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(if (not (nil? projected_field))
 								(list (quote get_column) prejoin_alias false projected_field false)
 								(begin
-								(define direct_prejoin_expr (rewrite_as_prejoin_column expr))
-								(if (not (equal? direct_prejoin_expr expr))
-									direct_prejoin_expr
-									(match lowered
-								(cons (symbol window_func) wf_rest)
-								(match wf_rest
-									'(fn wf_args over)
-								(list (quote window_func)
-									fn
-									(map wf_args lower_prejoin_group_expr)
-									(match over
-										'(partition_exprs order_exprs)
-										(list
-											(map partition_exprs lower_prejoin_group_expr)
-											(map order_exprs (lambda (o) (match o
-												'(col dir) (list (lower_prejoin_group_expr col) dir)
-												o))))
-										over))
-								_ expr)
-							(cons '(quote window_func) wf_rest)
-							(match wf_rest
-								'(fn wf_args over)
-								(list (quote window_func)
-									fn
-									(map wf_args lower_prejoin_group_expr)
-									(match over
-										'(partition_exprs order_exprs)
-										(list
-											(map partition_exprs lower_prejoin_group_expr)
-											(map order_exprs (lambda (o) (match o
-												'(col dir) (list (lower_prejoin_group_expr col) dir)
-												o))))
-										over))
-								_ expr)
-								(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
-									lowered
-									(cons sym (map args lower_prejoin_group_expr)))
-								lowered)))))))))
-										(define grouped_fields (map_assoc raw_fields (lambda (k v)
-												(lower_prejoin_group_expr
-													(rewrite_materialized_source_runtime_markers
-														(rewrite_materialized_source_aggs v false))))))
-										(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_group_expr))
-							(define grouped_stage_alias_result (if (nil? grouped_keys)
-						nil
-						(make_keytable_schema schema prejointbl grouped_keys prejoin_alias)))
+									(define direct_prejoin_expr (rewrite_as_prejoin_column expr))
+									(if (not (equal? direct_prejoin_expr expr))
+										direct_prejoin_expr
+										(match lowered
+											(cons (symbol window_func) wf_rest)
+											(match wf_rest
+												'(fn wf_args over)
+												(list (quote window_func)
+													fn
+													(map wf_args lower_prejoin_group_expr)
+													(match over
+														'(partition_exprs order_exprs)
+														(list
+															(map partition_exprs lower_prejoin_group_expr)
+															(map order_exprs (lambda (o) (match o
+																'(col dir) (list (lower_prejoin_group_expr col) dir)
+																o))))
+														over))
+												_ expr)
+											(cons '(quote window_func) wf_rest)
+											(match wf_rest
+												'(fn wf_args over)
+												(list (quote window_func)
+													fn
+													(map wf_args lower_prejoin_group_expr)
+													(match over
+														'(partition_exprs order_exprs)
+														(list
+															(map partition_exprs lower_prejoin_group_expr)
+															(map order_exprs (lambda (o) (match o
+																'(col dir) (list (lower_prejoin_group_expr col) dir)
+																o))))
+														over))
+												_ expr)
+											(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
+												lowered
+												(cons sym (map args lower_prejoin_group_expr)))
+											lowered)))))))))
+				(define grouped_fields (map_assoc raw_fields (lambda (k v)
+					(lower_prejoin_group_expr
+						(rewrite_materialized_source_runtime_markers
+							(rewrite_materialized_source_aggs v false))))))
+				(define grouped_keys (map (coalesce raw_stage_group '()) lower_prejoin_group_expr))
+				(define grouped_stage_alias_result (if (nil? grouped_keys)
+					nil
+					(make_keytable_schema schema prejointbl grouped_keys prejoin_alias)))
 				(define grouped_stage_alias (if (nil? grouped_stage_alias_result) nil
 					(car grouped_stage_alias_result)))
 				(define grouped_stage_key_names (if (nil? grouped_stage_alias_result) '()
@@ -12570,20 +12766,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				keytable. The marker itself stays an `(aggregate ...)` node; only
 				its column inputs are rewritten. */
 				(define lower_prejoin_agg_inputs (lambda (expr) (match expr
-						(cons (symbol aggregate) agg_args)
-						(match agg_args
-							'(agg_expr agg_reduce agg_neutral)
-							(if (equal? agg_reduce (quote group_any_value_reduce))
-								expr
-								(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral))
-							_ expr)
-						(cons '(quote aggregate) agg_args)
-						(match agg_args
-							'(agg_expr agg_reduce agg_neutral)
-							(if (equal? agg_reduce (quote group_any_value_reduce))
-								expr
-								(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral))
-							_ expr)
+					(cons (symbol aggregate) agg_args)
+					(match agg_args
+						'(agg_expr agg_reduce agg_neutral)
+						(if (equal? agg_reduce (quote group_any_value_reduce))
+							expr
+							(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral))
+						_ expr)
+					(cons '(quote aggregate) agg_args)
+					(match agg_args
+						'(agg_expr agg_reduce agg_neutral)
+						(if (equal? agg_reduce (quote group_any_value_reduce))
+							expr
+							(list (quote aggregate) (lower_prejoin_group_expr agg_expr) agg_reduce agg_neutral))
+						_ expr)
 					(cons sym args) (if (or (is_opaque_scope_sym sym) (is_quote_scope_sym sym) (not (list? args)))
 						expr
 						(cons sym (map args lower_prejoin_agg_inputs)))
@@ -12719,22 +12915,22 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						(not (grouped_expr_refs_only_prejoin? expr)))
 						expr
 						(grouped_any_value_aggregate expr))))
-					(define grouped_fields_for_recursive (if is_dedup
-						(map_assoc raw_fields (lambda (k v)
-							(recursive_replace_find_column v)))
-						(map_assoc grouped_fields (lambda (k v)
-							(grouped_carry_row_value_if_needed
-								(recursive_replace_find_column
-									(lower_prejoin_agg_inputs v)))))))
-					(define no_outer_group_fields_for_recursive (reduce_assoc grouped_fields_for_recursive (lambda (acc k v)
-						(if (or
-							(grouped_expr_is_group_key v)
-							(not (equal? (extract_aggregates v) '()))
-							(not (equal? (extract_window_funcs v) '())))
-							(set_assoc acc k v)
-							(set_assoc acc k (grouped_any_value_aggregate v))))
-						'()))
-					(define transform_recursive_stage (lambda (s)
+				(define grouped_fields_for_recursive (if is_dedup
+					(map_assoc raw_fields (lambda (k v)
+						(recursive_replace_find_column v)))
+					(map_assoc grouped_fields (lambda (k v)
+						(grouped_carry_row_value_if_needed
+							(recursive_replace_find_column
+								(lower_prejoin_agg_inputs v)))))))
+				(define no_outer_group_fields_for_recursive (reduce_assoc grouped_fields_for_recursive (lambda (acc k v)
+					(if (or
+						(grouped_expr_is_group_key v)
+						(not (equal? (extract_aggregates v) '()))
+						(not (equal? (extract_window_funcs v) '())))
+						(set_assoc acc k v)
+						(set_assoc acc k (grouped_any_value_aggregate v))))
+					'()))
+				(define transform_recursive_stage (lambda (s)
 					(begin
 						(define _sg (coalesceNil (stage_group_cols s) '()))
 						(define _stage_cfg (stage_ordering_config s))
@@ -12801,11 +12997,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(and (not (nil? raw_stage_order)) (not (equal? raw_stage_order '())))
 							(not (nil? stage_limit))
 							(not (nil? stage_offset))))
-							(define no_outer_group_stage (if no_outer_group_stage_needed
-								(if is_dedup
-									nil
-									(make_group_stage grouped_keys grouped_having grouped_order stage_limit stage_offset nil nil))
-								nil))
+						(define no_outer_group_stage (if no_outer_group_stage_needed
+							(if is_dedup
+								nil
+								(make_group_stage grouped_keys grouped_having grouped_order stage_limit stage_offset nil nil))
+							nil))
 						(build_queryplan schema
 							(list (list prejoin_alias schema prejointbl false nil))
 							no_outer_group_fields_for_recursive
@@ -12839,29 +13035,29 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								acc))
 						_ acc))
 						'()))
-					(define prejoin_has_temp_source_table
-						(reduce prejoin_trigger_source_tables (lambda (found td) (or found (match td
-							'(_ _ ttbl _ _) (temp_source_table? ttbl)
-							false)))
-							false))
-					/* Multi-table top-down prejoins otherwise serialize full row-update
-					trigger programs into every query plan. Plain invalidation is safe:
-					any base-table change drops the cache and the next query rebuilds it
-					from the declarative prejoin plan. Keep incremental maintenance for
-					single-table prejoins, where the trigger body is small and cheap. */
-					(define prejoin_use_invalidation_triggers
-						(or prejoin_has_temp_source_table
-							(> (count prejoin_source_tables) 1)))
-					(define pj_trigger_registrations
-						(filter (map tables (lambda (trigger_tbl)
-							(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
-								(begin
-									(define trigger_table_key (concat src_schema "." src_tbl))
-									(if (or (temp_source_table? src_tbl) (seen_trigger_tables trigger_table_key)) nil
-										(begin (seen_trigger_tables trigger_table_key true)
-											(if prejoin_use_invalidation_triggers
-												(list 'register_prejoin_invalidation src_schema (planner_table_source_base src_tbl) prejoin_schema prejoin_table_name)
-												(begin
+				(define prejoin_has_temp_source_table
+					(reduce prejoin_trigger_source_tables (lambda (found td) (or found (match td
+						'(_ _ ttbl _ _) (temp_source_table? ttbl)
+						false)))
+						false))
+				/* Multi-table top-down prejoins otherwise serialize full row-update
+				trigger programs into every query plan. Plain invalidation is safe:
+				any base-table change drops the cache and the next query rebuilds it
+				from the declarative prejoin plan. Keep incremental maintenance for
+				single-table prejoins, where the trigger body is small and cheap. */
+				(define prejoin_use_invalidation_triggers
+					(or prejoin_has_temp_source_table
+						(> (count prejoin_source_tables) 1)))
+				(define pj_trigger_registrations
+					(filter (map tables (lambda (trigger_tbl)
+						(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
+							(begin
+								(define trigger_table_key (concat src_schema "." src_tbl))
+								(if (or (temp_source_table? src_tbl) (seen_trigger_tables trigger_table_key)) nil
+									(begin (seen_trigger_tables trigger_table_key true)
+										(if prejoin_use_invalidation_triggers
+											(list 'register_prejoin_invalidation src_schema (planner_table_source_base src_tbl) prejoin_schema prejoin_table_name)
+											(begin
 												(define prejoin_incremental_guard_terms
 													(filter (map prejoin_source_tables (lambda (td) (match td
 														'(_ tschema ttbl _ _)
@@ -13177,14 +13373,14 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										(list new_inner pk))))
 								inner_reducefn))
 							(define orc_reduceinit (if has_partition (list inner_reduceinit nil) inner_reduceinit))
-								/* ORC columns are physical cache columns. Include the full
-								window signature so different PARTITION/ORDER specs never
-								reuse a stale ROW_NUMBER/RANK value for the same table. */
-								(define orc_signature
-									(list wf_fn wf_args over_partition over_order tbl))
-								(define orc_col_name
-									(concat ".orc_" wf_fn "_" (sanitize_temp_name tbl) "_"
-										(fnv_hash (string orc_signature))))
+							/* ORC columns are physical cache columns. Include the full
+							window signature so different PARTITION/ORDER specs never
+							reuse a stale ROW_NUMBER/RANK value for the same table. */
+							(define orc_signature
+								(list wf_fn wf_args over_partition over_order tbl))
+							(define orc_col_name
+								(concat ".orc_" wf_fn "_" (sanitize_temp_name tbl) "_"
+									(fnv_hash (string orc_signature))))
 							/* register column in planner schema so downstream plan can reference it
 							without the column existing in storage at compile time */
 							(planned_materialized_fields tbl (list (list "Field" orc_col_name "Type" "any")))
@@ -13195,8 +13391,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 								(cons '(quote window_func) _) '((quote get_column) (eval tblvar) false (eval orc_col_name) false)
 								(cons sym args_) (cons sym (map args_ replace_wf))
 								expr)))
-								(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
-								/* runtime plan: createcolumn with ORC params, then the actual scan */
+							(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
+							/* runtime plan: createcolumn with ORC params, then the actual scan */
 							/* sortcols: partition cols (ASC) first, then ORDER BY cols */
 							(define full_sort_cols (if has_partition (merge partition_col_names orc_sort_col_names) orc_sort_col_names))
 							(define full_sort_dirs (if has_partition
@@ -13209,7 +13405,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										"mapcols" extra_mapcols
 										"mapfn" orc_mapfn "reducefn" orc_reducefn
 										"reduceinit" orc_reduceinit "temp" true))))
-								(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
+							(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column nil))
 							(list (quote begin) (list orc_setup) scan_plan)
 						)
 						(error "window functions on joined tables not yet supported"))
@@ -13476,9 +13672,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ord_raw_scan_offset (ordered_scan_stage_config_offset ord_stage_cfg))
 									(define ord_raw_scan_limit (ordered_scan_stage_config_limit ord_stage_cfg))
 									(define ord_raw_scan_partcols (ordered_scan_stage_config_partcols ord_stage_cfg))
-										(define ord_effective_once_limit (coalesce
-											(ordered_scan_stage_config_once_limit ord_stage_cfg)
-											(if (and isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 1 nil)))
+									(define ord_effective_once_limit (coalesce
+										(ordered_scan_stage_config_once_limit ord_stage_cfg)
+										(if (and isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 1 nil)))
 									(define ord_once_contract (if (nil? ord_effective_once_limit)
 										nil
 										(make_once_limit_scan_contract ord_raw_scan_limit ord_raw_scan_offset ord_raw_scan_partcols ord_effective_once_limit tblvar condition joinexpr tbl)))
@@ -13645,9 +13841,9 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(define scan_raw_partcols (local_scan_stage_config_partcols scan_stage_cfg))
 												(define scan_raw_limit (local_scan_stage_config_limit scan_stage_cfg))
 												(define scan_raw_offset (local_scan_stage_config_offset scan_stage_cfg))
-													(define scan_effective_once_limit (coalesce
-														(local_scan_stage_config_once_limit scan_stage_cfg)
-														(if (and scan_isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 1 nil)))
+												(define scan_effective_once_limit (coalesce
+													(local_scan_stage_config_once_limit scan_stage_cfg)
+													(if (and scan_isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 1 nil)))
 												(define scan_once_contract (if (nil? scan_effective_once_limit)
 													nil
 													(make_once_limit_scan_contract scan_raw_limit scan_raw_offset scan_raw_partcols scan_effective_once_limit tblvar condition joinexpr tbl)))
