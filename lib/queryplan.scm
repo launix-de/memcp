@@ -9125,9 +9125,25 @@ seeing the correctly prefixed outer alias. */
 			(if (equal? (count parallel_inits) 1)
 				parallel_inits
 				(list (cons (quote parallel) parallel_inits)))))
+	(define unique_init_code (lambda (init_items)
+		(nth (reduce init_items (lambda (state init_code) (match state
+			'(seen kept)
+			(begin
+				(define init_key (concat "init:" (fnv_hash (serialize init_code))))
+				(if (has? seen init_key)
+					state
+					(list (merge seen (list init_key)) (merge kept (list init_code)))))
+			_ state))
+			(list '() '()))
+			1)))
+	(define serial_init_code (unique_init_code (coalesceNil (sq_cache "init") '())))
+	(define grouped_init_code
+		(if (<= (count serial_init_code) 1)
+			serial_init_code
+			(list (cons (quote parallel) serial_init_code))))
 	(list schema pruned_tables canon_fields canon_condition canon_groups schemas replace_find_column
 		(merge
-			(coalesceNil (sq_cache "init") '())
+			grouped_init_code
 			parallel_init_code
 			(qpu-low-drain-extra-inits)))
 )

@@ -140,7 +140,7 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 			(define session_cache_suffix
 				(if session_sensitive_query
 					(with_session session (lambda ()
-						(concat ":sess:" (planner_current_session_snapshot_suffix))))
+						(concat ":sess:" (planner_current_user_session_snapshot_suffix))))
 					""))
 			(define cache_key (concat username ":" schema ":" (fnv_hash parse_query) session_cache_suffix))
 			(define cached (queryplan_cache cache_key))
