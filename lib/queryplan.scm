@@ -457,28 +457,65 @@ the compile-budget-ms requirement.
 		(nil? offset))
 	false)))
 
-(define field_lookup (lambda (fields col ignorecase)
+(define field_lookup_entry (lambda (fields col ignorecase)
 	(begin
-		(define exact (get_assoc fields col))
+		(define exact (reduce_assoc (coalesceNil fields '()) (lambda (found key expr)
+			(if (not (nil? found))
+				found
+				(if (equal? key col) (list (quote found) expr) nil)))
+			nil))
 		(if (or (not (nil? exact)) (not ignorecase))
 			exact
 			(reduce_assoc (coalesceNil fields '()) (lambda (found key expr)
 				(if (not (nil? found))
 					found
-					(if (equal?? key col) expr nil)))
+					(if (equal?? key col) (list (quote found) expr) nil)))
+				nil)))))
+
+(define derived_alias_entry (lambda (alias fields is_outer)
+	(list alias fields is_outer (derived_presence_expr fields))))
+
+(define derived_alias_name (lambda (entry) (nth entry 0)))
+(define derived_alias_fields (lambda (entry) (nth entry 1)))
+(define derived_alias_outer? (lambda (entry) (nth entry 2)))
+(define derived_alias_presence (lambda (entry) (nth entry 3)))
+
+(define find_derived_alias (lambda (derived_aliases alias)
+	(reduce (coalesceNil derived_aliases '()) (lambda (found entry)
+		(if (not (nil? found))
+			found
+			(if (equal?? (derived_alias_name entry) alias) entry nil)))
+		nil)))
+
+(define guard_derived_value (lambda (entry expr)
+	(begin
+		(define presence (derived_alias_presence entry))
+		(if (or (not (derived_alias_outer? entry)) (nil? presence))
+			expr
+			(list (quote if)
+				presence
+				expr
 				nil)))))
 
 (define rewrite_derived_expr (lambda (expr derived_aliases) (match expr
 	'((symbol get_column) tbl ti col ci) (begin
-		(define fields (if (nil? tbl)
-			(if (equal? (count derived_aliases) 1) (cadr (car derived_aliases)) nil)
-			(qassoc_get derived_aliases tbl nil)))
-		(coalesceNil (field_lookup fields col ci) expr))
+		(define entry (if (nil? tbl)
+			(if (equal? (count derived_aliases) 1) (car derived_aliases) nil)
+			(find_derived_alias derived_aliases tbl)))
+		(if (nil? entry)
+			expr
+			(begin
+				(define hit (field_lookup_entry (derived_alias_fields entry) col ci))
+				(if (nil? hit) expr (guard_derived_value entry (nth hit 1))))))
 	'((quote get_column) tbl ti col ci) (begin
-		(define fields (if (nil? tbl)
-			(if (equal? (count derived_aliases) 1) (cadr (car derived_aliases)) nil)
-			(qassoc_get derived_aliases tbl nil)))
-		(coalesceNil (field_lookup fields col ci) expr))
+		(define entry (if (nil? tbl)
+			(if (equal? (count derived_aliases) 1) (car derived_aliases) nil)
+			(find_derived_alias derived_aliases tbl)))
+		(if (nil? entry)
+			expr
+			(begin
+				(define hit (field_lookup_entry (derived_alias_fields entry) col ci))
+				(if (nil? hit) expr (guard_derived_value entry (nth hit 1))))))
 	(cons sym args)
 	(cons (rewrite_derived_expr sym derived_aliases)
 		(map args (lambda (arg) (rewrite_derived_expr arg derived_aliases))))
@@ -487,15 +524,15 @@ the compile-budget-ms requirement.
 (define derived_star_fields (lambda (tbl derived_aliases)
 	(if (nil? tbl)
 		(merge (map derived_aliases (lambda (entry) (match entry
-			'(alias fields) (merge (extract_assoc fields (lambda (key expr)
-				(list key (rewrite_derived_expr expr derived_aliases)))))
+			'(alias fields _is_outer _presence) (merge (extract_assoc fields (lambda (key expr)
+				(list key (guard_derived_value entry (rewrite_derived_expr expr derived_aliases))))))
 			'()))))
 		(begin
-			(define fields (qassoc_get derived_aliases tbl nil))
-			(if (nil? fields)
+			(define entry (find_derived_alias derived_aliases tbl))
+			(if (nil? entry)
 				nil
-				(merge (extract_assoc fields (lambda (key expr)
-					(list key (rewrite_derived_expr expr derived_aliases))))))))))
+				(merge (extract_assoc (derived_alias_fields entry) (lambda (key expr)
+					(list key (guard_derived_value entry (rewrite_derived_expr expr derived_aliases)))))))))))
 
 (define expand_and_rewrite_fields (lambda (fields derived_aliases)
 	(merge (extract_assoc (coalesceNil fields '()) (lambda (key expr) (match expr
@@ -564,9 +601,80 @@ the compile-budget-ms requirement.
 	(retarget_expr_alias_with_columns expr old_alias new_alias
 		(dedupe_list (merge (map (coalesceNil tables '()) table_descriptor_columns))))))
 
+(define expr_contains_neumann_subplan? (lambda (expr) (match expr
+	'((symbol neumann_scalar) _ir) true
+	'((quote neumann_scalar) _ir) true
+	'((symbol neumann_in) _value _ir) true
+	'((quote neumann_in) _value _ir) true
+	(cons sym args)
+	(or
+		(expr_contains_neumann_subplan? sym)
+		(reduce args (lambda (found arg)
+			(or found (expr_contains_neumann_subplan? arg)))
+			false))
+	false)))
+
+(define fields_contain_neumann_subplan? (lambda (fields)
+	(reduce_assoc (coalesceNil fields '()) (lambda (found _key expr)
+		(or found (expr_contains_neumann_subplan? expr)))
+		false)))
+
+(define retarget_derived_field_expr_with_columns (lambda (expr old_alias new_alias local_cols) (match expr
+	'((symbol get_column) tbl ti col ci) (if (or
+		(and (not (nil? tbl)) (equal?? tbl old_alias))
+		(and (nil? tbl) (column_in_list? local_cols col ci)))
+		(list (quote get_column) new_alias false col ci)
+		expr)
+	'((quote get_column) tbl ti col ci) (if (or
+		(and (not (nil? tbl)) (equal?? tbl old_alias))
+		(and (nil? tbl) (column_in_list? local_cols col ci)))
+		(list (quote get_column) new_alias false col ci)
+		expr)
+	'((symbol neumann_scalar) ir) (list (quote neumann_scalar) (retarget_ir_alias ir old_alias new_alias))
+	'((quote neumann_scalar) ir) (list (quote neumann_scalar) (retarget_ir_alias ir old_alias new_alias))
+	'((symbol neumann_in) value ir) (list (quote neumann_in)
+		(retarget_derived_field_expr_with_columns value old_alias new_alias local_cols)
+		(retarget_ir_alias ir old_alias new_alias))
+	'((quote neumann_in) value ir) (list (quote neumann_in)
+		(retarget_derived_field_expr_with_columns value old_alias new_alias local_cols)
+		(retarget_ir_alias ir old_alias new_alias))
+	(cons sym args)
+	(if (or (equal? sym (quote neumann_scalar)) (equal? sym '(quote neumann_scalar)) (equal? sym '(symbol neumann_scalar)))
+		(list (quote neumann_scalar) (retarget_ir_alias (car args) old_alias new_alias))
+		(if (or (equal? sym (quote neumann_in)) (equal? sym '(quote neumann_in)) (equal? sym '(symbol neumann_in)))
+			(list (quote neumann_in)
+				(retarget_derived_field_expr_with_columns (car args) old_alias new_alias local_cols)
+				(retarget_ir_alias (nth args 1) old_alias new_alias))
+			(cons (retarget_derived_field_expr_with_columns sym old_alias new_alias local_cols)
+				(map args (lambda (arg) (retarget_derived_field_expr_with_columns arg old_alias new_alias local_cols))))))
+	expr)))
+
 (define retarget_fields_alias_for_tables (lambda (fields tables old_alias new_alias)
-	(map_assoc (coalesceNil fields '()) (lambda (_key expr)
-		(retarget_expr_alias_for_tables expr tables old_alias new_alias)))))
+	(begin
+		(define local_cols (dedupe_list (merge (map (coalesceNil tables '()) table_descriptor_columns))))
+		(if (fields_contain_neumann_subplan? fields)
+			(map_assoc (coalesceNil fields '()) (lambda (_key expr)
+				(retarget_expr_alias_for_tables expr tables old_alias new_alias)))
+			(map_assoc (coalesceNil fields '()) (lambda (_key expr)
+				(retarget_derived_field_expr_with_columns expr old_alias new_alias local_cols)))))))
+
+(define derived_presence_expr (lambda (fields)
+	(if (>= (count (coalesceNil fields '())) 2)
+		(nth fields 1)
+		nil)))
+
+(define null_guard_derived_fields (lambda (fields)
+	(begin
+		(define presence (derived_presence_expr fields))
+		(if (nil? presence)
+			fields
+			(map_assoc (coalesceNil fields '()) (lambda (_key expr)
+				(if (equal? expr presence)
+					expr
+					(list (quote if)
+						(list (quote nil?) presence)
+						nil
+						expr))))))))
 
 (define retarget_table_alias (lambda (td new_alias) (match td
 	'(old_alias schema tbl is_outer join_expr)
@@ -600,7 +708,7 @@ the compile-budget-ms requirement.
 						(retarget_fields_alias_for_tables inner_fields_raw inner_tables inner_alias alias)))
 				(list inner_tables inner_fields_raw)))
 			(define inner_fields (cadr retargeted))
-			(define derived_aliases (list (list alias inner_fields)))
+			(define derived_aliases (list (derived_alias_entry alias inner_fields is_outer)))
 			(define local_condition (if (equal? (count inner_tables) 1)
 				(retarget_expr_alias_for_tables (untangle_expr_subqueries (select_ast_condition subquery)) inner_tables (car (car inner_tables)) alias)
 				(untangle_expr_subqueries (select_ast_condition subquery))))
@@ -612,7 +720,7 @@ the compile-budget-ms requirement.
 				(car retargeted)))
 			(define flattened_inner (flatten_query_tables inner_with_join))
 			(list (car flattened_inner)
-				(merge (cadr flattened_inner) (list (list alias inner_fields)))))
+				(merge (cadr flattened_inner) (list (derived_alias_entry alias inner_fields is_outer)))))
 		(list (list td) '()))
 	_ (neumann_fail "untangle_query" "unknown parser table descriptor"))))
 
@@ -1652,6 +1760,7 @@ the compile-budget-ms requirement.
 					(quote scan) (if (has_aggregates? (qattr node (quote output-fields) '()))
 						(lower_project_global_aggregate_scan node grandchild (qattr child (quote predicate) true))
 						(lower_project_scan node grandchild (qattr child (quote predicate) true)))
+					(quote join) (lower_project_join node grandchild nil (qattr child (quote predicate) true))
 					_ (neumann_fail "build_queryplan" "select lowerer only supports empty-row or scan input yet"))
 				_ (neumann_fail "build_queryplan" "select expects one child"))
 			(quote scan) (if (has_aggregates? (qattr node (quote output-fields) '()))
@@ -1661,9 +1770,10 @@ the compile-budget-ms requirement.
 				(cons grandchild '()) (match (qop grandchild)
 					(quote scan) (lower_project_scan_order node child grandchild true)
 					(quote select) (match (qchildren grandchild)
-						(cons scan_child '()) (if (equal? (qop scan_child) (quote scan))
-							(lower_project_scan_order node child scan_child (qattr grandchild (quote predicate) true))
-							(neumann_fail "build_queryplan" "order_limit/select lowerer only supports scan input yet"))
+						(cons scan_child '()) (match (qop scan_child)
+							(quote scan) (lower_project_scan_order node child scan_child (qattr grandchild (quote predicate) true))
+							(quote join) (lower_project_join node scan_child child (qattr grandchild (quote predicate) true))
+							_ (neumann_fail "build_queryplan" "order_limit/select lowerer only supports scan input yet"))
 						_ (neumann_fail "build_queryplan" "select expects one child"))
 					(quote join) (lower_project_join node grandchild child true)
 					(quote group) (lower_project_group node grandchild child)
