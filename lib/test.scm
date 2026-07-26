@@ -202,14 +202,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list "id" expr_gc)
 		(list 'equal?? expr_gc (list 'get_column "outer" false "id" false))
 		nil nil nil nil nil))
-	(define subquery_contract (newsession))
-	(try (lambda () (untangle_query_term
+	(define correlated_scalar_ir (untangle_query_term
 		(list "memcp-tests" '()
 			(list "x" (list 'inner_select correlated_subquery_ast))
 			true nil nil nil nil nil)
 		nil))
-		(lambda (e) (subquery_contract "blocked" true)))
-	(assert (subquery_contract "blocked") true "untangle_query keeps correlated scalar subqueries fail-fast until depjoin unnesting is ported")
+	(assert (expr_contains_subquery? correlated_scalar_ir) false "untangle_query lifts correlated scalar subqueries into Neumann IR")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))
