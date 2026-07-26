@@ -118,6 +118,39 @@ test_cases:
         - id: 4
         - id: 5
 
+  - name: "ORDER BY LIMIT without WHERE warms sort index run 1"
+    sql: "SELECT id FROM cov_big ORDER BY id LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+
+  - name: "ORDER BY LIMIT without WHERE uses warmed sort index run 2"
+    sql: "SELECT id FROM cov_big ORDER BY id LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+
+  - name: "ORDER BY LIMIT without WHERE keeps order on active sort index run 3"
+    sql: "SELECT id FROM cov_big ORDER BY id LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+
   - name: "Ordered scan >50 rows with OFFSET"
     sql: "SELECT id FROM cov_big WHERE val > 0 ORDER BY id LIMIT 3 OFFSET 57"
     expect:

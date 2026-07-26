@@ -516,12 +516,9 @@ type scanOrderTableSpec struct {
 // index-order compatible (ASC). This lets the shard return rows already sorted
 // by ORDER BY, reducing the cross-shard merge to merging pre-sorted runs.
 func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) boundaries {
-	if len(b) == 0 {
-		return b
-	}
 	allEq := true
 	for _, bi := range b {
-		if !boundaryIsPoint(bi) {
+		if !bi.matcher.IsSorted() || !boundaryIsPoint(bi) {
 			allEq = false
 			break
 		}
@@ -612,6 +609,78 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	return b
 }
 
+func scanOrderSortDirAsc(dir func(...scm.Scmer) scm.Scmer) bool {
+	if dir == nil {
+		return true
+	}
+	asc := false
+	probeOK := true
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				probeOK = false
+			}
+		}()
+		asc = scm.ToBool(dir(scm.NewInt(1), scm.NewInt(2))) &&
+			!scm.ToBool(dir(scm.NewInt(2), scm.NewInt(1)))
+	}()
+	return probeOK && asc
+}
+
+func scanOrderUsesIndexOrder(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int) bool {
+	if limitPartitionCols != 0 || len(sortcols) != 1 {
+		return false
+	}
+	if len(sortdirs) > 0 && !scanOrderSortDirAsc(sortdirs[0]) {
+		return false
+	}
+	if !sortcols[0].IsString() {
+		return false
+	}
+	sortcol := sortcols[0].String()
+	for i, bi := range b {
+		if bi.col == sortcol {
+			return i == len(b)-1 && bi.matcher.IsSorted()
+		}
+		if !bi.matcher.IsSorted() || !boundaryIsPoint(bi) {
+			return false
+		}
+	}
+	return false
+}
+
+func (t *storageShard) hasActiveIndexForBounds(b boundaries, lower []scm.Scmer) bool {
+	if len(lower) == 0 {
+		return false
+	}
+	for _, index := range t.Indexes {
+		if len(index.Cols) < len(lower) {
+			continue
+		}
+		matches := true
+		for i := 0; i < len(lower); i++ {
+			if b[i].col != index.Cols[i] {
+				matches = false
+				break
+			}
+			if len(index.ColMatchers) > i && !matcherKindEqual(b[i].matcher, index.ColMatchers[i]) {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		if len(index.sessionKeys) > 0 || !index.mu.TryLock() {
+			return false
+		}
+		active := index.baseState.active
+		index.mu.Unlock()
+		return active
+	}
+	return false
+}
+
 // scanOrderMulti performs an ordered scan across one or more tables, merging
 // results from all tables' shards into a single globally sorted stream.
 // Each table has its own filter, sort columns and map function, but sort
@@ -659,6 +728,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		reorderByFrequency(bounds, t)
 		bounds = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		lower, upperLast := indexFromBoundaries(bounds)
+		indexOrdered := scanOrderUsesIndexOrder(bounds, spec.sortcols, sortdirs, limitPartitionCols)
 
 		if Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
@@ -683,6 +753,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		tableBounds := bounds
 		tableIdx := ti
 		shardLimit := shardTotalLimit
+		tableIndexOrdered := indexOrdered
 
 		done := t.iterateShardsParallel(tableBounds, func(s *storageShard, solo bool) {
 			if ss != nil && ss.IsKilled() {
@@ -693,7 +764,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 					q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 				}
 			}()
-			res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+			res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, tableIndexOrdered)
 			res.callbackCols = callbackCols
 			res.callback = callback
 			res.tableIdx = tableIdx
@@ -955,7 +1026,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState, indexOrdered bool) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	if ss == nil {
@@ -1104,6 +1175,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// scan loop in read lock
 	var maxInsertIndex int
 	var visibleUpper uint32
+	indexOrderedActive := false
 	func() {
 		shardLocked := false
 		if !skipShardReadLock {
@@ -1128,10 +1200,16 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		maxInsertIndex = len(t.inserts)
 		visibleUpper = t.main_count + uint32(maxInsertIndex)
 
+		indexOrderedActive = indexOrdered && t.hasActiveIndexForBounds(boundaries, lower)
 		// iterate over items (indexed)
-		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
 		var buf [1024]uint32
 		resultCap := 1024
+		if indexOrderedActive && limit >= 0 && limitPartitionCols == 0 && offset+limit < resultCap {
+			resultCap = offset + limit
+			if resultCap < 1 {
+				resultCap = 1
+			}
+		}
 		result.items = make([]uint32, resultCap)
 		resultN := 0
 		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
@@ -1195,6 +1273,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			}
 			copy(result.items[resultN:], batch[:outN])
 			resultN += outN
+			if indexOrderedActive && limit >= 0 && limitPartitionCols == 0 && resultN >= offset+limit {
+				return false
+			}
 			return true
 		})
 		result.items = result.items[:resultN]
@@ -1241,7 +1322,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	//    order matches ORDER BY and there are no deltas, the sort is free.
 	// When these conditions are met, the same knowledge could also be
 	// used to exit early during iterateIndex (stop after OFFSET+LIMIT).
-	if len(sortcols) > 0 {
+	if len(sortcols) > 0 && !indexOrderedActive {
 		keep := -1
 		if limit >= 0 && limitPartitionCols == 0 {
 			keep = offset + limit
