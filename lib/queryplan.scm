@@ -1163,6 +1163,35 @@ the compile-budget-ms requirement.
 	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (scan_expr_columns arg scan_node)))))
 	'())))
 
+(define require_scan_column (lambda (scan_node col ci)
+	(if (column_in_list? (scan_schema_columns scan_node) col ci)
+		(canonical_scan_col scan_node col ci)
+		(neumann_fail "build_queryplan" (concat "column not found: " col)))))
+
+(define validate_local_scan_columns (lambda (expr scan_node) (match expr
+	'((symbol get_column) tbl _ col ci) (if (or (nil? tbl) (equal?? tbl (qid scan_node)))
+		(require_scan_column scan_node col ci)
+		true)
+	'((quote get_column) tbl _ col ci) (if (or (nil? tbl) (equal?? tbl (qid scan_node)))
+		(require_scan_column scan_node col ci)
+		true)
+	'((symbol neumann_scalar) _ir) true
+	'((quote neumann_scalar) _ir) true
+	'((symbol neumann_in) _value _ir) true
+	'((quote neumann_in) _value _ir) true
+	'((symbol neumann_exists) _ir) true
+	'((quote neumann_exists) _ir) true
+	(cons sym args) (begin
+		(validate_local_scan_columns sym scan_node)
+		(map args (lambda (arg) (validate_local_scan_columns arg scan_node)))
+		true)
+	_ true)))
+
+(define validate_local_scan_fields (lambda (fields scan_node)
+	(map_assoc (coalesceNil fields '()) (lambda (_key expr)
+		(validate_local_scan_columns expr scan_node)))
+	true))
+
 (define scan_fields_columns (lambda (fields scan_node)
 	(dedupe_list (merge (extract_assoc (coalesceNil fields '()) (lambda (_key expr)
 		(scan_expr_columns expr scan_node)))))))
@@ -1171,12 +1200,12 @@ the compile-budget-ms requirement.
 	'((symbol get_column) tbl _ col ci) (if (or
 		(equal?? tbl (qid scan_node))
 		(and (nil? tbl) (column_in_list? (scan_schema_columns scan_node) col ci)))
-		(symbol (concat (qid scan_node) "." (canonical_scan_col scan_node col ci)))
+		(symbol (concat (qid scan_node) "." (require_scan_column scan_node col ci)))
 		expr)
 	'((quote get_column) tbl _ col ci) (if (or
 		(equal?? tbl (qid scan_node))
 		(and (nil? tbl) (column_in_list? (scan_schema_columns scan_node) col ci)))
-		(symbol (concat (qid scan_node) "." (canonical_scan_col scan_node col ci)))
+		(symbol (concat (qid scan_node) "." (require_scan_column scan_node col ci)))
 		expr)
 	'((symbol neumann_scalar) _ir) expr
 	'((quote neumann_scalar) _ir) expr
@@ -1291,6 +1320,8 @@ the compile-budget-ms requirement.
 		(define fields (qattr project_node (quote output-fields) '()))
 		(define outer_specs (list (list scan_node false true)))
 		(define effective_predicate (scan_effective_predicate scan_node predicate))
+		(validate_local_scan_columns effective_predicate scan_node)
+		(validate_local_scan_fields fields scan_node)
 		(define lowered_predicate (lower_embedded_scalars_with_specs (lower_scan_expr effective_predicate scan_node) outer_specs))
 		(define lowered_fields (map_assoc (lower_scan_fields fields scan_node) (lambda (_key expr)
 			(lower_embedded_scalars_with_specs expr outer_specs))))
@@ -1316,6 +1347,11 @@ the compile-budget-ms requirement.
 		(define order (qattr order_node (quote order) '()))
 		(define outer_specs (list (list scan_node false true)))
 		(define effective_predicate (scan_effective_predicate scan_node predicate))
+		(validate_local_scan_columns effective_predicate scan_node)
+		(validate_local_scan_fields fields scan_node)
+		(map order (lambda (item) (match item
+			'(expr _dir) (validate_local_scan_columns expr scan_node)
+			_ true)))
 		(define lowered_predicate (lower_embedded_scalars_with_specs (lower_scan_expr effective_predicate scan_node) outer_specs))
 		(define lowered_fields (map_assoc (lower_scan_fields fields scan_node) (lambda (_key expr)
 			(lower_embedded_scalars_with_specs expr outer_specs))))
