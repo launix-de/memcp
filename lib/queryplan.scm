@@ -1384,14 +1384,36 @@ the compile-budget-ms requirement.
 			_ (neumann_fail "build_queryplan" "IN lowerer only supports scan input yet"))
 		_ (neumann_fail "build_queryplan" "IN project expects one child"))))
 
+(define lower_in_project_or_join_with_specs (lambda (value project_node outer_specs)
+	(match (qchildren project_node)
+		(cons child '()) (match (qop child)
+			(quote scan) (list (quote contains?)
+				(lower_in_project_values project_node)
+				(lower_expr_for_specs value outer_specs))
+			(quote select) (match (qchildren child)
+				(cons grandchild '()) (match (qop grandchild)
+					(quote scan) (list (quote contains?)
+						(lower_in_project_values project_node)
+						(lower_expr_for_specs value outer_specs))
+					(quote join) (lower_exists_join grandchild
+						(combine_and
+							(qattr child (quote predicate) true)
+							(list (quote equal??) (scalar_single_expr project_node) value))
+						outer_specs)
+					_ (neumann_fail "build_queryplan" "IN/select lowerer only supports scan or join input yet"))
+				_ (neumann_fail "build_queryplan" "select expects one child"))
+			(quote join) (lower_exists_join child
+				(list (quote equal??) (scalar_single_expr project_node) value)
+				outer_specs)
+			_ (neumann_fail "build_queryplan" "IN lowerer only supports scan or join input yet"))
+		_ (neumann_fail "build_queryplan" "IN project expects one child"))))
+
 (define lower_in_ir_with_specs (lambda (value ir outer_specs)
 	(begin
 		(require_unnested_ir "build_queryplan IN subquery" ir)
-		(list (quote contains?)
-			(match (qop (ir_root ir))
-				(quote project) (lower_in_project_values (ir_root ir))
-				_ (neumann_fail "build_queryplan" "IN IR root must be project"))
-			(lower_expr_for_specs value outer_specs)))))
+		(match (qop (ir_root ir))
+			(quote project) (lower_in_project_or_join_with_specs value (ir_root ir) outer_specs)
+			_ (neumann_fail "build_queryplan" "IN IR root must be project")))))
 
 (define lower_exists_scan (lambda (scan_node predicate outer_specs)
 	(begin
@@ -1422,12 +1444,56 @@ the compile-budget-ms requirement.
 		(cons child '()) (match (qop child)
 			(quote scan) (lower_exists_scan child true outer_specs)
 			(quote select) (match (qchildren child)
-				(cons grandchild '()) (if (equal? (qop grandchild) (quote scan))
-					(lower_exists_scan grandchild (qattr child (quote predicate) true) outer_specs)
-					(neumann_fail "build_queryplan" "EXISTS/select lowerer only supports scan input yet"))
+				(cons grandchild '()) (match (qop grandchild)
+					(quote scan) (lower_exists_scan grandchild (qattr child (quote predicate) true) outer_specs)
+					(quote join) (lower_exists_join grandchild (qattr child (quote predicate) true) outer_specs)
+					_ (neumann_fail "build_queryplan" "EXISTS/select lowerer only supports scan input yet"))
 				_ (neumann_fail "build_queryplan" "select expects one child"))
+			(quote join) (lower_exists_join child true outer_specs)
 			_ (neumann_fail "build_queryplan" "EXISTS lowerer only supports scan input yet"))
 		_ (neumann_fail "build_queryplan" "EXISTS project expects one child"))))
+
+(define lower_scan_specs_exists (lambda (specs all_specs final_predicate outer_specs prefix_aliases)
+	(match specs
+		(cons spec rest) (begin
+			(define node (spec_node spec))
+			(define alias (qid node))
+			(define aliases_now (merge prefix_aliases (list alias)))
+			(define predicates (merge (specs_predicates all_specs) (list (coalesceNil final_predicate true))))
+			(define mapcols (dedupe_list (merge (map predicates (lambda (predicate)
+				(expr_columns_for_spec predicate spec all_specs))))))
+			(define filter_predicate (if (equal? rest '())
+				(combine_and (spec_predicate spec) (coalesceNil final_predicate true))
+				(spec_predicate spec)))
+			(define visible_specs (merge
+				(filter all_specs (lambda (s) (contains? aliases_now (qid (spec_node s)))))
+				outer_specs))
+			(define lowered_filter (lower_embedded_scalars_with_specs
+				(lower_expr_for_specs filter_predicate visible_specs)
+				outer_specs))
+			(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
+			(define map_expr (if (equal? rest '())
+				true
+				(lower_scan_specs_exists rest all_specs final_predicate outer_specs aliases_now)))
+			(list (quote scan)
+				'(session "__memcp_tx")
+				(list (quote table) (qattr node (quote schema) nil) (qattr node (quote table) nil))
+				(cons (quote list) (expr_columns_for_spec filter_predicate spec all_specs))
+				(list (quote lambda) (map (expr_columns_for_spec filter_predicate spec all_specs) (lambda (col) (symbol (concat alias "." col)))) lowered_filter)
+				(cons (quote list) mapcols)
+				(list (quote lambda) map_params map_expr)
+				(list (quote lambda) (list (quote acc) (quote value))
+					(list (quote or) (quote acc) (quote value)))
+				false
+				(list (quote lambda) (list (quote acc) (quote shard_value))
+					(list (quote or) (quote acc) (quote shard_value)))
+				(spec_outer? spec)))
+		'() (neumann_fail "build_queryplan" "empty EXISTS join scan sequence"))))
+
+(define lower_exists_join (lambda (join_node final_predicate outer_specs)
+	(begin
+		(define specs (join_scan_specs join_node))
+		(lower_scan_specs_exists specs specs final_predicate outer_specs '()))))
 
 (define lower_exists_union (lambda (union_node outer_specs)
 	(reduce (qchildren union_node) (lambda (acc branch)
