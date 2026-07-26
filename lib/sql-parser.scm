@@ -672,13 +672,33 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "READ" true) (? (atom "LOCAL" true))) nil)
 	)))
 
+	(define sql_boolean_context_expr (lambda (expr) (begin
+		(define contains_inner_select_marker (lambda (node) (match node
+			(cons sym args)
+			(if (or
+				(equal?? sym (quote inner_select))
+				(equal?? sym (quote inner_select_in))
+				(equal?? sym (quote inner_select_exists))
+				(equal?? sym (quote (quote inner_select)))
+				(equal?? sym (quote (quote inner_select_in)))
+				(equal?? sym (quote (quote inner_select_exists)))
+				(equal?? sym (symbol inner_select))
+				(equal?? sym (symbol inner_select_in))
+				(equal?? sym (symbol inner_select_exists)))
+				true
+				(reduce args (lambda (found arg) (or found (contains_inner_select_marker arg))) false))
+			false)))
+		(if (contains_inner_select_marker expr)
+			expr
+			(list (quote sql_truthy) expr)))))
+
 	(define sql_expression (parser (or
 		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
-		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
+		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (map (cons a b) sql_boolean_context_expr)))
 		sql_expression1
 	)))
 	(define sql_expression1 (parser (or
-		(parser '((define a sql_expression2) (atom "AND" true) (define b (+ sql_expression2 (atom "AND" true)))) (cons (quote and) (cons a b)))
+		(parser '((define a sql_expression2) (atom "AND" true) (define b (+ sql_expression2 (atom "AND" true)))) (cons (quote and) (map (cons a b) sql_boolean_context_expr)))
 		sql_expression2
 	)))
 
@@ -739,7 +759,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 	(define sql_expression5 (parser (or
 		/* NOT has lower precedence than IS NULL: NOT expr IS NULL == NOT (expr IS NULL) */
-		(parser '((atom "NOT" true) (define expr sql_expression5)) '('not expr))
+		(parser '((atom "NOT" true) (define expr sql_expression5)) (list (quote not) (sql_boolean_context_expr expr)))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr sql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
@@ -769,7 +789,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* EXISTS (SELECT ...) */
 		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") (sql_semijoin_count_expr sub nil false))
 		/* Searched CASE: CASE WHEN cond THEN result ... ELSE default END (must be before simple CASE so WHEN is consumed as keyword, not identifier) */
-		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
+		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) (list (sql_boolean_context_expr a) b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 		/* Simple CASE: CASE expr WHEN val THEN result ... ELSE default END */
 		(parser '((atom "CASE" true) (define expr sql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
 
@@ -855,7 +875,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
 		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
-		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") '((quote if) cond t f))
+		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") (list (quote if) (sql_boolean_context_expr cond) t f))
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" sql_expression "," sql_expression "," sql_expression ")") nil) /* ignore */
@@ -1290,7 +1310,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(define condition (or (parser '(
 			(atom "WHERE" true)
 			(define condition2 sql_expression)
-		) condition2) (empty true)))
+		) (sql_boolean_context_expr condition2)) (empty true)))
 		/* GROUP BY + HAVING */
 		(?
 			(atom "GROUP" true)
@@ -1338,7 +1358,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				)
 			)
 		)
-	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
+	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group (if having (sql_boolean_context_expr having) nil) order limit offset)))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)

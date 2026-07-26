@@ -51,6 +51,25 @@ test_cases:
       data:
         - v: "t"
 
+  - name: "String boolean truthiness uses MySQL numeric coercion"
+    sql: |
+      SELECT
+        IF('0', 't', 'f') AS zero_string_if,
+        IF('1', 't', 'f') AS one_string_if,
+        NOT '0' AS not_zero_string,
+        NOT '1' AS not_one_string,
+        '0' OR FALSE AS zero_string_or_false,
+        '1' AND TRUE AS one_string_and_true
+    expect:
+      rows: 1
+      data:
+        - zero_string_if: "f"
+          one_string_if: "t"
+          not_zero_string: true
+          not_one_string: false
+          zero_string_or_false: false
+          one_string_and_true: true
+
   - name: "SELECT WHERE without FROM"
     # Avoids aggregate over derived table; checks filter semantics directly
     sql: |
@@ -62,6 +81,12 @@ test_cases:
     # Avoids aggregate over derived table; checks filter semantics directly
     sql: |
       SELECT 1 WHERE 0
+    expect:
+      rows: 0
+
+  - name: "SELECT WHERE with false string"
+    sql: |
+      SELECT 1 WHERE '0'
     expect:
       rows: 0
 

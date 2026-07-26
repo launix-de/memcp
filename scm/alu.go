@@ -397,6 +397,20 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "sql_truthy",
+		Desc: "casts SQL condition values to boolean using numeric truthiness",
+		Fn: func(a ...Scmer) Scmer {
+			return NewBool(!a[0].IsNil() && a[0].Float() != 0.0)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "value", ParamDesc: "SQL condition value"},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "!",
 		Desc: "negates the boolean value",
 		Fn: func(a ...Scmer) Scmer {
