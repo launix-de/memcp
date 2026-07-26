@@ -1988,7 +1988,7 @@ the compile-budget-ms requirement.
 		(define specs (join_scan_specs join_node))
 		(lower_scan_specs specs specs
 			(qattr project_node (quote output-fields) '())
-			order_node final_predicate '() true))))
+			nil final_predicate '() true))))
 
 (define lower_project_scan_rows (lambda (project_node scan_node predicate order_node)
 	(begin
