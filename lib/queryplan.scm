@@ -4923,33 +4923,27 @@ seeing the correctly prefixed outer alias. */
 							(and acc (equal? (count (query_branch_field_names branch)) (count first_cols)))) true))
 							(error "UNION ALL branches must project the same number of columns")
 							nil)
-						(if (not (nil? resolved_target_expr))
-							(begin
-								(if (not (equal? (count first_cols) 1))
-									(error "UNION ALL subquery must project exactly one column for IN")
-									nil)
-								(define first_col (car first_cols))
-								(define union_alias (concat "__union_in_rhs_" (uuid)))
-								(define union_schema (match branches
-									(cons first_branch _) (nth first_branch 0)
-									_ ""))
-								(unnest_count_subselect
-									(list union_schema
-										(list (list union_alias union_schema subquery false nil))
-										(list first_col (list (quote get_column) union_alias false first_col false))
-										true
-										nil
-										nil
-										nil
-										nil
+							(if (not (nil? resolved_target_expr))
+								(begin
+									(if (not (equal? (count first_cols) 1))
+										(error "UNION ALL subquery must project exactly one column for IN")
 										nil)
-									outer_schemas
-									resolved_target_expr
-									comparison))
-							(begin
-								(define branch_exists_expr (lambda (branch) (match branch
-									'(s t f c g h o l off) (begin
-										(define exists_expr (build_exists_subselect
+									(define branch_results
+										(filter (map branches (lambda (branch)
+											(unnest_count_subselect
+												branch
+												outer_schemas
+												resolved_target_expr
+												comparison)))
+											(lambda (r) (not (nil? r)))))
+									(if (or (equal? branch_results '()) (not (equal? (count branch_results) (count branches))))
+										nil
+										(if (equal? 1 (count branch_results)) (car branch_results)
+											(cons (if (equal?? comparison (quote >)) (quote or) (quote and)) branch_results))))
+								(begin
+									(define branch_exists_expr (lambda (branch) (match branch
+										'(s t f c g h o l off) (begin
+											(define exists_expr (build_exists_subselect
 											(list s t f c g h o l off)
 											outer_schemas))
 										(if (equal?? comparison (quote >))
@@ -5208,21 +5202,21 @@ seeing the correctly prefixed outer alias. */
 									_ (if (list? args)
 										(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 										expr))
-								(quote inner_select_in) (match args
-									(cons target_expr (cons subquery '()))
-									(coalesce
-										(if (or
-											(dependent_marker_required_subquery subquery outer_schemas)
-											(subquery_has_outer_refs subquery outer_schemas))
-											(build_dependent_scalar_via_marker
+									(quote inner_select_in) (match args
+										(cons target_expr (cons subquery '()))
+										(coalesce
+											(union_in_expr target_expr subquery false)
+											(if (or
+												(dependent_marker_required_subquery subquery outer_schemas)
+												(subquery_has_outer_refs subquery outer_schemas))
+												(build_dependent_scalar_via_marker
 												(quote inner_select_in)
 												subquery
 												target_expr
 												outer_schemas)
-											nil)
-										(unnest_count_subselect subquery outer_schemas target_expr (quote >))
-										(union_in_expr target_expr subquery false)
-										expr)
+												nil)
+											(unnest_count_subselect subquery outer_schemas target_expr (quote >))
+											expr)
 									_ (if (list? args)
 										(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 										expr))
@@ -5463,6 +5457,8 @@ seeing the correctly prefixed outer alias. */
 												"top-down scalar lowering missing helper path: "
 												(serialize subquery)))
 											(begin
+												(define dep_final_source_query
+													(coalesce dep_simple_source_query dep_materialized_source_query))
 												(define dep_result_expr
 													(if (or (equal?? dep_kind (quote inner_select_exists))
 														(equal?? dep_kind (quote inner_select_in)))
@@ -5490,7 +5486,7 @@ seeing the correctly prefixed outer alias. */
 																(list (quote coalesceNil) dep_base_result_expr false)
 																dep_base_result_expr))))
 												(sq_cache "tables" (merge
-													(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr (coalesce dep_simple_source_query dep_materialized_source_query) dep_unnesting_info))
+													(list (dependent_join_helper_table_spec dep_alias dep_info dep_result_col dep_domain_cols dep_result_expr dep_final_source_query dep_unnesting_info))
 													(coalesceNil (sq_cache "tables") '())))
 												(sq_cache "schemas" (merge
 													(list dep_alias

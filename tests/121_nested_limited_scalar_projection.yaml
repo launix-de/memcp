@@ -1,0 +1,77 @@
+# Copyright (C) 2023-2026  Carl-Philip Haensch
+# Regression for limited scalar subqueries whose projection contains another
+# correlated scalar marker. The outer LIMIT must not be dropped before the
+# nested marker has been lowered with the surrounding parent-domain context.
+
+metadata:
+  version: "1.0"
+  description: "Nested scalar markers inside limited scalar projections"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nlsp_doc"
+  - sql: "DROP TABLE IF EXISTS nlsp_site"
+  - sql: "DROP TABLE IF EXISTS nlsp_tenant"
+  - sql: "DROP TABLE IF EXISTS nlsp_acl"
+  - sql: "CREATE TABLE nlsp_tenant (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nlsp_site (id INT PRIMARY KEY, tenant INT)"
+  - sql: "CREATE TABLE nlsp_doc (id INT PRIMARY KEY, site INT)"
+  - sql: "CREATE TABLE nlsp_acl (id INT PRIMARY KEY, usr INT, tenant INT)"
+  - sql: "INSERT INTO nlsp_tenant VALUES (1), (2)"
+  - sql: "INSERT INTO nlsp_site VALUES (10, 1), (20, 2), (30, NULL)"
+  - sql: "INSERT INTO nlsp_doc VALUES (100, 10), (200, 20), (300, 30)"
+  - sql: "INSERT INTO nlsp_acl VALUES (1, 7, 1), (2, 8, NULL)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nlsp_doc"
+  - sql: "DROP TABLE IF EXISTS nlsp_site"
+  - sql: "DROP TABLE IF EXISTS nlsp_tenant"
+  - sql: "DROP TABLE IF EXISTS nlsp_acl"
+
+test_cases:
+  - name: "set session user for nested limited scalar projection"
+    session_id: "nlsp_session"
+    sql: "SET @nlsp_user := 7"
+    expect:
+      rows_affected: 0
+
+  - name: "nested scalar marker in limited projection keeps parent domain"
+    session_id: "nlsp_session"
+    sql: |
+      SELECT d.id,
+        COALESCE((
+          SELECT
+            (EXISTS (
+              SELECT 1
+              FROM nlsp_acl global_acl
+              WHERE global_acl.usr = @nlsp_user
+                AND global_acl.tenant IS NULL
+              LIMIT 1
+            )
+            OR COALESCE((
+              SELECT EXISTS (
+                SELECT 1
+                FROM nlsp_acl tenant_acl
+                WHERE tenant_acl.tenant = t.id
+                  AND tenant_acl.usr = @nlsp_user
+                LIMIT 1
+              )
+              FROM nlsp_tenant t
+              WHERE t.id = s.tenant
+              LIMIT 1
+            ), FALSE))
+          FROM nlsp_site s
+          WHERE s.id = d.site
+          LIMIT 1
+        ), FALSE) AS can_view
+      FROM nlsp_doc d
+      ORDER BY d.id
+    expect:
+      rows: 3
+      data:
+        - id: 100
+          can_view: true
+        - id: 200
+          can_view: false
+        - id: 300
+          can_view: false

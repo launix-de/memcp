@@ -307,15 +307,24 @@ subquery. */
 						'(_ expr) (or acc (qpl-expr-has-aggregate? expr))
 						acc))
 					false))
-			/* Drop ONLY when: LIMIT is set, no OFFSET, no ORDER BY.
-			ORDER BY means the LIMIT selects a SPECIFIC subset (e.g. top-k);
-			dropping the LIMIT would change which rows are returned, even
-			if equi-binding bounds the cardinality. The ROW_NUMBER PARTITION
-			rewrite (qpl-rewrite-correlated-limit-with-rownumber) handles
-			the ordered case correctly. */
-			(if (or (nil? lim) (not (nil? off))
-				(> (count (qpl-collect-markers (qpp-tuple-condition sub))) 0)
-				(and (not (nil? ord)) (> (count ord) 0))) sub
+				/* Drop ONLY when: LIMIT is set, no OFFSET, no ORDER BY.
+				ORDER BY means the LIMIT selects a SPECIFIC subset (e.g. top-k);
+				dropping the LIMIT would change which rows are returned, even
+				if equi-binding bounds the cardinality. The ROW_NUMBER PARTITION
+				rewrite (qpl-rewrite-correlated-limit-with-rownumber) handles
+				the ordered case correctly. Nested markers in either WHERE or the
+				projected value need the normal top-down parent context, so do not
+				route them into the dropped-limit scalar path. */
+				(define field-marker-count
+					(reduce (qpp-fields-to-pairs (coalesceNil (qpp-tuple-fields sub) '()))
+						(lambda (acc pair) (match pair
+							'(_ expr) (+ acc (count (qpl-collect-markers expr)))
+							acc))
+						0))
+				(if (or (nil? lim) (not (nil? off))
+					(> (count (qpl-collect-markers (qpp-tuple-condition sub))) 0)
+					(> field-marker-count 0)
+					(and (not (nil? ord)) (> (count ord) 0))) sub
 				(begin
 					(define inner-aliases (qpl-outer-aliases (qpp-tuple-tables sub)))
 					(define cond (qpp-tuple-condition sub))
