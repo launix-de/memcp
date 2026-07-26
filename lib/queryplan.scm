@@ -2375,6 +2375,56 @@ the compile-budget-ms requirement.
 	(quote union) (lower_union node)
 	_ (neumann_fail "build_queryplan" (concat "operator not ported yet: " (qop node))))))
 
+(define lower_dml_scan (lambda (kind fields scan_node predicate)
+	(begin
+		(define alias (qid scan_node))
+		(define schema (qattr scan_node (quote schema) nil))
+		(define tbl (qattr scan_node (quote table) nil))
+		(define outer_specs (list (list scan_node false true)))
+		(define effective_predicate (scan_effective_predicate scan_node predicate))
+		(define lowered_predicate (lower_embedded_scalars_with_specs
+			(lower_scan_expr effective_predicate scan_node)
+			outer_specs))
+		(define lowered_fields (map_assoc (lower_scan_fields fields scan_node) (lambda (_key expr)
+			(lower_embedded_scalars_with_specs expr outer_specs))))
+		(define filtercols (scan_expr_columns effective_predicate scan_node))
+		(define updatecols (if (equal? kind (quote delete)) '() (scan_fields_columns fields scan_node)))
+		(define mapcols (dedupe_list (merge (list filtercols updatecols (list "$update")))))
+		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
+		(define map_params (map mapcols (lambda (col) (if (equal? col "$update")
+			(symbol "$update")
+			(symbol (concat alias "." col))))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(list (quote table) schema tbl)
+			(cons (quote list) filtercols)
+			(list (quote lambda) filter_params lowered_predicate)
+			(cons (quote list) mapcols)
+			(list (quote lambda) map_params
+				(if (equal? kind (quote delete))
+					(list (quote if) (list (quote $update)) 1 0)
+					(list (quote if) (list (quote $update) (build_row_assoc_expr lowered_fields)) 1 0)))
+			(quote +)
+			0
+			nil
+			false))))
+
+(define lower_dml_qnode (lambda (ir)
+	(match (ir_return ir)
+		'(kind _target_table _target_alias fields) (match (qop (ir_root ir))
+			(quote project) (match (qchildren (ir_root ir))
+				(cons child '()) (match (qop child)
+					(quote scan) (lower_dml_scan kind (qattr (ir_root ir) (quote output-fields) fields) child true)
+					(quote select) (match (qchildren child)
+						(cons scan_child '()) (if (equal? (qop scan_child) (quote scan))
+							(lower_dml_scan kind (qattr (ir_root ir) (quote output-fields) fields) scan_child (qattr child (quote predicate) true))
+							(neumann_fail "build_queryplan" "DML/select lowerer only supports scan input yet"))
+						_ (neumann_fail "build_queryplan" "select expects one child"))
+					_ (neumann_fail "build_queryplan" "DML project lowerer only supports scan input yet"))
+				_ (neumann_fail "build_queryplan" "project expects one child"))
+			_ (neumann_fail "build_queryplan" "DML root must be project"))
+		_ (neumann_fail "build_queryplan" "malformed DML return"))))
+
 (define lower_scalar_project (lambda (project_node outer_specs)
 	(match (qchildren project_node)
 		(cons child '()) (match (qop child)
@@ -2417,7 +2467,10 @@ the compile-budget-ms requirement.
 
 (define build_queryplan (lambda (ir) (begin
 	(require_unnested_ir "build_queryplan input" ir)
-	(lower_qnode (ir_root ir)))))
+	(match (ir_return ir)
+		(quote rows) (lower_qnode (ir_root ir))
+		'(kind _target_table _target_alias _fields) (lower_dml_qnode ir)
+		_ (neumann_fail "build_queryplan" "unknown IR return mode")))))
 
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan
