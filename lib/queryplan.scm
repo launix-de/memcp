@@ -650,7 +650,11 @@ the compile-budget-ms requirement.
 				(list (quote equal??)
 					(untangle_expr_subqueries value)
 					expr)))
-		(neumann_fail "untangle_query" "correlated IN subquery unnesting not ported yet"))))
+		(if (select_ast_uncorrelated? subquery)
+			(list (quote neumann_in)
+				(untangle_expr_subqueries value)
+				(untangle_query_term subquery nil))
+			(neumann_fail "untangle_query" "correlated IN subquery unnesting not ported yet")))))
 
 (define untangle_expr_subqueries (lambda (expr) (match expr
 	(cons sym args)
@@ -718,6 +722,8 @@ the compile-budget-ms requirement.
 (define lower_embedded_scalars_with_specs (lambda (expr outer_specs) (match expr
 	'((symbol neumann_scalar) ir) (lower_scalar_ir_with_specs ir outer_specs)
 	'((quote neumann_scalar) ir) (lower_scalar_ir_with_specs ir outer_specs)
+	'((symbol neumann_in) value ir) (lower_in_ir_with_specs value ir outer_specs)
+	'((quote neumann_in) value ir) (lower_in_ir_with_specs value ir outer_specs)
 	(cons sym args) (cons (lower_embedded_scalars_with_specs sym outer_specs)
 		(map args (lambda (arg) (lower_embedded_scalars_with_specs arg outer_specs))))
 	expr)))
@@ -915,6 +921,12 @@ the compile-budget-ms requirement.
 		'())
 	'((symbol neumann_scalar) ir) (ir_outer_columns_for_scan ir scan_node)
 	'((quote neumann_scalar) ir) (ir_outer_columns_for_scan ir scan_node)
+	'((symbol neumann_in) value ir) (dedupe_list (merge (list
+		(expr_outer_columns_for_scan value scan_node)
+		(ir_outer_columns_for_scan ir scan_node))))
+	'((quote neumann_in) value ir) (dedupe_list (merge (list
+		(expr_outer_columns_for_scan value scan_node)
+		(ir_outer_columns_for_scan ir scan_node))))
 	(cons sym args) (dedupe_list (merge
 		(list
 			(expr_outer_columns_for_scan sym scan_node)
@@ -948,6 +960,12 @@ the compile-budget-ms requirement.
 		'())
 	'((symbol neumann_scalar) ir) (ir_outer_columns_for_scan ir scan_node)
 	'((quote neumann_scalar) ir) (ir_outer_columns_for_scan ir scan_node)
+	'((symbol neumann_in) value ir) (dedupe_list (merge (list
+		(scan_expr_columns value scan_node)
+		(ir_outer_columns_for_scan ir scan_node))))
+	'((quote neumann_in) value ir) (dedupe_list (merge (list
+		(scan_expr_columns value scan_node)
+		(ir_outer_columns_for_scan ir scan_node))))
 	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (scan_expr_columns arg scan_node)))))
 	'())))
 
@@ -968,6 +986,8 @@ the compile-budget-ms requirement.
 		expr)
 	'((symbol neumann_scalar) _ir) expr
 	'((quote neumann_scalar) _ir) expr
+	'((symbol neumann_in) value ir) (list (quote neumann_in) (lower_scan_expr value scan_node) ir)
+	'((quote neumann_in) value ir) (list (quote neumann_in) (lower_scan_expr value scan_node) ir)
 	(cons sym args) (cons sym (map args (lambda (arg) (lower_scan_expr arg scan_node))))
 	expr)))
 
@@ -999,6 +1019,8 @@ the compile-budget-ms requirement.
 			(symbol (concat (qid target_node) "." (canonical_scan_col target_node col ci)))))
 	'((symbol neumann_scalar) _ir) (lower_embedded_scalars_with_specs expr specs)
 	'((quote neumann_scalar) _ir) (lower_embedded_scalars_with_specs expr specs)
+	'((symbol neumann_in) _value _ir) (lower_embedded_scalars_with_specs expr specs)
+	'((quote neumann_in) _value _ir) (lower_embedded_scalars_with_specs expr specs)
 	(cons sym args) (cons sym (map args (lambda (arg) (lower_expr_for_specs arg specs))))
 	expr)))
 
@@ -1015,6 +1037,12 @@ the compile-budget-ms requirement.
 	'((quote get_column) tbl _ col ci) (get_column_columns_for_spec tbl col ci spec specs)
 	'((symbol neumann_scalar) ir) (ir_outer_columns_for_scan ir (spec_node spec))
 	'((quote neumann_scalar) ir) (ir_outer_columns_for_scan ir (spec_node spec))
+	'((symbol neumann_in) value ir) (dedupe_list (merge (list
+		(expr_columns_for_spec value spec specs)
+		(ir_outer_columns_for_scan ir (spec_node spec)))))
+	'((quote neumann_in) value ir) (dedupe_list (merge (list
+		(expr_columns_for_spec value spec specs)
+		(ir_outer_columns_for_scan ir (spec_node spec)))))
 	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (expr_columns_for_spec arg spec specs)))))
 	'())))
 
@@ -1152,6 +1180,58 @@ the compile-budget-ms requirement.
 				(list (quote car) rows_sym)
 				(list (quote error) "Subquery returns more than 1 row"))
 			(list (quote car) rows_sym)))))
+
+(define ir_single_output_key (lambda (ir)
+	(match (qattr (ir_root ir) (quote output-fields) '())
+		(cons key (cons _expr '())) key
+		_ (neumann_fail "build_queryplan" "IN subquery must project exactly one field"))))
+
+(define lower_in_scan_values (lambda (project_node scan_node predicate)
+	(begin
+		(define alias (qid scan_node))
+		(define schema (qattr scan_node (quote schema) nil))
+		(define tbl (qattr scan_node (quote table) nil))
+		(define value_expr (scalar_single_expr project_node))
+		(define lowered_predicate (lower_scan_expr (coalesceNil predicate true) scan_node))
+		(define lowered_value (lower_scan_expr value_expr scan_node))
+		(define filtercols (scan_expr_columns predicate scan_node))
+		(define mapcols (dedupe_list (merge (list filtercols (scan_expr_columns value_expr scan_node)))))
+		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
+		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(list (quote table) schema tbl)
+			(cons (quote list) filtercols)
+			(list (quote lambda) filter_params lowered_predicate)
+			(cons (quote list) mapcols)
+			(list (quote lambda) map_params lowered_value)
+			(list (quote lambda) (list (quote acc) (quote value))
+				(list (quote append_unique) (quote acc) (quote value)))
+			'()
+			(list (quote lambda) (list (quote acc) (quote shard_rows))
+				(list (quote merge) (quote acc) (quote shard_rows)))
+			false))))
+
+(define lower_in_project_values (lambda (project_node)
+	(match (qchildren project_node)
+		(cons child '()) (match (qop child)
+			(quote scan) (lower_in_scan_values project_node child true)
+			(quote select) (match (qchildren child)
+				(cons grandchild '()) (if (equal? (qop grandchild) (quote scan))
+					(lower_in_scan_values project_node grandchild (qattr child (quote predicate) true))
+					(neumann_fail "build_queryplan" "IN/select lowerer only supports scan input yet"))
+				_ (neumann_fail "build_queryplan" "select expects one child"))
+			_ (neumann_fail "build_queryplan" "IN lowerer only supports scan input yet"))
+		_ (neumann_fail "build_queryplan" "IN project expects one child"))))
+
+(define lower_in_ir_with_specs (lambda (value ir outer_specs)
+	(begin
+		(require_unnested_ir "build_queryplan IN subquery" ir)
+		(list (quote contains?)
+			(match (qop (ir_root ir))
+				(quote project) (lower_in_project_values (ir_root ir))
+				_ (neumann_fail "build_queryplan" "IN IR root must be project"))
+			(lower_expr_for_specs value outer_specs)))))
 
 (define lower_scalar_scan (lambda (project_node scan_node predicate order_node outer_specs)
 	(begin
