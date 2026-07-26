@@ -1313,9 +1313,11 @@ the compile-budget-ms requirement.
 				(list (quote filter)
 					(list (quote extract_assoc) groups_sym
 						(list (quote lambda) (list key_sym agg_sym)
-							(list (quote if) having_expr
-								(build_row_assoc_expr final_fields)
-								nil)))
+							(list (quote begin)
+								(list (quote print) "NEUMANN_DEBUG scalar_group_extract" key_sym agg_sym having_expr)
+								(list (quote if) having_expr
+									(build_row_assoc_expr final_fields)
+									nil))))
 					(list (quote lambda) (list (quote row))
 						(list (quote not) (list (quote nil?) (quote row))))))
 			(list (quote define) sorted_sym (group_sort_rows_expr rows_sym fields (if (nil? order_node) '() (qattr order_node (quote order) '()))))
@@ -1418,16 +1420,12 @@ the compile-budget-ms requirement.
 						(list (quote merge_assoc) (quote acc) (quote shard_groups) merge_group_aggs))
 					false))
 			(list (quote define) rows_sym
-				(list (quote filter)
-					(list (quote extract_assoc) groups_sym
-						(list (quote lambda) (list key_sym agg_sym)
-							(list (quote if) having_expr
-								(if (equal? order '())
-									(get_assoc final_fields "__value")
-									(build_row_assoc_expr final_fields))
-								nil)))
-					(list (quote lambda) (list row_sym)
-						(list (quote not) (list (quote nil?) (quote row))))))
+				(list (quote reduce_assoc) groups_sym
+					(list (quote lambda) (list (quote acc) key_sym agg_sym)
+						(list (quote if) having_expr
+							(list (quote merge) (quote acc) (list (quote list) (build_row_assoc_expr final_fields)))
+							(quote acc)))
+					'()))
 			(list (quote define) sorted_sym
 				(if (equal? order '())
 					rows_sym
@@ -1440,11 +1438,9 @@ the compile-budget-ms requirement.
 				(if (nil? order_node) nil (qattr order_node (quote limit) nil))
 				(if (nil? order_node) nil (qattr order_node (quote offset) nil))))
 			(list (quote define) values_sym
-				(if (equal? order '())
-					limited_sym
-					(list (quote map) limited_sym
-						(list (quote lambda) (list row_sym)
-							(list (quote get_assoc) row_sym "__value")))))
+				(list (quote map) limited_sym
+					(list (quote lambda) (list row_sym)
+						(list (quote get_assoc) row_sym "__value"))))
 			(scalar_from_rows_expr values_sym (or (nil? order_node) (nil? (qattr order_node (quote limit) nil))))))))
 
 (define lower_project_group (lambda (project_node group_node order_node)
