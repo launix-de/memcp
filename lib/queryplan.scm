@@ -487,6 +487,10 @@ the compile-budget-ms requirement.
 			(if (equal?? (derived_alias_name entry) alias) entry nil)))
 		nil)))
 
+(define without_derived_alias (lambda (derived_aliases alias)
+	(filter (coalesceNil derived_aliases '()) (lambda (entry)
+		(not (equal?? (derived_alias_name entry) alias))))))
+
 (define guard_derived_value (lambda (entry expr)
 	(begin
 		(define presence (derived_alias_presence entry))
@@ -506,7 +510,11 @@ the compile-budget-ms requirement.
 			expr
 			(begin
 				(define hit (field_lookup_entry (derived_alias_fields entry) col ci))
-				(if (nil? hit) expr (guard_derived_value entry (nth hit 1))))))
+				(if (nil? hit)
+					expr
+					(guard_derived_value entry
+						(rewrite_derived_expr (nth hit 1)
+							(without_derived_alias derived_aliases (derived_alias_name entry))))))))
 	'((quote get_column) tbl ti col ci) (begin
 		(define entry (if (nil? tbl)
 			(if (equal? (count derived_aliases) 1) (car derived_aliases) nil)
@@ -515,7 +523,11 @@ the compile-budget-ms requirement.
 			expr
 			(begin
 				(define hit (field_lookup_entry (derived_alias_fields entry) col ci))
-				(if (nil? hit) expr (guard_derived_value entry (nth hit 1))))))
+				(if (nil? hit)
+					expr
+					(guard_derived_value entry
+						(rewrite_derived_expr (nth hit 1)
+							(without_derived_alias derived_aliases (derived_alias_name entry))))))))
 	(cons sym args)
 	(cons (rewrite_derived_expr sym derived_aliases)
 		(map args (lambda (arg) (rewrite_derived_expr arg derived_aliases))))
