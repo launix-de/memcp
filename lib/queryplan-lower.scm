@@ -1835,14 +1835,14 @@ attached to the wrapper join instead. */
 		(define new-tuple (qpp-rebuild-tuple
 			(qpp-tuple-schema tuple)
 			(nth pull 0)
-			(qpp-tuple-fields tuple)
-			(qpp-tuple-condition tuple)
-			(qpp-tuple-group tuple)
-			(qpp-tuple-having tuple)
-			(qpp-tuple-order tuple)
-			(qpp-tuple-limit tuple)
-			(qpp-tuple-offset tuple)))
-		(list new-tuple (nth pull 1)))))
+				(qpp-tuple-fields tuple)
+				(qpp-tuple-condition tuple)
+				(qpp-tuple-group tuple)
+				(qpp-tuple-having tuple)
+				(qpp-tuple-order tuple)
+				(qpp-tuple-limit tuple)
+				(qpp-tuple-offset tuple)))
+			(list new-tuple (nth pull 1)))))
 
 (define qpu-low-tuple-external-refs (lambda (tuple right-aliases left-aliases)
 	(begin
@@ -1892,40 +1892,131 @@ attached to the wrapper join instead. */
 				nil))
 		nil)))
 
-(define qpu-low-equibound-external-refs (lambda (expr right-aliases left-aliases)
-	(match expr
-		'((symbol equal??) lhs rhs)
-		(begin
-			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
-			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
-			(if (and (not (nil? lside)) (not (nil? rside))
-					(equal? (car lside) (quote left))
-					(equal? (car rside) (quote right)))
-				(list (list (nth lside 1) (nth lside 2)))
+	(define qpu-low-equibound-external-refs (lambda (expr right-aliases left-aliases)
+		(match expr
+			'((symbol equal??) lhs rhs)
+			(begin
+				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
 				(if (and (not (nil? lside)) (not (nil? rside))
-					(equal? (car lside) (quote right))
-					(equal? (car rside) (quote left)))
-					(list (list (nth rside 1) (nth rside 2)))
-					'())))
-		'((quote equal??) lhs rhs)
-		(begin
-			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
-			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
-			(if (and (not (nil? lside)) (not (nil? rside))
-					(equal? (car lside) (quote left))
-					(equal? (car rside) (quote right)))
-				(list (list (nth lside 1) (nth lside 2)))
+						(equal? (car lside) (quote left))
+						(equal? (car rside) (quote right)))
+					(list (list (nth lside 1) (nth lside 2)))
+					(if (and (not (nil? lside)) (not (nil? rside))
+						(equal? (car lside) (quote right))
+						(equal? (car rside) (quote left)))
+						(list (list (nth rside 1) (nth rside 2)))
+						'())))
+			'((quote equal??) lhs rhs)
+			(begin
+				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
 				(if (and (not (nil? lside)) (not (nil? rside))
-					(equal? (car lside) (quote right))
-					(equal? (car rside) (quote left)))
-					(list (list (nth rside 1) (nth rside 2)))
-					'())))
-		(cons sym args)
-		(if (or (is_opaque_scope_sym sym) (not (list? args)))
-			'()
-			(merge_unique (map args (lambda (arg)
-				(qpu-low-equibound-external-refs arg right-aliases left-aliases)))))
-		'())))
+						(equal? (car lside) (quote left))
+						(equal? (car rside) (quote right)))
+					(list (list (nth lside 1) (nth lside 2)))
+					(if (and (not (nil? lside)) (not (nil? rside))
+						(equal? (car lside) (quote right))
+						(equal? (car rside) (quote left)))
+						(list (list (nth rside 1) (nth rside 2)))
+						'())))
+			(cons sym args)
+			(if (or (is_opaque_scope_sym sym) (not (list? args)))
+				'()
+				(merge_unique (map args (lambda (arg)
+					(qpu-low-equibound-external-refs arg right-aliases left-aliases)))))
+			'())))
+
+	(define qpu-low-equibound-external-ref-replacements (lambda (expr right-aliases left-aliases)
+		(match expr
+			'((symbol equal??) lhs rhs)
+			(begin
+				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+				(if (and (not (nil? lside)) (not (nil? rside))
+						(equal? (car lside) (quote left))
+						(equal? (car rside) (quote right)))
+					(list (list (nth lside 1) (nth lside 2) (nth rside 1) (nth rside 2)))
+					(if (and (not (nil? lside)) (not (nil? rside))
+						(equal? (car lside) (quote right))
+						(equal? (car rside) (quote left)))
+						(list (list (nth rside 1) (nth rside 2) (nth lside 1) (nth lside 2)))
+						'())))
+			'((quote equal??) lhs rhs)
+			(begin
+				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+				(if (and (not (nil? lside)) (not (nil? rside))
+						(equal? (car lside) (quote left))
+						(equal? (car rside) (quote right)))
+					(list (list (nth lside 1) (nth lside 2) (nth rside 1) (nth rside 2)))
+					(if (and (not (nil? lside)) (not (nil? rside))
+						(equal? (car lside) (quote right))
+						(equal? (car rside) (quote left)))
+						(list (list (nth rside 1) (nth rside 2) (nth lside 1) (nth lside 2)))
+						'())))
+			(cons sym args)
+			(if (or (is_opaque_scope_sym sym) (not (list? args)))
+				'()
+				(merge_unique (map args (lambda (arg)
+					(qpu-low-equibound-external-ref-replacements arg right-aliases left-aliases)))))
+			'())))
+
+	(define qpu-low-equibound-replacement-lookup (lambda (replacements tv col)
+		(reduce replacements (lambda (found repl)
+			(if (not (nil? found))
+				found
+				(match repl
+					'(left-tv left-col right-tv right-col)
+					(if (and (equal? left-tv tv) (equal? left-col col))
+						(list (quote get_column) right-tv false right-col false)
+						nil)
+					nil)))
+			nil)))
+
+	(define qpu-low-rewrite-equibound-external-refs-expr (lambda (expr replacements)
+		(match expr
+			'((symbol get_column) tv _ col _)
+			(coalesce (qpu-low-equibound-replacement-lookup replacements tv col) expr)
+			'((quote get_column) tv _ col _)
+			(coalesce (qpu-low-equibound-replacement-lookup replacements tv col) expr)
+			(cons sym args)
+			(if (or (is_opaque_scope_sym sym) (not (list? args)))
+				expr
+				(cons sym (map args (lambda (arg)
+					(qpu-low-rewrite-equibound-external-refs-expr arg replacements)))))
+			_ expr)))
+
+	(define qpu-low-rewrite-equibound-external-refs-tuple (lambda (tuple replacements)
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema tuple)
+			(map (coalesceNil (qpp-tuple-tables tuple) '())
+				(lambda (td) (match td
+					'(tv tschema ttbl tisOuter tjoinexpr)
+					(list tv tschema ttbl tisOuter
+						(qpu-low-rewrite-equibound-external-refs-expr
+							(coalesceNil tjoinexpr true)
+							replacements))
+					td)))
+			(qpp-fields-to-flat
+				(map (qpp-fields-to-pairs (qpp-tuple-fields tuple)) (lambda (pair) (match pair
+					'(name expr)
+					(list name (qpu-low-rewrite-equibound-external-refs-expr expr replacements))
+					pair))))
+			(qpu-low-rewrite-equibound-external-refs-expr
+				(coalesceNil (qpp-tuple-condition tuple) true)
+				replacements)
+			(map (coalesceNil (qpp-tuple-group tuple) '())
+				(lambda (expr) (qpu-low-rewrite-equibound-external-refs-expr expr replacements)))
+			(qpu-low-rewrite-equibound-external-refs-expr
+				(coalesceNil (qpp-tuple-having tuple) true)
+				replacements)
+			(map (coalesceNil (qpp-tuple-order tuple) '()) (lambda (item) (match item
+				'(expr dir)
+				(list (qpu-low-rewrite-equibound-external-refs-expr expr replacements) dir)
+				item)))
+			(qpp-tuple-limit tuple)
+			(qpp-tuple-offset tuple))))
 
 (define qpu-low-domain-alias (lambda (alias)
 	(concat "dom_" alias)))
@@ -2005,20 +2096,46 @@ attached to the wrapper join instead. */
 	(define qpu-low-domain-equality-predicate (lambda (external-refs alias-map)
 		(qpu-low-conjuncts-to-and (map external-refs (lambda (ref) (match ref
 			'(tv col) (list (quote equal??)
-			(list (quote get_column) tv false col false)
-			(list (quote get_column)
-				(qpu-low-alias-map-lookup alias-map tv) false col false))
-		true))))))
+				(list (quote get_column) tv false col false)
+				(list (quote get_column)
+					(qpu-low-alias-map-lookup alias-map tv) false col false))
+			true))))))
 
-(define qpu-low-inject-domain-copies (lambda (left-tuple right-tuple join-pred)
-	(begin
-		(define right-aliases (map (coalesceNil (qpp-tuple-tables right-tuple) '())
-			(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
-		(define left-aliases (map (coalesceNil (qpp-tuple-tables left-tuple) '())
-			(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
-		(define external-refs (merge_unique
-			(qpu-low-tuple-external-refs right-tuple right-aliases left-aliases)
-			(qpu-low-expr-external-refs join-pred right-aliases left-aliases)))
+	(define qpu-low-tuple-has-aggregate? (lambda (tuple)
+		(or
+			(not (equal? (extract_aggregates (qpp-tuple-fields tuple)) '()))
+			(not (equal? (extract_aggregates (coalesceNil (qpp-tuple-condition tuple) true)) '()))
+			(not (equal? (extract_aggregates (coalesceNil (qpp-tuple-having tuple) true)) '())))))
+
+	(define qpu-low-inject-domain-copies (lambda (left-tuple right-tuple join-pred)
+		(begin
+			(define right-aliases (map (coalesceNil (qpp-tuple-tables right-tuple) '())
+				(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+			(define left-aliases (map (coalesceNil (qpp-tuple-tables left-tuple) '())
+				(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+			(define table-joinexpr (qpu-low-conjuncts-to-and
+				(map (coalesceNil (qpp-tuple-tables right-tuple) '())
+					(lambda (td) (match td
+						'(_ _ _ _ je) (coalesceNil je true)
+						true)))))
+			(define use-equibound-substitution false)
+			(define equibound-replacements (if use-equibound-substitution
+				(merge_unique
+					(qpu-low-equibound-external-ref-replacements join-pred right-aliases left-aliases)
+					(qpu-low-equibound-external-ref-replacements
+						(coalesceNil (qpp-tuple-condition right-tuple) true)
+						right-aliases left-aliases)
+					(qpu-low-equibound-external-ref-replacements table-joinexpr right-aliases left-aliases))
+				'()))
+			(define right-tuple (if (equal? equibound-replacements '())
+				right-tuple
+				(qpu-low-rewrite-equibound-external-refs-tuple right-tuple equibound-replacements)))
+			(define join-pred (if (equal? equibound-replacements '())
+				join-pred
+				(qpu-low-rewrite-equibound-external-refs-expr join-pred equibound-replacements)))
+			(define external-refs (merge_unique
+				(qpu-low-tuple-external-refs right-tuple right-aliases left-aliases)
+				(qpu-low-expr-external-refs join-pred right-aliases left-aliases)))
 		(define equibound-external-refs
 			(qpu-low-equibound-external-refs join-pred right-aliases left-aliases))
 		(if (equal? (count external-refs) 0)

@@ -25,12 +25,40 @@ test_cases:
         - name: "Bob"
           total: 50
 
+  - name: "Prejoin cache table exists after initial materialization"
+    scm: |
+      (begin
+        (define live_prejoins
+          (filter (planned_materialized_fields) (lambda (tbl)
+            (and
+              (strlike tbl ".prejoin:%")
+              (> (count (show "memcp-tests" tbl)) 0)
+              (strlike (serialize (materialized_source_dependency_tables tbl)) "%prejoin_orders%")
+              (strlike (serialize (materialized_source_dependency_tables tbl)) "%prejoin_customers%")))))
+        (if (> (count live_prejoins) 0)
+          "ok"
+          (error "expected live prejoin cache after initial GROUP BY")))
+
   # --- INSERT into prejoin_orders (child table) ---
 
   - name: "Insert a new order for Alice"
     sql: "INSERT INTO prejoin_orders VALUES (40, 1, 75)"
     expect:
       affected_rows: 1
+
+  - name: "Prejoin cache table survives INSERT before re-query"
+    scm: |
+      (begin
+        (define live_prejoins
+          (filter (planned_materialized_fields) (lambda (tbl)
+            (and
+              (strlike tbl ".prejoin:%")
+              (> (count (show "memcp-tests" tbl)) 0)
+              (strlike (serialize (materialized_source_dependency_tables tbl)) "%prejoin_orders%")
+              (strlike (serialize (materialized_source_dependency_tables tbl)) "%prejoin_customers%")))))
+        (if (> (count live_prejoins) 0)
+          "ok"
+          (error "expected prejoin cache to survive INSERT before re-query")))
 
   - name: "After INSERT into prejoin_orders: Alice total updated"
     sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"

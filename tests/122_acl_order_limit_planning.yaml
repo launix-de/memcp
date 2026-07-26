@@ -8,19 +8,34 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS aol_doc"
   - sql: "DROP TABLE IF EXISTS aol_site"
+  - sql: "DROP TABLE IF EXISTS aol_department"
   - sql: "DROP TABLE IF EXISTS aol_tenant"
   - sql: "DROP TABLE IF EXISTS aol_user_tenant"
+  - sql: "DROP TABLE IF EXISTS aol_user_scope"
+  - sql: "DROP TABLE IF EXISTS aol_file"
   - sql: "CREATE TABLE aol_tenant (ID INT PRIMARY KEY, name VARCHAR(64))"
   - sql: "CREATE TABLE aol_site (ID INT PRIMARY KEY, tenant INT, name VARCHAR(64))"
-  - sql: "CREATE TABLE aol_doc (ID INT PRIMARY KEY, site INT, year INT, title VARCHAR(64))"
+  - sql: "CREATE TABLE aol_department (ID INT PRIMARY KEY, site INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE aol_doc (ID INT PRIMARY KEY, site INT, file_id INT, year INT, title VARCHAR(64))"
   - sql: "CREATE TABLE aol_user_tenant (user_id INT, tenant INT)"
+  - sql: "CREATE TABLE aol_user_scope (user_id INT, site INT)"
+  - sql: "CREATE TABLE aol_file (ID INT PRIMARY KEY, filename VARCHAR(64), search VARCHAR(128))"
   - sql: "INSERT INTO aol_tenant VALUES (1, 'north'), (2, 'south'), (3, 'west')"
   - sql: "INSERT INTO aol_site VALUES (10, 1, 'alpha'), (20, 2, 'beta'), (30, 3, 'gamma')"
-  - sql: "INSERT INTO aol_doc VALUES (1, 10, 2026, 'a'), (2, 20, 2025, 'b'), (3, 30, 2024, 'c'), (4, 10, 2023, 'd')"
+  - sql: "INSERT INTO aol_department VALUES (1000, 10, 'ops'), (2000, 20, 'lab'), (3000, 30, 'field')"
+  - sql: "INSERT INTO aol_doc VALUES (1, 10, 100, 2026, 'a'), (2, 20, 200, 2025, 'b'), (3, 30, 300, 2024, 'c'), (4, 10, 100, 2023, 'd')"
   - sql: "INSERT INTO aol_user_tenant VALUES (105, 1), (105, 2), (777, 3)"
+  - sql: "INSERT INTO aol_user_scope VALUES (105, 10), (777, NULL)"
+  - sql: "INSERT INTO aol_file VALUES (100, 'protocol-a.pdf', 'north protocol'), (200, 'note.txt', 'plain note'), (300, 'protocol-b.pdf', 'west protocol')"
   - sql: "SET @aol_user := 105"
 
 test_cases:
+  - name: "set ACL session user"
+    session_id: "aol-acl-session"
+    sql: "SELECT @aol_user := 105"
+    expect:
+      rows: 1
+
   - name: "correlated scalar lookup returns tenant"
     sql: |
       SELECT d.ID,
@@ -132,8 +147,268 @@ test_cases:
       not_contains:
         - ".prejoin:"
 
+  - name: "site scope EXISTS with nullable fallback stays correlated correctly"
+    session_id: "aol-acl-session"
+    sql: |
+      SELECT s.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM aol_user_scope us
+          WHERE COALESCE(us.site, s.ID) = s.ID
+            AND us.user_id = @aol_user
+          LIMIT 1
+        ) AS can_use
+      FROM aol_site s
+      ORDER BY s.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 10
+          can_use: true
+        - ID: 20
+          can_use: false
+        - ID: 30
+          can_use: false
+
+  - name: "EXPLAIN site scope EXISTS avoids full prejoin materialization"
+    session_id: "aol-acl-session"
+    sql: |
+      EXPLAIN
+      SELECT s.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM aol_user_scope us
+          WHERE COALESCE(us.site, s.ID) = s.ID
+            AND us.user_id = @aol_user
+          LIMIT 1
+        ) AS can_use
+      FROM aol_site s
+      ORDER BY s.ID
+    expect:
+      contains:
+        - "scalar_scan"
+      not_contains:
+        - ".prejoin:"
+
+  - name: "derived ACL reference projects only used columns"
+    session_id: "aol-acl-session"
+    sql: |
+      SELECT d.ID, ref.can_use
+      FROM aol_doc d
+      LEFT JOIN (
+        SELECT s.ID AS site_id,
+          EXISTS (
+            SELECT TRUE
+            FROM aol_user_scope us
+            WHERE COALESCE(us.site, s.ID) = s.ID
+              AND us.user_id = @aol_user
+            LIMIT 1
+          ) AS can_use
+        FROM aol_site s
+      ) ref ON ref.site_id = d.site
+      ORDER BY d.year DESC, d.site ASC
+      LIMIT 4
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          can_use: true
+        - ID: 2
+          can_use: false
+        - ID: 3
+          can_use: false
+        - ID: 4
+          can_use: true
+
+  - name: "EXPLAIN derived ACL reference stays flattened"
+    session_id: "aol-acl-session"
+    sql: |
+      EXPLAIN IR
+      SELECT d.ID, ref.can_use
+      FROM aol_doc d
+      LEFT JOIN (
+        SELECT s.ID AS site_id,
+          EXISTS (
+            SELECT TRUE
+            FROM aol_user_scope us
+            WHERE COALESCE(us.site, s.ID) = s.ID
+              AND us.user_id = @aol_user
+            LIMIT 1
+          ) AS can_use
+        FROM aol_site s
+      ) ref ON ref.site_id = d.site
+      ORDER BY d.year DESC, d.site ASC
+      LIMIT 4
+    expect:
+      contains:
+        - "scalar_scan"
+      not_contains:
+        - "materialized-subquery-source"
+        - ".prejoin:"
+        - ".mat:"
+
+  - name: "nested derived ACL reference with shared checks stays flattened"
+    session_id: "aol-acl-session"
+    sql: |
+      EXPLAIN IR
+      SELECT d.ID, ref.can_view
+      FROM aol_doc d
+      LEFT JOIN (
+        SELECT s.ID AS site_id,
+          (
+            EXISTS (
+              SELECT TRUE
+              FROM aol_user_tenant global_scope
+              WHERE global_scope.user_id = @aol_user
+                AND global_scope.tenant IS NULL
+              LIMIT 1
+            )
+            OR
+            CASE
+              WHEN EXISTS (
+                SELECT TRUE
+                FROM aol_user_tenant global_scope2
+                WHERE global_scope2.user_id = @aol_user
+                  AND global_scope2.tenant IS NULL
+                LIMIT 1
+              )
+              THEN TRUE
+              ELSE EXISTS (
+                SELECT TRUE
+                FROM aol_user_scope site_scope
+                WHERE COALESCE(site_scope.site, s.ID) = s.ID
+                  AND site_scope.user_id = @aol_user
+                LIMIT 1
+              )
+            END
+          )
+          AND COALESCE((
+            SELECT EXISTS (
+              SELECT TRUE
+              FROM aol_user_tenant tenant_scope
+              WHERE tenant_scope.user_id = @aol_user
+                AND tenant_scope.tenant = t.ID
+              LIMIT 1
+            )
+            FROM aol_tenant t
+            WHERE t.ID = s.tenant
+            LIMIT 1
+          ), FALSE) AS can_view
+        FROM aol_site s
+      ) ref ON ref.site_id = d.site
+      ORDER BY d.year DESC, d.site ASC
+      LIMIT 4
+    expect:
+      contains:
+        - "scalar_scan"
+      not_contains:
+        - "materialized-subquery-source"
+        - ".prejoin:"
+        - ".mat:"
+
+  - name: "dataview wrapper with filtered file union keeps reference ACL flattened"
+    session_id: "aol-acl-session"
+    sql: |
+      EXPLAIN IR
+      SELECT t.ID, t.`site::canView`
+      FROM (
+        SELECT d.ID, d.site, d.file_id, d.year,
+          ref.`site:description` AS `site::description`,
+          ref.`site:tenant` AS `site::tenant`,
+          ref.`site:canView` AS `site::canView`
+        FROM aol_doc d
+        LEFT JOIN (
+          SELECT s.ID AS `site:ID`,
+            s.name AS `site:description`,
+            s.tenant AS `site:tenant`,
+            (
+              EXISTS (
+                SELECT TRUE
+                FROM aol_user_tenant global_scope
+                WHERE global_scope.user_id = @aol_user
+                  AND global_scope.tenant IS NULL
+                LIMIT 1
+              )
+              OR
+              CASE
+                WHEN EXISTS (
+                  SELECT TRUE
+                  FROM aol_user_tenant global_scope2
+                  WHERE global_scope2.user_id = @aol_user
+                    AND global_scope2.tenant IS NULL
+                  LIMIT 1
+                )
+                THEN TRUE
+                ELSE EXISTS (
+                  SELECT TRUE
+                  FROM aol_user_scope site_scope
+                  WHERE COALESCE(site_scope.site, s.ID) = s.ID
+                    AND site_scope.user_id = @aol_user
+                  LIMIT 1
+                )
+              END
+            )
+            AND COALESCE((
+              SELECT EXISTS (
+                SELECT TRUE
+                FROM aol_user_tenant tenant_scope
+                WHERE tenant_scope.user_id = @aol_user
+                  AND tenant_scope.tenant = tnt.ID
+                LIMIT 1
+              )
+              FROM aol_tenant tnt
+              WHERE tnt.ID = s.tenant
+              LIMIT 1
+            ), FALSE) AS `site:canView`
+          FROM aol_site s
+        ) ref ON ref.`site:ID` = d.site
+        WHERE COALESCE(ref.`site:canView`, FALSE)
+      ) t
+      LEFT JOIN aol_site sorter_site ON t.site = sorter_site.ID
+      WHERE t.file_id IN (
+        SELECT f1.ID FROM aol_file f1 WHERE f1.filename LIKE '%protocol%'
+        UNION
+        SELECT f2.ID FROM aol_file f2 WHERE f2.search LIKE '%protocol%'
+      )
+      ORDER BY t.year DESC, t.site ASC
+      LIMIT 4
+    expect:
+      contains:
+        - "scalar_scan"
+      not_contains:
+        - "materialized-subquery-source"
+        - ".prejoin:"
+
+  - name: "nested site scope through child reference avoids full prejoin"
+    session_id: "aol-acl-session"
+    sql: |
+      EXPLAIN IR
+      SELECT a.ID,
+        COALESCE((
+          SELECT EXISTS (
+            SELECT TRUE
+            FROM aol_user_scope site_scope
+            WHERE COALESCE(site_scope.site, s.ID) = s.ID
+              AND site_scope.user_id = @aol_user
+            LIMIT 1
+          )
+          FROM aol_site s
+          WHERE s.ID = a.site
+          LIMIT 1
+        ), FALSE) AS can_use
+      FROM aol_department a
+      ORDER BY a.ID
+    expect:
+      contains:
+        - "scalar_scan"
+      not_contains:
+        - ".prejoin:"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS aol_doc"
   - sql: "DROP TABLE IF EXISTS aol_site"
+  - sql: "DROP TABLE IF EXISTS aol_department"
   - sql: "DROP TABLE IF EXISTS aol_tenant"
   - sql: "DROP TABLE IF EXISTS aol_user_tenant"
+  - sql: "DROP TABLE IF EXISTS aol_user_scope"
+  - sql: "DROP TABLE IF EXISTS aol_file"

@@ -1011,12 +1011,91 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'((quote get_column) alias ti col ci) (list (quote get_column) (concat "__semijoin_outer:" alias) ti col ci)
 		(cons sym args) (cons (sql_semijoin_mark_outer_expr sym) (map args sql_semijoin_mark_outer_expr))
 		expr)))
-	(define sql_semijoin_single_field_name (lambda (fields subquery)
-		(if (equal? (count fields) 2)
-			(car fields)
-			(error (concat "sql_semijoin_count_query requires exactly one output field: " (serialize subquery))))))
-	(define sql_semijoin_count_query (lambda (subquery target_expr) (begin
-		(define union_parts (sql_union_all_parts subquery))
+		(define sql_semijoin_single_field_name (lambda (fields subquery)
+			(if (equal? (count fields) 2)
+				(car fields)
+				(error (concat "sql_semijoin_count_query requires exactly one output field: " (serialize subquery))))))
+		(define sql_semijoin_and_terms (lambda (expr)
+			(if (or (nil? expr) (equal? expr true))
+				'()
+				(match expr
+					(cons sym args)
+					(if (or (equal?? sym (quote sql_truthy)) (equal?? sym (symbol sql_truthy)))
+						(match args
+							(cons inner '()) (sql_semijoin_and_terms inner)
+							(list expr))
+						(if (or (equal?? sym (quote and)) (equal?? sym (symbol and)))
+						(merge (map args sql_semijoin_and_terms))
+						(list expr)))
+					(list expr)))))
+		(define sql_semijoin_and_from_terms (lambda (terms)
+			(reduce terms (lambda (acc term)
+				(if (or (nil? acc) (equal? acc true))
+					term
+					(if (or (nil? term) (equal? term true))
+						acc
+						(list (quote and) acc term))))
+				true)))
+		(define sql_semijoin_same_ref_or_expr? (lambda (a b)
+			(match a
+				'((symbol get_column) atv _ ati_col _)
+				(match b
+					'((symbol get_column) btv _ bti_col _) (and (equal? atv btv) (equal? ati_col bti_col))
+					'((quote get_column) btv _ bti_col _) (and (equal? atv btv) (equal? ati_col bti_col))
+					_ (equal? (serialize a) (serialize b)))
+				'((quote get_column) atv _ ati_col _)
+				(match b
+					'((symbol get_column) btv _ bti_col _) (and (equal? atv btv) (equal? ati_col bti_col))
+					'((quote get_column) btv _ bti_col _) (and (equal? atv btv) (equal? ati_col bti_col))
+					_ (equal? (serialize a) (serialize b)))
+				_ (equal? (serialize a) (serialize b)))))
+		(define sql_semijoin_equality_other_side (lambda (term expr)
+			(match term
+				(cons eq_sym (cons lhs (cons rhs '())))
+				(if (or
+					(equal?? eq_sym (quote equal??))
+					(equal?? eq_sym (symbol equal??))
+					(equal?? eq_sym (quote equal?))
+					(equal?? eq_sym (symbol equal?)))
+					(if (sql_semijoin_same_ref_or_expr? lhs expr)
+						rhs
+						(if (sql_semijoin_same_ref_or_expr? rhs expr)
+							lhs
+							nil))
+					nil)
+				_ nil)))
+		(define sql_semijoin_exists_union_branch_in_marker (lambda (branch)
+			(match branch
+				'(s t f c g h o l off)
+				(if (not (equal? (count f) 2))
+					nil
+					(begin
+						(define projected_expr (nth f 1))
+						(define cond_terms (sql_semijoin_and_terms c))
+						(define eq_info (reduce cond_terms (lambda (found term)
+							(if (not (nil? found))
+								found
+								(begin
+									(define target_expr
+										(sql_semijoin_equality_other_side term projected_expr))
+									(if (nil? target_expr)
+										nil
+										(list term target_expr)))))
+							nil))
+						(match eq_info
+							'(matched_term target_expr)
+							(list
+								(quote inner_select_in)
+								target_expr
+								(list s t f
+									(sql_semijoin_and_from_terms
+										(filter cond_terms (lambda (term)
+											(not (equal? term matched_term)))))
+									g h o l off))
+							_ nil)))
+				_ nil)))
+		(define sql_semijoin_count_query (lambda (subquery target_expr) (begin
+			(define union_parts (sql_union_all_parts subquery))
 		(if (not (nil? union_parts))
 			(error (concat "sql_semijoin_count_query does not yet support UNION ALL: " (serialize subquery)))
 			(match subquery
@@ -1132,17 +1211,28 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(if (nil? union_parts)
 					(list (quote inner_select) (sql_semijoin_count_query subquery target_expr))
 					(match union_parts '(branches order limit offset)
-						(if (or (not (nil? limit)) (not (nil? offset)))
-							(error (concat "sql_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
-							(if (nil? target_expr)
-								(cons
-									(if negated (quote and) (quote or))
-									(map branches (lambda (branch)
-										(if negated
-											(list (quote not) (list (quote inner_select_exists) branch))
-											(list (quote inner_select_exists) branch)))))
-								(begin
-									(map branches (lambda (branch) (match branch
+								(if (or (not (nil? limit)) (not (nil? offset)))
+								(error (concat "sql_semijoin_count_expr does not yet support UNION ALL with LIMIT/OFFSET: " (serialize subquery)))
+								(if (nil? target_expr)
+									(begin
+										(define branch_in_markers (filter
+											(map branches sql_semijoin_exists_union_branch_in_marker)
+											(lambda (marker) (not (nil? marker)))))
+										(if (equal? (count branch_in_markers) (count branches))
+											(cons
+												(if negated (quote and) (quote or))
+												(map branch_in_markers (lambda (marker)
+													(if negated
+														(list (quote not) marker)
+														marker))))
+											(cons
+												(if negated (quote and) (quote or))
+												(map branches (lambda (branch)
+													(if negated
+														(list (quote not) (list (quote inner_select_exists) branch))
+														(list (quote inner_select_exists) branch)))))))
+									(begin
+										(map branches (lambda (branch) (match branch
 										'(_ _ f _ _ _ _ _ _) (sql_semijoin_single_field_name f branch)
 										_ (error (concat "sql_semijoin_count_query requires a select_core query: " (serialize branch))))))
 									(reduce branches

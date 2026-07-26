@@ -191,3 +191,4 @@ Same as above but with an explicit schemas list passed to column_resolve. */
 /* neumann_pipeline_trace — when set to true, prints input + lowered tuple
 for each query routed through the new pipeline. Default off. */
 (set neumann_pipeline_trace false)
+(define materialize_reasons false)
