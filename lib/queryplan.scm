@@ -920,6 +920,11 @@ the compile-budget-ms requirement.
 			(merge acc (list key (lower_embedded_scalars expr))))
 			'()))))
 
+(define build_runtime_list_expr (lambda (exprs)
+	(match exprs
+		(cons first rest) (list (quote cons) first (build_runtime_list_expr rest))
+		'() '())))
+
 (define aggregate_expr? (lambda (expr) (match expr
 	'((symbol aggregate) _ _ _) true
 	'((quote aggregate) _ _ _) true
@@ -984,6 +989,12 @@ the compile-budget-ms requirement.
 (define replace_field_aggregates (lambda (fields aggs agg_sym)
 	(map_assoc (coalesceNil fields '()) (lambda (_key expr)
 		(replace_aggregate_refs expr aggs agg_sym)))))
+
+(define count_distinct_expr? (lambda (expr) (match expr
+	'(count_distinct _value) true
+	'((symbol count_distinct) _value) true
+	'((quote count_distinct) _value) true
+	_ false)))
 
 (define same_get_column_ref? (lambda (left right) (match left
 	'((symbol get_column) ltbl _ lcol lci) (match right
@@ -1344,23 +1355,43 @@ the compile-budget-ms requirement.
 		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
 		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 		(define agg_sym (symbol "__neumann_agg"))
-		(list (quote begin)
-			(list (quote define) agg_sym
-				(list (quote scan)
-					'(session "__memcp_tx")
-					(list (quote table) schema tbl)
-					(cons (quote list) filtercols)
-					(list (quote lambda) filter_params lowered_predicate)
-					(cons (quote list) mapcols)
-					(list (quote lambda) map_params (cons (quote list) lowered_inputs))
-					(list (quote lambda) (list (quote acc) (quote rowvals))
-						(cons (quote list) (map (produceN (count aggs)) (lambda (i)
-							(aggregate_reducer_expr (nth aggs i)
-								(list (quote nth) (quote acc) i)
-								(list (quote nth) (quote rowvals) i))))))
-					(cons (quote list) (map aggs aggregate_neutral_expr))
-					nil false))
-			(build_resultrow_expr (replace_field_aggregates fields aggs agg_sym))))))
+		(if (and (equal? (count aggs) 1) (count_distinct_expr? (car aggs)))
+			(begin
+				(define values_sym (symbol "__neumann_count_distinct_values"))
+				(list (quote begin)
+					(list (quote define) values_sym
+						(list (quote scan)
+							'(session "__memcp_tx")
+							(list (quote table) schema tbl)
+							(cons (quote list) filtercols)
+							(list (quote lambda) filter_params lowered_predicate)
+							(cons (quote list) mapcols)
+							(list (quote lambda) map_params (car lowered_inputs))
+							(list (quote lambda) (list (quote acc) (quote value))
+								(list (quote if) (list (quote list?) (quote value))
+									(list (quote merge_unique) (quote acc) (quote value))
+									(list (quote append_unique) (quote acc) (quote value))))
+							'()
+							nil false))
+					(list (quote define) agg_sym (list (quote list) values_sym))
+					(build_resultrow_expr (replace_field_aggregates fields aggs agg_sym))))
+			(list (quote begin)
+				(list (quote define) agg_sym
+					(list (quote scan)
+						'(session "__memcp_tx")
+						(list (quote table) schema tbl)
+						(cons (quote list) filtercols)
+						(list (quote lambda) filter_params lowered_predicate)
+						(cons (quote list) mapcols)
+						(list (quote lambda) map_params (build_runtime_list_expr lowered_inputs))
+						(list (quote lambda) (list (quote acc) (quote rowvals))
+							(cons (quote list) (map (produceN (count aggs)) (lambda (i)
+								(aggregate_reducer_expr (nth aggs i)
+									(list (quote nth) (quote acc) i)
+									(list (quote nth) (quote rowvals) i))))))
+						(cons (quote list) (map aggs aggregate_neutral_expr))
+						nil false))
+				(build_resultrow_expr (replace_field_aggregates fields aggs agg_sym)))))))
 
 (define scalar_single_expr (lambda (project_node)
 	(match (qattr project_node (quote output-fields) '())
@@ -1631,7 +1662,7 @@ the compile-budget-ms requirement.
 					(cons (quote list) filtercols)
 					(list (quote lambda) filter_params lowered_predicate)
 					(cons (quote list) mapcols)
-					(list (quote lambda) map_params (cons (quote list) lowered_inputs))
+					(list (quote lambda) map_params (build_runtime_list_expr lowered_inputs))
 					(list (quote lambda) (list (quote acc) (quote rowvals))
 						(cons (quote list) (map (produceN (count aggs)) (lambda (i)
 							(aggregate_reducer_expr (nth aggs i)
@@ -1693,7 +1724,7 @@ the compile-budget-ms requirement.
 					(list (quote lambda) map_params
 						(list (quote list)
 							(cons (quote list) lowered_groups)
-							(cons (quote list) lowered_inputs)))
+							(build_runtime_list_expr lowered_inputs)))
 					(list (quote lambda) (list (quote acc) (quote rowvals))
 						(list (quote begin)
 							(list (quote define) old_sym (list (quote get_assoc) (quote acc) row_key_expr agg_neutral))
@@ -1803,7 +1834,7 @@ the compile-budget-ms requirement.
 					(list (quote lambda) map_params
 						(list (quote list)
 							(cons (quote list) lowered_groups)
-							(cons (quote list) lowered_inputs)))
+							(build_runtime_list_expr lowered_inputs)))
 					(list (quote lambda) (list (quote acc) (quote rowvals))
 						(list (quote begin)
 							(list (quote define) old_sym (list (quote get_assoc) (quote acc) row_key_expr agg_neutral))
