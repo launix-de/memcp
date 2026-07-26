@@ -506,7 +506,8 @@ Naming: synthesized name `__kt_<col>` (suffixed if collision). */
 												false name-in-derived false)
 											local-equivalent))))
 								(merge (nth acc 2)
-									(list (list (list tv col) unique-name))))))))
+									(list (list (list tv col) unique-name
+										deep-derived name-in-derived))))))))
 			acc)) (list top-tables (list) (list))))
 		(define final-tables (nth plan 0))
 		(define added-projections (nth plan 1))
@@ -563,6 +564,10 @@ when the pair (tv col) appears in rename-map. */
 					'(rtv rcol)
 					(if (and (equal? rtv tv) (equal? rcol col)) newname acc)
 					acc)
+				'(refpair newname _local_alias _local_name) (match refpair
+					'(rtv rcol)
+					(if (and (equal? rtv tv) (equal? rcol col)) newname acc)
+					acc)
 				acc)) nil))
 			(if (nil? renamed) expr
 				(list (quote get_column) to-alias false renamed false)))
@@ -573,6 +578,10 @@ when the pair (tv col) appears in rename-map. */
 					'(rtv rcol)
 					(if (and (equal? rtv tv) (equal? rcol col)) newname acc)
 					acc)
+				'(refpair newname _local_alias _local_name) (match refpair
+					'(rtv rcol)
+					(if (and (equal? rtv tv) (equal? rcol col)) newname acc)
+					acc)
 				acc)) nil))
 			(if (nil? renamed) expr
 				(list (quote get_column) to-alias false renamed false)))
@@ -580,6 +589,43 @@ when the pair (tv col) appears in rename-map. */
 		(if (list? args)
 			(cons head (map args
 				(lambda (a) (qpu-low-rewrite-by-renames a rename-map to-alias))))
+			expr)
+		_ expr)))
+
+(define qpu-low-rewrite-by-renames-local (lambda (expr rename-map)
+	(match expr
+		'((symbol get_column) tv ti col ci)
+		(begin
+			(define local-ref (reduce rename-map (lambda (acc entry) (match entry
+				'(refpair _newname local_alias local_name) (match refpair
+					'(rtv rcol)
+					(if (and (equal? rtv tv) (equal? rcol col))
+						(list local_alias local_name)
+						acc)
+					acc)
+				acc)) nil))
+			(match local-ref
+				'(local_alias local_name)
+				(list (quote get_column) local_alias false local_name false)
+				_ expr))
+		'((quote get_column) tv ti col ci)
+		(begin
+			(define local-ref (reduce rename-map (lambda (acc entry) (match entry
+				'(refpair _newname local_alias local_name) (match refpair
+					'(rtv rcol)
+					(if (and (equal? rtv tv) (equal? rcol col))
+						(list local_alias local_name)
+						acc)
+					acc)
+				acc)) nil))
+			(match local-ref
+				'(local_alias local_name)
+				(list (quote get_column) local_alias false local_name false)
+				_ expr))
+		(cons head args)
+		(if (list? args)
+			(cons head (map args
+				(lambda (a) (qpu-low-rewrite-by-renames-local a rename-map))))
 			expr)
 		_ expr)))
 
@@ -1391,14 +1437,14 @@ Phase 1 path which is simpler)
 								false
 								(match fexpr
 									'((symbol get_column) f-tv _ f-col _)
-									(if (and (equal? f-tv td-alias) (equal? f-col field-name))
+									(if (equal? f-tv td-alias)
 										(begin
 											/* Must extract at least 1 correlation column */
 											(define cc (qpu-low-corr-from-pred join-pred td-alias left-aliases))
 											(> (count cc) 0))
 										false)
 									'((quote get_column) f-tv _ f-col _)
-									(if (and (equal? f-tv td-alias) (equal? f-col field-name))
+									(if (equal? f-tv td-alias)
 										(begin
 											/* Must extract at least 1 correlation column */
 											(define cc (qpu-low-corr-from-pred join-pred td-alias left-aliases))
@@ -2619,12 +2665,27 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 			right-tuple join-pred right-source-aliases))
 		(define right-tuple-keys-raw (nth keys-result 0))
 		(define key-rename-map (nth keys-result 1))
+		(define right-tuple-keys-local
+			(if (equal? key-rename-map '())
+				right-tuple-keys-raw
+				(qpp-rebuild-tuple
+					(qpp-tuple-schema right-tuple-keys-raw)
+					(qpp-tuple-tables right-tuple-keys-raw)
+					(qpp-tuple-fields right-tuple-keys-raw)
+					(qpu-low-rewrite-by-renames-local
+						(qpp-tuple-condition right-tuple-keys-raw)
+						key-rename-map)
+					(qpp-tuple-group right-tuple-keys-raw)
+					(qpp-tuple-having right-tuple-keys-raw)
+					(qpp-tuple-order right-tuple-keys-raw)
+					(qpp-tuple-limit right-tuple-keys-raw)
+					(qpp-tuple-offset right-tuple-keys-raw))))
 		/* Join-key exposure may synthesize __kt_* boundary fields that were
 		not visible to the earlier LIMIT pass. Re-run the wrapper here so
 		nested scalar LIMITs become per-domain, not global. */
 		(define right-tuple-keys-limited
 			(qpu-low-wrap-limit-with-rownumber
-				right-tuple-keys-raw join-pred inline-rename-map))
+				right-tuple-keys-local join-pred inline-rename-map))
 		/* For UNCORRELATED sq_*-aliased scalar derived: tag the inner base
 		table with scan-tagged-table once_limit=2 so multi-row inner scans
 		error per FAQ §20. CORRELATED scalars: tried partition-tagging in
@@ -2664,11 +2725,12 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 		(define right-kt-inner-cols
 			(qpu-low-kt-partition-cols-from-fields
 				(qpp-tuple-fields right-tuple-keys-limited)))
-		(define scalar-dropped-limit-candidate
-			(and is-scalar-rhs
-				(or
-					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-raw)
-					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-raw)
+			(define scalar-dropped-limit-candidate
+				(and is-scalar-rhs
+					(equal? (count (qpp-tuple-tables right-tuple-keys-limited)) 1)
+					(or
+						(qpu-low-tuple-has-dropped-limit-marker? right-tuple-raw)
+						(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-raw)
 					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-limited)
 					right-had-dropped-limit-marker)
 				(nil? (qpp-tuple-limit right-tuple-raw))
@@ -2678,23 +2740,16 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				(not (qpu-low-tuple-has-limit-stage? right-tuple-keys-limited))
 				(equal? right-tuple-keys-limited right-tuple-keys-raw)
 				(> (count right-kt-inner-cols) 0)))
-		(define right-tuple-keys
-			(if scalar-dropped-limit-candidate
-				(if (equal? (count (qpp-tuple-tables right-tuple-keys-limited)) 1)
+			(define right-tuple-keys
+				(if scalar-dropped-limit-candidate
 					(qpu-low-tag-inner-limit-contract right-tuple-keys-limited 1 1)
-					(qpu-low-wrap-derived-partition-owner
-						right-tuple-keys-limited
-						(qpp-tuple-tables right-tuple-keys-limited)
-						right-kt-inner-cols
-						nil nil nil nil nil
-						1 1))
-				(if scalar-no-limit-candidate
-					(if (> (count right-kt-inner-cols) 0)
-							(qpu-low-add-scalar-once-marker
+					(if scalar-no-limit-candidate
+						(if (> (count right-kt-inner-cols) 0)
+								(qpu-low-add-scalar-once-marker
+								(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
 							(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
-						(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
-					right-tuple-keys-limited)))
-		(define rewritten-fields (qpu-low-rewrite-projections
+						right-tuple-keys-limited)))
+			(define rewritten-fields (qpu-low-rewrite-projections
 			(qpp-tuple-fields left-tuple) right-only-aliases rhs-alias))
 		(define rewritten-cond (qpu-low-rewrite-refs
 			(qpp-tuple-condition left-tuple) right-only-aliases rhs-alias))

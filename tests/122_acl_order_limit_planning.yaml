@@ -1,0 +1,139 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+
+metadata:
+  version: "1.0"
+  description: "ACL-style correlated helpers stay keytable-backed under ordered limits"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS aol_doc"
+  - sql: "DROP TABLE IF EXISTS aol_site"
+  - sql: "DROP TABLE IF EXISTS aol_tenant"
+  - sql: "DROP TABLE IF EXISTS aol_user_tenant"
+  - sql: "CREATE TABLE aol_tenant (ID INT PRIMARY KEY, name VARCHAR(64))"
+  - sql: "CREATE TABLE aol_site (ID INT PRIMARY KEY, tenant INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE aol_doc (ID INT PRIMARY KEY, site INT, year INT, title VARCHAR(64))"
+  - sql: "CREATE TABLE aol_user_tenant (user_id INT, tenant INT)"
+  - sql: "INSERT INTO aol_tenant VALUES (1, 'north'), (2, 'south'), (3, 'west')"
+  - sql: "INSERT INTO aol_site VALUES (10, 1, 'alpha'), (20, 2, 'beta'), (30, 3, 'gamma')"
+  - sql: "INSERT INTO aol_doc VALUES (1, 10, 2026, 'a'), (2, 20, 2025, 'b'), (3, 30, 2024, 'c'), (4, 10, 2023, 'd')"
+  - sql: "INSERT INTO aol_user_tenant VALUES (105, 1), (105, 2), (777, 3)"
+  - sql: "SET @aol_user := 105"
+
+test_cases:
+  - name: "correlated scalar lookup returns tenant"
+    sql: |
+      SELECT d.ID,
+        (SELECT s.tenant
+         FROM aol_site s
+         WHERE s.ID = d.site) AS tenant_id
+      FROM aol_doc d
+      ORDER BY d.ID
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          tenant_id: 1
+        - ID: 2
+          tenant_id: 2
+        - ID: 3
+          tenant_id: 3
+        - ID: 4
+          tenant_id: 1
+
+  - name: "nested scalar lookup with EXISTS returns visibility"
+    sql: |
+      SELECT d.ID,
+        COALESCE((
+          SELECT EXISTS (
+            SELECT 1
+            FROM aol_user_tenant ut
+            WHERE ut.user_id = 105
+              AND ut.tenant = t.ID
+          )
+          FROM aol_tenant t
+          WHERE t.ID = (
+            SELECT s.tenant
+            FROM aol_site s
+            WHERE s.ID = d.site
+          )
+        ), FALSE) AS can_view
+      FROM aol_doc d
+      ORDER BY d.ID
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          can_view: true
+        - ID: 2
+          can_view: true
+        - ID: 3
+          can_view: false
+        - ID: 4
+          can_view: true
+
+  - name: "ordered ACL list computes visibility after limit"
+    sql: |
+      SELECT d.ID, d.year,
+        COALESCE((
+          SELECT EXISTS (
+            SELECT 1
+          FROM aol_user_tenant ut
+          WHERE ut.user_id = 105
+            AND ut.tenant = t.ID
+        )
+        FROM aol_tenant t
+        JOIN aol_site s ON s.tenant = t.ID
+        WHERE s.ID = d.site
+        ), FALSE) AS can_view
+      FROM aol_doc d
+      WHERE d.ID IS NOT NULL
+      ORDER BY d.year DESC, d.site ASC
+      LIMIT 4
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          year: 2026
+          can_view: true
+        - ID: 2
+          year: 2025
+          can_view: true
+        - ID: 3
+          year: 2024
+          can_view: false
+        - ID: 4
+          year: 2023
+          can_view: true
+
+  - name: "EXPLAIN ACL helper avoids full prejoin materialization"
+    sql: |
+      EXPLAIN
+      SELECT d.ID, d.year,
+        COALESCE((
+          SELECT EXISTS (
+            SELECT 1
+          FROM aol_user_tenant ut
+          WHERE ut.user_id = 105
+            AND ut.tenant = t.ID
+        )
+        FROM aol_tenant t
+        JOIN aol_site s ON s.tenant = t.ID
+        WHERE s.ID = d.site
+        ), FALSE) AS can_view
+      FROM aol_doc d
+      WHERE d.ID IS NOT NULL
+      ORDER BY d.year DESC, d.site ASC
+      LIMIT 4
+    expect:
+      contains:
+        - "scan_order"
+        - "createcolumn"
+      not_contains:
+        - ".prejoin:"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS aol_doc"
+  - sql: "DROP TABLE IF EXISTS aol_site"
+  - sql: "DROP TABLE IF EXISTS aol_tenant"
+  - sql: "DROP TABLE IF EXISTS aol_user_tenant"

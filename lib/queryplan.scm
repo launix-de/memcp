@@ -539,32 +539,35 @@ build_scan can lower scalar subselects without extra once-limit stages. */
 	'((quote scan-tagged-table) _ _ _ _ _ _ outer_sources) (coalesceNil outer_sources '())
 	'()
 )))
-(define scan_tagged_table_with_outer_sources (lambda (tbl outer_sources)
-	(if (or (nil? outer_sources) (equal? outer_sources '()))
-		tbl
-		(match tbl
-			'(unnest_helper_table schema_name base helper_kind)
-			(make_unnest_helper_table schema_name
-				(scan_tagged_table_with_outer_sources base outer_sources)
+	(define scan_tagged_table_with_outer_sources (lambda (tbl outer_sources)
+		(if (or (nil? outer_sources) (equal? outer_sources '()))
+			tbl
+			(match tbl
+				'((symbol scan-tagged-table) base order limit offset partition_cols once_limit)
+				(make_scan_tagged_table_parts base order limit offset partition_cols once_limit outer_sources)
+				'((quote scan-tagged-table) base order limit offset partition_cols once_limit)
+				(make_scan_tagged_table_parts base order limit offset partition_cols once_limit outer_sources)
+				'((symbol scan-tagged-table) base order limit offset partition_cols once_limit old_outer_sources)
+				(make_scan_tagged_table_parts base order limit offset partition_cols once_limit
+					(merge_unique (coalesceNil old_outer_sources '()) outer_sources))
+				'((quote scan-tagged-table) base order limit offset partition_cols once_limit old_outer_sources)
+				(make_scan_tagged_table_parts base order limit offset partition_cols once_limit
+					(merge_unique (coalesceNil old_outer_sources '()) outer_sources))
+				'(unnest_helper_table schema_name base helper_kind)
+				(make_unnest_helper_table schema_name
+					(scan_tagged_table_with_outer_sources base outer_sources)
 				helper_kind)
 			'((symbol unnest_helper_table) schema_name base helper_kind)
 			(make_unnest_helper_table schema_name
 				(scan_tagged_table_with_outer_sources base outer_sources)
 				helper_kind)
-			'((quote unnest_helper_table) schema_name base helper_kind)
-			(make_unnest_helper_table schema_name
-				(scan_tagged_table_with_outer_sources base outer_sources)
-				helper_kind)
-			_
-			(make_scan_tagged_table_parts
-				(scan_tagged_table_base tbl)
-				(scan_tagged_table_order tbl)
-				(scan_tagged_table_limit tbl)
-				(scan_tagged_table_offset tbl)
-				(scan_tagged_table_partition_cols tbl)
-				(scan_tagged_table_once_limit tbl)
-				outer_sources))
-)))
+				'((quote unnest_helper_table) schema_name base helper_kind)
+				(make_unnest_helper_table schema_name
+					(scan_tagged_table_with_outer_sources base outer_sources)
+					helper_kind)
+				_
+				tbl)
+	)))
 (define scan_tagged_table_needs_scan_order (lambda (tbl)
 	(or (not (equal? (scan_tagged_table_order tbl) '()))
 		(not (nil? (scan_tagged_table_limit tbl)))
@@ -5220,21 +5223,21 @@ seeing the correctly prefixed outer alias. */
 									_ (if (list? args)
 										(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 										expr))
-								(quote inner_select_exists) (match args
-									(cons subquery '())
-									(coalesce
-										(union_exists_expr subquery false)
-										(if (or
-											(dependent_marker_required_subquery subquery outer_schemas)
-											(subquery_has_outer_refs subquery outer_schemas))
+									(quote inner_select_exists) (match args
+										(cons subquery '())
+										(coalesce
+											(union_exists_expr subquery false)
+											(if (or
+												(dependent_marker_required_subquery subquery outer_schemas)
+												(subquery_has_outer_refs subquery outer_schemas))
 											(build_dependent_scalar_via_marker
-												(quote inner_select_exists)
-												subquery
-												nil
-												outer_schemas)
-											nil)
-										(unnest_count_subselect subquery outer_schemas nil (quote >))
-										(build_exists_subselect subquery outer_schemas))
+													(quote inner_select_exists)
+													subquery
+													nil
+													outer_schemas)
+												nil)
+											(unnest_count_subselect subquery outer_schemas nil (quote >))
+											(build_exists_subselect subquery outer_schemas))
 									_ (if (list? args)
 										(cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 										expr))
@@ -5896,40 +5899,34 @@ seeing the correctly prefixed outer alias. */
 						(match args
 							(cons subquery '())
 							(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
-								(if (subquery_has_local_ordering subquery)
-									(list sym
-										(dependent_join_helper_rewrite_query_for_domain_source
-											dep_info
-											subquery
-											domain_cols))
-									(cons sym (map args rewrite_independent_inner_selects)))
+								(list sym
+									(dependent_join_helper_rewrite_query_for_domain_source
+										dep_info
+										subquery
+										domain_cols))
 								(replace_inner_selects node dep_nested_outer_schemas))
 							_ node)
 						(quote inner_select_exists)
 						(match args
 							(cons subquery '())
 							(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
-								(if (subquery_has_local_ordering subquery)
-									(list sym
-										(dependent_join_helper_rewrite_query_for_domain_source
-											dep_info
-											subquery
-											domain_cols))
-									(cons sym (map args rewrite_independent_inner_selects)))
+								(list sym
+									(dependent_join_helper_rewrite_query_for_domain_source
+										dep_info
+										subquery
+										domain_cols))
 								(replace_inner_selects node dep_nested_outer_schemas))
 							_ node)
 						(quote inner_select_in)
 						(match args
 							(cons target_expr (cons subquery '()))
 							(if (dependent_marker_required_subquery subquery dep_nested_outer_schemas)
-								(if (subquery_has_local_ordering subquery)
-									(list sym
-										(rewrite_independent_inner_selects target_expr)
-										(dependent_join_helper_rewrite_query_for_domain_source
-											dep_info
-											subquery
-											domain_cols))
-									(cons sym (map args rewrite_independent_inner_selects)))
+								(list sym
+									(rewrite_independent_inner_selects target_expr)
+									(dependent_join_helper_rewrite_query_for_domain_source
+										dep_info
+										subquery
+										domain_cols))
 								(replace_inner_selects
 									(list sym (rewrite_independent_inner_selects target_expr) subquery)
 									dep_nested_outer_schemas))
@@ -6455,13 +6452,79 @@ seeing the correctly prefixed outer alias. */
 						_ nil)
 					nil)
 				_ nil)))))
+	(define dependent_join_helper_simple_scalar_equality_join_parts (lambda (term current_tables) (begin
+		(define eq_parts (match term
+			'((quote equal??) left right) (list left right)
+			'((symbol equal??) left right) (list left right)
+			'((quote =) left right) (list left right)
+			'((symbol =) left right) (list left right)
+			'((quote sql_truthy) inner) (dependent_join_helper_simple_scalar_equality_join_parts inner current_tables)
+			'((symbol sql_truthy) inner) (dependent_join_helper_simple_scalar_equality_join_parts inner current_tables)
+			_ nil))
+		(if (nil? eq_parts)
+			nil
+			(begin
+				(define left_expr (nth eq_parts 0))
+				(define right_expr (nth eq_parts 1))
+				(define scalar_side (lambda (expr other_expr)
+					(match expr
+						(cons scalar_sym scalar_args)
+						(if (equal?? (inner_select_kind scalar_sym) (quote inner_select))
+							(match scalar_args
+								(cons scalar_subquery '())
+								(list scalar_subquery other_expr)
+								_ nil)
+							nil)
+						_ nil)))
+				(match (coalesce
+					(scalar_side left_expr right_expr)
+					(scalar_side right_expr left_expr))
+					'(scalar_subquery target_expr)
+					(match scalar_subquery
+						'(sj_schema sj_tables sj_fields sj_condition sj_group sj_having sj_order sj_limit sj_offset)
+						(begin
+							(define first_field_expr (match sj_fields
+								(cons _ (cons v _)) v
+								nil))
+							(define current_aliases (dependent_join_helper_table_aliases current_tables))
+							(define sj_aliases (dependent_join_helper_table_aliases sj_tables))
+							(define local_aliases (merge_unique current_aliases sj_aliases))
+							(if (and
+								(not (nil? first_field_expr))
+								(not (equal? sj_tables '()))
+								(dependent_join_helper_aliases_disjoint current_aliases sj_aliases)
+								(or (nil? sj_group) (equal? sj_group '()))
+								(or (nil? sj_having) (equal? sj_having true))
+								(or (nil? sj_order) (equal? sj_order '()))
+								(or (nil? sj_limit) (equal? sj_limit 1))
+								(or (nil? sj_offset) (equal? sj_offset 0))
+								(equal? (extract_aggregates first_field_expr) '())
+								(not (contains_inner_select_marker first_field_expr))
+								(not (contains_inner_select_marker sj_condition)))
+								(begin
+									(define localized_field
+										(dependent_join_helper_localize_outer_expr first_field_expr local_aliases))
+									(define localized_target
+										(dependent_join_helper_localize_outer_expr target_expr local_aliases))
+									(define localized_condition
+										(dependent_join_helper_localize_outer_expr
+											(coalesceNil sj_condition true)
+											local_aliases))
+									(list sj_tables
+										(combine_and_terms (list
+											localized_condition
+											(list (quote equal??) localized_field localized_target)))))
+								nil))
+						_ nil)
+					_ nil))))))
 	(define dependent_join_helper_pull_simple_semijoins (lambda (dep_tables dep_condition)
 		(reduce (flatten_and_terms (coalesceNil dep_condition true)) (lambda (state term)
 			(match state
 				'(tables_acc terms_acc)
 				(match (coalesce
 					(dependent_join_helper_simple_semijoin_join_parts term tables_acc)
-					(dependent_join_helper_simple_scalar_bool_join_parts term tables_acc))
+					(dependent_join_helper_simple_scalar_bool_join_parts term tables_acc)
+					(dependent_join_helper_simple_scalar_equality_join_parts term tables_acc))
 					'(sj_tables sj_condition)
 					(list
 						(merge tables_acc sj_tables)
