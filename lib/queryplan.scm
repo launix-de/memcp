@@ -758,7 +758,7 @@ the compile-budget-ms requirement.
 (define untangle_zero_domain_exists (lambda (subquery)
 	(if (select_ast_zero_domain? subquery)
 		(untangle_expr_subqueries (select_ast_condition subquery))
-		(neumann_fail "untangle_query" "correlated EXISTS unnesting not ported yet"))))
+		(list (quote neumann_exists) (untangle_query_term subquery nil)))))
 
 (define untangle_zero_domain_in (lambda (value subquery)
 	(if (select_ast_zero_domain? subquery)
@@ -825,9 +825,41 @@ the compile-budget-ms requirement.
 		(untangle_query schema tables fields condition nil nil order limit offset nil)
 		(list kind target_table target_alias fields))))
 
+(define untangle_union_term (lambda (kind branches order limit offset outer_schemas)
+	(begin
+		(define child_irs (map (coalesceNil branches '()) (lambda (branch)
+			(untangle_query_term branch outer_schemas))))
+		(qir (quote select) nil
+			(qnode (quote union)
+				(concat "union:" (sha1 (string branches)))
+				(list
+					(list (quote union-kind) kind)
+					(list (quote order) (coalesceNil order '()))
+					(list (quote limit) limit)
+					(list (quote offset) offset))
+				(map child_irs ir_root)
+				(list
+					(list (quote aliases) '())
+					(list (quote cardinality) (quote unknown))))
+			(quote rows)
+			(initial_uctx outer_schemas)
+			(list (list (quote union-branches) child_irs))))))
+
 (define untangle_query_term (lambda (query outer_schemas) (match query
 	'(schema tables fields condition group having order limit offset)
 	(untangle_query schema tables fields condition group having order limit offset outer_schemas)
+	'(union_all branches order limit offset)
+	(untangle_union_term (quote all) branches order limit offset outer_schemas)
+	'((symbol union_all) branches order limit offset)
+	(untangle_union_term (quote all) branches order limit offset outer_schemas)
+	'((quote union_all) branches order limit offset)
+	(untangle_union_term (quote all) branches order limit offset outer_schemas)
+	'(union_distinct branches order limit offset)
+	(untangle_union_term (quote distinct) branches order limit offset outer_schemas)
+	'((symbol union_distinct) branches order limit offset)
+	(untangle_union_term (quote distinct) branches order limit offset outer_schemas)
+	'((quote union_distinct) branches order limit offset)
+	(untangle_union_term (quote distinct) branches order limit offset outer_schemas)
 	_ (neumann_fail "untangle_query_term" "query term kind not ported yet"))))
 
 /* ------------------------------------------------------------------------- */
@@ -844,6 +876,8 @@ the compile-budget-ms requirement.
 	'((quote neumann_scalar) ir) (lower_scalar_ir_with_specs ir outer_specs)
 	'((symbol neumann_in) value ir) (lower_in_ir_with_specs value ir outer_specs)
 	'((quote neumann_in) value ir) (lower_in_ir_with_specs value ir outer_specs)
+	'((symbol neumann_exists) ir) (lower_exists_ir_with_specs ir outer_specs)
+	'((quote neumann_exists) ir) (lower_exists_ir_with_specs ir outer_specs)
 	(cons sym args) (cons (lower_embedded_scalars_with_specs sym outer_specs)
 		(map args (lambda (arg) (lower_embedded_scalars_with_specs arg outer_specs))))
 	expr)))
@@ -1047,6 +1081,8 @@ the compile-budget-ms requirement.
 	'((quote neumann_in) value ir) (dedupe_list (merge (list
 		(expr_outer_columns_for_scan value scan_node)
 		(ir_outer_columns_for_scan ir scan_node))))
+	'((symbol neumann_exists) ir) (ir_outer_columns_for_scan ir scan_node)
+	'((quote neumann_exists) ir) (ir_outer_columns_for_scan ir scan_node)
 	(cons sym args) (dedupe_list (merge
 		(list
 			(expr_outer_columns_for_scan sym scan_node)
@@ -1086,6 +1122,8 @@ the compile-budget-ms requirement.
 	'((quote neumann_in) value ir) (dedupe_list (merge (list
 		(scan_expr_columns value scan_node)
 		(ir_outer_columns_for_scan ir scan_node))))
+	'((symbol neumann_exists) ir) (ir_outer_columns_for_scan ir scan_node)
+	'((quote neumann_exists) ir) (ir_outer_columns_for_scan ir scan_node)
 	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (scan_expr_columns arg scan_node)))))
 	'())))
 
@@ -1108,6 +1146,8 @@ the compile-budget-ms requirement.
 	'((quote neumann_scalar) _ir) expr
 	'((symbol neumann_in) value ir) (list (quote neumann_in) (lower_scan_expr value scan_node) ir)
 	'((quote neumann_in) value ir) (list (quote neumann_in) (lower_scan_expr value scan_node) ir)
+	'((symbol neumann_exists) _ir) expr
+	'((quote neumann_exists) _ir) expr
 	(cons sym args) (cons sym (map args (lambda (arg) (lower_scan_expr arg scan_node))))
 	expr)))
 
@@ -1141,6 +1181,8 @@ the compile-budget-ms requirement.
 	'((quote neumann_scalar) _ir) (lower_embedded_scalars_with_specs expr specs)
 	'((symbol neumann_in) _value _ir) (lower_embedded_scalars_with_specs expr specs)
 	'((quote neumann_in) _value _ir) (lower_embedded_scalars_with_specs expr specs)
+	'((symbol neumann_exists) _ir) (lower_embedded_scalars_with_specs expr specs)
+	'((quote neumann_exists) _ir) (lower_embedded_scalars_with_specs expr specs)
 	(cons sym args) (cons sym (map args (lambda (arg) (lower_expr_for_specs arg specs))))
 	expr)))
 
@@ -1163,6 +1205,8 @@ the compile-budget-ms requirement.
 	'((quote neumann_in) value ir) (dedupe_list (merge (list
 		(expr_columns_for_spec value spec specs)
 		(ir_outer_columns_for_scan ir (spec_node spec)))))
+	'((symbol neumann_exists) ir) (ir_outer_columns_for_scan ir (spec_node spec))
+	'((quote neumann_exists) ir) (ir_outer_columns_for_scan ir (spec_node spec))
 	(cons sym args) (dedupe_list (merge (map args (lambda (arg) (expr_columns_for_spec arg spec specs)))))
 	'())))
 
@@ -1352,6 +1396,59 @@ the compile-budget-ms requirement.
 				(quote project) (lower_in_project_values (ir_root ir))
 				_ (neumann_fail "build_queryplan" "IN IR root must be project"))
 			(lower_expr_for_specs value outer_specs)))))
+
+(define lower_exists_scan (lambda (scan_node predicate outer_specs)
+	(begin
+		(define alias (qid scan_node))
+		(define schema (qattr scan_node (quote schema) nil))
+		(define tbl (qattr scan_node (quote table) nil))
+		(define lowered_predicate (lower_embedded_scalars_with_specs
+			(lower_expr_for_specs (lower_scan_expr (coalesceNil predicate true) scan_node) outer_specs)
+			outer_specs))
+		(define filtercols (scan_expr_columns predicate scan_node))
+		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(list (quote table) schema tbl)
+			(cons (quote list) filtercols)
+			(list (quote lambda) filter_params lowered_predicate)
+			(cons (quote list) filtercols)
+			(list (quote lambda) filter_params true)
+			(list (quote lambda) (list (quote acc) (quote value))
+				(list (quote or) (quote acc) (quote value)))
+			false
+			(list (quote lambda) (list (quote acc) (quote shard_value))
+				(list (quote or) (quote acc) (quote shard_value)))
+			false))))
+
+(define lower_exists_project (lambda (project_node outer_specs)
+	(match (qchildren project_node)
+		(cons child '()) (match (qop child)
+			(quote scan) (lower_exists_scan child true outer_specs)
+			(quote select) (match (qchildren child)
+				(cons grandchild '()) (if (equal? (qop grandchild) (quote scan))
+					(lower_exists_scan grandchild (qattr child (quote predicate) true) outer_specs)
+					(neumann_fail "build_queryplan" "EXISTS/select lowerer only supports scan input yet"))
+				_ (neumann_fail "build_queryplan" "select expects one child"))
+			_ (neumann_fail "build_queryplan" "EXISTS lowerer only supports scan input yet"))
+		_ (neumann_fail "build_queryplan" "EXISTS project expects one child"))))
+
+(define lower_exists_union (lambda (union_node outer_specs)
+	(reduce (qchildren union_node) (lambda (acc branch)
+		(list (quote or)
+			acc
+			(match (qop branch)
+				(quote project) (lower_exists_project branch outer_specs)
+				_ (neumann_fail "build_queryplan" "EXISTS union branch must be project"))))
+		false)))
+
+(define lower_exists_ir_with_specs (lambda (ir outer_specs)
+	(begin
+		(require_unnested_ir "build_queryplan EXISTS subquery" ir)
+		(match (qop (ir_root ir))
+			(quote project) (lower_exists_project (ir_root ir) outer_specs)
+			(quote union) (lower_exists_union (ir_root ir) outer_specs)
+			_ (neumann_fail "build_queryplan" "EXISTS IR root must be project or union")))))
 
 (define lower_scalar_scan (lambda (project_node scan_node predicate order_node outer_specs)
 	(begin
