@@ -1222,6 +1222,31 @@ the compile-budget-ms requirement.
 		(map args (lambda (arg) (replace_window_refs arg windows row_sym))))
 	expr)))
 
+(define replace_scan_window_refs_with_outer (lambda (expr windows row_sym scan_node outer_specs) (match expr
+	'((symbol window_func) _fn _args _over) (begin
+		(define idx (window_index_of windows expr 0))
+		(if (nil? idx)
+			(neumann_fail "build_queryplan" "unknown window expression")
+			(list (quote get_assoc) row_sym (concat "__win_" (string idx)))))
+	'((quote window_func) _fn _args _over) (begin
+		(define idx (window_index_of windows expr 0))
+		(if (nil? idx)
+			(neumann_fail "build_queryplan" "unknown window expression")
+			(list (quote get_assoc) row_sym (concat "__win_" (string idx)))))
+	'((symbol get_column) tbl _ col ci) (if (or
+			(equal?? tbl (qid scan_node))
+			(and (nil? tbl) (column_in_list? (scan_schema_columns scan_node) col ci)))
+		(list (quote get_assoc) row_sym (require_scan_column scan_node col ci))
+		(lower_expr_for_specs expr outer_specs))
+	'((quote get_column) tbl _ col ci) (if (or
+			(equal?? tbl (qid scan_node))
+			(and (nil? tbl) (column_in_list? (scan_schema_columns scan_node) col ci)))
+		(list (quote get_assoc) row_sym (require_scan_column scan_node col ci))
+		(lower_expr_for_specs expr outer_specs))
+	(cons sym args) (cons (replace_scan_window_refs_with_outer sym windows row_sym scan_node outer_specs)
+		(map args (lambda (arg) (replace_scan_window_refs_with_outer arg windows row_sym scan_node outer_specs))))
+	expr)))
+
 (define same_partition_expr (lambda (left_sym right_sym part_keys)
 	(if (equal? part_keys '())
 		true
@@ -1247,6 +1272,15 @@ the compile-budget-ms requirement.
 	(match (cdr (window_args wf))
 		(cons offset _rest) offset
 		'() 1)))
+
+(define group_concat_step_expr (lambda (acc_expr val_expr sep_expr)
+	(list (quote if)
+		(list (quote nil?) val_expr)
+		acc_expr
+		(list (quote if)
+			(list (quote nil?) acc_expr)
+			val_expr
+			(list (quote concat) acc_expr sep_expr val_expr)))))
 
 (define window_aggregate_value_expr (lambda (fn val_expr)
 	(match fn
@@ -1276,6 +1310,15 @@ the compile-budget-ms requirement.
 		(define prev_sym (symbol "__window_prev"))
 		(define key_sym (symbol "__window_key"))
 		(define val_expr (window_arg_expr wf target_sym))
+		(define sep_expr (match (cdr (window_args wf))
+			(cons sep _rest) (replace_window_refs sep '() target_sym)
+			'() ","))
+		(define running_rows_expr (if (equal? order_keys '())
+			rows_sym
+			(list (quote map)
+				(list (quote produceN) (list (quote +) idx_sym 1))
+				(list (quote lambda) (list (quote i))
+					(list (quote nth) rows_sym (quote i))))))
 		(define target_idx (if (equal?? fn "LAG")
 			(list (quote -) idx_sym (window_offset_expr wf))
 			(list (quote +) idx_sym (window_offset_expr wf))))
@@ -1354,6 +1397,12 @@ the compile-budget-ms requirement.
 					(list (quote equal?) (list (quote nth) prev_sym 1) 0)
 					nil
 					(list (quote /) (list (quote nth) prev_sym 0) (list (quote nth) prev_sym 1))))
+			"GROUP_CONCAT" (list (quote reduce) running_rows_expr
+				(list (quote lambda) (list (quote acc) target_sym)
+					(list (quote if) (same_partition_expr row_sym target_sym part_keys)
+						(group_concat_step_expr (quote acc) val_expr sep_expr)
+						(quote acc)))
+				nil)
 			_ (list (quote reduce) rows_sym
 				(list (quote lambda) (list (quote acc) target_sym)
 					(list (quote if) (same_partition_expr row_sym target_sym part_keys)
@@ -1616,10 +1665,12 @@ the compile-budget-ms requirement.
 				windows)
 			'() '()))))
 
-(define lower_project_scan_window_rows (lambda (project_node scan_node predicate order_node)
+(define lower_project_scan_window_rows_with_outer (lambda (project_node scan_node predicate order_node outer_specs)
 	(begin
 		(define fields (qattr project_node (quote output-fields) '()))
-		(define windows (window_validate fields predicate order_node))
+		(define windows (begin
+			(window_validate fields predicate order_node)
+			(fields_or_expr_windows fields predicate)))
 		(define alias (qid scan_node))
 		(define first_wf (car windows))
 		(define partition (window_partition first_wf))
@@ -1671,10 +1722,10 @@ the compile-budget-ms requirement.
 		(define outer_sort_keys (order_key_dirs outer_order_keys (scan_order_dirs outer_order)))
 		(define final_fields (merge
 			(map_assoc fields (lambda (_key expr)
-				(replace_window_refs expr windows row_sym)))
+				(replace_scan_window_refs_with_outer expr windows row_sym scan_node outer_specs)))
 			(map_assoc outer_order_fields (lambda (_key expr)
-				(replace_window_refs expr windows row_sym)))))
-		(define final_predicate (replace_window_refs (coalesceNil predicate true) windows row_sym))
+				(replace_scan_window_refs_with_outer expr windows row_sym scan_node outer_specs)))))
+		(define final_predicate (replace_scan_window_refs_with_outer (coalesceNil predicate true) windows row_sym scan_node outer_specs))
 		(list (quote begin)
 			(list (quote define) input_rows_sym (lower_project_scan_rows input_project scan_node true nil))
 			(list (quote define) sorted_rows_sym
@@ -1710,6 +1761,9 @@ the compile-budget-ms requirement.
 				(list (quote lambda) (list out_row_sym)
 					(row_project_expr fields out_row_sym)))))))
 
+(define lower_project_scan_window_rows (lambda (project_node scan_node predicate order_node)
+	(lower_project_scan_window_rows_with_outer project_node scan_node predicate order_node '())))
+
 (define lower_project_scan_window (lambda (project_node scan_node predicate order_node)
 	(begin
 		(define rows_sym (symbol (concat "__neumann_window_emit_" (sha1 (string project_node)))))
@@ -1719,6 +1773,236 @@ the compile-budget-ms requirement.
 			(list (quote map) rows_sym
 				(list (quote lambda) (list row_sym)
 					(list (quote resultrow) row_sym)))))))
+
+(define fields_or_expr_windows (lambda (fields expr)
+	(dedupe_list (merge (list
+		(collect_field_windows fields)
+		(collect_window_funcs (coalesceNil expr true)))))))
+
+(define has_fields_or_expr_windows? (lambda (fields expr)
+	(not (equal? (fields_or_expr_windows fields expr) '()))))
+
+(define specs_windows (lambda (specs)
+	(dedupe_list (merge (map specs (lambda (spec)
+		(collect_window_funcs (spec_predicate spec))))))))
+
+(define specs_without_window_predicates (lambda (specs windows)
+	(begin
+		(define window_aliases (windows_table_refs windows))
+		(map specs (lambda (spec)
+			(if (and
+					(equal? (collect_window_funcs (spec_predicate spec)) '())
+					(not (contains? window_aliases (qid (spec_node spec)))))
+			spec
+			(list (spec_node spec) (spec_outer? spec) true)))))))
+
+(define specs_window_predicate (lambda (specs windows)
+	(begin
+		(define window_aliases (windows_table_refs windows))
+		(reduce specs (lambda (acc spec)
+			(if (and
+					(equal? (collect_window_funcs (spec_predicate spec)) '())
+					(not (contains? window_aliases (qid (spec_node spec)))))
+			acc
+			(combine_and acc (spec_predicate spec))))
+		true))))
+
+(define expr_table_refs (lambda (expr) (match expr
+	'((symbol get_column) tbl _ _ _) (if (nil? tbl) '() (list tbl))
+	'((quote get_column) tbl _ _ _) (if (nil? tbl) '() (list tbl))
+	(cons sym args) (dedupe_list (merge (list
+		(expr_table_refs sym)
+		(dedupe_list (merge (map args expr_table_refs))))))
+	'())))
+
+(define window_table_refs (lambda (wf)
+	(dedupe_list (merge (list
+		(dedupe_list (merge (map (window_args wf) expr_table_refs)))
+		(dedupe_list (merge (map (window_partition wf) expr_table_refs)))
+		(dedupe_list (merge (map (order_exprs (window_order wf)) expr_table_refs))))))))
+
+(define windows_table_refs (lambda (windows)
+	(dedupe_list (merge (map windows window_table_refs)))))
+
+(define non_window_domain_keys (lambda (specs windows)
+	(begin
+		(define window_aliases (windows_table_refs windows))
+		(dedupe_list (merge (map specs (lambda (spec) (begin
+			(define node (spec_node spec))
+			(define alias (qid node))
+			(if (contains? window_aliases alias)
+				'()
+				(map (scan_schema_columns node) (lambda (col) (concat alias "." col))))))))))))
+
+(define window_outer_preserved? (lambda (specs windows)
+	(begin
+		(define window_aliases (windows_table_refs windows))
+		(reduce specs (lambda (found spec)
+			(or found
+				(and
+					(spec_outer? spec)
+					(contains? window_aliases (qid (spec_node spec))))))
+			false))))
+
+(define null_window_alias_row_expr (lambda (row_expr specs windows partition order_exprs)
+	(begin
+		(define window_aliases (windows_table_refs windows))
+		(define alias_null_keys
+			(dedupe_list (merge (map specs (lambda (spec) (begin
+				(define node (spec_node spec))
+				(define alias (qid node))
+				(if (contains? window_aliases alias)
+					(map (scan_schema_columns node) (lambda (col) (concat alias "." col)))
+					'())))))))
+		(define null_keys (merge (list
+			alias_null_keys
+			(window_key_names "__win_" (count windows))
+			(window_key_names "__win_part_" (count partition))
+			(window_key_names "__win_order_" (count order_exprs)))))
+		(reduce null_keys (lambda (acc key)
+			(list (quote set_assoc) acc key nil))
+			row_expr))))
+
+(define join_source_col_fields_for_spec (lambda (spec)
+	(begin
+		(define node (spec_node spec))
+		(define alias (qid node))
+		(merge (map (scan_schema_columns node) (lambda (col)
+			(list (concat alias "." col) (list (quote get_column) alias false col false))))))))
+
+(define join_source_col_fields (lambda (specs)
+	(dedupe_list (merge (map specs join_source_col_fields_for_spec)))))
+
+(define replace_window_refs_for_specs (lambda (expr windows row_sym specs) (match expr
+	'((symbol window_func) _fn _args _over) (begin
+		(define idx (window_index_of windows expr 0))
+		(if (nil? idx)
+			(neumann_fail "build_queryplan" "unknown window expression")
+			(list (quote get_assoc) row_sym (concat "__win_" (string idx)))))
+	'((quote window_func) _fn _args _over) (begin
+		(define idx (window_index_of windows expr 0))
+		(if (nil? idx)
+			(neumann_fail "build_queryplan" "unknown window expression")
+			(list (quote get_assoc) row_sym (concat "__win_" (string idx)))))
+	'((symbol get_column) tbl _ col ci) (begin
+		(define aliases (specs_aliases specs))
+		(define target_alias (if (nil? tbl) (car aliases) tbl))
+		(list (quote get_assoc) row_sym (concat target_alias "." col)))
+	'((quote get_column) tbl _ col ci) (begin
+		(define aliases (specs_aliases specs))
+		(define target_alias (if (nil? tbl) (car aliases) tbl))
+		(list (quote get_assoc) row_sym (concat target_alias "." col)))
+	(cons sym args) (cons (replace_window_refs_for_specs sym windows row_sym specs)
+		(map args (lambda (arg) (replace_window_refs_for_specs arg windows row_sym specs))))
+	expr)))
+
+(define lower_window_value_expr_for_specs (lambda (wf idx_sym rows_sym row_sym part_keys order_keys specs)
+	(begin
+		(define fn (window_fn wf))
+		(define target_sym (symbol "__window_target"))
+		(define prev_sym (symbol "__window_prev"))
+		(define key_sym (symbol "__window_key"))
+		(define val_expr (match (window_args wf)
+			(cons arg _rest) (replace_window_refs_for_specs arg '() target_sym specs)
+			'() 1))
+		(define sep_expr (match (cdr (window_args wf))
+			(cons sep _rest) (replace_window_refs_for_specs sep '() target_sym specs)
+			'() ","))
+		(define running_rows_expr (if (equal? order_keys '())
+			rows_sym
+			(list (quote map)
+				(list (quote produceN) (list (quote +) idx_sym 1))
+				(list (quote lambda) (list (quote i))
+					(list (quote nth) rows_sym (quote i))))))
+		(define target_idx (if (equal?? fn "LAG")
+			(list (quote -) idx_sym (window_offset_expr wf))
+			(list (quote +) idx_sym (window_offset_expr wf))))
+		(match fn
+			"LAG" (list (quote if)
+				(list (quote and)
+					(list (quote >=) target_idx 0)
+					(list (quote <) target_idx (list (quote count) rows_sym)))
+				(list (quote begin)
+					(list (quote define) target_sym (list (quote nth) rows_sym target_idx))
+					(list (quote if)
+						(same_partition_expr row_sym target_sym part_keys)
+						val_expr
+						nil))
+				nil)
+			"LEAD" (list (quote if)
+				(list (quote and)
+					(list (quote >=) target_idx 0)
+					(list (quote <) target_idx (list (quote count) rows_sym)))
+				(list (quote begin)
+					(list (quote define) target_sym (list (quote nth) rows_sym target_idx))
+					(list (quote if)
+						(same_partition_expr row_sym target_sym part_keys)
+						val_expr
+						nil))
+				nil)
+			"ROW_NUMBER" (list (quote +) 1
+				(list (quote reduce) (list (quote produceN) idx_sym)
+					(list (quote lambda) (list (quote acc) (quote i))
+						(list (quote begin)
+							(list (quote define) target_sym (list (quote nth) rows_sym (quote i)))
+							(list (quote if) (same_partition_expr row_sym target_sym part_keys)
+								(list (quote +) (quote acc) 1)
+								(quote acc))))
+					0))
+			"RANK" (list (quote +) 1
+				(list (quote reduce) (list (quote produceN) idx_sym)
+					(list (quote lambda) (list (quote acc) (quote i))
+						(list (quote begin)
+							(list (quote define) target_sym (list (quote nth) rows_sym (quote i)))
+							(list (quote if)
+								(list (quote and)
+									(same_partition_expr row_sym target_sym part_keys)
+									(list (quote not) (same_order_key_expr row_sym target_sym order_keys)))
+								(list (quote +) (quote acc) 1)
+								(quote acc))))
+					0))
+			"DENSE_RANK" (list (quote +) 1
+				(list (quote count)
+					(list (quote reduce) (list (quote produceN) idx_sym)
+						(list (quote lambda) (list (quote acc) (quote i))
+							(list (quote begin)
+								(list (quote define) target_sym (list (quote nth) rows_sym (quote i)))
+								(list (quote define) key_sym (cons (quote list) (map order_keys (lambda (key)
+									(list (quote get_assoc) target_sym key)))))
+								(list (quote if)
+									(list (quote and)
+										(same_partition_expr row_sym target_sym part_keys)
+										(list (quote not) (same_order_key_expr row_sym target_sym order_keys)))
+									(list (quote append_unique) (quote acc) key_sym)
+									(quote acc))))
+						'())))
+			"AVG" (list (quote begin)
+				(list (quote define) prev_sym
+					(list (quote reduce) rows_sym
+						(list (quote lambda) (list (quote acc) target_sym)
+							(list (quote if) (same_partition_expr row_sym target_sym part_keys)
+								(list (quote list)
+									(list (quote +) (list (quote nth) (quote acc) 0) val_expr)
+									(list (quote +) (list (quote nth) (quote acc) 1) 1))
+								(quote acc)))
+						'(0 0)))
+				(list (quote if)
+					(list (quote equal?) (list (quote nth) prev_sym 1) 0)
+					nil
+					(list (quote /) (list (quote nth) prev_sym 0) (list (quote nth) prev_sym 1))))
+			"GROUP_CONCAT" (list (quote reduce) running_rows_expr
+				(list (quote lambda) (list (quote acc) target_sym)
+					(list (quote if) (same_partition_expr row_sym target_sym part_keys)
+						(group_concat_step_expr (quote acc) val_expr sep_expr)
+						(quote acc)))
+				nil)
+			_ (list (quote reduce) rows_sym
+				(list (quote lambda) (list (quote acc) target_sym)
+					(list (quote if) (same_partition_expr row_sym target_sym part_keys)
+						(window_aggregate_reducer fn (quote acc)
+							(window_aggregate_value_expr fn val_expr))
+						(quote acc)))
+				(window_aggregate_neutral fn))))))
 
 (define lower_project_empty_row (lambda (project_node child)
 	(match (qop child)
@@ -1807,6 +2091,31 @@ the compile-budget-ms requirement.
 		(define schema (qattr scan_node (quote schema) nil))
 		(define tbl (qattr scan_node (quote table) nil))
 		(define fields (qattr project_node (quote output-fields) '()))
+		(if (has_fields_or_expr_windows? fields predicate)
+			(begin
+				(define aggs_w (collect_field_aggregates fields))
+				(define inputs_w (map aggs_w aggregate_input_expr))
+				(define input_fields_w (indexed_expr_fields "__agg_in_" inputs_w))
+				(define input_project_w (qnode (quote project)
+					(concat "window-aggregate-input:" (qid project_node))
+					(list (list (quote output-fields) input_fields_w))
+					(list scan_node)
+					'()))
+				(define rows_sym_w (symbol (concat "__neumann_window_agg_rows_" (sha1 (string project_node)))))
+				(define agg_sym_w (symbol (concat "__neumann_window_agg_" (sha1 (string project_node)))))
+				(define row_sym_w (symbol "__window_agg_row"))
+				(list (quote begin)
+					(list (quote define) rows_sym_w (lower_project_scan_window_rows input_project_w scan_node predicate nil))
+					(list (quote define) agg_sym_w
+						(list (quote reduce) rows_sym_w
+							(list (quote lambda) (list (quote acc) row_sym_w)
+								(cons (quote list) (map (produceN (count aggs_w)) (lambda (i)
+									(aggregate_reducer_expr (nth aggs_w i)
+										(list (quote nth) (quote acc) i)
+										(list (quote get_assoc) row_sym_w (concat "__agg_in_" (string i))))))))
+							(cons (quote list) (map aggs_w aggregate_neutral_expr))))
+					(build_resultrow_expr (replace_field_aggregates fields aggs_w agg_sym_w))))
+			(begin
 		(define aggs (collect_field_aggregates fields))
 		(define inputs (map aggs aggregate_input_expr))
 		(define outer_specs (list (list scan_node false true)))
@@ -1854,7 +2163,7 @@ the compile-budget-ms requirement.
 									(list (quote nth) (quote rowvals) i))))))
 						(cons (quote list) (map aggs aggregate_neutral_expr))
 						nil false))
-				(build_resultrow_expr (replace_field_aggregates fields aggs agg_sym)))))))
+				(build_resultrow_expr (replace_field_aggregates fields aggs agg_sym)))))))))
 
 (define scalar_single_expr (lambda (project_node)
 	(match (qattr project_node (quote output-fields) '())
@@ -2065,6 +2374,25 @@ the compile-budget-ms requirement.
 		(define schema (qattr scan_node (quote schema) nil))
 		(define tbl (qattr scan_node (quote table) nil))
 		(define value_expr (scalar_single_expr project_node))
+		(if (has_fields_or_expr_windows? (qattr project_node (quote output-fields) '()) predicate)
+			(begin
+				(define value_key_w "__value")
+				(define row_project_w (qnode (quote project)
+					(concat "window-scalar-input:" (qid project_node))
+					(list (list (quote output-fields) (list value_key_w value_expr)))
+					(list scan_node)
+					'()))
+				(define rows_sym_w (symbol (concat "__neumann_window_scalar_rows_" (sha1 (string project_node)))))
+				(define values_sym_w (symbol (concat "__neumann_window_scalar_values_" (sha1 (string project_node)))))
+				(define row_sym_w (symbol "__window_scalar_row"))
+				(list (quote begin)
+					(list (quote define) rows_sym_w (lower_project_scan_window_rows_with_outer row_project_w scan_node predicate order_node outer_specs))
+					(list (quote define) values_sym_w
+						(list (quote map) rows_sym_w
+							(list (quote lambda) (list row_sym_w)
+								(list (quote get_assoc) row_sym_w value_key_w))))
+					(scalar_from_rows_expr values_sym_w (or (nil? order_node) (nil? (qattr order_node (quote limit) nil))))))
+			(begin
 		(define effective_predicate (scan_effective_predicate scan_node predicate))
 		(define lowered_predicate (lower_embedded_scalars_with_specs
 			(lower_expr_for_specs (lower_scan_expr effective_predicate scan_node) outer_specs)
@@ -2111,7 +2439,7 @@ the compile-budget-ms requirement.
 							(list (quote merge) (quote acc) (list (quote list) (quote value))))
 						'()
 						false)))
-			(scalar_from_rows_expr rows_sym strict)))))
+			(scalar_from_rows_expr rows_sym strict)))))))
 
 (define lower_scalar_global_aggregate_scan (lambda (project_node scan_node predicate outer_specs)
 	(begin
@@ -2121,6 +2449,30 @@ the compile-budget-ms requirement.
 		(define fields (qattr project_node (quote output-fields) '()))
 		(define value_expr (scalar_single_expr project_node))
 		(define aggs (collect_field_aggregates fields))
+		(if (has_fields_or_expr_windows? fields predicate)
+			(begin
+				(define inputs_w (map aggs aggregate_input_expr))
+				(define input_fields_w (indexed_expr_fields "__agg_in_" inputs_w))
+				(define input_project_w (qnode (quote project)
+					(concat "window-scalar-aggregate-input:" (qid project_node))
+					(list (list (quote output-fields) input_fields_w))
+					(list scan_node)
+					'()))
+				(define rows_sym_w (symbol (concat "__neumann_window_scalar_agg_rows_" (sha1 (string project_node)))))
+				(define agg_sym_w (symbol (concat "__neumann_window_scalar_agg_" (sha1 (string project_node)))))
+				(define row_sym_w (symbol "__window_scalar_agg_row"))
+				(list (quote begin)
+					(list (quote define) rows_sym_w (lower_project_scan_window_rows_with_outer input_project_w scan_node predicate nil outer_specs))
+					(list (quote define) agg_sym_w
+						(list (quote reduce) rows_sym_w
+							(list (quote lambda) (list (quote acc) row_sym_w)
+								(cons (quote list) (map (produceN (count aggs)) (lambda (i)
+									(aggregate_reducer_expr (nth aggs i)
+										(list (quote nth) (quote acc) i)
+										(list (quote get_assoc) row_sym_w (concat "__agg_in_" (string i))))))))
+							(cons (quote list) (map aggs aggregate_neutral_expr))))
+					(lower_embedded_scalars_with_specs (replace_aggregate_refs value_expr aggs agg_sym_w) outer_specs)))
+			(begin
 		(define inputs (map aggs aggregate_input_expr))
 		(define lowered_predicate (lower_embedded_scalars_with_specs
 			(lower_expr_for_specs (lower_scan_expr (coalesceNil predicate true) scan_node) outer_specs)
@@ -2149,7 +2501,7 @@ the compile-budget-ms requirement.
 								(list (quote nth) (quote rowvals) i))))))
 					(cons (quote list) (map aggs aggregate_neutral_expr))
 					nil false))
-			(lower_embedded_scalars (replace_aggregate_refs value_expr aggs agg_sym))))))
+			(lower_embedded_scalars (replace_aggregate_refs value_expr aggs agg_sym))))))))
 
 (define lower_project_group_scan (lambda (project_node group_node order_node scan_node predicate)
 	(begin
@@ -2508,7 +2860,18 @@ the compile-budget-ms requirement.
 	(begin
 		(define specs (join_scan_specs join_node))
 		(define fields (qattr project_node (quote output-fields) '()))
-		(if (nil? order_node)
+		(if (or
+				(has_fields_or_expr_windows? fields final_predicate)
+				(not (equal? (specs_windows specs) '())))
+			(begin
+				(define rows_sym (symbol (concat "__neumann_join_window_emit_" (sha1 (string project_node)))))
+				(define row_sym (symbol "__join_window_emit_row"))
+				(list (quote begin)
+					(list (quote define) rows_sym (lower_project_join_window_rows project_node join_node order_node final_predicate '()))
+					(list (quote map) rows_sym
+						(list (quote lambda) (list row_sym)
+							(list (quote resultrow) row_sym)))))
+			(if (nil? order_node)
 			(lower_scan_specs specs specs
 				fields
 				nil final_predicate '() true)
@@ -2536,7 +2899,7 @@ the compile-budget-ms requirement.
 						(qattr order_node (quote offset) nil)))
 					(list (quote map) limited_sym
 						(list (quote lambda) (list row_sym)
-							(list (quote resultrow) (row_project_expr fields row_sym))))))))))
+							(list (quote resultrow) (row_project_expr fields row_sym)))))))))))
 
 (define lower_project_scan_rows (lambda (project_node scan_node predicate order_node)
 	(begin
@@ -2636,15 +2999,132 @@ the compile-budget-ms requirement.
 				order_node))
 		'() (neumann_fail "build_queryplan" "empty join scan sequence"))))
 
+(define lower_project_join_window_rows (lambda (project_node join_node order_node final_predicate outer_specs)
+	(begin
+		(define specs (join_scan_specs join_node))
+		(define fields (qattr project_node (quote output-fields) '()))
+		(define windows (dedupe_list (merge (list
+			(fields_or_expr_windows fields final_predicate)
+			(specs_windows specs)))))
+		(define base_specs (specs_without_window_predicates specs windows))
+		(define post_predicate (combine_and (specs_window_predicate specs windows) final_predicate))
+		(match windows
+			(cons first rest) (begin
+				(define first_over (window_over first))
+				(if (reduce rest (lambda (ok wf) (and ok (equal? (window_over wf) first_over))) true)
+					true
+					(neumann_fail "build_queryplan" "multiple window functions with different OVER clauses are not supported")))
+			'() true)
+		(define first_wf (car windows))
+		(define partition (window_partition first_wf))
+		(define win_order (window_order first_wf))
+		(define outer_order (if (nil? order_node) '() (qattr order_node (quote order) '())))
+		true
+		(define part_fields (indexed_expr_fields "__win_part_" partition))
+		(define win_order_exprs (order_exprs win_order))
+		(define win_order_fields (indexed_expr_fields "__win_order_" win_order_exprs))
+		(define outer_order_exprs (order_exprs outer_order))
+		(define outer_order_fields (indexed_expr_fields "__outer_order_" outer_order_exprs))
+		(define input_fields (merge
+			(join_source_col_fields specs)
+			part_fields
+			win_order_fields
+			outer_order_fields))
+		(define input_project (qnode (quote project)
+			(concat "window-join-input:" (qid project_node))
+			(list (list (quote output-fields) input_fields))
+			(list join_node)
+			'()))
+		(define input_rows_sym (symbol (concat "__neumann_join_window_input_" (sha1 (string project_node)))))
+		(define sorted_rows_sym (symbol (concat "__neumann_join_window_sorted_" (sha1 (string project_node)))))
+		(define augmented_rows_sym (symbol (concat "__neumann_join_window_augmented_" (sha1 (string project_node)))))
+		(define filtered_augmented_sym (symbol (concat "__neumann_join_window_filtered_" (sha1 (string project_node)))))
+		(define preserved_augmented_sym (symbol (concat "__neumann_join_window_preserved_" (sha1 (string project_node)))))
+		(define result_rows_sym (symbol (concat "__neumann_join_window_result_" (sha1 (string project_node)))))
+		(define sorted_result_sym (symbol (concat "__neumann_join_window_result_sorted_" (sha1 (string project_node)))))
+		(define limited_result_sym (symbol (concat "__neumann_join_window_limited_" (sha1 (string project_node)))))
+		(define idx_sym (symbol "__join_window_idx"))
+		(define row_sym (symbol "__join_window_row"))
+		(define out_row_sym (symbol "__join_window_out_row"))
+		(define domain_part_keys (non_window_domain_keys specs windows))
+		(define part_keys (merge (list domain_part_keys (window_key_names "__win_part_" (count partition)))))
+		(define win_order_keys (window_key_names "__win_order_" (count win_order_exprs)))
+		(define outer_order_keys (window_key_names "__outer_order_" (count outer_order_exprs)))
+		(define window_sort_keys (merge (list
+			(order_key_dirs part_keys (map part_keys (lambda (_key) <)))
+			(order_key_dirs win_order_keys (scan_order_dirs win_order)))))
+		(define outer_sort_keys (order_key_dirs outer_order_keys (scan_order_dirs outer_order)))
+		(define final_fields (merge
+			(map_assoc fields (lambda (_key expr)
+				(replace_window_refs_for_specs expr windows row_sym specs)))
+			(map_assoc outer_order_fields (lambda (_key expr)
+				(replace_window_refs_for_specs expr windows row_sym specs)))))
+		(define final_predicate_expr (replace_window_refs_for_specs (coalesceNil post_predicate true) windows row_sym specs))
+		(list (quote begin)
+			(list (quote define) input_rows_sym
+				(lower_scan_specs_rows_with_outer base_specs base_specs input_fields nil true '() true outer_specs))
+			(list (quote define) sorted_rows_sym
+				(if (equal? window_sort_keys '())
+					input_rows_sym
+					(order_sort_rows_expr (list input_rows_sym window_sort_keys win_order))))
+			(list (quote define) augmented_rows_sym
+				(list (quote map) (list (quote produceN) (list (quote count) sorted_rows_sym))
+					(list (quote lambda) (list idx_sym)
+						(list (quote begin)
+							(list (quote define) row_sym (list (quote nth) sorted_rows_sym idx_sym))
+							(reduce (produceN (count windows)) (lambda (row_expr i)
+								(list (quote set_assoc) row_expr
+									(concat "__win_" (string i))
+									(lower_window_value_expr_for_specs (nth windows i) idx_sym sorted_rows_sym row_sym part_keys win_order_keys specs)))
+								row_sym)))))
+			(list (quote define) filtered_augmented_sym
+				(list (quote filter) augmented_rows_sym
+					(list (quote lambda) (list row_sym)
+						final_predicate_expr)))
+			(list (quote define) preserved_augmented_sym
+				(if (window_outer_preserved? specs windows)
+					(list (quote reduce) augmented_rows_sym
+						(list (quote lambda) (list (quote acc) row_sym)
+							(list (quote if)
+								(list (quote reduce) filtered_augmented_sym
+									(list (quote lambda) (list (quote found) (quote matched))
+										(list (quote or) (quote found)
+											(same_partition_expr row_sym (quote matched) domain_part_keys)))
+									false)
+								(quote acc)
+								(list (quote append_unique) (quote acc)
+									(null_window_alias_row_expr row_sym specs windows partition win_order_exprs))))
+						filtered_augmented_sym)
+					filtered_augmented_sym))
+			(list (quote define) result_rows_sym
+				(list (quote map) preserved_augmented_sym
+					(list (quote lambda) (list row_sym)
+						(build_row_assoc_expr final_fields))))
+			(list (quote define) sorted_result_sym
+				(if (equal? outer_sort_keys '())
+					result_rows_sym
+					(order_sort_rows_expr (list result_rows_sym outer_sort_keys outer_order))))
+			(list (quote define) limited_result_sym (group_limit_rows_expr sorted_result_sym
+				(if (nil? order_node) nil (qattr order_node (quote limit) nil))
+				(if (nil? order_node) nil (qattr order_node (quote offset) nil))))
+			(list (quote map) limited_result_sym
+				(list (quote lambda) (list out_row_sym)
+					(row_project_expr fields out_row_sym)))))))
+
 (define lower_scan_specs_rows (lambda (specs all_specs fields order_node final_predicate prefix_aliases use_order)
 	(lower_scan_specs_rows_with_outer specs all_specs fields order_node final_predicate prefix_aliases use_order '())))
 
 (define lower_project_join_rows_with_specs (lambda (project_node join_node order_node final_predicate outer_specs)
 	(begin
 		(define specs (join_scan_specs join_node))
-		(lower_scan_specs_rows_with_outer specs specs
-			(qattr project_node (quote output-fields) '())
-			order_node final_predicate '() true outer_specs))))
+		(define fields (qattr project_node (quote output-fields) '()))
+		(if (or
+				(has_fields_or_expr_windows? fields final_predicate)
+				(not (equal? (specs_windows specs) '())))
+			(lower_project_join_window_rows project_node join_node order_node final_predicate outer_specs)
+			(lower_scan_specs_rows_with_outer specs specs
+				fields
+				order_node final_predicate '() true outer_specs)))))
 
 (define lower_project_join_rows (lambda (project_node join_node order_node final_predicate)
 	(lower_project_join_rows_with_specs project_node join_node order_node final_predicate '())))
