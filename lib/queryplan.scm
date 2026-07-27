@@ -925,6 +925,50 @@ the compile-budget-ms requirement.
 		(cons first rest) (list (quote cons) first (build_runtime_list_expr rest))
 		'() '())))
 
+(define indexed_expr_fields (lambda (prefix exprs)
+	(merge (map (produceN (count exprs)) (lambda (i)
+		(list (concat prefix (string i)) (nth exprs i)))))))
+
+(define row_values_expr (lambda (row_sym prefix n)
+	(cons (quote list) (map (produceN n) (lambda (i)
+		(list (quote get_assoc) row_sym (concat prefix (string i))))))))
+
+(define row_project_expr (lambda (fields row_sym)
+	(cons (quote list)
+		(reduce_assoc (coalesceNil fields '()) (lambda (acc key _expr)
+			(merge acc (list key (list (quote get_assoc) row_sym key))))
+			'()))))
+
+(define order_exprs (lambda (order)
+	(map (coalesceNil order '()) (lambda (item) (match item
+		'(expr _dir) expr
+		_ nil)))))
+
+(define order_key_dirs (lambda (keys dirs)
+	(match keys
+		(cons key rest_keys) (match dirs
+			(cons dir rest_dirs) (cons (list key dir) (order_key_dirs rest_keys rest_dirs))
+			_ '())
+		'() '())))
+
+(define order_sort_rows_expr (lambda (state)
+	(begin
+		(define rows_sym (nth state 0))
+		(define key_dirs (nth state 1))
+		(define order (nth state 2))
+		(if (equal? (coalesceNil order '()) '())
+			rows_sym
+			(match key_dirs
+				(cons key_dir _rest_key_dirs) (begin
+					(define key (nth key_dir 0))
+					(define dir (nth key_dir 1))
+					(list (quote sort) rows_sym
+						(list (quote lambda) (list (quote a) (quote b))
+							(list dir
+								(list (quote get_assoc) (quote a) key)
+								(list (quote get_assoc) (quote b) key)))))
+				'() rows_sym)))))
+
 (define aggregate_expr? (lambda (expr) (match expr
 	'((symbol aggregate) _ _ _) true
 	'((quote aggregate) _ _ _) true
@@ -1778,7 +1822,6 @@ the compile-budget-ms requirement.
 					(list (quote extract_assoc) groups_sym
 						(list (quote lambda) (list key_sym agg_sym)
 							(list (quote begin)
-								(list (quote print) "NEUMANN_DEBUG scalar_group_extract" key_sym agg_sym having_expr)
 								(list (quote if) having_expr
 									(build_row_assoc_expr final_fields)
 									nil))))
@@ -1914,9 +1957,12 @@ the compile-budget-ms requirement.
 			(quote select) (match (qchildren child)
 				(cons grandchild '()) (if (equal? (qop grandchild) (quote scan))
 					(lower_project_group_scan project_node group_node order_node grandchild (qattr child (quote predicate) true))
-					(neumann_fail "build_queryplan" "GROUP BY select lowerer only supports scan input yet"))
+					(if (equal? (qop grandchild) (quote join))
+						(lower_project_group_join project_node group_node order_node grandchild (qattr child (quote predicate) true))
+						(neumann_fail "build_queryplan" "GROUP BY select lowerer only supports scan or join input yet")))
 				_ (neumann_fail "build_queryplan" "select expects one child"))
-			_ (neumann_fail "build_queryplan" "GROUP BY lowerer only supports scan input yet"))
+			(quote join) (lower_project_group_join project_node group_node order_node child true)
+			_ (neumann_fail "build_queryplan" "GROUP BY lowerer only supports scan or join input yet"))
 		_ (neumann_fail "build_queryplan" "GROUP BY expects one child"))))
 
 (define lower_scalar_group (lambda (project_node group_node order_node outer_specs)
@@ -1960,6 +2006,36 @@ the compile-budget-ms requirement.
 				(cons (quote list) mapcols)
 				(list (quote lambda) map_params map_expr)
 				nil nil nil is_outer)))))
+
+(define scan_call_reduce (lambda (op scan_node filtercols filter_expr mapcols map_expr row_reducer neutral_expr shard_reducer is_outer order_node)
+	(begin
+		(define alias (qid scan_node))
+		(define schema (qattr scan_node (quote schema) nil))
+		(define tbl (qattr scan_node (quote table) nil))
+		(define filter_params (map filtercols (lambda (col) (symbol (concat alias "." col)))))
+		(define map_params (map mapcols (lambda (col) (symbol (concat alias "." col)))))
+		(if (equal? op (quote scan_order))
+			(list (quote scan_order)
+				'(session "__memcp_tx")
+				(list (quote table) schema tbl)
+				(cons (quote list) filtercols)
+				(list (quote lambda) filter_params filter_expr)
+				(cons (quote list) (scan_order_columns (qattr order_node (quote order) '()) scan_node))
+				(cons (quote list) (scan_order_dirs (qattr order_node (quote order) '())))
+				0
+				(coalesceNil (qattr order_node (quote offset) nil) 0)
+				(coalesceNil (qattr order_node (quote limit) nil) -1)
+				(cons (quote list) mapcols)
+				(list (quote lambda) map_params map_expr)
+				row_reducer neutral_expr is_outer)
+			(list (quote scan)
+				'(session "__memcp_tx")
+				(list (quote table) schema tbl)
+				(cons (quote list) filtercols)
+				(list (quote lambda) filter_params filter_expr)
+				(cons (quote list) mapcols)
+				(list (quote lambda) map_params map_expr)
+				row_reducer neutral_expr shard_reducer is_outer)))))
 
 (define join_scan_specs (lambda (node) (match (qop node)
 	(quote scan) (list (list node false true))
@@ -2022,9 +2098,36 @@ the compile-budget-ms requirement.
 (define lower_project_join (lambda (project_node join_node order_node final_predicate)
 	(begin
 		(define specs (join_scan_specs join_node))
-		(lower_scan_specs specs specs
-			(qattr project_node (quote output-fields) '())
-			nil final_predicate '() true))))
+		(define fields (qattr project_node (quote output-fields) '()))
+		(if (nil? order_node)
+			(lower_scan_specs specs specs
+				fields
+				nil final_predicate '() true)
+			(begin
+				(define order (qattr order_node (quote order) '()))
+				(define order_expr_list (order_exprs order))
+				(define order_fields (indexed_expr_fields "__order_key_" order_expr_list))
+				(define order_keys (extract_assoc order_fields (lambda (key _expr) key)))
+				(define sort_key_dirs (order_key_dirs order_keys (scan_order_dirs order)))
+				(define row_fields (merge fields order_fields))
+				(define row_project (qnode (quote project)
+					(concat "ordered-join:" (qid join_node))
+					(list (list (quote output-fields) row_fields))
+					(list join_node)
+					'()))
+				(define rows_sym (symbol (concat "__neumann_join_order_rows_" (sha1 (string project_node)))))
+				(define sorted_sym (symbol (concat "__neumann_join_order_sorted_" (sha1 (string project_node)))))
+				(define limited_sym (symbol (concat "__neumann_join_order_limited_" (sha1 (string project_node)))))
+				(define row_sym (symbol (concat "__neumann_join_order_row_" (sha1 (string project_node)))))
+				(list (quote begin)
+					(list (quote define) rows_sym (lower_project_join_rows row_project join_node nil final_predicate))
+					(list (quote define) sorted_sym (order_sort_rows_expr (list rows_sym sort_key_dirs order)))
+					(list (quote define) limited_sym (group_limit_rows_expr sorted_sym
+						(qattr order_node (quote limit) nil)
+						(qattr order_node (quote offset) nil)))
+					(list (quote map) limited_sym
+						(list (quote lambda) (list row_sym)
+							(list (quote resultrow) (row_project_expr fields row_sym))))))))))
 
 (define lower_project_scan_rows (lambda (project_node scan_node predicate order_node)
 	(begin
@@ -2092,20 +2195,22 @@ the compile-budget-ms requirement.
 				(build_row_assoc_expr (map_assoc fields (lambda (_key expr)
 					(lower_expr_for_specs expr all_specs))))
 				(lower_scan_specs_rows rest all_specs fields order_node final_predicate aliases_now false)))
-			(define rows_expr (scan_call (if (and use_order (not (nil? order_node))) (quote scan_order) (quote scan))
+			(scan_call_reduce (if (and use_order (not (nil? order_node))) (quote scan_order) (quote scan))
 				node
 				(expr_columns_for_spec filter_predicate spec all_specs)
 				lowered_filter
 				mapcols
 				map_expr
-				(spec_outer? spec)
-				order_node))
-			(if (equal? rest '())
-				(list (quote reduce) rows_expr
+				(if (equal? rest '())
 					(list (quote lambda) (list (quote acc) (quote row))
 						(list (quote merge) (quote acc) (list (quote list) (quote row))))
-					'())
-				rows_expr))
+					(list (quote lambda) (list (quote acc) (quote rows))
+						(list (quote merge) (quote acc) (quote rows))))
+				'()
+				(list (quote lambda) (list (quote acc) (quote shard_rows))
+					(list (quote merge) (quote acc) (quote shard_rows)))
+				(spec_outer? spec)
+				order_node))
 		'() (neumann_fail "build_queryplan" "empty join scan sequence"))))
 
 (define lower_project_join_rows (lambda (project_node join_node order_node final_predicate)
@@ -2114,6 +2219,95 @@ the compile-budget-ms requirement.
 		(lower_scan_specs_rows specs specs
 			(qattr project_node (quote output-fields) '())
 			order_node final_predicate '() true))))
+
+(define lower_project_global_aggregate_join (lambda (project_node join_node predicate)
+	(begin
+		(define fields (qattr project_node (quote output-fields) '()))
+		(define aggs (collect_field_aggregates fields))
+		(define inputs (map aggs aggregate_input_expr))
+		(define input_fields (indexed_expr_fields "__agg_in_" inputs))
+		(define input_project (qnode (quote project)
+			(concat "aggregate-input:" (qid join_node))
+			(list (list (quote output-fields) input_fields))
+			(list join_node)
+			'()))
+		(define rows_sym (symbol (concat "__neumann_join_agg_rows_" (sha1 (string project_node)))))
+		(define agg_sym (symbol (concat "__neumann_join_agg_" (sha1 (string project_node)))))
+		(define row_sym (symbol (concat "__neumann_join_agg_row_" (sha1 (string project_node)))))
+		(list (quote begin)
+			(list (quote define) rows_sym (lower_project_join_rows input_project join_node nil predicate))
+			(list (quote define) agg_sym
+				(list (quote reduce) rows_sym
+					(list (quote lambda) (list (quote acc) row_sym)
+						(cons (quote list) (map (produceN (count aggs)) (lambda (i)
+							(aggregate_reducer_expr (nth aggs i)
+								(list (quote nth) (quote acc) i)
+								(list (quote get_assoc) row_sym (concat "__agg_in_" (string i))))))))
+					(cons (quote list) (map aggs aggregate_neutral_expr))))
+			(build_resultrow_expr (replace_field_aggregates fields aggs agg_sym))))))
+
+(define lower_project_group_join (lambda (project_node group_node order_node join_node predicate)
+	(begin
+		(define fields (qattr project_node (quote output-fields) '()))
+		(define groups (qattr group_node (quote keys) '()))
+		(define having (qattr group_node (quote having) nil))
+		(define aggs (collect_field_aggregates fields))
+		(define inputs (map aggs aggregate_input_expr))
+		(define hidden_fields (merge
+			(indexed_expr_fields "__group_key_" groups)
+			(indexed_expr_fields "__agg_in_" inputs)))
+		(define hidden_project (qnode (quote project)
+			(concat "group-input:" (qid join_node))
+			(list (list (quote output-fields) hidden_fields))
+			(list join_node)
+			'()))
+		(define rows_sym (symbol (concat "__neumann_join_group_input_" (sha1 (string project_node)))))
+		(define groups_sym (symbol (concat "__neumann_join_groups_" (sha1 (string project_node)))))
+		(define result_rows_sym (symbol (concat "__neumann_join_group_rows_" (sha1 (string project_node)))))
+		(define sorted_sym (symbol (concat "__neumann_join_group_sorted_" (sha1 (string project_node)))))
+		(define limited_sym (symbol (concat "__neumann_join_group_limited_" (sha1 (string project_node)))))
+		(define row_sym (symbol (concat "__neumann_join_group_row_" (sha1 (string project_node)))))
+		(define key_sym (symbol "__key"))
+		(define agg_sym (symbol "__agg"))
+		(define old_sym (symbol "__old"))
+		(define row_key_expr (row_values_expr row_sym "__group_key_" (count groups)))
+		(define row_vals_expr (row_values_expr row_sym "__agg_in_" (count aggs)))
+		(define agg_neutral (cons (quote list) (map aggs aggregate_neutral_expr)))
+		(define merge_group_aggs
+			(list (quote lambda) (list (quote old) (quote new))
+				(cons (quote list) (map (produceN (count aggs)) (lambda (i)
+					(aggregate_reducer_expr (nth aggs i)
+						(list (quote nth) (quote old) i)
+						(list (quote nth) (quote new) i)))))))
+		(define final_fields (replace_group_fields fields groups aggs key_sym agg_sym))
+		(define having_expr (if (nil? having) true (replace_group_refs having groups aggs key_sym agg_sym)))
+		(list (quote begin)
+			(list (quote define) rows_sym (lower_project_join_rows hidden_project join_node nil predicate))
+			(list (quote define) groups_sym
+				(list (quote reduce) rows_sym
+					(list (quote lambda) (list (quote acc) row_sym)
+						(list (quote begin)
+							(list (quote define) old_sym (list (quote get_assoc) (quote acc) row_key_expr agg_neutral))
+							(list (quote set_assoc) (quote acc) row_key_expr
+								(cons (quote list) (map (produceN (count aggs)) (lambda (i)
+									(aggregate_reducer_expr (nth aggs i)
+										(list (quote nth) old_sym i)
+										(list (quote nth) row_vals_expr i))))))))
+					'()))
+			(list (quote define) result_rows_sym
+				(list (quote reduce_assoc) groups_sym
+					(list (quote lambda) (list (quote acc) key_sym agg_sym)
+						(list (quote if) having_expr
+							(list (quote merge) (quote acc) (list (quote list) (build_row_assoc_expr final_fields)))
+							(quote acc)))
+					'()))
+			(list (quote define) sorted_sym (group_sort_rows_expr result_rows_sym fields (if (nil? order_node) '() (qattr order_node (quote order) '()))))
+			(list (quote define) limited_sym (group_limit_rows_expr sorted_sym
+				(if (nil? order_node) nil (qattr order_node (quote limit) nil))
+				(if (nil? order_node) nil (qattr order_node (quote offset) nil))))
+			(list (quote map) limited_sym
+				(list (quote lambda) (list row_sym)
+					(list (quote resultrow) row_sym)))))))
 
 (define lower_qnode_rows (lambda (node) (match (qop node)
 	(quote project) (match (qchildren node)
@@ -2382,7 +2576,9 @@ the compile-budget-ms requirement.
 					(quote scan) (if (has_aggregates? (qattr node (quote output-fields) '()))
 						(lower_project_global_aggregate_scan node grandchild (qattr child (quote predicate) true))
 						(lower_project_scan node grandchild (qattr child (quote predicate) true)))
-					(quote join) (lower_project_join node grandchild nil (qattr child (quote predicate) true))
+					(quote join) (if (has_aggregates? (qattr node (quote output-fields) '()))
+						(lower_project_global_aggregate_join node grandchild (qattr child (quote predicate) true))
+						(lower_project_join node grandchild nil (qattr child (quote predicate) true)))
 					_ (neumann_fail "build_queryplan" "select lowerer only supports empty-row or scan input yet"))
 				_ (neumann_fail "build_queryplan" "select expects one child"))
 			(quote scan) (if (has_aggregates? (qattr node (quote output-fields) '()))
@@ -2401,7 +2597,9 @@ the compile-budget-ms requirement.
 					(quote group) (lower_project_group node grandchild child)
 					_ (neumann_fail "build_queryplan" "order_limit lowerer only supports scan input yet"))
 				_ (neumann_fail "build_queryplan" "order_limit expects one child"))
-			(quote join) (lower_project_join node child nil true)
+			(quote join) (if (has_aggregates? (qattr node (quote output-fields) '()))
+				(lower_project_global_aggregate_join node child true)
+				(lower_project_join node child nil true))
 			(quote group) (lower_project_group node child nil)
 			(quote union) (if (has_aggregates? (qattr node (quote output-fields) '()))
 				(lower_project_global_aggregate_union node child)
