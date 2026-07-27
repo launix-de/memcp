@@ -700,7 +700,7 @@ the compile-budget-ms requirement.
 
 (define rewrite_table_join_expr (lambda (td derived_aliases) (match td
 	'(alias schema tbl is_outer join_expr)
-	(list alias schema tbl is_outer (rewrite_derived_expr join_expr derived_aliases))
+	(list alias schema tbl is_outer (rewrite_derived_expr (untangle_expr_subqueries (coalesceNil join_expr true)) derived_aliases))
 	_ td)))
 
 (define flatten_table_descriptor (lambda (td) (match td
@@ -725,7 +725,7 @@ the compile-budget-ms requirement.
 				(retarget_expr_alias_for_tables (untangle_expr_subqueries (select_ast_condition subquery)) inner_tables (car (car inner_tables)) alias)
 				(untangle_expr_subqueries (select_ast_condition subquery))))
 			(define flattened_join_expr (combine_and
-				(rewrite_derived_expr (coalesceNil join_expr true) derived_aliases)
+				(rewrite_derived_expr (untangle_expr_subqueries (coalesceNil join_expr true)) derived_aliases)
 				local_condition))
 			(define inner_with_join (if (equal? (count (car retargeted)) 1)
 				(list (table_with_join (car (car retargeted)) is_outer flattened_join_expr))
@@ -1826,6 +1826,20 @@ the compile-budget-ms requirement.
 		(dedupe_list (merge (map args expr_table_refs))))))
 	'())))
 
+(define expr_shallow_table_refs (lambda (expr) (match expr
+	'((symbol get_column) tbl _ _ _) (if (nil? tbl) '() (list tbl))
+	'((quote get_column) tbl _ _ _) (if (nil? tbl) '() (list tbl))
+	'((symbol neumann_scalar) _ir) '()
+	'((quote neumann_scalar) _ir) '()
+	'((symbol neumann_in) value _ir) (expr_shallow_table_refs value)
+	'((quote neumann_in) value _ir) (expr_shallow_table_refs value)
+	'((symbol neumann_exists) _ir) '()
+	'((quote neumann_exists) _ir) '()
+	(cons sym args) (dedupe_list (merge (list
+		(expr_shallow_table_refs sym)
+		(dedupe_list (merge (map args expr_shallow_table_refs))))))
+	'())))
+
 (define window_table_refs (lambda (wf)
 	(dedupe_list (merge (list
 		(dedupe_list (merge (map (window_args wf) expr_table_refs)))
@@ -2266,11 +2280,30 @@ the compile-budget-ms requirement.
 			(quote project) (lower_in_project_or_join_with_specs value (ir_root ir) outer_specs)
 			_ (neumann_fail "build_queryplan" "IN IR root must be project")))))
 
+(define missing_table_refs_for_specs (lambda (expr specs outer_specs)
+	(begin
+		(define aliases (merge (specs_aliases specs) (specs_aliases outer_specs)))
+		(filter (expr_shallow_table_refs expr) (lambda (tbl)
+			(not (contains? aliases tbl)))))))
+
+(define exists_scan_with_implicit_refs (lambda (scan_node predicate outer_specs missing_refs)
+	(begin
+		(define schema (qattr scan_node (quote schema) nil))
+		(define implicit_nodes (map missing_refs (lambda (alias)
+			(ast_scan_node alias schema alias false true))))
+		(join_table_nodes (merge (list scan_node) implicit_nodes)))))
+
 (define lower_exists_scan (lambda (scan_node predicate outer_specs)
 	(begin
 		(define alias (qid scan_node))
 		(define schema (qattr scan_node (quote schema) nil))
 		(define tbl (qattr scan_node (quote table) nil))
+		(define missing_refs (missing_table_refs_for_specs (coalesceNil predicate true)
+			(list (list scan_node false true))
+			outer_specs))
+		(if (not (equal? missing_refs '()))
+			(lower_exists_join (exists_scan_with_implicit_refs scan_node predicate outer_specs missing_refs) predicate outer_specs)
+			(begin
 		(define lowered_predicate (lower_embedded_scalars_with_specs
 			(lower_expr_for_specs (lower_scan_expr (coalesceNil predicate true) scan_node) outer_specs)
 			outer_specs))
@@ -2288,7 +2321,7 @@ the compile-budget-ms requirement.
 			false
 			(list (quote lambda) (list (quote acc) (quote shard_value))
 				(list (quote or) (quote acc) (quote shard_value)))
-			false))))
+			false))))))
 
 (define lower_exists_project (lambda (project_node outer_specs)
 	(match (qchildren project_node)
