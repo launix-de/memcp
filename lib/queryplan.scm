@@ -1135,13 +1135,24 @@ the compile-budget-ms requirement.
 			(group_index rest target (+ idx 1)))
 		'() nil)))
 
+(define replace_group_outer_refs (lambda (expr groups key_sym) (match expr
+	'((symbol get_column) _tbl _ti _col _ci) (begin
+		(define group_idx (group_index groups expr 0))
+		(if (nil? group_idx) expr (list (quote nth) key_sym group_idx)))
+	'((quote get_column) _tbl _ti _col _ci) (begin
+		(define group_idx (group_index groups expr 0))
+		(if (nil? group_idx) expr (list (quote nth) key_sym group_idx)))
+	(cons sym args) (cons (replace_group_outer_refs sym groups key_sym)
+		(map args (lambda (arg) (replace_group_outer_refs arg groups key_sym))))
+	expr)))
+
 (define replace_group_refs (lambda (expr groups aggs key_sym agg_sym) (match expr
-	'((symbol neumann_scalar) _ir) expr
-	'((quote neumann_scalar) _ir) expr
-	'((symbol neumann_in) _value _ir) expr
-	'((quote neumann_in) _value _ir) expr
-	'((symbol neumann_exists) _ir) expr
-	'((quote neumann_exists) _ir) expr
+	'((symbol neumann_scalar) ir) (list (quote neumann_scalar) (replace_group_outer_refs ir groups key_sym))
+	'((quote neumann_scalar) ir) (list (quote neumann_scalar) (replace_group_outer_refs ir groups key_sym))
+	'((symbol neumann_in) value ir) (list (quote neumann_in) (replace_group_outer_refs value groups key_sym) (replace_group_outer_refs ir groups key_sym))
+	'((quote neumann_in) value ir) (list (quote neumann_in) (replace_group_outer_refs value groups key_sym) (replace_group_outer_refs ir groups key_sym))
+	'((symbol neumann_exists) ir) (list (quote neumann_exists) (replace_group_outer_refs ir groups key_sym))
+	'((quote neumann_exists) ir) (list (quote neumann_exists) (replace_group_outer_refs ir groups key_sym))
 	(cons sym args) (if (aggregate_expr? expr)
 		(begin
 			(define agg_idx (aggregate_index aggs expr 0))
