@@ -198,10 +198,23 @@ the compile-budget-ms requirement.
 		(equal? sym '(quote inner_select_exists))
 		(equal? sym '(symbol inner_select_exists)))))
 
+(define logical_subquery_head? (lambda (sym)
+	(or
+		(inner_select_head? sym)
+		(equal? sym (quote neumann_scalar))
+		(equal? sym '(quote neumann_scalar))
+		(equal? sym '(symbol neumann_scalar))
+		(equal? sym (quote neumann_in))
+		(equal? sym '(quote neumann_in))
+		(equal? sym '(symbol neumann_in))
+		(equal? sym (quote neumann_exists))
+		(equal? sym '(quote neumann_exists))
+		(equal? sym '(symbol neumann_exists)))))
+
 (define expr_contains_subquery? (lambda (expr) (match expr
 	(cons sym args)
 	(or
-		(inner_select_head? sym)
+		(logical_subquery_head? sym)
 		(expr_contains_subquery? sym)
 		(reduce args (lambda (found arg)
 			(or found (expr_contains_subquery? arg)))
