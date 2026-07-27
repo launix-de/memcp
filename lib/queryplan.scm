@@ -1628,7 +1628,9 @@ the compile-budget-ms requirement.
 				(expr_columns_for_spec predicate spec all_specs))))))
 			(define filter_predicate (if (equal? rest '())
 				(combine_and (spec_predicate spec) (coalesceNil final_predicate true))
-				(spec_predicate spec)))
+				(if (predicate_safe_for_prefix? (coalesceNil final_predicate true) rest all_specs)
+					(combine_and (spec_predicate spec) (coalesceNil final_predicate true))
+					(spec_predicate spec))))
 			(define visible_specs (merge
 				(filter all_specs (lambda (s) (contains? aliases_now (qid (spec_node s)))))
 				outer_specs))
