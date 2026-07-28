@@ -116,18 +116,30 @@ test_cases:
         - {id: 5, parent: 200, amount: 400, mx: 400}
 
   # ==========================================================================
-  # Case 3: OVER ORDER BY + outer ORDER BY → compile-time error
+  # Case 3: OVER ORDER BY + outer ORDER BY → ORC materialized window value
   # ==========================================================================
 
   - name: "Case 3: LEAD with conflicting outer ORDER BY"
     sql: "SELECT id, LEAD(time_val) OVER (ORDER BY time_val) AS next_time FROM win_emp ORDER BY amount"
     expect:
-      error: true
+      rows: 5
+      data:
+        - {id: 4, next_time: 20}
+        - {id: 2, next_time: 25}
+        - {id: 5, next_time: 30}
+        - {id: 1, next_time: 15}
+        - {id: 3, next_time: null}
 
   - name: "Case 3: LAG with partition + order + outer ORDER BY"
     sql: "SELECT id, LAG(time_val) OVER (PARTITION BY parent ORDER BY time_val) AS prev FROM win_emp ORDER BY amount"
     expect:
-      error: true
+      rows: 5
+      data:
+        - {id: 4, prev: null}
+        - {id: 2, prev: 10}
+        - {id: 5, prev: 15}
+        - {id: 1, prev: null}
+        - {id: 3, prev: 20}
 
   # ==========================================================================
   # Case 4: OVER (PARTITION BY + ORDER BY) + LAG/LEAD — ERPL use case
@@ -251,13 +263,19 @@ test_cases:
         - {id: 5, time_val: 25, prev_time: 15, next_amt: null}
 
   # ==========================================================================
-  # Case 8: Multiple window functions — different OVER clauses → error
+  # Case 8: Multiple window functions — different OVER clauses use separate ORCs
   # ==========================================================================
 
   - name: "Case 8: Different OVER ORDER BY clauses"
     sql: "SELECT id, LEAD(time_val) OVER (ORDER BY time_val) AS a, LAG(amount) OVER (ORDER BY amount) AS b FROM win_emp"
     expect:
-      error: true
+      rows: 5
+      data:
+        - {id: 1, a: 15, b: 400}
+        - {id: 2, a: 25, b: 200}
+        - {id: 3, a: null, b: 500}
+        - {id: 4, a: 20, b: null}
+        - {id: 5, a: 30, b: 300}
 
   # ==========================================================================
   # Case 9: Window function + GROUP BY → error

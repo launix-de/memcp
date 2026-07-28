@@ -756,6 +756,131 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(list stage)
 			'())))))
 
+(define window_rank_initial_state (lambda (fn)
+	(if (equal? fn "DENSE_RANK")
+		(list (quote list) 0 nil)
+		(list (quote list) 0 0 nil))))
+
+(define make_window_rank_mapfn (lambda (partition_cols order_cols)
+	(begin
+		(define order_key (if (single_source? order_cols)
+			(symbol (car order_cols))
+			(cons (quote list) (map order_cols (lambda (colname) (symbol colname))))))
+		(if (empty_list? partition_cols)
+			(list (quote lambda)
+				(cons (quote $set) (map order_cols (lambda (colname) (symbol colname))))
+				(list (quote list) (quote $set) order_key))
+			(list (quote lambda)
+				(merge (list
+					(list (quote $set))
+					(map partition_cols (lambda (colname) (symbol colname)))
+					(map order_cols (lambda (colname) (symbol colname)))))
+				(list (quote cons)
+					(if (single_source? partition_cols)
+						(symbol (car partition_cols))
+						(cons (quote list) (map partition_cols (lambda (colname) (symbol colname)))))
+					(list (quote list) (quote $set) order_key)))))))
+
+(define make_window_rank_inner_body (lambda (fn inner_state_expr order_key_expr writer_expr)
+	(if (equal? fn "DENSE_RANK")
+		(list
+			(list (quote define) (quote dense_rank) (list (quote car) inner_state_expr))
+			(list (quote define) (quote prev_key) (list (quote cadr) inner_state_expr))
+			(list (quote define) (quote same_key) (list (quote and)
+				(list (quote not) (list (quote nil?) (quote prev_key)))
+				(list (quote equal?) order_key_expr (quote prev_key))))
+			(list (quote define) (quote new_rank) (list (quote if) (quote same_key) (quote dense_rank) (list (quote +) (quote dense_rank) 1)))
+			(list writer_expr (quote new_rank))
+			(list (quote list) (quote new_rank) order_key_expr))
+		(list
+			(list (quote define) (quote rank_value) (list (quote car) inner_state_expr))
+			(list (quote define) (quote rownum) (list (quote cadr) inner_state_expr))
+			(list (quote define) (quote prev_key) (list (quote car) (list (quote cdr) (list (quote cdr) inner_state_expr))))
+			(list (quote define) (quote same_key) (list (quote and)
+				(list (quote not) (list (quote nil?) (quote prev_key)))
+				(list (quote equal?) order_key_expr (quote prev_key))))
+			(list (quote define) (quote new_rownum) (list (quote +) (quote rownum) 1))
+			(list (quote define) (quote new_rank) (list (quote if) (quote same_key) (quote rank_value) (quote new_rownum)))
+			(list writer_expr (quote new_rank))
+			(list (quote list) (quote new_rank) (quote new_rownum) order_key_expr)))))
+
+(define make_window_rank_reducefn (lambda (fn partitioned)
+	(begin
+		(define init (window_rank_initial_state fn))
+		(if partitioned
+			(list (quote lambda) (list (quote acc) (quote mapped))
+				(cons (quote begin)
+					(merge (list
+						(list
+							(list (quote define) (quote row_partition) (list (quote car) (quote mapped)))
+							(list (quote define) (quote payload) (list (quote cdr) (quote mapped)))
+							(list (quote define) (quote writer) (list (quote car) (quote payload)))
+							(list (quote define) (quote order_key) (list (quote cadr) (quote payload)))
+							(list (quote define) (quote old_inner) (list (quote car) (quote acc)))
+							(list (quote define) (quote prev_partition) (list (quote cadr) (quote acc)))
+							(list (quote define) (quote same_partition) (list (quote or)
+								(list (quote nil?) (quote prev_partition))
+								(list (quote equal?) (quote row_partition) (quote prev_partition))))
+							(list (quote define) (quote inner_state) (list (quote if) (quote same_partition) (quote old_inner) init)))
+						(make_window_rank_inner_body fn (quote inner_state) (quote order_key) (quote writer))
+						(list (list (quote list)
+							(if (equal? fn "DENSE_RANK")
+								(list (quote list) (quote new_rank) (quote order_key))
+								(list (quote list) (quote new_rank) (quote new_rownum) (quote order_key)))
+							(quote row_partition)))))))
+			(list (quote lambda) (list (quote acc) (quote mapped))
+				(cons (quote begin)
+					(merge (list
+						(list
+							(list (quote define) (quote writer) (list (quote car) (quote mapped)))
+							(list (quote define) (quote order_key) (list (quote cadr) (quote mapped))))
+						(make_window_rank_inner_body fn (quote acc) (quote order_key) (quote writer))))))))))
+
+(define make_window_rank_orc_stage_rewrite (lambda (fn args over outer_sources ctx)
+	(begin
+		(if (not (empty_list? args))
+			(neumann_fail "untangle_query" "rank window function does not accept arguments")
+			true)
+		(if (not (single_source? outer_sources))
+			(neumann_fail "untangle_query" "rank ORC stage currently supports one base source")
+			true)
+		(define src (car outer_sources))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "untangle_query" "rank ORC stage requires a base source")
+			true)
+		(define alias (source_alias src))
+		(define partition_exprs (nth over 0))
+		(define order_items (nth over 1))
+		(if (empty_list? order_items)
+			(neumann_fail "untangle_query" "rank window function requires ORDER BY")
+			true)
+		(define partition_cols (map partition_exprs (lambda (expr)
+			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+		(define order_cols (map (window_order_exprs order_items) (lambda (expr)
+			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+		(define sortcols (merge (list partition_cols order_cols)))
+		(define sortdirs (merge (list
+			(map partition_exprs (lambda (_expr) false))
+			(window_order_dirs_for_orc order_items))))
+		(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list (source_relation src) alias sortcols sortdirs (count partition_exprs))))))
+		(define stage (make_orc_stage
+			(concat "orc-" (toLower fn) ":" col)
+			src
+			col
+			sortcols
+			sortdirs
+			(count partition_exprs)
+			(merge (list partition_cols order_cols))
+			(make_window_rank_mapfn partition_cols order_cols)
+			(make_window_rank_reducefn fn (not (empty_list? partition_exprs)))
+			(if (empty_list? partition_exprs)
+				(window_rank_initial_state fn)
+				(list (quote list) (window_rank_initial_state fn) nil))))
+		(qp_any (list
+			(list (quote get_column) alias false col false)
+			(list stage)
+			'())))))
+
 (define make_row_number_orc_stage_rewrite (lambda (args over outer_sources ctx)
 	(begin
 		(if (not (empty_list? args))
@@ -910,7 +1035,9 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 				(make_row_number_orc_stage_rewrite args over outer_sources ctx)
 				(if (or (equal? fn "LAG") (equal? fn "LEAD"))
 					(make_window_offset_orc_stage_rewrite fn args over outer_sources ctx)
-					(make_window_aggregate_stage_rewrite fn args over outer_sources ctx)))
+					(if (or (equal? fn "RANK") (equal? fn "DENSE_RANK"))
+						(make_window_rank_orc_stage_rewrite fn args over outer_sources ctx)
+						(make_window_aggregate_stage_rewrite fn args over outer_sources ctx))))
 		(cons head tail) (combine_stage_rewrite_results head (map tail (lambda (item) (untangle_expr_with_stages item outer_sources ctx))))
 		_ (list expr '() '()))))
 
