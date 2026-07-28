@@ -55,6 +55,8 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define empty_list? (lambda (xs)
 	(or (nil? xs) (equal? xs '()))))
 
+(define qp_any (lambda (x) x))
+
 /* ------------------------------------------------------------------------- */
 /* Combined logical operators                                                 */
 
@@ -252,6 +254,13 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(cons head tail) (or
 			(subquery_head? head)
 			(reduce tail (lambda (a b) (or a (expr_contains_subquery? b))) false))
+		_ false)))
+
+(define expr_contains_window? (lambda (expr)
+	(match expr
+		((symbol window_func) _fn _args _over) true
+		((quote window_func) _fn _args _over) true
+		(cons _head tail) (reduce tail (lambda (a b) (or a (expr_contains_window? b))) false)
 		_ false)))
 
 (define fields_contains_subquery? (lambda (fields)
@@ -638,6 +647,115 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			'(_expr dir) (window_order_sort_dir dir)
 			_ (neumann_fail "untangle_query" "malformed window ORDER BY item"))))))
 
+(define invert_window_order_dirs (lambda (dirs)
+	(map (coalesceNil dirs '()) (lambda (dir) (not dir)))))
+
+(define window_offset_arg (lambda (args)
+	(begin
+		(if (> (count args) 2)
+			(neumann_fail "untangle_query" "window offset function accepts at most two arguments")
+			true)
+		(define offset (if (> (count args) 1) (nth args 1) 1))
+		(if (not (number? offset))
+			(neumann_fail "untangle_query" "window offset must be a numeric literal")
+			true)
+		(if (< offset 1)
+			(neumann_fail "untangle_query" "window offset must be positive")
+			true)
+		offset)))
+
+(define make_window_offset_mapfn (lambda (partition_cols value_col)
+	(if (empty_list? partition_cols)
+		(list (quote lambda)
+			(list (quote $set) (quote $value))
+			(list (quote list) (quote $set) (quote $value)))
+		(list (quote lambda)
+			(merge (list (list (quote $set)) (map partition_cols (lambda (colname) (symbol colname))) (list (quote $value))))
+			(list (quote cons)
+				(if (single_source? partition_cols)
+					(symbol (car partition_cols))
+					(cons (quote list) (map partition_cols (lambda (colname) (symbol colname)))))
+				(list (quote list) (quote $set) (quote $value)))))))
+
+(define make_window_offset_reducefn (lambda (offset partitioned)
+	(if partitioned
+		(list (quote lambda) (list (quote acc) (quote mapped))
+			(list (quote begin)
+				(list (quote define) (quote row_partition) (list (quote car) (quote mapped)))
+				(list (quote define) (quote payload) (list (quote cdr) (quote mapped)))
+				(list (quote define) (quote writer) (list (quote car) (quote payload)))
+				(list (quote define) (quote value) (list (quote cadr) (quote payload)))
+				(list (quote define) (quote old_queue) (list (quote car) (quote acc)))
+				(list (quote define) (quote prev_partition) (list (quote cadr) (quote acc)))
+				(list (quote define) (quote same_partition) (list (quote or)
+					(list (quote nil?) (quote prev_partition))
+					(list (quote equal?) (quote row_partition) (quote prev_partition))))
+				(list (quote define) (quote queue) (list (quote if) (quote same_partition) (quote old_queue) (list (quote list))))
+				(list (quote define) (quote shifted) (list (quote if) (list (quote <) (list (quote count) (quote queue)) offset) nil (list (quote car) (quote queue))))
+				(list (quote writer) (quote shifted))
+				(list (quote define) (quote next_queue) (list (quote append) (quote queue) (quote value)))
+				(list (quote define) (quote trimmed) (list (quote if) (list (quote >) (list (quote count) (quote next_queue)) offset) (list (quote cdr) (quote next_queue)) (quote next_queue)))
+				(list (quote list) (quote trimmed) (quote row_partition))))
+		(list (quote lambda) (list (quote acc) (quote mapped))
+			(list (quote begin)
+				(list (quote define) (quote writer) (list (quote car) (quote mapped)))
+				(list (quote define) (quote value) (list (quote cadr) (quote mapped)))
+				(list (quote define) (quote shifted) (list (quote if) (list (quote <) (list (quote count) (quote acc)) offset) nil (list (quote car) (quote acc))))
+				(list (quote writer) (quote shifted))
+				(list (quote define) (quote next_queue) (list (quote append) (quote acc) (quote value)))
+				(list (quote if) (list (quote >) (list (quote count) (quote next_queue)) offset) (list (quote cdr) (quote next_queue)) (quote next_queue)))))))
+
+(define make_window_offset_orc_stage_rewrite (lambda (fn args over outer_sources ctx)
+	(begin
+		(if (or (not (equal? fn "LAG")) (empty_list? args))
+			(if (or (not (equal? fn "LEAD")) (empty_list? args))
+				(neumann_fail "untangle_query" "window offset function requires a value argument")
+				true)
+			true)
+		(if (not (single_source? outer_sources))
+			(neumann_fail "untangle_query" "window offset ORC stage currently supports one base source")
+			true)
+		(define src (car outer_sources))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "untangle_query" "window offset ORC stage requires a base source")
+			true)
+		(define alias (source_alias src))
+		(define partition_exprs (nth over 0))
+		(define order_items (nth over 1))
+		(if (empty_list? order_items)
+			(neumann_fail "untangle_query" "window offset function requires ORDER BY")
+			true)
+		(define offset (window_offset_arg args))
+		(define value_col (order_column_for_alias alias (canonical_column_expr_for_alias alias (car args))))
+		(define partition_cols (map partition_exprs (lambda (expr)
+			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+		(if (contains? partition_cols value_col)
+			(neumann_fail "untangle_query" "window offset value column must not duplicate partition columns yet")
+			true)
+		(define order_cols (map (window_order_exprs order_items) (lambda (expr)
+			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+		(define order_dirs (window_order_dirs_for_orc order_items))
+		(define sortdirs (merge (list
+			(map partition_exprs (lambda (_expr) false))
+			(if (equal? fn "LEAD") (invert_window_order_dirs order_dirs) order_dirs))))
+		(define sortcols (merge (list partition_cols order_cols)))
+		(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list (source_relation src) alias value_col sortcols sortdirs offset (count partition_exprs))))))
+		(define stage (make_orc_stage
+			(concat "orc-" (toLower fn) ":" col)
+			src
+			col
+			sortcols
+			sortdirs
+			(count partition_exprs)
+			(merge (list partition_cols (list value_col)))
+			(make_window_offset_mapfn partition_cols value_col)
+			(make_window_offset_reducefn offset (not (empty_list? partition_exprs)))
+			(if (empty_list? partition_exprs) (list (quote list)) (list (quote list) (list (quote list)) nil))))
+		(qp_any (list
+			(list (quote get_column) alias false col false)
+			(list stage)
+			'())))))
+
 (define make_row_number_orc_stage_rewrite (lambda (args over outer_sources ctx)
 	(begin
 		(if (not (empty_list? args))
@@ -790,7 +908,9 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		((symbol window_func) fn args over)
 			(if (equal? fn "ROW_NUMBER")
 				(make_row_number_orc_stage_rewrite args over outer_sources ctx)
-				(make_window_aggregate_stage_rewrite fn args over outer_sources ctx))
+				(if (or (equal? fn "LAG") (equal? fn "LEAD"))
+					(make_window_offset_orc_stage_rewrite fn args over outer_sources ctx)
+					(make_window_aggregate_stage_rewrite fn args over outer_sources ctx)))
 		(cons head tail) (combine_stage_rewrite_results head (map tail (lambda (item) (untangle_expr_with_stages item outer_sources ctx))))
 		_ (list expr '() '()))))
 
@@ -1023,6 +1143,9 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define source_where_terms (nth flattened_sources 2))
 		(define source_stages (nth flattened_sources 3))
 		(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
+		(if (expr_contains_window? rewritten_where)
+			(neumann_fail "untangle_query" "window function is not allowed in WHERE")
+			true)
 		(define where_result (untangle_expr_with_stages rewritten_where sources child_ctx))
 		(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) sources child_ctx))
 		(define stage_sources (merge (list (nth where_result 2) (nth field_result 2))))
