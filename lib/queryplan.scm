@@ -1074,11 +1074,11 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 
 (define lower_zero_source_query_block (lambda (block)
 	(if (equal? (coalesceNil (qb_where block) true) true)
-		(list (quote resultrow) (quoted_runtime_list (qb_fields block)))
+		(list (quote resultrow) (cons (quote list) (qb_fields block)))
 		(list (quote if)
 			(qb_where block)
-			(list (quote resultrow) (quoted_runtime_list (qb_fields block)))
-			(list (quote resultrow) (quoted_runtime_list '()))))))
+			(list (quote resultrow) (cons (quote list) (qb_fields block)))
+			(list (quote resultrow) (list (quote list)))))))
 
 (define build_queryplan (lambda (ir)
 	(begin

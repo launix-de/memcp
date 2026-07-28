@@ -182,7 +182,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (logical_op (build_queryplan_term simple_select_ast)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
-		"(resultrow (quote (\"result\" 8)))") true "build_queryplan_term lowers no-FROM projection")
+		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
 	(define inner_derived_ast (list "memcp-tests" '() (list "a" 1) true nil nil nil nil nil))
 	(define outer_derived_ast (list "memcp-tests"
 		(list (list "d" "memcp-tests" inner_derived_ast false nil))
@@ -192,7 +192,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (qb_sources (ir_root derived_ir)) '()) true "untangle_query flattens zero-source derived table")
 	(assert (equal? (ir_output_fields derived_ir) (list "a" 1)) true "untangle_query expands derived-table wildcard projection")
 	(assert (equal? (serialize (build_queryplan_term outer_derived_ast))
-		"(resultrow (quote (\"a\" 1)))") true "build_queryplan_term lowers flattened zero-source derived table")
+		"(resultrow '(\"a\" 1))") true "build_queryplan_term lowers flattened zero-source derived table")
 	(define scalar_no_from_ast (list "memcp-tests" '()
 		(list "x" (list 'inner_select no_from_select_ast)
 			"in_ok" (list 'inner_select_in 8 no_from_select_ast)
@@ -200,7 +200,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		true nil nil nil nil nil))
 	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
 	(assert (equal? (serialize (build_queryplan_term scalar_no_from_ast))
-		"(resultrow (quote (\"x\" 8 \"in_ok\" (and true (equal?? 8 8)) \"exists_ok\" true)))") true "build_queryplan_term lowers zero-domain expression subqueries")
+		"(resultrow '(\"x\" 8 \"in_ok\" (and true (equal?? 8 8)) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))
