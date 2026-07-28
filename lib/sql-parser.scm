@@ -844,50 +844,61 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	(define limit nil)
 	(define offset nil)
 	(define sql_select_order (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) order
 		'(schema tables fields condition group having order limit offset) order
 		_ nil
 	)))
 	(define sql_select_limit (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) limit
 		'(schema tables fields condition group having order limit offset) limit
 		_ nil
 	)))
 	(define sql_select_offset (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) offset
 		'(schema tables fields condition group having order limit offset) offset
 		_ nil
 	)))
 	(define sql_select_clear_stage (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
+			(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
 	(define sql_union_all_parts (lambda (query)
-		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
-			(cdr query)
-			nil)))
+		(match query
+			((symbol union-block) (symbol all) branches order limit offset facts) (list branches order limit offset)
+			((symbol union_all) branches order limit offset) (list branches order limit offset)
+			_ nil)))
 	(define sql_union_distinct_parts (lambda (query)
-		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
-			(cdr query)
-			nil)))
+		(match query
+			((symbol union-block) (symbol distinct) branches order limit offset facts) (list branches order limit offset)
+			((symbol union_distinct) branches order limit offset) (list branches order limit offset)
+			_ nil)))
 	(define sql_union_all_query (lambda (left right) (begin
 		(define right_parts (sql_union_all_parts right))
 		(if (nil? right_parts)
-			(list (quote union_all)
+			(list (quote union-block)
+				(quote all)
 				(list left (sql_select_clear_stage right))
 				(sql_select_order right)
 				(sql_select_limit right)
-				(sql_select_offset right))
+				(sql_select_offset right)
+				'())
 			(match right_parts '(branches order limit offset)
-				(list (quote union_all) (cons left branches) order limit offset)))
+				(list (quote union-block) (quote all) (cons left branches) order limit offset '())))
 	)))
 	(define sql_union_distinct_query (lambda (left right) (begin
 		(define right_parts (sql_union_distinct_parts right))
 		(if (nil? right_parts)
-			(list (quote union_distinct)
+			(list (quote union-block)
+				(quote distinct)
 				(list left (sql_select_clear_stage right))
 				(sql_select_order right)
 				(sql_select_limit right)
-				(sql_select_offset right))
+				(sql_select_offset right)
+				'())
 			(match right_parts '(branches order limit offset)
-				(list (quote union_distinct) (cons left branches) order limit offset)))
+				(list (quote union-block) (quote distinct) (cons left branches) order limit offset '())))
 	)))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
@@ -1003,7 +1014,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				'((define limit sql_expression))
 			)
 		)
-	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
+	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset '() '() '())))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)
