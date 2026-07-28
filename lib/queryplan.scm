@@ -1445,7 +1445,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 	(concat "k" i)))
 
 (define aggregate_col_name (lambda (ag)
-	(concat "agg_" (fnv_hash (string ag)))))
+	(concat "agg_" (fnv_hash (serialize ag)))))
 
 (define dedupe_aggregates_by_col (lambda (ags)
 	(reduce (coalesceNil ags '()) (lambda (acc ag)
@@ -1459,7 +1459,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		'())))
 
 (define group_table_name (lambda (schema tbl alias keys condition ags)
-	(concat ".grp:" tbl ":" (fnv_hash (string (list "neumann-clean-groups-v2" schema tbl alias keys condition ags))))))
+	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v2" schema tbl alias keys condition ags))))))
 
 (define group_stage_schema (lambda (stage)
 	(begin
@@ -2164,6 +2164,73 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(list (quote resultrow) (cons (quote list) (qb_fields block)))
 			(list (quote resultrow) (list (quote list)))))))
 
+(define dml_assignment_exprs (lambda (cols)
+	(extract_assoc (coalesceNil cols '()) (lambda (_title expr) expr))))
+
+(define lower_dml_update_values (lambda (alias cols)
+	(map_assoc (coalesceNil cols '()) (lambda (_title expr)
+		(lower_column_expr_for_alias alias expr)))))
+
+(define lower_single_source_dml_query_block (lambda (block target_schema target_tbl)
+	(begin
+		(define src (car (qb_sources block)))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "DML target must be a base table")
+			true)
+		(if (or (not (equal? (source_schema src) target_schema)) (not (equal? (source_relation src) target_tbl)))
+			(neumann_fail "build_queryplan" "DML target relation mismatch")
+			true)
+		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
+			(neumann_fail "build_queryplan" "DML over grouped query-block is not implemented yet")
+			true)
+		(if (or (not (empty_list? (qb_order block))) (or (not (nil? (qb_limit block))) (not (nil? (qb_offset block)))))
+			(neumann_fail "build_queryplan" "ORDER/LIMIT DML needs ordered write lowering")
+			true)
+		(define alias (source_alias src))
+		(define cols (qb_fields block))
+		(define delete_mode (empty_list? (coalesceNil cols '())))
+		(define cond (coalesceNil (qb_where block) true))
+		(define filtercols (extract_columns_for_alias alias cond))
+		(define valuecols (merge_unique (map (dml_assignment_exprs cols) (lambda (expr)
+			(extract_columns_for_alias alias expr)))))
+		(define mapcols (cons "$update" (merge_unique (list filtercols valuecols))))
+		(define filter_expr (list (quote lambda)
+			(map filtercols (lambda (col) (symbol (concat alias "." col))))
+			(list (quote optimize) (lower_column_expr_for_alias alias cond))))
+		(define update_values (if delete_mode
+			nil
+			(cons (quote list) (lower_dml_update_values alias cols))))
+		(define map_expr (list (quote lambda)
+			(map mapcols (lambda (col)
+				(if (equal? col "$update") (symbol "$update") (symbol (concat alias "." col)))))
+			(if delete_mode
+				(list (quote if) (list (quote $update)) 1 0)
+				(list (quote if) (list (quote $update) update_values) 1 0))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(list (quote table) target_schema target_tbl)
+			(cons (quote list) filtercols)
+			filter_expr
+			(cons (quote list) mapcols)
+			map_expr
+			(quote +)
+			0
+			nil
+			false))))
+
+(define lower_dml_query_block_core (lambda (block target_schema target_tbl)
+	(if (single_source? (qb_sources block))
+		(lower_single_source_dml_query_block block target_schema target_tbl)
+		(neumann_fail "build_queryplan" "multi-source DML needs combined query-block write lowering"))))
+
+(define lower_dml_query_block_with_stages (lambda (block target_schema target_tbl)
+	(if (empty_list? (qb_stages block))
+		(lower_dml_query_block_core block target_schema target_tbl)
+		(cons (quote begin)
+			(merge (list
+				(map (qb_stages block) lower_stage_prepare)
+				(list (lower_dml_query_block_core (query_block_without_stages block) target_schema target_tbl))))))))
+
 (define build_queryplan (lambda (ir)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
@@ -2172,6 +2239,9 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 				(symbol query-block) (lower_query_block_with_stages (ir_root ir))
 				(symbol union-block) (neumann_fail "build_queryplan" "union-block lowering is intentionally not scaffolded yet")
 				_ (neumann_fail "build_queryplan" "unknown logical root"))
+			((symbol dml) target_schema target_tbl) (match (logical_op (ir_root ir))
+				(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
+				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))))
 
 (define neumann_compile_pipeline (lambda (ast)
@@ -2200,8 +2270,20 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 	(neumann_compile_ir_pipeline
 		(ir_with_return logical_ir sink_mode))))
 
-(define build_dml_plan (lambda (_schema _tbl _tblalias _all_defs _cols _condition _order _limit _offset)
-	(neumann_fail "build_dml_plan" "DML lowering is outside the combined-operator scaffold")))
+(define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset)
+	(begin
+		(define query (make_query_block
+			schema
+			all_defs
+			cols
+			(coalesceNil condition true)
+			'() nil
+			(coalesceNil order '())
+			limit
+			offset
+			'() '() '()))
+		(neumann_compile_ir_pipeline
+			(ir_with_return (untangle_query_term query nil) (list (quote dml) schema tbl))))))
 
 (define sql_truncate (lambda (schema tbl)
 	(build_dml_plan schema tbl nil
