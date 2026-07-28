@@ -130,11 +130,16 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define gs_offset (lambda (node) (nth node 10)))
 (define gs_facts (lambda (node) (nth node 11)))
 
-(define source_alias (lambda (src) (nth src 0)))
-(define source_schema (lambda (src) (nth src 1)))
-(define source_relation (lambda (src) (nth src 2)))
-(define source_outer? (lambda (src) (nth src 3)))
-(define source_join_expr (lambda (src) (nth src 4)))
+(define source_alias (lambda (src)
+	(match src '(alias _schema _relation _outer _join) alias _ nil)))
+(define source_schema (lambda (src)
+	(match src '(_alias schema _relation _outer _join) schema _ nil)))
+(define source_relation (lambda (src)
+	(match src '(_alias _schema relation _outer _join) relation _ nil)))
+(define source_outer? (lambda (src)
+	(match src '(_alias _schema _relation outer _join) outer _ nil)))
+(define source_join_expr (lambda (src)
+	(match src '(_alias _schema _relation _outer join) join _ nil)))
 
 /* ------------------------------------------------------------------------- */
 /* IR envelope                                                                */
@@ -269,6 +274,181 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(cons title (cons (untangle_expr expr ctx) (untangle_fields rest ctx)))
 		_ '())))
 
+(define field_expr_by_title (lambda (fields title)
+	(match (coalesceNil fields '())
+		(cons current_title (cons expr rest)) (if (equal? current_title title)
+			expr
+			(field_expr_by_title rest title))
+		_ nil)))
+
+(define derived_star_ref? (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
+		((quote get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
+		_ false)))
+
+(define rewrite_derived_ref (lambda (alias projection expr)
+	(match expr
+		((symbol get_column) tblvar _ col _) (if (or (equal? tblvar alias) (nil? tblvar))
+			(coalesceNil (field_expr_by_title projection col) expr)
+			expr)
+		((quote get_column) tblvar _ col _) (if (or (equal? tblvar alias) (nil? tblvar))
+			(coalesceNil (field_expr_by_title projection col) expr)
+			expr)
+		(cons head tail) (cons head (map tail (lambda (item) (rewrite_derived_ref alias projection item))))
+		_ expr)))
+
+(define rewrite_derived_fields (lambda (alias projection fields)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (if (derived_star_ref? alias expr)
+			(merge (list projection (rewrite_derived_fields alias projection rest)))
+			(cons title (cons (rewrite_derived_ref alias projection expr) (rewrite_derived_fields alias projection rest))))
+		_ '())))
+
+(define rewrite_derived_order (lambda (alias projection order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr dir) (list (rewrite_derived_ref alias projection expr) dir)
+			_ item)))))
+
+(define rewrite_source_join_for_derived (lambda (alias projection src)
+	(list
+		(source_alias src)
+		(source_schema src)
+		(source_relation src)
+		(source_outer? src)
+		(rewrite_derived_ref alias projection (source_join_expr src)))))
+
+(define rewrite_sources_join_for_derived (lambda (alias projection sources)
+	(map (coalesceNil sources '()) (lambda (src)
+		(rewrite_source_join_for_derived alias projection src)))))
+
+(define rewrite_derived_ref_chain (lambda (rewrites expr)
+	(reduce (coalesceNil rewrites '()) (lambda (acc rewrite)
+		(match rewrite
+			'(alias projection) (rewrite_derived_ref alias projection acc)
+			_ acc))
+		expr)))
+
+(define rewrite_derived_fields_chain (lambda (rewrites fields)
+	(reduce (coalesceNil rewrites '()) (lambda (acc rewrite)
+		(match rewrite
+			'(alias projection) (rewrite_derived_fields alias projection acc)
+			_ acc))
+		fields)))
+
+(define rewrite_derived_order_chain (lambda (rewrites order_items)
+	(reduce (coalesceNil rewrites '()) (lambda (acc rewrite)
+		(match rewrite
+			'(alias projection) (rewrite_derived_order alias projection acc)
+			_ acc))
+		order_items)))
+
+(define requalify_single_source_expr (lambda (old_alias new_alias expr)
+	(match expr
+		((symbol get_column) tblvar ignorecase col json_path)
+			(list (quote get_column) (if (or (nil? tblvar) (equal? tblvar old_alias)) new_alias tblvar) ignorecase col json_path)
+		((quote get_column) tblvar ignorecase col json_path)
+			(list (quote get_column) (if (or (nil? tblvar) (equal? tblvar old_alias)) new_alias tblvar) ignorecase col json_path)
+		(cons head tail) (cons head (map tail (lambda (item) (requalify_single_source_expr old_alias new_alias item))))
+		_ expr)))
+
+(define requalify_single_source_fields (lambda (old_alias new_alias fields)
+	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
+		(requalify_single_source_expr old_alias new_alias expr)))))
+
+(define combine_where (lambda (a b)
+	(begin
+		(define aa (coalesceNil a true))
+		(define bb (coalesceNil b true))
+		(if (equal? aa true)
+			bb
+			(if (equal? bb true)
+				aa
+				(list (quote and) aa bb)))))))
+
+(define derived_block_needs_operator? (lambda (block)
+	(or (not (empty_list? (qb_group block)))
+		(or (not (nil? (qb_having block)))
+			(or (not (nil? (qb_limit block)))
+				(or (not (nil? (qb_offset block)))
+					(or (not (empty_list? (qb_stages block)))
+						(query_block_has_aggregates? block))))))))
+
+(define untangle_flattened_base_source (lambda (src ctx)
+	(list
+		(source_alias src)
+		(source_schema src)
+		(normalize_query_ast (source_relation src))
+		(source_outer? src)
+		(untangle_expr (source_join_expr src) ctx))))
+
+(define flatten_source_list (lambda (sources ctx)
+	(if (empty_list? sources)
+		(list '() '() '())
+		(begin
+			(define src (car sources))
+			(define rest (cdr sources))
+			(define relation (normalize_query_ast (source_relation src)))
+				(define tail (flatten_source_list rest ctx))
+				(define tail_sources (nth tail 0))
+				(define tail_rewrites (nth tail 1))
+				(define tail_wheres (nth tail 2))
+				(if (string? relation)
+					(begin
+						(list
+							(cons (untangle_flattened_base_source src ctx) tail_sources)
+							tail_rewrites
+							tail_wheres))
+					(if (union_block? relation)
+						(neumann_fail "untangle_query" "FROM union-block needs union logical lowering before source flattening")
+						(begin
+						(define alias (source_alias src))
+						(define inner (untangle_query relation ctx))
+						(if (derived_block_needs_operator? inner)
+							(neumann_fail "untangle_query" "derived table with group/limit/stage must become an explicit logical operator before flattening")
+							(begin
+								(define inner_sources (coalesceNil (qb_sources inner) '()))
+								(if (empty_list? inner_sources)
+									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
+									(neumann_fail "untangle_query" "zero-source derived JOIN needs constant-relation support")
+									(list
+										(rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)
+										(cons (list alias (qb_fields inner)) tail_rewrites)
+										(cons (qb_where inner) tail_wheres)))
+									(if (equal? (count inner_sources) 1)
+										(begin
+											(define only_inner (car inner_sources))
+											(define inner_alias (source_alias only_inner))
+											(define projection (requalify_single_source_fields inner_alias alias (qb_fields inner)))
+											(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
+											(define outer_join (rewrite_derived_ref alias projection (source_join_expr src)))
+											(define joined_condition (if (or (source_outer? src) (not (nil? outer_join)))
+												(combine_where inner_where outer_join)
+												nil))
+											(define parent_condition (if (nil? joined_condition) inner_where nil))
+											(list
+												(cons
+													(list
+														alias
+														(source_schema only_inner)
+														(source_relation only_inner)
+														(source_outer? src)
+														joined_condition)
+													(rewrite_sources_join_for_derived alias projection tail_sources))
+												(cons (list alias projection) tail_rewrites)
+												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))))
+										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
+											(neumann_fail "untangle_query" "multi-source derived JOIN needs relation-unit lowering")
+											(list
+												(merge (list inner_sources (rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)))
+												(cons (list alias (qb_fields inner)) tail_rewrites)
+												(cons (qb_where inner) tail_wheres)))))))))
+						))))))))
+
+(define combine_where_terms (lambda (terms seed)
+	(reduce (coalesceNil terms '()) combine_where seed)))
+
 (define untangle_source (lambda (src ctx)
 	(begin
 		(define relation (normalize_query_ast (source_relation src)))
@@ -293,17 +473,21 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(list
 				(list (quote compile-budget-ms) 1000)
 				(list (quote operator-model) (quote combined)))))
+		(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
+		(define sources (nth flattened_sources 0))
+		(define rewrites (nth flattened_sources 1))
+		(define source_where_terms (nth flattened_sources 2))
 		(make_query_block
 			(qb_schema block)
-			(untangle_sources (qb_sources block) child_ctx)
-			(untangle_fields (qb_fields block) child_ctx)
-			(untangle_expr (qb_where block) child_ctx)
-			(map (coalesceNil (qb_group block) '()) (lambda (item) (untangle_expr item child_ctx)))
-			(untangle_expr (qb_having block) child_ctx)
-			(map (coalesceNil (qb_order block) '()) (lambda (item) (untangle_expr item child_ctx)))
+			sources
+			(untangle_fields (rewrite_derived_fields_chain rewrites (qb_fields block)) child_ctx)
+			(untangle_expr (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))) child_ctx)
+			(map (coalesceNil (qb_group block) '()) (lambda (item) (untangle_expr (rewrite_derived_ref_chain rewrites item) child_ctx)))
+			(untangle_expr (rewrite_derived_ref_chain rewrites (qb_having block)) child_ctx)
+			(map (rewrite_derived_order_chain rewrites (qb_order block)) (lambda (item) (untangle_expr item child_ctx)))
 			(qb_limit block)
 			(qb_offset block)
-			(untangle_fields (qb_hidden block) child_ctx)
+			(untangle_fields (rewrite_derived_fields_chain rewrites (qb_hidden block)) child_ctx)
 			(qb_stages block)
 			(qb_facts block)))))
 
@@ -384,6 +568,20 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		((symbol get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar alias) "." col))
 		((quote get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar alias) "." col))
 		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias alias item))))
+		_ expr)))
+
+(define extract_columns_for_join_alias (lambda (default_alias alias expr)
+	(match expr
+		((symbol get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar default_alias) alias) (list col) '())
+		((quote get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar default_alias) alias) (list col) '())
+		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_join_alias default_alias alias item))))
+		_ '())))
+
+(define lower_column_expr_for_join (lambda (default_alias expr)
+	(match expr
+		((symbol get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar default_alias) "." col))
+		((quote get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar default_alias) "." col))
+		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_join default_alias item))))
 		_ expr)))
 
 (define canonical_column_expr_for_alias (lambda (alias expr)
@@ -675,9 +873,41 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define query_block_has_aggregates? (lambda (block)
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
 
+(define table_column_names (lambda (schema tbl)
+	(map (show schema tbl) (lambda (col) (col "Field")))))
+
+(define star_expr_alias (lambda (expr)
+	(match expr
+		((symbol get_column) tblvar _ "*" _) tblvar
+		((quote get_column) tblvar _ "*" _) tblvar
+		_ false)))
+
+(define star_expr? (lambda (expr)
+	(match expr
+		((symbol get_column) _ _ "*" _) true
+		((quote get_column) _ _ "*" _) true
+		_ false)))
+
+(define expand_star_for_sources (lambda (sources requested_alias)
+	(merge (map (coalesceNil sources '()) (lambda (src)
+		(if (or (nil? requested_alias) (equal? requested_alias (source_alias src)))
+			(merge (map (table_column_names (source_schema src) (source_relation src)) (lambda (col)
+				(list col (list (quote get_column) (source_alias src) false col false)))))
+			'()))))))
+
+(define expand_query_block_fields (lambda (sources fields)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (begin
+			(define requested_alias (star_expr_alias expr))
+			(if (star_expr? expr)
+				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
+				(cons title (cons expr (expand_query_block_fields sources rest)))))
+		_ '())))
+
 (define lower_single_source_query_block (lambda (block)
 	(begin
 		(define src (car (qb_sources block)))
+		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 		(if (not (source_is_base_table? src))
 			(neumann_fail "build_queryplan" "single-source query-block lowering only supports base tables")
 			true)
@@ -697,7 +927,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define condition (coalesceNil (qb_where block) true))
 		(define order_items (coalesceNil (qb_order block) '()))
 		(define filtercols (extract_columns_for_alias alias condition))
-		(define fieldcols (merge_unique (extract_assoc (qb_fields block) (lambda (_title expr)
+		(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 			(extract_columns_for_alias alias expr)))))
 		(define ordercols (if (empty_list? order_items) '() (order_cols_for_alias alias order_items)))
 		(define mapcols (merge_unique (list filtercols fieldcols)))
@@ -708,7 +938,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col) (symbol (concat alias "." col))))
 			(list (quote resultrow)
-				(cons (quote list) (map_assoc (qb_fields block) (lambda (title expr)
+				(cons (quote list) (map_assoc fields (lambda (title expr)
 					(lower_column_expr_for_alias alias expr)))))))
 		(if (empty_list? order_items)
 			(list (quote scan)
@@ -738,6 +968,110 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 				nil
 				false)))))))
 
+(define order_exprs (lambda (order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr _dir) expr
+			_ true)))))
+
+(define source_join_exprs (lambda (sources)
+	(map (coalesceNil sources '()) (lambda (src) (coalesceNil (source_join_expr src) true)))))
+
+(define join_cols_for_alias (lambda (default_alias alias needed_exprs)
+	(merge_unique (map (coalesceNil needed_exprs '()) (lambda (expr)
+		(extract_columns_for_join_alias default_alias alias expr))))))
+
+(define join_filter_cols_for_alias (lambda (default_alias alias condition)
+	(extract_columns_for_join_alias default_alias alias condition)))
+
+(define lower_join_result_fields (lambda (default_alias fields)
+	(map_assoc fields (lambda (_title expr)
+		(lower_column_expr_for_join default_alias expr)))))
+
+(define build_join_scan_rows (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value)
+	(if (empty_list? sources)
+		(if (equal? (coalesceNil final_condition true) true)
+			(list (quote list)
+				(list (quote resultrow)
+					(cons (quote list) (lower_join_result_fields default_alias fields))))
+			(list (quote if)
+				(list (quote optimize) (lower_column_expr_for_join default_alias final_condition))
+				(list (quote list)
+					(list (quote resultrow)
+						(cons (quote list) (lower_join_result_fields default_alias fields))))
+				(list (quote list))))
+		(begin
+			(define src (car sources))
+			(if (not (source_is_base_table? src))
+				(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
+				true)
+			(define alias (source_alias src))
+			(define condition (coalesceNil (source_join_expr src) true))
+			(define filtercols (join_filter_cols_for_alias default_alias alias condition))
+			(define mapcols (merge_unique (list
+				(table_column_names (source_schema src) (source_relation src))
+				(join_cols_for_alias default_alias alias needed_exprs))))
+			(define table_expr (list (quote table) (source_schema src) (source_relation src)))
+			(define filter_expr (list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat alias "." col))))
+				(list (quote optimize) (lower_column_expr_for_join default_alias condition))))
+			(define map_expr (list (quote lambda)
+				(map mapcols (lambda (col) (symbol (concat alias "." col))))
+				(build_join_scan_rows schema (cdr sources) default_alias needed_exprs final_condition fields '() 0 -1)))
+			(define reduce_expr (list (quote lambda) (list (quote acc) (quote subrows))
+				(list (quote merge) (quote acc) (quote subrows))))
+			(if (empty_list? order_items)
+				(list (quote scan)
+					'(session "__memcp_tx")
+					table_expr
+					(cons (quote list) filtercols)
+					filter_expr
+					(cons (quote list) mapcols)
+					map_expr
+					reduce_expr
+					(list (quote list))
+					nil
+					(source_outer? src))
+				(list (quote scan_order)
+					'(session "__memcp_tx")
+					table_expr
+					(cons (quote list) filtercols)
+					filter_expr
+					(cons (quote list) (order_cols_for_alias alias order_items))
+					(cons (quote list) (order_dirs order_items))
+					0
+					(coalesceNil offset_value 0)
+					(coalesceNil limit_value -1)
+					(cons (quote list) mapcols)
+					map_expr
+					reduce_expr
+					(list (quote list))
+					(source_outer? src)))))))
+
+(define lower_multi_source_query_block (lambda (block)
+	(begin
+		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
+		(if (not (empty_list? (qb_stages block)))
+			(neumann_fail "build_queryplan" "pre-existing stages are not implemented yet")
+			true)
+		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
+			(neumann_fail "build_queryplan" "group-stage over joins is not implemented yet")
+			true)
+		(if (or (not (nil? (qb_limit block))) (not (nil? (qb_offset block))))
+			(if (empty_list? (qb_order block))
+				(neumann_fail "build_queryplan" "LIMIT/OFFSET without ORDER BY is not implemented yet")
+				true)
+			true)
+		(define sources (qb_sources block))
+		(define first_alias (source_alias (car sources)))
+		(define needed_exprs (merge (list
+			(extract_assoc fields (lambda (_title expr) (list expr)))
+			(list (coalesceNil (qb_where block) true))
+			(order_exprs (qb_order block))
+			(source_join_exprs sources))))
+		(define rows_plan (build_join_scan_rows (qb_schema block) sources first_alias needed_exprs (coalesceNil (qb_where block) true) fields (qb_order block) (qb_offset block) (qb_limit block)))
+		rows_plan)))
+
 (define lower_zero_source_query_block (lambda (block)
 	(if (equal? (coalesceNil (qb_where block) true) true)
 		(list (quote resultrow) (quoted_runtime_list (qb_fields block)))
@@ -755,7 +1089,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 					(lower_zero_source_query_block (ir_root ir))
 					(if (single_source? (qb_sources (ir_root ir)))
 						(lower_single_source_query_block (ir_root ir))
-						(neumann_fail "build_queryplan" "multi-source query-block lowering is not implemented yet")))
+						(lower_multi_source_query_block (ir_root ir))))
 				(symbol union-block) (neumann_fail "build_queryplan" "union-block lowering is intentionally not scaffolded yet")
 				_ (neumann_fail "build_queryplan" "unknown logical root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))))
