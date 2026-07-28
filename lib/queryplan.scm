@@ -97,6 +97,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define query_block? (lambda (node) (equal? (logical_op node) (quote query-block))))
 (define group_stage? (lambda (node) (equal? (logical_op node) (quote group-stage))))
 (define union_block? (lambda (node) (equal? (logical_op node) (quote union-block))))
+(define orc_stage? (lambda (node) (equal? (logical_op node) (quote orc-stage))))
 
 (define qb_schema (lambda (node) (nth node 1)))
 (define qb_sources (lambda (node) (nth node 2)))
@@ -129,6 +130,28 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define gs_limit (lambda (node) (nth node 9)))
 (define gs_offset (lambda (node) (nth node 10)))
 (define gs_facts (lambda (node) (nth node 11)))
+
+(define make_orc_stage (lambda (id source column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit)
+	(list (quote orc-stage)
+		id source column
+		(coalesceNil sortcols '())
+		(coalesceNil sortdirs '())
+		(coalesceNil partitioncount 0)
+		(coalesceNil mapcols '())
+		mapfn
+		reducefn
+		reduceinit)))
+
+(define os_id (lambda (node) (nth node 1)))
+(define os_source (lambda (node) (nth node 2)))
+(define os_column (lambda (node) (nth node 3)))
+(define os_sortcols (lambda (node) (nth node 4)))
+(define os_sortdirs (lambda (node) (nth node 5)))
+(define os_partitioncount (lambda (node) (nth node 6)))
+(define os_mapcols (lambda (node) (nth node 7)))
+(define os_mapfn (lambda (node) (nth node 8)))
+(define os_reducefn (lambda (node) (nth node 9)))
+(define os_reduceinit (lambda (node) (nth node 10)))
 
 (define source_alias (lambda (src)
 	(match src '(alias _schema _relation _outer _join) alias _ nil)))
@@ -600,6 +623,90 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		"MIN" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
 		_ (neumann_fail "untangle_query" "window function needs ORC stage"))))
 
+(define window_order_sort_dir (lambda (dir)
+	(if (equal? dir >) true false)))
+
+(define window_order_exprs (lambda (order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr _dir) expr
+			_ (neumann_fail "untangle_query" "malformed window ORDER BY item"))))))
+
+(define window_order_dirs_for_orc (lambda (order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(_expr dir) (window_order_sort_dir dir)
+			_ (neumann_fail "untangle_query" "malformed window ORDER BY item"))))))
+
+(define make_row_number_orc_stage_rewrite (lambda (args over outer_sources ctx)
+	(begin
+		(if (not (empty_list? args))
+			(neumann_fail "untangle_query" "ROW_NUMBER does not accept arguments")
+			true)
+		(if (not (single_source? outer_sources))
+			(neumann_fail "untangle_query" "ROW_NUMBER ORC stage currently supports one base source")
+			true)
+		(define src (car outer_sources))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "untangle_query" "ROW_NUMBER ORC stage requires a base source")
+			true)
+		(define alias (source_alias src))
+		(define partition_exprs (nth over 0))
+		(define order_items (nth over 1))
+		(if (empty_list? order_items)
+			(neumann_fail "untangle_query" "ROW_NUMBER requires ORDER BY for ORC lowering")
+			true)
+		(define partition_cols (map partition_exprs (lambda (expr)
+			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+		(define order_cols (map (window_order_exprs order_items) (lambda (expr)
+			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+		(define sortcols (merge (list partition_cols order_cols)))
+		(define sortdirs (merge (list
+			(map partition_exprs (lambda (_expr) false))
+			(window_order_dirs_for_orc order_items))))
+		(define col (concat "__orc_row_number_" (fnv_hash (string (list (source_relation src) alias sortcols sortdirs (count partition_exprs))))))
+		(define stage (make_orc_stage
+			(concat "orc-row-number:" col)
+			src
+			col
+			sortcols
+			sortdirs
+			(count partition_exprs)
+			partition_cols
+			(if (empty_list? partition_exprs)
+				(list (quote lambda) (list (quote $set)) (list (quote list) (quote $set)))
+				(list (quote lambda)
+					(cons (quote $set) (map partition_cols (lambda (colname) (symbol colname))))
+					(list (quote cons)
+						(if (single_source? partition_cols)
+							(symbol (car partition_cols))
+							(cons (quote list) (map partition_cols (lambda (colname) (symbol colname)))))
+						(list (quote list) (quote $set)))))
+			(if (empty_list? partition_exprs)
+				(list (quote lambda) (list (quote acc) (quote mapped))
+					(list (quote begin)
+						(list (list (quote car) (quote mapped)) (list (quote +) (quote acc) 1))
+						(list (quote +) (quote acc) 1)))
+				(list (quote lambda) (list (quote acc) (quote mapped))
+					(list (quote begin)
+						(list (quote define) (quote row_partition) (list (quote car) (quote mapped)))
+						(list (quote define) (quote writer) (list (quote car) (list (quote cdr) (quote mapped))))
+						(list (quote define) (quote prev_partition) (list (quote cadr) (quote acc)))
+						(list (quote define) (quote inner_acc) (list (quote car) (quote acc)))
+						(list (quote define) (quote eff_acc) (list (quote if)
+							(list (quote or)
+								(list (quote nil?) (quote prev_partition))
+								(list (quote equal?) (quote row_partition) (quote prev_partition)))
+							(quote inner_acc)
+							0))
+						(list (quote writer) (list (quote +) (quote eff_acc) 1))
+						(list (quote list) (list (quote +) (quote eff_acc) 1) (quote row_partition)))))
+			(if (empty_list? partition_exprs) 0 (list (quote list) 0 nil))))
+		(list
+			(list (quote get_column) alias false col false)
+			(list stage)
+			'()))))
+
 (define make_window_aggregate_stage_rewrite (lambda (fn args over outer_sources ctx)
 	(begin
 		(if (not (single_source? outer_sources))
@@ -681,7 +788,9 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 					(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
 					(make_in_stage_rewrite rewritten_probe inner outer_sources subquery ctx)))
 		((symbol window_func) fn args over)
-			(make_window_aggregate_stage_rewrite fn args over outer_sources ctx)
+			(if (equal? fn "ROW_NUMBER")
+				(make_row_number_orc_stage_rewrite args over outer_sources ctx)
+				(make_window_aggregate_stage_rewrite fn args over outer_sources ctx))
 		(cons head tail) (combine_stage_rewrite_results head (map tail (lambda (item) (untangle_expr_with_stages item outer_sources ctx))))
 		_ (list expr '() '()))))
 
@@ -1341,6 +1450,34 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 					nil))
 			(cons (quote parallel) agg_plans)))))
 
+(define lower_orc_stage_prepare (lambda (stage)
+	(begin
+		(define src (os_source stage))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "ORC stage lowering only supports base tables")
+			true)
+		(list (quote createcolumn)
+			(list (quote table) (source_schema src) (source_relation src))
+			(os_column stage)
+			"any"
+			(quoted_runtime_list '())
+			(list (quote list)
+				"temp" true
+				"sortcols" (quoted_runtime_list (os_sortcols stage))
+				"sortdirs" (cons (quote list) (os_sortdirs stage))
+				"partitioncount" (os_partitioncount stage)
+				"mapcols" (quoted_runtime_list (os_mapcols stage))
+				"mapfn" (os_mapfn stage)
+				"reducefn" (os_reducefn stage)
+				"reduceinit" (os_reduceinit stage))))))
+
+(define lower_stage_prepare (lambda (stage)
+	(if (group_stage? stage)
+		(lower_group_stage_prepare stage)
+		(if (orc_stage? stage)
+			(lower_orc_stage_prepare stage)
+			(neumann_fail "build_queryplan" "unknown logical stage")))))
+
 (define lower_group_stage (lambda (stage)
 	(begin
 		(define src (gs_input stage))
@@ -1384,7 +1521,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(cons (quote begin)
 			(merge (list
 				(list (lower_group_stage_prepare main_stage))
-				(map (qb_stages block) lower_group_stage_prepare)
+				(map (qb_stages block) lower_stage_prepare)
 				(list (lower_query_block_core (group_stage_final_block main_stage stage_sources)))))))))
 
 (define query_block_without_stages (lambda (block)
@@ -1416,7 +1553,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(lower_grouped_query_block_with_stages block)
 			(cons (quote begin)
 				(merge (list
-					(map (qb_stages block) lower_group_stage_prepare)
+					(map (qb_stages block) lower_stage_prepare)
 					(list (lower_query_block_core (query_block_without_stages block))))))))))
 
 (define source_is_base_table? (lambda (src)

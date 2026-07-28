@@ -1104,7 +1104,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter":
 			// handled by createcolumn builtin, not a column property
-		case "sortcols", "sortdirs", "mapcols", "mapfn", "reducefn", "reduceinit":
+		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapfn", "reducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn
 		default:
 			panic("unknown column attribute: " + key)
