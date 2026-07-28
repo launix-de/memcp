@@ -1515,6 +1515,36 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(list
 				(list (quote condition) (coalesceNil (qb_where block) true)))))))
 
+(define make_group_stage_for_query_block (lambda (block)
+	(begin
+		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
+		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
+			visible_ags
+			(merge_unique (list visible_ags (list aggregate_count_descriptor))))))
+		(define alias (source_alias (car (qb_sources block))))
+		(define input (make_query_block
+			(qb_schema block)
+			(qb_sources block)
+			'()
+			(qb_where block)
+			'() nil '() nil nil
+			'()
+			(qb_stages block)
+			(qb_facts block)))
+		(make_group_stage
+			(concat "group:query:" (fnv_hash (serialize (list (qb_sources block) (qb_where block) (qb_group block) ags))))
+			input
+			'()
+			(map (coalesceNil (qb_group block) '()) (lambda (expr) (canonical_column_expr_for_alias alias expr)))
+			ags
+			(qb_having block)
+			(qb_fields block)
+			(qb_order block)
+			(qb_limit block)
+			(qb_offset block)
+			(list
+				(list (quote condition) true))))))
+
 (define group_key_index (lambda (alias keys expr)
 	(if (or (nil? expr) (or (equal? expr true) (equal? expr false)))
 		nil
@@ -1701,13 +1731,13 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 
 (define group_stage_keytable_block (lambda (stage grouptbl key_names ags having_expr)
 	(make_query_block
-		(source_schema (gs_input stage))
-		(list (list grouptbl (source_schema (gs_input stage)) grouptbl false nil))
+		(group_stage_schema stage)
+		(list (list grouptbl (group_stage_schema stage) grouptbl false nil))
 		(gs_output stage)
 		having_expr
 		nil nil
 		(map (coalesceNil (gs_order stage) '()) (lambda (item)
-			(match item '(expr dir) (list (replace_group_expr (source_alias (gs_input stage)) grouptbl (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)) key_names ags expr) dir))))
+			(match item '(expr dir) (list (replace_group_expr (group_stage_input_alias stage) grouptbl (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)) key_names ags expr) dir))))
 		(gs_limit stage)
 		(gs_offset stage)
 		'() '() '())))
@@ -1723,9 +1753,9 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define group_stage_final_block (lambda (stage extra_sources)
 	(begin
 		(define src (gs_input stage))
-		(define schema (source_schema src))
-		(define tbl (source_relation src))
-		(define alias (source_alias src))
+		(define schema (group_stage_schema stage))
+		(define tbl (group_stage_input_name stage))
+		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
@@ -1837,12 +1867,12 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define lower_group_stage (lambda (stage)
 	(begin
 		(define src (gs_input stage))
-		(if (not (source_is_base_table? src))
-			(neumann_fail "build_queryplan" "group-stage lowering only supports base tables")
+		(if (and (not (query_block? src)) (not (source_is_base_table? src)))
+			(neumann_fail "build_queryplan" "group-stage lowering expects a base table or query-block input")
 			true)
-		(define schema (source_schema src))
-		(define tbl (source_relation src))
-		(define alias (source_alias src))
+		(define schema (group_stage_schema stage))
+		(define tbl (group_stage_input_name stage))
+		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
@@ -1876,8 +1906,8 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define main_stage (make_group_stage_for_block base_block base_src))
 		(cons (quote begin)
 			(merge (list
-				(list (lower_group_stage_prepare main_stage))
 				(map (qb_stages block) lower_stage_prepare)
+				(list (lower_group_stage_prepare main_stage))
 				(list (lower_query_block_core (group_stage_final_block main_stage stage_sources)))))))))
 
 (define query_block_without_stages (lambda (block)
@@ -2139,22 +2169,23 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(neumann_fail "build_queryplan" "pre-existing stages are not implemented yet")
 			true)
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-			(neumann_fail "build_queryplan" "group-stage over joins is not implemented yet")
-			true)
-		(if (or (not (nil? (qb_limit block))) (not (nil? (qb_offset block))))
-			(if (empty_list? (qb_order block))
-				(neumann_fail "build_queryplan" "LIMIT/OFFSET without ORDER BY is not implemented yet")
-				true)
-			true)
-		(define sources (qb_sources block))
-		(define first_alias (source_alias (car sources)))
-		(define needed_exprs (merge (list
-			(extract_assoc fields (lambda (_title expr) expr))
-			(list (coalesceNil (qb_where block) true))
-			(order_exprs (qb_order block))
-			(source_join_exprs sources))))
-		(define rows_plan (build_join_scan_rows (qb_schema block) sources first_alias needed_exprs (coalesceNil (qb_where block) true) fields (qb_order block) (qb_offset block) (qb_limit block)))
-		rows_plan)))
+			(lower_group_stage (make_group_stage_for_query_block block))
+			(begin
+				(if (or (not (nil? (qb_limit block))) (not (nil? (qb_offset block))))
+					(if (empty_list? (qb_order block))
+						(neumann_fail "build_queryplan" "LIMIT/OFFSET without ORDER BY is not implemented yet")
+						true)
+					true)
+				(define sources (qb_sources block))
+				(define first_alias (source_alias (car sources)))
+				(define needed_exprs (merge (list
+					(extract_assoc fields (lambda (_title expr) expr))
+					(list (coalesceNil (qb_where block) true))
+					(order_exprs (qb_order block))
+					(source_join_exprs sources))))
+				(define rows_plan (build_join_scan_rows (qb_schema block) sources first_alias needed_exprs (coalesceNil (qb_where block) true) fields (qb_order block) (qb_offset block) (qb_limit block)))
+				rows_plan))
+		)))
 
 (define lower_zero_source_query_block (lambda (block)
 	(if (equal? (coalesceNil (qb_where block) true) true)
