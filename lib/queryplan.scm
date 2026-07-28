@@ -584,6 +584,69 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(list stage)
 			(list source)))))
 
+(define window_aggregate_descriptor (lambda (fn args)
+	(match fn
+		"COUNT" (list aggregate_count_descriptor)
+		"SUM" (list (list (car args) (quote +) 0))
+		"MAX" (list (list (car args) (quote max) nil))
+		"MIN" (list (list (car args) (quote min) nil))
+		_ (neumann_fail "untangle_query" "window function needs ORC stage"))))
+
+(define window_aggregate_value_expr (lambda (fn args ags stage_alias)
+	(match fn
+		"COUNT" (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false)
+		"SUM" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+		"MAX" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+		"MIN" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+		_ (neumann_fail "untangle_query" "window function needs ORC stage"))))
+
+(define make_window_aggregate_stage_rewrite (lambda (fn args over outer_sources ctx)
+	(begin
+		(if (not (single_source? outer_sources))
+			(neumann_fail "untangle_query" "window aggregate stage currently supports one base source")
+			true)
+		(define src (car outer_sources))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "untangle_query" "window aggregate stage requires a base source")
+			true)
+		(define alias (source_alias src))
+		(define partition_exprs (nth over 0))
+		(define canonical_args (map (coalesceNil args '()) (lambda (arg) (canonical_column_expr_for_alias alias arg))))
+		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
+		(define keys (if (empty_list? partition_exprs)
+			'(1)
+			(map partition_exprs (lambda (expr) (canonical_column_expr_for_alias alias expr)))))
+		(define outer_domain (if (empty_list? partition_exprs)
+			'()
+			partition_exprs))
+		(define stage_id (concat "window-agg:" (fnv_hash (string (list fn canonical_args keys)))))
+		(define stage (make_group_stage
+			stage_id
+			src
+			outer_domain
+			keys
+			ags
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) true)
+				(list (quote purpose) (quote window-aggregate-cache)))))
+		(define stage_alias (exists_stage_alias stage_id))
+		(define key_names (group_key_cols keys))
+		(define grouptbl (exists_stage_table_name stage))
+		(define source (list
+			stage_alias
+			(source_schema src)
+			grouptbl
+			true
+			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
+		(list
+			(window_aggregate_value_expr fn canonical_args ags stage_alias)
+			(list stage)
+			(list source)))))
+
 (define combine_stage_rewrite_results (lambda (head rewritten_args)
 	(begin
 		(define expr (cons head (map rewritten_args (lambda (item) (nth item 0)))))
@@ -617,6 +680,8 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 				(if (query_block_no_from? inner)
 					(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
 					(make_in_stage_rewrite rewritten_probe inner outer_sources subquery ctx)))
+		((symbol window_func) fn args over)
+			(make_window_aggregate_stage_rewrite fn args over outer_sources ctx)
 		(cons head tail) (combine_stage_rewrite_results head (map tail (lambda (item) (untangle_expr_with_stages item outer_sources ctx))))
 		_ (list expr '() '()))))
 
