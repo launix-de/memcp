@@ -141,10 +141,10 @@ persist produced rows in a session list. */
 													(list (quote lambda) (list) true)
 													true)
 												nil))))
-								(define inner_plan
-									(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym)))
-								(define mat_dependency_tables
-									(collect_materialized_query_dependency_tables subquery))
+									(define inner_plan
+										(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym)))
+									(define mat_dependency_tables
+										(collect_materialized_query_dependency_tables subquery))
 								(define mat_dependency_invalidations
 									(filter (map mat_dependency_tables (lambda (dep_td)
 										(match dep_td '(dep_schema dep_tbl)
@@ -210,13 +210,23 @@ persist produced rows in a session list. */
 session-backed query-term materialization bridge. Callers stay responsible
 for registering visible schema metadata. */
 (define legacy_materialized_query_term_binding_ast (lambda (id subquery rows_sym sink_sym limit_val cnt_sym) (begin
+	(define build_sink_plan (lambda ()
+		(if (or
+			(and (list? subquery) (> (count subquery) 0)
+				(equal? (car subquery) (quote select_core_term)))
+			(and (list? subquery) (> (count subquery) 0)
+				(or
+					(equal? (car subquery) (quote union_all_term))
+					(equal? (car subquery) (quote union_distinct_term)))))
+			(build_queryplan_term_from_logical_with_sink subquery (list (quote callback) sink_sym))
+			(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym)))))
 	(if (legacy_materialized_table_backed_id? id)
 		(coalesce
 			(legacy_materialized_table_backed_binding_ast id subquery sink_sym limit_val)
 			(materialized_query_term_binding_ast_from_sink_plan id subquery rows_sym sink_sym limit_val cnt_sym
-				(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))))
+				(build_sink_plan)))
 		(materialized_query_term_binding_ast_from_sink_plan id subquery rows_sym sink_sym limit_val cnt_sym
-			(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym))))
+			(build_sink_plan)))
 )))
 
 /* materialized_query_term_binding_ast_from_sink_plan: session-backed
@@ -232,9 +242,9 @@ materialization when the caller already compiled a callback-sink plan. */
 		(concat
 			id
 			(user_session_runtime_cache_suffix_from_exprs (list subquery materialized_rows))))
-	(define mat_source (materialized-subquery-source runtime_id subquery))
-	(materialized_source_dependency_tables mat_source
-		(collect_materialized_query_dependency_tables subquery))
+		(define mat_source (materialized-subquery-source runtime_id subquery))
+		(materialized_source_dependency_tables mat_source
+			(collect_materialized_query_dependency_tables subquery))
 	(list
 		mat_source
 		(materialized-subquery-init runtime_id subquery materialized_rows))

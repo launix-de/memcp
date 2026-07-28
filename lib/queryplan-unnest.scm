@@ -487,9 +487,11 @@ the empty list (no constraint). */
 (define qpu-and-conjuncts (lambda (expr)
 	(if (or (nil? expr) (equal? expr true) (equal? expr (quote true)))
 		(list)
-		(if (qpu-expr-is-and? expr)
+		(if (qpu-expr-is-sql-truthy-and? expr)
+			(qpu-flatten-sql-truthy-and-args (cdr (nth expr 1)))
+			(if (qpu-expr-is-and? expr)
 			(qpu-flatten-and-args (cdr expr))
-			(list expr)))))
+			(list expr))))))
 
 /* qpu-expr-is-and? — true if expr is a list whose head is the `and` symbol. */
 (define qpu-expr-is-and? (lambda (expr) (match expr
@@ -499,9 +501,26 @@ the empty list (no constraint). */
 		false)
 	false)))
 
+(define qpu-expr-is-sql-truthy-and? (lambda (expr) (match expr
+	(cons head args)
+	(if (and
+		(or
+			(equal? head (quote sql_truthy))
+			(equal? head '(symbol sql_truthy))
+			(equal? head '(quote sql_truthy)))
+		(list? args)
+		(equal? (count args) 1))
+		(qpu-expr-is-and? (nth args 0))
+		false)
+	false)))
+
 (define qpu-flatten-and-args (lambda (args)
 	(reduce (coalesceNil args (list)) (lambda (acc a)
 		(merge acc (qpu-and-conjuncts a))) (list))))
+
+(define qpu-flatten-sql-truthy-and-args (lambda (args)
+	(reduce (coalesceNil args (list)) (lambda (acc a)
+		(merge acc (qpu-and-conjuncts (list (quote sql_truthy) a)))) (list))))
 
 /* qpu-and-from-conjuncts — rebuild an AND expression from a conjunct list.
 Empty → true; one element → bare; >1 → (and a b c …).
@@ -716,6 +735,62 @@ whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
 (define qpu-substitute-exprs (lambda (exprs repr)
 	(map (coalesceNil exprs (list)) (lambda (e) (qpu-substitute-expr e repr)))))
 
+(define qpu-hidden-key-name? (lambda (name)
+	(and (string? name) (>= (strlen name) 5)
+		(equal? (substr name 0 5) "__kt_"))))
+
+(define qpu-map-projection-has-name? (lambda (projections name)
+	(reduce (coalesceNil projections '()) (lambda (found pair) (match pair
+		'(n _expr) (or found (equal? n name))
+		found))
+	false)))
+
+(define qpu-hidden-key-projections-from-predicate
+	(lambda (pred provided-aliases projections)
+		(reduce (qpir-expr-column-refs pred) (lambda (acc ref) (match ref
+			'(tv col)
+			(if (has? provided-aliases tv)
+				(begin
+					(define key-name (if (qpu-hidden-key-name? col)
+						col
+						(concat "__kt_" col)))
+					(if (qpu-map-projection-has-name?
+						(merge projections acc) key-name)
+						acc
+						(merge acc (list
+							(list key-name
+								(list (quote get_column) tv false col false))))))
+				acc)
+			acc))
+		'())))
+
+(define qpu-node-output-projections (lambda (node)
+	(match (qpir-kind node)
+		(quote qpir-leaf)
+		(qpp-fields-to-pairs (qpp-tuple-fields (qpir-leaf-7tuple node)))
+		(quote qpir-map)
+		(qpir-map-projections node)
+		'())))
+
+(define qpu-node-add-hidden-key-projections (lambda (node pred)
+	(begin
+		(define provided (qpir-provided-aliases node))
+		(define projections (qpu-node-output-projections node))
+		(define hidden
+			(qpu-hidden-key-projections-from-predicate pred provided projections))
+		(if (equal? (count hidden) 0)
+			node
+			(match (qpir-kind node)
+				(quote qpir-map)
+				(qpir-map (merge (qpir-map-projections node) hidden)
+					(qpir-map-child node))
+				(quote qpir-leaf)
+				(qpir-map (merge projections hidden) node)
+				/* A generic map wrapper would need the full output projection
+				of joins/groups. Keep unsupported shapes unchanged; the lowerer
+				will still expose join keys for ordinary derived boundaries. */
+				node)))))
+
 (define qpu-outer-equality-covered-by-repr? (lambda (expr outer-aliases repr)
 	(begin
 		(define refs (qpu-cc-equality-refs expr))
@@ -738,6 +813,61 @@ whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
 		'(tv col) (and acc (has? provided-aliases tv))
 		false))
 		true)))
+
+(define qpu-correlated-local-key-from-equality (lambda (expr provided-aliases)
+	(begin
+		(define local-ref-expr (lambda (a b)
+			(begin
+				(define arefs (qpir-expr-column-refs a))
+				(define brefs (qpir-expr-column-refs b))
+				(if (and
+					(equal? (count arefs) 1)
+					(equal? (count brefs) 1)
+					(qpu-strip-expr-to-col-ref? a)
+					(qpu-strip-expr-to-col-ref? b))
+					(begin
+						(define ar (nth arefs 0))
+						(define br (nth brefs 0))
+						(match ar
+							'(atv acol)
+							(match br
+								'(btv _bcol)
+								(if (and (has? provided-aliases atv)
+									(not (has? provided-aliases btv)))
+									(list (quote get_column) atv false acol false)
+									nil)
+								nil)
+							nil))
+					nil))))
+		(match expr
+			'((symbol sql_truthy) inner)
+			(qpu-correlated-local-key-from-equality inner provided-aliases)
+			'((quote sql_truthy) inner)
+			(qpu-correlated-local-key-from-equality inner provided-aliases)
+			'((symbol equal??) lhs rhs)
+			(coalesce
+				(local-ref-expr lhs rhs)
+				(local-ref-expr rhs lhs))
+			'((quote equal??) lhs rhs)
+			(coalesce
+				(local-ref-expr lhs rhs)
+				(local-ref-expr rhs lhs))
+			'((symbol =) lhs rhs)
+			(coalesce
+				(local-ref-expr lhs rhs)
+				(local-ref-expr rhs lhs))
+			'((quote =) lhs rhs)
+			(coalesce
+				(local-ref-expr lhs rhs)
+				(local-ref-expr rhs lhs))
+			nil))))
+
+(define qpu-child-join-correlated-local-keys (lambda (child-join child-provided)
+	(reduce (qpu-and-conjuncts child-join) (lambda (acc part)
+		(begin
+			(define key (qpu-correlated-local-key-from-equality part child-provided))
+			(if (or (nil? key) (has? acc key)) acc (merge acc (list key)))))
+		'())))
 
 /* ==================== Right-side walker (§3.3 rules) ==================== */
 
@@ -765,12 +895,20 @@ after hoist) instead of the deeply-buried inner ref (t.col). */
 		'((symbol get_column) tv ti col ci)
 		(if (has? inner-aliases tv)
 			(list (quote get_column) sq-alias false
-				(concat "__kt_" col) false)
+				(if (and (string? col) (>= (strlen col) 5)
+					(equal? (substr col 0 5) "__kt_"))
+					col
+					(concat "__kt_" col))
+				false)
 			expr)
 		'((quote get_column) tv ti col ci)
 		(if (has? inner-aliases tv)
 			(list (quote get_column) sq-alias false
-				(concat "__kt_" col) false)
+				(if (and (string? col) (>= (strlen col) 5)
+					(equal? (substr col 0 5) "__kt_"))
+					col
+					(concat "__kt_" col))
+				false)
 			expr)
 		(cons head args)
 		(if (list? args)
@@ -856,7 +994,11 @@ converted dep-join. */
 				outer-aliases outer-ref-exprs repr))
 			(define child-new (nth child-result 0))
 			(define child-join (nth child-result 1))
-			(list (qpir-map new-projs child-new) child-join))
+			(define hidden-key-projs
+				(qpu-hidden-key-projections-from-predicate child-join
+					(qpir-provided-aliases child-new) new-projs))
+			(list (qpir-map (merge new-projs hidden-key-projs) child-new)
+				child-join))
 
 		(quote qpir-groupby) (begin
 			(define child-result (qpu-unnest-right (qpir-groupby-child node)
@@ -878,8 +1020,10 @@ converted dep-join. */
 			(define child-provided (qpir-provided-aliases child-new))
 			(define groupable-outer-refs (filter sub-outer-refs
 				(lambda (k) (qpu-expr-refs-provided-by? k child-provided))))
+			(define child-join-domain-keys
+				(qpu-child-join-correlated-local-keys child-join child-provided))
 			(define existing-keys (coalesceNil (qpir-groupby-keys node) '()))
-			(define new-keys (reduce groupable-outer-refs (lambda (acc k)
+			(define new-keys (reduce (merge groupable-outer-refs child-join-domain-keys) (lambda (acc k)
 				(if (has? acc k) acc (merge acc (list k))))
 				existing-keys))
 			(define final-having (if (equal? sub-having true) nil sub-having))
@@ -912,12 +1056,21 @@ converted dep-join. */
 				outer-aliases outer-ref-exprs repr))
 			(define left-new (nth left-result 0))
 			(define right-new (nth right-result 0))
+			(define right-with-boundary-keys
+				(if (nil? rhs-alias)
+					right-new
+					(qpu-node-add-hidden-key-projections right-new outer-pred)))
+			(define boundary-outer-pred (if (nil? rhs-alias)
+				outer-pred
+				(qpu-rewrite-refs-to-sq-kt outer-pred
+					(qpir-provided-aliases right-new)
+					rhs-alias)))
 			(define combined-join (qpu-and-from-conjuncts
 				(merge
 					(merge (qpu-and-conjuncts (nth left-result 1))
 						(qpu-and-conjuncts (nth right-result 1)))
-					(qpu-and-conjuncts outer-pred))))
-			(list (qpir-join (qpir-join-type node) pure-pred left-new right-new
+					(qpu-and-conjuncts boundary-outer-pred))))
+			(list (qpir-join (qpir-join-type node) pure-pred left-new right-with-boundary-keys
 				rhs-alias) combined-join))
 
 		(error (concat "qpu-unnest-right: operator " (string (qpir-kind node))

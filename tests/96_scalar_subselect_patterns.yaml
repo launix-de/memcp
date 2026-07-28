@@ -344,11 +344,12 @@ test_cases:
       WHERE NOT sq_doc.archive
       LIMIT 72 OFFSET 0
     expect:
-      rows: 8
+      rows: 12
       contains:
-        - "_unn_sq_uconf_0"
+        - "nq_"
+        - "sq_uconf"
       not_contains:
-        - "_unn_sq_uconf_1"
+        - "_unn_sq_uconf_"
 
   # Pattern 3: GROUP BY with MIN(CONCAT(...)) (6s in prod)
   # Aggregation with string concat in GROUP BY

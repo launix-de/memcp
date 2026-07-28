@@ -220,6 +220,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(reduce (coalesceNil order '()) (lambda (a b) (or a (contains_inner_select_order_item b))) false)))
 				_ true))
 			(define union_parts (psql_union_all_parts subquery))
+			(define union_membership_branch_simple? (lambda (branch) (match branch
+				'(_ tables _ _ group having order limit offset)
+				(and
+					(or (nil? group) (equal? group '()))
+					(or (nil? having) (equal? having true))
+					(or (nil? order) (equal? order '()))
+					(nil? limit)
+					(or (nil? offset) (equal? offset 0))
+					(reduce tables (lambda (ok td) (and ok (match td
+						'(_ tschema tbl _ _)
+						(and
+							(string? tbl)
+							(not (nil? (try (lambda () (get_schema tschema tbl)) (lambda (e) nil)))))
+						false)))
+						true))
+				false)))
+			(define union_membership_branches_simple? (if (nil? union_parts)
+				false
+				(match union_parts '(branches _ _ _)
+					(reduce branches (lambda (ok branch) (and ok (union_membership_branch_simple? branch))) true)
+					false)))
 			(define count_expr
 				(if (nil? union_parts)
 					(list (quote inner_select) (psql_semijoin_count_query subquery target_expr))
@@ -257,13 +278,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							(list (quote coalesceNil) count_expr 0)
 							0)
 						/* IN / NOT IN: SQL tri-valued NULL handling. See
-						sql_semijoin_count_expr in sql-parser.scm for full rationale. */
-						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
-							(match union_parts '(branches _ _ _)
-								(cons (if negated (quote and) (quote or))
-									(map branches (lambda (branch)
-										(psql_semijoin_count_expr branch target_expr negated)))))
-							(begin
+							sql_semijoin_count_expr in sql-parser.scm for full rationale. */
+							(if (and (not (nil? union_parts)) (not (nil? target_expr)))
+								(if union_membership_branches_simple?
+									(match union_parts '(branches _ _ _)
+										(cons (if negated (quote and) (quote or))
+											(map branches (lambda (branch)
+												(if negated
+													(list (quote not) (list (quote inner_select_in) target_expr branch))
+													(list (quote inner_select_in) target_expr branch))))))
+									(if negated
+										(list (quote not) (list (quote inner_select_in) target_expr subquery))
+										(list (quote inner_select_in) target_expr subquery)))
+								(begin
 								(define null_count_expr
 									(list (quote inner_select)
 										(psql_semijoin_null_count_query subquery)))

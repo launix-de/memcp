@@ -81,11 +81,40 @@ display them next to the plan root. */
 	(map stages explain_normalize_stage)
 ))
 
+(define explain_neumann_pipeline_rows (lambda (query) (begin
+	(define tuple-pairs (qpp-rebuild-tuple
+		(qpp-tuple-schema query)
+		(qpp-tuple-tables query)
+		(qpp-fields-to-pairs (qpp-tuple-fields query))
+		(qpp-tuple-condition query)
+		(qpp-tuple-group query)
+		(qpp-tuple-having query)
+		(qpp-tuple-order query)
+		(qpp-tuple-limit query)
+		(qpp-tuple-offset query)))
+	(define t0 (alias_disambiguate_pass tuple-pairs))
+	(define t1 (alias_normalize_pass t0))
+	(define t2 (column_resolve_scoped_pass t1 (list)))
+	(define t3 (derived_table_inline_pass t2))
+	(define t3b (column_resolve_scoped_pass t3 (list)))
+	(define t4 (lift_dep_joins_pass t3b))
+	(define t5 (unnest_pass t4))
+	(define t6 (lower_to_scans_pass t5))
+		(list
+			(list "stage" "neumann" "kind" "after-resolve" "value" (serialize t3b))
+			(list "stage" "neumann" "kind" "after-lift" "value" (serialize t4))
+			(list "stage" "neumann" "kind" "after-unnest" "value" (serialize t5))
+			(list "stage" "neumann" "kind" "after-lower" "value" (serialize t6)))))
+	)
+
 /* explain_queryplan_ir: expose planner IR around the logical query-term planner.
 Returns compact stage/kind/value rows for stable SQL-level inspection. */
 (define explain_queryplan_ir (lambda (query) (begin
 	(planner_debug_settings "scalar-trace" true)
 	(planner_debug_reset_scalar_events)
+	(define neumann_debug_rows (if (qpp-tuple? query)
+		(explain_neumann_pipeline_rows query)
+		'()))
 	(define explain_input (if (qpp-tuple? query)
 		(neumann_compile_select query)
 		query))
@@ -118,7 +147,7 @@ Returns compact stage/kind/value rows for stable SQL-level inspection. */
 				(list "stage" "plan" "kind" "root" "value" (explain_plan_root_with_scalar_debug plan_result))))
 			(planner_debug_settings "scalar-trace" false)
 			(if (qpp-tuple? query) (planner_neumann_lowered_scope_stack "stack" neumann_old_stack) nil)
-			(explain_emit_rows explain_rows))
+			(explain_emit_rows (merge neumann_debug_rows explain_rows)))
 		'(union_all_term branches order limit offset)
 		(begin
 			(planner_debug_settings "scalar-trace" false)

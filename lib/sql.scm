@@ -65,6 +65,35 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
 
+(define sql_identifier_chars
+	'("a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m"
+		"n" "o" "p" "q" "r" "s" "t" "u" "v" "w" "x" "y" "z"
+		"A" "B" "C" "D" "E" "F" "G" "H" "I" "J" "K" "L" "M"
+		"N" "O" "P" "Q" "R" "S" "T" "U" "V" "W" "X" "Y" "Z"
+		"0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "_"))
+(define sql_identifier_char? (lambda (ch)
+	(contains? sql_identifier_chars ch)))
+
+(define sql_session_vars_in_query (lambda (query) (begin
+	(define len (strlen query))
+	(define read_var_name (lambda (start) (begin
+		(for (list start "")
+			(lambda (i name) (and (< i len) (sql_identifier_char? (substr query i 1))))
+			(lambda (i name) (list (+ i 1) (concat name (substr query i 1))))))))
+	(define result (for (list 0 '())
+		(lambda (i names) (< i len))
+		(lambda (i names) (begin
+			(define ch (substr query i 1))
+			(define next_ch (if (< (+ i 1) len) (substr query (+ i 1) 1) ""))
+			(if (and (equal? ch "@") (not (equal? next_ch "@")))
+				(match (read_var_name (+ i 1)) '(next_i name)
+					(if (equal? name "")
+						(list (+ i 1) names)
+						(list next_i (append_unique names name))))
+				(list (+ i 1) names))))))
+	(cadr result)
+)))
+
 (define sql_query_text_has_plain_union (lambda (query_text) (begin
 	(define upper_query (toUpper query_text))
 	(and
@@ -136,14 +165,15 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
 				nil)
-			(define session_sensitive_query (strlike parse_query "%@%"))
-			(define session_cache_suffix
-				(if session_sensitive_query
-					(with_session session (lambda ()
-						(concat ":sess:" (planner_current_user_session_snapshot_suffix))))
-					""))
-			(define cache_key (concat username ":" schema ":" (fnv_hash parse_query) session_cache_suffix))
-			(define cached (queryplan_cache cache_key))
+				(define session_vars (sql_session_vars_in_query parse_query))
+				(define session_sensitive_query (not (equal? session_vars '())))
+				(define session_cache_suffix
+					(if session_sensitive_query
+						(concat ":sess:" (fnv_hash (serialize
+							(map session_vars (lambda (key) (list key (session key)))))))
+						""))
+				(define cache_key (concat username ":" schema ":" (fnv_hash parse_query) session_cache_suffix))
+				(define cached (queryplan_cache cache_key))
 			(if cached cached
 				(begin
 					(define explain_plan_query (sql_explain_plan_query parse_query))

@@ -55,11 +55,13 @@ test_cases:
       FROM jd_item
       ORDER BY id
     expect:
-      rows: 8
+      rows: 12
       contains:
-        - "_unn_jd_ref_0"
+        - "dom_jd_item"
+        - "nq_"
       not_contains:
-        - "_unn_jd_ref_1"
+        - ".mat:"
+        - "legacy_materialized"
         - "scan-tagged-table"
 
   # Three identical subqueries: all three must match
@@ -112,11 +114,13 @@ test_cases:
       FROM jd_item
       ORDER BY id
     expect:
-      rows: 8
+      rows: 12
       contains:
-        - "_unn_jd_ref_0"
+        - "dom_jd_item"
+        - "nq_"
       not_contains:
-        - "_unn_jd_ref_1"
+        - ".mat:"
+        - "legacy_materialized"
         - "scan-tagged-table"
 
   # Mix of identical + different-field subqueries
