@@ -816,6 +816,71 @@ the compile-budget-ms requirement.
 		'(expr dir) (list (untangle_expr_subqueries expr) dir)
 		item)))))
 
+(define retarget_explicit_alias_expr (lambda (expr old_alias new_alias) (match expr
+	'((symbol get_column) tbl ti col ci) (if (and (not (nil? tbl)) (equal?? tbl old_alias))
+		(list (quote get_column) new_alias ti col ci)
+		expr)
+	'((quote get_column) tbl ti col ci) (if (and (not (nil? tbl)) (equal?? tbl old_alias))
+		(list (quote get_column) new_alias ti col ci)
+		expr)
+	(cons sym args) (cons (retarget_explicit_alias_expr sym old_alias new_alias)
+		(map args (lambda (arg) (retarget_explicit_alias_expr arg old_alias new_alias))))
+	expr)))
+
+(define scalar_join_candidate (lambda (schema key subquery derived_aliases idx)
+	(match subquery
+		'(subschema subtables subfields subcondition group having order limit offset) (if (and
+				(equal? (count (coalesceNil subtables '())) 1)
+				(equal? (coalesceNil group '()) '())
+				(nil? having)
+				(equal? (coalesceNil order '()) '())
+				(or (nil? limit) (equal? limit 1))
+				(nil? offset))
+			(match (car subtables)
+				'(inner_alias inner_schema (string? inner_tbl) false inner_join_expr) (begin
+					(define helper_alias (concat "__scalar_" key "_" (string idx)))
+					(define value_expr (retarget_explicit_alias_expr
+						(untangle_expr_subqueries (select_ast_single_expr subquery))
+						inner_alias helper_alias))
+					(define joined_condition (rewrite_derived_expr
+						(retarget_explicit_alias_expr
+							(untangle_expr_subqueries (combine_and inner_join_expr subcondition))
+							inner_alias helper_alias)
+						derived_aliases))
+					(list (quote scalar-join)
+						(list helper_alias (coalesceNil inner_schema subschema) inner_tbl true joined_condition)
+						value_expr
+						(list (quote once-limit) 2)))
+				_ nil)
+			nil)
+		_ nil)))
+
+(define relationalize_scalar_field (lambda (schema key expr derived_aliases idx)
+	(match expr
+		'((symbol inner_select) subquery) (scalar_join_candidate schema key subquery derived_aliases idx)
+		'((quote inner_select) subquery) (scalar_join_candidate schema key subquery derived_aliases idx)
+		_ nil)))
+
+(define relationalize_scalar_fields (lambda (schema fields flat_tables derived_aliases)
+	(reduce_assoc (coalesceNil fields '()) (lambda (state key expr)
+		(begin
+			(define tables_acc (nth state 0))
+			(define fields_acc (nth state 1))
+			(define idx (nth state 2))
+			(define group_acc (nth state 3))
+			(define hit (relationalize_scalar_field schema key expr derived_aliases idx))
+			(if (nil? hit)
+				(list tables_acc
+					(merge fields_acc (list key (rewrite_derived_expr (untangle_expr_subqueries expr) derived_aliases)))
+					(+ idx 1)
+					group_acc)
+				(list
+					(merge tables_acc (list (nth hit 1)))
+					(merge fields_acc (list key (nth hit 2)))
+					(+ idx 1)
+					(merge group_acc (list (nth hit 2)))))))
+		(list flat_tables '() 0 '()))))
+
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas) (begin
 	(define ctx (initial_uctx outer_schemas))
 	(define derived_union_root (match (coalesceNil tables '())
@@ -847,10 +912,14 @@ the compile-budget-ms requirement.
 			(define flattened (flatten_query_tables tables))
 			(define derived_aliases (cadr flattened))
 			(define flat_tables (map (car flattened) (lambda (td) (rewrite_table_join_expr td derived_aliases))))
-			(parser_select_to_initial_dag schema flat_tables
-				(expand_and_rewrite_fields (untangle_fields_subqueries fields) derived_aliases)
+			(define relationalized_fields (relationalize_scalar_fields schema fields flat_tables derived_aliases))
+			(define effective_group (if (equal? (coalesceNil group '()) '())
+				(coalesceNil group '())
+				(merge (coalesceNil group '()) (nth relationalized_fields 3))))
+			(parser_select_to_initial_dag schema (nth relationalized_fields 0)
+				(expand_and_rewrite_fields (nth relationalized_fields 1) derived_aliases)
 				(rewrite_derived_expr (untangle_expr_subqueries (coalesceNil condition true)) derived_aliases)
-				(map (coalesceNil group '()) untangle_expr_subqueries)
+				(map effective_group untangle_expr_subqueries)
 				(if (nil? having) nil (rewrite_derived_expr (untangle_expr_subqueries having) derived_aliases))
 				(untangle_order_subqueries (map (coalesceNil order '()) (lambda (item) (match item
 					'(expr dir) (list (rewrite_derived_expr expr derived_aliases) dir)

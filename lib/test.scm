@@ -191,27 +191,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
 	(assert (equal? (serialize (build_queryplan_term scalar_no_from_ast))
 		"(resultrow '(\"x\" 8 \"in_ok\" (and true (equal?? 8 8)) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
-	(assert (strlike (try (lambda () (begin
-			(untangle_query_term
-				(list "memcp-tests" '()
-					(list "x" (list 'inner_select simple_select_ast))
-					true nil nil nil nil nil)
-				nil)
-			"unexpected-ok"))
-		(lambda (e) e)) "NEUMANN_INVARIANT_BROKEN:%") true "untangle_query rejects table-backed scalar expression fallback")
+	(define table_scalar_ir (untangle_query_term
+		(list "memcp-tests" '()
+			(list "x" (list 'inner_select simple_select_ast))
+			true nil nil nil nil nil)
+		nil))
+	(assert (expr_contains_subquery? table_scalar_ir) false "untangle_query relationalizes table-backed scalar subquery")
 	(define correlated_subquery_ast (list "memcp-tests"
 		(list (list "t" "memcp-tests" "t" false nil))
 		(list "id" expr_gc)
 		(list 'equal?? expr_gc (list 'get_column "outer" false "id" false))
 		nil nil nil nil nil))
-	(assert (strlike (try (lambda () (begin
-			(untangle_query_term
-				(list "memcp-tests" '()
-					(list "x" (list 'inner_select correlated_subquery_ast))
-					true nil nil nil nil nil)
-				nil)
-			"unexpected-ok"))
-		(lambda (e) e)) "NEUMANN_INVARIANT_BROKEN:%") true "untangle_query rejects correlated scalar expression fallback")
+	(define correlated_scalar_ir (untangle_query_term
+		(list "memcp-tests" '()
+			(list "x" (list 'inner_select correlated_subquery_ast))
+			true nil nil nil nil nil)
+		nil))
+	(assert (expr_contains_subquery? correlated_scalar_ir) false "untangle_query relationalizes correlated scalar subqueries")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))
