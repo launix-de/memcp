@@ -207,6 +207,12 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(cons _title (cons expr _rest)) expr
 		_ nil)))
 
+(define split_and_terms (lambda (expr)
+	(match (coalesceNil expr true)
+		((symbol and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
+		((quote and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
+		_ (list expr))))
+
 (define neumann_fail (lambda (phase msg)
 	(error (concat phase ": " msg))))
 
@@ -257,16 +263,289 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 					(symbol inner_select_in) (list (quote and) where (list (quote equal??) probe (query_block_first_expr inner)))
 					_ (neumann_fail "untangle_query" "unknown subquery expression")))))))
 
-(define untangle_expr (lambda (expr ctx)
+(define source_aliases (lambda (sources)
+	(map (coalesceNil sources '()) source_alias)))
+
+(define expr_refs_alias? (lambda (default_alias alias expr)
+	(match expr
+		((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
+		((quote get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
+		(cons _head tail) (reduce tail (lambda (found item) (or found (expr_refs_alias? default_alias alias item))) false)
+		_ false)))
+
+(define expr_refs_any_alias? (lambda (default_alias aliases expr)
+	(reduce (coalesceNil aliases '()) (lambda (found alias)
+		(or found (expr_refs_alias? default_alias alias expr))) false)))
+
+(define direct_column_ref? (lambda (expr)
+	(match expr
+		((symbol get_column) _ _ _ _) true
+		((quote get_column) _ _ _ _) true
+		_ false)))
+
+(define exists_correlation_pair (lambda (inner_default inner_aliases outer_aliases term)
+	(match term
+		((symbol equal??) a b) (begin
+			(define a_inner (expr_refs_any_alias? inner_default inner_aliases a))
+			(define b_inner (expr_refs_any_alias? inner_default inner_aliases b))
+			(define a_outer (and (not a_inner) (expr_refs_any_alias? nil outer_aliases a)))
+			(define b_outer (and (not b_inner) (expr_refs_any_alias? nil outer_aliases b)))
+			(if (and a_inner b_outer)
+				(list a b)
+				(if (and b_inner a_outer)
+					(list b a)
+					nil)))
+		((quote equal??) a b) (exists_correlation_pair inner_default inner_aliases outer_aliases (list (quote equal??) a b))
+		((symbol equal?) a b) (exists_correlation_pair inner_default inner_aliases outer_aliases (list (quote equal??) a b))
+		((quote equal?) a b) (exists_correlation_pair inner_default inner_aliases outer_aliases (list (quote equal??) a b))
+		_ nil)))
+
+(define exists_stage_alias (lambda (stage_id)
+	(concat "__exists_" (fnv_hash stage_id))))
+
+(define exists_stage_table_name (lambda (stage)
+	(begin
+		(define src (gs_input stage))
+		(group_table_name
+			(source_schema src)
+			(source_relation src)
+			(source_alias src)
+			(if (empty_list? (gs_keys stage)) '(1) (gs_keys stage))
+			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+			(gs_aggregates stage)))))
+
+(define make_exists_stage_join_condition (lambda (stage_alias key_names outer_domain)
+	(if (empty_list? outer_domain)
+		nil
+		(combine_where_terms
+			(map (produceN (count outer_domain)) (lambda (i)
+				(list (quote equal??)
+					(list (quote get_column) stage_alias false (nth key_names i) false)
+					(nth outer_domain i))))
+			true))))
+
+(define exists_inner_supported? (lambda (inner)
+	(and (query_block? inner)
+		(and (single_source? (qb_sources inner))
+			(and (empty_list? (qb_group inner))
+				(and (nil? (qb_having inner))
+					(and (empty_list? (qb_order inner))
+						(and (nil? (qb_limit inner))
+							(and (nil? (qb_offset inner))
+								(empty_list? (qb_stages inner)))))))))))
+
+(define make_exists_stage_rewrite (lambda (inner outer_sources subquery ctx)
+	(begin
+		(if (not (exists_inner_supported? inner))
+			(neumann_fail "untangle_query" "EXISTS group-stage(D) currently supports one plain inner query-block")
+			true)
+		(define inner_src (car (qb_sources inner)))
+		(if (not (source_is_base_table? inner_src))
+			(neumann_fail "untangle_query" "EXISTS group-stage(D) requires a base inner source after FROM flattening")
+			true)
+		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_default (source_alias inner_src))
+		(define outer_aliases (source_aliases outer_sources))
+		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
+		(define corr_pairs (filter (map terms (lambda (term)
+			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(lambda (pair) (not (nil? pair)))))
+		(define local_terms (filter terms (lambda (term)
+			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+		(define keys (if (empty_list? corr_pairs)
+			'(1)
+			(map corr_pairs (lambda (pair) (canonical_column_expr_for_alias inner_default (nth pair 0))))))
+		(define outer_domain (if (empty_list? corr_pairs)
+			'()
+			(map corr_pairs (lambda (pair) (nth pair 1)))))
+		(define condition (combine_where_terms local_terms true))
+		(define stage_id (concat "exists:" (fnv_hash (string (list subquery keys outer_domain condition)))))
+		(define stage (make_group_stage
+			stage_id
+			inner_src
+			outer_domain
+			keys
+			(list aggregate_count_descriptor)
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) condition)
+				(list (quote purpose) (quote exists-cache)))))
+		(define stage_alias (exists_stage_alias stage_id))
+		(define key_names (group_key_cols keys))
+		(define grouptbl (exists_stage_table_name stage))
+		(define source (list
+			stage_alias
+			(source_schema inner_src)
+			grouptbl
+			true
+			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
+		(define count_col (aggregate_col_name aggregate_count_descriptor))
+		(list
+			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
+			(list stage)
+			(list source)))))
+
+(define make_in_stage_rewrite (lambda (probe inner outer_sources subquery ctx)
+	(begin
+		(if (not (exists_inner_supported? inner))
+			(neumann_fail "untangle_query" "IN group-stage(D) currently supports one plain inner query-block")
+			true)
+		(define inner_src (car (qb_sources inner)))
+		(if (not (source_is_base_table? inner_src))
+			(neumann_fail "untangle_query" "IN group-stage(D) requires a base inner source after FROM flattening")
+			true)
+		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_default (source_alias inner_src))
+		(define outer_aliases (source_aliases outer_sources))
+		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
+		(define corr_pairs (filter (map terms (lambda (term)
+			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(lambda (pair) (not (nil? pair)))))
+		(define local_terms (filter terms (lambda (term)
+			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+		(define rhs_expr (canonical_column_expr_for_alias inner_default (query_block_first_expr inner)))
+		(define keys (cons rhs_expr
+			(map corr_pairs (lambda (pair) (canonical_column_expr_for_alias inner_default (nth pair 0))))))
+		(define outer_domain (cons probe
+			(map corr_pairs (lambda (pair) (nth pair 1)))))
+		(define condition (combine_where_terms local_terms true))
+		(define stage_id (concat "in:" (fnv_hash (string (list subquery probe keys outer_domain condition)))))
+		(define stage (make_group_stage
+			stage_id
+			inner_src
+			outer_domain
+			keys
+			(list aggregate_count_descriptor)
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) condition)
+				(list (quote purpose) (quote in-cache)))))
+		(define stage_alias (exists_stage_alias stage_id))
+		(define key_names (group_key_cols keys))
+		(define grouptbl (exists_stage_table_name stage))
+		(define source (list
+			stage_alias
+			(source_schema inner_src)
+			grouptbl
+			true
+			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
+		(define count_col (aggregate_col_name aggregate_count_descriptor))
+		(list
+			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
+			(list stage)
+			(list source)))))
+
+(define make_scalar_aggregate_stage_rewrite (lambda (inner outer_sources subquery ctx)
+	(begin
+		(if (not (exists_inner_supported? inner))
+			(neumann_fail "untangle_query" "scalar aggregate group-stage(D) currently supports one plain inner query-block")
+			true)
+		(define value_expr (query_block_first_expr inner))
+		(define ags (dedupe_aggregates_by_col (extract_aggregates value_expr)))
+		(if (empty_list? ags)
+			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs once_limit stage")
+			true)
+		(define inner_src (car (qb_sources inner)))
+		(if (not (source_is_base_table? inner_src))
+			(neumann_fail "untangle_query" "scalar aggregate group-stage(D) requires a base inner source after FROM flattening")
+			true)
+		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_default (source_alias inner_src))
+		(define outer_aliases (source_aliases outer_sources))
+		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
+		(define corr_pairs (filter (map terms (lambda (term)
+			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(lambda (pair) (not (nil? pair)))))
+		(define local_terms (filter terms (lambda (term)
+			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+		(define keys (if (empty_list? corr_pairs)
+			'(1)
+			(map corr_pairs (lambda (pair) (canonical_column_expr_for_alias inner_default (nth pair 0))))))
+		(define outer_domain (if (empty_list? corr_pairs)
+			'()
+			(map corr_pairs (lambda (pair) (nth pair 1)))))
+		(define condition (combine_where_terms local_terms true))
+		(define stage_id (concat "scalar-agg:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
+		(define stage (make_group_stage
+			stage_id
+			inner_src
+			outer_domain
+			keys
+			ags
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) condition)
+				(list (quote purpose) (quote scalar-aggregate-cache)))))
+		(define stage_alias (exists_stage_alias stage_id))
+		(define key_names (group_key_cols keys))
+		(define grouptbl (exists_stage_table_name stage))
+		(define source (list
+			stage_alias
+			(source_schema inner_src)
+			grouptbl
+			true
+			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
+		(list
+			(replace_group_expr inner_default stage_alias keys key_names ags value_expr)
+			(list stage)
+			(list source)))))
+
+(define combine_stage_rewrite_results (lambda (head rewritten_args)
+	(begin
+		(define expr (cons head (map rewritten_args (lambda (item) (nth item 0)))))
+		(define stages (merge (map rewritten_args (lambda (item) (nth item 1)))))
+		(define sources (merge (map rewritten_args (lambda (item) (nth item 2)))))
+		(list expr stages sources))))
+
+(define untangle_expr_with_stages (lambda (expr outer_sources ctx)
 	(match expr
 		((symbol inner_select) subquery)
-			(untangle_zero_domain_subquery (quote inner_select) nil subquery ctx)
+			(begin
+				(define normalized (normalize_query_ast subquery))
+				(define inner (untangle_query normalized ctx))
+				(if (query_block_no_from? inner)
+					(list (untangle_zero_domain_subquery (quote inner_select) nil subquery ctx) '() '())
+					(make_scalar_aggregate_stage_rewrite inner outer_sources subquery ctx)))
 		((symbol inner_select_exists) subquery)
-			(untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx)
+			(begin
+				(define normalized (normalize_query_ast subquery))
+				(define inner (untangle_query normalized ctx))
+				(if (query_block_no_from? inner)
+					(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
+					(make_exists_stage_rewrite inner outer_sources subquery ctx)))
 		((symbol inner_select_in) probe subquery)
-			(untangle_zero_domain_subquery (quote inner_select_in) (untangle_expr probe ctx) subquery ctx)
-		(cons head tail) (cons head (map tail (lambda (item) (untangle_expr item ctx))))
-		_ expr)))
+			(begin
+				(define normalized (normalize_query_ast subquery))
+				(define inner (untangle_query normalized ctx))
+				(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+				(if (query_block_no_from? inner)
+					(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
+					(make_in_stage_rewrite rewritten_probe inner outer_sources subquery ctx)))
+		(cons head tail) (combine_stage_rewrite_results head (map tail (lambda (item) (untangle_expr_with_stages item outer_sources ctx))))
+		_ (list expr '() '()))))
+
+(define untangle_expr (lambda (expr ctx)
+	(nth (untangle_expr_with_stages expr '() ctx) 0)))
+
+(define untangle_fields_with_stages (lambda (fields outer_sources ctx)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (begin
+			(define rewritten (untangle_expr_with_stages expr outer_sources ctx))
+			(define tail (untangle_fields_with_stages rest outer_sources ctx))
+			(list
+				(cons title (cons (nth rewritten 0) (nth tail 0)))
+				(merge (list (nth rewritten 1) (nth tail 1)))
+				(merge (list (nth rewritten 2) (nth tail 2)))))
+		_ (list '() '() '()))))
 
 (define untangle_fields (lambda (fields ctx)
 	(match (coalesceNil fields '())
@@ -477,18 +756,22 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define sources (nth flattened_sources 0))
 		(define rewrites (nth flattened_sources 1))
 		(define source_where_terms (nth flattened_sources 2))
+		(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
+		(define where_result (untangle_expr_with_stages rewritten_where sources child_ctx))
+		(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) sources child_ctx))
+		(define stage_sources (merge (list (nth where_result 2) (nth field_result 2))))
 		(make_query_block
 			(qb_schema block)
-			sources
-			(untangle_fields (rewrite_derived_fields_chain rewrites (qb_fields block)) child_ctx)
-			(untangle_expr (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))) child_ctx)
+			(merge (list sources stage_sources))
+			(nth field_result 0)
+			(nth where_result 0)
 			(map (coalesceNil (qb_group block) '()) (lambda (item) (untangle_expr (rewrite_derived_ref_chain rewrites item) child_ctx)))
 			(untangle_expr (rewrite_derived_ref_chain rewrites (qb_having block)) child_ctx)
 			(map (rewrite_derived_order_chain rewrites (qb_order block)) (lambda (item) (untangle_expr item child_ctx)))
 			(qb_limit block)
 			(qb_offset block)
 			(untangle_fields (rewrite_derived_fields_chain rewrites (qb_hidden block)) child_ctx)
-			(qb_stages block)
+			(merge (list (qb_stages block) (nth where_result 1) (nth field_result 1)))
 			(qb_facts block)))))
 
 (define untangle_union_block (lambda (block ctx)
@@ -801,7 +1084,20 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 				alias
 				(cons (quote list) (map pairs (lambda (p) (cons (quote list) p)))))))))
 
-(define lower_group_stage (lambda (stage)
+(define group_stage_keytable_block (lambda (stage grouptbl key_names ags having_expr)
+	(make_query_block
+		(source_schema (gs_input stage))
+		(list (list grouptbl (source_schema (gs_input stage)) grouptbl false nil))
+		(gs_output stage)
+		having_expr
+		nil nil
+		(map (coalesceNil (gs_order stage) '()) (lambda (item)
+			(match item '(expr dir) (list (replace_group_expr (source_alias (gs_input stage)) grouptbl (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)) key_names ags expr) dir))))
+		(gs_limit stage)
+		(gs_offset stage)
+		'() '() '())))
+
+(define lower_group_stage_prepare (lambda (stage)
 	(begin
 		(define src (gs_input stage))
 		(if (not (source_is_base_table? src))
@@ -832,6 +1128,32 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define collect_plan (build_group_collect_plan schema tbl alias grouptbl keys key_names condition))
 		(define cleanup_plan (build_group_keytable_cleanup schema tbl alias grouptbl keys key_names))
 		(define agg_plans (map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names condition ag))))
+		(list (quote begin)
+			(if (nil? cleanup_plan)
+				(list (quote begin)
+					keytable_init
+					collect_plan)
+				(list (quote if) keytable_init
+					(list (quote begin)
+						collect_plan
+						cleanup_plan)
+					nil))
+			(cons (quote parallel) agg_plans)))))
+
+(define lower_group_stage (lambda (stage)
+	(begin
+		(define src (gs_input stage))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "group-stage lowering only supports base tables")
+			true)
+		(define schema (source_schema src))
+		(define tbl (source_relation src))
+		(define alias (source_alias src))
+		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define ags (gs_aggregates stage))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define key_names (group_key_cols keys))
+		(define grouptbl (group_table_name schema tbl alias keys condition ags))
 		(define output_fields (map_assoc (gs_output stage) (lambda (_title expr)
 			(replace_group_expr alias grouptbl keys key_names ags expr))))
 		(define replaced_having (replace_group_expr alias grouptbl keys key_names ags (coalesceNil (gs_having stage) true)))
@@ -843,29 +1165,53 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(if (or (nil? replaced_having) (equal? replaced_having true))
 				count_check
 				(list (quote and) replaced_having count_check))))
-		(define keytable_block (make_query_block
-			schema
-			(list (list grouptbl schema grouptbl false nil))
-			output_fields
-			having_expr
-			nil nil
-			(map (coalesceNil (gs_order stage) '()) (lambda (item)
-				(match item '(expr dir) (list (replace_group_expr alias grouptbl keys key_names ags expr) dir))))
-			(gs_limit stage)
-			(gs_offset stage)
-			'() '() '()))
+		(define keytable_block (group_stage_keytable_block
+			(make_group_stage
+				(gs_id stage)
+				(gs_input stage)
+				(gs_domain stage)
+				(gs_keys stage)
+				(gs_aggregates stage)
+				(gs_having stage)
+				output_fields
+				(gs_order stage)
+				(gs_limit stage)
+				(gs_offset stage)
+				(gs_facts stage))
+			grouptbl key_names ags having_expr))
 		(list (quote begin)
-			(if (nil? cleanup_plan)
-				(list (quote begin)
-					keytable_init
-					collect_plan)
-				(list (quote if) keytable_init
-					(list (quote begin)
-						collect_plan
-						cleanup_plan)
-					nil))
-			(cons (quote parallel) agg_plans)
+			(lower_group_stage_prepare stage)
 			(lower_single_source_query_block keytable_block)))))))
+
+(define query_block_without_stages (lambda (block)
+	(make_query_block
+		(qb_schema block)
+		(qb_sources block)
+		(qb_fields block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		'()
+		(qb_facts block))))
+
+(define lower_query_block_core (lambda (block)
+	(if (empty_list? (qb_sources block))
+		(lower_zero_source_query_block block)
+		(if (single_source? (qb_sources block))
+			(lower_single_source_query_block block)
+			(lower_multi_source_query_block block)))))
+
+(define lower_query_block_with_stages (lambda (block)
+	(if (empty_list? (qb_stages block))
+		(lower_query_block_core block)
+		(cons (quote begin)
+			(merge (list
+				(map (qb_stages block) lower_group_stage_prepare)
+				(list (lower_query_block_core (query_block_without_stages block)))))))))
 
 (define source_is_base_table? (lambda (src)
 	(string? (source_relation src))))
@@ -1008,9 +1354,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(define alias (source_alias src))
 			(define condition (coalesceNil (source_join_expr src) true))
 			(define filtercols (join_filter_cols_for_alias default_alias alias condition))
-			(define mapcols (merge_unique (list
-				(table_column_names (source_schema src) (source_relation src))
-				(join_cols_for_alias default_alias alias needed_exprs))))
+			(define mapcols (join_cols_for_alias default_alias alias needed_exprs))
 			(define table_expr (list (quote table) (source_schema src) (source_relation src)))
 			(define filter_expr (list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -1065,7 +1409,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define sources (qb_sources block))
 		(define first_alias (source_alias (car sources)))
 		(define needed_exprs (merge (list
-			(extract_assoc fields (lambda (_title expr) (list expr)))
+			(extract_assoc fields (lambda (_title expr) expr))
 			(list (coalesceNil (qb_where block) true))
 			(order_exprs (qb_order block))
 			(source_join_exprs sources))))
@@ -1085,11 +1429,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		(match (ir_return ir)
 			(symbol rows) (match (logical_op (ir_root ir))
-				(symbol query-block) (if (empty_list? (qb_sources (ir_root ir)))
-					(lower_zero_source_query_block (ir_root ir))
-					(if (single_source? (qb_sources (ir_root ir)))
-						(lower_single_source_query_block (ir_root ir))
-						(lower_multi_source_query_block (ir_root ir))))
+				(symbol query-block) (lower_query_block_with_stages (ir_root ir))
 				(symbol union-block) (neumann_fail "build_queryplan" "union-block lowering is intentionally not scaffolded yet")
 				_ (neumann_fail "build_queryplan" "unknown logical root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))))
