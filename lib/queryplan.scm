@@ -619,7 +619,10 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 (define window_aggregate_descriptor (lambda (fn args)
 	(match fn
 		"COUNT" (list aggregate_count_descriptor)
-		"SUM" (list (list (car args) (quote +) 0))
+		"SUM" (match (car args)
+			((symbol aggregate) agg_expr (symbol +) 0) (list (list agg_expr (quote +) 0))
+			((quote aggregate) agg_expr (quote +) 0) (list (list agg_expr (quote +) 0))
+			_ (list (list (car args) (quote +) 0)))
 		"MAX" (list (list (car args) (quote max) nil))
 		"MIN" (list (list (car args) (quote min) nil))
 		_ (neumann_fail "untangle_query" "window function needs ORC stage"))))
