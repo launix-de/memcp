@@ -16,18 +16,42 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 /*
-Neumann compiler rebuild scaffold
----------------------------------
+Neumann compiler rebuild
+------------------------
 
-The logical compiler IR intentionally uses few combined operators:
+This file is the clean query compiler pipeline:
 
-	query-block  select/join/filter/project/order/limit work unit
+	parser AST -> untangle_query -> join_reorder -> build_queryplan
+
+The logical IR deliberately uses a small set of combined operators instead of
+textbook one-operation nodes:
+
+	query-block  SELECT/FROM/JOIN/WHERE/project/ORDER/LIMIT work unit
 	group-stage  domain-D/keytable/aggregate/EXISTS/HAVING work unit
 	union-block  set operator work unit
+	orc-stage    ordered computed column work unit for window/order-sensitive work
 
-There is no logical scan operator.  Physical scans, bounds, indexes,
-materialisation and fused loops are decisions of build_queryplan after
-untangle_query and join_reorder have produced a decorrelated logical program.
+There is no logical scan operator.  scan, scan_order, scan_order_multi, index
+bounds, update callbacks, temp tables and fused loops are physical choices made
+by build_queryplan after the logical program is decorrelated and optimized.
+
+The Neumann/top-down invariant is strict: untangle_query must remove logical
+subquery expressions.  Correlated scalar/EXISTS/IN forms become explicit domain
+and keytable work; they must not survive as scalar fallback calls hidden inside
+expression lowering.  Unsupported forms should fail early and loudly until a
+relational rewrite exists.
+
+Logical trees may be deep.  That depth is compiler structure, not a license to
+materialize.  The lowering goal is to fuse filter, projection, joins, ordering,
+limits and DML sinks into the strongest physical scan available.  Materialization
+is reserved for real barriers: keytables/groups, ORC columns, unions with global
+ordering/deduplication, deduplicated domains and once-limit/scalar caches.  In
+hot paths, avoid using runtime row lists as a general adapter; prefer emitting a
+single fused scan/keytable builder once the logical rules are clear.
+
+Keep the code small and explicit.  Do not reintroduce legacy fallback branches,
+parser-specific operator variants, or early subselect recompilation.  SQL and
+PostgreSQL parsers should both lower to the same combined operators.
 */
 
 /* ------------------------------------------------------------------------- */
