@@ -912,8 +912,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(or (not (nil? (qb_having block)))
 			(or (not (nil? (qb_limit block)))
 				(or (not (nil? (qb_offset block)))
-					(or (not (empty_list? (qb_stages block)))
-						(query_block_has_aggregates? block))))))))
+					(query_block_has_aggregates? block)))))))
 
 (define untangle_flattened_base_source (lambda (src ctx)
 	(list
@@ -925,7 +924,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 
 (define flatten_source_list (lambda (sources ctx)
 	(if (empty_list? sources)
-		(list '() '() '())
+		(list '() '() '() '())
 		(begin
 			(define src (car sources))
 			(define rest (cdr sources))
@@ -934,12 +933,14 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 				(define tail_sources (nth tail 0))
 				(define tail_rewrites (nth tail 1))
 				(define tail_wheres (nth tail 2))
+				(define tail_stages (nth tail 3))
 				(if (string? relation)
 					(begin
 						(list
 							(cons (untangle_flattened_base_source src ctx) tail_sources)
 							tail_rewrites
-							tail_wheres))
+							tail_wheres
+							tail_stages))
 					(if (union_block? relation)
 						(neumann_fail "untangle_query" "FROM union-block needs union logical lowering before source flattening")
 						(begin
@@ -955,7 +956,8 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 									(list
 										(rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)
 										(cons (list alias (qb_fields inner)) tail_rewrites)
-										(cons (qb_where inner) tail_wheres)))
+										(cons (qb_where inner) tail_wheres)
+										(merge (list (qb_stages inner) tail_stages))))
 									(if (equal? (count inner_sources) 1)
 										(begin
 											(define only_inner (car inner_sources))
@@ -977,13 +979,15 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 														joined_condition)
 													(rewrite_sources_join_for_derived alias projection tail_sources))
 												(cons (list alias projection) tail_rewrites)
-												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))))
+												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))
+												(merge (list (qb_stages inner) tail_stages))))
 										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
 											(neumann_fail "untangle_query" "multi-source derived JOIN needs relation-unit lowering")
 											(list
 												(merge (list inner_sources (rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)))
 												(cons (list alias (qb_fields inner)) tail_rewrites)
-												(cons (qb_where inner) tail_wheres)))))))))
+												(cons (qb_where inner) tail_wheres)
+												(merge (list (qb_stages inner) tail_stages)))))))))
 						))))))))
 
 (define combine_where_terms (lambda (terms seed)
@@ -1017,6 +1021,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 		(define sources (nth flattened_sources 0))
 		(define rewrites (nth flattened_sources 1))
 		(define source_where_terms (nth flattened_sources 2))
+		(define source_stages (nth flattened_sources 3))
 		(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
 		(define where_result (untangle_expr_with_stages rewritten_where sources child_ctx))
 		(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) sources child_ctx))
@@ -1032,7 +1037,7 @@ untangle_query and join_reorder have produced a decorrelated logical program.
 			(qb_limit block)
 			(qb_offset block)
 			(untangle_fields (rewrite_derived_fields_chain rewrites (qb_hidden block)) child_ctx)
-			(merge (list (qb_stages block) (nth where_result 1) (nth field_result 1)))
+			(merge (list source_stages (qb_stages block) (nth where_result 1) (nth field_result 1)))
 			(qb_facts block)))))
 
 (define untangle_union_block (lambda (block ctx)
