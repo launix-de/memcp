@@ -1543,6 +1543,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
 		(requalify_single_source_expr old_alias new_alias expr)))))
 
+(define first_projection_expr (lambda (fields)
+	(match (coalesceNil fields '())
+		(cons _title (cons expr _rest)) expr
+		_ nil)))
+
+(define null_extend_projection_fields (lambda (fields)
+	(begin
+		(define presence (first_projection_expr fields))
+		(if (nil? presence)
+			fields
+			(map_assoc (coalesceNil fields '()) (lambda (_title expr)
+				(list (quote if) (list (quote nil?) presence) nil expr)))))))
+
 (define combine_where (lambda (a b)
 	(begin
 		(define aa (coalesceNil a true))
@@ -1609,8 +1622,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 											(define only_inner (car inner_sources))
 											(define inner_alias (source_alias only_inner))
 											(define projection (requalify_single_source_fields inner_alias alias (qb_fields inner)))
+											(define effective_projection (if (source_outer? src)
+												(null_extend_projection_fields projection)
+												projection))
 											(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
-											(define outer_join (rewrite_derived_ref alias projection (source_join_expr src)))
+											(define outer_join (rewrite_derived_ref alias effective_projection (source_join_expr src)))
 											(define joined_condition (if (or (source_outer? src) (not (nil? outer_join)))
 												(combine_where inner_where outer_join)
 												nil))
@@ -1623,8 +1639,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 														(source_relation only_inner)
 														(source_outer? src)
 														joined_condition)
-													(rewrite_sources_join_for_derived alias projection tail_sources))
-												(cons (list alias projection) tail_rewrites)
+													(rewrite_sources_join_for_derived alias effective_projection tail_sources))
+												(cons (list alias effective_projection) tail_rewrites)
 												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))
 												(merge (list (qb_stages inner) tail_stages))))
 										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
