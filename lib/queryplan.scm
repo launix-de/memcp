@@ -536,8 +536,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(and (nil? (qb_having inner))
 					(and (empty_list? (qb_order inner))
 						(and (nil? (qb_limit inner))
-							(and (nil? (qb_offset inner))
-								(empty_list? (qb_stages inner)))))))))))
+							(nil? (qb_offset inner))))))))))
 
 (define scalar_once_supported? (lambda (inner)
 	(and (query_block? inner)
@@ -762,13 +761,34 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define make_exists_union_stage_rewrite (lambda (inner args)
 	(if (not (union_block? inner))
 		(neumann_fail "untangle_query" "EXISTS UNION lowering expects union-block")
-		(if (or (not (equal? (union_mode inner) (quote all)))
-			(or (not (empty_list? (union_order inner)))
-				(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner))))))
-			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain UNION ALL branches")
+		(if (or (not (empty_list? (union_order inner)))
+			(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner)))))
+			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain unordered branches")
 			(combine_exists_union_results
 				(map (union_branches inner) (lambda (branch)
 					(make_exists_stage_rewrite branch args))))))))
+
+(define combine_in_union_results (lambda (results)
+	(match (coalesceNil results '())
+		(cons item rest) (begin
+			(define tail (combine_in_union_results rest))
+			(list
+				(if (empty_list? rest)
+					(nth item 0)
+					(list (quote or) (nth item 0) (nth tail 0)))
+				(merge (list (nth item 1) (nth tail 1)))
+				(merge (list (nth item 2) (nth tail 2)))))
+		_ (list false '() '()))))
+
+(define make_in_union_stage_rewrite (lambda (probe inner args)
+	(if (not (union_block? inner))
+		(neumann_fail "untangle_query" "IN UNION lowering expects union-block")
+		(if (or (not (empty_list? (union_order inner)))
+			(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner)))))
+			(neumann_fail "untangle_query" "IN over UNION currently supports plain unordered branches")
+			(combine_in_union_results
+				(map (union_branches inner) (lambda (branch)
+					(make_in_stage_rewrite probe branch args))))))))
 
 (define make_in_stage_rewrite (lambda (probe inner args)
 	(begin
@@ -776,10 +796,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "IN group-stage(D) currently supports one plain inner query-block")
 			true)
-		(define inner_src (car (qb_sources inner)))
-		(if (not (source_is_base_table? inner_src))
-			(neumann_fail "untangle_query" "IN group-stage(D) requires a base inner source after FROM flattening")
+		(if (not (equal? (count (qb_fields inner)) 2))
+			(neumann_fail "untangle_query" "IN subquery must expose exactly one column")
 			true)
+		(define inner_src (car (qb_sources inner)))
 		(define inner_aliases (source_aliases (qb_sources inner)))
 		(define inner_default (source_alias inner_src))
 		(define outer_aliases (source_aliases outer_sources))
@@ -797,10 +817,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define domain_lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define lookup_keys (cons probe domain_lookup_keys))
 		(define condition (combine_where_terms local_terms true))
+		(define stage_input (if (and (source_is_base_table? inner_src) (empty_list? (qb_stages inner)))
+			inner_src
+			(make_query_block
+				(qb_schema inner)
+				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				'()
+				condition
+				'() nil '() nil nil
+				'()
+				(qb_stages inner)
+				(qb_facts inner))))
+		(define stage_condition (if (query_block? stage_input) true condition))
 		(define stage_id (concat "in:" (fnv_hash (string (list probe keys lookup_keys condition)))))
 		(define stage (make_group_stage
 			stage_id
-			inner_src
+			stage_input
 			outer_domain
 			keys
 			(list aggregate_count_descriptor)
@@ -809,7 +841,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			nil nil
 			(list
-				(list (quote condition) condition)
+				(list (quote condition) stage_condition)
 				(list (quote purpose) (quote in_membership))
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) lookup_keys)
@@ -820,7 +852,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define key_names (group_key_cols keys))
 		(define source (list
 			stage_alias
-			(source_schema inner_src)
+			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
@@ -995,6 +1027,56 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(scalar_once_value_expr stage_alias ag)
 			(list stage)
 			(list source)))))
+
+(define make_limited_derived_stage_source (lambda (alias inner original_relation)
+	(begin
+		(if (not (scalar_once_supported? inner))
+			(neumann_fail "untangle_query" "derived relation stage currently supports ORDER/LIMIT scalar shape only")
+			true)
+		(if (not (equal? (count (qb_fields inner)) 2))
+			(neumann_fail "untangle_query" "derived relation stage currently supports one projected column")
+			true)
+		(define value_expr (query_block_first_expr inner))
+		(define inner_src (car (qb_sources inner)))
+		(if (not (source_is_base_table? inner_src))
+			(neumann_fail "untangle_query" "derived relation stage requires a base inner source")
+			true)
+		(define inner_default (source_alias inner_src))
+		(define keys '(1))
+		(define condition (coalesceNil (qb_where inner) true))
+		(define value_for_inner (canonical_column_expr_for_alias inner_default value_expr))
+		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
+			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default expr) dir)))))
+		(define ag (scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner)))
+		(define stage_id (concat "derived-once:" (fnv_hash (string (list original_relation alias condition ag)))))
+		(define stage (make_group_stage
+			stage_id
+			inner_src
+			'()
+			keys
+			(list ag)
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) condition)
+				(list (quote purpose) (quote scalar_single))
+				(list (quote domain) '())
+				(list (quote lookup-keys) '())
+				(list (quote preserve_empty_domain) true)
+				(list (quote null_semantics) (quote scalar))
+				(list (quote cardinality_mode) (quote first))
+				(list (quote partition_by) '())
+				(list (quote physical_max_rows) 1)
+				(list (quote on_overflow) (quote ignore)))))
+		(define projection (match (qb_fields inner)
+			'(title _expr) (list title (scalar_once_value_expr alias ag))
+			_ (neumann_fail "untangle_query" "malformed derived relation projection")))
+		(list
+			(list alias (group_stage_schema stage) (make_stage_output_relation stage_id) false nil)
+			projection
+			stage))))
 
 (define make_scalar_single_stage_rewrite (lambda (inner args)
 	(begin
@@ -1503,9 +1585,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
 			(define inner (untangle_query normalized sub_ctx))
 			(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
-			(if (query_block_no_from? inner)
-				(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
-				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery))))
+			(if (union_block? inner)
+				(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery))
+				(if (query_block_no_from? inner)
+					(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
+					(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery)))))
 		((symbol window_func) fn args over)
 		(if (equal? fn "ROW_NUMBER")
 			(make_row_number_orc_stage_rewrite args over outer_sources ctx)
@@ -1683,7 +1767,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(define alias (source_alias src))
 						(define inner (untangle_query relation ctx))
 						(if (derived_block_needs_operator? inner)
-							(neumann_fail "untangle_query" "derived table with group/limit/stage must become an explicit logical operator before flattening")
+							(if (or (source_outer? src) (not (nil? (source_join_expr src))))
+								(neumann_fail "untangle_query" "derived relation stage with outer join needs relation-unit lowering")
+								(begin
+									(define staged (make_limited_derived_stage_source alias inner relation))
+									(list
+										(cons (nth staged 0) tail_sources)
+										(cons (list alias (nth staged 1)) tail_rewrites)
+										tail_wheres
+										(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages))))))
 							(begin
 								(define inner_sources (coalesceNil (qb_sources inner) '()))
 								(if (empty_list? inner_sources)
