@@ -2306,6 +2306,14 @@ attached to the wrapper join instead. */
 (define qpu-low-domain-source-alias (lambda (alias)
 	(concat "domainSource" (fnv_hash alias))))
 
+(define qpu-low-domain-source-alias-for-table (lambda (td alias)
+	(match td
+		'(_td-alias td-schema td-tname _td-isOuter _td-joinExpr)
+		(if (string? td-tname)
+			(qpu-low-domain-source-alias (concat td-schema "." td-tname))
+			(qpu-low-domain-source-alias alias))
+		(qpu-low-domain-source-alias alias))))
+
 (define qpu-low-find-table-entry (lambda (tables alias)
 	(reduce (coalesceNil tables '()) (lambda (acc td)
 		(if (not (nil? acc)) acc
@@ -2341,7 +2349,7 @@ attached to the wrapper join instead. */
 		'(td-alias td-schema _td-tname _td-isOuter _td-joinExpr)
 		(begin
 			(define domain-alias (qpu-low-domain-alias alias))
-			(define source-alias (qpu-low-domain-source-alias alias))
+			(define source-alias (qpu-low-domain-source-alias-for-table td alias))
 			(define source-map (list (list td-alias source-alias)))
 			(define source-table (qpu-low-rewrite-domain-table td source-map))
 			(define field-pairs (map cols (lambda (col)

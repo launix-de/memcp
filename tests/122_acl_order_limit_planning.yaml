@@ -522,6 +522,64 @@ test_cases:
       not_contains:
         - ".prejoin:"
 
+  - name: "repeated nested ACL scalar keeps canonical domain sources"
+    session_id: "aol-acl-session"
+    max_plan_size: 90000
+    sql: |
+      SELECT d.ID,
+        (
+          COALESCE((
+            SELECT COALESCE((
+              SELECT EXISTS (
+                SELECT TRUE
+                FROM aol_user_tenant tenant_scope
+                WHERE tenant_scope.user_id = @aol_user
+                  AND tenant_scope.tenant = tnt.ID
+                LIMIT 1
+              )
+              FROM aol_tenant tnt
+              WHERE tnt.ID = s.tenant
+              LIMIT 1
+            ), FALSE)
+            FROM aol_site s
+            WHERE s.ID = d.site
+            LIMIT 1
+          ), FALSE)
+          AND
+          COALESCE((
+            SELECT COALESCE((
+              SELECT EXISTS (
+                SELECT TRUE
+                FROM aol_user_tenant tenant_scope
+                WHERE tenant_scope.user_id = @aol_user
+                  AND tenant_scope.tenant = tnt.ID
+                LIMIT 1
+              )
+              FROM aol_tenant tnt
+              WHERE tnt.ID = s.tenant
+              LIMIT 1
+            ), FALSE)
+            FROM aol_site s
+            WHERE s.ID = d.site
+            LIMIT 1
+          ), FALSE)
+        ) AS can_view
+      FROM aol_doc d
+      WHERE d.ID IS NOT NULL
+      ORDER BY d.year DESC, d.site ASC
+      LIMIT 4
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          can_view: true
+        - ID: 2
+          can_view: true
+        - ID: 3
+          can_view: false
+        - ID: 4
+          can_view: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS aol_doc"
   - sql: "DROP TABLE IF EXISTS aol_site"
