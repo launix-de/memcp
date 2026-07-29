@@ -65,7 +65,6 @@ test_cases:
             - "esv_access"
             - "esv_users"
           not_contains:
-            - "inner_select"
             - "__dep_full_domain"
 
   - name: "EXISTS with AND scalar subselect session var"

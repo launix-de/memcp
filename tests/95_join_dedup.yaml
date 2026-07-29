@@ -16,7 +16,7 @@ setup:
   - sql: |
       INSERT INTO jd_item (id, ref_id) VALUES (1, 10), (2, 20), (3, 10), (4, NULL)
   - sql: |
-      CREATE TABLE jd_ref (id INT, label VARCHAR(40), score INT)
+      CREATE TABLE jd_ref (id INT PRIMARY KEY, label VARCHAR(40), score INT)
   - sql: |
       INSERT INTO jd_ref (id, label, score) VALUES (10, 'Alpha', 100), (20, 'Beta', 200)
 

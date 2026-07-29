@@ -1137,6 +1137,14 @@ one thunk per exact guard/materialize body and replacing repeated occurrences
 with calls to that thunk inside the same query plan. */
 (define planner_prejoin_init_scope_stack (newsession))
 (planner_prejoin_init_scope_stack "stack" '())
+(define planner_dml_compile_scope (newsession))
+(planner_dml_compile_scope "depth" 0)
+(define planner_in_dml_compile_scope? (lambda ()
+	(> (coalesceNil (planner_dml_compile_scope "depth") 0) 0)))
+(define planner_dml_target_table? (lambda (src_schema src_tbl) (and
+	(planner_in_dml_compile_scope?)
+	(equal? src_schema (planner_dml_compile_scope "schema"))
+	(equal? (planner_table_source_base src_tbl) (planner_dml_compile_scope "table")))))
 (define planner_prejoin_init_current_scope (lambda ()
 	(match (coalesceNil (planner_prejoin_init_scope_stack "stack") '())
 		(cons scope _) scope
@@ -5779,6 +5787,7 @@ seeing the correctly prefixed outer alias. */
 						(define dep_binding_schemas
 							(merge_unique (list outer_schemas outer_schemas_chain)))
 						(define dep_outer_refs (subquery_outer_refs normalized_subquery outer_schemas))
+						(define dep_local_aliases (raw_query_local_aliases normalized_subquery))
 						(define dep_nested_outer_refs
 							(raw_query_nested_outer_refs_for_domain
 								subquery
@@ -5792,7 +5801,10 @@ seeing the correctly prefixed outer alias. */
 								_ nil)))
 							(filter (map (collect_all_column_refs normalized_subquery) (lambda (ref_pair) (match ref_pair
 								'(alias col)
-								(if (or (nil? alias) (nil? (schema_assoc_cols dep_binding_schemas alias)))
+								(if (or
+									(nil? alias)
+									(alias_in_list dep_local_aliases alias)
+									(nil? (schema_assoc_cols dep_binding_schemas alias)))
 									nil
 									(concat alias "." col))
 								_ nil)))
@@ -11239,6 +11251,12 @@ full WHERE/join pipeline reached its final leaf. Keep this contract: inner scans
 must stay pure row/filter pipelines, and DML side effects happen only at the
 same boundary where SELECT would emit result rows. */
 (define build_dml_plan (lambda (schema target_tbl target_alias all_defs cols condition order limit_val offset_val) (begin
+	(define _prev_dml_compile_depth (coalesceNil (planner_dml_compile_scope "depth") 0))
+	(define _prev_dml_compile_schema (planner_dml_compile_scope "schema"))
+	(define _prev_dml_compile_table (planner_dml_compile_scope "table"))
+	(planner_dml_compile_scope "depth" (+ _prev_dml_compile_depth 1))
+	(planner_dml_compile_scope "schema" schema)
+	(planner_dml_compile_scope "table" target_tbl)
 	(define tgt (coalesce target_alias target_tbl))
 	(define is_update (and (not (nil? cols)) (not (equal? cols '()))))
 	/* For UPDATE: put SET expressions into synthetic fields so untangle_query processes them
@@ -11312,7 +11330,11 @@ same boundary where SELECT would emit result rows. */
 		(list (quote define) dml_rc dml_plan)
 		(list (quote set) (symbol "resultrow") dml_prev_rr)
 		dml_rc))
-	(if (equal? uq_init '()) wrapped_plan (cons (quote begin) (merge uq_init (list wrapped_plan))))
+	(define _dml_result_plan (if (equal? uq_init '()) wrapped_plan (cons (quote begin) (merge uq_init (list wrapped_plan)))))
+	(planner_dml_compile_scope "depth" _prev_dml_compile_depth)
+	(planner_dml_compile_scope "schema" _prev_dml_compile_schema)
+	(planner_dml_compile_scope "table" _prev_dml_compile_table)
+	_dml_result_plan
 )))
 
 /* Convenience wrapper for multi-table UPDATE (called from sql_update) */
@@ -14566,6 +14588,13 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				Deduplicate by physical table to avoid duplicate triggers. */
 				(define seen_trigger_tables (newsession))
 				(define prejoin_trigger_source_tables (merge prejoin_source_tables tables))
+				(define prejoin_depends_on_dml_target_table
+					(reduce prejoin_trigger_source_tables (lambda (found td) (or found (match td
+						'(_ src_schema src_tbl _ _) (planner_dml_target_table? src_schema src_tbl)
+						false)))
+						false))
+				(define prejoin_query_local_for_dml
+					(or (not (nil? update_target)) prejoin_depends_on_dml_target_table))
 				(define prejoin_materialized_dependency_tables
 					(reduce prejoin_trigger_source_tables (lambda (acc td) (match td
 						'(_ _ ttbl _ _)
@@ -14588,15 +14617,20 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				incrementally; otherwise every write throws away the prejoin and all
 				auto-index work on top of it. Fall back to drop-invalidation only when
 				the prejoin depends on temporary/helper sources that cannot be updated
-				from a base-row trigger with a stable table handle. */
+				from a base-row trigger with a stable table handle. DML-owned helpers
+				are query-local when they depend on the modified table: do not attach
+				row triggers that can fire while the UPDATE/DELETE pipeline is still
+				scanning the helper. */
 				(define prejoin_use_invalidation_triggers
 					prejoin_has_temp_source_table)
 				(define pj_trigger_registrations
-					(filter (map tables (lambda (trigger_tbl)
-						(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
-							(begin
-								(define trigger_table_key (concat src_schema "." src_tbl))
-								(if (or (temp_source_table? src_tbl) (seen_trigger_tables trigger_table_key)) nil
+					(if prejoin_query_local_for_dml
+						'()
+						(filter (map tables (lambda (trigger_tbl)
+							(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
+								(begin
+									(define trigger_table_key (concat src_schema "." src_tbl))
+									(if (or (temp_source_table? src_tbl) (seen_trigger_tables trigger_table_key)) nil
 									(begin (seen_trigger_tables trigger_table_key true)
 										(if prejoin_use_invalidation_triggers
 											(list 'register_prejoin_invalidation src_schema (planner_table_source_base src_tbl) prejoin_schema prejoin_table_name)
@@ -14694,19 +14728,21 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 															prejoin_invalidation_expr))))
 												/* emit the register call as an S-expression to be executed at query time */
 												(list 'register_prejoin_incremental src_schema (planner_table_source_base src_tbl) prejoin_schema prejoin_table_name
-													delete_fn insert_fn update_fn))))))))) (lambda (x) (not (nil? x)))))
+													delete_fn insert_fn update_fn))))))))) (lambda (x) (not (nil? x))))))
 				(define pj_dependency_invalidations
-					(filter (map prejoin_materialized_dependency_tables (lambda (dep_td)
-						(match dep_td '(dep_schema dep_tbl)
-							(begin
-								(define trigger_table_key (concat dep_schema "." dep_tbl))
-								(if (seen_trigger_tables trigger_table_key)
-									nil
-									(begin
-										(seen_trigger_tables trigger_table_key true)
-										(list 'register_prejoin_invalidation dep_schema dep_tbl prejoin_schema prejoin_table_name))))
-							_ nil)))
-						(lambda (x) (not (nil? x)))))
+					(if prejoin_query_local_for_dml
+						'()
+						(filter (map prejoin_materialized_dependency_tables (lambda (dep_td)
+							(match dep_td '(dep_schema dep_tbl)
+								(begin
+									(define trigger_table_key (concat dep_schema "." dep_tbl))
+									(if (seen_trigger_tables trigger_table_key)
+										nil
+										(begin
+											(seen_trigger_tables trigger_table_key true)
+											(list 'register_prejoin_invalidation dep_schema dep_tbl prejoin_schema prejoin_table_name))))
+								_ nil)))
+							(lambda (x) (not (nil? x))))))
 				(define pj_trigger_registrations
 					(merge pj_trigger_registrations pj_dependency_invalidations))
 				/* assemble: createtable returns true on first creation -> materialize + deploy triggers.
@@ -14723,9 +14759,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					(planner_prejoin_init_register
 						(concat prejointbl ":" (fnv_hash (serialize (list prejoin_init_body))))
 						prejoin_init_body))
+				(define prejoin_result_with_dml_cleanup (if (not prejoin_query_local_for_dml)
+					grouped_result
+					(begin
+						(define dml_prejoin_result_var (symbol (concat "__dml_prejoin_result:" (fnv_hash prejoin_table_name))))
+						(list 'begin
+							(list 'define dml_prejoin_result_var grouped_result)
+							(list 'droptable prejoin_schema prejoin_table_name true)
+							dml_prejoin_result_var))))
 				(cons 'begin (merge
 					(list prejoin_init_call)
-					(list grouped_result)))
+					(list prejoin_result_with_dml_cleanup)))
 			)
 		)
 	) (optimize (begin

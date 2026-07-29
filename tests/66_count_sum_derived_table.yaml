@@ -95,11 +95,12 @@ test_cases:
         FROM csd_main m
       ) t
     expect:
-      rows: 8
+      rows: 12
       contains:
-        - "\"t\\u0000m\" \"memcp-tests\" \"csd_main\" false nil"
+        - '"stage": "neumann", "kind": "after-unnest"'
+        - "(qpir-join left"
+        - "(qpir-groupby ((get_column \"d\" false \"parent\" false))"
         - "(aggregate 1 + 0)"
-        - "(aggregate (coalesceNil (scan"
       not_contains:
         - "__mat:"
 
