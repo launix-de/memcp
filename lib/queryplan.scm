@@ -29,7 +29,7 @@ textbook one-operation nodes:
 	query-block  SELECT/FROM/JOIN/WHERE/project/ORDER/LIMIT work unit
 	group-stage  domain-D/keytable/aggregate/EXISTS/HAVING work unit
 	union-block  set operator work unit
-	orc-stage    ordered computed column work unit for window/order-sensitive work
+	orc-stage    ordered-reduced computed column barrier for incompatible windows
 
 There is no logical scan operator.  scan, scan_order, scan_order_multi, index
 bounds, update callbacks, temp tables and fused loops are physical choices made
@@ -45,9 +45,21 @@ Logical trees may be deep.  That depth is compiler structure, not a license to
 materialize.  The lowering goal is to fuse filter, projection, joins, ordering,
 limits and DML sinks into the strongest physical scan available.  Materialization
 is reserved for real barriers: keytables/groups, ORC columns, unions with global
-ordering/deduplication, deduplicated domains and once-limit/scalar caches.  In
-hot paths, avoid using runtime row lists as a general adapter; prefer emitting a
-single fused scan/keytable builder once the logical rules are clear.
+ordering/deduplication, deduplicated domains and once-limit/scalar caches.
+Group stages are referenced from query-block sources through logical
+stage-output relations.  Those aliases are stable enough for expression rewrites
+such as SUM(x) -> stage_alias.agg, but they are not physical table names.
+build_queryplan resolves a stage-output through a group-carrier decision.  The
+default carrier is a generated keytable; later optimizers may choose an existing
+referenced table when the final group/domain keys match a foreign-key entity.
+Window functions are not ORCs by default.  If the query is unordered and has a
+single window domain, build_queryplan should run the main scan in that window
+order and compute the value in the scan accumulator.  ORCs are only needed when
+multiple window domains need incompatible orders, or when the final query order
+conflicts with the window order.  Pure partition aggregates use group-stage /
+keytable lookup, not ORC.  In hot paths, avoid using runtime row lists as a
+general adapter; prefer emitting a single fused scan/keytable builder once the
+logical rules are clear.
 
 Keep the code small and explicit.  Do not reintroduce legacy fallback branches,
 parser-specific operator variants, or early subselect recompilation.  SQL and
@@ -119,11 +131,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 		order limit offset
 		(coalesceNil facts '()))))
 
+(define make_stage_output_relation (lambda (stage_id)
+	(list (quote stage-output) stage_id)))
+
 (define logical_op (lambda (node) (if (and (list? node) (not (nil? node))) (car node) nil)))
 (define query_block? (lambda (node) (equal? (logical_op node) (quote query-block))))
 (define group_stage? (lambda (node) (equal? (logical_op node) (quote group-stage))))
 (define union_block? (lambda (node) (equal? (logical_op node) (quote union-block))))
 (define orc_stage? (lambda (node) (equal? (logical_op node) (quote orc-stage))))
+(define window_stage? (lambda (node) (equal? (logical_op node) (quote window-stage))))
+(define stage_output_relation? (lambda (relation) (equal? (logical_op relation) (quote stage-output))))
+(define stage_output_relation_id (lambda (relation)
+	(match relation
+		'(_ stage_id) stage_id
+		_ nil)))
 
 (define qb_schema (lambda (node) (nth node 1)))
 (define qb_sources (lambda (node) (nth node 2)))
@@ -179,6 +200,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define os_reducefn (lambda (node) (nth node 9)))
 (define os_reduceinit (lambda (node) (nth node 10)))
 
+(define make_window_stage (lambda (id source column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit facts)
+	(list (quote window-stage)
+		id source column
+		(coalesceNil sortcols '())
+		(coalesceNil sortdirs '())
+		(coalesceNil partitioncount 0)
+		(coalesceNil mapcols '())
+		mapfn
+		reducefn
+		reduceinit
+		(coalesceNil facts '()))))
+
 (define source_alias (lambda (src)
 	(match src '(alias _schema _relation _outer _join) alias _ nil)))
 (define source_schema (lambda (src)
@@ -189,6 +222,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(match src '(_alias _schema _relation outer _join) outer _ nil)))
 (define source_join_expr (lambda (src)
 	(match src '(_alias _schema _relation _outer join) join _ nil)))
+
+(define source_with_relation (lambda (src relation)
+	(match src
+		'(alias schema _relation outer join) (list alias schema relation outer join)
+		_ src)))
 
 /* ------------------------------------------------------------------------- */
 /* IR envelope                                                                */
@@ -271,7 +309,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define subquery_head? (lambda (head)
 	(or (equal? head (quote inner_select))
 		(or (equal? head (quote inner_select_in))
-			(equal? head (quote inner_select_exists))))))
+			(or (equal? head (quote inner_select_exists))
+				(or (equal? head (quote neumann_scalar))
+					(or (equal? head (quote neumann_exists))
+						(equal? head (quote neumann_in)))))))))
 
 (define expr_contains_subquery? (lambda (expr)
 	(match expr
@@ -298,10 +339,47 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(or (fields_contains_subquery? (qb_hidden node))
 					(or (fields_contains_subquery? (qb_group node))
 						(or (expr_contains_subquery? (qb_having node))
-							(fields_contains_subquery? (qb_order node)))))))
+							(or (fields_contains_subquery? (qb_order node))
+								(or (reduce (qb_sources node) (lambda (found src)
+									(or found
+										(or (expr_contains_subquery? (source_join_expr src))
+											(expr_contains_subquery? (source_relation src)))))
+									false)
+									(reduce (qb_stages node) (lambda (found stage)
+										(or found (query_contains_subquery? stage)))
+										false))))))))
 		(if (union_block? node)
 			(reduce (union_branches node) (lambda (a b) (or a (query_contains_subquery? b))) false)
-			false))))
+			(if (group_stage? node)
+				(or (query_contains_subquery? (gs_input node))
+					(or (fields_contains_subquery? (gs_domain node))
+						(or (fields_contains_subquery? (gs_keys node))
+							(or (fields_contains_subquery? (gs_aggregates node))
+								(or (expr_contains_subquery? (gs_having node))
+									(or (fields_contains_subquery? (gs_output node))
+										(fields_contains_subquery? (gs_order node))))))))
+				false)))))
+
+(define physical_helper_relation? (lambda (relation)
+	(and (string? relation) (strlike relation ".grp:%"))))
+
+(define node_contains_physical_helper? (lambda (node)
+	(if (query_block? node)
+		(or (reduce (qb_sources node) (lambda (found src)
+			(or found
+				(or (physical_helper_relation? (source_relation src))
+					(node_contains_physical_helper? (source_relation src)))))
+			false)
+			(reduce (qb_stages node) (lambda (found stage)
+				(or found (node_contains_physical_helper? stage)))
+				false))
+		(if (union_block? node)
+			(reduce (union_branches node) (lambda (found branch)
+				(or found (node_contains_physical_helper? branch)))
+				false)
+			(if (group_stage? node)
+				(node_contains_physical_helper? (gs_input node))
+				false)))))
 
 (define untangle_zero_domain_subquery (lambda (kind probe subquery ctx)
 	(begin
@@ -359,17 +437,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define exists_stage_alias (lambda (stage_id)
 	(concat "__exists_" (fnv_hash stage_id))))
 
-(define exists_stage_table_name (lambda (stage)
-	(begin
-		(define src (gs_input stage))
-		(group_table_name
-			(group_stage_schema stage)
-			(group_stage_input_name stage)
-			(group_stage_input_alias stage)
-			(if (empty_list? (gs_keys stage)) '(1) (gs_keys stage))
-			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
-			(gs_aggregates stage)))))
-
 (define make_exists_stage_join_condition (lambda (stage_alias key_names outer_domain)
 	(if (empty_list? outer_domain)
 		nil
@@ -415,8 +482,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 				_ (neumann_fail "untangle_query" "malformed scalar once_limit ORDER BY"))
 			_ (neumann_fail "untangle_query" "scalar once_limit supports one ORDER BY item")))))
 
-(define make_exists_stage_rewrite (lambda (inner outer_sources subquery ctx)
+(define make_exists_stage_rewrite (lambda (inner args)
 	(begin
+		(define outer_sources (nth args 0))
+		(define subquery (nth args 1))
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "EXISTS group-stage(D) currently supports one plain inner query-block")
 			true)
@@ -460,14 +529,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote exists-cache)))))
+				(list (quote purpose) (quote semijoin))
+				(list (quote domain-binding) outer_domain))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (exists_stage_table_name stage))
 		(define source (list
 			stage_alias
 			(group_stage_schema stage)
-			grouptbl
+			(make_stage_output_relation stage_id)
 			true
 			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
@@ -476,8 +545,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list stage)
 			(list source)))))
 
-(define make_in_stage_rewrite (lambda (probe inner outer_sources subquery ctx)
+(define make_in_stage_rewrite (lambda (probe inner args)
 	(begin
+		(define outer_sources (nth args 0))
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "IN group-stage(D) currently supports one plain inner query-block")
 			true)
@@ -500,7 +570,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define outer_domain (cons probe
 			(map corr_pairs (lambda (pair) (nth pair 1)))))
 		(define condition (combine_where_terms local_terms true))
-		(define stage_id (concat "in:" (fnv_hash (string (list subquery probe keys outer_domain condition)))))
+		(define stage_id (concat "in:" (fnv_hash (string (list probe keys outer_domain condition)))))
 		(define stage (make_group_stage
 			stage_id
 			inner_src
@@ -513,14 +583,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) condition)
-				(list (quote purpose) (quote in-cache)))))
+				(list (quote purpose) (quote semijoin))
+				(list (quote domain-binding) outer_domain))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (exists_stage_table_name stage))
 		(define source (list
 			stage_alias
 			(source_schema inner_src)
-			grouptbl
+			(make_stage_output_relation stage_id)
 			true
 			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
@@ -529,8 +599,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list stage)
 			(list source)))))
 
-(define make_scalar_aggregate_stage_rewrite (lambda (inner outer_sources subquery ctx)
+(define make_scalar_aggregate_stage_rewrite (lambda (inner args)
 	(begin
+		(define outer_sources (nth args 0))
+		(define subquery (nth args 1))
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "scalar aggregate group-stage(D) currently supports one plain inner query-block")
 			true)
@@ -572,14 +644,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) condition)
-				(list (quote purpose) (quote scalar-aggregate-cache)))))
+				(list (quote purpose) (quote scalar-aggregate))
+				(list (quote scalar-mode) (quote aggregate))
+				(list (quote domain-binding) outer_domain))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (exists_stage_table_name stage))
 		(define source (list
 			stage_alias
 			(source_schema inner_src)
-			grouptbl
+			(make_stage_output_relation stage_id)
 			true
 			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
 		(list
@@ -587,8 +660,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list stage)
 			(list source)))))
 
-(define make_scalar_once_stage_rewrite (lambda (inner outer_sources subquery ctx)
+(define make_scalar_once_stage_rewrite (lambda (inner args)
 	(begin
+		(define outer_sources (nth args 0))
+		(define subquery (nth args 1))
 		(if (not (scalar_once_supported? inner))
 			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs once_limit stage")
 			true)
@@ -632,14 +707,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list
 				(list (quote condition) condition)
 				(list (quote once_limit) 1)
-				(list (quote purpose) (quote scalar-once-cache)))))
+				(list (quote purpose) (quote scalar-join))
+				(list (quote scalar-mode) (quote first))
+				(list (quote on-overflow) (quote ignore-after-first))
+				(list (quote domain-binding) outer_domain))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (exists_stage_table_name stage))
 		(define source (list
 			stage_alias
 			(source_schema inner_src)
-			grouptbl
+			(make_stage_output_relation stage_id)
 			true
 			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
 		(list
@@ -749,46 +826,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (single_source? outer_sources))
 			(neumann_fail "untangle_query" "window offset ORC stage currently supports one base source")
 			true)
-		(define src (car outer_sources))
-		(if (not (source_is_base_table? src))
-			(neumann_fail "untangle_query" "window offset ORC stage requires a base source")
-			true)
-		(define alias (source_alias src))
-		(define partition_exprs (nth over 0))
-		(define order_items (nth over 1))
-		(if (empty_list? order_items)
-			(neumann_fail "untangle_query" "window offset function requires ORDER BY")
-			true)
-		(define offset (window_offset_arg args))
-		(define value_col (order_column_for_alias alias (canonical_column_expr_for_alias alias (car args))))
-		(define partition_cols (map partition_exprs (lambda (expr)
-			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
-		(if (contains? partition_cols value_col)
-			(neumann_fail "untangle_query" "window offset value column must not duplicate partition columns yet")
-			true)
-		(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
-		(define order_dirs (window_order_dirs_for_orc order_items))
-		(define sortdirs (merge (list
-			(map partition_exprs (lambda (_expr) false))
-			(if (equal? fn "LEAD") (invert_window_order_dirs order_dirs) order_dirs))))
-		(define sortcols (merge (list partition_cols order_cols)))
-		(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list (source_relation src) alias value_col sortcols sortdirs offset (count partition_exprs))))))
-		(define stage (make_orc_stage
-			(concat "orc-" (toLower fn) ":" col)
-			src
-			col
-			sortcols
-			sortdirs
-			(count partition_exprs)
-			(merge (list partition_cols (list value_col)))
-			(make_window_offset_mapfn partition_cols value_col)
-			(make_window_offset_reducefn offset (not (empty_list? partition_exprs)))
-			(if (empty_list? partition_exprs) (list (quote list)) (list (quote list) (list (quote list)) nil))))
-		(qp_any (list
-			(list (quote get_column) alias false col false)
-			(list stage)
-			'())))))
+		(match outer_sources
+			(cons src _rest) (match src '(alias _schema relation _outer _join)
+				(if (not (string? relation))
+					(neumann_fail "untangle_query" "window offset ORC stage requires a base source")
+					(match over '(partition_exprs order_items) (begin
+						(if (empty_list? order_items)
+							(neumann_fail "untangle_query" "window offset function requires ORDER BY")
+							true)
+						(define offset (window_offset_arg args))
+						(define value_col (order_column_for_alias alias (canonical_column_expr_for_alias alias (car args))))
+						(define partition_cols (map partition_exprs (lambda (expr)
+							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+						(if (contains? partition_cols value_col)
+							(neumann_fail "untangle_query" "window offset value column must not duplicate partition columns yet")
+							true)
+						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
+							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+						(define order_dirs (window_order_dirs_for_orc order_items))
+						(define sortdirs (merge (list
+							(map partition_exprs (lambda (_expr) false))
+							(if (equal? fn "LEAD") (invert_window_order_dirs order_dirs) order_dirs))))
+						(define sortcols (merge (list partition_cols order_cols)))
+						(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list relation alias value_col sortcols sortdirs offset (count partition_exprs))))))
+						(define stage (make_window_stage
+							(concat "window-" (toLower fn) ":" col)
+							src
+							col
+							sortcols
+							sortdirs
+							(count partition_exprs)
+							(merge (list partition_cols (list value_col)))
+							(make_window_offset_mapfn partition_cols value_col)
+							(make_window_offset_reducefn offset (not (empty_list? partition_exprs)))
+							(if (empty_list? partition_exprs) (list (quote list)) (list (quote list) (list (quote list)) nil))
+							(list (list (quote kind) (quote ordered-window)))))
+						(qp_any (list
+							(list (quote get_column) alias false col false)
+							(list stage)
+							'())))))
+			_ (neumann_fail "untangle_query" "window offset ORC stage requires one source"))))))
 
 (define window_rank_initial_state (lambda (fn)
 	(if (equal? fn "DENSE_RANK")
@@ -878,42 +955,42 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (single_source? outer_sources))
 			(neumann_fail "untangle_query" "rank ORC stage currently supports one base source")
 			true)
-		(define src (car outer_sources))
-		(if (not (source_is_base_table? src))
-			(neumann_fail "untangle_query" "rank ORC stage requires a base source")
-			true)
-		(define alias (source_alias src))
-		(define partition_exprs (nth over 0))
-		(define order_items (nth over 1))
-		(if (empty_list? order_items)
-			(neumann_fail "untangle_query" "rank window function requires ORDER BY")
-			true)
-		(define partition_cols (map partition_exprs (lambda (expr)
-			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
-		(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
-		(define sortcols (merge (list partition_cols order_cols)))
-		(define sortdirs (merge (list
-			(map partition_exprs (lambda (_expr) false))
-			(window_order_dirs_for_orc order_items))))
-		(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list (source_relation src) alias sortcols sortdirs (count partition_exprs))))))
-		(define stage (make_orc_stage
-			(concat "orc-" (toLower fn) ":" col)
-			src
-			col
-			sortcols
-			sortdirs
-			(count partition_exprs)
-			(merge (list partition_cols order_cols))
-			(make_window_rank_mapfn partition_cols order_cols)
-			(make_window_rank_reducefn fn (not (empty_list? partition_exprs)))
-			(if (empty_list? partition_exprs)
-				(window_rank_initial_state fn)
-				(list (quote list) (window_rank_initial_state fn) nil))))
-		(qp_any (list
-			(list (quote get_column) alias false col false)
-			(list stage)
-			'())))))
+		(match outer_sources
+			(cons src _rest) (match src '(alias _schema relation _outer _join)
+				(if (not (string? relation))
+					(neumann_fail "untangle_query" "rank ORC stage requires a base source")
+					(match over '(partition_exprs order_items) (begin
+						(if (empty_list? order_items)
+							(neumann_fail "untangle_query" "rank window function requires ORDER BY")
+							true)
+						(define partition_cols (map partition_exprs (lambda (expr)
+							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
+							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+						(define sortcols (merge (list partition_cols order_cols)))
+						(define sortdirs (merge (list
+							(map partition_exprs (lambda (_expr) false))
+							(window_order_dirs_for_orc order_items))))
+						(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list relation alias sortcols sortdirs (count partition_exprs))))))
+						(define stage (make_window_stage
+							(concat "window-" (toLower fn) ":" col)
+							src
+							col
+							sortcols
+							sortdirs
+							(count partition_exprs)
+							(merge (list partition_cols order_cols))
+							(make_window_rank_mapfn partition_cols order_cols)
+							(make_window_rank_reducefn fn (not (empty_list? partition_exprs)))
+							(if (empty_list? partition_exprs)
+								(window_rank_initial_state fn)
+								(list (quote list) (window_rank_initial_state fn) nil))
+							(list (list (quote kind) (quote ordered-window)))))
+						(qp_any (list
+							(list (quote get_column) alias false col false)
+							(list stage)
+							'())))))
+			_ (neumann_fail "untangle_query" "rank ORC stage requires one source"))))))
 
 (define make_row_number_orc_stage_rewrite (lambda (args over outer_sources ctx)
 	(begin
@@ -923,66 +1000,66 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (single_source? outer_sources))
 			(neumann_fail "untangle_query" "ROW_NUMBER ORC stage currently supports one base source")
 			true)
-		(define src (car outer_sources))
-		(if (not (source_is_base_table? src))
-			(neumann_fail "untangle_query" "ROW_NUMBER ORC stage requires a base source")
-			true)
-		(define alias (source_alias src))
-		(define partition_exprs (nth over 0))
-		(define order_items (nth over 1))
-		(if (empty_list? order_items)
-			(neumann_fail "untangle_query" "ROW_NUMBER requires ORDER BY for ORC lowering")
-			true)
-		(define partition_cols (map partition_exprs (lambda (expr)
-			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
-		(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-			(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
-		(define sortcols (merge (list partition_cols order_cols)))
-		(define sortdirs (merge (list
-			(map partition_exprs (lambda (_expr) false))
-			(window_order_dirs_for_orc order_items))))
-		(define col (concat "__orc_row_number_" (fnv_hash (string (list (source_relation src) alias sortcols sortdirs (count partition_exprs))))))
-		(define stage (make_orc_stage
-			(concat "orc-row-number:" col)
-			src
-			col
-			sortcols
-			sortdirs
-			(count partition_exprs)
-			partition_cols
-			(if (empty_list? partition_exprs)
-				(list (quote lambda) (list (quote $set)) (list (quote list) (quote $set)))
-				(list (quote lambda)
-					(cons (quote $set) (map partition_cols (lambda (colname) (symbol colname))))
-					(list (quote cons)
-						(if (single_source? partition_cols)
-							(symbol (car partition_cols))
-							(cons (quote list) (map partition_cols (lambda (colname) (symbol colname)))))
-						(list (quote list) (quote $set)))))
-			(if (empty_list? partition_exprs)
-				(list (quote lambda) (list (quote acc) (quote mapped))
-					(list (quote begin)
-						(list (list (quote car) (quote mapped)) (list (quote +) (quote acc) 1))
-						(list (quote +) (quote acc) 1)))
-				(list (quote lambda) (list (quote acc) (quote mapped))
-					(list (quote begin)
-						(list (quote define) (quote row_partition) (list (quote car) (quote mapped)))
-						(list (quote define) (quote writer) (list (quote car) (list (quote cdr) (quote mapped))))
-						(list (quote define) (quote prev_partition) (list (quote cadr) (quote acc)))
-						(list (quote define) (quote inner_acc) (list (quote car) (quote acc)))
-						(list (quote define) (quote eff_acc) (list (quote if)
-							(list (quote or)
-								(list (quote nil?) (quote prev_partition))
-								(list (quote equal?) (quote row_partition) (quote prev_partition)))
-							(quote inner_acc)
-							0))
-						(list (quote writer) (list (quote +) (quote eff_acc) 1))
-						(list (quote list) (list (quote +) (quote eff_acc) 1) (quote row_partition)))))
-			(if (empty_list? partition_exprs) 0 (list (quote list) 0 nil))))
-		(list
-			(list (quote get_column) alias false col false)
-			(list stage)
-			'()))))
+		(match outer_sources
+			(cons src _rest) (match src '(alias _schema relation _outer _join)
+				(if (not (string? relation))
+					(neumann_fail "untangle_query" "ROW_NUMBER ORC stage requires a base source")
+					(match over '(partition_exprs order_items) (begin
+						(if (empty_list? order_items)
+							(neumann_fail "untangle_query" "ROW_NUMBER requires ORDER BY for ORC lowering")
+							true)
+						(define partition_cols (map partition_exprs (lambda (expr)
+							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
+							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+						(define sortcols (merge (list partition_cols order_cols)))
+						(define sortdirs (merge (list
+							(map partition_exprs (lambda (_expr) false))
+							(window_order_dirs_for_orc order_items))))
+						(define col (concat "__orc_row_number_" (fnv_hash (string (list relation alias sortcols sortdirs (count partition_exprs))))))
+						(define stage (make_window_stage
+							(concat "window-row-number:" col)
+							src
+							col
+							sortcols
+							sortdirs
+							(count partition_exprs)
+							partition_cols
+							(if (empty_list? partition_exprs)
+								(list (quote lambda) (list (quote $set)) (list (quote list) (quote $set)))
+								(list (quote lambda)
+									(cons (quote $set) (map partition_cols (lambda (colname) (symbol colname))))
+									(list (quote cons)
+										(if (single_source? partition_cols)
+											(symbol (car partition_cols))
+											(cons (quote list) (map partition_cols (lambda (colname) (symbol colname)))))
+										(list (quote list) (quote $set)))))
+							(if (empty_list? partition_exprs)
+								(list (quote lambda) (list (quote acc) (quote mapped))
+									(list (quote begin)
+										(list (list (quote car) (quote mapped)) (list (quote +) (quote acc) 1))
+										(list (quote +) (quote acc) 1)))
+								(list (quote lambda) (list (quote acc) (quote mapped))
+									(list (quote begin)
+										(list (quote define) (quote row_partition) (list (quote car) (quote mapped)))
+										(list (quote define) (quote writer) (list (quote car) (list (quote cdr) (quote mapped))))
+										(list (quote define) (quote prev_partition) (list (quote cadr) (quote acc)))
+										(list (quote define) (quote inner_acc) (list (quote car) (quote acc)))
+										(list (quote define) (quote eff_acc) (list (quote if)
+											(list (quote or)
+												(list (quote nil?) (quote prev_partition))
+												(list (quote equal?) (quote row_partition) (quote prev_partition)))
+											(quote inner_acc)
+											0))
+										(list (quote writer) (list (quote +) (quote eff_acc) 1))
+										(list (quote list) (list (quote +) (quote eff_acc) 1) (quote row_partition)))))
+							(if (empty_list? partition_exprs) 0 (list (quote list) 0 nil))
+							(list (list (quote kind) (quote ordered-window)))))
+						(list
+							(list (quote get_column) alias false col false)
+							(list stage)
+							'())))))
+			_ (neumann_fail "untangle_query" "ROW_NUMBER ORC stage requires one source")))))
 
 (define make_window_aggregate_stage_rewrite (lambda (fn args over outer_sources ctx)
 	(begin
@@ -1019,11 +1096,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (quote purpose) (quote window-aggregate-cache)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (exists_stage_table_name stage))
 		(define source (list
 			stage_alias
 			(source_schema src)
-			grouptbl
+			(make_stage_output_relation stage_id)
 			true
 			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
 		(list
@@ -1047,15 +1123,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if (query_block_no_from? inner)
 					(list (untangle_zero_domain_subquery (quote inner_select) nil subquery ctx) '() '())
 					(if (empty_list? (extract_aggregates (query_block_first_expr inner)))
-						(make_scalar_once_stage_rewrite inner outer_sources subquery ctx)
-						(make_scalar_aggregate_stage_rewrite inner outer_sources subquery ctx))))
+						(make_scalar_once_stage_rewrite inner (list outer_sources subquery))
+						(make_scalar_aggregate_stage_rewrite inner (list outer_sources subquery)))))
 		((symbol inner_select_exists) subquery)
 			(begin
 				(define normalized (normalize_query_ast subquery))
 				(define inner (untangle_query normalized ctx))
 				(if (query_block_no_from? inner)
 					(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
-					(make_exists_stage_rewrite inner outer_sources subquery ctx)))
+					(make_exists_stage_rewrite inner (list outer_sources subquery))))
 		((symbol inner_select_in) probe subquery)
 			(begin
 				(define normalized (normalize_query_ast subquery))
@@ -1063,7 +1139,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
 				(if (query_block_no_from? inner)
 					(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
-					(make_in_stage_rewrite rewritten_probe inner outer_sources subquery ctx)))
+					(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery))))
 		((symbol window_func) fn args over)
 			(if (equal? fn "ROW_NUMBER")
 				(make_row_number_orc_stage_rewrite args over outer_sources ctx)
@@ -1347,6 +1423,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (query_contains_subquery? node)
 			(neumann_fail phase "subquery marker survived untangle_query")
 			true)
+		(if (node_contains_physical_helper? node)
+			(neumann_fail phase "physical helper relation survived before build_queryplan")
+			true)
 		node)))
 
 (define untangle_query_term (lambda (query ctx)
@@ -1485,6 +1564,24 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define group_table_name (lambda (schema tbl alias keys condition ags)
 	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v2" schema tbl alias keys condition ags))))))
 
+(define make_group_keytable_carrier (lambda (schema relation)
+	(list (quote group-keytable) schema relation)))
+
+(define group_carrier_kind (lambda (carrier)
+	(match carrier
+		'(kind _schema _relation) kind
+		_ nil)))
+
+(define group_carrier_schema (lambda (carrier)
+	(match carrier
+		'(_kind schema _relation) schema
+		_ nil)))
+
+(define group_carrier_relation (lambda (carrier)
+	(match carrier
+		'(_kind _schema relation) relation
+		_ nil)))
+
 (define group_stage_schema (lambda (stage)
 	(begin
 		(define input (gs_input stage))
@@ -1505,6 +1602,27 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (query_block? input)
 			(concat "query:" (fnv_hash (string input)))
 			(source_relation input)))))
+
+(define group_stage_default_carrier (lambda (stage)
+	(begin
+		(define schema (group_stage_schema stage))
+		(define tbl (group_stage_input_name stage))
+		(define alias (group_stage_input_alias stage))
+		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define ags (gs_aggregates stage))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(make_group_keytable_carrier schema (group_table_name schema tbl alias keys condition ags)))))
+
+(define group_stage_carrier (lambda (stage)
+	(coalesceNil
+		(qassoc_get (gs_facts stage) (quote carrier) nil)
+		(group_stage_default_carrier stage))))
+
+(define group_stage_carrier_relation (lambda (stage)
+	(group_carrier_relation (group_stage_carrier stage))))
+
+(define group_stage_carrier_schema (lambda (stage)
+	(group_carrier_schema (group_stage_carrier stage))))
 
 (define group_key_cols (lambda (keys)
 	(map (produceN (count keys)) group_key_col_name)))
@@ -1774,17 +1892,57 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(source_outer? src)
 		(replace_group_expr alias grouptbl keys key_names ags (source_join_expr src)))))
 
+(define stage_by_id (lambda (stages stage_id)
+	(reduce (coalesceNil stages '()) (lambda (found stage)
+		(if (not (nil? found))
+			found
+			(if (and (group_stage? stage) (equal? (gs_id stage) stage_id))
+				stage
+				nil)))
+		nil)))
+
+(define physicalize_stage_output_source (lambda (stages src)
+	(begin
+		(define relation (source_relation src))
+		(if (not (stage_output_relation? relation))
+			src
+			(begin
+				(define stage (stage_by_id stages (stage_output_relation_id relation)))
+				(if (nil? stage)
+					(neumann_fail "build_queryplan" "stage-output source references unknown stage")
+					true)
+				(source_with_relation src (group_stage_carrier_relation stage)))))))
+
+(define physicalize_stage_output_sources (lambda (stages sources)
+	(map (coalesceNil sources '()) (lambda (src)
+		(physicalize_stage_output_source stages src)))))
+
+(define query_block_without_stages_after_prepare (lambda (block)
+	(make_query_block
+		(qb_schema block)
+		(physicalize_stage_output_sources (qb_stages block) (qb_sources block))
+		(qb_fields block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		'()
+		(qb_facts block))))
+
 (define group_stage_final_block (lambda (stage extra_sources)
 	(begin
 		(define src (gs_input stage))
-		(define schema (group_stage_schema stage))
-		(define tbl (group_stage_input_name stage))
 		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (group_table_name schema tbl alias keys condition ags))
+		(define carrier (group_stage_carrier stage))
+		(define schema (group_carrier_schema carrier))
+		(define grouptbl (group_carrier_relation carrier))
 		(define output_fields (map_assoc (gs_output stage) (lambda (_title expr)
 			(replace_group_expr alias grouptbl keys key_names ags expr))))
 		(define replaced_having (replace_group_expr alias grouptbl keys key_names ags (coalesceNil (gs_having stage) true)))
@@ -1817,14 +1975,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (and (not (query_block? src)) (not (source_is_base_table? src)))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table or query-block input")
 			true)
-		(define schema (group_stage_schema stage))
+		(define carrier (group_stage_carrier stage))
+		(if (not (equal? (group_carrier_kind carrier) (quote group-keytable)))
+			(neumann_fail "build_queryplan" "foreign-key backed group carriers are not lowered yet")
+			true)
+		(define schema (group_carrier_schema carrier))
 		(define tbl (group_stage_input_name stage))
 		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (group_table_name schema tbl alias keys condition ags))
+		(define grouptbl (group_carrier_relation carrier))
 		(define key_columns (map key_names (lambda (col) (list (quote list) "column" col "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))
 		(define agg_columns (map ags (lambda (ag) (list (quote list) "column" (aggregate_col_name ag) "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))
 		(define create_cols (cons (quote list)
@@ -1881,12 +2043,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 				"reducefn" (os_reducefn stage)
 				"reduceinit" (os_reduceinit stage))))))
 
+(define lower_window_stage_prepare (lambda (stage)
+	(match stage
+		'(_ id source column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit _facts)
+			(lower_orc_stage_prepare (make_orc_stage
+				id source column
+				sortcols sortdirs partitioncount
+				mapcols mapfn reducefn reduceinit))
+		_ (neumann_fail "build_queryplan" "malformed window-stage"))))
+
 (define lower_stage_prepare (lambda (stage)
 	(if (group_stage? stage)
 		(lower_group_stage_prepare stage)
 		(if (orc_stage? stage)
 			(lower_orc_stage_prepare stage)
-			(neumann_fail "build_queryplan" "unknown logical stage")))))
+			(if (window_stage? stage)
+				(lower_window_stage_prepare stage)
+				(neumann_fail "build_queryplan" "unknown logical stage"))))))
 
 (define lower_group_stage (lambda (stage)
 	(begin
@@ -1894,26 +2067,128 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (and (not (query_block? src)) (not (source_is_base_table? src)))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table or query-block input")
 			true)
-		(define schema (group_stage_schema stage))
 		(define tbl (group_stage_input_name stage))
 		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
-		(define grouptbl (group_table_name schema tbl alias keys condition ags))
 		(list (quote begin)
 			(lower_group_stage_prepare stage)
 			(lower_query_block_core (group_stage_final_block stage '())))))))
 
+(define row_number_get_column? (lambda (col expr)
+	(match expr
+		'(fn _tblvar _ignore column _json_path)
+			(and (equal? fn (quote get_column)) (equal? column col))
+		_ false)))
+
+(define row_number_stage_filter_from_condition (lambda (col condition)
+	(match condition
+		'(op expr limit) (if (row_number_get_column? col expr)
+			(if (equal? op (quote <=))
+				(list (quote le) limit)
+				(if (or (equal? op (quote equal??)) (equal? op (quote equal?)))
+					(list (quote eq) limit)
+					nil))
+			nil)
+		_ nil)))
+
+(define window_scan_dirs (lambda (sortdirs)
+	(map (coalesceNil sortdirs '()) (lambda (desc) (if desc (quote >) (quote <))))))
+
+(define count_star_field_title (lambda (fields)
+	(match (coalesceNil fields '())
+		'(title expr) (match expr
+			'(fn seed reduce init) (if (and (equal? fn (quote aggregate))
+					(and (equal? seed 1)
+						(and (equal? reduce (quote +)) (equal? init 0))))
+				title
+				nil)
+			_ nil)
+		_ nil)))
+
+(define row_number_count_match_expr (lambda (mode rownum limit)
+	(if (equal? mode (quote eq))
+		(list (quote equal?) rownum limit)
+		(list (quote <=) rownum limit))))
+
+(define row_number_count_mapfn (lambda (mapcols)
+	(list (quote lambda)
+		(map (coalesceNil mapcols '()) (lambda (col) (symbol col)))
+		(if (empty_list? mapcols)
+			true
+			(if (single_source? mapcols)
+				(symbol (car mapcols))
+				(cons (quote list) (map mapcols (lambda (col) (symbol col)))))))))
+
+(define row_number_count_reducefn (lambda (mode limit)
+	(list (quote lambda) (list (quote state) (quote partition_key))
+		(list (quote begin)
+			(list (quote define) (quote cnt) (list (quote car) (quote state)))
+			(list (quote define) (quote prev_partition) (list (quote cadr) (quote state)))
+			(list (quote define) (quote prev_rownum) (list (quote car) (list (quote cdr) (list (quote cdr) (quote state)))))
+			(list (quote define) (quote same_partition) (list (quote or)
+				(list (quote nil?) (quote prev_partition))
+				(list (quote equal?) (quote partition_key) (quote prev_partition))))
+			(list (quote define) (quote next_rownum) (list (quote if) (quote same_partition) (list (quote +) (quote prev_rownum) 1) 1))
+			(list (quote define) (quote include_row) (row_number_count_match_expr mode (quote next_rownum) limit))
+			(list (quote list)
+				(list (quote +) (quote cnt) (list (quote if) (quote include_row) 1 0))
+				(quote partition_key)
+				(quote next_rownum))))))
+
+(define lower_row_number_count_scan (lambda (title schema relation sortcols sortdirs mapcols filter)
+	(match filter '(mode limit)
+	(list (quote resultrow)
+		(list (quote list) title
+			(list (quote car)
+				(list (quote scan_order)
+					'(session "__memcp_tx")
+					(list (quote table) schema relation)
+					(quoted_runtime_list '())
+					(list (quote lambda) '() true)
+					(quoted_runtime_list sortcols)
+					(cons (quote list) (window_scan_dirs sortdirs))
+					0
+					0
+					-1
+					(quoted_runtime_list mapcols)
+					(row_number_count_mapfn mapcols)
+					(row_number_count_reducefn mode limit)
+					(list (quote list) 0 nil 0)
+					false))))
+		_ nil)))
+
+(define lower_row_number_top_count_block (lambda (block)
+	(match (qb_stages block)
+		'(stage) (if (not (window_stage? stage))
+			nil
+			(match stage
+				'(_ _id src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
+					(match src '(alias schema relation _outer _join)
+						(begin
+							(define title (count_star_field_title (qb_fields block)))
+							(define filter (row_number_stage_filter_from_condition col (qb_where block)))
+							(if (or (nil? title) (or (nil? filter) (not (number? (cadr filter)))))
+								nil
+								(lower_row_number_count_scan title schema relation sortcols sortdirs mapcols filter)))
+						_ nil)
+				_ nil))
+		_ nil)))
+
 (define lower_grouped_query_block_with_stages (lambda (block)
 	(begin
+		(define fused_top_count (lower_row_number_top_count_block block))
+		(if (not (nil? fused_top_count))
+			fused_top_count
+			(begin
 		(define sources (qb_sources block))
 		(define base_src (car sources))
 		(if (not (source_is_base_table? base_src))
 			(neumann_fail "build_queryplan" "group-stage with subquery stages requires a base driver source")
 			true)
-		(define stage_sources (cdr sources))
+		(define stage_sources (physicalize_stage_output_sources (qb_stages block) (cdr sources)))
 		(define base_block (make_query_block
 			(qb_schema block)
 			(list base_src)
@@ -1932,7 +2207,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(merge (list
 				(map (qb_stages block) lower_stage_prepare)
 				(list (lower_group_stage_prepare main_stage))
-				(list (lower_query_block_core (group_stage_final_block main_stage stage_sources)))))))))
+				(list (lower_query_block_core (group_stage_final_block main_stage stage_sources)))))))))))
 
 (define query_block_without_stages (lambda (block)
 	(make_query_block
@@ -1964,7 +2239,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (quote begin)
 				(merge (list
 					(map (qb_stages block) lower_stage_prepare)
-					(list (lower_query_block_core (query_block_without_stages block))))))))))
+					(list (lower_query_block_core (query_block_without_stages_after_prepare block))))))))))
 
 (define source_is_base_table? (lambda (src)
 	(string? (source_relation src))))
@@ -2284,7 +2559,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(cons (quote begin)
 			(merge (list
 				(map (qb_stages block) lower_stage_prepare)
-				(list (lower_dml_query_block_core (query_block_without_stages block) target_schema target_tbl))))))))
+				(list (lower_dml_query_block_core (query_block_without_stages_after_prepare block) target_schema target_tbl))))))))
 
 (define build_queryplan (lambda (ir)
 	(begin

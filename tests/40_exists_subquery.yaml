@@ -81,9 +81,14 @@ test_cases:
           ORDER BY ID
         expect:
           contains:
-            - "plan"
-            - "__scalar_"
+            - "group-stage"
+            - "stage-output"
+            - "semijoin"
+            - "domain-binding"
           not_contains:
+            - "neumann_exists"
+            - "inner_select"
+            - ".grp:"
             - "__mat:_uncorr_cnt_"
             - "touch_keytable"
             - "\"__cnt\""
@@ -142,9 +147,14 @@ test_cases:
           ORDER BY ID
         expect:
           contains:
-            - "plan"
-            - "__scalar_"
+            - "group-stage"
+            - "stage-output"
+            - "semijoin"
+            - "domain-binding"
           not_contains:
+            - "neumann_exists"
+            - "inner_select"
+            - ".grp:"
             - "__mat:_uncorr_cnt_"
             - "touch_keytable"
             - "\"__cnt\""
