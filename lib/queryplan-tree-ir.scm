@@ -578,7 +578,6 @@ ports the actual operator rules to the tree representation. */
 (define unnest_static_session_aggregate_scalar_scan (lambda (schema tbl_desc filter_expr value_expr inner_stages group_expr having_expr order_expr limit_expr offset_expr cache_policy) (begin
 	(if (not (and
 		(equal? (coalesceNil inner_stages '()) '())
-		(or (nil? having_expr) (equal? having_expr true))
 		(equal? (coalesceNil order_expr '()) '())
 		(or (nil? limit_expr) (>= limit_expr 1))
 		(or (nil? offset_expr) (equal? offset_expr 0))
@@ -599,6 +598,11 @@ ports the actual operator rules to the tree representation. */
 					(define agg_expr (nth value_expr 1))
 					(define agg_reduce (nth value_expr 2))
 					(define agg_neutral (nth value_expr 3))
+					(define agg_descriptor (list agg_expr agg_reduce agg_neutral))
+					(define scalar_having_supported
+						(reduce (extract_aggregates (coalesceNil having_expr true)) (lambda (ok ag)
+							(and ok (equal? (normalize_count_literal_aggregate_args ag) agg_descriptor)))
+							true))
 					(define combined_filter (combine_and_terms (list (coalesceNil local_joinexpr true) (coalesceNil filter_expr true))))
 					(define filter_cols
 						(reduce (extract_columns_for_tblvar local_alias combined_filter)
@@ -609,8 +613,10 @@ ports the actual operator rules to the tree representation. */
 							(lambda (acc col) (if (has? acc col) acc (merge acc (list col))))
 							'()))
 					(if (or
+						(not scalar_having_supported)
 						(expr_has_opaque_scope combined_filter)
 						(expr_has_opaque_scope agg_expr)
+						(expr_has_opaque_scope (coalesceNil having_expr true))
 						(has? filter_cols "#0")
 						(has? map_cols "#0")
 						(strlike (serialize combined_filter) "%#%"))
@@ -630,9 +636,39 @@ ports the actual operator rules to the tree representation. */
 								agg_reduce
 								agg_neutral
 								nil))
-							(if (nil? agg_neutral)
-								scan_expr
-								(list (quote coalesceNil) scan_expr agg_neutral)))))))))))
+							(define scalar_value_expr
+								(if (nil? agg_neutral)
+									scan_expr
+									(list (quote coalesceNil) scan_expr agg_neutral)))
+							(if (or (nil? having_expr) (equal? having_expr true))
+								scalar_value_expr
+								(begin
+									(define scalar_value_sym
+										(symbol (concat "__scalar_agg_" (fnv_hash (serialize (list schema tbl_desc filter_expr value_expr having_expr))))))
+									(define replace_having_aggregate (lambda (expr) (match expr
+										(cons (symbol aggregate) agg_args)
+										(if (equal? (normalize_count_literal_aggregate_args agg_args) agg_descriptor)
+											scalar_value_sym
+											expr)
+										(cons '(quote aggregate) agg_args)
+										(if (equal? (normalize_count_literal_aggregate_args agg_args) agg_descriptor)
+											scalar_value_sym
+											expr)
+										(cons sym args)
+										(if (is_opaque_scope_sym sym)
+											expr
+											(cons
+												(replace_having_aggregate sym)
+												(map args (lambda (arg) (replace_having_aggregate arg)))))
+										expr)))
+									(list (quote begin)
+										(list (quote define) scalar_value_sym scalar_value_expr)
+										(list (quote if)
+											(unnest_scalar_scan_lower_expr
+												(replace_having_aggregate having_expr)
+												local_alias)
+											scalar_value_sym
+											nil))))))))))))))
 (define unnest_map_rule_projection_expr (lambda (map_node field_name)
 	(if (nil? map_node)
 		nil
@@ -1060,7 +1096,12 @@ ports the actual operator rules to the tree representation. */
 				'((quote aggregate) _ (symbol +) 0) true
 				'((quote aggregate) _ '(symbol +) 0) true
 				false))
-			(define us_subst (if us_is_count (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
+			(define us_count_preserves_empty_group
+				(and
+					us_is_count
+					us_static_group
+					(or (nil? us_new_having) (equal? us_new_having true))))
+			(define us_subst (if us_count_preserves_empty_group (list (quote coalesceNil) us_subst_raw 0) us_subst_raw))
 			(list us_subst '()))))))
 (define planner_flat_tables_to_tree_ir (lambda (schema tables)
 	(if (or (nil? tables) (equal? tables '()))

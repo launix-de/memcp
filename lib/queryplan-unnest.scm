@@ -258,8 +258,17 @@ fn receives the node (with already-rewritten children) and returns a new node. *
 
 /* ==================== Trivial elimination ==================== */
 
+/* qpu-trivial-join-type — scalar subqueries expose their right side through
+rhs-alias (sq_N.value). They must preserve the left row domain even when the
+right side is uncorrelated: an empty scalar result becomes NULL, not "remove
+the outer row". Non-scalar trivial dep-joins remain ordinary inner joins. */
+(define qpu-trivial-join-type (lambda (dep-join-node)
+	(if (nil? (qpir-dep-join-rhs-alias dep-join-node))
+		(quote inner)
+		(quote left))))
+
 /* qpu-trivial-eliminate — converts dep-joins whose right side has NO free
-variables referencing the left side into regular inner joins.
+variables referencing the left side into regular joins.
 
 Per FAQ trivial-dep-join: "after simple unnesting, if no operator on the
 right side still references left-side columns (A(L) ∩ F(R) = ∅), convert
@@ -278,14 +287,9 @@ self-contained right sides (e.g. uncorrelated subqueries that snuck through). */
 				'(tv col) (has? left-aliases tv)
 				false))))
 			(if (equal? (count correlated-free) 0)
-				/* Trivial: right doesn't reference left → INNER join.
-				For an UNCORRELATED subquery the right side always produces
-				exactly one row (COUNT returns 0, SUM returns NULL, etc. —
-				never empty). INNER and LEFT are semantically equivalent
-				here. INNER is what build_queryplan_inner reliably handles
-				for `LEFT JOIN ON TRUE` (the joinExpr=true case the
-				physical layer would degenerate to). */
-				(qpir-join (quote inner) (qpir-dep-join-predicate node) left right
+				/* Trivial: right doesn't reference left. The dependency is gone,
+				but scalar RHS aliases still carry NULL-on-empty semantics. */
+				(qpir-join (qpu-trivial-join-type node) (qpir-dep-join-predicate node) left right
 					(qpir-dep-join-rhs-alias node))
 				node)))))
 
@@ -1206,13 +1210,11 @@ Pre-condition: dj is a qpir-dep-join. */
 			would silently vanish — wrong for NOT EXISTS, COALESCE-default
 			scalar subselects, and other LEFT-tolerant patterns.
 
-			Trivial case (no outer refs in right): INNER join is correct
-			here because uncorrelated scalar helpers are lowered so they
-			produce their scalar row independently of the outer domain. INNER
-			also avoids the legacy `LEFT JOIN ON TRUE` degeneracy inside nested
-			scalar materializations. */
+			Trivial case (no outer refs in right): there is no domain pushdown
+			work left. Scalar RHS aliases still preserve left rows because SQL
+			scalar subqueries return NULL when the subquery yields no rows. */
 			(if (equal? (count outer-ref-exprs) 0)
-				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
+				(qpir-join (qpu-trivial-join-type dj) (qpir-dep-join-predicate dj) left right
 					(qpir-dep-join-rhs-alias dj))
 				(begin
 					/* Pass 1: collect cclasses from select equalities in the right. */
@@ -1261,7 +1263,7 @@ qpu-unnest-dep-join exactly — only the outer-aliases derivation differs. */
 				(qpu-collect-outer-refs-with-aliases dj outer-aliases))
 			(if (equal? (count outer-ref-exprs) 0)
 				/* Trivial case: see qpu-unnest-dep-join above. */
-				(qpir-join (quote inner) (qpir-dep-join-predicate dj) left right
+				(qpir-join (qpu-trivial-join-type dj) (qpir-dep-join-predicate dj) left right
 					(qpir-dep-join-rhs-alias dj))
 				(begin
 					(define cc (qpu-make-cclasses))

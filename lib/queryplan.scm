@@ -2833,13 +2833,15 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 	/* physical_tbl: true for real user tables, false for planner-internal temps
 	(dot-prefixed keytables/prejoins) that may not exist in storage at compile time */
 	(define physical_tbl (and (string? tbl) (> (strlen tbl) 0) (not (equal? (substr tbl 0 1) "."))))
+	(define has_condition_suffix
+		(and (not (nil? condition_suffix)) (not (equal? condition_suffix true))))
 	(define keytable_source_name_raw (planner-temp-source-name tbl tblvar))
 	(define keytable_source_name
 		(coalesce (prejoin_keytable_domain_sources (normalize-materialized-subquery-source tbl))
 			keytable_source_name_raw))
 	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
 	reuse the parent (referenced) table instead of creating a temp keytable. */
-	(define fk_result (if (and physical_tbl (nil? condition_suffix) (equal? 1 (count keys)))
+	(define fk_result (if (and physical_tbl (not has_condition_suffix) (equal? 1 (count keys)))
 		(match (car keys)
 			'('get_column (eval tblvar) false scol false) (begin
 				(define fk_info (get_fk_target (table schema tbl) scol))
@@ -2889,7 +2891,7 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 				'()))
 			(define key_names (map key_pairs car))
 			(define key_exprs (map key_pairs cadr))
-			(define condition_name (if (nil? condition_suffix) nil
+			(define condition_name (if (not has_condition_suffix) nil
 				(fnv_hash (concat
 					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs tbl tblvar condition_suffix)) '(list) '(list) alias_map)
 					(runtime_cache_suffix_from_exprs (list condition_suffix))
@@ -2897,8 +2899,8 @@ comes from show() on the existing parent table and fk_init_code creates the alia
 			(define key_name_at (lambda (i) (nth key_names i)))
 			(define key_at (lambda (i) (nth key_exprs i)))
 			(define keytable_name (concat ".keytable:"
-				(fnv_hash
-					(if (nil? condition_suffix)
+					(fnv_hash
+					(if (not has_condition_suffix)
 						(concat keytable_source_name ":" key_names)
 						(concat keytable_source_name ":" key_names "|" condition_name)))))
 			(define keytable_dependency_tables
@@ -8710,10 +8712,28 @@ seeing the correctly prefixed outer alias. */
 									(or acc (stage_has_group_boundary stage))
 								) false)
 								false))
-							(define outer_has_non_group_stage (or
-								(not (equal? (coalesceNil order '()) '()))
-								(not (nil? limit))
-								(not (nil? offset))))
+								(define outer_has_non_group_stage (or
+									(not (equal? (coalesceNil order '()) '()))
+									(not (nil? limit))
+									(not (nil? offset))))
+								(define flatten_has_order_limit_boundary
+									(reduce flatten_groups2 (lambda (found stage)
+										(or found
+											(not (equal? (coalesceNil (stage_order_list stage) '()) '()))
+											(not (nil? (stage_limit_val stage)))
+											(not (nil? (stage_offset_val stage)))))
+										false))
+								(define outer_nullable_group_boundary
+									(and
+										isOuter
+										groups2_present
+										derived_plain_projection_can_flatten_group_boundary
+										(reduce groups2 (lambda (found stage)
+											(or found
+												(and
+													(not (nil? (stage_having_expr stage)))
+													(not (equal? (stage_having_expr stage) true)))))
+											false)))
 							(define condition2_has_null_default (lambda (expr) (match expr
 								(cons sym args)
 								(if (or
@@ -8755,10 +8775,12 @@ seeing the correctly prefixed outer alias. */
 											(not (correlated_inner_select_refs_subquery_alias col)))
 										_ true)))
 									true)))
-							(define use_materialize (or
-								subquery_has_window
-								(and unsupported_groups (not derived_plain_projection_can_flatten_group_boundary))
-								(and (not derived_plain_projection_can_flatten_group_boundary) (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
+								(define use_materialize (or
+									subquery_has_window
+									outer_nullable_group_boundary
+									(and unsupported_groups (not derived_plain_projection_can_flatten_group_boundary))
+									(and derived_plain_projection_can_flatten_group_boundary flatten_has_order_limit_boundary outer_has_non_group_stage)
+									(and (not derived_plain_projection_can_flatten_group_boundary) (not (equal? flatten_groups2 '())) outer_has_non_group_stage)
 								(and (not derived_plain_projection_can_flatten_group_boundary) (not (equal? flatten_groups2 '())) outer_has_group_stage)
 								(and (not derived_plain_projection_can_flatten_group_boundary) (not (equal? flatten_groups2 '())) (not (equal? (coalesceNil outer_schemas '()) '())))))
 							(if (and materialize_reasons use_materialize)
@@ -8766,6 +8788,7 @@ seeing the correctly prefixed outer alias. */
 									(serialize
 										(list
 											(list "window" subquery_has_window)
+											(list "outer-nullable-group-boundary" outer_nullable_group_boundary)
 											(list "unsupported-groups" unsupported_groups)
 											(list "outer-post-filter" outer_post_filter_needs_boundary)
 											(list "flatten-groups" (not (equal? flatten_groups2 '())))
@@ -8776,15 +8799,15 @@ seeing the correctly prefixed outer alias. */
 											(list "outer-uses-boundary" outer_uses_subquery_group_boundary)
 											(list "outer-plain-projection-only" outer_plain_projection_only)))))
 								nil)
-							(if (and
-								(not use_materialize)
-								(not (nil? _init2))
-								(not (equal? _init2 '())))
+								(if (and
+									(not use_materialize)
+									(not (nil? _init2))
+									(not (equal? _init2 '())))
 								(sq_cache "init" (merge
 									(coalesceNil (sq_cache "init") '())
 									(map _init2 replace_column_alias)))
-								nil)
-							(if neumann_pipeline_trace (print (concat "[neumann] legacy derived " id ": after use materialize")) nil)
+									nil)
+								(if neumann_pipeline_trace (print (concat "[neumann] legacy derived " id ": after use materialize")) nil)
 							/* Window-function LIMIT pushdown */
 							(define mat_limit nil)
 							(if subquery_has_window (begin
@@ -8829,13 +8852,16 @@ seeing the correctly prefixed outer alias. */
 									expr
 									(cons (replace_stage_column_alias sym) (map args replace_stage_column_alias)))
 								expr)))
-							/* pass-through stage semantics stay on the flattened plan.
-							Pure inner ORDER BY without LIMIT/OFFSET is dropped; the outer ORDER BY wins. */
-							(if (and groups2_present (not use_materialize) (not (equal? flatten_groups2 '())))
-								(sq_cache "groups" (merge
-									(map flatten_groups2 (lambda (stage)
-										(rewrite_stage_for_flattened_aliases stage replace_stage_column_alias flatten_stage_alias)))
-									(coalesceNil (sq_cache "groups") '()))))
+								/* pass-through stage semantics stay on the flattened plan.
+								Pure inner ORDER BY without LIMIT/OFFSET is dropped; the outer ORDER BY wins. */
+								(if (and groups2_present (not use_materialize) (not (equal? flatten_groups2 '())))
+									(sq_cache "groups" (merge
+										(map flatten_groups2 (lambda (stage)
+											(stage_set
+												(rewrite_stage_for_flattened_aliases stage replace_stage_column_alias flatten_stage_alias)
+												(quote flattened-derived)
+												true)))
+										(coalesceNil (sq_cache "groups") '()))))
 							(define derived_result
 								(if use_materialize
 									(begin
@@ -9640,10 +9666,16 @@ seeing the correctly prefixed outer alias. */
 									"__dep_full_domain"
 									(concat "__dep_full_domain_" (fnv_hash dep_domain_runtime_suffix))))
 							(define dep_match_alias "__dep_full_match")
+							(define dep_subquery_having_trivial
+								(match (dependent_expr_compile_info_subquery dep_info)
+									'(_ _ _ _ _ dep_having _ _ _)
+									(or (nil? dep_having) (equal? dep_having true))
+									_ true))
 							(define dep_empty_result
 								(if (and
 									(equal?? (dependent_expr_compile_info_kind dep_info) (quote inner_select))
-									(dependent_join_helper_scalar_count_aggregate? dep_info))
+									(dependent_join_helper_scalar_count_aggregate? dep_info)
+									dep_subquery_having_trivial)
 									0
 									(if (or
 										(dependent_join_helper_scalar_presence_value? dep_info)
@@ -10062,15 +10094,19 @@ seeing the correctly prefixed outer alias. */
 	(set conditionList (filter conditionList (lambda (part)
 		(not (reduce sq_local_helper_joinexprs (lambda (found helper_joinexpr)
 			(or found (equal? helper_joinexpr part))) false)))))
-	(define sq_prop_groups (dedupe_logical_stages
-		(if (equal? sq_scalar_alias_map '())
-			(coalesceNil (sq_cache "groups") '())
-			(map (coalesceNil (sq_cache "groups") '()) (lambda (stage)
-				(rewrite_stage_for_flattened_aliases
-					stage
-					rewrite_scalar_left_join_aliases
-					rewrite_scalar_left_join_alias))))))
-	(set groups (if (equal? sq_prop_groups '()) groups (merge sq_prop_groups (coalesceNil groups '()))))
+		(define sq_prop_groups (dedupe_logical_stages
+			(if (equal? sq_scalar_alias_map '())
+				(coalesceNil (sq_cache "groups") '())
+				(map (coalesceNil (sq_cache "groups") '()) (lambda (stage)
+					(rewrite_stage_for_flattened_aliases
+						stage
+						rewrite_scalar_left_join_aliases
+						rewrite_scalar_left_join_alias))))))
+		(define sq_prop_groups_from_flattened_derived
+			(reduce sq_prop_groups (lambda (found stage)
+				(or found (equal? (stage_get stage (quote flattened-derived) false) true)))
+				false))
+		(set groups (if (equal? sq_prop_groups '()) groups (merge sq_prop_groups (coalesceNil groups '()))))
 	(if (not (equal? (coalesceNil groups '()) '()))
 		(begin
 			(define condition_terms_for_group (flatten_and_terms (coalesceNil condition true)))
@@ -10253,8 +10289,30 @@ seeing the correctly prefixed outer alias. */
 	anywhere in the query (fields, condition, having, order, or sibling
 	joinexprs). A LEFT JOIN that is never read contributes only NULL columns
 	and cannot filter rows, so it is safe to drop entirely. */
+	(define stage_live_aliases (lambda (stage) (merge_unique (list
+		(merge (map (coalesceNil (stage_group_cols stage) '()) extract_all_table_aliases))
+		(extract_all_table_aliases (coalesceNil (stage_having_expr stage) true))
+		(extract_all_table_aliases (coalesceNil (stage_condition stage) true))
+		(merge (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o
+			'(col _dir) (extract_all_table_aliases col)
+			_ '()))))))))
+	(define cd_live_source_aliases
+		(if cd_has
+			(merge
+				(map cd_distinct_exprs extract_all_table_aliases)
+				(merge (map tables (lambda (td) (match td
+					'(alias _ _ true _)
+					(if (reduce (schema_assoc_cols schemas alias) (lambda (found coldef)
+						(or found (cd_find (coalesceNil (coldef "Expr") nil))))
+						false)
+						(list (string alias))
+						'())
+					_ '())))))
+			'()))
 	(define all_referenced_aliases (merge_unique (list
 		(extract_all_table_aliases fields)
+		cd_live_source_aliases
+		(merge (map (coalesceNil sq_prop_groups '()) stage_live_aliases))
 		(extract_all_table_aliases conditionAll)
 		(extract_all_table_aliases (coalesceNil having true))
 		(merge (map (coalesceNil order '()) (lambda (o) (extract_all_table_aliases o))))
@@ -10292,17 +10350,29 @@ seeing the correctly prefixed outer alias. */
 					(reduce_assoc fields (lambda (found _k v)
 						(or found (not (equal? (extract_window_funcs v) '()))))
 						false))
-				(define stage_having
-					(if (and fields_have_window (equal? having true))
-						nil
-						having))
-				(if (or fields_have_aggregate (group_stage_requested group stage_having order limit offset))
-					(list (make_group_stage
-						(if (and fields_have_aggregate (or (nil? group) (equal? group '())))
-							'(1)
-							group)
-						stage_having order limit offset nil nil))
-					'())))))
+					(define stage_having
+						(if (and fields_have_window (equal? having true))
+							nil
+							having))
+					/* Flattened grouped derived tables expose aggregate results as their
+					output relation. A parent that only projects/orders that relation must
+					not synthesize a new GROUP BY 1 just because those output expressions
+					still contain aggregate markers after alias rewriting. */
+					(define flattened_group_supplies_aggregates
+						(and
+							fields_have_aggregate
+							sq_prop_groups_from_flattened_derived
+							(or (nil? group) (equal? group '()))
+							(or (nil? stage_having) (equal? stage_having true))))
+					(define aggregate_stage_needed
+						(and fields_have_aggregate (not flattened_group_supplies_aggregates)))
+					(if (or aggregate_stage_needed (group_stage_requested group stage_having order limit offset))
+						(list (make_group_stage
+							(if (and aggregate_stage_needed (or (nil? group) (equal? group '())))
+								'(1)
+								group)
+							stage_having order limit offset nil nil))
+						'())))))
 	/* Contract boundary: untangle_query returns canonical logical IR.
 	All case-insensitive parser markers are resolved here, before build_queryplan
 	starts creating keytables/prejoins or serializing canonical expression names. */
@@ -11466,11 +11536,19 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 	Materialized temp sources may expose aggregate results as physical temp
 	columns, but logical aggregate sentinels must survive until the scan stage
 	that actually reads that temp source. Lower them exactly once here. */
-	(define lower_materialized_scan_expr (lambda (scan_schema scan_tbl scan_tblvar scan_expr agg_name_context) (begin
-		(define materialized_source (materialized-source? scan_tbl))
-		(if (not materialized_source)
-			scan_expr
-			(begin
+		(define lower_materialized_scan_expr (lambda (scan_schema scan_tbl scan_tblvar scan_expr agg_name_context) (begin
+			(define materialized_source (materialized-source? scan_tbl))
+			(define planner_materialized_scan_table
+				(and (string? scan_tbl)
+					(or
+						(strlike scan_tbl ".keytable:%")
+						(strlike scan_tbl ".prejoin:%")
+						(strlike scan_tbl ".mat:%"))))
+			(define scan_has_planned_fields
+				(not (equal? (coalesceNil (planned_materialized_fields scan_tbl) '()) '())))
+			(if (and (not materialized_source) (not planner_materialized_scan_table) (not scan_has_planned_fields))
+				scan_expr
+				(begin
 				(define canon_alias_map (list (list scan_tblvar (concat scan_schema "." scan_tbl))))
 				(define scan_expr_name (lambda (expr)
 					(canonical_expr_name (normalize_canonical_aliases (preserve_current_materialized_field_refs scan_tbl scan_tblvar expr)) '(list) '(list) canon_alias_map)))
@@ -12539,14 +12617,17 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				scoped stages when they have a local condition (different WHERE
 				clauses on the same physical table need distinct keytables). */
 				(define keytable_condition_suffix
-					(if (or session_sensitive_group_domain (expr_uses_session_state condition))
+					(if is_dedup
 						(if (or (nil? collect_condition) (equal? collect_condition true))
-							condition
-							collect_condition)
-						(if (or (and is_dedup (not session_sensitive_group_domain))
-							(and scoped_stage (not (or (nil? collect_condition) (equal? collect_condition true)))))
-							collect_condition
-							nil)))
+							(list (quote dedup_domain))
+							(list (quote dedup_domain) collect_condition))
+						(if (or session_sensitive_group_domain (expr_uses_session_state condition))
+							(if (or (nil? collect_condition) (equal? collect_condition true))
+								condition
+								collect_condition)
+							(if (and scoped_stage (not (or (nil? collect_condition) (equal? collect_condition true))))
+								collect_condition
+								nil))))
 				(define kt_result (make_keytable schema tbl resolved_stage_group tblvar
 					keytable_condition_suffix))
 				(set grouptbl (car kt_result))
@@ -12874,7 +12955,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 							(map resolved_stage_group (lambda (expr)
 								(list "Field" (if is_fk_reuse fk_pk_col (expr_name expr)) "Type" "any")))
 							(map ags (lambda (ag)
-								(list "Field" (agg_col_name ag) "Type" "any")))))
+								(list "Field" (agg_col_name ag) "Type" "any"
+									"Expr" (cons (quote aggregate) ag))))))
 						(planned_materialized_fields grouptbl keytable_schema_def)
 						/* AND count>0 into HAVING so empty/non-matching groups are excluded */
 						(define effective_having (if (and needs_count filter_empty_groups)
@@ -15120,7 +15202,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 										tbl ps_ord stage_order stage_limit stage_offset stage_partcols is_first))
 									/* tagged helper scans override the local scan config; otherwise use
 									partition-stage order first and the outer ORDER only on the driver scan. */
-									(define eff_order (ordered_scan_stage_config_order ord_stage_cfg))
+									(define eff_order_raw (ordered_scan_stage_config_order ord_stage_cfg))
+									(define eff_order (map (coalesce eff_order_raw '()) (lambda (o) (match o
+										'(col dir)
+										(list (lower_materialized_emit_expr schema base_tbl tblvar col) dir)
+										o))))
 									/* extract order cols for this tblvar */
 									(set ordercols (extract_scan_order_cols_for_tblvar eff_order tblvar))
 									(set dirs (extract_scan_order_dirs_for_tblvar eff_order tblvar))
@@ -15131,7 +15217,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 									(define ord_raw_scan_partcols (ordered_scan_stage_config_partcols ord_stage_cfg))
 									(define ord_effective_once_limit (coalesce
 										(ordered_scan_stage_config_once_limit ord_stage_cfg)
-										(if (and isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 1 nil)))
+										(if (and isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 2 nil)))
 									(define ord_once_contract (if (nil? ord_effective_once_limit)
 										nil
 										(make_once_limit_scan_contract ord_raw_scan_limit ord_raw_scan_offset ord_raw_scan_partcols ord_effective_once_limit tblvar condition joinexpr tbl)))
@@ -15300,7 +15386,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												(define scan_raw_offset (local_scan_stage_config_offset scan_stage_cfg))
 												(define scan_effective_once_limit (coalesce
 													(local_scan_stage_config_once_limit scan_stage_cfg)
-													(if (and scan_isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 1 nil)))
+													(if (and scan_isOuter (scalar_once_helper_scan? schema base_tbl tblvar schemas) (not (nil? joinexpr))) 2 nil)))
 												(define scan_once_contract (if (nil? scan_effective_once_limit)
 													nil
 													(make_once_limit_scan_contract scan_raw_limit scan_raw_offset scan_raw_partcols scan_effective_once_limit tblvar condition joinexpr tbl)))

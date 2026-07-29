@@ -1039,6 +1039,11 @@ or pairs (pipeline). */
 						(qpp-tuple-tables sub))))
 			false)))))
 
+(define qpu-low-tuple-count-zero-defaults-preserve-empty? (lambda (tuple)
+	(begin
+		(define having (qpp-tuple-having tuple))
+		(or (nil? having) (equal? having true)))))
+
 (define qpu-low-exists-default-refs-for-tables (lambda (tables)
 	(merge (map (coalesceNil tables '()) (lambda (td) (match td
 		'(alias _ tname _ _)
@@ -1550,6 +1555,58 @@ anyway, and helper scans for aggregates break the simple tag) */
 			(qpp-tuple-order sub-tuple)
 			(qpp-tuple-limit sub-tuple)
 			(qpp-tuple-offset sub-tuple)))))
+
+(define qpu-low-field-name-has-prefix? (lambda (name prefix)
+	(and
+		(string? name)
+		(>= (strlen name) (strlen prefix))
+		(equal? (substr name 0 (strlen prefix)) prefix))))
+
+(define qpu-low-enforce-scalar-once-by-domain (lambda (sub-tuple)
+	(begin
+		(define user-limit (qpp-tuple-limit sub-tuple))
+		(define once-limit (if (and (not (nil? user-limit)) (<= user-limit 1)) 1 2))
+		(define field-pairs (qpp-fields-to-pairs (coalesceNil (qpp-tuple-fields sub-tuple) '())))
+		(define kt-fields (filter field-pairs (lambda (pair) (match pair
+			'(name _expr) (qpu-low-field-name-has-prefix? name "__kt_")
+			false))))
+		(if (or
+			(not (equal? once-limit 2))
+			(equal? kt-fields '())
+			(qpu-low-tuple-has-aggregate-field? sub-tuple)
+			(not (equal? (coalesceNil (qpp-tuple-group sub-tuple) '()) '()))
+			(not (nil? (qpp-tuple-having sub-tuple))))
+			(qpu-low-add-scalar-once-marker sub-tuple)
+			(begin
+				(define kt-names (map kt-fields car))
+				(define kt-exprs (map kt-fields cadr))
+				(define grouped-fields
+					(reduce field-pairs (lambda (acc pair) (match pair
+						'(name expr)
+						(if (equal? name "__qpu_scalar_once_limit")
+							acc
+							(merge acc (list
+								(list name
+									(if (has? kt-names name)
+										expr
+										(list (quote aggregate) expr qpu-low-group-any-reduce nil))))))
+						acc))
+						'()))
+				(qpp-rebuild-tuple
+					(qpp-tuple-schema sub-tuple)
+					(qpp-tuple-tables sub-tuple)
+					(qpp-fields-to-flat grouped-fields)
+					(qpp-tuple-condition sub-tuple)
+					kt-exprs
+					(list (quote if)
+						(list (quote >)
+							(list (quote aggregate) 1 (symbol "+") 0)
+							1)
+						(list (quote error) "Subquery returns more than 1 row")
+						true)
+					(qpp-tuple-order sub-tuple)
+					nil
+					nil))))))
 
 (define qpu-low-tag-expr-has-aggregate? (lambda (expr) (match expr
 	'((symbol aggregate) . _) true
@@ -3266,7 +3323,7 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 					(if (> (count right-kt-inner-cols) 0)
 						(if (qpu-low-tuple-has-aggregate-field? right-tuple-keys-limited)
 							right-tuple-keys-limited
-							(qpu-low-add-scalar-once-marker
+							(qpu-low-enforce-scalar-once-by-domain
 								(qpu-low-tag-inner-once-limit right-tuple-keys-limited)))
 						(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
 					right-tuple-keys-limited)))
@@ -3295,15 +3352,17 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				'()))
 		(define rhs-zero-default-cols
 			(if is-left
-				(filter (map (qpp-fields-to-pairs
-					(coalesceNil (qpp-tuple-fields right-tuple-keys) '()))
-					(lambda (pair) (match pair
-						'(name expr)
-						(if (qpu-low-count-zero-default-field? expr
-							(qpp-tuple-tables right-tuple-keys))
-							name nil)
-						nil)))
-					(lambda (x) (not (nil? x))))
+				(if (qpu-low-tuple-count-zero-defaults-preserve-empty? right-tuple-keys)
+					(filter (map (qpp-fields-to-pairs
+						(coalesceNil (qpp-tuple-fields right-tuple-keys) '()))
+						(lambda (pair) (match pair
+							'(name expr)
+							(if (qpu-low-count-zero-default-field? expr
+								(qpp-tuple-tables right-tuple-keys))
+								name nil)
+							nil)))
+						(lambda (x) (not (nil? x))))
+					'())
 				'()))
 		(define rewrite-rhs-default-ref (lambda (expr) (match expr
 			'((symbol get_column) alias_ ti col ci)
