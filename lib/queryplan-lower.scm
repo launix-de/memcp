@@ -2848,6 +2848,14 @@ Skips when:
 								(equal? (substr alias 0 11) "__limit_rn_"))))))))
 		false)))
 
+(define qpu-low-table-alias-limit-wrapped? (lambda (alias)
+	(and (string? alias)
+		(or
+			(and (>= (strlen alias) 13)
+				(equal? (substr alias 0 13) "__limit_wrap_"))
+			(and (>= (strlen alias) 11)
+				(equal? (substr alias 0 11) "__limit_rn_"))))))
+
 /* qpu-low-find-partition-table-alias — when partition cols all belong to
 ONE table alias, return that alias. Otherwise nil (mixed table partition). */
 (define qpu-low-find-partition-table-alias (lambda (inner-cols)
@@ -2986,10 +2994,12 @@ __kt_* boundary columns as partition keys. */
 			nil))))
 
 (define qpu-low-wrap-limit-with-rownumber (lambda (right-tuple join-pred rename-map)
-	(begin
-		(define lim (qpp-tuple-limit right-tuple))
-		(define tbls (qpp-tuple-tables right-tuple))
-		(if (or (nil? lim)
+		(begin
+			(define lim (qpp-tuple-limit right-tuple))
+			(define has-dropped-limit-marker
+				(qpu-low-tuple-has-dropped-limit-marker? right-tuple))
+			(define tbls (qpp-tuple-tables right-tuple))
+			(if (or (nil? lim)
 			(expr_uses_session_state (qpp-tuple-condition right-tuple))
 			(expr_uses_session_state join-pred)
 			(qpl-expr-has-aggregate? (qpp-tuple-condition right-tuple))
@@ -3000,9 +3010,9 @@ __kt_* boundary columns as partition keys. */
 					'(_ e) (or acc (qpl-expr-has-aggregate? e))
 					acc))
 				false)
-			/* Already wrapped by lift-time ROW_NUMBER — adding another
-			wrap would double the partition logic. */
-			(qpu-low-tables-already-wrapped? tbls)) right-tuple
+			(and
+				(qpu-low-tables-already-wrapped? tbls)
+				(not has-dropped-limit-marker))) right-tuple
 			(begin
 				(define inner-aliases (map tbls (lambda (td)
 					(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
@@ -3016,8 +3026,10 @@ __kt_* boundary columns as partition keys. */
 				(if (or
 					(equal? (count inner-cols) 0)
 					(nil? partition-alias)
-					(and (equal? (count rename-map) 0)
-						(equal? (count kt-inner-cols) 0)))
+					(and
+						(equal? (count rename-map) 0)
+						(equal? (count kt-inner-cols) 0)
+						(not has-dropped-limit-marker)))
 					right-tuple
 					(begin
 						/* Multi-table-safe RESTRUCTURE per FAQ §43:
@@ -3028,7 +3040,9 @@ __kt_* boundary columns as partition keys. */
 						to a `rn <= k` filter at right-tuple level. The OTHER tables
 						remain flat siblings, just joining to the wrapped one. */
 						(define partition-td (qpu-low-table-schema-of partition-alias tbls))
-						(if (nil? partition-td) right-tuple
+						(if (or (nil? partition-td)
+							(qpu-low-table-alias-limit-wrapped? partition-alias))
+							right-tuple
 							(begin
 								(match partition-td '(pa-alias pa-schema pa-tname pa-isOuter pa-joinExpr)
 									(if (qpp-tuple? pa-tname)
@@ -3316,8 +3330,26 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				(not (qpu-low-tuple-has-limit-stage? right-tuple-keys-limited))
 				(equal? right-tuple-keys-limited right-tuple-keys-raw)
 				(> (count right-kt-inner-cols) 0)))
+		(define scalar-explicit-domain-limit-candidate
+			(and is-scalar-rhs
+				(not (nil? (qpp-tuple-limit right-tuple-keys-limited)))
+				(<= (qpp-tuple-limit right-tuple-keys-limited) 1)
+				(or
+					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-raw)
+					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-raw)
+					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-limited)
+					right-had-dropped-limit-marker)
+				(> (count right-kt-inner-cols) 0)))
 		(define right-tuple-keys
-			(if scalar-dropped-limit-candidate
+			(if scalar-explicit-domain-limit-candidate
+				(qpu-low-wrap-derived-partition-owner
+					right-tuple-keys-limited
+					(qpp-tuple-tables right-tuple-keys-limited)
+					right-kt-inner-cols
+					nil nil nil nil nil
+					(qpp-tuple-limit right-tuple-keys-limited)
+					1)
+				(if scalar-dropped-limit-candidate
 				(qpu-low-tag-inner-limit-contract right-tuple-keys-limited 1 1)
 				(if scalar-no-limit-candidate
 					(if (> (count right-kt-inner-cols) 0)
@@ -3326,7 +3358,7 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 							(qpu-low-enforce-scalar-once-by-domain
 								(qpu-low-tag-inner-once-limit right-tuple-keys-limited)))
 						(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
-					right-tuple-keys-limited)))
+					right-tuple-keys-limited))))
 		(define rewritten-fields (qpu-low-rewrite-projections
 			(qpp-tuple-fields left-tuple) right-only-aliases rhs-alias))
 		(define rewritten-cond (qpu-low-rewrite-refs

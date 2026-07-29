@@ -7358,6 +7358,10 @@ seeing the correctly prefixed outer alias. */
 									_ nil)))
 									(lambda (x) (not (nil? x))))))
 						(sq_cache_add_init_once dep_mat_source dep_mat_init)
+						(define dep_once_limit
+							(if (and (not (nil? dep_limit)) (<= dep_limit 1))
+								1
+								2))
 						(list dep_schema
 							(list
 								(list dep_scan_alias dep_schema
@@ -7374,7 +7378,7 @@ seeing the correctly prefixed outer alias. */
 										dep_limit
 										dep_offset
 										(count domain_cols)
-										2)
+										dep_once_limit)
 									false
 									nil))
 							(merge

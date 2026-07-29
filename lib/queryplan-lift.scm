@@ -435,9 +435,16 @@ apply qpl-drop-redundant-correlated-limit to their sub-tuples. */
 				'inner_select         true
 				false))
 			(if (and is-scalar (list? args) (equal? (count args) 1))
-				(list sym (qpl-drop-redundant-correlated-limit
-					(qpp-apply-to-tuple (nth args 0)
-						qpl-rewrite-redundant-limit-in-expr)))
+				(begin
+					(define rewritten-sub
+						(qpp-apply-to-tuple (nth args 0)
+							qpl-rewrite-redundant-limit-in-expr))
+					(list sym
+						(if (and
+							(qpl-tuple-has-markers? rewritten-sub)
+							(qpl-tuple-visible-field-is-marker? rewritten-sub))
+							rewritten-sub
+							(qpl-drop-redundant-correlated-limit rewritten-sub))))
 				(if (list? args)
 					(cons sym (map args
 						(lambda (a) (qpl-rewrite-redundant-limit-in-expr a))))
@@ -446,6 +453,16 @@ apply qpl-drop-redundant-correlated-limit to their sub-tuples. */
 
 (define qpl-rewrite-redundant-limit-tuple (lambda (t)
 	(qpp-apply-to-tuple t qpl-rewrite-redundant-limit-in-expr)))
+
+(define qpl-tuple-visible-field-is-marker? (lambda (t)
+	(begin
+		(define fields (qpp-fields-to-pairs
+			(coalesceNil (qpp-tuple-fields t) '())))
+		(if (equal? (count fields) 0)
+			false
+			(match (nth fields 0)
+				'(_ expr) (not (nil? (qpl-marker-kind expr)))
+				false)))))
 
 (define qpl-predicate-binds-limited-leaf-primary? (lambda (pred leaf-tuple)
 	(begin
@@ -514,6 +531,65 @@ apply qpl-drop-redundant-correlated-limit to their sub-tuples. */
 		(qpp-tuple-order leaf-tuple)
 		nil
 		nil)))
+
+(define qpl-leaf-has-dropped-limit-marker? (lambda (leaf-tuple)
+	(reduce (qpp-fields-to-pairs (coalesceNil (qpp-tuple-fields leaf-tuple) '()))
+		(lambda (found pair) (or found (qpl-dropped-limit-marker-field? pair)))
+		false)))
+
+(define qpl-add-dropped-limit-marker-to-leaf (lambda (leaf-tuple lim)
+	(if (qpl-leaf-has-dropped-limit-marker? leaf-tuple)
+		leaf-tuple
+		(qpp-rebuild-tuple
+			(qpp-tuple-schema leaf-tuple)
+			(qpp-tuple-tables leaf-tuple)
+			(merge
+				(qpp-fields-to-pairs (qpp-tuple-fields leaf-tuple))
+				(list (list "__qpl_dropped_limit" lim)))
+			(qpp-tuple-condition leaf-tuple)
+			(qpp-tuple-group leaf-tuple)
+			(qpp-tuple-having leaf-tuple)
+			(qpp-tuple-order leaf-tuple)
+			(qpp-tuple-limit leaf-tuple)
+			(qpp-tuple-offset leaf-tuple)))))
+
+(define qpl-add-dropped-limit-marker-to-first-leaf (lambda (node lim)
+	(match (qpir-kind node)
+		(quote qpir-leaf)
+		(qpir-leaf (qpl-add-dropped-limit-marker-to-leaf
+			(qpir-leaf-7tuple node) lim))
+		(quote qpir-select)
+		(qpir-select (qpir-select-predicate node)
+			(qpl-add-dropped-limit-marker-to-first-leaf
+				(qpir-select-child node) lim))
+		(quote qpir-map)
+		(qpir-map (qpir-map-projections node)
+			(qpl-add-dropped-limit-marker-to-first-leaf
+				(qpir-map-child node) lim))
+		(quote qpir-groupby)
+		(qpir-groupby (qpir-groupby-keys node) (qpir-groupby-aggs node)
+			(qpir-groupby-having node)
+			(qpl-add-dropped-limit-marker-to-first-leaf
+				(qpir-groupby-child node) lim))
+		(quote qpir-window)
+		(qpir-window (qpir-window-partition node) (qpir-window-order node)
+			(qpir-window-computations node)
+			(qpl-add-dropped-limit-marker-to-first-leaf
+				(qpir-window-child node) lim))
+		(quote qpir-dep-join)
+		(qpir-dep-join (qpir-dep-join-predicate node)
+			(qpl-add-dropped-limit-marker-to-first-leaf
+				(qpir-dep-join-left node) lim)
+			(qpir-dep-join-right node)
+			(qpir-dep-join-accessing node)
+			(qpir-dep-join-rhs-alias node))
+		(quote qpir-join)
+		(qpir-join (qpir-join-type node) (qpir-join-predicate node)
+			(qpl-add-dropped-limit-marker-to-first-leaf
+				(qpir-join-left node) lim)
+			(qpir-join-right node)
+			(qpir-join-rhs-alias node))
+		_ node)))
 
 (define qpl-drop-redundant-limits-under-select (lambda (pred node)
 	(match (qpir-kind node)
@@ -1071,7 +1147,16 @@ the column, preserving SQL's outer-scope fallback for other nil refs. */
 				'inner_select         true
 				false))
 			(if (and is-scalar (list? args) (equal? (count args) 1))
-				(list sym (qpl-rewrite-correlated-limit-with-rownumber (nth args 0)))
+				(begin
+					(define rewritten-sub
+						(qpp-apply-to-tuple (nth args 0)
+							qpl-rewrite-correlated-limit-in-expr))
+					(list sym
+						(if (and
+							(qpl-tuple-has-markers? rewritten-sub)
+							(qpl-tuple-visible-field-is-marker? rewritten-sub))
+							rewritten-sub
+							(qpl-rewrite-correlated-limit-with-rownumber rewritten-sub))))
 				(if (list? args)
 					(cons sym (map args
 						(lambda (a) (qpl-rewrite-correlated-limit-in-expr a))))
@@ -2457,6 +2542,16 @@ original SQL alias. */
 			/* Step 1: rename the visible field to "value" so callers uniformly
 			reference sq_N.value regardless of the user's SQL alias. */
 			(define renamed (qpl-rename-first-field-to-value sub))
+			(define renamed-with-limit-contract
+				(if (not (nil? (qpp-tuple-limit renamed)))
+					(if (and
+						(nil? (qpp-tuple-offset renamed))
+						(or (nil? (qpp-tuple-order renamed))
+							(equal? (qpp-tuple-order renamed) '())))
+						renamed
+						(qpl-rewrite-correlated-limit-with-rownumber
+							(qpl-drop-redundant-correlated-limit renamed)))
+					renamed))
 			/* Step 2: RECURSIVELY lift the renamed sub. This is the architectural
 			fix per FAQ "every query is unnestable": if `sub` itself contains
 			inner_select markers (a NESTED correlated subquery), lift turns
@@ -2465,7 +2560,19 @@ original SQL alias. */
 			unnest_pass eliminates BOTH the outer dep-join and the inner
 			ones (top-down per BTW2025 §3.2 with parent-chained UnnestingInfo
 			— see queryplan-unnest.scm). */
-			(define lifted (lift_dep_joins_pass renamed))
+			(define lifted-raw (lift_dep_joins_pass renamed-with-limit-contract))
+			(define lifted
+				(if (and
+					(not (nil? (qpp-tuple-limit renamed)))
+					(nil? (qpp-tuple-offset renamed))
+					(or (nil? (qpp-tuple-order renamed))
+						(equal? (qpp-tuple-order renamed) '()))
+					(qpl-tuple-visible-field-is-marker? renamed)
+					(> (count (qpl-sub-outer-refs renamed)) 0))
+					(qpl-add-dropped-limit-marker-to-first-leaf
+						lifted-raw
+						(qpp-tuple-limit renamed))
+					lifted-raw))
 			/* Step 3: if lifted is a plain qpir-leaf whose 7-tuple needs
 			aggregate/group-by decomposition (the static-group case for the
 			typical SUM correlated subquery), apply the decomposition so the
@@ -2557,8 +2664,9 @@ can apply during unnest_pass. */
 		(qpir-select cond inner))))
 
 (define qpl-build-simple-leaf-inner (lambda (sub) (begin
-	(define field-pair (nth (qpp-tuple-fields sub) 0))
+	(define field-pair (nth (qpl-visible-scalar-fields (qpp-tuple-fields sub)) 0))
 	(define field-expr (nth field-pair 1))
+	(define marker-fields (qpl-internal-marker-fields (qpp-tuple-fields sub)))
 	(if (qpl-expr-has-aggregate? field-expr)
 		(error "qpl-build-simple-leaf-inner: field has nested aggregate; should have decomposed")
 		/* Hoist WHERE to qpir-select wrapper (architectural — gives the
@@ -2569,7 +2677,9 @@ can apply during unnest_pass. */
 			(qpir-leaf (qpp-rebuild-tuple
 				(qpp-tuple-schema sub)
 				(qpp-tuple-tables sub)
-				(list (list "value" field-expr))
+				(merge
+					(list (list "value" field-expr))
+					marker-fields)
 				true
 				(qpp-tuple-group sub)
 				nil
