@@ -2716,9 +2716,10 @@ carrier until session domains are modeled explicitly. */
 													nil nil nil nil nil)
 											)
 											_ branch)))
-										order limit offset)))))
-					query2))
-			query2))))
+										order limit offset)))
+							_ query2)))
+				_ query2))
+		_ query2)))
 	(define top_union_parts (query_union_parts query))
 	(if (not (nil? top_union_parts))
 		(match top_union_parts '(branches order limit offset distinct)
@@ -2731,14 +2732,14 @@ carrier until session domains are modeled explicitly. */
 				(list schema
 					(map tables (lambda (tbldesc) (match tbldesc
 						'(alias schema2 (string? tbl) isOuter joinexpr) tbldesc
-						'(id schemax subquery isOuter joinexpr) (if (or
-							(query_is_select_core subquery)
-							(not (nil? (query_union_parts subquery))))
-							(list id schemax (rewrite_query_term subquery) isOuter joinexpr)
-							tbldesc)
-						tbldesc)))
-					fields condition group having order limit offset)
-				query))))
+							'(id schemax subquery isOuter joinexpr) (if (or
+								(query_is_select_core subquery)
+								(not (nil? (query_union_parts subquery))))
+								(list id schemax (rewrite_query_term subquery) isOuter joinexpr)
+								tbldesc)
+							tbldesc)))
+						fields condition group having order limit offset)
+					_ query))))
 )))
 (define logical_query_term_output_cols (lambda (term) (match term
 	'(select_core_term _ _ fields _ _ _ _ _) (extract_assoc fields (lambda (k v) k))
