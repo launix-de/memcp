@@ -424,6 +424,80 @@ test_cases:
         - ".prejoin:"
         - ".mat:"
 
+  - name: "dataview file union uses primary semijoin instead of file scalar probes"
+    session_id: "aol-acl-session"
+    steps:
+      - session_id: "aol-acl-session"
+        sql: |
+          EXPLAIN IR
+          SELECT t.ID, t.`site::canView`
+          FROM (
+            SELECT d.ID, d.site, d.file_id, d.year,
+              ref.`site:description` AS `site::description`,
+              ref.`site:tenant` AS `site::tenant`,
+              ref.`site:canView` AS `site::canView`
+            FROM aol_doc d
+            LEFT JOIN (
+              SELECT s.ID AS `site:ID`,
+                s.name AS `site:description`,
+                s.tenant AS `site:tenant`,
+                (
+                  EXISTS (
+                    SELECT TRUE
+                    FROM aol_user_tenant global_scope
+                    WHERE global_scope.user_id = @aol_user
+                      AND global_scope.tenant IS NULL
+                    LIMIT 1
+                  )
+                  OR
+                  CASE
+                    WHEN EXISTS (
+                      SELECT TRUE
+                      FROM aol_user_tenant global_scope2
+                      WHERE global_scope2.user_id = @aol_user
+                        AND global_scope2.tenant IS NULL
+                      LIMIT 1
+                    )
+                    THEN TRUE
+                    ELSE EXISTS (
+                      SELECT TRUE
+                      FROM aol_user_scope site_scope
+                      WHERE COALESCE(site_scope.site, s.ID) = s.ID
+                        AND site_scope.user_id = @aol_user
+                      LIMIT 1
+                    )
+                  END
+                )
+                AND COALESCE((
+                  SELECT EXISTS (
+                    SELECT TRUE
+                    FROM aol_user_tenant tenant_scope
+                    WHERE tenant_scope.user_id = @aol_user
+                      AND tenant_scope.tenant = tnt.ID
+                    LIMIT 1
+                  )
+                  FROM aol_tenant tnt
+                  WHERE tnt.ID = s.tenant
+                  LIMIT 1
+                ), FALSE) AS `site:canView`
+              FROM aol_site s
+            ) ref ON ref.`site:ID` = d.site
+            WHERE COALESCE(ref.`site:canView`, FALSE)
+          ) t
+          LEFT JOIN aol_site sorter_site ON t.site = sorter_site.ID
+          WHERE t.file_id IN (
+            SELECT f1.ID FROM aol_file f1 WHERE f1.filename LIKE '%protocol%'
+            UNION
+            SELECT f2.ID FROM aol_file f2 WHERE f2.search LIKE '%protocol%'
+          )
+          ORDER BY t.year DESC, t.site ASC
+          LIMIT 4
+        expect:
+          contains:
+            - "aol_file"
+          not_contains:
+            - "scalar_scan \"memcp-tests\" \"aol_file\""
+
   - name: "dataview wrapper with filtered file union returns visible rows"
     session_id: "aol-acl-session"
     sql: |

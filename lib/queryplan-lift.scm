@@ -272,6 +272,26 @@ the sub becomes per-outer-binding implicitly. */
 			false)
 		_ false)))
 
+(define qpl-table-ref-unique? (lambda (td tv col)
+	(match td
+		'(alias tschema ttbl _ _)
+		(if (not (equal? alias tv)) false
+			(begin
+				(define base_tbl (planner_table_source_base ttbl))
+				(if (not (string? base_tbl)) false
+					(begin
+						(define cols (try (lambda () (get_schema tschema base_tbl))
+							(lambda (e) nil)))
+						(reduce (coalesceNil cols '()) (lambda (col_found coldef)
+							(or col_found
+								(and
+									(equal?? (coldef "Field") col)
+									(or
+										(equal? (coldef "Key") "PRI")
+										(equal? (coldef "Key") "UNI")))))
+							false)))))
+		_ false)))
+
 /* qpl-extract-col-refs — like qpir-expr-column-refs but doesn't skip nil-tv.
 Returns a list of (tv col) pairs for every (get_column …) leaf. */
 (define qpl-extract-col-refs (lambda (expr)
@@ -1600,10 +1620,207 @@ anything else. */
 			(reduce (cdr terms) (lambda (acc t)
 				(list (quote or) acc t)) (car terms))))))
 
+(define qpl-or-disjuncts (lambda (expr)
+	(match expr
+		(cons head args) (begin
+			(define is-or (match head
+				(symbol or)  true
+				(quote or)   true
+				'(quote or)  true
+				'or          true
+				false))
+			(if is-or
+				(reduce (coalesceNil args '()) (lambda (acc arg)
+					(merge acc (qpl-or-disjuncts arg))) '())
+				(list expr)))
+		(list expr))))
+
 (define qpl-and-from-list (lambda (terms)
 	(reduce terms (lambda (acc term)
 		(qpl-and-cond acc term))
 		true)))
+
+(define qpl-realias-local-refs (lambda (expr from-alias to-alias) (match expr
+	'((symbol get_column) alias_ ti col ci)
+	(if (or (nil? alias_) (equal?? alias_ from-alias))
+		(list (quote get_column) to-alias ti col ci)
+		expr)
+	'((quote get_column) alias_ ti col ci)
+	(if (or (nil? alias_) (equal?? alias_ from-alias))
+		(list (quote get_column) to-alias ti col ci)
+		expr)
+	(cons sym args) (if (list? args)
+		(cons sym (map args (lambda (arg)
+			(qpl-realias-local-refs arg from-alias to-alias))))
+		expr)
+	_ expr)))
+
+(define qpl-simple-unique-membership-branch-info (lambda (branch target-expr outer-aliases) (begin
+	(if (or (not (qpp-tuple? branch)) (qpl-tuple-has-outer-refs? branch))
+		nil
+		(if (not (and
+			(equal? (count (qpp-tuple-tables branch)) 1)
+			(or (nil? (qpp-tuple-group branch)) (equal? (qpp-tuple-group branch) '()))
+			(or (nil? (qpp-tuple-having branch)) (equal? (qpp-tuple-having branch) true))
+			(or (nil? (qpp-tuple-order branch)) (equal? (qpp-tuple-order branch) '()))
+			(nil? (qpp-tuple-limit branch))
+			(or (nil? (qpp-tuple-offset branch)) (equal? (qpp-tuple-offset branch) 0))))
+			nil
+			(match (car (qpp-tuple-tables branch))
+				'(tv tschema ttbl _isOuter tjoinexpr)
+				(if (not (qpl-direct-scalar-scan-source? tschema ttbl))
+					nil
+					(begin
+						(define field-pairs (qpp-fields-to-pairs (qpp-tuple-fields branch)))
+						(if (not (equal? (count field-pairs) 1))
+							nil
+							(begin
+								(define projected-raw (nth (nth field-pairs 0) 1))
+								(define projected (qpl-realias-local-refs projected-raw tv tv))
+								(match projected
+									'((symbol get_column) (eval tv) ti col ci)
+									(if (qpl-table-ref-unique? (car (qpp-tuple-tables branch)) tv col)
+										(list tv tschema ttbl col
+											(qpl-and-cond (coalesceNil tjoinexpr true)
+												(coalesceNil (qpp-tuple-condition branch) true)))
+										nil)
+									'((quote get_column) (eval tv) ti col ci)
+									(if (qpl-table-ref-unique? (car (qpp-tuple-tables branch)) tv col)
+										(list tv tschema ttbl col
+											(qpl-and-cond (coalesceNil tjoinexpr true)
+												(coalesceNil (qpp-tuple-condition branch) true)))
+										nil)
+									_ nil)))))
+				_ nil))))))
+
+(define qpl-build-unique-in-semijoin-info (lambda (target-expr branch-infos) (begin
+	(define first-info (car branch-infos))
+	(define first-schema (nth first-info 1))
+	(define first-table (nth first-info 2))
+	(define first-col (nth first-info 3))
+	(define same-source (reduce branch-infos (lambda (ok info)
+		(and ok
+			(equal?? (nth info 1) first-schema)
+			(equal?? (nth info 2) first-table)
+			(equal?? (nth info 3) first-col)))
+		true))
+	(if (not same-source)
+		nil
+		(begin
+			(define semijoin-alias (qpl-fresh-sq-alias))
+			(define branch-filters (map branch-infos (lambda (info)
+				(qpl-realias-local-refs (nth info 4)
+					(nth info 0) semijoin-alias))))
+			(define semijoin-cond
+				(qpl-and-cond
+					(list (quote not) (list (quote nil?) target-expr))
+					(qpl-and-cond
+						(list (quote equal??)
+							target-expr
+							(list (quote get_column)
+								semijoin-alias false first-col false))
+						(qpl-or-from-list branch-filters))))
+			(list
+				(list semijoin-alias first-schema first-table false nil)
+				semijoin-cond))))))
+
+(define qpl-unique-union-in-semijoin-info (lambda (term outer-aliases) (begin
+	(if (not (equal? (qpl-marker-kind term) (quote inner_select_in)))
+		nil
+		(begin
+			(define sub (qpl-marker-subquery term))
+			(define branches (qpl-union-all-parts sub))
+			(define target-expr
+				(qpl-qualify-outer-nil-refs (qpl-marker-lhs term) outer-aliases))
+			(if (or (nil? branches) (< (count branches) 2)
+				(> (count (qpl-collect-markers target-expr)) 0))
+				nil
+				(begin
+					(define branch-infos (map branches (lambda (branch)
+						(qpl-simple-unique-membership-branch-info
+							branch target-expr outer-aliases))))
+					(if (reduce branch-infos (lambda (ok info)
+						(and ok (not (nil? info)))) true)
+						(qpl-build-unique-in-semijoin-info target-expr branch-infos)
+						nil))))))))
+
+(define qpl-unique-single-in-branch-info (lambda (term outer-aliases) (begin
+	(if (not (equal? (qpl-marker-kind term) (quote inner_select_in)))
+		nil
+		(begin
+			(define sub (qpl-marker-subquery term))
+			(define target-expr
+				(qpl-qualify-outer-nil-refs (qpl-marker-lhs term) outer-aliases))
+			(if (or
+				(not (qpp-tuple? sub))
+				(> (count (qpl-collect-markers target-expr)) 0))
+				nil
+				(begin
+					(define branch-info
+						(qpl-simple-unique-membership-branch-info
+							sub target-expr outer-aliases))
+					(if (nil? branch-info)
+						nil
+						(list target-expr branch-info)))))))))
+
+(define qpl-unique-or-in-semijoin-info (lambda (term outer-aliases) (begin
+	(define disjuncts (qpl-or-disjuncts term))
+	(if (< (count disjuncts) 2)
+		nil
+		(begin
+			(define branch-pairs (map disjuncts (lambda (disjunct)
+				(qpl-unique-single-in-branch-info disjunct outer-aliases))))
+			(if (not (reduce branch-pairs (lambda (ok pair)
+				(and ok (not (nil? pair)))) true))
+				nil
+				(begin
+					(define first-target (nth (car branch-pairs) 0))
+					(define same-target (reduce branch-pairs (lambda (ok pair)
+						(and ok (equal? (serialize (nth pair 0)) (serialize first-target))))
+						true))
+					(if (not same-target)
+						nil
+						(qpl-build-unique-in-semijoin-info
+							first-target
+							(map branch-pairs (lambda (pair) (nth pair 1))))))))))))
+
+(define qpl-pull-unique-union-in-semijoins-tuple (lambda (t) (begin
+	(define rewritten-tables (map (coalesceNil (qpp-tuple-tables t) '()) (lambda (td) (match td
+		'(alias schema tname isOuter joinExpr)
+		(list alias schema
+			(if (qpp-tuple? tname)
+				(qpl-pull-unique-union-in-semijoins-tuple tname)
+				tname)
+			isOuter
+			joinExpr)
+		td))))
+	(define outer-aliases (qpl-outer-aliases rewritten-tables))
+	(define condition-terms (qpl-and-conjuncts (qpp-tuple-condition t)))
+	(define pull-state
+		(reduce condition-terms
+			(lambda (state term) (match state
+				'(tables conditions)
+				(begin
+					(define semijoin-info
+						(coalesce
+							(qpl-unique-union-in-semijoin-info term outer-aliases)
+							(qpl-unique-or-in-semijoin-info term outer-aliases)))
+					(if (nil? semijoin-info)
+						(list tables (merge conditions (list term)))
+						(list
+							(merge tables (list (nth semijoin-info 0)))
+						(merge conditions (list (nth semijoin-info 1))))))))
+			(list rewritten-tables '())))
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema t)
+		(nth pull-state 0)
+		(qpp-tuple-fields t)
+		(qpl-and-from-list (nth pull-state 1))
+		(qpp-tuple-group t)
+		(qpp-tuple-having t)
+		(qpp-tuple-order t)
+		(qpp-tuple-limit t)
+		(qpp-tuple-offset t)))))
 
 (define qpl-equality-other-side (lambda (term expr) (match term
 	(cons eq-sym (cons lhs (cons rhs '())))
@@ -2589,7 +2806,8 @@ handles them uniformly. Step 2 — qpir-tree assembly via qpl-lift-with-markers.
 			PARTITION BY uses inner-equibound col where available,
 			avoiding correlated PARTITION BY that legacy can't handle. */
 			(define t-rn (qpl-rewrite-correlated-limit-tuple t-lim))
-			(define t-prime (qpl-rewrite-in-exists-tuple t-rn))
+			(define t-sj (qpl-pull-unique-union-in-semijoins-tuple t-rn))
+			(define t-prime (qpl-rewrite-in-exists-tuple t-sj))
 			(define t-derived (qpl-lower-derived-table-markers t-prime))
 			(qpl-drop-redundant-qpir-limits
 				(if (not (qpl-tuple-has-markers? t-derived))
