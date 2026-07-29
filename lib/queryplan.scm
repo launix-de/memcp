@@ -2902,7 +2902,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(list (quote if)
 			(qb_where block)
 			(list (quote resultrow) (cons (quote list) (qb_fields block)))
-			(list (quote resultrow) (list (quote list)))))))
+			(list (quote list))))))
 
 (define dml_assignment_exprs (lambda (cols)
 	(extract_assoc (coalesceNil cols '()) (lambda (_title expr) expr))))
