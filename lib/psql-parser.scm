@@ -377,7 +377,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 	(define psql_select_clear_stage (lambda (query) (match query
 		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
-			(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
+		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))

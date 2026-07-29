@@ -860,7 +860,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	)))
 	(define sql_select_clear_stage (lambda (query) (match query
 		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
-			(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
+		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
