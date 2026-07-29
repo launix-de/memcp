@@ -467,6 +467,35 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(merge acc (list key))))
 				corr_keys)))))
 
+(define source_join_correlation_pairs (lambda (inner_default inner_aliases outer_aliases sources)
+	(merge
+		(map
+			(coalesceNil sources '())
+			(lambda (src)
+				(filter
+					(map
+						(split_and_terms (coalesceNil (source_join_expr src) true))
+						(lambda (term)
+							(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+					(lambda (pair)
+						(not (nil? pair)))))))))
+
+(define source_without_outer_join_terms (lambda (inner_default inner_aliases outer_aliases src)
+	(begin
+		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
+		(define local_terms (filter terms (lambda (term)
+			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+		(list
+			(source_alias src)
+			(source_schema src)
+			(source_relation src)
+			(source_outer? src)
+			(combine_where_terms local_terms true)))))
+
+(define sources_without_outer_join_terms (lambda (inner_default inner_aliases outer_aliases sources)
+	(map (coalesceNil sources '()) (lambda (src)
+		(source_without_outer_join_terms inner_default inner_aliases outer_aliases src)))))
+
 (define exists_stage_alias (lambda (stage_id)
 	(concat "__exists_" (fnv_hash stage_id))))
 
@@ -488,6 +517,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(make_exists_stage_join_condition stage_alias key_names outer_domain)
 		post_condition)))
 
+(define source_is_stage_output? (lambda (src)
+	(stage_output_relation? (source_relation src))))
+
+(define scalar_source_shape_supported? (lambda (sources)
+	(match (coalesceNil sources '())
+		(cons base helpers)
+		(and (source_is_base_table? base)
+			(reduce helpers (lambda (ok src)
+				(and ok (source_is_stage_output? src)))
+				true))
+		_ false)))
+
 (define exists_inner_supported? (lambda (inner)
 	(and (query_block? inner)
 		(and (not (empty_list? (qb_sources inner)))
@@ -500,12 +541,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define scalar_once_supported? (lambda (inner)
 	(and (query_block? inner)
-		(and (single_source? (qb_sources inner))
+		(and (scalar_source_shape_supported? (qb_sources inner))
 			(and (empty_list? (qb_group inner))
 				(and (nil? (qb_having inner))
 					(and (nil? (qb_offset inner))
-						(and (empty_list? (qb_stages inner))
-							(equal? (qb_limit inner) 1)))))))))
+						(equal? (qb_limit inner) 1))))))))
 
 (define scalar_aggregate_supported? (lambda (inner)
 	(and (query_block? inner)
@@ -516,18 +556,49 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define scalar_single_supported? (lambda (inner)
 	(and (query_block? inner)
-		(and (single_source? (qb_sources inner))
+		(and (scalar_source_shape_supported? (qb_sources inner))
 			(and (empty_list? (qb_group inner))
 				(and (nil? (qb_having inner))
 					(and (empty_list? (qb_order inner))
 						(and (nil? (qb_limit inner))
-							(and (nil? (qb_offset inner))
-								(empty_list? (qb_stages inner)))))))))))
+							(nil? (qb_offset inner))))))))))
 
 (define scalar_once_reduce_first (lambda ()
 	(list (quote lambda)
 		(list (quote a) (quote b))
 		(list (quote if) (list (quote nil?) (quote a)) (quote b) (quote a)))))
+
+(define scalar_first_payload (lambda (order_key value)
+	(list order_key value)))
+
+(define scalar_first_order_reduce (lambda (dir)
+	(list (quote lambda)
+		(list (quote a) (quote b))
+		(list (quote if)
+			(list (quote nil?) (list (quote car) (quote a)))
+			(quote b)
+			(list (quote if)
+				(list dir (list (quote car) (quote b)) (list (quote car) (quote a)))
+				(quote b)
+				(quote a))))))
+
+(define scalar_once_ordered_payload? (lambda (ag)
+	(match ag
+		'(((symbol scalar_first_payload) _order_expr _value_expr) _reduce _neutral) true
+		'(((quote scalar_first_payload) _order_expr _value_expr) _reduce _neutral) true
+		_ false)))
+
+(define scalar_once_value_expr (lambda (stage_alias ag)
+	(begin
+		(define stored (list (quote get_column) stage_alias false (aggregate_col_name ag) false))
+		(if (scalar_once_ordered_payload? ag)
+			(list (quote if)
+				(list (quote or)
+					(list (quote nil?) stored)
+					(list (quote nil?) (list (quote car) stored)))
+				nil
+				(list (quote cadr) stored))
+			stored))))
 
 (define scalar_single_value_expr (lambda (stage_alias value_ag count_ag)
 	(begin
@@ -552,7 +623,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons item '()) (match item
 				'(order_expr dir) (if (equal? order_expr value_expr)
 					(list value_expr (if (equal? dir <) (quote min) (quote max)) nil)
-					(neumann_fail "untangle_query" "scalar once_limit ORDER BY different expression needs ORC stage"))
+					(list
+						(list (quote scalar_order_value) value_expr order_expr dir)
+						(scalar_once_reduce_first)
+						nil))
 				_ (neumann_fail "untangle_query" "malformed scalar once_limit ORDER BY"))
 			_ (neumann_fail "untangle_query" "scalar once_limit supports one ORDER BY item")))))
 
@@ -714,7 +788,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(lambda (pair) (not (nil? pair)))))
 		(define local_having_terms (filter having_terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
-		(define all_corr_pairs (unique_correlation_pairs (merge (list corr_pairs having_corr_pairs))))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
+		(define all_corr_pairs (unique_correlation_pairs (merge (list corr_pairs having_corr_pairs source_corr_pairs))))
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys))
@@ -726,7 +801,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(qb_sources inner)
+				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
 				'()
 				condition
 				'() nil '() nil nil
@@ -786,7 +861,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define corr_pairs (filter (map terms (lambda (term)
 			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
 			(lambda (pair) (not (nil? pair)))))
-		(define lookup_pairs (unique_correlation_pairs corr_pairs))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
+		(define lookup_pairs (unique_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
 		(define keys (if (empty_list? lookup_pairs)
@@ -800,10 +876,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default expr) dir)))))
 		(define ag (scalar_once_descriptor value_for_inner order_for_inner))
 		(define ags (list ag))
+		(define stage_input (if (empty_list? (qb_stages inner))
+			inner_src
+			(make_query_block
+				(qb_schema inner)
+				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				'()
+				condition
+				'() nil '() nil nil
+				'()
+				(qb_stages inner)
+				(qb_facts inner))))
+		(define stage_condition (if (query_block? stage_input) true condition))
 		(define stage_id (concat "scalar-once:" (fnv_hash (string (list subquery keys outer_domain condition ag)))))
 		(define stage (make_group_stage
 			stage_id
-			inner_src
+			stage_input
 			outer_domain
 			keys
 			ags
@@ -812,7 +900,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			nil nil
 			(list
-				(list (quote condition) condition)
+				(list (quote condition) stage_condition)
 				(list (quote purpose) (quote scalar_single))
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) lookup_keys)
@@ -826,12 +914,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define key_names (group_key_cols keys))
 		(define source (list
 			stage_alias
-			(source_schema inner_src)
+			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(list
-			(list (quote get_column) stage_alias false (aggregate_col_name ag) false)
+			(scalar_once_value_expr stage_alias ag)
 			(list stage)
 			(list source)))))
 
@@ -854,7 +942,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define corr_pairs (filter (map terms (lambda (term)
 			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
 			(lambda (pair) (not (nil? pair)))))
-		(define lookup_pairs (unique_correlation_pairs corr_pairs))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
+		(define lookup_pairs (unique_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
 		(define keys (if (empty_list? lookup_pairs)
@@ -867,10 +956,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define ags (scalar_single_aggregates value_for_inner))
 		(define value_ag (car ags))
 		(define count_ag (cadr ags))
+		(define stage_input (if (empty_list? (qb_stages inner))
+			inner_src
+			(make_query_block
+				(qb_schema inner)
+				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				'()
+				condition
+				'() nil '() nil nil
+				'()
+				(qb_stages inner)
+				(qb_facts inner))))
+		(define stage_condition (if (query_block? stage_input) true condition))
 		(define stage_id (concat "scalar-single:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
 		(define stage (make_group_stage
 			stage_id
-			inner_src
+			stage_input
 			outer_domain
 			keys
 			ags
@@ -879,7 +980,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			nil nil
 			(list
-				(list (quote condition) condition)
+				(list (quote condition) stage_condition)
 				(list (quote purpose) (quote scalar_single))
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) lookup_keys)
@@ -893,7 +994,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define key_names (group_key_cols keys))
 		(define source (list
 			stage_alias
-			(source_schema inner_src)
+			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
@@ -1013,14 +1114,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 							(neumann_fail "untangle_query" "window offset function requires ORDER BY")
 							true)
 						(define offset (window_offset_arg args))
-						(define value_col (order_column_for_alias alias (canonical_column_expr_for_alias alias (car args))))
+						(define value_col (order_column_for_alias src (canonical_column_expr_for_alias alias (car args))))
 						(define partition_cols (map partition_exprs (lambda (expr)
-							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
 						(if (contains? partition_cols value_col)
 							(neumann_fail "untangle_query" "window offset value column must not duplicate partition columns yet")
 							true)
 						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
 						(define order_dirs (window_order_dirs_for_orc order_items))
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
@@ -1142,9 +1243,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 							(neumann_fail "untangle_query" "rank window function requires ORDER BY")
 							true)
 						(define partition_cols (map partition_exprs (lambda (expr)
-							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
 						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
 						(define sortcols (merge (list partition_cols order_cols)))
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
@@ -1187,9 +1288,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 							(neumann_fail "untangle_query" "ROW_NUMBER requires ORDER BY for ORC lowering")
 							true)
 						(define partition_cols (map partition_exprs (lambda (expr)
-							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
 						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-							(order_column_for_alias alias (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
 						(define sortcols (merge (list partition_cols order_cols)))
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
@@ -1302,7 +1403,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((symbol inner_select) subquery)
 		(begin
 			(define normalized (normalize_query_ast subquery))
-			(define inner (untangle_query normalized ctx))
+			(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+			(define inner (untangle_query normalized sub_ctx))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select) nil subquery ctx) '() '())
 				(if (empty_list? (extract_aggregates (query_block_first_expr inner)))
@@ -1313,14 +1415,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((symbol inner_select_exists) subquery)
 		(begin
 			(define normalized (normalize_query_ast subquery))
-			(define inner (untangle_query normalized ctx))
+			(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+			(define inner (untangle_query normalized sub_ctx))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
 				(make_exists_stage_rewrite inner (list outer_sources subquery))))
 		((symbol inner_select_in) probe subquery)
 		(begin
 			(define normalized (normalize_query_ast subquery))
-			(define inner (untangle_query normalized ctx))
+			(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+			(define inner (untangle_query normalized sub_ctx))
 			(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
@@ -1356,11 +1460,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(cons title (cons (untangle_expr expr ctx) (untangle_fields rest ctx)))
 		_ '())))
 
-(define field_expr_by_title (lambda (fields title)
+(define field_expr_by_title (lambda (fields title ignorecase)
 	(match (coalesceNil fields '())
-		(cons current_title (cons expr rest)) (if (equal? current_title title)
+		(cons current_title (cons expr rest)) (if (if ignorecase (equal?? current_title title) (equal? current_title title))
 			expr
-			(field_expr_by_title rest title))
+			(field_expr_by_title rest title ignorecase))
 		_ nil)))
 
 (define derived_star_ref? (lambda (alias expr)
@@ -1371,11 +1475,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define rewrite_derived_ref (lambda (alias projection expr)
 	(match expr
-		((symbol get_column) tblvar _ col _) (if (or (equal? tblvar alias) (nil? tblvar))
-			(coalesceNil (field_expr_by_title projection col) expr)
+		((symbol get_column) tblvar ignorecase col _json_path) (if (or (equal? tblvar alias) (nil? tblvar))
+			(coalesceNil (field_expr_by_title projection col ignorecase) expr)
 			expr)
-		((quote get_column) tblvar _ col _) (if (or (equal? tblvar alias) (nil? tblvar))
-			(coalesceNil (field_expr_by_title projection col) expr)
+		((quote get_column) tblvar ignorecase col _json_path) (if (or (equal? tblvar alias) (nil? tblvar))
+			(coalesceNil (field_expr_by_title projection col ignorecase) expr)
 			expr)
 		(cons head tail) (cons head (map tail (lambda (item) (rewrite_derived_ref alias projection item))))
 		_ expr)))
@@ -1447,7 +1551,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			bb
 			(if (equal? bb true)
 				aa
-				(list (quote and) aa bb)))))))
+				(list (quote and) aa bb))))))
 
 (define derived_block_needs_operator? (lambda (block)
 	(or (not (empty_list? (qb_group block)))
@@ -1530,7 +1634,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 												(cons (list alias (qb_fields inner)) tail_rewrites)
 												(cons (qb_where inner) tail_wheres)
 												(merge (list (qb_stages inner) tail_stages)))))))))
-))))))))
+))))))
 
 (define combine_where_terms (lambda (terms seed)
 	(reduce (coalesceNil terms '()) combine_where seed)))
@@ -1564,22 +1668,25 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define rewrites (nth flattened_sources 1))
 		(define source_where_terms (nth flattened_sources 2))
 		(define source_stages (nth flattened_sources 3))
+		(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
+		(define expr_outer_sources (merge (list inherited_outer_sources sources)))
+		(define expr_ctx (make_uctx child_ctx (list (list (quote outer-sources) expr_outer_sources))))
 		(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
 		(if (expr_contains_window? rewritten_where)
 			(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 			true)
-		(define where_result (untangle_expr_with_stages rewritten_where sources child_ctx))
-		(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) sources child_ctx))
-		(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) sources child_ctx))
+		(define where_result (untangle_expr_with_stages rewritten_where expr_outer_sources expr_ctx))
+		(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) expr_outer_sources expr_ctx))
+		(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) expr_outer_sources expr_ctx))
 		(define stage_sources (merge (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
 		(make_query_block
 			(qb_schema block)
 			(merge (list sources stage_sources))
 			(nth field_result 0)
 			(nth where_result 0)
-			(map (coalesceNil (qb_group block) '()) (lambda (item) (untangle_expr (rewrite_derived_ref_chain rewrites item) child_ctx)))
+			(map (coalesceNil (qb_group block) '()) (lambda (item) (nth (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites item) expr_outer_sources expr_ctx) 0)))
 			(nth having_result 0)
-			(map (rewrite_derived_order_chain rewrites (qb_order block)) (lambda (item) (untangle_expr item child_ctx)))
+			(map (rewrite_derived_order_chain rewrites (qb_order block)) (lambda (item) (nth (untangle_expr_with_stages item expr_outer_sources expr_ctx) 0)))
 			(qb_limit block)
 			(qb_offset block)
 			(untangle_fields (rewrite_derived_fields_chain rewrites (qb_hidden block)) child_ctx)
@@ -1654,55 +1761,98 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define resolve_column_alias (lambda (alias default_alias)
 	(if (nil? alias) default_alias alias)))
 
-(define extract_columns_for_alias (lambda (alias expr)
+(define source_alias_matches? (lambda (src default_alias tblvar tbl_ignorecase)
+	(begin
+		(define ref_alias (resolve_column_alias tblvar default_alias))
+		(if tbl_ignorecase
+			(equal?? ref_alias (source_alias src))
+			(equal? ref_alias (source_alias src))))))
+
+(define source_for_alias (lambda (sources default_alias tblvar tbl_ignorecase)
+	(reduce (coalesceNil sources '()) (lambda (found src)
+		(if (not (nil? found))
+			found
+			(if (source_alias_matches? src default_alias tblvar tbl_ignorecase) src nil)))
+		nil)))
+
+(define resolve_physical_column_name (lambda (src col col_ignorecase)
+	(if (or (not col_ignorecase) (not (string? col)))
+		col
+		(if (not (source_is_base_table? src))
+			col
+			(coalesceNil
+				(reduce (show (source_schema src) (source_relation src)) (lambda (found row)
+					(if (not (nil? found))
+						found
+						(if (equal?? (row "Field") col) (row "Field") nil)))
+					nil)
+				col)))))
+
+(define extract_columns_for_alias (lambda (src expr)
 	(match expr
-		((symbol get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar alias) alias) (list col) '())
-		((quote get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar alias) alias) (list col) '())
-		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias alias item))))
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
+		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
 		_ '())))
 
-(define lower_column_expr_for_alias (lambda (alias expr)
+(define lower_column_expr_for_alias (lambda (src expr)
 	(match expr
-		((symbol get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar alias) "." col))
-		((quote get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar alias) "." col))
-		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias alias item))))
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
+		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias src item))))
 		_ expr)))
 
-(define extract_columns_for_join_alias (lambda (default_alias alias expr)
+(define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(match expr
-		((symbol get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar default_alias) alias) (list col) '())
-		((quote get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar default_alias) alias) (list col) '())
-		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_join_alias default_alias alias item))))
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(if (and (not (nil? src)) (equal?? (source_alias src) alias))
+				(list (resolve_physical_column_name src col col_ignorecase))
+				'()))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(if (and (not (nil? src)) (equal?? (source_alias src) alias))
+				(list (resolve_physical_column_name src col col_ignorecase))
+				'()))
+		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_join_alias sources default_alias alias item))))
 		_ '())))
 
-(define lower_column_expr_for_join (lambda (default_alias expr)
+(define lower_column_expr_for_join (lambda (sources default_alias expr)
 	(match expr
-		((symbol get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar default_alias) "." col))
-		((quote get_column) tblvar _ col _) (symbol (concat (resolve_column_alias tblvar default_alias) "." col))
-		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_join default_alias item))))
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(if (nil? src)
+				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
+				(symbol (concat (source_alias src) "." (resolve_physical_column_name src col col_ignorecase)))))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(if (nil? src)
+				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
+				(symbol (concat (source_alias src) "." (resolve_physical_column_name src col col_ignorecase)))))
+		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_join sources default_alias item))))
 		_ expr)))
 
 (define canonical_column_expr_for_alias (lambda (alias expr)
 	(match expr
-		((symbol get_column) tblvar _ col _) (list (quote get_column) (resolve_column_alias tblvar alias) false col false)
-		((quote get_column) tblvar _ col _) (list (quote get_column) (resolve_column_alias tblvar alias) false col false)
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase) (list (quote get_column) (resolve_column_alias tblvar alias) false col false)
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase) (list (quote get_column) (resolve_column_alias tblvar alias) false col false)
 		(cons head tail) (cons head (map tail (lambda (item) (canonical_column_expr_for_alias alias item))))
 		_ expr)))
 
-(define order_column_for_alias (lambda (alias expr)
+(define order_column_for_alias (lambda (src expr)
 	(match expr
-		((symbol get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar alias) alias)
-			col
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			(resolve_physical_column_name src col col_ignorecase)
 			(neumann_fail "build_queryplan" "ORDER BY references a different source"))
-		((quote get_column) tblvar _ col _) (if (equal?? (resolve_column_alias tblvar alias) alias)
-			col
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			(resolve_physical_column_name src col col_ignorecase)
 			(neumann_fail "build_queryplan" "ORDER BY references a different source"))
 		_ (neumann_fail "build_queryplan" "ORDER BY expression lowering needs a computed sort column"))))
 
-(define order_cols_for_alias (lambda (alias order_items)
+(define order_cols_for_alias (lambda (src order_items)
 	(map (coalesceNil order_items '()) (lambda (item)
 		(match item
-			'(expr _dir) (order_column_for_alias alias expr)
+			'(expr _dir) (order_column_for_alias src expr)
 			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
 
 (define order_dirs (lambda (order_items)
@@ -1905,10 +2055,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 				_ expr)))))
 
 (define group_key_equality_terms (lambda (alias key_names keys)
-	(map (produceN (count keys)) (lambda (i)
-		(list (quote equal?)
-			(lower_column_expr_for_alias alias (nth keys i))
-			(list (quote outer) (symbol (nth key_names i))))))))
+	(begin
+		(define src (list alias nil nil false nil))
+		(map (produceN (count keys)) (lambda (i)
+			(list (quote equal?)
+				(lower_column_expr_for_alias src (nth keys i))
+				(list (quote outer) (symbol (nth key_names i)))))))))
 
 (define build_group_collect_plan (lambda (schema tbl alias grouptbl keys key_names condition)
 	(if (equal? keys '(1))
@@ -1920,7 +2072,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote lambda) '() true)
 			true)
 		(begin
-			(define keycols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias alias expr)))))
+			(define src (list alias schema tbl false nil))
+			(define keycols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 			(list (quote scan)
 				'(session "__memcp_tx")
 				(list (quote table) schema tbl)
@@ -1929,7 +2082,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(cons (quote list) keycols)
 				(list (quote lambda)
 					(map keycols (lambda (col) (symbol (concat alias "." col))))
-					(cons (quote list) (map keys (lambda (expr) (lower_column_expr_for_alias alias expr)))))
+					(cons (quote list) (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
 				(list (quote lambda) (list (quote acc) (quote rowvals))
 					(list (quote set_assoc) (quote acc) (quote rowvals) true))
 				(quoted_runtime_list '())
@@ -1971,13 +2124,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 					true))
 			false))))
 
-(define build_group_aggregate_column (lambda (schema tbl alias grouptbl keys key_names condition ag)
-	(match ag '(agg_expr agg_reduce agg_neutral) (begin
+(define build_group_ordered_scalar_column (lambda (schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir agg_reduce agg_neutral)
+	(begin
+		(define src (list alias schema tbl false nil))
 		(define agg_col (aggregate_col_name ag))
-		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias alias expr)))))
-		(define condition_cols (extract_columns_for_alias alias condition))
-		(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols)))
-		(define aggcols (extract_columns_for_alias alias agg_expr))
+		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define condition_cols (extract_columns_for_alias src condition))
+		(define order_col (order_column_for_alias src order_expr))
+		(define valuecols (extract_columns_for_alias src value_expr))
+		(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols (list order_col))))
+		(define mapcols (merge_unique (list valuecols)))
 		(list (quote createcolumn)
 			(list (quote table) schema grouptbl)
 			agg_col
@@ -1987,7 +2143,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (quote list) key_names)
 			(list (quote lambda)
 				(map key_names (lambda (col) (symbol col)))
-				(list (quote scan)
+				(list (quote scan_order)
 					'(session "__memcp_tx")
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
@@ -1995,16 +2151,61 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(list (quote optimize)
 							(cons (quote and) (cons
-								(lower_column_expr_for_alias alias condition)
+								(lower_column_expr_for_alias src condition)
 								(group_key_equality_terms alias key_names keys)))))
-					(cons (quote list) aggcols)
+					(quoted_runtime_list (list order_col))
+					(list (quote list) dir)
+					0
+					0
+					1
+					(cons (quote list) mapcols)
 					(list (quote lambda)
-						(map aggcols (lambda (col) (symbol (concat alias "." col))))
-						(lower_column_expr_for_alias alias agg_expr))
+						(map mapcols (lambda (col) (symbol (concat alias "." col))))
+						(lower_column_expr_for_alias src value_expr))
 					agg_reduce
 					agg_neutral
-					nil
-					false)))))))
+					false))))))
+
+(define build_group_aggregate_column (lambda (schema tbl alias grouptbl keys key_names condition ag)
+	(match ag
+		'(((symbol scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir agg_reduce agg_neutral)
+		'(((quote scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir agg_reduce agg_neutral)
+		'(agg_expr agg_reduce agg_neutral) (begin
+			(define src (list alias schema tbl false nil))
+			(define agg_col (aggregate_col_name ag))
+			(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+			(define condition_cols (extract_columns_for_alias src condition))
+			(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols)))
+			(define aggcols (extract_columns_for_alias src agg_expr))
+			(list (quote createcolumn)
+				(list (quote table) schema grouptbl)
+				agg_col
+				"any"
+				(quoted_runtime_list '())
+				(quoted_runtime_list '("temp" true))
+				(cons (quote list) key_names)
+				(list (quote lambda)
+					(map key_names (lambda (col) (symbol col)))
+					(list (quote scan)
+						'(session "__memcp_tx")
+						(list (quote table) schema tbl)
+						(cons (quote list) filtercols)
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat alias "." col))))
+							(list (quote optimize)
+								(cons (quote and) (cons
+									(lower_column_expr_for_alias src condition)
+									(group_key_equality_terms alias key_names keys)))))
+						(cons (quote list) aggcols)
+						(list (quote lambda)
+							(map aggcols (lambda (col) (symbol (concat alias "." col))))
+							(lower_column_expr_for_alias src agg_expr))
+						agg_reduce
+						agg_neutral
+						nil
+						false)))))))
 
 (define build_query_group_aggregate_column (lambda (input grouptbl keys key_names ag)
 	(match ag '(agg_expr agg_reduce agg_neutral) (begin
@@ -2269,7 +2470,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define key_names (group_key_cols keys))
 		(list (quote begin)
 			(lower_group_stage_prepare stage)
-			(lower_query_block_core (group_stage_final_block stage '())))))))
+			(lower_query_block_core (group_stage_final_block stage '()))))))
 
 (define row_number_get_column? (lambda (col expr)
 	(match expr
@@ -2491,20 +2692,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define alias (source_alias src))
 				(define condition (combine_where (qb_where block) (source_join_expr src)))
 				(define order_items (coalesceNil (qb_order block) '()))
-				(define filtercols (extract_columns_for_alias alias condition))
+				(define filtercols (extract_columns_for_alias src condition))
 				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
-					(extract_columns_for_alias alias expr)))))
-				(define ordercols (if (empty_list? order_items) '() (order_cols_for_alias alias order_items)))
+					(extract_columns_for_alias src expr)))))
+				(define ordercols (if (empty_list? order_items) '() (order_cols_for_alias src order_items)))
 				(define mapcols (merge_unique (list filtercols fieldcols)))
 				(define table_expr (list (quote table) (source_schema src) (source_relation src)))
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (col) (symbol (concat alias "." col))))
-					(list (quote optimize) (lower_column_expr_for_alias alias condition))))
+					(list (quote optimize) (lower_column_expr_for_alias src condition))))
 				(define map_expr (list (quote lambda)
 					(map mapcols (lambda (col) (symbol (concat alias "." col))))
 					(list (quote resultrow)
 						(cons (quote list) (map_assoc fields (lambda (title expr)
-							(lower_column_expr_for_alias alias expr)))))))
+							(lower_column_expr_for_alias src expr)))))))
 				(if (empty_list? order_items)
 					(list (quote scan)
 						'(session "__memcp_tx")
@@ -2542,23 +2743,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define source_join_exprs (lambda (sources)
 	(map (coalesceNil sources '()) (lambda (src) (coalesceNil (source_join_expr src) true)))))
 
-(define join_cols_for_alias (lambda (default_alias alias needed_exprs)
+(define join_cols_for_alias (lambda (all_sources default_alias alias needed_exprs)
 	(merge_unique (map (coalesceNil needed_exprs '()) (lambda (expr)
-		(extract_columns_for_join_alias default_alias alias expr))))))
+		(extract_columns_for_join_alias all_sources default_alias alias expr))))))
 
-(define join_filter_cols_for_alias (lambda (default_alias alias condition)
-	(extract_columns_for_join_alias default_alias alias condition)))
+(define join_filter_cols_for_alias (lambda (all_sources default_alias alias condition)
+	(extract_columns_for_join_alias all_sources default_alias alias condition)))
 
-(define lower_join_result_fields (lambda (default_alias fields)
+(define lower_join_result_fields (lambda (all_sources default_alias fields)
 	(map_assoc fields (lambda (_title expr)
-		(lower_column_expr_for_join default_alias expr)))))
+		(lower_column_expr_for_join all_sources default_alias expr)))))
 
-(define build_join_scan_rows_with_mapper (lambda (schema sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value)
+(define build_join_scan_rows_with_mapper (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value)
 	(if (empty_list? sources)
 		(if (equal? (coalesceNil final_condition true) true)
 			(list (quote list) row_expr)
 			(list (quote if)
-				(list (quote optimize) (lower_column_expr_for_join default_alias final_condition))
+				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias final_condition))
 				(list (quote list) row_expr)
 				(list (quote list))))
 		(begin
@@ -2568,15 +2769,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 				true)
 			(define alias (source_alias src))
 			(define condition (coalesceNil (source_join_expr src) true))
-			(define filtercols (join_filter_cols_for_alias default_alias alias condition))
-			(define mapcols (join_cols_for_alias default_alias alias needed_exprs))
+			(define filtercols (join_filter_cols_for_alias all_sources default_alias alias condition))
+			(define mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
 			(define table_expr (list (quote table) (source_schema src) (source_relation src)))
 			(define filter_expr (list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
-				(list (quote optimize) (lower_column_expr_for_join default_alias condition))))
+				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias condition))))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_rows_with_mapper schema (cdr sources) default_alias needed_exprs final_condition row_expr '() 0 -1)))
+				(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs final_condition row_expr '() 0 -1)))
 			(define reduce_expr (list (quote lambda) (list (quote acc) (quote subrows))
 				(list (quote merge) (quote acc) (quote subrows))))
 			(if (empty_list? order_items)
@@ -2596,7 +2797,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					table_expr
 					(cons (quote list) filtercols)
 					filter_expr
-					(cons (quote list) (order_cols_for_alias alias order_items))
+					(cons (quote list) (order_cols_for_alias src order_items))
 					(cons (quote list) (order_dirs order_items))
 					0
 					(coalesceNil offset_value 0)
@@ -2611,11 +2812,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(build_join_scan_rows_with_mapper
 		schema
 		sources
+		sources
 		default_alias
 		needed_exprs
 		final_condition
 		(list (quote resultrow)
-			(cons (quote list) (lower_join_result_fields default_alias fields)))
+			(cons (quote list) (lower_join_result_fields sources default_alias fields)))
 		order_items
 		offset_value
 		limit_value)))
@@ -2643,11 +2845,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(build_join_scan_rows_with_mapper
 			(qb_schema block)
 			sources
+			sources
 			first_alias
 			needed_exprs
 			(coalesceNil (qb_where block) true)
 			(cons (quote list) (map_assoc fields (lambda (_title expr)
-				(lower_column_expr_for_join first_alias expr))))
+				(lower_column_expr_for_join sources first_alias expr))))
 			'()
 			0
 			-1))))
@@ -2688,9 +2891,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define dml_assignment_exprs (lambda (cols)
 	(extract_assoc (coalesceNil cols '()) (lambda (_title expr) expr))))
 
-(define lower_dml_update_values (lambda (alias cols)
+(define lower_dml_update_values (lambda (src cols)
 	(map_assoc (coalesceNil cols '()) (lambda (_title expr)
-		(lower_column_expr_for_alias alias expr)))))
+		(lower_column_expr_for_alias src expr)))))
 
 (define lower_single_source_dml_query_block (lambda (block target_schema target_tbl)
 	(begin
@@ -2711,16 +2914,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define cols (qb_fields block))
 		(define delete_mode (empty_list? (coalesceNil cols '())))
 		(define cond (coalesceNil (qb_where block) true))
-		(define filtercols (extract_columns_for_alias alias cond))
+		(define filtercols (extract_columns_for_alias src cond))
 		(define valuecols (merge_unique (map (dml_assignment_exprs cols) (lambda (expr)
-			(extract_columns_for_alias alias expr)))))
+			(extract_columns_for_alias src expr)))))
 		(define mapcols (cons "$update" (merge_unique (list filtercols valuecols))))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (symbol (concat alias "." col))))
-			(list (quote optimize) (lower_column_expr_for_alias alias cond))))
+			(list (quote optimize) (lower_column_expr_for_alias src cond))))
 		(define update_values (if delete_mode
 			nil
-			(cons (quote list) (lower_dml_update_values alias cols))))
+			(cons (quote list) (lower_dml_update_values src cols))))
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col)
 				(if (equal? col "$update") (symbol "$update") (symbol (concat alias "." col)))))
