@@ -697,6 +697,29 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list stage)
 			(list source)))))
 
+(define combine_exists_union_results (lambda (results)
+	(match (coalesceNil results '())
+		(cons item rest) (begin
+			(define tail (combine_exists_union_results rest))
+			(list
+				(if (empty_list? rest)
+					(nth item 0)
+					(list (quote or) (nth item 0) (nth tail 0)))
+				(merge (list (nth item 1) (nth tail 1)))
+				(merge (list (nth item 2) (nth tail 2)))))
+		_ (list false '() '()))))
+
+(define make_exists_union_stage_rewrite (lambda (inner args)
+	(if (not (union_block? inner))
+		(neumann_fail "untangle_query" "EXISTS UNION lowering expects union-block")
+		(if (or (not (equal? (union_mode inner) (quote all)))
+			(or (not (empty_list? (union_order inner)))
+				(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner))))))
+			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain UNION ALL branches")
+			(combine_exists_union_results
+				(map (union_branches inner) (lambda (branch)
+					(make_exists_stage_rewrite branch args))))))))
+
 (define make_in_stage_rewrite (lambda (probe inner args)
 	(begin
 		(define outer_sources (nth args 0))
@@ -1417,9 +1440,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define normalized (normalize_query_ast subquery))
 			(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
 			(define inner (untangle_query normalized sub_ctx))
-			(if (query_block_no_from? inner)
-				(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
-				(make_exists_stage_rewrite inner (list outer_sources subquery))))
+			(if (union_block? inner)
+				(make_exists_union_stage_rewrite inner (list outer_sources subquery))
+				(if (query_block_no_from? inner)
+					(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
+					(make_exists_stage_rewrite inner (list outer_sources subquery)))))
 		((symbol inner_select_in) probe subquery)
 		(begin
 			(define normalized (normalize_query_ast subquery))
