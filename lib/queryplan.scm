@@ -563,6 +563,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(and (nil? (qb_limit inner))
 							(nil? (qb_offset inner))))))))))
 
+(define grouped_scalar_top_supported? (lambda (inner outer_sources)
+	(and (empty_list? outer_sources)
+		(and (query_block? inner)
+			(and (scalar_source_shape_supported? (qb_sources inner))
+				(and (not (empty_list? (qb_group inner)))
+					(and (nil? (qb_having inner))
+						(and (not (empty_list? (qb_order inner)))
+							(and (equal? (qb_limit inner) 1)
+								(nil? (qb_offset inner)))))))))))
+
 (define scalar_once_reduce_first (lambda ()
 	(list (quote lambda)
 		(list (quote a) (quote b))
@@ -629,6 +639,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 						nil))
 				_ (neumann_fail "untangle_query" "malformed scalar once_limit ORDER BY"))
 			_ (neumann_fail "untangle_query" "scalar once_limit supports one ORDER BY item")))))
+
+(define order_item_exprs (lambda (order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr _dir) expr
+			_ true)))))
+
+(define make_grouped_scalar_top_rewrite (lambda (inner subquery)
+	(begin
+		(define inner_src (car (qb_sources inner)))
+		(define inner_default (source_alias inner_src))
+		(define visible_ags (stage_aggregates_for_fields (qb_fields inner)))
+		(define order_ags (merge_unique (map (order_item_exprs (qb_order inner)) extract_aggregates)))
+		(define ags (dedupe_aggregates_by_col (merge_unique (list visible_ags order_ags (list aggregate_count_descriptor)))))
+		(define keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
+			(canonical_column_expr_for_alias inner_default expr))))
+		(define stage_id (concat "scalar-group-top:" (fnv_hash (serialize (list subquery keys ags (qb_order inner))))))
+		(define stage (make_group_stage
+			stage_id
+			inner_src
+			'()
+			keys
+			ags
+			nil
+			(qb_fields inner)
+			(qb_order inner)
+			1
+			nil
+			(list
+				(list (quote condition) (coalesceNil (qb_where inner) true))
+				(list (quote purpose) (quote scalar_aggregate))
+				(list (quote domain) '())
+				(list (quote lookup-keys) '())
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote scalar))
+				(list (quote cardinality_mode) (quote first)))))
+		(list
+			(list (quote grouped_scalar_top) stage)
+			(list stage)
+			'()))))
 
 (define make_exists_stage_rewrite (lambda (inner args)
 	(begin
@@ -1430,11 +1480,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define inner (untangle_query normalized sub_ctx))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select) nil subquery ctx) '() '())
-				(if (empty_list? (extract_aggregates (query_block_first_expr inner)))
-					(if (scalar_once_supported? inner)
-						(make_scalar_once_stage_rewrite inner (list outer_sources subquery))
-						(make_scalar_single_stage_rewrite inner (list outer_sources subquery)))
-					(make_scalar_aggregate_stage_rewrite inner (list outer_sources subquery)))))
+				(if (grouped_scalar_top_supported? inner outer_sources)
+					(make_grouped_scalar_top_rewrite inner subquery)
+					(if (empty_list? (extract_aggregates (query_block_first_expr inner)))
+						(if (scalar_once_supported? inner)
+							(make_scalar_once_stage_rewrite inner (list outer_sources subquery))
+							(make_scalar_single_stage_rewrite inner (list outer_sources subquery)))
+						(make_scalar_aggregate_stage_rewrite inner (list outer_sources subquery))))))
 		((symbol inner_select_exists) subquery)
 		(begin
 			(define normalized (normalize_query_ast subquery))
@@ -1901,6 +1953,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(match item
 			'(_expr dir) dir
 			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
+
+(define lower_grouped_scalar_top_expr (lambda (stage)
+	(begin
+		(define alias (group_stage_input_alias stage))
+		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define ags (gs_aggregates stage))
+		(define key_names (group_key_cols keys))
+		(define carrier (group_stage_carrier stage))
+		(define schema (group_carrier_schema carrier))
+		(define grouptbl (group_carrier_relation carrier))
+		(define group_src (list grouptbl schema grouptbl false nil))
+		(define value_expr (replace_group_expr alias grouptbl keys key_names ags (first_projection_expr (gs_output stage))))
+		(define replaced_order (map (coalesceNil (gs_order stage) '()) (lambda (item)
+			(match item '(expr dir) (list (replace_group_expr alias grouptbl keys key_names ags expr) dir)))))
+		(define ordercols (order_cols_for_alias group_src replaced_order))
+		(define valuecols (extract_columns_for_alias group_src value_expr))
+		(list (quote scan_order)
+			'(session "__memcp_tx")
+			(list (quote table) schema grouptbl)
+			(quoted_runtime_list '())
+			(list (quote lambda) '() true)
+			(cons (quote list) ordercols)
+			(cons (quote list) (order_dirs replaced_order))
+			0
+			0
+			1
+			(cons (quote list) valuecols)
+			(list (quote lambda)
+				(map valuecols (lambda (col) (symbol (concat grouptbl "." col))))
+				(lower_column_expr_for_alias group_src value_expr))
+			(scalar_once_reduce_first)
+			nil
+			false))))
+
+(define lower_scalar_marker_expr (lambda (expr)
+	(match expr
+		((symbol grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
+		((quote grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
+		(cons head tail) (cons head (map tail lower_scalar_marker_expr))
+		_ expr)))
 
 (define aggregate_expr? (lambda (expr)
 	(match expr
@@ -2928,10 +3020,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_zero_source_query_block (lambda (block)
 	(if (equal? (coalesceNil (qb_where block) true) true)
-		(list (quote resultrow) (cons (quote list) (qb_fields block)))
+		(list (quote resultrow) (cons (quote list) (map_assoc (qb_fields block) (lambda (_title expr) (lower_scalar_marker_expr expr)))))
 		(list (quote if)
-			(qb_where block)
-			(list (quote resultrow) (cons (quote list) (qb_fields block)))
+			(lower_scalar_marker_expr (qb_where block))
+			(list (quote resultrow) (cons (quote list) (map_assoc (qb_fields block) (lambda (_title expr) (lower_scalar_marker_expr expr)))))
 			(list (quote list))))))
 
 (define dml_assignment_exprs (lambda (cols)
