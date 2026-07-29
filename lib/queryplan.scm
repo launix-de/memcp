@@ -279,8 +279,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		query
 		((symbol union_all) branches order limit offset)
 		(make_union_block (quote all) branches order limit offset '())
+		((quote union_all) branches order limit offset)
+		(make_union_block (quote all) branches order limit offset '())
 		((symbol union_distinct) branches order limit offset)
-		(make_union_block (quote distinct) branches order limit offset '())
+		(make_union_block (quote union_distinct) branches order limit offset '())
+		((quote union_distinct) branches order limit offset)
+		(make_union_block (quote union_distinct) branches order limit offset '())
 		'(schema sources fields where group having order limit offset)
 		(make_query_block schema sources fields where group having order limit offset '() '() '())
 		_ query)))
@@ -1859,6 +1863,34 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(and (not (query_block_has_aggregates? block))
 				(empty_list? (qb_hidden block)))))))
 
+(define union_count_projection_title (lambda (fields)
+	(match (coalesceNil fields '())
+		'(title expr) (match expr
+			'(fn seed reduce init) (if (and (equal? fn (quote aggregate))
+				(and (equal? seed 1)
+					(and (equal? reduce (quote +)) (equal? init 0))))
+				title
+				nil)
+			_ nil)
+		_ nil)))
+
+(define rewrite_query_block_union_count (lambda (block src ctx)
+	(begin
+		(define title (union_count_projection_title (qb_fields block)))
+		(if (or (nil? title)
+			(or (not (equal? (coalesceNil (qb_where block) true) true))
+				(or (not (empty_list? (qb_order block)))
+					(or (not (nil? (qb_limit block)))
+						(or (not (nil? (qb_offset block)))
+							(not (empty_list? (qb_hidden block))))))))
+			nil
+			(make_query_block
+				(qb_schema block)
+				'()
+				(list title (list (quote union_count) (untangle_union_block (normalize_query_ast (source_relation src)) ctx)))
+				true
+				'() nil '() nil nil '() '() '())))))
+
 (define wrap_union_branch_query (lambda (outer alias branch)
 	(begin
 		(define inner (normalize_query_ast branch))
@@ -1906,39 +1938,43 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (nil? union_rewrite))
 			(untangle_union_block union_rewrite child_ctx)
 			(begin
-				(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
-				(define sources (nth flattened_sources 0))
-				(define rewrites (nth flattened_sources 1))
-				(define source_where_terms (nth flattened_sources 2))
-				(define source_stages (nth flattened_sources 3))
-				(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
-				(define expr_outer_sources (merge (list inherited_outer_sources sources)))
-				(define expr_ctx (make_uctx child_ctx (list (list (quote outer-sources) expr_outer_sources))))
-				(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
-				(if (expr_contains_window? rewritten_where)
-					(neumann_fail "untangle_query" "window function is not allowed in WHERE")
-					true)
-				(define where_result (untangle_expr_with_stages rewritten_where expr_outer_sources expr_ctx))
-				(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) expr_outer_sources expr_ctx))
-				(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) expr_outer_sources expr_ctx))
-				(define stage_sources (merge (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
-				(make_query_block
-					(qb_schema block)
-					(merge (list sources stage_sources))
-					(nth field_result 0)
-					(nth where_result 0)
-					(map (coalesceNil (qb_group block) '()) (lambda (item) (nth (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites item) expr_outer_sources expr_ctx) 0)))
-					(nth having_result 0)
-					(map (rewrite_derived_order_chain rewrites (qb_order block)) (lambda (item) (nth (untangle_expr_with_stages item expr_outer_sources expr_ctx) 0)))
-					(qb_limit block)
-					(qb_offset block)
-					(untangle_fields (rewrite_derived_fields_chain rewrites (qb_hidden block)) child_ctx)
-					(merge (list source_stages (qb_stages block) (nth where_result 1) (nth field_result 1) (nth having_result 1)))
-					(qb_facts block)))))))
+				(define union_count_rewrite (if (nil? union_src) nil (rewrite_query_block_union_count block union_src child_ctx)))
+				(if (not (nil? union_count_rewrite))
+					union_count_rewrite
+					(begin
+						(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
+						(define sources (nth flattened_sources 0))
+						(define rewrites (nth flattened_sources 1))
+						(define source_where_terms (nth flattened_sources 2))
+						(define source_stages (nth flattened_sources 3))
+						(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
+						(define expr_outer_sources (merge (list inherited_outer_sources sources)))
+						(define expr_ctx (make_uctx child_ctx (list (list (quote outer-sources) expr_outer_sources))))
+						(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
+						(if (expr_contains_window? rewritten_where)
+							(neumann_fail "untangle_query" "window function is not allowed in WHERE")
+							true)
+						(define where_result (untangle_expr_with_stages rewritten_where expr_outer_sources expr_ctx))
+						(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) expr_outer_sources expr_ctx))
+						(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) expr_outer_sources expr_ctx))
+						(define stage_sources (merge (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
+						(make_query_block
+							(qb_schema block)
+							(merge (list sources stage_sources))
+							(nth field_result 0)
+							(nth where_result 0)
+							(map (coalesceNil (qb_group block) '()) (lambda (item) (nth (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites item) expr_outer_sources expr_ctx) 0)))
+							(nth having_result 0)
+							(map (rewrite_derived_order_chain rewrites (qb_order block)) (lambda (item) (nth (untangle_expr_with_stages item expr_outer_sources expr_ctx) 0)))
+							(qb_limit block)
+							(qb_offset block)
+							(untangle_fields (rewrite_derived_fields_chain rewrites (qb_hidden block)) child_ctx)
+							(merge (list source_stages (qb_stages block) (nth where_result 1) (nth field_result 1) (nth having_result 1)))
+							(qb_facts block)))))))))
 
 (define untangle_union_block (lambda (block ctx)
 	(make_union_block
-		(union_mode block)
+		(if (equal? (union_mode block) (quote distinct)) (quote union_distinct) (union_mode block))
 		(map (union_branches block) (lambda (branch) (untangle_query (normalize_query_ast branch) ctx)))
 		(union_order block)
 		(union_limit block)
@@ -2137,10 +2173,40 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil
 			false))))
 
+(define lower_union_count_branch_expr (lambda (branch)
+	(begin
+		(if (not (union_ordered_branch_supported? branch))
+			(neumann_fail "build_queryplan" "COUNT over UNION currently supports simple single-source branches")
+			true)
+		(define src (car (qb_sources branch)))
+		(define alias (source_alias src))
+		(define condition (combine_where (qb_where branch) (source_join_expr src)))
+		(define filtercols (extract_columns_for_alias src condition))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(list (quote table) (source_schema src) (source_relation src))
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat alias "." col))))
+				(list (quote optimize) (lower_column_expr_for_alias src condition)))
+			(quoted_runtime_list '())
+			(list (quote lambda) '() 1)
+			(quote +)
+			0
+			nil
+			false))))
+
+(define lower_union_count_expr (lambda (block)
+	(if (not (equal? (union_mode block) (quote all)))
+		(neumann_fail "build_queryplan" "COUNT over UNION currently supports UNION ALL only")
+		(cons (quote +) (map (union_branches block) lower_union_count_branch_expr)))))
+
 (define lower_scalar_marker_expr (lambda (expr)
 	(match expr
 		((symbol grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
 		((quote grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
+		((symbol union_count) block) (lower_union_count_expr block)
+		((quote union_count) block) (lower_union_count_expr block)
 		(cons head tail) (cons head (map tail lower_scalar_marker_expr))
 		_ expr)))
 
@@ -3326,6 +3392,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(and (nil? (qb_limit branch))
 									(nil? (qb_offset branch))))))))))))
 
+(define union_sort_column_for_alias (lambda (src expr)
+	(match expr
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) (order_column_for_alias src expr)
+		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) (order_column_for_alias src expr)
+		_ (begin
+			(define cols (extract_columns_for_alias src expr))
+			(list (quote lambda)
+				(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(lower_column_expr_for_alias src expr))))))
+
 (define union_ordered_scan_spec (lambda (branch titles order_positions)
 	(begin
 		(if (not (union_ordered_branch_supported? branch))
@@ -3342,8 +3418,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define order_exprs (map order_positions (lambda (pos) (nth exprs pos))))
 		(define filtercols (extract_columns_for_alias src condition))
 		(define outputcols (merge_unique (map exprs (lambda (expr) (extract_columns_for_alias src expr)))))
-		(define sortcols (map order_exprs (lambda (expr) (order_column_for_alias src expr))))
-		(define mapcols (merge_unique (list outputcols sortcols)))
+		(define sortcols (map order_exprs (lambda (expr) (union_sort_column_for_alias src expr))))
+		(define sort_input_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define mapcols (merge_unique (list outputcols sort_input_cols)))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (symbol (concat alias "." col))))
 			(list (quote optimize) (lower_column_expr_for_alias src condition))))
@@ -3381,6 +3458,30 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 4)))))
 			(cons (quote list) (map specs (lambda (spec) (nth spec 5))))))))
 
+(define union_direct_order_supported? (lambda (block)
+	(begin
+		(define branches (union_branches block))
+		(if (empty_list? branches)
+			true
+			(begin
+				(define first_branch (car branches))
+				(if (not (query_block? first_branch))
+					false
+					(begin
+						(define titles (projection_titles (qb_fields first_branch)))
+						(define order_positions (union_order_positions titles (union_order block)))
+						(reduce branches (lambda (ok branch)
+							(if (not ok)
+								false
+								(if (not (query_block? branch))
+									false
+									(begin
+										(define exprs (projection_exprs (qb_fields branch)))
+										(reduce order_positions (lambda (inner_ok pos)
+											(and inner_ok (direct_column_ref? (nth exprs pos))))
+											true)))))
+							true))))))))
+
 (define lower_union_all_successive (lambda (block)
 	(begin
 		(define branches (union_branches block))
@@ -3401,10 +3502,36 @@ PostgreSQL parsers should both lower to the same combined operators.
 							(map branches (lambda (branch)
 								(lower_query_block_with_stages (union_align_branch_fields branch titles width))))))))))))
 
+(define wrap_plan_with_distinct_resultrow (lambda (plan)
+	(begin
+		(define seen (symbol "__union_distinct_seen"))
+		(define emit (symbol "__union_distinct_resultrow"))
+		(define row (symbol "__union_distinct_row"))
+		(define key (symbol "__union_distinct_key"))
+		(list (quote begin)
+			(list (quote define) seen (list (quote newsession)))
+			(list (quote define) emit (quote resultrow))
+			(list (quote define) (quote resultrow)
+				(list (quote lambda) (list row)
+					(list (quote begin)
+						(list (quote define) key (list (quote serialize) row))
+						(list (quote if)
+							(list seen key)
+							nil
+							(list (quote begin)
+								(list seen key true)
+								(list emit row))))))
+			plan))))
+
 (define lower_union_block (lambda (block)
 	(if (equal? (union_mode block) (quote all))
 		(lower_union_all_successive block)
-		(neumann_fail "build_queryplan" "UNION DISTINCT needs explicit dedup lowering"))))
+		(if (or (equal? (union_mode block) (quote distinct)) (equal? (union_mode block) (quote union_distinct)))
+			(if (and (not (empty_list? (union_order block))) (not (union_direct_order_supported? block)))
+				(wrap_plan_with_distinct_resultrow
+					(lower_union_all_successive (make_union_block (quote all) (union_branches block) '() nil nil (union_facts block))))
+				(wrap_plan_with_distinct_resultrow (lower_union_all_successive block)))
+			(neumann_fail "build_queryplan" "unknown UNION mode")))))
 
 (define build_queryplan (lambda (ir)
 	(begin
@@ -3465,11 +3592,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(list (list tbl schema tbl false nil))
 		nil true nil nil nil)))
 
+(define explain_union_ir_metadata (lambda (ir)
+	(begin
+		(define root (ir_root ir))
+		(if (union_block? root)
+			(concat "\nbranches " (count (union_branches root)) " " (union_mode root))
+			""))))
+
 (define explain_queryplan_ir (lambda (query)
-	(list (quote resultrow)
-		(list (quote list)
-			"ir"
-			(pretty_print (untangle_query_term query nil) (settings "ExplainWidth"))))))
+	(begin
+		(define ir (untangle_query_term query nil))
+		(list (quote resultrow)
+			(list (quote list)
+				"ir"
+				(concat
+					(pretty_print ir (settings "ExplainWidth"))
+					(explain_union_ir_metadata ir)))))))
 
 (define explain_queryplan_reorder (lambda (query)
 	(list (quote resultrow)
