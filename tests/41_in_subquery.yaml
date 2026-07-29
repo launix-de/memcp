@@ -116,6 +116,27 @@ test_cases:
         - "\"__cnt\""
         - ".in_renderjob:((get_column"
 
+  - name: "EXPLAIN IR IN subquery keeps membership semantics logical"
+    sql: |
+      EXPLAIN IR SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob)
+      ORDER BY ID
+    expect:
+      rows: 1
+      contains:
+        - "group-stage"
+        - "stage-output"
+        - "in_membership"
+        - "domain"
+        - "lookup-keys"
+        - "null_semantics"
+        - "cardinality_mode"
+      not_contains:
+        - "neumann_in"
+        - "inner_select"
+        - ".grp:"
+        - "touch_keytable"
+
   # === UNION ALL inside IN subselect ===
   # Can be compiled to (or (scan...) (scan...))
 

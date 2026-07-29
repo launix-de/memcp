@@ -228,6 +228,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 		'(alias schema _relation outer join) (list alias schema relation outer join)
 		_ src)))
 
+(define source_with_schema_relation (lambda (src schema relation)
+	(match src
+		'(alias _schema _relation outer join) (list alias schema relation outer join)
+		_ src)))
+
 /* ------------------------------------------------------------------------- */
 /* IR envelope                                                                */
 
@@ -529,8 +534,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote semijoin))
-				(list (quote domain-binding) outer_domain))))
+				(list (quote purpose) (quote exists))
+				(list (quote domain) outer_domain)
+				(list (quote lookup-keys) outer_domain)
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote exists))
+				(list (quote cardinality_mode) (quote many)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -567,10 +576,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define rhs_expr (canonical_column_expr_for_alias inner_default (query_block_first_expr inner)))
 		(define keys (cons rhs_expr
 			(map corr_pairs (lambda (pair) (canonical_column_expr_for_alias inner_default (nth pair 0))))))
-		(define outer_domain (cons probe
-			(map corr_pairs (lambda (pair) (nth pair 1)))))
+		(define outer_domain (map corr_pairs (lambda (pair) (nth pair 1))))
+		(define lookup_keys (cons probe outer_domain))
 		(define condition (combine_where_terms local_terms true))
-		(define stage_id (concat "in:" (fnv_hash (string (list probe keys outer_domain condition)))))
+		(define stage_id (concat "in:" (fnv_hash (string (list probe keys lookup_keys condition)))))
 		(define stage (make_group_stage
 			stage_id
 			inner_src
@@ -583,8 +592,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) condition)
-				(list (quote purpose) (quote semijoin))
-				(list (quote domain-binding) outer_domain))))
+				(list (quote purpose) (quote in_membership))
+				(list (quote domain) outer_domain)
+				(list (quote lookup-keys) lookup_keys)
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote in))
+				(list (quote cardinality_mode) (quote many)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -592,7 +605,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(source_schema inner_src)
 			(make_stage_output_relation stage_id)
 			true
-			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(list
 			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
@@ -609,7 +622,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define value_expr (query_block_first_expr inner))
 		(define ags (dedupe_aggregates_by_col (extract_aggregates value_expr)))
 		(if (empty_list? ags)
-			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs once_limit stage")
+			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs cardinality_mode single_or_error lowering")
 			true)
 		(define inner_src (car (qb_sources inner)))
 		(if (not (source_is_base_table? inner_src))
@@ -644,9 +657,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) condition)
-				(list (quote purpose) (quote scalar-aggregate))
-				(list (quote scalar-mode) (quote aggregate))
-				(list (quote domain-binding) outer_domain))))
+				(list (quote purpose) (quote scalar_aggregate))
+				(list (quote domain) outer_domain)
+				(list (quote lookup-keys) outer_domain)
+				(list (quote preserve_empty_domain) true)
+				(list (quote null_semantics) (quote aggregate))
+				(list (quote cardinality_mode) (quote many)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -665,7 +681,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
 		(if (not (scalar_once_supported? inner))
-			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs once_limit stage")
+			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
 			true)
 		(define value_expr (query_block_first_expr inner))
 		(define inner_src (car (qb_sources inner)))
@@ -706,11 +722,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) condition)
-				(list (quote once_limit) 1)
-				(list (quote purpose) (quote scalar-join))
-				(list (quote scalar-mode) (quote first))
-				(list (quote on-overflow) (quote ignore-after-first))
-				(list (quote domain-binding) outer_domain))))
+				(list (quote purpose) (quote scalar_single))
+				(list (quote domain) outer_domain)
+				(list (quote lookup-keys) outer_domain)
+				(list (quote preserve_empty_domain) true)
+				(list (quote null_semantics) (quote scalar))
+				(list (quote cardinality_mode) (quote first)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -1093,7 +1110,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil nil
 			(list
 				(list (quote condition) true)
-				(list (quote purpose) (quote window-aggregate-cache)))))
+				(list (quote purpose) (quote window_partition_aggregate))
+				(list (quote domain) outer_domain)
+				(list (quote lookup-keys) outer_domain)
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote aggregate))
+				(list (quote cardinality_mode) (quote many)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -1911,7 +1933,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if (nil? stage)
 					(neumann_fail "build_queryplan" "stage-output source references unknown stage")
 					true)
-				(source_with_relation src (group_stage_carrier_relation stage)))))))
+				(source_with_schema_relation
+					src
+					(group_stage_carrier_schema stage)
+					(group_stage_carrier_relation stage)))))))
 
 (define physicalize_stage_output_sources (lambda (stages sources)
 	(map (coalesceNil sources '()) (lambda (src)

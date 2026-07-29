@@ -83,8 +83,10 @@ test_cases:
           contains:
             - "group-stage"
             - "stage-output"
-            - "semijoin"
-            - "domain-binding"
+            - "exists"
+            - "domain"
+            - "lookup-keys"
+            - "cardinality_mode"
           not_contains:
             - "neumann_exists"
             - "inner_select"
@@ -149,8 +151,10 @@ test_cases:
           contains:
             - "group-stage"
             - "stage-output"
-            - "semijoin"
-            - "domain-binding"
+            - "exists"
+            - "domain"
+            - "lookup-keys"
+            - "cardinality_mode"
           not_contains:
             - "neumann_exists"
             - "inner_select"
