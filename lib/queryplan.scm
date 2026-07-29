@@ -2604,9 +2604,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(neumann_fail "build_queryplan" "group-stage with subquery stages requires a base driver source")
 					true)
 				(define stage_sources (physicalize_stage_output_sources (qb_stages block) (cdr sources)))
-				(define base_block (make_query_block
+				(define grouped_input_block (make_query_block
 					(qb_schema block)
-					(list base_src)
+					(cons base_src stage_sources)
 					(qb_fields block)
 					(qb_where block)
 					(qb_group block)
@@ -2617,12 +2617,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(qb_hidden block)
 					'()
 					(qb_facts block)))
-				(define main_stage (make_group_stage_for_block base_block base_src))
+				(define main_stage (make_group_stage_for_query_block grouped_input_block))
 				(cons (quote begin)
 					(merge (list
 						(map (qb_stages block) lower_stage_prepare)
 						(list (lower_group_stage_prepare main_stage))
-						(list (lower_query_block_core (group_stage_final_block main_stage stage_sources)))))))))))
+						(list (lower_query_block_core (group_stage_final_block main_stage '()))))))))))
+)
 
 (define query_block_without_stages (lambda (block)
 	(make_query_block
