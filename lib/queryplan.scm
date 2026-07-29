@@ -544,7 +544,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(and (scalar_source_shape_supported? (qb_sources inner))
 			(and (empty_list? (qb_group inner))
 				(and (nil? (qb_having inner))
-					(and (nil? (qb_offset inner))
+					(and (or (nil? (qb_offset inner)) (not (empty_list? (qb_order inner))))
 						(equal? (qb_limit inner) 1))))))))
 
 (define scalar_aggregate_supported? (lambda (inner)
@@ -613,18 +613,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define scalar_single_aggregates (lambda (value_expr)
 	(list
-		(scalar_once_descriptor value_expr '())
+		(scalar_once_descriptor value_expr '() nil)
 		aggregate_count_descriptor)))
 
-(define scalar_once_descriptor (lambda (value_expr order_items)
+(define scalar_once_descriptor (lambda (value_expr order_items offset_value)
 	(if (empty_list? order_items)
 		(list value_expr (scalar_once_reduce_first) nil)
 		(match order_items
 			(cons item '()) (match item
-				'(order_expr dir) (if (equal? order_expr value_expr)
+				'(order_expr dir) (if (and (equal? (coalesceNil offset_value 0) 0) (equal? order_expr value_expr))
 					(list value_expr (if (equal? dir <) (quote min) (quote max)) nil)
 					(list
-						(list (quote scalar_order_value) value_expr order_expr dir)
+						(list (quote scalar_order_value) value_expr order_expr dir (coalesceNil offset_value 0))
 						(scalar_once_reduce_first)
 						nil))
 				_ (neumann_fail "untangle_query" "malformed scalar once_limit ORDER BY"))
@@ -874,7 +874,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define value_for_inner (canonical_column_expr_for_alias inner_default value_expr))
 		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
 			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default expr) dir)))))
-		(define ag (scalar_once_descriptor value_for_inner order_for_inner))
+		(define ag (scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner)))
 		(define ags (list ag))
 		(define stage_input (if (empty_list? (qb_stages inner))
 			inner_src
@@ -2140,7 +2140,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					true))
 			false))))
 
-(define build_group_ordered_scalar_column (lambda (schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir agg_reduce agg_neutral)
+(define build_group_ordered_scalar_column (lambda (schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir offset_value agg_reduce agg_neutral)
 	(begin
 		(define src (list alias schema tbl false nil))
 		(define agg_col (aggregate_col_name ag))
@@ -2172,7 +2172,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(quoted_runtime_list (list order_col))
 					(list (quote list) dir)
 					0
-					0
+					(coalesceNil offset_value 0)
 					1
 					(cons (quote list) mapcols)
 					(list (quote lambda)
@@ -2184,10 +2184,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define build_group_aggregate_column (lambda (schema tbl alias grouptbl keys key_names condition ag)
 	(match ag
+		'(((symbol scalar_order_value) value_expr order_expr dir offset_value) agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir offset_value agg_reduce agg_neutral)
+		'(((quote scalar_order_value) value_expr order_expr dir offset_value) agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir offset_value agg_reduce agg_neutral)
 		'(((symbol scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
-		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir 0 agg_reduce agg_neutral)
 		'(((quote scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
-		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_expr dir 0 agg_reduce agg_neutral)
 		'(agg_expr agg_reduce agg_neutral) (begin
 			(define src (list alias schema tbl false nil))
 			(define agg_col (aggregate_col_name ag))
