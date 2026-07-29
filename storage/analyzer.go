@@ -436,6 +436,9 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			d := scm.DeclarationForValue(head)
 			return d != nil && d.Name == name
 		}
+		if funcIs(v[0], "optimize") && len(v) == 2 {
+			return traverseCondition(v[1])
+		}
 		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {

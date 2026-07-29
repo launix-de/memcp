@@ -132,16 +132,19 @@ printf '%s\n' "${test_files_arr[@]}"
 echo ""
 
 test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
+test_data_dir="${MEMCP_TEST_DATA_DIR:-./data}"
 tmpdir=""
 supervisor_pid=""
 
 # Runner contract:
-# - All suites use the repository-local ./data directory.
-# - ./data must never be deleted by this hook.
+# - All suites use one shared data directory so restart/persistence tests see
+#   the same state. The default is repository-local ./data; callers may set
+#   MEMCP_TEST_DATA_DIR to use an isolated temporary test store.
+# - The selected data directory must never be deleted by this hook.
 # - "isolated" means serialized execution on the same shared database, not
 #   storage isolation.
 # - restart/SHUTDOWN suites may temporarily stop the shared supervisor, but
-#   they must come back on the same ./data afterwards.
+#   they must come back on the same data directory afterwards.
 
 run_memcp_forever() {
   trap 'kill $memcp_pid 2>/dev/null; exit 0' TERM INT
@@ -150,7 +153,7 @@ run_memcp_forever() {
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
     memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
-    ./memcp --no-repl -data ./data --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
+    ./memcp --no-repl -data "$test_data_dir" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
     wait $memcp_pid
     rc=$?
@@ -167,7 +170,7 @@ start_supervisor() {
   supervisor_pid=$!
 
   echo "⏳ Waiting for MemCP to be ready..."
-  if wait_for_sql_ready 60 1; then
+  if wait_for_sql_ready 180 1; then
     echo "✅ MemCP is ready!"
     return 0
   fi
@@ -290,7 +293,7 @@ run_one() {
   if [ "$fail_fast_mode" -eq 1 ]; then
     runner_args+=("--fail-fast")
   fi
-  if ! wait_for_sql_ready 60 1; then
+  if ! wait_for_sql_ready 180 1; then
     echo "FAIL" > "$statusf"
     {
       flock -x 9

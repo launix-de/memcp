@@ -35,41 +35,35 @@ test_cases:
 
   # Create compound index (a, b) first by querying 3 times
   - name: "Create compound index hit 1"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 10 AND b = 20"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 10 AND b = 20"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create compound index hit 2"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 20 AND b = 40"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 20 AND b = 40"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create compound index hit 3"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 30 AND b = 60"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 30 AND b = 60"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # Now query on (a) alone — should reuse the (a, b) index, NOT create a new one
   - name: "Single-col query reuses compound index 1"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 40"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 40"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Single-col query reuses compound index 2"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 50"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 50"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Single-col query reuses compound index 3"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 60"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 60"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # Verify only one index exists — the shorter prefix was NOT created
   - name: "Only compound index exists (no prefix created)"
@@ -135,16 +129,14 @@ test_cases:
 
   # Queries still work after rebuild (index rebuilds lazily)
   - name: "Post-rebuild: compound query still works"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 70 AND b = 140"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 70 AND b = 140"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Post-rebuild: prefix query still works"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 80"
+    sql: "SELECT c FROM idx_nopfx WHERE a = 80"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # ==============================================================
   # Phase 3: rebuildIndexes() merges prefix indexes
@@ -171,41 +163,35 @@ test_cases:
 
   # Create single-col index (p) FIRST
   - name: "Create single-col index first hit 1"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 10"
+    sql: "SELECT r FROM idx_rev WHERE p = 10"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create single-col index first hit 2"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 20"
+    sql: "SELECT r FROM idx_rev WHERE p = 20"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create single-col index first hit 3"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 30"
+    sql: "SELECT r FROM idx_rev WHERE p = 30"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # Now create compound index (p, q)
   - name: "Create compound index hit 1"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 40 AND q = 160"
+    sql: "SELECT r FROM idx_rev WHERE p = 40 AND q = 160"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create compound index hit 2"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 50 AND q = 200"
+    sql: "SELECT r FROM idx_rev WHERE p = 50 AND q = 200"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create compound index hit 3"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 60 AND q = 240"
+    sql: "SELECT r FROM idx_rev WHERE p = 60 AND q = 240"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # Two indexes should exist: (p) and (p|q)
   - name: "Both indexes exist before rebuild"
@@ -250,16 +236,14 @@ test_cases:
 
   # Queries still correct after dedup
   - name: "Post-dedup: single-col query works via compound index"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 99"
+    sql: "SELECT r FROM idx_rev WHERE p = 99"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Post-dedup: compound query works"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 100 AND q = 400"
+    sql: "SELECT r FROM idx_rev WHERE p = 100 AND q = 400"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # ==============================================================
   # Phase 4: Non-prefix indexes are NOT merged
@@ -285,41 +269,35 @@ test_cases:
 
   # Create index on (x) by querying 3 times
   - name: "Create x index hit 1"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 10"
+    sql: "SELECT z FROM idx_nonoverlap WHERE x = 10"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create x index hit 2"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 20"
+    sql: "SELECT z FROM idx_nonoverlap WHERE x = 20"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create x index hit 3"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 30"
+    sql: "SELECT z FROM idx_nonoverlap WHERE x = 30"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # Create index on (y) by querying 3 times — different column, NOT a prefix
   - name: "Create y index hit 1"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE y = 30"
+    sql: "SELECT z FROM idx_nonoverlap WHERE y = 30"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create y index hit 2"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE y = 60"
+    sql: "SELECT z FROM idx_nonoverlap WHERE y = 60"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   - name: "Create y index hit 3"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE y = 90"
+    sql: "SELECT z FROM idx_nonoverlap WHERE y = 90"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
   # Verify both exist before rebuild
   - name: "Two non-overlapping indexes exist"
@@ -341,10 +319,9 @@ test_cases:
           (error (concat "expected 2 non-overlapping indexes after rebuild, got " (count indexes)))))
 
   - name: "Non-prefix queries still work after rebuild"
-    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 50"
+    sql: "SELECT z FROM idx_nonoverlap WHERE x = 50"
     expect:
-      data:
-        - cnt: 1
+      rows: 1
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS idx_nopfx"

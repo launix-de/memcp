@@ -123,15 +123,15 @@ test_cases:
         - cnt: 2
 
   # --- COUNT(DISTINCT) alongside regular aggregate ---
-  # NOTE: COUNT(*) alongside COUNT(DISTINCT) currently counts deduplicated rows
-  # TODO: support mixed distinct/non-distinct aggregates correctly
+  # COUNT(DISTINCT) deduplicates only its own aggregate input. Other aggregates
+  # in the same group-stage keep normal row semantics.
   - name: "COUNT DISTINCT with COUNT star"
     sql: "SELECT COUNT(DISTINCT name) AS distinct_cnt, COUNT(*) AS total_cnt FROM cd_test"
     expect:
       rows: 1
       data:
         - distinct_cnt: 4
-          total_cnt: 4
+          total_cnt: 8
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS cd_test"
