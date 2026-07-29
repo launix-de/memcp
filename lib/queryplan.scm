@@ -3226,12 +3226,105 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(qb_stages branch)
 			(qb_facts branch)))))
 
+(define projection_index_by_title (lambda (titles title)
+	(reduce (produceN (count titles)) (lambda (found i)
+		(if (not (nil? found))
+			found
+			(if (equal?? (nth titles i) title) i nil)))
+		nil)))
+
+(define union_order_position (lambda (titles expr)
+	(match expr
+		((symbol get_column) _tblvar _tbl_ignorecase col _col_ignorecase) (projection_index_by_title titles col)
+		((quote get_column) _tblvar _tbl_ignorecase col _col_ignorecase) (projection_index_by_title titles col)
+		_ (if (and (number? expr) (and (> expr 0) (<= expr (count titles))))
+			(- expr 1)
+			nil))))
+
+(define union_order_positions (lambda (titles order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr _dir) (begin
+				(define pos (union_order_position titles expr))
+				(if (nil? pos)
+					(neumann_fail "build_queryplan" "UNION ALL ORDER BY column not found")
+					pos))
+			_ (neumann_fail "build_queryplan" "malformed UNION ORDER BY item"))))))
+
+(define union_order_dirs (lambda (order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(_expr dir) dir
+			_ (neumann_fail "build_queryplan" "malformed UNION ORDER BY item"))))))
+
+(define union_ordered_branch_supported? (lambda (branch)
+	(and (query_block? branch)
+		(and (single_source? (qb_sources branch))
+			(and (empty_list? (qb_stages branch))
+				(and (empty_list? (qb_group branch))
+					(and (nil? (qb_having branch))
+						(and (not (query_block_has_aggregates? branch))
+							(and (empty_list? (qb_order branch))
+								(and (nil? (qb_limit branch))
+									(nil? (qb_offset branch))))))))))))
+
+(define union_ordered_scan_spec (lambda (branch titles order_positions)
+	(begin
+		(if (not (union_ordered_branch_supported? branch))
+			(neumann_fail "build_queryplan" "UNION ALL ORDER BY requires simple single-source branches")
+			true)
+		(define src (car (qb_sources branch)))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "UNION ALL ORDER BY requires base table branches")
+			true)
+		(define alias (source_alias src))
+		(define fields (qb_fields branch))
+		(define exprs (projection_exprs fields))
+		(define condition (combine_where (qb_where branch) (source_join_expr src)))
+		(define order_exprs (map order_positions (lambda (pos) (nth exprs pos))))
+		(define filtercols (extract_columns_for_alias src condition))
+		(define outputcols (merge_unique (map exprs (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define sortcols (map order_exprs (lambda (expr) (order_column_for_alias src expr))))
+		(define mapcols (merge_unique (list outputcols sortcols)))
+		(define filter_expr (list (quote lambda)
+			(map filtercols (lambda (col) (symbol (concat alias "." col))))
+			(list (quote optimize) (lower_column_expr_for_alias src condition))))
+		(define map_expr (list (quote lambda)
+			(map mapcols (lambda (col) (symbol (concat alias "." col))))
+			(list (quote resultrow)
+				(cons (quote list) (merge (map (produceN (count titles)) (lambda (i)
+					(list (nth titles i) (lower_column_expr_for_alias src (nth exprs i))))))))))
+		(list
+			(list (quote table) (source_schema src) (source_relation src))
+			filtercols
+			filter_expr
+			sortcols
+			mapcols
+			map_expr))))
+
+(define lower_union_all_ordered (lambda (block titles width)
+	(begin
+		(define branches (union_branches block))
+		(define aligned (map branches (lambda (branch) (union_align_branch_fields branch titles width))))
+		(define order_positions (union_order_positions titles (union_order block)))
+		(define specs (map aligned (lambda (branch) (union_ordered_scan_spec branch titles order_positions))))
+		(list (quote scan_order_multi)
+			'(session "__memcp_tx")
+			(cons (quote list) (map specs (lambda (spec) (nth spec 0))))
+			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
+			(cons (quote list) (map specs (lambda (spec) (nth spec 2))))
+			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 3)))))
+			(cons (quote list) (union_order_dirs (union_order block)))
+			nil
+			nil
+			0
+			(coalesceNil (union_offset block) 0)
+			(coalesceNil (union_limit block) -1)
+			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 4)))))
+			(cons (quote list) (map specs (lambda (spec) (nth spec 5))))))))
+
 (define lower_union_all_successive (lambda (block)
 	(begin
-		(if (or (not (empty_list? (union_order block)))
-			(or (not (nil? (union_limit block))) (not (nil? (union_offset block)))))
-			(neumann_fail "build_queryplan" "ordered/limited UNION ALL needs scan_order_multi or temp-table lowering")
-			true)
 		(define branches (union_branches block))
 		(if (empty_list? branches)
 			nil
@@ -3242,9 +3335,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 					true)
 				(define titles (projection_titles (qb_fields first_branch)))
 				(define width (count (qb_fields first_branch)))
-				(cons (quote begin)
-					(map branches (lambda (branch)
-						(lower_query_block_with_stages (union_align_branch_fields branch titles width))))))))))
+				(if (not (empty_list? (union_order block)))
+					(lower_union_all_ordered block titles width)
+					(if (or (not (nil? (union_limit block))) (not (nil? (union_offset block))))
+						(lower_union_all_ordered block titles width)
+						(cons (quote begin)
+							(map branches (lambda (branch)
+								(lower_query_block_with_stages (union_align_branch_fields branch titles width))))))))))))
 
 (define lower_union_block (lambda (block)
 	(if (equal? (union_mode block) (quote all))
