@@ -226,13 +226,13 @@ for `(get_column tv ti col ci)` where tv ∈ aliases. */
 							(begin
 								(define fields (qpp-fields-to-pairs
 									(qpp-tuple-fields td-tname)))
-									(if (not (nil? (qpu-low-fields-expr-by-name fields name)))
-										name
-										(if (not (nil? (qpu-low-fields-expr-by-name fields base-name)))
-											base-name
-											nil)))
-								nil)
+								(if (not (nil? (qpu-low-fields-expr-by-name fields name)))
+									name
+									(if (not (nil? (qpu-low-fields-expr-by-name fields base-name)))
+										base-name
+										nil)))
 							nil)
+						nil)
 					nil)))
 			nil))))
 
@@ -290,27 +290,27 @@ for `(get_column tv ti col ci)` where tv ∈ aliases. */
 														child-ref)
 													(list (merge acc-tables (list child-td)) nil))))
 										(list (list child-td) nil))))
-								(list '() nil))))
-						(match nested-result
-							'(nested-tables passthrough-expr)
-							(if (nil? passthrough-expr)
-								(list td nil)
-								(begin
-									(define new-sub (qpp-rebuild-tuple
-										(qpp-tuple-schema sub)
-										nested-tables
-										(merge sub-fields (list (list name passthrough-expr)))
-										(qpp-tuple-condition sub)
-										(qpp-tuple-group sub)
-										(qpp-tuple-having sub)
-										(qpp-tuple-order sub)
-										(qpp-tuple-limit sub)
-										(qpp-tuple-offset sub)))
-									(list
-										(list td-alias td-schema new-sub td-isOuter td-jE)
-										(list (quote get_column) td-alias false name false))))
-							(list td nil)))))
-			_ (list td nil))))
+							(list '() nil))))
+					(match nested-result
+						'(nested-tables passthrough-expr)
+						(if (nil? passthrough-expr)
+							(list td nil)
+							(begin
+								(define new-sub (qpp-rebuild-tuple
+									(qpp-tuple-schema sub)
+									nested-tables
+									(merge sub-fields (list (list name passthrough-expr)))
+									(qpp-tuple-condition sub)
+									(qpp-tuple-group sub)
+									(qpp-tuple-having sub)
+									(qpp-tuple-order sub)
+									(qpp-tuple-limit sub)
+									(qpp-tuple-offset sub)))
+								(list
+									(list td-alias td-schema new-sub td-isOuter td-jE)
+									(list (quote get_column) td-alias false name false))))
+						(list td nil)))))
+		_ (list td nil))))
 
 /* qpu-low-find-deep-alias-in-tables — for an alias name NOT in the top-level
 table aliases, find which top-level DERIVED table's sub-tuple contains it.
@@ -404,7 +404,7 @@ projection at the outer level. */
 	(reduce (qpir-expr-column-refs expr) (lambda (found ref) (match ref
 		'(tv _col) (or found (equal? tv alias))
 		found))
-	false)))
+		false)))
 
 (define qpu-low-derived-local-equivalent-from-joinexpr (lambda (tables derived-alias projected-name)
 	(begin
@@ -501,8 +501,8 @@ projection at the outer level. */
 						(list (quote equal??)
 							(list (quote get_column) derived-alias false projected-name false)
 							local-equivalent)))
-					td)
-				td))))))
+				td)
+			td))))))
 
 (define qpu-low-left-join-boundary-key-expr (lambda (name expr tables)
 	(match name
@@ -553,23 +553,23 @@ Naming: synthesized name `__kt_<col>` (suffixed if collision). */
 			(if (has? right-source-aliases tv)
 				/* Direct case: always expose a stable __kt_* boundary key.
 				qpu-collect-cclasses predicts those names for sq-derived refs. */
-					(begin
-						(define direct-tables
-							(qpu-low-ensure-direct-derived-boundary-field (nth acc 0) tv col))
-							(define direct-local-equivalent
-								(qpu-low-derived-local-equivalent-from-joinexpr direct-tables tv col))
-							(define direct-exposed-name
-								(qpu-low-derived-exposed-field-name direct-tables tv col))
-							(define existing-key-name (reduce (nth acc 2)
-								(lambda (found entry) (match entry
-									'(refpair newname) (if (and (nil? found)
-									(equal? refpair (list tv col))) newname found)
-									'(refpair newname _local_alias _local_name)
-									(if (and (nil? found)
-										(equal? refpair (list tv col))) newname found)
-									_ found))
-							nil))
-						(if (not (nil? existing-key-name))
+				(begin
+					(define direct-tables
+						(qpu-low-ensure-direct-derived-boundary-field (nth acc 0) tv col))
+					(define direct-local-equivalent
+						(qpu-low-derived-local-equivalent-from-joinexpr direct-tables tv col))
+					(define direct-exposed-name
+						(qpu-low-derived-exposed-field-name direct-tables tv col))
+					(define existing-key-name (reduce (nth acc 2)
+						(lambda (found entry) (match entry
+							'(refpair newname) (if (and (nil? found)
+								(equal? refpair (list tv col))) newname found)
+							'(refpair newname _local_alias _local_name)
+							(if (and (nil? found)
+								(equal? refpair (list tv col))) newname found)
+							_ found))
+						nil))
+					(if (not (nil? existing-key-name))
 						(list direct-tables (nth acc 1) (merge (nth acc 2)
 							(list (list (list tv col) existing-key-name))))
 						(begin
@@ -857,7 +857,7 @@ aggregate must be static-grouped per domain binding, not computed globally. */
 				acc)
 			acc)
 		acc))
-	'())))
+		'())))
 
 (define qpu-low-select (lambda (node) (begin
 	(define child-tuple (qpu-lower-to-tuple (qpir-select-child node)))
@@ -988,27 +988,27 @@ or pairs (pipeline). */
 
 (define qpu-low-exists-bool-default-field? (lambda (expr tables) (begin
 	(if (qpu-low-exists-bool-default-expr? expr)
-			true
-			(match expr
-				'((symbol coalesceNil) _ false) true
-				'((quote coalesceNil) _ false) true
-				'((symbol get_column) alias_ _ col _)
-				(begin
-					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
-					(if (nil? sub)
-						(qpu-low-false-default-rewrite? alias_ col)
-						(qpu-low-exists-bool-default-field?
-							(qpu-low-fields-expr-by-name
-								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+		true
+		(match expr
+			'((symbol coalesceNil) _ false) true
+			'((quote coalesceNil) _ false) true
+			'((symbol get_column) alias_ _ col _)
+			(begin
+				(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+				(if (nil? sub)
+					(qpu-low-false-default-rewrite? alias_ col)
+					(qpu-low-exists-bool-default-field?
+						(qpu-low-fields-expr-by-name
+							(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
 						(qpp-tuple-tables sub))))
-				'((quote get_column) alias_ _ col _)
-				(begin
-					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
-					(if (nil? sub)
-						(qpu-low-false-default-rewrite? alias_ col)
-						(qpu-low-exists-bool-default-field?
-							(qpu-low-fields-expr-by-name
-								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+			'((quote get_column) alias_ _ col _)
+			(begin
+				(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+				(if (nil? sub)
+					(qpu-low-false-default-rewrite? alias_ col)
+					(qpu-low-exists-bool-default-field?
+						(qpu-low-fields-expr-by-name
+							(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
 						(qpp-tuple-tables sub))))
 			false)))))
 
@@ -1017,22 +1017,22 @@ or pairs (pipeline). */
 		true
 		(match expr
 			'((symbol get_column) alias_ _ col _)
-				(begin
-					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
-					(if (nil? sub)
-						(qpu-low-zero-default-rewrite? alias_ col)
-						(qpu-low-count-zero-default-field?
-							(qpu-low-fields-expr-by-name
-								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+			(begin
+				(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+				(if (nil? sub)
+					(qpu-low-zero-default-rewrite? alias_ col)
+					(qpu-low-count-zero-default-field?
+						(qpu-low-fields-expr-by-name
+							(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
 						(qpp-tuple-tables sub))))
 			'((quote get_column) alias_ _ col _)
-				(begin
-					(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
-					(if (nil? sub)
-						(qpu-low-zero-default-rewrite? alias_ col)
-						(qpu-low-count-zero-default-field?
-							(qpu-low-fields-expr-by-name
-								(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
+			(begin
+				(define sub (qpu-low-derived-subtuple-for-alias tables alias_))
+				(if (nil? sub)
+					(qpu-low-zero-default-rewrite? alias_ col)
+					(qpu-low-count-zero-default-field?
+						(qpu-low-fields-expr-by-name
+							(qpp-fields-to-pairs (qpp-tuple-fields sub)) col)
 						(qpp-tuple-tables sub))))
 			false)))))
 
@@ -1369,7 +1369,7 @@ the legacy resolver doesn't know the derived produces those names. */
 				acc
 				(merge acc (list (list key-name key-expr)))))
 		acc))
-	'())))
+		'())))
 
 (define qpu-low-groupby (lambda (node) (begin
 	(define child-tuple (qpu-lower-to-tuple (qpir-groupby-child node)))
@@ -1530,9 +1530,9 @@ anyway, and helper scans for aggregates break the simple tag) */
 (define qpu-low-tag-inner-once-limit (lambda (sub-tuple)
 	(qpu-low-tag-inner-limit-contract sub-tuple 2 2)))
 
-	(define qpu-low-add-scalar-once-marker (lambda (sub-tuple)
-		(begin
-			(define user-limit (qpp-tuple-limit sub-tuple))
+(define qpu-low-add-scalar-once-marker (lambda (sub-tuple)
+	(begin
+		(define user-limit (qpp-tuple-limit sub-tuple))
 		(define once-limit (if (and (not (nil? user-limit)) (<= user-limit 1)) 1 2))
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema sub-tuple)
@@ -1545,8 +1545,8 @@ anyway, and helper scans for aggregates break the simple tag) */
 			(qpp-tuple-group sub-tuple)
 			(qpp-tuple-having sub-tuple)
 			(qpp-tuple-order sub-tuple)
-				(qpp-tuple-limit sub-tuple)
-				(qpp-tuple-offset sub-tuple)))))
+			(qpp-tuple-limit sub-tuple)
+			(qpp-tuple-offset sub-tuple)))))
 
 (define qpu-low-tag-expr-has-aggregate? (lambda (expr) (match expr
 	'((symbol aggregate) . _) true
@@ -1596,7 +1596,40 @@ conjuncts. Order preserves first-seen. */
 					'((quote =)        lhs rhs) (handle-eq lhs rhs)
 					nil)
 				acc)) nil)
-		(seen "cols"))))
+		(coalesceNil (seen "cols") '()))))
+
+(define qpu-low-boundary-corr-cols-from-fields (lambda (fields inner-alias)
+	(begin
+		(define seen (newsession))
+		(seen "cols" '())
+		(define add-boundary-expr (lambda (expr)
+			(match expr
+				(cons head args)
+				(if (and
+					(qpl-marker-head-eq? head "get_column")
+					(list? args)
+					(equal? (count args) 4)
+					(equal? (nth args 0) inner-alias)
+					(not (has? (seen "cols") (nth args 2))))
+					(seen "cols" (merge (seen "cols") (list (nth args 2))))
+					nil)
+				nil)))
+		(reduce (qpp-fields-to-pairs (coalesceNil fields '())) (lambda (acc pair)
+			(begin
+				(if (and (list? pair) (>= (count pair) 2))
+					(begin
+						(define name (nth pair 0))
+						(define expr (nth pair 1))
+						(define name-s (replace (serialize name) "\"" ""))
+						(if (and
+							(>= (strlen name-s) 5)
+							(equal? (substr name-s 0 5) "__kt_"))
+							(add-boundary-expr expr)
+							nil))
+					nil)
+				acc))
+			nil)
+		(coalesceNil (seen "cols") '()))))
 
 (define qpu-low-subquery-alias? (lambda (alias)
 	(and (string? alias) (>= (strlen alias) 3)
@@ -1607,14 +1640,15 @@ conjuncts. Order preserves first-seen. */
 side can be inlined as flat (instead of derived-wrap). Conservative gate
 matching qpu-low-tag-inner-once-limit:
 - join-type=left for correlated helpers, or an uncorrelated scalar helper
-  whose predicate is trivially true
+whose predicate is trivially true
 - rhs-alias is a topdown/legacy subquery alias
 - right has 1 table entry, base table (not derived/tagged)
-- right has 1 field (the scalar value)
+- right has simple column-backed fields (the scalar value plus optional
+domain/boundary projections)
 - right has no group/having (aggregates use derived path)
-- right's field has no aggregate / count_distinct
+- right's fields have no aggregate / count_distinct
 - correlated helpers need at least one extracted correlation column;
-  uncorrelated helpers use a zero-column scalar scan with LIMIT/once metadata. */
+uncorrelated helpers use a zero-column scalar scan with LIMIT/once metadata. */
 (define qpu-low-inline-scalar-eligible? (lambda (right-tuple join-pred rhs-alias join-type left-aliases)
 	(begin
 		(define tbls (coalesceNil (qpp-tuple-tables right-tuple) '()))
@@ -1631,7 +1665,7 @@ matching qpu-low-tag-inner-once-limit:
 				(and (equal? join-type (quote inner)) uncorrelated-pred))
 			(qpu-low-subquery-alias? rhs-alias)
 			(equal? (count tbls) 1)
-			(equal? (count flds) 1)
+			(> (count flds) 0)
 			(equal? (count grp) 0)
 			(nil? hav)))
 			false
@@ -1645,26 +1679,23 @@ matching qpu-low-tag-inner-once-limit:
 								(equal? (car td-tname) (symbol scan-tagged-table)))))
 						false
 						(begin
-							(define fpair (nth flds 0))
-							(define field-name (nth fpair 0))
-							(define fexpr (nth fpair 1))
-							(if (or (qpl-expr-has-aggregate? fexpr)
-								(qpu-low-tag-has-count-distinct? fexpr))
+							(define fields-simple
+								(reduce flds (lambda (ok fpair) (match fpair
+									'(_field-name fexpr)
+									(and ok
+										(not (qpl-expr-has-aggregate? fexpr))
+										(not (qpu-low-tag-has-count-distinct? fexpr))
+										(match fexpr
+											'((symbol get_column) f-tv _ _ _) (equal? f-tv td-alias)
+											'((quote get_column) f-tv _ _ _) (equal? f-tv td-alias)
+											false))
+									false))
+									true))
+							(if (not fields-simple)
 								false
-								(match fexpr
-									'((symbol get_column) f-tv _ f-col _)
-									(if (equal? f-tv td-alias)
-										(begin
-											(define cc (qpu-low-corr-from-pred join-pred td-alias left-aliases))
-											(or uncorrelated-pred (> (count cc) 0)))
-										false)
-									'((quote get_column) f-tv _ f-col _)
-									(if (equal? f-tv td-alias)
-										(begin
-											(define cc (qpu-low-corr-from-pred join-pred td-alias left-aliases))
-											(or uncorrelated-pred (> (count cc) 0)))
-										false)
-									false))))
+								(begin
+									(define cc (qpu-low-corr-from-pred join-pred td-alias left-aliases))
+									(or uncorrelated-pred (> (count cc) 0))))))
 					false))))))
 
 /* qpu-low-join-inline-scalar — produce a flat-join outer tuple instead of
@@ -1694,15 +1725,17 @@ Layout:
 		(define inner-order (coalesceNil (qpp-tuple-order right-tuple) '()))
 		(define inner-offset (qpp-tuple-offset right-tuple))
 		(define sub-lim (qpp-tuple-limit right-tuple))
-		(define fpair (nth (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)) 0))
-		(define field-name (nth fpair 0))
-		(define field-expr-raw (nth fpair 1))
+		(define field-pairs (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)))
 		(define left-aliases (map (qpp-tuple-tables left-tuple) (lambda (t)
 			(if (or (nil? t) (< (count t) 1)) nil (nth t 0)))))
 		(define corr-cols (qpu-low-corr-from-pred join-pred inner-natural-alias left-aliases))
 		/* Retarget all refs to inner-natural-alias → rhs-alias */
 		(define retarget-aliases (list inner-natural-alias))
-		(define field-expr (qpu-low-rewrite-refs field-expr-raw retarget-aliases rhs-alias))
+		(define field-rewrites
+			(map field-pairs (lambda (pair) (match pair
+				'(name expr)
+				(list name (qpu-low-rewrite-refs expr retarget-aliases rhs-alias))
+				pair))))
 		(define inner-where-clean
 			(if (or (nil? inner-where) (equal? inner-where true)
 				(equal? inner-where (quote true))) nil inner-where))
@@ -1711,8 +1744,14 @@ Layout:
 				(qpu-low-rewrite-refs inner-where-clean retarget-aliases rhs-alias)))
 		(define join-pred-retargeted (qpu-low-rewrite-refs
 			join-pred retarget-aliases rhs-alias))
+		(define boundary-corr-cols
+			(coalesceNil
+				(qpu-low-boundary-corr-cols-from-fields field-pairs inner-natural-alias)
+				'()))
+		(define effective-corr-cols
+			(if (> (count corr-cols) 0) corr-cols boundary-corr-cols))
 		(define corr-order
-			(map corr-cols (lambda (c) (list
+			(map effective-corr-cols (lambda (c) (list
 				(list (quote get_column) rhs-alias false c false)
 				(quote <)))))
 		(define inner-order-retargeted
@@ -1729,7 +1768,7 @@ Layout:
 				(if (equal? sub-lim 1) 1 0)))
 		(define tagged-tname (make_scan_tagged_table
 			inner-base stag-order stag-limit inner-offset
-			(count corr-cols) stag-once-limit))
+			(count effective-corr-cols) stag-once-limit))
 		(define combined-je (qpu-low-and-cond join-pred-retargeted inner-where-retargeted))
 		(define new-entry
 			(list rhs-alias inner-schema tagged-tname true combined-je))
@@ -1738,7 +1777,12 @@ Layout:
 		it up when applying its own predicates/projections. Lift placed
 		sq_X.field refs in the outer's WHERE/SELECT — those scopes are
 		processed at a different lowering step than ours. */
-		(qpu-low-sq-rewrites-add rhs-alias field-name field-expr)
+		(reduce field-rewrites (lambda (acc pair) (match pair
+			'(field-name field-expr)
+			(begin
+				(qpu-low-sq-rewrites-add rhs-alias field-name field-expr)
+				acc)
+			acc)) nil)
 		/* (rewrite map populated for any future wrapper that needs it —
 		currently only used by the local rewrite below; the qpu-low-select
 		integration is deferred since it caused esv test regressions —
@@ -1747,21 +1791,44 @@ Layout:
 		(define left-has-group (and (not (nil? left-group))
 			(or (> (count left-group) 0)
 				(qpu-low-fields-have-aggregate? (qpp-tuple-fields left-tuple)))))
+		(define boundary-field-rewrites
+			(filter field-rewrites (lambda (pair) (match pair
+				'(field-name _field-expr)
+				(begin
+					(define field-name-s (replace (serialize field-name) "\"" ""))
+					(and
+						(>= (strlen field-name-s) 5)
+						(equal? (substr field-name-s 0 5) "__kt_")))
+				false))))
+		(define active-field-rewrites
+			(if left-has-group boundary-field-rewrites field-rewrites))
 		(define rewritten-fields
-			(if left-has-group
+			(if (and left-has-group (equal? (count active-field-rewrites) 0))
 				(qpp-tuple-fields left-tuple)
-				(qpu-low-replace-sq-field (qpp-tuple-fields left-tuple)
-					rhs-alias field-name field-expr)))
+				(reduce active-field-rewrites (lambda (fields-acc pair) (match pair
+					'(field-name field-expr)
+					(qpu-low-replace-sq-field fields-acc
+						rhs-alias field-name field-expr)
+					fields-acc))
+					(qpp-tuple-fields left-tuple))))
 		(define rewritten-cond
-			(if left-has-group
+			(if (and left-has-group (equal? (count active-field-rewrites) 0))
 				(qpp-tuple-condition left-tuple)
-				(qpu-low-replace-sq-field-expr (qpp-tuple-condition left-tuple)
-					rhs-alias field-name field-expr)))
+				(reduce active-field-rewrites (lambda (cond-acc pair) (match pair
+					'(field-name field-expr)
+					(qpu-low-replace-sq-field-expr cond-acc
+						rhs-alias field-name field-expr)
+					cond-acc))
+					(qpp-tuple-condition left-tuple))))
 		(define rewritten-having
 			(if (or left-has-group (nil? (qpp-tuple-having left-tuple)))
 				(qpp-tuple-having left-tuple)
-				(qpu-low-replace-sq-field-expr (qpp-tuple-having left-tuple)
-					rhs-alias field-name field-expr)))
+				(reduce field-rewrites (lambda (having-acc pair) (match pair
+					'(field-name field-expr)
+					(qpu-low-replace-sq-field-expr having-acc
+						rhs-alias field-name field-expr)
+					having-acc))
+					(qpp-tuple-having left-tuple))))
 		(qpp-rebuild-tuple
 			(qpp-tuple-schema left-tuple)
 			(merge (qpp-tuple-tables left-tuple) (list new-entry))
@@ -2049,14 +2116,14 @@ attached to the wrapper join instead. */
 		(define new-tuple (qpp-rebuild-tuple
 			(qpp-tuple-schema tuple)
 			(nth pull 0)
-				(qpp-tuple-fields tuple)
-				(qpp-tuple-condition tuple)
-				(qpp-tuple-group tuple)
-				(qpp-tuple-having tuple)
-				(qpp-tuple-order tuple)
-				(qpp-tuple-limit tuple)
-				(qpp-tuple-offset tuple)))
-			(list new-tuple (nth pull 1)))))
+			(qpp-tuple-fields tuple)
+			(qpp-tuple-condition tuple)
+			(qpp-tuple-group tuple)
+			(qpp-tuple-having tuple)
+			(qpp-tuple-order tuple)
+			(qpp-tuple-limit tuple)
+			(qpp-tuple-offset tuple)))
+		(list new-tuple (nth pull 1)))))
 
 (define qpu-low-tuple-external-refs (lambda (tuple right-aliases left-aliases)
 	(begin
@@ -2106,131 +2173,131 @@ attached to the wrapper join instead. */
 				nil))
 		nil)))
 
-	(define qpu-low-equibound-external-refs (lambda (expr right-aliases left-aliases)
-		(match expr
-			'((symbol equal??) lhs rhs)
-			(begin
-				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
-				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+(define qpu-low-equibound-external-refs (lambda (expr right-aliases left-aliases)
+	(match expr
+		'((symbol equal??) lhs rhs)
+		(begin
+			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+			(if (and (not (nil? lside)) (not (nil? rside))
+				(equal? (car lside) (quote left))
+				(equal? (car rside) (quote right)))
+				(list (list (nth lside 1) (nth lside 2)))
 				(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote left))
-						(equal? (car rside) (quote right)))
-					(list (list (nth lside 1) (nth lside 2)))
-					(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote right))
-						(equal? (car rside) (quote left)))
-						(list (list (nth rside 1) (nth rside 2)))
-						'())))
-			'((quote equal??) lhs rhs)
-			(begin
-				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
-				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+					(equal? (car lside) (quote right))
+					(equal? (car rside) (quote left)))
+					(list (list (nth rside 1) (nth rside 2)))
+					'())))
+		'((quote equal??) lhs rhs)
+		(begin
+			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+			(if (and (not (nil? lside)) (not (nil? rside))
+				(equal? (car lside) (quote left))
+				(equal? (car rside) (quote right)))
+				(list (list (nth lside 1) (nth lside 2)))
 				(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote left))
-						(equal? (car rside) (quote right)))
-					(list (list (nth lside 1) (nth lside 2)))
-					(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote right))
-						(equal? (car rside) (quote left)))
-						(list (list (nth rside 1) (nth rside 2)))
-						'())))
-			(cons sym args)
-			(if (or (is_opaque_scope_sym sym) (not (list? args)))
-				'()
-				(merge_unique (map args (lambda (arg)
-					(qpu-low-equibound-external-refs arg right-aliases left-aliases)))))
-			'())))
+					(equal? (car lside) (quote right))
+					(equal? (car rside) (quote left)))
+					(list (list (nth rside 1) (nth rside 2)))
+					'())))
+		(cons sym args)
+		(if (or (is_opaque_scope_sym sym) (not (list? args)))
+			'()
+			(merge_unique (map args (lambda (arg)
+				(qpu-low-equibound-external-refs arg right-aliases left-aliases)))))
+		'())))
 
-	(define qpu-low-equibound-external-ref-replacements (lambda (expr right-aliases left-aliases)
-		(match expr
-			'((symbol equal??) lhs rhs)
-			(begin
-				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
-				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+(define qpu-low-equibound-external-ref-replacements (lambda (expr right-aliases left-aliases)
+	(match expr
+		'((symbol equal??) lhs rhs)
+		(begin
+			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+			(if (and (not (nil? lside)) (not (nil? rside))
+				(equal? (car lside) (quote left))
+				(equal? (car rside) (quote right)))
+				(list (list (nth lside 1) (nth lside 2) (nth rside 1) (nth rside 2)))
 				(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote left))
-						(equal? (car rside) (quote right)))
-					(list (list (nth lside 1) (nth lside 2) (nth rside 1) (nth rside 2)))
-					(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote right))
-						(equal? (car rside) (quote left)))
-						(list (list (nth rside 1) (nth rside 2) (nth lside 1) (nth lside 2)))
-						'())))
-			'((quote equal??) lhs rhs)
-			(begin
-				(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
-				(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+					(equal? (car lside) (quote right))
+					(equal? (car rside) (quote left)))
+					(list (list (nth rside 1) (nth rside 2) (nth lside 1) (nth lside 2)))
+					'())))
+		'((quote equal??) lhs rhs)
+		(begin
+			(define lside (qpu-low-col-ref-side lhs right-aliases left-aliases))
+			(define rside (qpu-low-col-ref-side rhs right-aliases left-aliases))
+			(if (and (not (nil? lside)) (not (nil? rside))
+				(equal? (car lside) (quote left))
+				(equal? (car rside) (quote right)))
+				(list (list (nth lside 1) (nth lside 2) (nth rside 1) (nth rside 2)))
 				(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote left))
-						(equal? (car rside) (quote right)))
-					(list (list (nth lside 1) (nth lside 2) (nth rside 1) (nth rside 2)))
-					(if (and (not (nil? lside)) (not (nil? rside))
-						(equal? (car lside) (quote right))
-						(equal? (car rside) (quote left)))
-						(list (list (nth rside 1) (nth rside 2) (nth lside 1) (nth lside 2)))
-						'())))
-			(cons sym args)
-			(if (or (is_opaque_scope_sym sym) (not (list? args)))
-				'()
-				(merge_unique (map args (lambda (arg)
-					(qpu-low-equibound-external-ref-replacements arg right-aliases left-aliases)))))
-			'())))
+					(equal? (car lside) (quote right))
+					(equal? (car rside) (quote left)))
+					(list (list (nth rside 1) (nth rside 2) (nth lside 1) (nth lside 2)))
+					'())))
+		(cons sym args)
+		(if (or (is_opaque_scope_sym sym) (not (list? args)))
+			'()
+			(merge_unique (map args (lambda (arg)
+				(qpu-low-equibound-external-ref-replacements arg right-aliases left-aliases)))))
+		'())))
 
-	(define qpu-low-equibound-replacement-lookup (lambda (replacements tv col)
-		(reduce replacements (lambda (found repl)
-			(if (not (nil? found))
-				found
-				(match repl
-					'(left-tv left-col right-tv right-col)
-					(if (and (equal? left-tv tv) (equal? left-col col))
-						(list (quote get_column) right-tv false right-col false)
-						nil)
-					nil)))
-			nil)))
+(define qpu-low-equibound-replacement-lookup (lambda (replacements tv col)
+	(reduce replacements (lambda (found repl)
+		(if (not (nil? found))
+			found
+			(match repl
+				'(left-tv left-col right-tv right-col)
+				(if (and (equal? left-tv tv) (equal? left-col col))
+					(list (quote get_column) right-tv false right-col false)
+					nil)
+				nil)))
+		nil)))
 
-	(define qpu-low-rewrite-equibound-external-refs-expr (lambda (expr replacements)
-		(match expr
-			'((symbol get_column) tv _ col _)
-			(coalesce (qpu-low-equibound-replacement-lookup replacements tv col) expr)
-			'((quote get_column) tv _ col _)
-			(coalesce (qpu-low-equibound-replacement-lookup replacements tv col) expr)
-			(cons sym args)
-			(if (or (is_opaque_scope_sym sym) (not (list? args)))
-				expr
-				(cons sym (map args (lambda (arg)
-					(qpu-low-rewrite-equibound-external-refs-expr arg replacements)))))
-			_ expr)))
+(define qpu-low-rewrite-equibound-external-refs-expr (lambda (expr replacements)
+	(match expr
+		'((symbol get_column) tv _ col _)
+		(coalesce (qpu-low-equibound-replacement-lookup replacements tv col) expr)
+		'((quote get_column) tv _ col _)
+		(coalesce (qpu-low-equibound-replacement-lookup replacements tv col) expr)
+		(cons sym args)
+		(if (or (is_opaque_scope_sym sym) (not (list? args)))
+			expr
+			(cons sym (map args (lambda (arg)
+				(qpu-low-rewrite-equibound-external-refs-expr arg replacements)))))
+		_ expr)))
 
-	(define qpu-low-rewrite-equibound-external-refs-tuple (lambda (tuple replacements)
-		(qpp-rebuild-tuple
-			(qpp-tuple-schema tuple)
-			(map (coalesceNil (qpp-tuple-tables tuple) '())
-				(lambda (td) (match td
-					'(tv tschema ttbl tisOuter tjoinexpr)
-					(list tv tschema ttbl tisOuter
-						(qpu-low-rewrite-equibound-external-refs-expr
-							(coalesceNil tjoinexpr true)
-							replacements))
-					td)))
-			(qpp-fields-to-flat
-				(map (qpp-fields-to-pairs (qpp-tuple-fields tuple)) (lambda (pair) (match pair
-					'(name expr)
-					(list name (qpu-low-rewrite-equibound-external-refs-expr expr replacements))
-					pair))))
-			(qpu-low-rewrite-equibound-external-refs-expr
-				(coalesceNil (qpp-tuple-condition tuple) true)
-				replacements)
-			(map (coalesceNil (qpp-tuple-group tuple) '())
-				(lambda (expr) (qpu-low-rewrite-equibound-external-refs-expr expr replacements)))
-			(qpu-low-rewrite-equibound-external-refs-expr
-				(coalesceNil (qpp-tuple-having tuple) true)
-				replacements)
-			(map (coalesceNil (qpp-tuple-order tuple) '()) (lambda (item) (match item
-				'(expr dir)
-				(list (qpu-low-rewrite-equibound-external-refs-expr expr replacements) dir)
-				item)))
-			(qpp-tuple-limit tuple)
-			(qpp-tuple-offset tuple))))
+(define qpu-low-rewrite-equibound-external-refs-tuple (lambda (tuple replacements)
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema tuple)
+		(map (coalesceNil (qpp-tuple-tables tuple) '())
+			(lambda (td) (match td
+				'(tv tschema ttbl tisOuter tjoinexpr)
+				(list tv tschema ttbl tisOuter
+					(qpu-low-rewrite-equibound-external-refs-expr
+						(coalesceNil tjoinexpr true)
+						replacements))
+				td)))
+		(qpp-fields-to-flat
+			(map (qpp-fields-to-pairs (qpp-tuple-fields tuple)) (lambda (pair) (match pair
+				'(name expr)
+				(list name (qpu-low-rewrite-equibound-external-refs-expr expr replacements))
+				pair))))
+		(qpu-low-rewrite-equibound-external-refs-expr
+			(coalesceNil (qpp-tuple-condition tuple) true)
+			replacements)
+		(map (coalesceNil (qpp-tuple-group tuple) '())
+			(lambda (expr) (qpu-low-rewrite-equibound-external-refs-expr expr replacements)))
+		(qpu-low-rewrite-equibound-external-refs-expr
+			(coalesceNil (qpp-tuple-having tuple) true)
+			replacements)
+		(map (coalesceNil (qpp-tuple-order tuple) '()) (lambda (item) (match item
+			'(expr dir)
+			(list (qpu-low-rewrite-equibound-external-refs-expr expr replacements) dir)
+			item)))
+		(qpp-tuple-limit tuple)
+		(qpp-tuple-offset tuple))))
 
 (define qpu-low-domain-alias (lambda (alias)
 	(concat "dom_" alias)))
@@ -2289,9 +2356,9 @@ attached to the wrapper join instead. */
 			(list domain-alias td-schema domain-tuple false nil))
 		td)))
 
-	(define qpu-low-rewrite-domain-tuple (lambda (tuple alias-map)
-		(qpp-rebuild-tuple
-			(qpp-tuple-schema tuple)
+(define qpu-low-rewrite-domain-tuple (lambda (tuple alias-map)
+	(qpp-rebuild-tuple
+		(qpp-tuple-schema tuple)
 		(map (coalesceNil (qpp-tuple-tables tuple) '())
 			(lambda (td) (qpu-low-rewrite-domain-table td alias-map)))
 		(qpu-low-rewrite-alias-map-fields (qpp-tuple-fields tuple) alias-map)
@@ -2304,52 +2371,52 @@ attached to the wrapper join instead. */
 		(map (coalesceNil (qpp-tuple-order tuple) '()) (lambda (item) (match item
 			'(expr dir) (list (qpu-low-rewrite-alias-map-expr expr alias-map) dir)
 			item)))
-			(qpp-tuple-limit tuple)
-			(qpp-tuple-offset tuple))))
+		(qpp-tuple-limit tuple)
+		(qpp-tuple-offset tuple))))
 
-	(define qpu-low-domain-equality-predicate (lambda (external-refs alias-map)
-		(qpu-low-conjuncts-to-and (map external-refs (lambda (ref) (match ref
-			'(tv col) (list (quote equal??)
-				(list (quote get_column) tv false col false)
-				(list (quote get_column)
-					(qpu-low-alias-map-lookup alias-map tv) false col false))
-			true))))))
+(define qpu-low-domain-equality-predicate (lambda (external-refs alias-map)
+	(qpu-low-conjuncts-to-and (map external-refs (lambda (ref) (match ref
+		'(tv col) (list (quote equal??)
+			(list (quote get_column) tv false col false)
+			(list (quote get_column)
+				(qpu-low-alias-map-lookup alias-map tv) false col false))
+		true))))))
 
-	(define qpu-low-tuple-has-aggregate? (lambda (tuple)
-		(or
-			(not (equal? (extract_aggregates (qpp-tuple-fields tuple)) '()))
-			(not (equal? (extract_aggregates (coalesceNil (qpp-tuple-condition tuple) true)) '()))
-			(not (equal? (extract_aggregates (coalesceNil (qpp-tuple-having tuple) true)) '())))))
+(define qpu-low-tuple-has-aggregate? (lambda (tuple)
+	(or
+		(not (equal? (extract_aggregates (qpp-tuple-fields tuple)) '()))
+		(not (equal? (extract_aggregates (coalesceNil (qpp-tuple-condition tuple) true)) '()))
+		(not (equal? (extract_aggregates (coalesceNil (qpp-tuple-having tuple) true)) '())))))
 
-	(define qpu-low-inject-domain-copies (lambda (left-tuple right-tuple join-pred)
-		(begin
-			(define right-aliases (map (coalesceNil (qpp-tuple-tables right-tuple) '())
-				(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
-			(define left-aliases (map (coalesceNil (qpp-tuple-tables left-tuple) '())
-				(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
-			(define table-joinexpr (qpu-low-conjuncts-to-and
-				(map (coalesceNil (qpp-tuple-tables right-tuple) '())
-					(lambda (td) (match td
-						'(_ _ _ _ je) (coalesceNil je true)
-						true)))))
-			(define use-equibound-substitution false)
-			(define equibound-replacements (if use-equibound-substitution
-				(merge_unique
-					(qpu-low-equibound-external-ref-replacements join-pred right-aliases left-aliases)
-					(qpu-low-equibound-external-ref-replacements
-						(coalesceNil (qpp-tuple-condition right-tuple) true)
-						right-aliases left-aliases)
-					(qpu-low-equibound-external-ref-replacements table-joinexpr right-aliases left-aliases))
-				'()))
-			(define right-tuple (if (equal? equibound-replacements '())
-				right-tuple
-				(qpu-low-rewrite-equibound-external-refs-tuple right-tuple equibound-replacements)))
-			(define join-pred (if (equal? equibound-replacements '())
-				join-pred
-				(qpu-low-rewrite-equibound-external-refs-expr join-pred equibound-replacements)))
-			(define external-refs (merge_unique
-				(qpu-low-tuple-external-refs right-tuple right-aliases left-aliases)
-				(qpu-low-expr-external-refs join-pred right-aliases left-aliases)))
+(define qpu-low-inject-domain-copies (lambda (left-tuple right-tuple join-pred)
+	(begin
+		(define right-aliases (map (coalesceNil (qpp-tuple-tables right-tuple) '())
+			(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+		(define left-aliases (map (coalesceNil (qpp-tuple-tables left-tuple) '())
+			(lambda (td) (if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+		(define table-joinexpr (qpu-low-conjuncts-to-and
+			(map (coalesceNil (qpp-tuple-tables right-tuple) '())
+				(lambda (td) (match td
+					'(_ _ _ _ je) (coalesceNil je true)
+					true)))))
+		(define use-equibound-substitution false)
+		(define equibound-replacements (if use-equibound-substitution
+			(merge_unique
+				(qpu-low-equibound-external-ref-replacements join-pred right-aliases left-aliases)
+				(qpu-low-equibound-external-ref-replacements
+					(coalesceNil (qpp-tuple-condition right-tuple) true)
+					right-aliases left-aliases)
+				(qpu-low-equibound-external-ref-replacements table-joinexpr right-aliases left-aliases))
+			'()))
+		(define right-tuple (if (equal? equibound-replacements '())
+			right-tuple
+			(qpu-low-rewrite-equibound-external-refs-tuple right-tuple equibound-replacements)))
+		(define join-pred (if (equal? equibound-replacements '())
+			join-pred
+			(qpu-low-rewrite-equibound-external-refs-expr join-pred equibound-replacements)))
+		(define external-refs (merge_unique
+			(qpu-low-tuple-external-refs right-tuple right-aliases left-aliases)
+			(qpu-low-expr-external-refs join-pred right-aliases left-aliases)))
 		(define equibound-external-refs
 			(qpu-low-equibound-external-refs join-pred right-aliases left-aliases))
 		(if (equal? (count external-refs) 0)
@@ -2361,34 +2428,34 @@ attached to the wrapper join instead. */
 						acc)) '()))
 				(define alias-map (map external-aliases (lambda (a)
 					(list a (qpu-low-domain-alias a)))))
-					(define domain-tables (reduce external-aliases (lambda (acc a)
-						(begin
-							(define td (qpu-low-find-table-entry
-								(qpp-tuple-tables left-tuple) a))
-							(if (nil? td) acc
-								(begin
-									(define cols (qpu-low-domain-ref-cols-for-alias external-refs a))
-									(if (equal? (count cols) 0) acc
-										(merge acc (list
-											(qpu-low-domain-table-for-alias td a cols))))))))
-						'()))
-					(define rewritten-right
-						(qpu-low-rewrite-domain-tuple right-tuple alias-map))
-					(define rewritten-join-pred
-						(qpu-low-rewrite-alias-map-expr
-							(coalesceNil join-pred true) alias-map))
-					(define new-right (qpp-rebuild-tuple
-						(qpp-tuple-schema rewritten-right)
-						(merge domain-tables (qpp-tuple-tables rewritten-right))
-						(qpp-tuple-fields rewritten-right)
-						(qpu-low-and-cond
-							(qpp-tuple-condition rewritten-right)
-							rewritten-join-pred)
-						(qpp-tuple-group rewritten-right)
-						(qpp-tuple-having rewritten-right)
-						(qpp-tuple-order rewritten-right)
-						(qpp-tuple-limit rewritten-right)
-						(qpp-tuple-offset rewritten-right)))
+				(define domain-tables (reduce external-aliases (lambda (acc a)
+					(begin
+						(define td (qpu-low-find-table-entry
+							(qpp-tuple-tables left-tuple) a))
+						(if (nil? td) acc
+							(begin
+								(define cols (qpu-low-domain-ref-cols-for-alias external-refs a))
+								(if (equal? (count cols) 0) acc
+									(merge acc (list
+										(qpu-low-domain-table-for-alias td a cols))))))))
+					'()))
+				(define rewritten-right
+					(qpu-low-rewrite-domain-tuple right-tuple alias-map))
+				(define rewritten-join-pred
+					(qpu-low-rewrite-alias-map-expr
+						(coalesceNil join-pred true) alias-map))
+				(define new-right (qpp-rebuild-tuple
+					(qpp-tuple-schema rewritten-right)
+					(merge domain-tables (qpp-tuple-tables rewritten-right))
+					(qpp-tuple-fields rewritten-right)
+					(qpu-low-and-cond
+						(qpp-tuple-condition rewritten-right)
+						rewritten-join-pred)
+					(qpp-tuple-group rewritten-right)
+					(qpp-tuple-having rewritten-right)
+					(qpp-tuple-order rewritten-right)
+					(qpp-tuple-limit rewritten-right)
+					(qpp-tuple-offset rewritten-right)))
 				(list new-right
 					(qpu-low-and-cond join-pred
 						(qpu-low-domain-equality-predicate
@@ -2668,26 +2735,26 @@ __kt_* boundary columns as partition keys. */
 		(define mat-tbls (map tbls (lambda (td) (match td
 			'(a s t io je) (list a s t io je)
 			_ td))))
-			(define fields-pairs (qpp-fields-to-pairs
-				(coalesceNil (qpp-tuple-fields right-tuple) '())))
-			(define materialized-fields-pairs
-				(map fields-pairs (lambda (pair) (match pair
-					'(name expr)
-					(begin
-						(define rewritten-expr
-							(qpu-low-sq-rewrites-apply-expr-scoped expr
-								(qpp-tuple-tables right-tuple)))
-						(list name (qpu-low-left-join-boundary-key-expr
-							name rewritten-expr
-							(qpp-tuple-tables right-tuple))))
-					pair))))
-			(define mat-tuple (qpp-rebuild-tuple
-				(qpp-tuple-schema right-tuple)
-				mat-tbls
-				(qpp-fields-to-flat materialized-fields-pairs)
-				(qpp-tuple-condition right-tuple)
-				(qpp-tuple-group right-tuple)
-				(qpp-tuple-having right-tuple)
+		(define fields-pairs (qpp-fields-to-pairs
+			(coalesceNil (qpp-tuple-fields right-tuple) '())))
+		(define materialized-fields-pairs
+			(map fields-pairs (lambda (pair) (match pair
+				'(name expr)
+				(begin
+					(define rewritten-expr
+						(qpu-low-sq-rewrites-apply-expr-scoped expr
+							(qpp-tuple-tables right-tuple)))
+					(list name (qpu-low-left-join-boundary-key-expr
+						name rewritten-expr
+						(qpp-tuple-tables right-tuple))))
+				pair))))
+		(define mat-tuple (qpp-rebuild-tuple
+			(qpp-tuple-schema right-tuple)
+			mat-tbls
+			(qpp-fields-to-flat materialized-fields-pairs)
+			(qpp-tuple-condition right-tuple)
+			(qpp-tuple-group right-tuple)
+			(qpp-tuple-having right-tuple)
 			nil
 			nil
 			nil))
@@ -2710,25 +2777,25 @@ __kt_* boundary columns as partition keys. */
 				(make_materialized-subquery-source-with-init
 					(materialized-subquery-source-key mat-source)
 					mat-init)))
-			(planned_materialized_fields mat-source
-				(map fields-pairs (lambda (pair) (match pair
-					'(name _expr) (list "Field" name "Type" "any")
-					_ nil))))
-			(reduce materialized-fields-pairs (lambda (acc pair) (match pair
-				'(name expr)
-				(if (qpu-low-exists-bool-default-field? expr
-					(qpp-tuple-tables right-tuple))
-					(qpu-low-sq-rewrites-add wrap-alias name
-						(list (quote coalesceNil)
-							(list (quote get_column) wrap-alias false name false)
-							false))
-					nil)
-				acc))
+		(planned_materialized_fields mat-source
+			(map fields-pairs (lambda (pair) (match pair
+				'(name _expr) (list "Field" name "Type" "any")
+				_ nil))))
+		(reduce materialized-fields-pairs (lambda (acc pair) (match pair
+			'(name expr)
+			(if (qpu-low-exists-bool-default-field? expr
+				(qpp-tuple-tables right-tuple))
+				(qpu-low-sq-rewrites-add wrap-alias name
+					(list (quote coalesceNil)
+						(list (quote get_column) wrap-alias false name false)
+						false))
 				nil)
-			(reduce materialized-fields-pairs (lambda (acc pair) (match pair
-				'(name expr)
-				(if (qpu-low-count-zero-default-field? expr
-					(qpp-tuple-tables right-tuple))
+			acc))
+			nil)
+		(reduce materialized-fields-pairs (lambda (acc pair) (match pair
+			'(name expr)
+			(if (qpu-low-count-zero-default-field? expr
+				(qpp-tuple-tables right-tuple))
 				(qpu-low-sq-rewrites-add wrap-alias name
 					(list (quote coalesceNil)
 						(list (quote get_column) wrap-alias false name false)
@@ -2953,13 +3020,17 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 		(define inline-result (qpu-low-inline-merge-sq-derived-with-map right-tuple-raw))
 		(define right-merged (qpu-low-sq-rewrites-apply-tuple-scoped (nth inline-result 0)))
 		(define inline-rename-map (nth inline-result 1))
+		(define join-pred-scoped
+			(qpu-low-sq-rewrites-apply-expr-scoped
+				join-pred-raw
+				(qpp-tuple-tables right-merged)))
 		/* Also apply the rename-map to the incoming join-pred so any refs to
 		the inlined sq_Y.__kt_col map to the underlying inner col. */
 		(define join-pred-base
-			(if (equal? (count inline-rename-map) 0) join-pred-raw
+			(if (equal? (count inline-rename-map) 0) join-pred-scoped
 				(reduce inline-rename-map (lambda (acc pair) (match pair
 					'(sa pm) (qpu-low-rewrite-sq-refs-to-inner acc sa pm)
-					acc)) join-pred-raw)))
+					acc)) join-pred-scoped)))
 		/* FAQ §43 per-outer LIMIT: after nested scalar helpers have been
 		inline-merged, a LIMIT belongs to each outer binding, not to the
 		whole derived relation. Rewrite it to ROW_NUMBER() partitioned by
@@ -3057,12 +3128,12 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 		(define right-kt-inner-cols
 			(qpu-low-kt-partition-cols-from-fields
 				(qpp-tuple-fields right-tuple-keys-limited)))
-			(define scalar-dropped-limit-candidate
-				(and is-scalar-rhs
-					(equal? (count (qpp-tuple-tables right-tuple-keys-limited)) 1)
-					(or
-						(qpu-low-tuple-has-dropped-limit-marker? right-tuple-raw)
-						(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-raw)
+		(define scalar-dropped-limit-candidate
+			(and is-scalar-rhs
+				(equal? (count (qpp-tuple-tables right-tuple-keys-limited)) 1)
+				(or
+					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-raw)
+					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-raw)
 					(qpu-low-tuple-has-dropped-limit-marker? right-tuple-keys-limited)
 					right-had-dropped-limit-marker)
 				(nil? (qpp-tuple-limit right-tuple-raw))
@@ -3072,18 +3143,18 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				(not (qpu-low-tuple-has-limit-stage? right-tuple-keys-limited))
 				(equal? right-tuple-keys-limited right-tuple-keys-raw)
 				(> (count right-kt-inner-cols) 0)))
-			(define right-tuple-keys
-				(if scalar-dropped-limit-candidate
-					(qpu-low-tag-inner-limit-contract right-tuple-keys-limited 1 1)
-					(if scalar-no-limit-candidate
-						(if (> (count right-kt-inner-cols) 0)
-							(if (qpu-low-tuple-has-aggregate-field? right-tuple-keys-limited)
-								right-tuple-keys-limited
-								(qpu-low-add-scalar-once-marker
-									(qpu-low-tag-inner-once-limit right-tuple-keys-limited)))
-							(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
-						right-tuple-keys-limited)))
-			(define rewritten-fields (qpu-low-rewrite-projections
+		(define right-tuple-keys
+			(if scalar-dropped-limit-candidate
+				(qpu-low-tag-inner-limit-contract right-tuple-keys-limited 1 1)
+				(if scalar-no-limit-candidate
+					(if (> (count right-kt-inner-cols) 0)
+						(if (qpu-low-tuple-has-aggregate-field? right-tuple-keys-limited)
+							right-tuple-keys-limited
+							(qpu-low-add-scalar-once-marker
+								(qpu-low-tag-inner-once-limit right-tuple-keys-limited)))
+						(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
+					right-tuple-keys-limited)))
+		(define rewritten-fields (qpu-low-rewrite-projections
 			(qpp-tuple-fields left-tuple) right-only-aliases rhs-alias))
 		(define rewritten-cond (qpu-low-rewrite-refs
 			(qpp-tuple-condition left-tuple) right-only-aliases rhs-alias))
@@ -3132,11 +3203,11 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				expr
 				(cons sym (map args rewrite-rhs-default-ref)))
 			expr)))
-			(define final-fields
-				(if (> (count rhs-default-cols) 0)
-					(qpp-map-fields rewritten-fields rewrite-rhs-default-ref)
-					rewritten-fields))
-			(reduce rhs-default-cols (lambda (acc col) (begin
+		(define final-fields
+			(if (> (count rhs-default-cols) 0)
+				(qpp-map-fields rewritten-fields rewrite-rhs-default-ref)
+				rewritten-fields))
+		(reduce rhs-default-cols (lambda (acc col) (begin
 			(qpu-low-sq-rewrites-add rhs-alias col
 				(list (quote coalesceNil)
 					(list (quote get_column) rhs-alias false col false)
