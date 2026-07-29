@@ -100,12 +100,12 @@ display them next to the plan root. */
 	(define t4 (lift_dep_joins_pass t3b))
 	(define t5 (unnest_pass t4))
 	(define t6 (lower_to_scans_pass t5))
-		(list
-			(list "stage" "neumann" "kind" "after-resolve" "value" (serialize t3b))
-			(list "stage" "neumann" "kind" "after-lift" "value" (serialize t4))
-			(list "stage" "neumann" "kind" "after-unnest" "value" (serialize t5))
-			(list "stage" "neumann" "kind" "after-lower" "value" (serialize t6)))))
-	)
+	(list
+		(list "stage" "neumann" "kind" "after-resolve" "value" (serialize t3b))
+		(list "stage" "neumann" "kind" "after-lift" "value" (serialize t4))
+		(list "stage" "neumann" "kind" "after-unnest" "value" (serialize t5))
+		(list "stage" "neumann" "kind" "after-lower" "value" (serialize t6)))))
+)
 
 /* explain_queryplan_ir: expose planner IR around the logical query-term planner.
 Returns compact stage/kind/value rows for stable SQL-level inspection. */

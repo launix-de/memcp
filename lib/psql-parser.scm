@@ -278,19 +278,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							(list (quote coalesceNil) count_expr 0)
 							0)
 						/* IN / NOT IN: SQL tri-valued NULL handling. See
-							sql_semijoin_count_expr in sql-parser.scm for full rationale. */
-							(if (and (not (nil? union_parts)) (not (nil? target_expr)))
-								(if union_membership_branches_simple?
-									(match union_parts '(branches _ _ _)
-										(cons (if negated (quote and) (quote or))
-											(map branches (lambda (branch)
-												(if negated
-													(list (quote not) (list (quote inner_select_in) target_expr branch))
-													(list (quote inner_select_in) target_expr branch))))))
-									(if negated
-										(list (quote not) (list (quote inner_select_in) target_expr subquery))
-										(list (quote inner_select_in) target_expr subquery)))
-								(begin
+						sql_semijoin_count_expr in sql-parser.scm for full rationale. */
+						(if (and (not (nil? union_parts)) (not (nil? target_expr)))
+							(if union_membership_branches_simple?
+								(match union_parts '(branches _ _ _)
+									(cons (if negated (quote and) (quote or))
+										(map branches (lambda (branch)
+											(if negated
+												(list (quote not) (list (quote inner_select_in) target_expr branch))
+												(list (quote inner_select_in) target_expr branch))))))
+								(if negated
+									(list (quote not) (list (quote inner_select_in) target_expr subquery))
+									(list (quote inner_select_in) target_expr subquery)))
+							(begin
 								(define null_count_expr
 									(list (quote inner_select)
 										(psql_semijoin_null_count_query subquery)))

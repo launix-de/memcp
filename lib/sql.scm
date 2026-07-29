@@ -165,15 +165,15 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
 				nil)
-				(define session_vars (sql_session_vars_in_query parse_query))
-				(define session_sensitive_query (not (equal? session_vars '())))
-				(define session_cache_suffix
-					(if session_sensitive_query
-						(concat ":sess:" (fnv_hash (serialize
-							(map session_vars (lambda (key) (list key (session key)))))))
-						""))
-				(define cache_key (concat username ":" schema ":" (fnv_hash parse_query) session_cache_suffix))
-				(define cached (queryplan_cache cache_key))
+			(define session_vars (sql_session_vars_in_query parse_query))
+			(define session_sensitive_query (not (equal? session_vars '())))
+			(define session_cache_suffix
+				(if session_sensitive_query
+					(concat ":sess:" (fnv_hash (serialize
+						(map session_vars (lambda (key) (list key (session key)))))))
+					""))
+			(define cache_key (concat username ":" schema ":" (fnv_hash parse_query) session_cache_suffix))
+			(define cached (queryplan_cache cache_key))
 			(if cached cached
 				(begin
 					(define explain_plan_query (sql_explain_plan_query parse_query))

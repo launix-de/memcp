@@ -163,6 +163,22 @@ test_cases:
         - ID: 3
           name: "image3.png"
 
+  - name: "IN with derived table does not expose helper columns"
+    steps:
+      - sql: |
+          SELECT ID, name FROM in_fop_files
+          WHERE ID IN (
+            SELECT result FROM (
+              SELECT result FROM in_renderjob
+            ) AS result_ids
+          )
+          ORDER BY ID
+        expect:
+          rows: 2
+          not_contains:
+            - "__kt_"
+            - "__rn"
+
   - name: "EXPLAIN IN subquery uses materialized count helper cache"
     sql: |
       EXPLAIN SELECT ID, name FROM in_fop_files

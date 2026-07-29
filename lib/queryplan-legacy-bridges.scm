@@ -141,10 +141,10 @@ persist produced rows in a session list. */
 													(list (quote lambda) (list) true)
 													true)
 												nil))))
-									(define inner_plan
-										(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym)))
-									(define mat_dependency_tables
-										(collect_materialized_query_dependency_tables subquery))
+								(define inner_plan
+									(build_queryplan_term_with_sink subquery (list (quote callback) sink_sym)))
+								(define mat_dependency_tables
+									(collect_materialized_query_dependency_tables subquery))
 								(define mat_dependency_invalidations
 									(filter (map mat_dependency_tables (lambda (dep_td)
 										(match dep_td '(dep_schema dep_tbl)
@@ -242,9 +242,9 @@ materialization when the caller already compiled a callback-sink plan. */
 		(concat
 			id
 			(user_session_runtime_cache_suffix_from_exprs (list subquery materialized_rows))))
-		(define mat_source (materialized-subquery-source runtime_id subquery))
-		(materialized_source_dependency_tables mat_source
-			(collect_materialized_query_dependency_tables subquery))
+	(define mat_source (materialized-subquery-source runtime_id subquery))
+	(materialized_source_dependency_tables mat_source
+		(collect_materialized_query_dependency_tables subquery))
 	(list
 		mat_source
 		(materialized-subquery-init runtime_id subquery materialized_rows))

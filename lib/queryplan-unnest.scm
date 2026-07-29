@@ -490,8 +490,8 @@ the empty list (no constraint). */
 		(if (qpu-expr-is-sql-truthy-and? expr)
 			(qpu-flatten-sql-truthy-and-args (cdr (nth expr 1)))
 			(if (qpu-expr-is-and? expr)
-			(qpu-flatten-and-args (cdr expr))
-			(list expr))))))
+				(qpu-flatten-and-args (cdr expr))
+				(list expr))))))
 
 /* qpu-expr-is-and? — true if expr is a list whose head is the `and` symbol. */
 (define qpu-expr-is-and? (lambda (expr) (match expr
@@ -743,7 +743,7 @@ whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
 	(reduce (coalesceNil projections '()) (lambda (found pair) (match pair
 		'(n _expr) (or found (equal? n name))
 		found))
-	false)))
+		false)))
 
 (define qpu-hidden-key-projections-from-predicate
 	(lambda (pred provided-aliases projections)
@@ -762,7 +762,7 @@ whose (tv col) appears as a key in repr with the substituted (tv' col') form. */
 								(list (quote get_column) tv false col false))))))
 				acc)
 			acc))
-		'())))
+			'())))
 
 (define qpu-node-output-projections (lambda (node)
 	(match (qpir-kind node)

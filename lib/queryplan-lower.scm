@@ -542,7 +542,10 @@ Naming: synthesized name `__kt_<col>` (suffixed if collision). */
 	(begin
 		/* Collect ALL refs in join-pred (not just those in right-source-aliases) —
 		the cascade case needs to see refs to deeper-nested aliases too. */
-		(define all-refs (qpir-expr-column-refs join-pred))
+		(define all-refs
+			(reduce (qpir-expr-column-refs join-pred) (lambda (acc ref)
+				(if (has? acc ref) acc (merge acc (list ref))))
+				'()))
 		(define existing-fields (qpp-fields-to-pairs (qpp-tuple-fields right-tuple)))
 		(define top-tables (qpp-tuple-tables right-tuple))
 		/* Plan: walk every ref, classify (direct / cascaded / skip), accumulate
@@ -1803,14 +1806,12 @@ Layout:
 		(define active-field-rewrites
 			(if left-has-group boundary-field-rewrites field-rewrites))
 		(define rewritten-fields
-			(if (and left-has-group (equal? (count active-field-rewrites) 0))
-				(qpp-tuple-fields left-tuple)
-				(reduce active-field-rewrites (lambda (fields-acc pair) (match pair
-					'(field-name field-expr)
-					(qpu-low-replace-sq-field fields-acc
-						rhs-alias field-name field-expr)
-					fields-acc))
-					(qpp-tuple-fields left-tuple))))
+			(reduce active-field-rewrites (lambda (fields-acc pair) (match pair
+				'(field-name field-expr)
+				(qpu-low-replace-sq-field fields-acc
+					rhs-alias field-name field-expr)
+				fields-acc))
+				(qpp-tuple-fields left-tuple)))
 		(define rewritten-cond
 			(if (and left-has-group (equal? (count active-field-rewrites) 0))
 				(qpp-tuple-condition left-tuple)
@@ -2493,6 +2494,72 @@ sq_Y.col map directly to (table.col) per sq_Y's projection definition. */
 		'(name expr) (if (equal? name col) expr acc)
 		acc)) nil)))
 
+(define qpu-low-joinexpr-boundary-projections (lambda (sq-alias joinExpr existing-fields)
+	(begin
+		(define field-exists? (lambda (name)
+			(not (nil? (qpu-low-fields-expr-by-name existing-fields name)))))
+		(define boundary-ref? (lambda (expr) (match expr
+			'((symbol get_column) (eval sq-alias) _ col _)
+			(if (and (string? col) (>= (strlen col) 5)
+				(equal? (substr col 0 5) "__kt_"))
+				col
+				nil)
+			'((quote get_column) (eval sq-alias) _ col _)
+			(if (and (string? col) (>= (strlen col) 5)
+				(equal? (substr col 0 5) "__kt_"))
+				col
+				nil)
+			nil)))
+		(define expr_refs_sq_alias? (lambda (expr)
+			(reduce (qpir-expr-column-refs expr) (lambda (found ref) (match ref
+				'(tv _col) (or found (equal? tv sq-alias))
+				found))
+				false)))
+		(define projection-from-eq (lambda (lhs rhs)
+			(begin
+				(define left-boundary (boundary-ref? lhs))
+				(define right-boundary (boundary-ref? rhs))
+				(if (and (not (nil? left-boundary)) (not (field-exists? left-boundary)) (not (expr_refs_sq_alias? rhs)))
+					(list (list left-boundary rhs))
+					(if (and (not (nil? right-boundary)) (not (field-exists? right-boundary)) (not (expr_refs_sq_alias? lhs)))
+						(list (list right-boundary lhs))
+						'())))))
+		(define collect-boundary-projections (lambda (part) (match part
+			'((symbol equal??) lhs rhs) (projection-from-eq lhs rhs)
+			'((quote equal??) lhs rhs) (projection-from-eq lhs rhs)
+			'((symbol =) lhs rhs) (projection-from-eq lhs rhs)
+			'((quote =) lhs rhs) (projection-from-eq lhs rhs)
+			(cons sym args) (if (or (is_opaque_scope_sym sym) (not (list? args)))
+				'()
+				(merge (map args collect-boundary-projections)))
+			'())))
+		(collect-boundary-projections (coalesceNil joinExpr true)))))
+
+(define qpu-low-parent-boundary-projections (lambda (sq-alias parent-fields sub-tables existing-fields)
+	(begin
+		(define field-exists? (lambda (name)
+			(not (nil? (qpu-low-fields-expr-by-name existing-fields name)))))
+		(filter (map (qpp-fields-to-pairs (coalesceNil parent-fields '()))
+			(lambda (pair) (match pair
+				'(_name ((symbol get_column) (eval sq-alias) _ col _))
+				(if (and (string? col) (strlike col "__kt_%")
+					(not (field-exists? col)))
+					(begin
+						(define local-ref (qpu-low-nested-derived-field-ref
+							sub-tables col))
+						(if (nil? local-ref) nil (list col local-ref)))
+					nil)
+				'(_name ((quote get_column) (eval sq-alias) _ col _))
+				(if (and (string? col) (strlike col "__kt_%")
+					(not (field-exists? col)))
+					(begin
+						(define local-ref (qpu-low-nested-derived-field-ref
+							sub-tables col))
+						(if (nil? local-ref) nil (list col local-ref)))
+					nil)
+				_ nil)))
+			(lambda (entry) (not (nil? entry)))))))
+
 (define qpu-low-inline-merge-sq-derived (lambda (right-tuple)
 	(nth (qpu-low-inline-merge-sq-derived-with-map right-tuple) 0)))
 
@@ -2549,6 +2616,18 @@ sq_Y.col map directly to (table.col) per sq_Y's projection definition. */
 						(define sub-cond (qpp-tuple-condition sub))
 						(define sub-fields-pairs (qpp-fields-to-pairs
 							(coalesceNil (qpp-tuple-fields sub) '())))
+						(define sub-projection-map
+							(merge sub-fields-pairs
+								(merge
+									(qpu-low-joinexpr-boundary-projections
+										sq-alias
+										joinExpr
+										sub-fields-pairs)
+									(qpu-low-parent-boundary-projections
+										sq-alias
+										(qpp-tuple-fields right-tuple)
+										added-tbls
+										sub-fields-pairs))))
 						(list
 							/* accumulated tables */
 							(merge (nth acc 0) added-tbls)
@@ -2559,7 +2638,7 @@ sq_Y.col map directly to (table.col) per sq_Y's projection definition. */
 								(if (or (nil? sub-cond) (equal? sub-cond true)) nil sub-cond))
 							/* accumulated rename map: (sq-alias . projection-map) */
 							(merge (nth acc 2)
-								(list (list sq-alias sub-fields-pairs)))))
+								(list (list sq-alias sub-projection-map)))))
 					acc)) (list '() nil '())))
 				(define added-tables (nth merge-acc 0))
 				(define added-cond-raw (nth merge-acc 1))
@@ -3017,7 +3096,30 @@ Pre-step (FAQ §32 flatten): if right-tuple has nested sq_Y deriveds,
 INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 (define qpu-low-join-wrap-derived (lambda (left-tuple right-tuple-raw join-pred-raw rhs-alias join-type right-had-dropped-limit-marker)
 	(begin
-		(define inline-result (qpu-low-inline-merge-sq-derived-with-map right-tuple-raw))
+		(define raw-right-source-aliases (map (qpp-tuple-tables right-tuple-raw) (lambda (td)
+			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))
+		(define raw-sq-boundary-ref-needed
+			(reduce (qpir-expr-column-refs join-pred-raw) (lambda (needed ref)
+				(match ref
+					'(tv col)
+					(or needed
+						(and (string? col)
+							(strlike col "__kt_%")
+							(qpu-low-is-sq-derived-entry?
+								(qpu-low-find-table-entry
+									(qpp-tuple-tables right-tuple-raw) tv))))
+					needed))
+				false))
+		/* Parent join predicates may reference boundary keys of a nested
+		scalar helper (sq_Y.__kt_col). Expose those keys before flattening
+		sq_Y, otherwise inline-merge removes sq_Y and the predicate keeps a
+		dangling alias. */
+		(define right-tuple-prekeys
+			(if raw-sq-boundary-ref-needed
+				(nth (qpu-low-ensure-join-key-fields
+					right-tuple-raw join-pred-raw raw-right-source-aliases) 0)
+				right-tuple-raw))
+		(define inline-result (qpu-low-inline-merge-sq-derived-with-map right-tuple-prekeys))
 		(define right-merged (qpu-low-sq-rewrites-apply-tuple-scoped (nth inline-result 0)))
 		(define inline-rename-map (nth inline-result 1))
 		(define join-pred-scoped
@@ -3039,7 +3141,13 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 		(define right-tuple-limited right-merged)
 		(define domain-result
 			(qpu-low-inject-domain-copies left-tuple right-tuple-limited join-pred-base))
-		(define join-pred (nth domain-result 1))
+		(define join-pred-after-domain (nth domain-result 1))
+		(define join-pred
+			(if (equal? (count inline-rename-map) 0)
+				join-pred-after-domain
+				(reduce inline-rename-map (lambda (acc pair) (match pair
+					'(sa pm) (qpu-low-rewrite-sq-refs-to-inner acc sa pm)
+					acc)) join-pred-after-domain)))
 		(define right-tuple (nth domain-result 0))
 		(define right-source-aliases (map (qpp-tuple-tables right-tuple) (lambda (td)
 			(if (or (nil? td) (< (count td) 1)) nil (nth td 0)))))

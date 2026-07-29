@@ -1330,47 +1330,62 @@ schema info to disambiguate — a separate concern). */
 					(qpl-union-scalar-scan-lower-expr a union-alias)))))
 		_ expr)))
 
+(define qpl-direct-scalar-scan-source? (lambda (schema-name table-source)
+	(or
+		(materialized-subquery-source? (normalize-materialized-subquery-source table-source))
+		(and
+			(string? table-source)
+			(or (equal? (strlen table-source) 0) (not (equal? (substr table-source 0 1) ".")))
+			(not (nil? (try
+				(lambda () (get_schema schema-name table-source))
+				(lambda (e) nil))))))))
+
 (define qpl-union-in-scalar-scan-expr (lambda (target-expr sub branches) (begin
 	(define value-col (qpl-union-first-field-name branches))
 	(if (nil? value-col)
 		(error "lift_dep_joins_pass: UNION IN-subquery must project exactly one field")
+		(if (not (qpl-direct-scalar-scan-source? "" sub))
+			nil
+			(begin
+				(define union-alias (qpl-fresh-sq-alias))
+				(define filter-expr
+					(list (quote equal??)
+						(list (quote get_column) union-alias false value-col false)
+						target-expr))
+				(define scan-expr
+					(list (quote scalar_scan)
+						""
+						sub
+						(list (quote list) value-col)
+						(list (quote lambda)
+							(list (symbol (concat union-alias "." value-col)))
+							(qpl-union-scalar-scan-lower-expr filter-expr union-alias))
+						(list (quote list))
+						(list (quote lambda) (list) true)
+						(list (quote lambda) (list (quote acc) (quote item)) true)
+						nil
+						nil))
+				(list (quote if)
+					(list (quote nil?) target-expr)
+					nil
+					(list (quote not) (list (quote nil?) scan-expr)))))))))
+
+(define qpl-union-exists-scalar-scan-expr (lambda (sub) (begin
+	(if (not (qpl-direct-scalar-scan-source? "" sub))
+		nil
 		(begin
-			(define union-alias (qpl-fresh-sq-alias))
-			(define filter-expr
-				(list (quote equal??)
-					(list (quote get_column) union-alias false value-col false)
-					target-expr))
 			(define scan-expr
 				(list (quote scalar_scan)
 					""
 					sub
-					(list (quote list) value-col)
-					(list (quote lambda)
-						(list (symbol (concat union-alias "." value-col)))
-						(qpl-union-scalar-scan-lower-expr filter-expr union-alias))
+					(list (quote list))
+					(list (quote lambda) (list) true)
 					(list (quote list))
 					(list (quote lambda) (list) true)
 					(list (quote lambda) (list (quote acc) (quote item)) true)
 					nil
 					nil))
-			(list (quote if)
-				(list (quote nil?) target-expr)
-				nil
-				(list (quote not) (list (quote nil?) scan-expr))))))))
-
-(define qpl-union-exists-scalar-scan-expr (lambda (sub) (begin
-	(define scan-expr
-		(list (quote scalar_scan)
-			""
-			sub
-			(list (quote list))
-			(list (quote lambda) (list) true)
-			(list (quote list))
-			(list (quote lambda) (list) true)
-			(list (quote lambda) (list (quote acc) (quote item)) true)
-			nil
-			nil))
-	(list (quote not) (list (quote nil?) scan-expr)))))
+			(list (quote not) (list (quote nil?) scan-expr)))))))
 
 (define qpl-cols-for-alias (lambda (expr alias-name)
 	(match expr
@@ -1400,26 +1415,29 @@ schema info to disambiguate — a separate concern). */
 		(or (nil? sq_offset) (equal? sq_offset 0)))
 		(match (car sq_tables)
 			'(tv tschema ttbl _isOuter tjoinexpr)
-			(begin
-				(define filter-expr
-					(qpl-and-cond (coalesceNil tjoinexpr true) (coalesceNil sq_condition true)))
-				(define filter-cols (qpl-cols-for-alias filter-expr tv))
-				(define filter-params (map filter-cols (lambda (col)
-					(symbol (concat tv "." col)))))
-				(define scan-expr
-					(list (quote scalar_scan)
-						tschema
-						ttbl
-						(cons (quote list) filter-cols)
-						(list (quote lambda)
-							filter-params
-							(qpl-union-scalar-scan-lower-expr filter-expr tv))
-						(list (quote list))
-						(list (quote lambda) (list) true)
-						(list (quote lambda) (list (quote acc) (quote item)) true)
-						nil
-						nil))
-				(list (quote not) (list (quote nil?) scan-expr)))
+			(if (not (qpl-direct-scalar-scan-source? tschema ttbl))
+				nil
+				(begin
+					(define filter-expr
+						(qpl-and-cond (coalesceNil tjoinexpr true) (coalesceNil sq_condition true)))
+					(define filter-cols (qpl-cols-for-alias filter-expr tv))
+					(define filter-params (map filter-cols (lambda (col)
+						(symbol (concat tv "." col)))))
+					(define scan-expr
+						(list (quote scalar_scan)
+							tschema
+							ttbl
+							(cons (quote list) filter-cols)
+							(list (quote lambda)
+								filter-params
+								(qpl-union-scalar-scan-lower-expr filter-expr tv))
+							(list (quote list))
+							(list (quote lambda) (list) true)
+							(list (quote lambda) (list (quote acc) (quote item)) true)
+							nil
+							nil))
+					(list (quote not) (list (quote nil?) scan-expr)))
+			)
 			_ nil)
 		(if (equal? sq_limit 0) false nil))
 	_ nil)))
@@ -1435,44 +1453,46 @@ schema info to disambiguate — a separate concern). */
 		(or (nil? sq_offset) (equal? sq_offset 0)))
 		(match (car sq_tables)
 			'(tv tschema ttbl _isOuter tjoinexpr)
-			(begin
-				(define first-field-expr-raw (match (qpp-fields-to-pairs sq_fields)
-					(cons first-pair _) (nth first-pair 1)
-					nil))
-				(define first-field-expr (match first-field-expr-raw
-					'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
-						(list (quote get_column) tv ti col ci)
-						first-field-expr-raw)
-					'((quote get_column) alias_ ti col ci) (if (nil? alias_)
-						(list (quote get_column) tv ti col ci)
-						first-field-expr-raw)
-					first-field-expr-raw))
-				(if (nil? first-field-expr)
-					nil
-					(begin
-						(define filter-expr (qpl-and-cond
-							(qpl-and-cond (coalesceNil tjoinexpr true) (coalesceNil sq_condition true))
-							(list (quote equal??) first-field-expr target-expr)))
-						(define filter-cols (qpl-cols-for-alias filter-expr tv))
-						(define filter-params (map filter-cols (lambda (col)
-							(symbol (concat tv "." col)))))
-						(define scan-expr
-							(list (quote scalar_scan)
-								tschema
-								ttbl
-								(cons (quote list) filter-cols)
-								(list (quote lambda)
-									filter-params
-									(qpl-union-scalar-scan-lower-expr filter-expr tv))
-								(list (quote list))
-								(list (quote lambda) (list) true)
-								(list (quote lambda) (list (quote acc) (quote item)) true)
+			(if (not (qpl-direct-scalar-scan-source? tschema ttbl))
+				nil
+				(begin
+					(define first-field-expr-raw (match (qpp-fields-to-pairs sq_fields)
+						(cons first-pair _) (nth first-pair 1)
+						nil))
+					(define first-field-expr (match first-field-expr-raw
+						'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
+							(list (quote get_column) tv ti col ci)
+							first-field-expr-raw)
+						'((quote get_column) alias_ ti col ci) (if (nil? alias_)
+							(list (quote get_column) tv ti col ci)
+							first-field-expr-raw)
+						first-field-expr-raw))
+					(if (nil? first-field-expr)
+						nil
+						(begin
+							(define filter-expr (qpl-and-cond
+								(qpl-and-cond (coalesceNil tjoinexpr true) (coalesceNil sq_condition true))
+								(list (quote equal??) first-field-expr target-expr)))
+							(define filter-cols (qpl-cols-for-alias filter-expr tv))
+							(define filter-params (map filter-cols (lambda (col)
+								(symbol (concat tv "." col)))))
+							(define scan-expr
+								(list (quote scalar_scan)
+									tschema
+									ttbl
+									(cons (quote list) filter-cols)
+									(list (quote lambda)
+										filter-params
+										(qpl-union-scalar-scan-lower-expr filter-expr tv))
+									(list (quote list))
+									(list (quote lambda) (list) true)
+									(list (quote lambda) (list (quote acc) (quote item)) true)
+									nil
+									nil))
+							(list (quote if)
+								(list (quote nil?) target-expr)
 								nil
-								nil))
-						(list (quote if)
-							(list (quote nil?) target-expr)
-							nil
-							(list (quote not) (list (quote nil?) scan-expr))))))
+								(list (quote not) (list (quote nil?) scan-expr)))))))
 			_ nil)
 		nil)
 	_ nil)))
