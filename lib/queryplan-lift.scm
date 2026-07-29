@@ -1389,6 +1389,41 @@ schema info to disambiguate — a separate concern). */
 				'()))
 		'())))
 
+(define qpl-single-table-exists-scalar-scan-expr (lambda (sub) (match sub
+	'(sq_schema sq_tables _sq_fields sq_condition sq_group sq_having sq_order sq_limit sq_offset)
+	(if (and
+		(equal? (count sq_tables) 1)
+		(or (nil? sq_group) (equal? sq_group '()))
+		(or (nil? sq_having) (equal? sq_having true))
+		(or (nil? sq_order) (equal? sq_order '()))
+		(or (nil? sq_limit) (> sq_limit 0))
+		(or (nil? sq_offset) (equal? sq_offset 0)))
+		(match (car sq_tables)
+			'(tv tschema ttbl _isOuter tjoinexpr)
+			(begin
+				(define filter-expr
+					(qpl-and-cond (coalesceNil tjoinexpr true) (coalesceNil sq_condition true)))
+				(define filter-cols (qpl-cols-for-alias filter-expr tv))
+				(define filter-params (map filter-cols (lambda (col)
+					(symbol (concat tv "." col)))))
+				(define scan-expr
+					(list (quote scalar_scan)
+						tschema
+						ttbl
+						(cons (quote list) filter-cols)
+						(list (quote lambda)
+							filter-params
+							(qpl-union-scalar-scan-lower-expr filter-expr tv))
+						(list (quote list))
+						(list (quote lambda) (list) true)
+						(list (quote lambda) (list (quote acc) (quote item)) true)
+						nil
+						nil))
+				(list (quote not) (list (quote nil?) scan-expr)))
+			_ nil)
+		(if (equal? sq_limit 0) false nil))
+	_ nil)))
+
 (define qpl-single-table-in-scalar-scan-expr (lambda (target-expr sub) (match sub
 	'(sq_schema sq_tables sq_fields sq_condition sq_group sq_having sq_order sq_limit sq_offset)
 	(if (and
@@ -1639,6 +1674,13 @@ sub's WHERE. */
 							(list (quote inner_select_in) (qpl-marker-lhs expr) br))))
 						outer-aliases)
 					(coalesce
+						(if (not (qpl-tuple-has-outer-refs? sub))
+							(qpl-single-table-in-scalar-scan-expr
+								(qpl-qualify-outer-nil-refs
+									(qpl-rewrite-in-exists (qpl-marker-lhs expr) outer-aliases)
+									outer-aliases)
+								sub)
+							nil)
 						(qpl-single-row-in-scalar-equality-expr
 							(qpl-qualify-outer-nil-refs
 								(qpl-rewrite-in-exists (qpl-marker-lhs expr) outer-aliases)
@@ -1676,8 +1718,12 @@ sub's WHERE. */
 							(qpl-or-from-list (map raw-branches (lambda (br)
 								(list (quote inner_select_exists) br))))
 							outer-aliases)
-						(qpl-wrap-as-count-gt-zero
-							(qpl-make-count-subquery-for-exists sub)))))
+						(coalesce
+							(if (not (qpl-tuple-has-outer-refs? sub))
+								(qpl-single-table-exists-scalar-scan-expr sub)
+								nil)
+							(qpl-wrap-as-count-gt-zero
+								(qpl-make-count-subquery-for-exists sub))))))
 			(match expr
 				(cons sym args) (if (list? args)
 					(cons sym (map args

@@ -56,6 +56,50 @@ test_cases:
         - ID: 4
           tenant_id: 1
 
+  - name: "uncorrelated session EXISTS uses scalar scan"
+    session_id: "aol-acl-session"
+    sql: |
+      SELECT d.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM aol_user_tenant global_scope
+          WHERE global_scope.user_id = @aol_user
+            AND global_scope.tenant IS NULL
+          LIMIT 1
+        ) AS global_allowed
+      FROM aol_doc d
+      ORDER BY d.ID
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          global_allowed: false
+        - ID: 2
+          global_allowed: false
+
+  - name: "EXPLAIN uncorrelated session EXISTS avoids aggregate helper"
+    session_id: "aol-acl-session"
+    sql: |
+      EXPLAIN IR
+      SELECT d.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM aol_user_tenant global_scope
+          WHERE global_scope.user_id = @aol_user
+            AND global_scope.tenant IS NULL
+          LIMIT 1
+        ) AS global_allowed
+      FROM aol_doc d
+      ORDER BY d.ID
+      LIMIT 2
+    expect:
+      contains:
+        - "scalar_scan"
+      not_contains:
+        - ".keytable:"
+        - ".mat:"
+
   - name: "nested scalar lookup with EXISTS returns visibility"
     sql: |
       SELECT d.ID,
