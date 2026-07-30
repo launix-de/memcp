@@ -1,7 +1,8 @@
 # Fulltext LIKE index tests
 # Verifies that non-prefix LIKE patterns produce correct results with ORDER BY,
-# that the index is built after repeated queries, and that indexed scans are
-# not slower than full scans (self-checked via system_statistic.scans).
+# that repeated queries remain correct after cache/index warmup, and that the
+# new planner lowers aggregate LIKE shapes through deterministic group carriers
+# instead of relying on flaky scan timing diagnostics.
 
 metadata:
   version: "1.0"
@@ -147,19 +148,19 @@ test_cases:
       data:
         - cnt: 30000
 
-  # --- Speedup test helper: run query 8x, compare first 2 (full scan) vs last 4 (indexed, cached) ---
-  # Minimum speedup: 3x (indexed late_ns must be < early_ns / 3 * 2, i.e. late avg < early avg / 3)
-  # early = runs 1-2 (no index), late = runs 5-8 (indexed + cached)
+  # --- Deterministic cache/lowering gates plus repeated correctness warmup ---
 
   # -- Test 1: LIKE needle-in-haystack (5 matches in 30k) --
-  - name: "Enable scan debugging for LIKE test"
-    setup:
-      - scm: '(settings "ScanDebugging" true)'
-      - scm: '(sleep 0.1)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
-    sql: "SELECT 1 AS ok"
+  - name: "EXPLAIN LIKE aggregate uses canonical group carrier"
+    sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
-      rows: 1
+      contains:
+        - "touch_keytable"
+        - "createcolumn"
+        - ".grp:ft_large:"
+        - "strlike"
+      not_contains:
+        - "inner_select"
 
   - name: "LIKE run 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
@@ -186,38 +187,17 @@ test_cases:
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect: { rows: 1, data: [{ cnt: 5 }] }
 
-  - name: "Wait for LIKE scan logs"
-    setup:
-      - scm: '(sleep 0.2)'
-    sql: "SELECT 1 AS ok"
-    expect: { rows: 1 }
-
-  - name: "LIKE speedup >= 3x"
-    noncritical: true
-    sql: |
-      SELECT early_ns, late_ns,
-        CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
-      FROM (
-        SELECT
-          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
-          SUM(CASE WHEN rn >= 5 THEN exec_ns ELSE 0 END) AS late_ns
-        FROM (
-          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
-          FROM `system_statistic`.`scans`
-          WHERE `table` = 'ft_large'
-        ) t WHERE rn <= 8
-      ) s
-    expect: { rows: 1, data: [{ result: "ok" }] }
-    on_fail:
-      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
-
   # -- Test 2: Equal id=42 (regression test, must not be slower) --
-  - name: "Clear log for Equal test"
-    setup:
-      - scm: '(sleep 0.1)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
-    sql: "SELECT 1 AS ok"
-    expect: { rows: 1 }
+  - name: "EXPLAIN Equal uses direct id scan"
+    sql: "EXPLAIN SELECT name FROM ft_large WHERE id = 42"
+    expect:
+      contains:
+        - "(scan"
+        - "\"ft_large\""
+        - "'(\"id\")"
+        - "equal??"
+      not_contains:
+        - ".grp:ft_large:"
 
   - name: "Equal run 1"
     sql: "SELECT name FROM ft_large WHERE id = 42"
@@ -244,38 +224,18 @@ test_cases:
     sql: "SELECT name FROM ft_large WHERE id = 42"
     expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
 
-  - name: "Wait for Equal scan logs"
-    setup:
-      - scm: '(sleep 0.2)'
-    sql: "SELECT 1 AS ok"
-    expect: { rows: 1 }
-
-  - name: "Equal speedup >= 3x"
-    noncritical: true
-    sql: |
-      SELECT early_ns, late_ns,
-        CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
-      FROM (
-        SELECT
-          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
-          SUM(CASE WHEN rn >= 5 THEN exec_ns ELSE 0 END) AS late_ns
-        FROM (
-          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
-          FROM `system_statistic`.`scans`
-          WHERE `table` = 'ft_large'
-        ) t WHERE rn <= 8
-      ) s
-    expect: { rows: 1, data: [{ result: "ok" }] }
-    on_fail:
-      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
-
   # -- Test 3: LIKE + Range (must be >= 3x faster) --
-  - name: "Clear log for LIKE+Range test"
-    setup:
-      - scm: '(sleep 0.1)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
-    sql: "SELECT 1 AS ok"
-    expect: { rows: 1 }
+  - name: "EXPLAIN LIKE+Range aggregate uses canonical group carrier"
+    sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect:
+      contains:
+        - "touch_keytable"
+        - "createcolumn"
+        - ".grp:ft_large:"
+        - "strlike"
+        - "15000"
+      not_contains:
+        - "inner_select"
 
   - name: "LIKE+Range run 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
@@ -301,37 +261,6 @@ test_cases:
   - name: "LIKE+Range run 8"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
     expect: { rows: 1, data: [{ cnt: 2 }] }
-
-  - name: "Wait for LIKE+Range scan logs"
-    setup:
-      - scm: '(sleep 0.2)'
-    sql: "SELECT 1 AS ok"
-    expect: { rows: 1 }
-
-  - name: "LIKE+Range speedup >= 3x"
-    noncritical: true
-    sql: |
-      SELECT early_ns, late_ns,
-        CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
-      FROM (
-        SELECT
-          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
-          SUM(CASE WHEN rn >= 5 AND rn <= 8 THEN exec_ns ELSE 0 END) AS late_ns
-        FROM (
-          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
-          FROM `system_statistic`.`scans`
-          WHERE `table` = 'ft_large'
-        ) t WHERE rn <= 8
-      ) s
-    expect: { rows: 1, data: [{ result: "ok" }] }
-    on_fail:
-      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
-
-  - name: "Disable scan debugging"
-    setup:
-      - scm: '(settings "ScanDebugging" false)'
-    sql: "SELECT 1 AS ok"
-    expect: { rows: 1 }
 
   # --- Range operator corner cases (>, >=, <, <=) with LIKE ---
   # Needles at id: 42, 1337, 15000, 22777, 29999

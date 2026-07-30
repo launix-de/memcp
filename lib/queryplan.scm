@@ -426,8 +426,41 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(query_block_first_expr inner)
 						(list (quote if) where (query_block_first_expr inner) nil))
 					(symbol inner_select_exists) where
-					(symbol inner_select_in) (list (quote and) where (list (quote equal??) probe (query_block_first_expr inner)))
+					(symbol inner_select_in) (begin
+						(define rhs (query_block_first_expr inner))
+						(define compare
+							(list (quote if)
+								(list (quote nil?) probe)
+								nil
+								(list (quote if)
+									(list (quote nil?) rhs)
+									nil
+									(list (quote equal??) probe rhs))))
+						(if (equal? where true)
+							compare
+							(list (quote if) where compare false)))
 					_ (neumann_fail "untangle_query" "unknown subquery expression")))))))
+
+(define untangle_zero_domain_not_in_subquery (lambda (probe subquery ctx)
+	(begin
+		(define normalized (normalize_query_ast subquery))
+		(define inner (untangle_query normalized ctx))
+		(if (not (query_block_no_from? inner))
+			(neumann_fail "untangle_query" "table-backed NOT IN subquery unnesting must become group-stage(D) before lowering")
+			(begin
+				(define where (coalesceNil (qb_where inner) true))
+				(define rhs (query_block_first_expr inner))
+				(define compare
+					(list (quote if)
+						(list (quote nil?) probe)
+						nil
+						(list (quote if)
+							(list (quote nil?) rhs)
+							nil
+							(list (quote not) (list (quote equal??) probe rhs)))))
+				(if (equal? where true)
+					compare
+					(list (quote if) where compare true)))))))
 
 (define source_aliases (lambda (sources)
 	(map (coalesceNil sources '()) source_alias)))
@@ -585,6 +618,44 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote get_column) stage_alias false (nth key_names i) false)
 					(nth outer_domain i))))
 			true))))
+
+(define in_null_count_descriptor (lambda (rhs_expr)
+	(list (list (quote if) (list (quote nil?) rhs_expr) 1 0) (quote +) 0)))
+
+(define membership_count_expr (lambda (stage_alias ag)
+	(list (quote coalesceNil)
+		(list (quote get_column) stage_alias false (aggregate_col_name ag) false)
+		0)))
+
+(define in_membership_expr (lambda (probe match_alias match_ag null_alias null_ag)
+	(begin
+		(define match_count (membership_count_expr match_alias match_ag))
+		(define null_count (membership_count_expr null_alias null_ag))
+		(list (quote if)
+			(list (quote nil?) probe)
+			nil
+			(list (quote if)
+				(list (quote >) match_count 0)
+				true
+				(list (quote if)
+					(list (quote >) null_count 0)
+					nil
+					false))))))
+
+(define not_in_membership_expr (lambda (probe match_alias match_ag null_alias null_ag)
+	(begin
+		(define match_count (membership_count_expr match_alias match_ag))
+		(define null_count (membership_count_expr null_alias null_ag))
+		(list (quote if)
+			(list (quote nil?) probe)
+			nil
+			(list (quote if)
+				(list (quote >) match_count 0)
+				false
+				(list (quote if)
+					(list (quote >) null_count 0)
+					nil
+					true))))))
 
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
@@ -854,14 +925,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(map (union_branches inner) (lambda (branch)
 					(make_exists_stage_rewrite branch args))))))))
 
-(define combine_in_union_results (lambda (results)
+(define combine_in_union_results (lambda (results negate)
 	(match (coalesceNil results '())
 		(cons item rest) (begin
-			(define tail (combine_in_union_results rest))
+			(define tail (combine_in_union_results rest negate))
 			(list
 				(if (empty_list? rest)
 					(nth item 0)
-					(list (quote or) (nth item 0) (nth tail 0)))
+					(list (if negate (quote and) (quote or)) (nth item 0) (nth tail 0)))
 				(merge (list (nth item 1) (nth tail 1)))
 				(merge (list (nth item 2) (nth tail 2)))))
 		_ (list false '() '()))))
@@ -874,11 +945,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(neumann_fail "untangle_query" "IN over UNION currently supports plain unordered branches")
 			(combine_in_union_results
 				(map (union_branches inner) (lambda (branch)
-					(make_in_stage_rewrite probe branch args))))))))
+					(make_in_stage_rewrite probe branch args)))
+				(if (>= (count args) 3) (nth args 2) false))))))
 
 (define make_in_stage_rewrite (lambda (probe inner args)
 	(begin
 		(define outer_sources (nth args 0))
+		(define negate (if (>= (count args) 3) (nth args 2) false))
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "IN group-stage(D) currently supports one plain inner query-block")
 			true)
@@ -900,6 +973,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define keys (cons rhs_expr
 			(correlation_inner_keys inner_default lookup_pairs)))
 		(define outer_domain (correlation_domain lookup_pairs))
+		(define null_keys (if (empty_list? (correlation_inner_keys inner_default lookup_pairs))
+			'(1)
+			(correlation_inner_keys inner_default lookup_pairs)))
 		(define domain_lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define lookup_keys (cons probe domain_lookup_keys))
 		(define condition (combine_where_terms local_terms true))
@@ -916,6 +992,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
 		(define stage_id (concat "in:" (fnv_hash (string (list probe keys lookup_keys condition)))))
+		(define null_ag (in_null_count_descriptor rhs_expr))
+		(define null_stage_id (concat "in-null:" (fnv_hash (string (list outer_domain condition rhs_expr)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -934,19 +1012,47 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (quote preserve_empty_domain) false)
 				(list (quote null_semantics) (quote in))
 				(list (quote cardinality_mode) (quote many)))))
+		(define null_stage (make_group_stage
+			null_stage_id
+			stage_input
+			outer_domain
+			null_keys
+			(list null_ag)
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) stage_condition)
+				(list (quote purpose) (quote in_rhs_nulls))
+				(list (quote domain) outer_domain)
+				(list (quote lookup-keys) domain_lookup_keys)
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote in))
+				(list (quote cardinality_mode) (quote many)))))
 		(define stage_alias (exists_stage_alias stage_id))
+		(define null_stage_alias (exists_stage_alias null_stage_id))
 		(define key_names (group_key_cols keys))
+		(define null_key_names (group_key_cols null_keys))
 		(define source (list
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+		(define null_source (list
+			null_stage_alias
+			(group_stage_schema null_stage)
+			(make_stage_output_relation null_stage_id)
+			(stage_source_outer? outer_sources)
+			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(list
-			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
-			(list stage)
-			(list source)))))
+			(if negate
+				(not_in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
+				(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
+			(list stage null_stage)
+			(list source null_source)))))
 
 (define make_scalar_aggregate_stage_rewrite (lambda (inner args)
 	(begin
@@ -1784,6 +1890,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
 				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery)))))))
 
+(define untangle_not_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
+	(begin
+		(define normalized (normalize_query_ast subquery))
+		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+		(define inner (untangle_query normalized sub_ctx))
+		(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+		(if (union_block? inner)
+			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery true))
+			(if (query_block_no_from? inner)
+				(list (untangle_zero_domain_not_in_subquery rewritten_probe subquery ctx) '() '())
+				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery true)))))))
+
 (define untangle_expr_with_stages (lambda (expr outer_sources ctx)
 	(match expr
 		((symbol inner_select) subquery)
@@ -1798,6 +1916,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(untangle_in_subquery_with_stages probe subquery outer_sources ctx)
 		((quote inner_select_in) probe subquery)
 		(untangle_in_subquery_with_stages probe subquery outer_sources ctx)
+		((symbol not) ((symbol inner_select_in) probe subquery))
+		(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
+		((quote not) ((quote inner_select_in) probe subquery))
+		(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
+		((symbol not) ((quote inner_select_in) probe subquery))
+		(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
+		((quote not) ((symbol inner_select_in) probe subquery))
+		(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
 		((symbol window_func) fn args over)
 		(begin
 			(define window_sources (uctx_get ctx (quote local-sources) outer_sources))

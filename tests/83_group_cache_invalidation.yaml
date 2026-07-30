@@ -1,6 +1,7 @@
 # Group table cache invalidation preparation tests
 # Validates that GROUP BY results update correctly after DML on the base table.
-# Also inspects keytable contents (noncritical) to prepare for subquery-cache.
+# Also checks that GROUP BY lowers to a canonical keytable/computed-column carrier
+# without depending on legacy physical table names.
 
 metadata:
   version: "1.0"
@@ -68,14 +69,15 @@ test_cases:
         - dept: "Sales"
           s: 150
 
-  # --- Inspect keytable after GROUP BY (noncritical) ---
-  - name: "Legacy keytable inspection after GROUP BY"
-    noncritical: true
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
+  # --- Inspect lowering after GROUP BY ---
+  - name: "GROUP BY lowering uses canonical keytable carrier"
+    sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
-      data:
-        - c: 3
+      contains:
+        - "touch_keytable"
+        - "createcolumn"
+        - ".grp:sc_base:"
 
   # === INSERT new rows into base table ===
   - name: "Insert new Engineering employee"
@@ -123,13 +125,14 @@ test_cases:
         - dept: "Sales"
           s: 200
 
-  - name: "Legacy keytable inspection after INSERT"
-    noncritical: true
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
+  - name: "GROUP BY lowering after INSERT reuses canonical keytable carrier"
+    sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
-      data:
-        - c: 4
+      contains:
+        - "touch_keytable"
+        - "createcolumn"
+        - ".grp:sc_base:"
 
   # === UPDATE rows in base table ===
   - name: "Move employee from Sales to HR"
@@ -191,13 +194,14 @@ test_cases:
         - dept: "Marketing"
           s: 80
 
-  - name: "Legacy keytable inspection after DELETE"
-    noncritical: true
-    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
+  - name: "GROUP BY lowering after DELETE keeps canonical keytable carrier"
+    sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
-      data:
-        - c: 3
+      contains:
+        - "touch_keytable"
+        - "createcolumn"
+        - ".grp:sc_base:"
 
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"
