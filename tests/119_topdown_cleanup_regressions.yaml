@@ -131,6 +131,24 @@ test_cases:
         - id: 3
           matched_d: 30
 
+  - name: "EXPLAIN skip-level correlated IN is lifted out of inner_select_in"
+    sql: |
+      EXPLAIN IR
+      SELECT a.id,
+        (SELECT
+          (SELECT c.ref_d FROM tdr_c c
+           WHERE c.id = b.ref_c
+           AND c.ref_d IN (SELECT d.id FROM tdr_d d WHERE d.ref_e = a.id)
+           LIMIT 1)
+         FROM tdr_b b WHERE b.id = a.ref_b LIMIT 1) AS matched_d
+      FROM tdr_a a
+      ORDER BY a.id
+    expect:
+      contains:
+        - "after-lift"
+      not_contains:
+        - "inner_select_in"
+
   - name: "HAVING EXISTS must filter grouped rows by correlated group key"
     sql: |
       SELECT e.did, COUNT(*) AS cnt
@@ -228,3 +246,26 @@ test_cases:
           not_archived_label: "D20"
         - id: 3
           not_archived_label: null
+
+  - name: "EXPLAIN skip-level NOT IN is lifted out of inner_select_in"
+    sql: |
+      EXPLAIN IR
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT d.label FROM tdr_d d
+             WHERE d.id = c.ref_d
+             AND d.ref_e NOT IN (
+               SELECT t.ref_id FROM tdr_tags t
+               WHERE t.ref_id = a.id AND t.tag = 'archived'
+             )
+             LIMIT 1)
+           FROM tdr_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM tdr_b b WHERE b.id = a.ref_b LIMIT 1) AS not_archived_label
+      FROM tdr_a a
+      ORDER BY a.id
+    expect:
+      contains:
+        - "after-lift"
+      not_contains:
+        - "inner_select_in"

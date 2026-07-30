@@ -69,6 +69,16 @@ test_cases:
         - dept: "Sales"
           s: 150
 
+  - name: "EXPLAIN baseline GROUP BY stays in group IR without legacy materialization"
+    sql: "EXPLAIN IR SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      contains:
+        - "qpir-groupby"
+        - "get_column \"sc_base\" false \"dept\" false"
+      not_contains:
+        - "legacy_materialized"
+        - ".mat:"
+
   # === INSERT new rows into base table ===
   - name: "Insert new Engineering employee"
     sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (6, 'Engineering', 300, true)"
@@ -114,6 +124,16 @@ test_cases:
           s: 600
         - dept: "Sales"
           s: 200
+
+  - name: "EXPLAIN GROUP BY after INSERT still avoids legacy materialization"
+    sql: "EXPLAIN IR SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      contains:
+        - "qpir-groupby"
+        - "get_column \"sc_base\" false \"dept\" false"
+      not_contains:
+        - "legacy_materialized"
+        - ".mat:"
 
   # === UPDATE rows in base table ===
   - name: "Move employee from Sales to HR"
@@ -174,6 +194,16 @@ test_cases:
           s: 270
         - dept: "Marketing"
           s: 80
+
+  - name: "EXPLAIN GROUP BY after DELETE still avoids stale materialized helper"
+    sql: "EXPLAIN IR SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      contains:
+        - "qpir-groupby"
+        - "get_column \"sc_base\" false \"dept\" false"
+      not_contains:
+        - "legacy_materialized"
+        - ".mat:"
 
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"
