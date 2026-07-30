@@ -8707,6 +8707,10 @@ seeing the correctly prefixed outer alias. */
 							(if neumann_pipeline_trace (print (concat "[neumann] legacy derived " id ": after boundary check")) nil)
 							/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 							(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
+							(define grouped_window_plain_wrapper
+								(and subquery_has_window groups2_present outer_plain_projection_only))
+							(define subquery_has_scalar_once_limit_field
+								(has_assoc? fields2 "__qpu_scalar_once_limit"))
 							(define derived_plain_projection_can_flatten_group_boundary
 								(and
 									outer_plain_projection_only
@@ -8744,13 +8748,7 @@ seeing the correctly prefixed outer alias. */
 									(and
 										isOuter
 										groups2_present
-										derived_plain_projection_can_flatten_group_boundary
-										(reduce groups2 (lambda (found stage)
-											(or found
-												(and
-													(not (nil? (stage_having_expr stage)))
-													(not (equal? (stage_having_expr stage) true)))))
-											false)))
+										(not subquery_has_scalar_once_limit_field)))
 							(define condition2_has_null_default (lambda (expr) (match expr
 								(cons sym args)
 								(if (or
@@ -8793,7 +8791,7 @@ seeing the correctly prefixed outer alias. */
 										_ true)))
 									true)))
 								(define use_materialize (or
-									subquery_has_window
+									(and subquery_has_window (not grouped_window_plain_wrapper))
 									outer_nullable_group_boundary
 									(and unsupported_groups (not derived_plain_projection_can_flatten_group_boundary))
 									(and derived_plain_projection_can_flatten_group_boundary flatten_has_order_limit_boundary outer_has_non_group_stage)
@@ -14216,7 +14214,10 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 												lowered
 												(cons sym (map args lower_prejoin_group_expr)))
 											lowered)))))))))
-				(define grouped_fields (map_assoc raw_fields (lambda (k v)
+				(define grouped_source_fields (if (nil? (wg_store "fields"))
+					raw_fields
+					(wg_store "fields")))
+				(define grouped_fields (map_assoc grouped_source_fields (lambda (k v)
 					(lower_prejoin_group_expr
 						(rewrite_materialized_source_runtime_markers
 							(rewrite_materialized_source_aggs v false))))))
@@ -14481,7 +14482,7 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 						expr
 						(grouped_any_value_aggregate expr))))
 				(define grouped_fields_for_recursive (if is_dedup
-					(map_assoc raw_fields (lambda (k v)
+					(map_assoc grouped_source_fields (lambda (k v)
 						(recursive_replace_find_column v)))
 					(map_assoc grouped_fields (lambda (k v)
 						(grouped_carry_row_value_if_needed
