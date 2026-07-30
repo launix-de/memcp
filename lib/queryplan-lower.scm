@@ -1654,6 +1654,18 @@ conjuncts. Order preserves first-seen. */
 		(reduce (qpu-and-conjuncts join-pred) (lambda (acc c)
 			(begin
 				(match c
+					'((symbol sql_truthy) inner) (match inner
+						'((symbol equal??) lhs rhs) (handle-eq lhs rhs)
+						'((quote equal??)  lhs rhs) (handle-eq lhs rhs)
+						'((symbol =)       lhs rhs) (handle-eq lhs rhs)
+						'((quote =)        lhs rhs) (handle-eq lhs rhs)
+						nil)
+					'((quote sql_truthy) inner) (match inner
+						'((symbol equal??) lhs rhs) (handle-eq lhs rhs)
+						'((quote equal??)  lhs rhs) (handle-eq lhs rhs)
+						'((symbol =)       lhs rhs) (handle-eq lhs rhs)
+						'((quote =)        lhs rhs) (handle-eq lhs rhs)
+						nil)
 					'((symbol equal??) lhs rhs) (handle-eq lhs rhs)
 					'((quote equal??)  lhs rhs) (handle-eq lhs rhs)
 					'((symbol =)       lhs rhs) (handle-eq lhs rhs)
@@ -3314,7 +3326,6 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 				(not right-had-dropped-limit-marker)
 				(not (qpu-low-tuple-has-limit-stage-for-source?
 					left-tuple right-source-aliases right-source-table-names))
-				(equal? right-tuple-keys-limited right-tuple-keys-raw)
 				(not (qpu-low-tables-already-wrapped?
 					(qpp-tuple-tables right-tuple-keys-limited)))
 				(or is-uncorrelated (not left-has-aggregate-context))))
@@ -3362,7 +3373,7 @@ INLINE-MERGE them into the wrapping tuple (eliminate nesting). */
 						(if (qpu-low-tuple-has-aggregate-field? right-tuple-keys-limited)
 							right-tuple-keys-limited
 							(qpu-low-enforce-scalar-once-by-domain
-								(qpu-low-tag-inner-once-limit right-tuple-keys-limited)))
+								right-tuple-keys-limited))
 						(qpu-low-tag-inner-once-limit right-tuple-keys-limited))
 					right-tuple-keys-limited))))
 		(define rewritten-fields (qpu-low-rewrite-projections

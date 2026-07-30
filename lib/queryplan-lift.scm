@@ -738,21 +738,6 @@ which handles the equi-binding optimization case. */
 (define qpl-fresh-limwrap-alias (lambda () (begin
 	(qpl-limwrap-counter "n" (+ (qpl-limwrap-counter "n") 1))
 	(concat "__limit_wrap_" (string (qpl-limwrap-counter "n"))))))
-(define qpl-stable-limwrap-alias (lambda (sub inner-sub-fields corr-where passthrough-cols)
-	(concat "__limit_wrap_" (substr
-		(fnv_hash
-			(serialize
-				(normalize_canonical_aliases
-					(list
-						(qpp-tuple-schema sub)
-						(qpp-tuple-tables sub)
-						inner-sub-fields
-						corr-where
-						passthrough-cols
-						(qpp-tuple-order sub)
-						(qpp-tuple-limit sub)
-						(qpp-tuple-offset sub)))))
-		0 12))))
 
 /* qpl-extract-col-refs-skip-nested — like qpl-extract-col-refs but does NOT
 descend into nested inner_select / inner_select_in / inner_select_exists
@@ -1028,11 +1013,7 @@ derived. */
 												(unnest_pass_allow_free
 													(lift_dep_joins_pass inner-sub)))
 											inner-sub))
-									(define wrap-alias (qpl-stable-limwrap-alias
-										sub
-										inner-sub-fields
-										corr-where
-										passthrough-cols))
+									(define wrap-alias (qpl-fresh-limwrap-alias))
 									(define schema (qpp-tuple-schema sub))
 									(define offset-val (if (nil? off) 0 off))
 									/* Wrapper WHERE: rn-filter AND retargeted corr-where.
@@ -2589,16 +2570,34 @@ original SQL alias. */
 			/* Step 1: rename the visible field to "value" so callers uniformly
 			reference sq_N.value regardless of the user's SQL alias. */
 			(define renamed (qpl-rename-first-field-to-value sub))
+			(define simple-limit
+				(and
+					(not (nil? (qpp-tuple-limit renamed)))
+					(nil? (qpp-tuple-offset renamed))
+					(or (nil? (qpp-tuple-order renamed))
+						(equal? (qpp-tuple-order renamed) '()))))
+			(define nested-marker-limit-contract
+				(and simple-limit
+					(qpl-tuple-has-markers? renamed)
+					(not (qpl-tuple-visible-field-is-marker? renamed))))
 			(define renamed-with-limit-contract
-				(if (not (nil? (qpp-tuple-limit renamed)))
-					(if (and
-						(nil? (qpp-tuple-offset renamed))
-						(or (nil? (qpp-tuple-order renamed))
-							(equal? (qpp-tuple-order renamed) '())))
-						renamed
+				(if simple-limit
+					(if nested-marker-limit-contract
+						(qpp-rebuild-tuple
+							(qpp-tuple-schema renamed)
+							(qpp-tuple-tables renamed)
+							(qpp-tuple-fields renamed)
+							(qpp-tuple-condition renamed)
+							(qpp-tuple-group renamed)
+							(qpp-tuple-having renamed)
+							(qpp-tuple-order renamed)
+							nil
+							(qpp-tuple-offset renamed))
+						renamed)
+					(if (not (nil? (qpp-tuple-limit renamed)))
 						(qpl-rewrite-correlated-limit-with-rownumber
-							(qpl-drop-redundant-correlated-limit renamed)))
-					renamed))
+							(qpl-drop-redundant-correlated-limit renamed))
+						renamed)))
 			/* Step 2: RECURSIVELY lift the renamed sub. This is the architectural
 			fix per FAQ "every query is unnestable": if `sub` itself contains
 			inner_select markers (a NESTED correlated subquery), lift turns
@@ -2614,8 +2613,11 @@ original SQL alias. */
 					(nil? (qpp-tuple-offset renamed))
 					(or (nil? (qpp-tuple-order renamed))
 						(equal? (qpp-tuple-order renamed) '()))
-					(qpl-tuple-visible-field-is-marker? renamed)
-					(> (count (qpl-sub-outer-refs renamed)) 0))
+					(or
+						nested-marker-limit-contract
+						(and
+							(qpl-tuple-visible-field-is-marker? renamed)
+							(> (count (qpl-sub-outer-refs renamed)) 0))))
 					(qpl-add-dropped-limit-marker-to-first-leaf
 						lifted-raw
 						(qpp-tuple-limit renamed))
