@@ -2,6 +2,7 @@ metadata:
   version: "1.0"
   description: "Memory pressure management"
   isolated: true
+  max_time: 15
 
 setup:
   - sql: "DROP TABLE IF EXISTS mp_pressure"
