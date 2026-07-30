@@ -738,6 +738,21 @@ which handles the equi-binding optimization case. */
 (define qpl-fresh-limwrap-alias (lambda () (begin
 	(qpl-limwrap-counter "n" (+ (qpl-limwrap-counter "n") 1))
 	(concat "__limit_wrap_" (string (qpl-limwrap-counter "n"))))))
+(define qpl-stable-limwrap-alias (lambda (sub inner-sub-fields corr-where passthrough-cols)
+	(concat "__limit_wrap_" (substr
+		(fnv_hash
+			(serialize
+				(normalize_canonical_aliases
+					(list
+						(qpp-tuple-schema sub)
+						(qpp-tuple-tables sub)
+						inner-sub-fields
+						corr-where
+						passthrough-cols
+						(qpp-tuple-order sub)
+						(qpp-tuple-limit sub)
+						(qpp-tuple-offset sub)))))
+		0 12))))
 
 /* qpl-extract-col-refs-skip-nested — like qpl-extract-col-refs but does NOT
 descend into nested inner_select / inner_select_in / inner_select_exists
@@ -1013,7 +1028,11 @@ derived. */
 												(unnest_pass_allow_free
 													(lift_dep_joins_pass inner-sub)))
 											inner-sub))
-									(define wrap-alias (qpl-fresh-limwrap-alias))
+									(define wrap-alias (qpl-stable-limwrap-alias
+										sub
+										inner-sub-fields
+										corr-where
+										passthrough-cols))
 									(define schema (qpp-tuple-schema sub))
 									(define offset-val (if (nil? off) 0 off))
 									/* Wrapper WHERE: rn-filter AND retargeted corr-where.
