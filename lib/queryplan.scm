@@ -480,6 +480,43 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(reduce (coalesceNil aliases '()) (lambda (found alias)
 		(or found (expr_refs_alias? default_alias alias expr))) false)))
 
+(define btw2025_expr_accessing_aliases (lambda (expr outer_aliases)
+	(merge_unique (map (coalesceNil outer_aliases '()) (lambda (alias)
+		(if (expr_refs_any_alias? nil (list alias) expr)
+			(list alias)
+			'()))))))
+
+(define btw2025_fields_accessing_aliases (lambda (fields outer_aliases)
+	(merge_unique (extract_assoc (coalesceNil fields '()) (lambda (_title expr)
+		(btw2025_expr_accessing_aliases expr outer_aliases))))))
+
+(define btw2025_order_accessing_aliases (lambda (order_items outer_aliases)
+	(merge_unique (map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr _dir) (btw2025_expr_accessing_aliases expr outer_aliases)
+			_ '()))))))
+
+(define btw2025_sources_accessing_aliases (lambda (sources outer_aliases)
+	(merge_unique (map (coalesceNil sources '()) (lambda (src)
+		(btw2025_expr_accessing_aliases (coalesceNil (source_join_expr src) true) outer_aliases))))))
+
+(define btw2025_terms_accessing_aliases (lambda (terms outer_aliases)
+	(merge_unique (map (coalesceNil terms '()) (lambda (term)
+		(btw2025_expr_accessing_aliases term outer_aliases))))))
+
+(define btw2025_query_block_accessing_aliases (lambda (block outer_sources)
+	(if (not (query_block? block))
+		'()
+		(begin
+			(define outer_aliases (source_aliases outer_sources))
+			(merge_unique (list
+				(btw2025_sources_accessing_aliases (qb_sources block) outer_aliases)
+				(btw2025_fields_accessing_aliases (qb_fields block) outer_aliases)
+				(btw2025_fields_accessing_aliases (qb_hidden block) outer_aliases)
+				(btw2025_expr_accessing_aliases (qb_where block) outer_aliases)
+				(btw2025_expr_accessing_aliases (coalesceNil (qb_having block) true) outer_aliases)
+				(btw2025_order_accessing_aliases (qb_order block) outer_aliases)))))))
+
 (define expr_refs_alias_after_group? (lambda (default_alias alias expr)
 	(match expr
 		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) false
@@ -602,6 +639,40 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define sources_without_outer_join_terms (lambda (inner_default inner_aliases outer_aliases sources)
 	(map (coalesceNil sources '()) (lambda (src)
 		(source_without_outer_join_terms inner_default inner_aliases outer_aliases src)))))
+
+(define btw2025_local_where_terms_after_simple (lambda (inner_default inner_aliases outer_aliases block)
+	(filter
+		(split_and_terms (coalesceNil (qb_where block) true))
+		(lambda (term)
+			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term))))))
+
+(define btw2025_accessing_after_simple (lambda (block outer_sources)
+	(if (not (query_block? block))
+		'()
+		(begin
+			(define inner_default (if (empty_list? (qb_sources block)) nil (source_alias (car (qb_sources block)))))
+			(define inner_aliases (source_aliases (qb_sources block)))
+			(define outer_aliases (source_aliases outer_sources))
+			(define local_terms (btw2025_local_where_terms_after_simple inner_default inner_aliases outer_aliases block))
+			(define local_sources (sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources block)))
+			(merge_unique (list
+				(btw2025_sources_accessing_aliases local_sources outer_aliases)
+				(btw2025_fields_accessing_aliases (qb_fields block) outer_aliases)
+				(btw2025_fields_accessing_aliases (qb_hidden block) outer_aliases)
+				(btw2025_terms_accessing_aliases local_terms outer_aliases)
+				(btw2025_expr_accessing_aliases (coalesceNil (qb_having block) true) outer_aliases)
+				(btw2025_order_accessing_aliases (qb_order block) outer_aliases)))))))
+
+(define btw2025_stage_facts (lambda (block outer_sources lookup_pairs)
+	(begin
+		(define accessing (btw2025_query_block_accessing_aliases block outer_sources))
+		(define accessing_after_simple (btw2025_accessing_after_simple block outer_sources))
+		(list
+			(list (quote btw2025_accessing) accessing)
+			(list (quote btw2025_accessing_after_simple) accessing_after_simple)
+			(list (quote btw2025_simple_d_eliminated) (and (not (empty_list? accessing)) (empty_list? accessing_after_simple)))
+			(list (quote btw2025_domain) (correlation_domain lookup_pairs))
+			(list (quote btw2025_lookup_keys) (correlation_lookup_keys lookup_pairs))))))
 
 (define exists_stage_alias (lambda (stage_id)
 	(concat "__exists_" (fnv_hash stage_id))))
@@ -881,14 +952,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			'()
 			nil nil
-			(list
-				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote exists))
-				(list (quote domain) outer_domain)
-				(list (quote lookup-keys) lookup_keys)
-				(list (quote preserve_empty_domain) false)
-				(list (quote null_semantics) (quote exists))
-				(list (quote cardinality_mode) (quote many)))))
+			(merge (list
+				(list
+					(list (quote condition) stage_condition)
+					(list (quote purpose) (quote exists))
+					(list (quote domain) outer_domain)
+					(list (quote lookup-keys) lookup_keys)
+					(list (quote preserve_empty_domain) false)
+					(list (quote null_semantics) (quote exists))
+					(list (quote cardinality_mode) (quote many)))
+				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -1004,14 +1077,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			'()
 			nil nil
-			(list
-				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote in_membership))
-				(list (quote domain) outer_domain)
-				(list (quote lookup-keys) lookup_keys)
-				(list (quote preserve_empty_domain) false)
-				(list (quote null_semantics) (quote in))
-				(list (quote cardinality_mode) (quote many)))))
+			(merge (list
+				(list
+					(list (quote condition) stage_condition)
+					(list (quote purpose) (quote in_membership))
+					(list (quote domain) outer_domain)
+					(list (quote lookup-keys) lookup_keys)
+					(list (quote preserve_empty_domain) false)
+					(list (quote null_semantics) (quote in))
+					(list (quote cardinality_mode) (quote many)))
+				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
 		(define null_stage (make_group_stage
 			null_stage_id
 			stage_input
@@ -1022,14 +1097,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			'()
 			nil nil
-			(list
-				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote in_rhs_nulls))
-				(list (quote domain) outer_domain)
-				(list (quote lookup-keys) domain_lookup_keys)
-				(list (quote preserve_empty_domain) false)
-				(list (quote null_semantics) (quote in))
-				(list (quote cardinality_mode) (quote many)))))
+			(merge (list
+				(list
+					(list (quote condition) stage_condition)
+					(list (quote purpose) (quote in_rhs_nulls))
+					(list (quote domain) outer_domain)
+					(list (quote lookup-keys) domain_lookup_keys)
+					(list (quote preserve_empty_domain) false)
+					(list (quote null_semantics) (quote in))
+					(list (quote cardinality_mode) (quote many)))
+				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define null_stage_alias (exists_stage_alias null_stage_id))
 		(define key_names (group_key_cols keys))
@@ -1114,14 +1191,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			'()
 			nil nil
-			(list
-				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote scalar_aggregate))
-				(list (quote domain) outer_domain)
-				(list (quote lookup-keys) lookup_keys)
-				(list (quote preserve_empty_domain) true)
-				(list (quote null_semantics) (quote aggregate))
-				(list (quote cardinality_mode) (quote many)))))
+			(merge (list
+				(list
+					(list (quote condition) stage_condition)
+					(list (quote purpose) (quote scalar_aggregate))
+					(list (quote domain) outer_domain)
+					(list (quote lookup-keys) lookup_keys)
+					(list (quote preserve_empty_domain) true)
+					(list (quote null_semantics) (quote aggregate))
+					(list (quote cardinality_mode) (quote many)))
+				(btw2025_stage_facts inner outer_sources all_corr_pairs)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define post_condition (replace_group_expr inner_default stage_alias keys key_names ags local_having))
@@ -1197,17 +1276,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			'()
 			nil nil
-			(list
-				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote scalar_single))
-				(list (quote domain) outer_domain)
-				(list (quote lookup-keys) lookup_keys)
-				(list (quote preserve_empty_domain) true)
-				(list (quote null_semantics) (quote scalar))
-				(list (quote cardinality_mode) (quote first))
-				(list (quote partition_by) outer_domain)
-				(list (quote physical_max_rows) 1)
-				(list (quote on_overflow) (quote ignore)))))
+			(merge (list
+				(list
+					(list (quote condition) stage_condition)
+					(list (quote purpose) (quote scalar_single))
+					(list (quote domain) outer_domain)
+					(list (quote lookup-keys) lookup_keys)
+					(list (quote preserve_empty_domain) true)
+					(list (quote null_semantics) (quote scalar))
+					(list (quote cardinality_mode) (quote first))
+					(list (quote partition_by) outer_domain)
+					(list (quote physical_max_rows) 1)
+					(list (quote on_overflow) (quote ignore)))
+				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -1418,17 +1499,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			'()
 			nil nil
-			(list
-				(list (quote condition) stage_condition)
-				(list (quote purpose) (quote scalar_single))
-				(list (quote domain) outer_domain)
-				(list (quote lookup-keys) lookup_keys)
-				(list (quote preserve_empty_domain) true)
-				(list (quote null_semantics) (quote scalar))
-				(list (quote cardinality_mode) (quote single_or_error))
-				(list (quote partition_by) outer_domain)
-				(list (quote physical_max_rows) 2)
-				(list (quote on_overflow) (quote error)))))
+			(merge (list
+				(list
+					(list (quote condition) stage_condition)
+					(list (quote purpose) (quote scalar_single))
+					(list (quote domain) outer_domain)
+					(list (quote lookup-keys) lookup_keys)
+					(list (quote preserve_empty_domain) true)
+					(list (quote null_semantics) (quote scalar))
+					(list (quote cardinality_mode) (quote single_or_error))
+					(list (quote partition_by) outer_domain)
+					(list (quote physical_max_rows) 2)
+					(list (quote on_overflow) (quote error)))
+				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list

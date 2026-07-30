@@ -201,6 +201,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
 	(assert (equal? (serialize (build_queryplan_term scalar_no_from_ast))
 		"(resultrow '(\"x\" 8 \"in_ok\" (and true (equal?? 8 8)) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
+	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil)))
+	(define btw_inner_sources (list (list "i" "memcp-tests" "inner_t" false nil)))
+	(define btw_outer_id (list 'get_column "o" false "id" false))
+	(define btw_outer_limit (list 'get_column "o" false "limit_value" false))
+	(define btw_inner_user_id (list 'get_column "i" false "user_id" false))
+	(define btw_inner_score (list 'get_column "i" false "score" false))
+	(define btw_simple_inner (make_query_block "memcp-tests"
+		btw_inner_sources
+		(list "score" btw_inner_score)
+		(list 'and (list 'equal?? btw_inner_user_id btw_outer_id) (list '> btw_inner_score 0))
+		'() nil '() nil nil '() '() '()))
+	(assert (equal? (btw2025_query_block_accessing_aliases btw_simple_inner btw_outer_sources) '("o")) true "BTW2025 accessing records simple correlated outer alias")
+	(assert (equal? (btw2025_accessing_after_simple btw_simple_inner btw_outer_sources) '()) true "BTW2025 simple D-join elimination removes pure equality dependency")
+	(define btw_general_inner (make_query_block "memcp-tests"
+		btw_inner_sources
+		(list "score" btw_inner_score)
+		(list 'and
+			(list 'equal?? btw_inner_user_id btw_outer_id)
+			(list '< btw_inner_score btw_outer_limit))
+		'() nil '() nil nil '() '() '()))
+	(assert (equal? (btw2025_query_block_accessing_aliases btw_general_inner btw_outer_sources) '("o")) true "BTW2025 accessing records general correlated outer alias")
+	(assert (equal? (btw2025_accessing_after_simple btw_general_inner btw_outer_sources) '("o")) true "BTW2025 accessing after simple keeps non-equality dependency")
+	(define btw_exists_rewrite (make_exists_stage_rewrite btw_simple_inner (list btw_outer_sources btw_simple_inner)))
+	(define btw_exists_stage (car (nth btw_exists_rewrite 1)))
+	(assert (equal? (qassoc_get (gs_facts btw_exists_stage) 'btw2025_accessing '()) '("o")) true "BTW2025 facts expose original accessing set")
+	(assert (equal? (qassoc_get (gs_facts btw_exists_stage) 'btw2025_accessing_after_simple '("missing")) '()) true "BTW2025 facts expose simple-eliminated accessing set")
+	(assert (equal? (qassoc_get (gs_facts btw_exists_stage) 'btw2025_simple_d_eliminated false) true) true "BTW2025 facts mark successful simple D elimination")
+	(assert (equal? (qassoc_get (gs_facts btw_exists_stage) 'btw2025_domain '()) (list btw_outer_id)) true "BTW2025 facts retain domain projection")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))
