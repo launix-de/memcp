@@ -1099,6 +1099,42 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	))
 ))
 
+(define psql_copy_line_payload (lambda (line)
+	(if (and (> (strlen line) 0) (equal? (substr line (- (strlen line) 1) 1) "\n"))
+		(substr line 0 (- (strlen line) 1))
+		line)
+))
+
+(define psql_copy_flush_rows (lambda (schema tbl columns state) (begin
+	(define rows (state "copy_rows"))
+	(if (empty_list? rows)
+		false
+		(begin
+			(insert (table schema tbl) columns rows)
+			(state "copy_rows" '())
+			true))
+)))
+
+(define psql_copy_stdin_line (lambda (schema state line) (begin
+	(define tbl (state "copy_tbl"))
+	(define columns (state "copy_cols"))
+	(define column_types (state "copy_types"))
+	(if (equal? line "\\.\n")
+		(begin
+			(psql_copy_flush_rows schema tbl columns state)
+			(state "copy_tbl" nil)
+			(state "copy_cols" nil)
+			(state "copy_types" nil)
+			true)
+		(begin
+			(state "copy_rows" (merge
+				(state "copy_rows")
+				(list (psql_copy_decode_row (split (psql_copy_line_payload line) "\t") column_types))))
+			(if (>= (count (state "copy_rows")) 1000)
+				(psql_copy_flush_rows schema tbl columns state)
+				false)))
+)))
+
 (define psql_copy_insert_stream (lambda (schema tbl columns source) (begin
 	(define column_types (psql_copy_column_types schema tbl columns))
 	(insert (table schema tbl) columns
@@ -1198,31 +1234,30 @@ substring replace (which is the historical behaviour). */
 	(set source_dir (psql_path_dir source_sql))
 	(state "dump_schema" nil)
 	(define psql_line (lambda (line) (begin
-		(match line
-			(concat "--" b) false
-			(concat "\\" b "\n") false
-			(concat "CREATE FUNCTION " b "\n")
-			(state "line" (lambda (line)
-				(psql_skip_function_line state psql_line line)))
-			(concat "COPY " def " FROM stdin;\n")
-			(match (psql_copy_def def) '(tbl columns) (begin
-				(define column_types (psql_copy_column_types schema tbl columns))
-				(state "line" (lambda (line) (begin
-					(match line
-						"\\.\n" (state "line" psql_line)
-						(concat x "\n") (insert (table schema tbl) columns (list (psql_copy_decode_row (split x "\t") column_types))))
-				)))
-			))
-			(concat "COPY " def " FROM '" path "';\n") (psql_handle_copy_path schema source_dir def path)
-			(concat start ";" rest) (begin
-				(state "dump_schema" (psql_eval_import_command
-					schema
-					source_dir
-					(state "dump_schema")
-					(psql_normalize_command (concat (state "sql") start))
-					policy))
-				(state "sql" rest))
-			(state "sql" (concat (state "sql") line)))
+		(if (not (nil? (state "copy_tbl")))
+			(psql_copy_stdin_line schema state line)
+			(match line
+				(concat "--" b) false
+				(concat "\\" b "\n") false
+				(concat "CREATE FUNCTION " b "\n")
+				(state "line" (lambda (line)
+					(psql_skip_function_line state psql_line line)))
+				(concat "COPY " def " FROM stdin;\n")
+				(match (psql_copy_def def) '(tbl columns) (begin
+					(state "copy_tbl" tbl)
+					(state "copy_cols" columns)
+					(state "copy_types" (psql_copy_column_types schema tbl columns))
+					(state "copy_rows" '())))
+				(concat "COPY " def " FROM '" path "';\n") (psql_handle_copy_path schema source_dir def path)
+				(concat start ";" rest) (begin
+					(state "dump_schema" (psql_eval_import_command
+						schema
+						source_dir
+						(state "dump_schema")
+						(psql_normalize_command (concat (state "sql") start))
+						policy))
+					(state "sql" rest))
+				(state "sql" (concat (state "sql") line))))
 	)))
 	(state "line" psql_line)
 	(state "sql" "")

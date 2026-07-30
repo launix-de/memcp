@@ -1,0 +1,87 @@
+metadata:
+  version: "1.0"
+  description: "SAFE shard rollover persistence"
+  isolated: true
+
+setup:
+  - scm: (settings "ShardSize" 3)
+  - sql: "DROP TABLE IF EXISTS safe_rollover"
+  - sql: "DROP TABLE IF EXISTS safe_copy_rollover"
+  - sql: "CREATE TABLE safe_rollover (id INT PRIMARY KEY, note TEXT) ENGINE=SAFE"
+
+test_cases:
+  - name: "Insert enough rows to create multiple free shards"
+    scm: |
+      (insert (table "memcp-tests" "safe_rollover") '("id" "note")
+        (map (produceN 8) (lambda (i)
+          (list (+ i 1) (concat "row-" i)))))
+
+  - name: "Rows are visible before restart"
+    sql: "SELECT COUNT(*) AS cnt FROM safe_rollover"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  - name: "Import COPY stream across shard rollover"
+    scm: |
+      (load_psql "memcp-tests"
+        (streamString (concat
+          "CREATE SCHEMA source_schema;\n"
+          "CREATE TABLE source_schema.safe_copy_rollover (id integer NOT NULL, note text);\n"
+          "COPY source_schema.safe_copy_rollover (id, note) FROM stdin;\n"
+          "1\tcopy-0\n"
+          "2\tcopy-1\n"
+          "3\tcopy-2\n"
+          "4\tcopy-3\n"
+          "5\tcopy-4\n"
+          "6\tcopy-5\n"
+          "7\tcopy-6\n"
+          "8\tcopy-7\n"
+          "\\.\n"))
+        (sql_policy "root"))
+
+  - name: "COPY rows are visible before restart"
+    sql: "SELECT COUNT(*) AS cnt FROM safe_copy_rollover"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  - name: "Restart after SAFE and COPY shard rollover"
+    sql: "SHUTDOWN"
+
+  - name: "Rows survive restart after shard rollover"
+    sql: "SELECT COUNT(*) AS cnt FROM safe_rollover"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  - name: "Last row survives restart"
+    sql: "SELECT note FROM safe_rollover WHERE id = 8"
+    expect:
+      rows: 1
+      data:
+        - note: "row-7"
+
+  - name: "COPY rows survive restart after shard rollover"
+    sql: "SELECT COUNT(*) AS cnt FROM safe_copy_rollover"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  - name: "Last COPY row survives restart"
+    sql: "SELECT note FROM safe_copy_rollover WHERE id = 8"
+    expect:
+      rows: 1
+      data:
+        - note: "copy-7"
+
+  - name: "Restore default shard size"
+    scm: (settings "ShardSize" 60000)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS safe_rollover"
+  - sql: "DROP TABLE IF EXISTS safe_copy_rollover"
