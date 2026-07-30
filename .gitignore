@@ -10,6 +10,7 @@ memcp.sif
 trace*.json
 *.diff
 go.sum
+docs/
 todos/
 .perf_baseline.json
 .gocache/

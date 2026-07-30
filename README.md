@@ -136,6 +136,16 @@ MemCP supports several storage engines, selectable per table via `CREATE TABLE .
 - **Extensive error handling and validation**
 - **Built-in performance monitoring**
 
+### Generated Documentation
+
+The generated API/reference documentation is not versioned. Build it locally when needed:
+
+```bash
+make docs
+```
+
+This writes the generated files to `docs/`.
+
 ## Quick Start 🚀
 
 ```bash
