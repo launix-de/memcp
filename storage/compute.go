@@ -265,9 +265,11 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 			// Detect parameter changes (different OVER clause on same column).
 			paramsChanged = !slicesEqual(c.OrcSortCols, sortCols) ||
 				!boolSlicesEqual(c.OrcSortDirs, sortDirs) ||
+				c.OrcPartitionCount != partCount ||
 				!slicesEqual(c.OrcMapCols, mapCols)
 			t.Columns[i].OrcSortCols = sortCols
 			t.Columns[i].OrcSortDirs = sortDirs
+			t.Columns[i].OrcPartitionCount = partCount
 			t.Columns[i].OrcMapCols = mapCols
 			t.Columns[i].OrcMapFn = mapFn
 			t.Columns[i].OrcReduceFn = reduceFn

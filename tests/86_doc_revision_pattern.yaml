@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
 metadata:
   version: "1.0"
   description: "Real-world pattern: latest revision per document via ROW_NUMBER PARTITION BY"
@@ -43,6 +45,19 @@ test_cases:
         - {doc: 3, file: "invoice_v2.pdf", rn: 1}
         - {doc: 3, file: "invoice_v1.pdf", rn: 2}
 
+  - name: "EXPLAIN compatible ROW_NUMBER stays fused"
+    sql: |
+      EXPLAIN SELECT doc, file, ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+      FROM doc_revision
+      ORDER BY doc, created DESC
+    expect:
+      rows: 1
+      contains:
+        - "scan_order"
+      not_contains:
+        - "createcolumn"
+        - "__orc_row_number"
+
   # =========================================================================
   # LEFT JOIN with rn=1 — the actual business query
   # =========================================================================
@@ -63,6 +78,24 @@ test_cases:
         - {id: 1, title: "Contract A", file: "contract_v3.pdf"}
         - {id: 2, title: "Contract B", file: "draft.pdf"}
         - {id: 3, title: "Invoice C", file: "invoice_v2.pdf"}
+
+  - name: "EXPLAIN derived ROW_NUMBER join avoids ORC carrier"
+    sql: |
+      EXPLAIN SELECT doc.id, doc.title, dr.file
+      FROM doc
+      LEFT JOIN (
+          SELECT doc, file,
+                 ROW_NUMBER() OVER (PARTITION BY doc ORDER BY created DESC) AS rn
+          FROM doc_revision
+      ) dr ON dr.doc = doc.id AND dr.rn = 1
+      ORDER BY doc.id
+    expect:
+      rows: 1
+      contains:
+        - "scan_order"
+      not_contains:
+        - "createcolumn"
+        - "__orc_row_number"
 
   # =========================================================================
   # Partition-local mutation: INSERT new revision for doc=1

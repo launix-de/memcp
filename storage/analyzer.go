@@ -436,6 +436,9 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			d := scm.DeclarationForValue(head)
 			return d != nil && d.Name == name
 		}
+		if funcIs(v[0], "optimize") && len(v) == 2 {
+			return traverseCondition(v[1])
+		}
 		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
@@ -772,6 +775,12 @@ func reorderByFrequency(bounds boundaries, t *table) {
 //   - Partitioned ROW_NUMBER (list 0 nil) + 2 sortCols → 1
 //   - Partitioned RANK (list (list 0 0 nil) nil) + 2 sortCols → 1
 func analyzeOrcPartition(col *column) int {
+	if col.OrcPartitionCount > 0 {
+		if col.OrcPartitionCount > len(col.OrcSortCols) {
+			return len(col.OrcSortCols)
+		}
+		return col.OrcPartitionCount
+	}
 	if len(col.OrcSortCols) < 2 {
 		return 0
 	}

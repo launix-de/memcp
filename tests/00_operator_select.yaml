@@ -1,0 +1,49 @@
+# Minimal combined-operator SELECT lowering test
+
+metadata:
+  version: "1.0"
+  description: "Query-block operator lowers to scan for simple table projection"
+
+cleanup:
+  - action: "Clean up operator select table"
+    sql: "DROP TABLE IF EXISTS operator_select_00"
+
+setup:
+  - action: "Drop pre-existing operator select table"
+    sql: "DROP TABLE IF EXISTS operator_select_00"
+  - action: "Create operator select table"
+    sql: "CREATE TABLE operator_select_00 (id INT, name VARCHAR(50))"
+  - action: "Seed operator select rows"
+    sql: "INSERT INTO operator_select_00 (id, name) VALUES (1, 'one'), (2, 'two')"
+
+test_cases:
+  - name: "Simple projected SELECT from table"
+    sql: "SELECT id FROM operator_select_00"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
+
+  - name: "Projected SELECT with WHERE"
+    sql: "SELECT id FROM operator_select_00 WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "Projected SELECT with ORDER BY"
+    sql: "SELECT id FROM operator_select_00 ORDER BY id DESC"
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 1
+
+  - name: "Projected SELECT with WHERE and ORDER BY"
+    sql: "SELECT name FROM operator_select_00 WHERE id > 0 ORDER BY id DESC"
+    expect:
+      rows: 2
+      data:
+        - name: "two"
+        - name: "one"

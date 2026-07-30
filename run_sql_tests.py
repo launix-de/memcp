@@ -133,6 +133,7 @@ DEFAULT_MAX_TIME_SEC = 5.0
 # helper nodes. Per-case `max_plan_size` / suite `metadata.max_plan_size`
 # override it; set to 0 to disable the check for a case/suite.
 DEFAULT_MAX_PLAN_SIZE = int(os.environ.get("MEMCP_MAX_PLAN_SIZE", "200000"))
+MEMCP_START_TIMEOUT = int(os.environ.get("MEMCP_START_TIMEOUT", "180"))
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
 FAILURE_MAP_KEY = "failures"
@@ -698,9 +699,13 @@ class SQLTestRunner:
                 scm_code = scm_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
             expect = test_case.get("expect", {})
             expect_error = expect.get("error", False)
+            scm_timeout = int(test_case.get(
+                "timeout",
+                2 if expect_error or self._expect_interrupted_ok(expect) else 600,
+            ))
             try:
                 url = f"{self.base_url}/scm"
-                resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=600)
+                resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=scm_timeout)
             except Exception as e:
                 if self._expect_interrupted_ok(expect):
                     self._record_success(name, is_noncritical)
@@ -1285,15 +1290,10 @@ _memcp_log_file: str = ""
 def start_memcp_process(port: int) -> subprocess.Popen | None:
     global _memcp_log_file
     try:
-        # Test-runner contract:
-        # - Always use the repository-local ./data directory.
-        # - Never create port-specific or temp datadirs here.
-        # - Never delete ./data in the runner.
-        #
-        # The SQL suites intentionally share one database state across tables and
-        # restart/shutdown scenarios. "isolated" means serialized execution, not
-        # storage isolation.
-        datadir = "./data"
+        # Test-runner contract: every managed runner owns one data directory for
+        # all suites in this process, so restart/shutdown scenarios keep state
+        # without depending on a developer's persistent ./data credentials.
+        datadir = os.environ.get("MEMCP_TEST_DATA_DIR", f"/tmp/memcp-sql-tests-{port}")
         _memcp_log_file = f"/tmp/memcp-test-{port}.log"
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
@@ -1304,7 +1304,7 @@ def start_memcp_process(port: int) -> subprocess.Popen | None:
             "--disable-mysql", "lib/main.scm"
         ], cwd=os.path.dirname(os.path.abspath(__file__)),
            env=env, stdin=subprocess.PIPE, stdout=logfile, stderr=logfile, text=True)
-        if not wait_for_memcp(port):
+        if not wait_for_memcp(port, timeout=MEMCP_START_TIMEOUT):
             print_memcp_log(tail=50)
             return None
         return proc

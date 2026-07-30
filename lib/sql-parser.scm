@@ -298,13 +298,24 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 										(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
 										/* Transform: replace NEW/OLD column refs with get_assoc for trigger context */
 										(define transform_new_old (lambda (expr) (match expr
-											'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-											'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+											((symbol get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+											((quote get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+											((symbol get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+											((quote get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 											(cons h t) (cons (transform_new_old h) (map t transform_new_old))
 											expr)))
 										/* Transform the SELECT 9-tuple to handle NEW/OLD refs */
 										/* fields is a flat assoc (k1 v1 k2 v2 ...), order is list of (expr dir) pairs */
-										(define inner_t (match inner '(s tables fields condition group having order limit offset)
+										(define inner_t (match inner
+											((symbol query-block) s tables fields condition group having order limit offset hidden stages facts)
+											(list (quote query-block) s tables
+												(map_assoc fields (lambda (k v) (transform_new_old v)))
+												(transform_new_old condition)
+												(if (nil? group) nil (map group transform_new_old))
+												(if (nil? having) nil (transform_new_old having))
+												(if (nil? order) nil (map order (lambda (o) (match o '(e d) (list (transform_new_old e) d) o))))
+												limit offset hidden stages facts)
+											'(s tables fields condition group having order limit offset)
 											(list s tables
 												(map_assoc fields (lambda (k v) (transform_new_old v)))
 												(transform_new_old condition)
@@ -314,21 +325,36 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 												limit offset)
 											inner))
 										/* Extract SELECT field names from the 9-tuple (fields is a flat assoc list) */
-										(define select_fields (match inner_t '(_ _ fields _ _ _ _ _ _) fields '()))
+										(define select_fields (match inner_t
+											((symbol query-block) _ _ fields _ _ _ _ _ _ _ _ _) fields
+											'(_ _ fields _ _ _ _ _ _) fields
+											_ '()))
 										(define select_names (extract_assoc select_fields (lambda (k v) k)))
-										/* Generate code: set resultrow + build_queryplan_term */
-										(list (list (symbol "begin")
-											(list (symbol "set") (symbol "resultrow")
-												(list (symbol "lambda") (list (symbol "item"))
-													(list (symbol "insert") (list (symbol "table") schema tbl)
-														(cons (symbol "list") cols)
-														(list (symbol "list")
-															(cons (symbol "list")
-																(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
-														(list (symbol "list"))
-														(if ignore (list (symbol "lambda") '() 0) nil)
-														false nil)))
-											(build_queryplan_term inner_t))))
+										(define select_values (extract_assoc select_fields (lambda (_k v) v)))
+										(define select_sources (match inner_t
+											((symbol query-block) _ tables _ _ _ _ _ _ _ _ _ _) tables
+											'(_ tables _ _ _ _ _ _ _) tables
+											_ '()))
+										(if (empty_list? select_sources)
+											(list (list (symbol "insert") (list (symbol "table") schema tbl)
+												(cons (symbol "list") cols)
+												(list (symbol "list") (cons (symbol "list") select_values))
+												(list (symbol "list"))
+												(if ignore (list (symbol "lambda") '() 0) nil)
+												false nil))
+											/* Generate code: set resultrow + build_queryplan_term */
+											(list (list (symbol "begin")
+												(list (symbol "set") (symbol "resultrow")
+													(list (symbol "lambda") (list (symbol "item"))
+														(list (symbol "insert") (list (symbol "table") schema tbl)
+															(cons (symbol "list") cols)
+															(list (symbol "list")
+																(cons (symbol "list")
+																	(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
+															(list (symbol "list"))
+															(if ignore (list (symbol "lambda") '() 0) nil)
+															false nil)))
+												(build_queryplan_term inner_t)))))
 									(if (equal? tag '!update)
 										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin
@@ -844,50 +870,61 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	(define limit nil)
 	(define offset nil)
 	(define sql_select_order (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) order
 		'(schema tables fields condition group having order limit offset) order
 		_ nil
 	)))
 	(define sql_select_limit (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) limit
 		'(schema tables fields condition group having order limit offset) limit
 		_ nil
 	)))
 	(define sql_select_offset (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) offset
 		'(schema tables fields condition group having order limit offset) offset
 		_ nil
 	)))
 	(define sql_select_clear_stage (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
+		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
 	(define sql_union_all_parts (lambda (query)
-		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
-			(cdr query)
-			nil)))
+		(match query
+			((symbol union-block) (symbol all) branches order limit offset facts) (list branches order limit offset)
+			((symbol union_all) branches order limit offset) (list branches order limit offset)
+			_ nil)))
 	(define sql_union_distinct_parts (lambda (query)
-		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
-			(cdr query)
-			nil)))
+		(match query
+			((symbol union-block) (symbol distinct) branches order limit offset facts) (list branches order limit offset)
+			((symbol union_distinct) branches order limit offset) (list branches order limit offset)
+			_ nil)))
 	(define sql_union_all_query (lambda (left right) (begin
 		(define right_parts (sql_union_all_parts right))
 		(if (nil? right_parts)
-			(list (quote union_all)
+			(list (quote union-block)
+				(quote all)
 				(list left (sql_select_clear_stage right))
 				(sql_select_order right)
 				(sql_select_limit right)
-				(sql_select_offset right))
+				(sql_select_offset right)
+				'())
 			(match right_parts '(branches order limit offset)
-				(list (quote union_all) (cons left branches) order limit offset)))
+				(list (quote union-block) (quote all) (cons left branches) order limit offset '())))
 	)))
 	(define sql_union_distinct_query (lambda (left right) (begin
 		(define right_parts (sql_union_distinct_parts right))
 		(if (nil? right_parts)
-			(list (quote union_distinct)
+			(list (quote union-block)
+				(quote distinct)
 				(list left (sql_select_clear_stage right))
 				(sql_select_order right)
 				(sql_select_limit right)
-				(sql_select_offset right))
+				(sql_select_offset right)
+				'())
 			(match right_parts '(branches order limit offset)
-				(list (quote union_distinct) (cons left branches) order limit offset)))
+				(list (quote union-block) (quote distinct) (cons left branches) order limit offset '())))
 	)))
 	(define sql_inner_select_kind (lambda (sym) (begin
 		(if (equal?? sym "inner_select")
@@ -1003,7 +1040,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				'((define limit sql_expression))
 			)
 		)
-	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
+	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset '() '() '())))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)

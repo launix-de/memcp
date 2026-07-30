@@ -168,7 +168,7 @@ test_cases:
   # =================================================================
   # 8. GROUP BY with scalar subquery in SELECT
   # =================================================================
-  - name: "GROUP BY with correlated scalar subquery"
+  - name: "Loose GROUP BY with correlated scalar subquery is rejected"
     sql: |
       SELECT o.customer,
              COUNT(*) AS order_cnt,
@@ -177,14 +177,7 @@ test_cases:
       GROUP BY o.customer
       ORDER BY o.customer
     expect:
-      rows: 3
-      data:
-        - customer: "Alice"
-          order_cnt: 3
-        - customer: "Bob"
-          order_cnt: 2
-        - customer: "Charlie"
-          order_cnt: 1
+      error: true
 
   # =================================================================
   # 9. Aggregated subquery in JOIN

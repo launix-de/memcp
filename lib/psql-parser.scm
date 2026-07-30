@@ -361,50 +361,61 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define limit nil)
 	(define offset nil)
 	(define psql_select_order (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) order
 		'(schema tables fields condition group having order limit offset) order
 		_ nil
 	)))
 	(define psql_select_limit (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) limit
 		'(schema tables fields condition group having order limit offset) limit
 		_ nil
 	)))
 	(define psql_select_offset (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) offset
 		'(schema tables fields condition group having order limit offset) offset
 		_ nil
 	)))
 	(define psql_select_clear_stage (lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
+		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
 	(define psql_union_all_parts (lambda (query)
-		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_all)))
-			(cdr query)
-			nil)))
+		(match query
+			((symbol union-block) (symbol all) branches order limit offset facts) (list branches order limit offset)
+			((symbol union_all) branches order limit offset) (list branches order limit offset)
+			_ nil)))
 	(define psql_union_distinct_parts (lambda (query)
-		(if (and (list? query) (equal? (count query) 5) (equal?? (car query) (quote union_distinct)))
-			(cdr query)
-			nil)))
+		(match query
+			((symbol union-block) (symbol distinct) branches order limit offset facts) (list branches order limit offset)
+			((symbol union_distinct) branches order limit offset) (list branches order limit offset)
+			_ nil)))
 	(define psql_union_all_query (lambda (left right) (begin
 		(define right_parts (psql_union_all_parts right))
 		(if (nil? right_parts)
-			(list (quote union_all)
+			(list (quote union-block)
+				(quote all)
 				(list left (psql_select_clear_stage right))
 				(psql_select_order right)
 				(psql_select_limit right)
-				(psql_select_offset right))
+				(psql_select_offset right)
+				'())
 			(match right_parts '(branches order limit offset)
-				(list (quote union_all) (cons left branches) order limit offset)))
+				(list (quote union-block) (quote all) (cons left branches) order limit offset '())))
 	)))
 	(define psql_union_distinct_query (lambda (left right) (begin
 		(define right_parts (psql_union_distinct_parts right))
 		(if (nil? right_parts)
-			(list (quote union_distinct)
+			(list (quote union-block)
+				(quote distinct)
 				(list left (psql_select_clear_stage right))
 				(psql_select_order right)
 				(psql_select_limit right)
-				(psql_select_offset right))
+				(psql_select_offset right)
+				'())
 			(match right_parts '(branches order limit offset)
-				(list (quote union_distinct) (cons left branches) order limit offset)))
+				(list (quote union-block) (quote distinct) (cons left branches) order limit offset '())))
 	)))
 	(define psql_select_core (parser '(
 		(atom "SELECT" true)
@@ -464,7 +475,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				'((define limit psql_expression))
 			)
 		)
-	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
+	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset '() '() '())))
 	(define psql_select (parser (or
 		(parser '(
 			(define left psql_select_core)

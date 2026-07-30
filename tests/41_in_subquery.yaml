@@ -116,6 +116,27 @@ test_cases:
         - "\"__cnt\""
         - ".in_renderjob:((get_column"
 
+  - name: "EXPLAIN IR IN subquery keeps membership semantics logical"
+    sql: |
+      EXPLAIN IR SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob)
+      ORDER BY ID
+    expect:
+      rows: 1
+      contains:
+        - "group-stage"
+        - "stage-output"
+        - "in_membership"
+        - "domain"
+        - "lookup-keys"
+        - "null_semantics"
+        - "cardinality_mode"
+      not_contains:
+        - "neumann_in"
+        - "inner_select"
+        - ".grp:"
+        - "touch_keytable"
+
   # === UNION ALL inside IN subselect ===
   # Can be compiled to (or (scan...) (scan...))
 
@@ -342,8 +363,15 @@ test_cases:
           )
           ORDER BY ID
         expect:
+          contains:
+            - "or"
+            - "in_membership"
+            - "in_rhs_nulls"
+            - "stage-output"
           not_contains:
             - "union_distinct"
+            - "inner_select"
+            - ".grp:"
       - sql: |
           EXPLAIN
           SELECT ID, name FROM in_fop_files
@@ -370,8 +398,15 @@ test_cases:
           )
           ORDER BY ID
         expect:
+          contains:
+            - "and"
+            - "in_membership"
+            - "in_rhs_nulls"
+            - "stage-output"
           not_contains:
             - "union_distinct"
+            - "inner_select"
+            - ".grp:"
       - sql: |
           EXPLAIN
           SELECT ID, name FROM in_fop_files
@@ -431,6 +466,191 @@ test_cases:
             - "__union_distinct_rows"
             - "__union_distinct_seen"
 
+  # === SQL three-valued logic for IN / NOT IN with NULL RHS ===
+
+  - name: "Setup NULL membership table"
+    sql: "DROP TABLE IF EXISTS in_nullable_rhs"
+    expect: {}
+
+  - name: "Create NULL membership table"
+    sql: "CREATE TABLE in_nullable_rhs (ID INT PRIMARY KEY, grp INT, result INT)"
+    expect: {}
+
+  - name: "Insert NULL membership rows"
+    sql: |
+      INSERT INTO in_nullable_rhs (ID, grp, result) VALUES
+      (1, 1, 2),
+      (2, 1, NULL),
+      (3, 2, NULL)
+    expect: {}
+
+  - name: "NOT IN subquery with RHS NULL returns no nonmatching rows"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID NOT IN (SELECT result FROM in_nullable_rhs)
+      ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "IN subquery with RHS NULL still returns matching rows"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_nullable_rhs)
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 2
+
+  - name: "NOT IN subquery with RHS NULL projects UNKNOWN"
+    sql: |
+      SELECT ID, ID NOT IN (SELECT result FROM in_nullable_rhs) AS ok
+      FROM in_fop_files
+      ORDER BY ID
+    expect:
+      rows: 5
+      data:
+        - ID: 1
+          ok: null
+        - ID: 2
+          ok: false
+        - ID: 3
+          ok: null
+        - ID: 4
+          ok: null
+        - ID: 5
+          ok: null
+
+  - name: "IN subquery with RHS NULL projects UNKNOWN for nonmatch"
+    sql: |
+      SELECT ID, ID IN (SELECT result FROM in_nullable_rhs) AS ok
+      FROM in_fop_files
+      ORDER BY ID
+    expect:
+      rows: 5
+      data:
+        - ID: 1
+          ok: null
+        - ID: 2
+          ok: true
+        - ID: 3
+          ok: null
+        - ID: 4
+          ok: null
+        - ID: 5
+          ok: null
+
+  - name: "Correlated NOT IN sees RHS NULL per domain"
+    sql: |
+      SELECT ID FROM in_fop_files f
+      WHERE ID NOT IN (
+        SELECT result FROM in_nullable_rhs r WHERE r.grp = f.ID
+      )
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 3
+        - ID: 4
+        - ID: 5
+
+  - name: "Correlated NOT IN without RHS NULL keeps nonmatching domain rows"
+    sql: |
+      SELECT ID FROM in_fop_files f
+      WHERE ID NOT IN (
+        SELECT result FROM in_nullable_rhs r WHERE r.grp = f.ID AND r.result IS NOT NULL
+      )
+      ORDER BY ID
+    expect:
+      rows: 5
+      data:
+        - ID: 1
+        - ID: 2
+        - ID: 3
+        - ID: 4
+        - ID: 5
+
+  - name: "NOT IN UNION with RHS NULL returns no nonmatching rows"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID NOT IN (
+        SELECT result FROM in_nullable_rhs WHERE ID = 1
+        UNION ALL
+        SELECT result FROM in_nullable_rhs WHERE ID = 2
+      )
+      ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "EXPLAIN IR NOT IN UNION with RHS NULL keeps branch null facts"
+    sql: |
+      EXPLAIN IR SELECT ID FROM in_fop_files
+      WHERE ID NOT IN (
+        SELECT result FROM in_nullable_rhs WHERE ID = 1
+        UNION ALL
+        SELECT result FROM in_nullable_rhs WHERE ID = 2
+      )
+      ORDER BY ID
+    expect:
+      rows: 1
+      contains:
+        - "and"
+        - "in_membership"
+        - "in_rhs_nulls"
+        - "null_semantics"
+      not_contains:
+        - "union_distinct"
+        - "inner_select"
+        - ".grp:"
+
+  - name: "NOT IN constant NULL subquery returns no rows"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID NOT IN (SELECT NULL)
+      ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "NOT IN constant NULL subquery projects UNKNOWN"
+    sql: "SELECT 1 NOT IN (SELECT NULL) AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: null
+
+  - name: "IN constant NULL subquery projects UNKNOWN"
+    sql: "SELECT 1 IN (SELECT NULL) AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: null
+
+  - name: "NOT IN with NULL probe projects UNKNOWN"
+    sql: "SELECT NULL NOT IN (SELECT 1) AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: null
+
+  - name: "EXPLAIN IR IN with RHS NULL exposes null-aware membership semantics"
+    sql: |
+      EXPLAIN IR SELECT ID FROM in_fop_files
+      WHERE ID NOT IN (SELECT result FROM in_nullable_rhs)
+      ORDER BY ID
+    expect:
+      rows: 1
+      contains:
+        - "in_membership"
+        - "in_rhs_nulls"
+        - "null_semantics"
+        - "lookup-keys"
+      not_contains:
+        - "inner_select"
+        - "neumann_in"
+        - ".grp:"
+        - "touch_keytable"
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS in_nullable_rhs"
   - sql: "DROP TABLE IF EXISTS in_renderjob"
   - sql: "DROP TABLE IF EXISTS in_fop_files"

@@ -73,6 +73,39 @@ test_cases:
           name: "Bob"
           total_with_next: 300
 
+  - name: "COUNT over LEAD derived table grouped directly unordered"
+    sql: |
+      SELECT parent, COUNT(*) AS cnt_with_next
+      FROM (SELECT parent, val, ts,
+        LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+      FROM lwsa_hist) m
+      WHERE m.next_ts IS NOT NULL
+      GROUP BY parent
+    expect:
+      rows: 2
+      data:
+        - parent: 1
+          cnt_with_next: 2
+        - parent: 2
+          cnt_with_next: 1
+
+  - name: "COUNT over LEAD derived table grouped directly"
+    sql: |
+      SELECT parent, COUNT(*) AS cnt_with_next
+      FROM (SELECT parent, val, ts,
+        LEAD(ts) OVER (PARTITION BY parent ORDER BY ts) AS next_ts
+      FROM lwsa_hist) m
+      WHERE m.next_ts IS NOT NULL
+      GROUP BY parent
+      ORDER BY parent
+    expect:
+      rows: 2
+      data:
+        - parent: 1
+          cnt_with_next: 2
+        - parent: 2
+          cnt_with_next: 1
+
   - name: "COUNT over LEAD derived table (correlated)"
     sql: |
       SELECT m2.ID,

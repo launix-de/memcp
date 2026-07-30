@@ -79,12 +79,13 @@ type column struct {
 
 	// ORC fields — non-empty OrcSortCols signals this is an ordered-reduce computed column.
 	// The column value is produced by a scan_order pass rather than per-row computation.
-	OrcSortCols   []string  `json:",omitempty"` // ORDER BY column names (partition cols first, then order cols)
-	OrcSortDirs   []bool    `json:",omitempty"` // false=ASC, true=DESC, one per OrcSortCol
-	OrcMapCols    []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
-	OrcMapFn      scm.Scmer // (lambda ($set mapcols...) ...) — passes data to reduceFn
-	OrcReduceFn   scm.Scmer // (lambda (acc mapped) ...) — accumulates and writes via $set
-	OrcReduceInit scm.Scmer // initial accumulator value (neutral element)
+	OrcSortCols       []string  `json:",omitempty"` // ORDER BY column names (partition cols first, then order cols)
+	OrcSortDirs       []bool    `json:",omitempty"` // false=ASC, true=DESC, one per OrcSortCol
+	OrcPartitionCount int       `json:",omitempty"` // number of leading OrcSortCols that form the window partition
+	OrcMapCols        []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
+	OrcMapFn          scm.Scmer // (lambda ($set mapcols...) ...) — passes data to reduceFn
+	OrcReduceFn       scm.Scmer // (lambda (acc mapped) ...) — accumulates and writes via $set
+	OrcReduceInit     scm.Scmer // initial accumulator value (neutral element)
 }
 
 // OrcFirstSortCol returns the first sort column name.
@@ -1104,7 +1105,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter":
 			// handled by createcolumn builtin, not a column property
-		case "sortcols", "sortdirs", "mapcols", "mapfn", "reducefn", "reduceinit":
+		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapfn", "reducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn
 		default:
 			panic("unknown column attribute: " + key)

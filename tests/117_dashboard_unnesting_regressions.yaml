@@ -73,7 +73,7 @@ test_cases:
       FROM u3_main
       WHERE ID = 1
     expect:
-      rows: 8
+      rows: 1
       not_contains:
         - "(\"_unn_u3_main_0\" \"_unn_u3_main_1\")"
 

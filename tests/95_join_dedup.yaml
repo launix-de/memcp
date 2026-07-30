@@ -55,12 +55,16 @@ test_cases:
       FROM jd_item
       ORDER BY id
     expect:
-      rows: 8
       contains:
-        - "_unn_jd_ref_0"
+        - "(stage-output"
+        - "scalar-single:"
+        - "(purpose scalar_single)"
+        - "(cardinality_mode single_or_error)"
+        - "jd_ref"
       not_contains:
-        - "_unn_jd_ref_1"
+        - "_unn_jd_ref_"
         - "scan-tagged-table"
+        - "inner_select"
 
   # Three identical subqueries: all three must match
   - name: "Three identical scalar subqueries all agree"
@@ -112,12 +116,16 @@ test_cases:
       FROM jd_item
       ORDER BY id
     expect:
-      rows: 8
       contains:
-        - "_unn_jd_ref_0"
+        - "(stage-output"
+        - "scalar-single:"
+        - "(purpose scalar_single)"
+        - "(cardinality_mode single_or_error)"
+        - "jd_ref"
       not_contains:
-        - "_unn_jd_ref_1"
+        - "_unn_jd_ref_"
         - "scan-tagged-table"
+        - "inner_select"
 
   # Mix of identical + different-field subqueries
   - name: "Mixed identical and different-field subqueries"

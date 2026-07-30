@@ -15,6 +15,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+(define sql_metadata_identity (lambda (x) x))
+
 /* format_create_table: build a CREATE TABLE statement from show metadata */
 (define format_create_table (lambda (schema tbl) (begin
 	(define tblinfo (show schema tbl true))
@@ -170,6 +172,59 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
+
+/* runtime row source for virtual INFORMATION_SCHEMA tables */
+(define information_schema_rows (lambda (schema tbl) (match '(schema tbl)
+	'((ignorecase "information_schema") (ignorecase "schemata"))
+	(map (show) (lambda (db)
+		(list
+			"catalog_name" "def"
+			"schema_name" db
+			"default_character_set_name" "utf8mb4"
+			"default_collation_name" "utf8mb3_general_ci"
+			"sql_path" NULL
+			"schema_comment" "")))
+
+	'((ignorecase "information_schema") (ignorecase "tables"))
+	(merge (map (show) (lambda (db)
+		(map (show db) (lambda (table_name)
+			(info_schema_table_row db table_name))))))
+
+	'((ignorecase "information_schema") (ignorecase "columns"))
+	(merge (map (show) (lambda (db)
+		(merge (map (show db) (lambda (table_name)
+			(map (show db table_name) (lambda (col)
+				(list
+					"table_catalog" "def"
+					"table_schema" db
+					"table_name" table_name
+					"column_name" (col "Field")
+					"data_type" (col "RawType")
+					"column_type" (concat (col "Type") (col "Dimensions")))))))))))
+
+	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
+	(list)
+
+	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
+	(list)
+
+	'((ignorecase "information_schema") (ignorecase "statistics"))
+	(merge (map (show) (lambda (db)
+		(merge (map (show db) (lambda (table_name)
+			(show db table_name (sql_metadata_identity "statistics"))))))))
+
+	'((ignorecase "information_schema") (ignorecase "files"))
+	(list)
+
+	'((ignorecase "information_schema") (ignorecase "partitions"))
+	(list)
+
+	'((ignorecase "information_schema") _)
+	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
+
+	(show schema tbl)
+)))
+
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "schemata"))
 	(merge '(scanfn '(session "__memcp_tx")
