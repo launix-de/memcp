@@ -264,6 +264,7 @@ test_cases:
         - c: 8
 
   - name: "EXPLAIN IR rewrites simple wrapper over UNION ALL"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT t.ID FROM (
@@ -277,7 +278,11 @@ test_cases:
         - '"stage": "term", "kind": "root", "value": "union_all"'
         - '"kind": "branches", "value": 2'
 
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "EXPLAIN IR top-level UNION ALL includes ordering metadata"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT ID FROM fop_files WHERE ID <= 2
@@ -293,6 +298,9 @@ test_cases:
         - '"kind": "limit", "value": 2'
         - '"kind": "offset", "value": 1'
 
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "UNION ALL with simple derived branch"
     sql: |
       SELECT ID FROM fop_files WHERE ID = 1

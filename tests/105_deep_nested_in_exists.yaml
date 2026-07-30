@@ -64,6 +64,35 @@ test_cases:
         - id: 3
           active_ref: null
 
+  - name: "EXPLAIN IR recursively decorrelates nested EXISTS stages"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
+    sql: |
+      EXPLAIN IR SELECT a.id
+      FROM dn_a a
+      WHERE EXISTS (
+        SELECT 1 FROM dn_b b
+        WHERE b.id = a.ref_b
+          AND EXISTS (
+            SELECT 1 FROM dn_tags t
+            WHERE t.ref_id = b.ref_c AND t.tag = 'active'
+          )
+      )
+      ORDER BY a.id
+    expect:
+      rows: 1
+      contains:
+        - "group-stage"
+        - "stage-output"
+        - "btw2025_accessing"
+        - "presence_only"
+        - "max_needed_per_domain"
+        - "lookup-keys"
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
+        - ".grp:"
+        - "touch_keytable"
+
   - name: "Depth 3: EXISTS buried inside 2 scalar levels"
     sql: |
       SELECT a.id,

@@ -198,6 +198,7 @@ test_cases:
           dept: "Engineering"
 
   - name: "EXPLAIN IR nested correlated subselect keeps helper LEFT JOIN chain"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT e.name,
@@ -209,6 +210,8 @@ test_cases:
         - '_unn_sq_emp_0'
         - '_unn_sq_dept_0'
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - '__scalar_promise_'
 
   # === nD domain: multiple outer references ===

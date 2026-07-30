@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "IN and NOT IN with subquery tests"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS in_renderjob"
@@ -117,6 +118,7 @@ test_cases:
         - ".in_renderjob:((get_column"
 
   - name: "EXPLAIN IR IN subquery keeps membership semantics logical"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR SELECT ID, name FROM in_fop_files
       WHERE ID IN (SELECT result FROM in_renderjob)
@@ -126,14 +128,15 @@ test_cases:
       contains:
         - "group-stage"
         - "stage-output"
-        - "in_membership"
         - "domain"
         - "lookup-keys"
         - "null_semantics"
         - "cardinality_mode"
       not_contains:
+        - "dependent-subquery"
         - "neumann_in"
         - "inner_select"
+        - "in_membership"
         - ".grp:"
         - "touch_keytable"
 
@@ -352,6 +355,7 @@ test_cases:
           name: "image5.png"
 
   - name: "EXPLAIN IN with UNION without ALL skips duplicate materialization"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     steps:
       - sql: |
           EXPLAIN IR
@@ -364,13 +368,13 @@ test_cases:
           ORDER BY ID
         expect:
           contains:
-            - "or"
-            - "in_membership"
-            - "in_rhs_nulls"
+            - "in_candidate"
+            - "candidate"
             - "stage-output"
+            - "lookup-keys"
           not_contains:
-            - "union_distinct"
             - "inner_select"
+            - "in_membership"
             - ".grp:"
       - sql: |
           EXPLAIN
@@ -386,7 +390,117 @@ test_cases:
             - "__union_distinct_rows"
             - "__union_distinct_seen"
 
+  - name: "IN UNION dataview-shaped filter exposes joinable candidate relation"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_dv_doc"
+      - sql: "DROP TABLE IF EXISTS in_dv_file"
+      - sql: "DROP TABLE IF EXISTS in_dv_acl"
+      - sql: |
+          CREATE TABLE in_dv_file (
+            ID INT PRIMARY KEY,
+            filename VARCHAR(64),
+            search VARCHAR(128)
+          )
+      - sql: |
+          CREATE TABLE in_dv_doc (
+            ID INT PRIMARY KEY,
+            file_id INT,
+            tenant INT,
+            sort_key INT
+          )
+      - sql: |
+          CREATE TABLE in_dv_acl (
+            ID INT PRIMARY KEY,
+            tenant INT,
+            allowed INT
+          )
+      - sql: |
+          INSERT INTO in_dv_file (ID, filename, search) VALUES
+          (10, 'invoice-hit.pdf', 'other'),
+          (20, 'other.pdf', 'needle token'),
+          (30, 'miss.pdf', 'other')
+      - sql: |
+          INSERT INTO in_dv_doc (ID, file_id, tenant, sort_key) VALUES
+          (1, 10, 1, 20),
+          (2, 20, 1, 10),
+          (3, 30, 1, 30),
+          (4, 10, 2, 5)
+      - sql: |
+          INSERT INTO in_dv_acl (ID, tenant, allowed) VALUES
+          (1, 1, 1),
+          (2, 2, 0)
+    steps:
+      - sql: |
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          rows: 2
+          data:
+            - ID: 2
+            - ID: 1
+      - sql: |
+          EXPLAIN IR
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "in_candidate"
+            - "candidate"
+            - "stage-output"
+            - "lookup-keys"
+          not_contains:
+            - "inner_select"
+            - "dependent-subquery"
+            - "in_membership"
+            - ".grp:"
+            - "touch_keytable"
+      - sql: |
+          EXPLAIN
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "scan"
+          not_contains:
+            - "__union_distinct_rows"
+            - "__union_distinct_seen"
+
   - name: "EXPLAIN NOT IN with UNION without ALL skips duplicate materialization"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     steps:
       - sql: |
           EXPLAIN IR
@@ -583,6 +697,7 @@ test_cases:
       rows: 0
 
   - name: "EXPLAIN IR NOT IN UNION with RHS NULL keeps branch null facts"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR SELECT ID FROM in_fop_files
       WHERE ID NOT IN (
@@ -599,6 +714,7 @@ test_cases:
         - "in_rhs_nulls"
         - "null_semantics"
       not_contains:
+        - "dependent-subquery"
         - "union_distinct"
         - "inner_select"
         - ".grp:"
@@ -633,6 +749,7 @@ test_cases:
         - ok: null
 
   - name: "EXPLAIN IR IN with RHS NULL exposes null-aware membership semantics"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR SELECT ID FROM in_fop_files
       WHERE ID NOT IN (SELECT result FROM in_nullable_rhs)
@@ -645,6 +762,7 @@ test_cases:
         - "null_semantics"
         - "lookup-keys"
       not_contains:
+        - "dependent-subquery"
         - "inner_select"
         - "neumann_in"
         - ".grp:"

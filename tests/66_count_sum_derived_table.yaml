@@ -69,6 +69,7 @@ test_cases:
           total: 60
 
   - name: "EXPLAIN IR prunes unused scalar payload from COUNT(*) derived table"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT COUNT(*) AS cnt FROM (
@@ -82,11 +83,14 @@ test_cases:
         - '"kind": "tables", "value": "((\"t\\u0000m\" \"memcp-tests\" \"csd_main\" false nil))"'
         - '"kind": "fields", "value": "(\"cnt\" (aggregate 1 + 0))"'
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - 'total_val'
         - 'has_detail'
         - 'csd_detail'
 
   - name: "EXPLAIN IR keeps non-window derived aggregates flattened"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT COUNT(*) AS cnt, SUM(t.total_val) AS grand_total FROM (
@@ -102,6 +106,8 @@ test_cases:
         - "(domain ((get_column \"m\" true \"ID\" true)))"
         - "(aggregate 1 + 0)"
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - "__mat:"
         - "(scan"
 

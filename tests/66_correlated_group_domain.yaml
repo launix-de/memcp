@@ -66,6 +66,7 @@ test_cases:
         - grp: 20
           score: 1
   - name: "outer grouped domain stays logical in EXPLAIN IR"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR SELECT o.grp,
         COALESCE((SELECT SUM(i.cnt)
@@ -86,6 +87,8 @@ test_cases:
       contains:
         - "\"_unn_"
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - "__mat:o:"
 cleanup:
   - sql: "DROP TABLE IF EXISTS cgd_state"

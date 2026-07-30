@@ -79,6 +79,7 @@ test_cases:
         - v: 42
 
   - name: "EXPLAIN IR exposes uncorrelated scalar fallback reasons"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
     expect:
       contains:
@@ -86,6 +87,9 @@ test_cases:
         - "inline-uncorrelated"
         - "legacy-fallback-non-aggregate"
 
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "Scalar subselect without LIMIT rejects multiple rows"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
@@ -172,6 +176,7 @@ test_cases:
           v: 55
 
   - name: "EXPLAIN IR exposes correlated scalar unnest reason"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT id, (SELECT val FROM t2 WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
     expect:
       contains:
@@ -180,6 +185,8 @@ test_cases:
         - "limit-partition-cols 1"
         - "partition-aliases (\"_unn_t2_0\")"
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - "__scalar_promise_"
         - "scan-tagged-table"
         - "inline-grouped-non-domain-correlation"
@@ -199,19 +206,27 @@ test_cases:
           cnt: 1
 
   - name: "EXPLAIN IR exposes correlated aggregate inline reason"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM t2 WHERE owner = t1.id LIMIT 1) AS cnt FROM t1"
     expect:
       contains:
         - "scalar-events"
         - "inline-direct-agg-scan"
 
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "EXPLAIN IR exposes grouped scalar fallback reason"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM t2 GROUP BY owner HAVING owner = t1.id) AS cnt FROM t1"
     expect:
       contains:
         - "scalar-events"
         - "inline-grouped-non-domain-correlation"
 
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "Scalar subselect preserves outer rows on missing ref"
     sql: "SELECT id, (SELECT description FROM t4 WHERE id = t3.ref) AS d FROM t3 ORDER BY id"
     expect:

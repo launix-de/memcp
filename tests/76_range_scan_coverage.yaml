@@ -202,6 +202,7 @@ test_cases:
       rows: 1
 
   - name: "EXPLAIN IR exposes planner stages"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT id FROM rs_data WHERE val BETWEEN 50 AND 150 ORDER BY id LIMIT 5"
     expect:
       rows: 1
@@ -212,18 +213,23 @@ test_cases:
         - "order"
         - "limit"
       not_contains:
+        - "dependent-subquery"
         - "inner_select"
         - "neumann_"
         - "scan_order"
         - ".grp:"
 
   - name: "EXPLAIN IR exposes table order"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT a.id, b.id FROM rs_data a, rs_data b WHERE a.id = b.id"
     expect:
       contains:
         - '"stage": "untangle", "kind": "tables", "value": "((\"a\" \"memcp-tests\" \"rs_data\" false nil) (\"b\" \"memcp-tests\" \"rs_data\" false nil))"'
         - '"stage": "reorder", "kind": "tables", "value": "((\"a\" \"memcp-tests\" \"rs_data\" false true) (\"b\" \"memcp-tests\" \"rs_data\" false true))"'
 
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "Create selective join tables"
     sql: "CREATE TABLE perf_dim (cat_id INT PRIMARY KEY, label VARCHAR(20))"
     expect:
@@ -245,13 +251,18 @@ test_cases:
       affected_rows: 3
 
   - name: "EXPLAIN IR swaps to selective driver"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT d.label, m.id FROM perf_main m JOIN perf_dim d ON m.category = d.cat_id WHERE d.label = 'one'"
     expect:
       contains:
         - '"stage": "untangle", "kind": "tables", "value": "((\"m\" \"memcp-tests\" \"perf_main\" false nil) (\"d\" \"memcp-tests\" \"perf_dim\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
         - '"stage": "reorder", "kind": "tables", "value": "((\"d\" \"memcp-tests\" \"perf_dim\" false true) (\"m\" \"memcp-tests\" \"perf_main\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
 
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "EXPLAIN IR keeps already selective order"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id WHERE d.label = 'one'"
     expect:
       contains:
@@ -260,6 +271,9 @@ test_cases:
   # ========================================================================
   # 7. Compress and re-test (exercises range scans on compressed storage)
   # ========================================================================
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
   - name: "SHUTDOWN to compress"
     sql: "SHUTDOWN"
     expect:

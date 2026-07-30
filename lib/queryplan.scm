@@ -278,6 +278,25 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define ir_with_return (lambda (ir return_mode)
 	(make_ir (ir_kind ir) (ir_root ir) (ir_stages ir) (ir_context_of ir) return_mode)))
 
+(define make_dependent_subquery_marker (lambda (kind probe subquery outer_sources)
+	(list
+		(quote dependent-subquery)
+		kind
+		probe
+		subquery
+		(coalesceNil outer_sources '()))))
+
+(define dependent_subquery_marker? (lambda (expr)
+	(match expr
+		((symbol dependent-subquery) _kind _probe _subquery _outer_sources) true
+		((quote dependent-subquery) _kind _probe _subquery _outer_sources) true
+		_ false)))
+
+(define dep_subquery_kind (lambda (expr) (nth expr 1)))
+(define dep_subquery_probe (lambda (expr) (nth expr 2)))
+(define dep_subquery_query (lambda (expr) (nth expr 3)))
+(define dep_subquery_outer_sources (lambda (expr) (nth expr 4)))
+
 /* ------------------------------------------------------------------------- */
 /* Normalisation                                                              */
 
@@ -332,7 +351,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(quote inner_select_exists)
 		(quote neumann_scalar)
 		(quote neumann_exists)
-		(quote neumann_in)) head)
+		(quote neumann_in)
+		(quote dependent-subquery)) head)
 		true
 		(match head
 			((quote quote) sym) (subquery_head? sym)
@@ -600,6 +620,35 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define correlation_domain (lambda (pairs)
 	(merge_unique (list (correlation_lookup_keys pairs)))))
 
+(define btw2025_cclasses_for_pairs (lambda (pairs)
+	(map (coalesceNil pairs '()) (lambda (pair)
+		(list (nth pair 0) (nth pair 1))))))
+
+(define btw2025_repr_for_pairs (lambda (inner_default pairs)
+	(map (coalesceNil pairs '()) (lambda (pair)
+		(list
+			(nth pair 1)
+			(canonical_column_expr_for_alias inner_default (nth pair 0)))))))
+
+(define make_btw2025_unnesting_info (lambda (parent outer_refs domain accessing accessing_after_simple cclasses repr)
+	(list
+		(quote btw2025-unnesting-info)
+		parent
+		(coalesceNil outer_refs '())
+		(coalesceNil domain '())
+		(coalesceNil accessing '())
+		(coalesceNil accessing_after_simple '())
+		(coalesceNil cclasses '())
+		(coalesceNil repr '()))))
+
+(define btw2025_info_parent (lambda (info) (nth info 1)))
+(define btw2025_info_outer_refs (lambda (info) (nth info 2)))
+(define btw2025_info_domain (lambda (info) (nth info 3)))
+(define btw2025_info_accessing (lambda (info) (nth info 4)))
+(define btw2025_info_accessing_after_simple (lambda (info) (nth info 5)))
+(define btw2025_info_cclasses (lambda (info) (nth info 6)))
+(define btw2025_info_repr (lambda (info) (nth info 7)))
+
 (define group_keys_for_correlations (lambda (inner_default pairs explicit_group_keys)
 	(begin
 		(define corr_keys (correlation_inner_keys inner_default pairs))
@@ -665,13 +714,21 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define btw2025_stage_facts (lambda (block outer_sources lookup_pairs)
 	(begin
+		(define inner_default (if (or (not (query_block? block)) (empty_list? (qb_sources block))) nil (source_alias (car (qb_sources block)))))
 		(define accessing (btw2025_query_block_accessing_aliases block outer_sources))
 		(define accessing_after_simple (btw2025_accessing_after_simple block outer_sources))
+		(define domain (correlation_domain lookup_pairs))
+		(define cclasses (btw2025_cclasses_for_pairs lookup_pairs))
+		(define repr (btw2025_repr_for_pairs inner_default lookup_pairs))
+		(define info (make_btw2025_unnesting_info nil domain domain accessing accessing_after_simple cclasses repr))
 		(list
 			(list (quote btw2025_accessing) accessing)
 			(list (quote btw2025_accessing_after_simple) accessing_after_simple)
 			(list (quote btw2025_simple_d_eliminated) (and (not (empty_list? accessing)) (empty_list? accessing_after_simple)))
-			(list (quote btw2025_domain) (correlation_domain lookup_pairs))
+			(list (quote btw2025_domain) domain)
+			(list (quote btw2025_cclasses) cclasses)
+			(list (quote btw2025_repr) repr)
+			(list (quote btw2025_info) info)
 			(list (quote btw2025_lookup_keys) (correlation_lookup_keys lookup_pairs))))))
 
 (define exists_stage_alias (lambda (stage_id)
@@ -689,6 +746,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote get_column) stage_alias false (nth key_names i) false)
 					(nth outer_domain i))))
 			true))))
+
+(define make_positive_in_join_condition (lambda (stage_alias key_names lookup_keys probe match_ag)
+	(combine_where_terms
+		(list
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys)
+			(list (quote not) (list (quote nil?) probe))
+			(list (quote >) (membership_count_expr stage_alias match_ag) 0))
+		true)))
 
 (define in_null_count_descriptor (lambda (rhs_expr)
 	(list (list (quote if) (list (quote nil?) rhs_expr) 1 0) (quote +) 0)))
@@ -956,6 +1021,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list
 					(list (quote condition) stage_condition)
 					(list (quote purpose) (quote exists))
+					(list (quote presence_only) true)
+					(list (quote max_needed_per_domain) 1)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) false)
@@ -1016,15 +1083,133 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (or (not (empty_list? (union_order inner)))
 			(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner)))))
 			(neumann_fail "untangle_query" "IN over UNION currently supports plain unordered branches")
-			(combine_in_union_results
-				(map (union_branches inner) (lambda (branch)
-					(make_in_stage_rewrite probe branch args)))
-				(if (>= (count args) 3) (nth args 2) false))))))
+			(if (not (in_union_single_column? inner))
+				(neumann_fail "untangle_query" "IN UNION subquery branches must expose exactly one column")
+				(if (and (not (if (>= (count args) 3) (nth args 2) false))
+					(in_union_candidate_supported? inner (nth args 0)))
+					(make_in_union_candidate_stage_rewrite probe inner args)
+					(combine_in_union_results
+						(map (union_branches inner) (lambda (branch)
+							(make_in_stage_rewrite probe branch args)))
+						(if (>= (count args) 3) (nth args 2) false))))))))
+
+(define in_union_single_column? (lambda (inner)
+	(reduce (union_branches inner) (lambda (ok branch)
+		(and ok
+			(and (query_block? branch)
+				(equal? (count (qb_fields branch)) 2))))
+		true)))
+
+(define in_union_candidate_supported? (lambda (inner outer_sources)
+	(and (union_block? inner)
+		(or (equal? (union_mode inner) (quote all))
+			(or (equal? (union_mode inner) (quote distinct))
+				(equal? (union_mode inner) (quote union_distinct))))
+		(reduce (union_branches inner) (lambda (ok branch)
+			(and ok
+				(and (exists_inner_supported? branch)
+					(and (equal? (count (qb_fields branch)) 2)
+						(empty_list? (btw2025_query_block_accessing_aliases branch outer_sources))))))
+			true))))
+
+(define make_in_union_candidate_branch (lambda (branch)
+	(begin
+		(define inner_src (car (qb_sources branch)))
+		(define inner_default (source_alias inner_src))
+		(define rhs_expr (canonical_column_expr_for_alias inner_default (query_block_first_expr branch)))
+		(make_query_block
+			(qb_schema branch)
+			(qb_sources branch)
+			(list "v" rhs_expr)
+			(qb_where branch)
+			'() nil '() nil nil
+			'()
+			(qb_stages branch)
+			(qb_facts branch)))))
+
+(define make_in_union_candidate_stage_rewrite (lambda (probe inner args)
+	(begin
+		(define semijoin_where (if (>= (count args) 4) (nth args 3) false))
+		(define candidate_alias (concat "__in_candidate_" (fnv_hash (string (list probe inner)))))
+		(define union_input (make_union_block
+			(union_mode inner)
+			(map (union_branches inner) make_in_union_candidate_branch)
+			'() nil nil
+			(list
+				(list (quote purpose) (quote in_candidate_union))
+				(list (quote alias) candidate_alias))))
+		(define candidate_key (list (quote get_column) candidate_alias false "v" false))
+		(define keys (list candidate_key))
+		(define stage_id (concat "in-candidate:" (fnv_hash (string (list probe inner)))))
+		(define null_stage_id (concat "in-candidate-null:" (fnv_hash (string inner))))
+		(define null_ag (in_null_count_descriptor candidate_key))
+		(define stage (make_group_stage
+			stage_id
+			union_input
+			'()
+			keys
+			(list aggregate_count_descriptor)
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) true)
+				(list (quote purpose) (quote in_candidate))
+				(list (quote candidate) true)
+				(list (quote domain) '())
+				(list (quote lookup-keys) (list probe))
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote in))
+				(list (quote cardinality_mode) (quote many)))))
+		(define null_stage (make_group_stage
+			null_stage_id
+			union_input
+			'()
+			'(1)
+			(list null_ag)
+			nil
+			'()
+			'()
+			nil nil
+			(list
+				(list (quote condition) true)
+				(list (quote purpose) (quote in_candidate_rhs_nulls))
+				(list (quote candidate) true)
+				(list (quote domain) '())
+				(list (quote lookup-keys) '())
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote in))
+				(list (quote cardinality_mode) (quote many)))))
+		(define stage_alias (exists_stage_alias stage_id))
+		(define null_stage_alias (exists_stage_alias null_stage_id))
+		(define key_names (group_key_cols keys))
+		(define source (list
+			stage_alias
+			(group_stage_schema stage)
+			(make_stage_output_relation stage_id)
+			false
+			(if semijoin_where
+				(make_positive_in_join_condition stage_alias key_names (list probe) probe aggregate_count_descriptor)
+				(make_exists_stage_join_condition stage_alias key_names (list probe)))))
+		(define null_source (list
+			null_stage_alias
+			(group_stage_schema null_stage)
+			(make_stage_output_relation null_stage_id)
+			false
+			true))
+		(if semijoin_where
+			(list true (list stage) (list source))
+			(list
+				(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
+				(list stage null_stage)
+				(list source null_source))))))
 
 (define make_in_stage_rewrite (lambda (probe inner args)
 	(begin
 		(define outer_sources (nth args 0))
 		(define negate (if (>= (count args) 3) (nth args 2) false))
+		(define semijoin_where (and (not negate) (if (>= (count args) 4) (nth args 3) false)))
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "IN group-stage(D) currently supports one plain inner query-block")
 			true)
@@ -1115,8 +1300,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
-			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+			(if semijoin_where false (stage_source_outer? outer_sources))
+			(if semijoin_where
+				(make_positive_in_join_condition stage_alias key_names lookup_keys probe aggregate_count_descriptor)
+				(make_exists_stage_join_condition stage_alias key_names lookup_keys))))
 		(define null_source (list
 			null_stage_alias
 			(group_stage_schema null_stage)
@@ -1124,12 +1311,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
-		(list
-			(if negate
-				(not_in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
-				(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
-			(list stage null_stage)
-			(list source null_source)))))
+		(if semijoin_where
+			(list true (list stage) (list source))
+			(list
+				(if negate
+					(not_in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
+					(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
+				(list stage null_stage)
+				(list source null_source))))))
 
 (define make_scalar_aggregate_stage_rewrite (lambda (inner args)
 	(begin
@@ -1963,15 +2152,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define untangle_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
 	(begin
+		(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+		(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx false))))
+
+(define resolve_in_subquery_with_stages (lambda (rewritten_probe subquery outer_sources ctx semijoin_where)
+	(begin
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
 		(define inner (untangle_query normalized sub_ctx))
-		(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
 		(if (union_block? inner)
-			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery))
+			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery false semijoin_where))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
-				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery)))))))
+				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery false semijoin_where)))))))
 
 (define untangle_not_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
 	(begin
@@ -1985,20 +2178,80 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (untangle_zero_domain_not_in_subquery rewritten_probe subquery ctx) '() '())
 				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery true)))))))
 
+(define direct_positive_in_term_rewrite (lambda (expr outer_sources ctx)
+	(match expr
+		((symbol inner_select_in) probe subquery)
+		(begin
+			(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+			(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true))
+		((quote inner_select_in) probe subquery)
+		(begin
+			(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+			(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true))
+		_ nil)))
+
+(define where_conjunct_with_stages (lambda (expr outer_sources ctx)
+	(begin
+		(define direct_in (direct_positive_in_term_rewrite expr outer_sources ctx))
+		(if (nil? direct_in)
+			(untangle_expr_with_stages expr outer_sources ctx)
+			direct_in))))
+
+(define untangle_where_with_stages (lambda (expr outer_sources ctx)
+	(begin
+		(define terms (split_and_terms (coalesceNil expr true)))
+		(define rewritten_terms (map terms (lambda (term)
+			(where_conjunct_with_stages term outer_sources ctx))))
+		(list
+			(combine_where_terms (map rewritten_terms (lambda (item) (nth item 0))) true)
+			(merge_unique (map rewritten_terms (lambda (item) (nth item 1))))
+			(merge_unique (map rewritten_terms (lambda (item) (nth item 2))))))))
+
+(define btw2025_normalized_subquery_accessing_aliases (lambda (subquery outer_sources)
+	(if (query_block? subquery)
+		(btw2025_query_block_accessing_aliases subquery outer_sources)
+		(if (union_block? subquery)
+			(merge_unique (map (union_branches subquery) (lambda (branch)
+				(btw2025_subquery_accessing_aliases branch outer_sources))))
+			'()))))
+
+(define btw2025_subquery_accessing_aliases (lambda (subquery outer_sources)
+	(if (empty_list? outer_sources)
+		'()
+		(if (or (query_block? subquery) (union_block? subquery))
+			(btw2025_normalized_subquery_accessing_aliases subquery outer_sources)
+			(btw2025_normalized_subquery_accessing_aliases (normalize_query_ast subquery) outer_sources)))))
+
+(define btw2025_defer_subquery_rewrite? (lambda (subquery outer_sources ctx)
+	(and (uctx_get ctx (quote defer-subquery-rewrites) false)
+		(not (empty_list? (btw2025_subquery_accessing_aliases subquery outer_sources))))))
+
 (define untangle_expr_with_stages (lambda (expr outer_sources ctx)
 	(match expr
 		((symbol inner_select) subquery)
-		(untangle_scalar_subquery_with_stages subquery outer_sources ctx)
+		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
+			(untangle_scalar_subquery_with_stages subquery outer_sources ctx))
 		((quote inner_select) subquery)
-		(untangle_scalar_subquery_with_stages subquery outer_sources ctx)
+		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
+			(untangle_scalar_subquery_with_stages subquery outer_sources ctx))
 		((symbol inner_select_exists) subquery)
-		(untangle_exists_subquery_with_stages subquery outer_sources ctx)
+		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+			(list (make_dependent_subquery_marker (quote exists) nil subquery outer_sources) '() '())
+			(untangle_exists_subquery_with_stages subquery outer_sources ctx))
 		((quote inner_select_exists) subquery)
-		(untangle_exists_subquery_with_stages subquery outer_sources ctx)
+		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+			(list (make_dependent_subquery_marker (quote exists) nil subquery outer_sources) '() '())
+			(untangle_exists_subquery_with_stages subquery outer_sources ctx))
 		((symbol inner_select_in) probe subquery)
-		(untangle_in_subquery_with_stages probe subquery outer_sources ctx)
+		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
+			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
 		((quote inner_select_in) probe subquery)
-		(untangle_in_subquery_with_stages probe subquery outer_sources ctx)
+		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
+			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
 		((symbol not) ((symbol inner_select_in) probe subquery))
 		(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
 		((quote not) ((quote inner_select_in) probe subquery))
@@ -2034,11 +2287,151 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(merge (list (nth rewritten 2) (nth tail 2)))))
 		_ (list '() '() '()))))
 
+(define untangle_expr_list_with_stages (lambda (exprs outer_sources ctx)
+	(match (coalesceNil exprs '())
+		(cons expr rest) (begin
+			(define rewritten (untangle_expr_with_stages expr outer_sources ctx))
+			(define tail (untangle_expr_list_with_stages rest outer_sources ctx))
+			(list
+				(cons (nth rewritten 0) (nth tail 0))
+				(merge (list (nth rewritten 1) (nth tail 1)))
+				(merge (list (nth rewritten 2) (nth tail 2)))))
+		_ (list '() '() '()))))
+
+(define untangle_order_with_stages (lambda (order_items outer_sources ctx)
+	(match (coalesceNil order_items '())
+		(cons item rest) (begin
+			(define rewritten_item (match item
+				'(expr dir) (begin
+					(define rewritten_expr (untangle_expr_with_stages expr outer_sources ctx))
+					(list (list (nth rewritten_expr 0) dir) (nth rewritten_expr 1) (nth rewritten_expr 2)))
+				_ (list item '() '())))
+			(define tail (untangle_order_with_stages rest outer_sources ctx))
+			(list
+				(cons (nth rewritten_item 0) (nth tail 0))
+				(merge (list (nth rewritten_item 1) (nth tail 1)))
+				(merge (list (nth rewritten_item 2) (nth tail 2)))))
+		_ (list '() '() '()))))
+
 (define untangle_fields (lambda (fields ctx)
 	(match (coalesceNil fields '())
 		(cons title (cons expr rest))
 		(cons title (cons (untangle_expr expr ctx) (untangle_fields rest ctx)))
 		_ '())))
+
+(define btw2025_resolve_dependent_subquery (lambda (marker ctx)
+	(begin
+		(define kind (dep_subquery_kind marker))
+		(define probe (dep_subquery_probe marker))
+		(define subquery (dep_subquery_query marker))
+		(define outer_sources (dep_subquery_outer_sources marker))
+		(match kind
+			(symbol scalar)
+			(untangle_scalar_subquery_with_stages subquery outer_sources ctx)
+			(symbol exists)
+			(untangle_exists_subquery_with_stages subquery outer_sources ctx)
+			(symbol in)
+			(begin
+				(define probe_result (btw2025_decorrelate_expr_with_stages probe ctx))
+				(define in_result (resolve_in_subquery_with_stages (nth probe_result 0) subquery outer_sources ctx false))
+				(list
+					(nth in_result 0)
+					(merge_unique (list (nth probe_result 1) (nth in_result 1)))
+					(merge_unique (list (nth probe_result 2) (nth in_result 2)))))
+			_ (neumann_fail "untangle_query" "unknown dependent subquery marker")))))
+
+(define btw2025_decorrelate_expr_with_stages (lambda (expr ctx)
+	(match expr
+		((symbol dependent-subquery) _kind _probe _subquery _outer_sources)
+		(btw2025_resolve_dependent_subquery expr ctx)
+		((quote dependent-subquery) _kind _probe _subquery _outer_sources)
+		(btw2025_resolve_dependent_subquery expr ctx)
+		(cons head tail)
+		(combine_stage_rewrite_results head (map tail (lambda (item)
+			(btw2025_decorrelate_expr_with_stages item ctx))))
+		_ (list expr '() '()))))
+
+(define btw2025_decorrelate_fields_with_stages (lambda (fields ctx)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (begin
+			(define rewritten (btw2025_decorrelate_expr_with_stages expr ctx))
+			(define tail (btw2025_decorrelate_fields_with_stages rest ctx))
+			(list
+				(cons title (cons (nth rewritten 0) (nth tail 0)))
+				(merge_unique (list (nth rewritten 1) (nth tail 1)))
+				(merge_unique (list (nth rewritten 2) (nth tail 2)))))
+		_ (list '() '() '()))))
+
+(define btw2025_decorrelate_order_with_stages (lambda (order_items ctx)
+	(match (coalesceNil order_items '())
+		(cons item rest) (begin
+			(define rewritten_item (match item
+				'(expr dir) (begin
+					(define rewritten_expr (btw2025_decorrelate_expr_with_stages expr ctx))
+					(list (list (nth rewritten_expr 0) dir) (nth rewritten_expr 1) (nth rewritten_expr 2)))
+				_ (list item '() '())))
+			(define tail (btw2025_decorrelate_order_with_stages rest ctx))
+			(list
+				(cons (nth rewritten_item 0) (nth tail 0))
+				(merge_unique (list (nth rewritten_item 1) (nth tail 1)))
+				(merge_unique (list (nth rewritten_item 2) (nth tail 2)))))
+		_ (list '() '() '()))))
+
+(define btw2025_decorrelate_expr_list_with_stages (lambda (exprs ctx)
+	(match (coalesceNil exprs '())
+		(cons expr rest) (begin
+			(define rewritten (btw2025_decorrelate_expr_with_stages expr ctx))
+			(define tail (btw2025_decorrelate_expr_list_with_stages rest ctx))
+			(list
+				(cons (nth rewritten 0) (nth tail 0))
+				(merge_unique (list (nth rewritten 1) (nth tail 1)))
+				(merge_unique (list (nth rewritten 2) (nth tail 2)))))
+		_ (list '() '() '()))))
+
+(define btw2025_decorrelate_source_with_stages (lambda (src ctx)
+	(begin
+		(define rewritten_join (btw2025_decorrelate_expr_with_stages (source_join_expr src) ctx))
+		(list
+			(merge_unique (list (nth rewritten_join 2) (list (source_with_join_expr src (nth rewritten_join 0)))))
+			(nth rewritten_join 1)
+			'()))))
+
+(define btw2025_decorrelate_sources_with_stages (lambda (sources ctx)
+	(match (coalesceNil sources '())
+		(cons src rest) (begin
+			(define rewritten_src (btw2025_decorrelate_source_with_stages src ctx))
+			(define tail (btw2025_decorrelate_sources_with_stages rest ctx))
+			(list
+				(merge_unique (list (nth rewritten_src 0) (nth tail 0)))
+				(merge_unique (list (nth rewritten_src 1) (nth tail 1)))
+				(merge_unique (list (nth rewritten_src 2) (nth tail 2)))))
+		_ (list '() '() '()))))
+
+(define btw2025_decorrelate_query_block (lambda (block ctx)
+	(begin
+		(define source_result (btw2025_decorrelate_sources_with_stages (qb_sources block) ctx))
+		(define sources (nth source_result 0))
+		(define source_stages (nth source_result 1))
+		(define source_stage_sources (nth source_result 2))
+		(define where_result (btw2025_decorrelate_expr_with_stages (qb_where block) ctx))
+		(define field_result (btw2025_decorrelate_fields_with_stages (qb_fields block) ctx))
+		(define group_result (btw2025_decorrelate_expr_list_with_stages (qb_group block) ctx))
+		(define having_result (btw2025_decorrelate_expr_with_stages (qb_having block) ctx))
+		(define order_result (btw2025_decorrelate_order_with_stages (qb_order block) ctx))
+		(define hidden_result (btw2025_decorrelate_fields_with_stages (qb_hidden block) ctx))
+		(make_query_block
+			(qb_schema block)
+			(merge_unique (list sources source_stage_sources (nth where_result 2) (nth field_result 2) (nth group_result 2) (nth having_result 2) (nth order_result 2) (nth hidden_result 2)))
+			(nth field_result 0)
+			(nth where_result 0)
+			(nth group_result 0)
+			(nth having_result 0)
+			(nth order_result 0)
+			(qb_limit block)
+			(qb_offset block)
+			(nth hidden_result 0)
+			(merge_unique (list (qb_stages block) source_stages (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
+			(qb_facts block)))))
 
 (define field_expr_by_title (lambda (fields title ignorecase)
 	(match (coalesceNil fields '())
@@ -2449,23 +2842,33 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(if (expr_contains_window? rewritten_where)
 							(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 							true)
-						(define where_result (untangle_expr_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
+						(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
 						(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) joined_expr_outer_sources joined_expr_ctx))
 						(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) joined_expr_outer_sources joined_expr_ctx))
 						(define stage_sources (merge_unique (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
-						(make_query_block
+						(define group_result (untangle_expr_list_with_stages
+							(map (coalesceNil (qb_group block) '()) (lambda (item) (rewrite_derived_ref_chain rewrites item)))
+							joined_expr_outer_sources
+							joined_expr_ctx))
+						(define order_result (untangle_order_with_stages
+							(rewrite_derived_order_chain rewrites (qb_order block))
+							joined_expr_outer_sources
+							joined_expr_ctx))
+						(define hidden_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_hidden block)) joined_expr_outer_sources joined_expr_ctx))
+						(define delayed_block (make_query_block
 							(qb_schema block)
-							(merge_unique (list untangled_sources source_join_stage_sources stage_sources))
+							(merge_unique (list untangled_sources source_join_stage_sources stage_sources (nth group_result 2) (nth order_result 2) (nth hidden_result 2)))
 							(nth field_result 0)
 							(nth where_result 0)
-							(map (coalesceNil (qb_group block) '()) (lambda (item) (nth (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites item) joined_expr_outer_sources joined_expr_ctx) 0)))
+							(nth group_result 0)
 							(nth having_result 0)
-							(map (rewrite_derived_order_chain rewrites (qb_order block)) (lambda (item) (nth (untangle_expr_with_stages item joined_expr_outer_sources joined_expr_ctx) 0)))
+							(nth order_result 0)
 							(qb_limit block)
 							(qb_offset block)
-							(untangle_fields (rewrite_derived_fields_chain rewrites (qb_hidden block)) child_ctx)
-							(merge_unique (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth having_result 1)))
-							(qb_facts block)))))))))
+							(nth hidden_result 0)
+							(merge_unique (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
+							(qb_facts block)))
+						(btw2025_decorrelate_query_block delayed_block child_ctx)))))))))
 
 (define untangle_union_block (lambda (block ctx)
 	(make_union_block
@@ -2497,19 +2900,240 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define untangle_query_term (lambda (query ctx)
 	(begin
 		(define root (require_unnested_node "untangle_query" (untangle_query query ctx)))
-		(make_ir (if (union_block? root) (quote union) (quote select))
+		(define ir (make_ir (if (union_block? root) (quote union) (quote select))
 			root
 			(if (query_block? root) (qb_stages root) '())
 			(make_uctx ctx (list
 				(list (quote compile-budget-ms) 1000)
 				(list (quote operator-model) (quote combined))))
-			(quote rows)))))
+			(quote rows)))
+		(require_flat_stage_dependencies "untangle_query" (normalize_stage_dependencies ir)))))
 
 /* ------------------------------------------------------------------------- */
 /* Reorder/optimise scaffold                                                  */
 
+(define candidate_stage_output_source? (lambda (stages src)
+	(and (stage_output_relation? (source_relation src))
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(and (not (nil? stage))
+				(equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_candidate)))))))
+
+(define first_candidate_source (lambda (stages sources)
+	(reduce (coalesceNil sources '()) (lambda (found src)
+		(if (not (nil? found))
+			found
+			(if (candidate_stage_output_source? stages src) src nil)))
+		nil)))
+
+(define without_source_alias (lambda (sources alias)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(not (equal? (source_alias src) alias))))))
+
+(define attach_candidate_join_condition (lambda (default_alias candidate_alias condition sources)
+	(match (coalesceNil sources '())
+		(cons src rest) (if (and (not (equal? (source_alias src) candidate_alias))
+			(expr_refs_alias_after_group? default_alias (source_alias src) condition))
+			(cons (source_with_join_expr src (combine_where (source_join_expr src) condition)) rest)
+			(cons src (attach_candidate_join_condition default_alias candidate_alias condition rest)))
+		_ '())))
+
+(define reorder_candidate_sources (lambda (stages sources)
+	(begin
+		(define candidate (first_candidate_source stages sources))
+		(if (nil? candidate)
+			sources
+			(begin
+				(define candidate_alias (source_alias candidate))
+				(define candidate_join (coalesceNil (source_join_expr candidate) true))
+				(define rest (without_source_alias sources candidate_alias))
+				(if (equal? candidate_join true)
+					(cons candidate rest)
+					(cons
+						(source_with_join_expr candidate true)
+						(attach_candidate_join_condition
+							(if (empty_list? rest) candidate_alias (source_alias (car rest)))
+							candidate_alias
+							candidate_join
+							rest))))))))
+
+(define join_reorder_node (lambda (node)
+	(if (query_block? node)
+		(begin
+			(define reordered_sources (reorder_candidate_sources (qb_stages node) (qb_sources node)))
+			(if (equal? reordered_sources (qb_sources node))
+				node
+				(make_query_block
+					(qb_schema node)
+					reordered_sources
+					(qb_fields node)
+					(qb_where node)
+					(qb_group node)
+					(qb_having node)
+					(qb_order node)
+					(qb_limit node)
+					(qb_offset node)
+					(qb_hidden node)
+					(map (qb_stages node) join_reorder_stage)
+					(qassoc_set (qb_facts node) (quote default_alias) (source_alias (car (qb_sources node)))))))
+		(if (union_block? node)
+			(make_union_block
+				(union_mode node)
+				(map (union_branches node) join_reorder_node)
+				(union_order node)
+				(union_limit node)
+				(union_offset node)
+				(union_facts node))
+			node))))
+
+(define join_reorder_stage (lambda (stage)
+	(if (group_stage? stage)
+		(make_group_stage
+			(gs_id stage)
+			(join_reorder_node (gs_input stage))
+			(gs_domain stage)
+			(gs_keys stage)
+			(gs_aggregates stage)
+			(gs_having stage)
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			(gs_facts stage))
+		stage)))
+
+(define query_block_without_logical_stages (lambda (block)
+	(make_query_block
+		(qb_schema block)
+		(qb_sources block)
+		(qb_fields block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		'()
+		(qb_facts block))))
+
+(define normalize_stage_dependencies_node (lambda (node)
+	(if (query_block? node)
+		(normalize_stage_dependencies_query_block node)
+		(if (union_block? node)
+			(normalize_stage_dependencies_union_block node)
+			(list node '())))))
+
+(define normalize_stage_dependencies_stage (lambda (stage)
+	(if (group_stage? stage)
+		(begin
+			(define input_result (normalize_stage_dependencies_node (gs_input stage)))
+			(define input_node (nth input_result 0))
+			(define nested_stages (nth input_result 1))
+			(define normalized_input (if (query_block? input_node)
+				(query_block_without_logical_stages input_node)
+				input_node))
+			(list
+				(make_group_stage
+					(gs_id stage)
+					normalized_input
+					(gs_domain stage)
+					(gs_keys stage)
+					(gs_aggregates stage)
+					(gs_having stage)
+					(gs_output stage)
+					(gs_order stage)
+					(gs_limit stage)
+					(gs_offset stage)
+					(gs_facts stage))
+				nested_stages))
+		(list stage '()))))
+
+(define normalize_stage_dependencies_stages (lambda (stages)
+	(match (coalesceNil stages '())
+		(cons stage rest) (begin
+			(define head (normalize_stage_dependencies_stage stage))
+			(define tail (normalize_stage_dependencies_stages rest))
+			(merge_unique (list (nth head 1) (list (nth head 0)) tail)))
+		_ '())))
+
+(define normalize_stage_dependencies_query_block (lambda (block)
+	(if (empty_list? (qb_stages block))
+		(list block '())
+		(begin
+			(define normalized_stages (normalize_stage_dependencies_stages (qb_stages block)))
+			(define normalized_block (make_query_block
+				(qb_schema block)
+				(qb_sources block)
+				(qb_fields block)
+				(qb_where block)
+				(qb_group block)
+				(qb_having block)
+				(qb_order block)
+				(qb_limit block)
+				(qb_offset block)
+				(qb_hidden block)
+				normalized_stages
+				(qb_facts block)))
+			(list normalized_block normalized_stages)))))
+
+(define normalize_stage_dependencies_union_block (lambda (block)
+	(begin
+		(define branch_results (map (union_branches block) normalize_stage_dependencies_node))
+		(list
+			(make_union_block
+				(union_mode block)
+				(map branch_results (lambda (item) (nth item 0)))
+				(union_order block)
+				(union_limit block)
+				(union_offset block)
+				(union_facts block))
+			(merge_unique (map branch_results (lambda (item) (nth item 1))))))))
+
+(define normalize_stage_dependencies (lambda (ir)
+	(begin
+		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
+		(make_ir
+			(ir_kind ir)
+			(nth root_result 0)
+			(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
+			(ir_context_of ir)
+			(ir_return ir)))))
+
+(define node_contains_nested_stage_input? (lambda (node)
+	(if (query_block? node)
+		(reduce (qb_stages node) (lambda (found stage)
+			(or found (node_contains_nested_stage_input? stage)))
+			false)
+		(if (union_block? node)
+			(reduce (union_branches node) (lambda (found branch)
+				(or found (node_contains_nested_stage_input? branch)))
+				false)
+			(if (group_stage? node)
+				(begin
+					(define input (gs_input node))
+					(or
+						(and (query_block? input) (not (empty_list? (qb_stages input))))
+						(node_contains_nested_stage_input? input)))
+				false)))))
+
+(define require_flat_stage_dependencies (lambda (phase ir)
+	(begin
+		(if (or (node_contains_nested_stage_input? (ir_root ir))
+			(reduce (ir_stages ir) (lambda (found stage)
+				(or found (node_contains_nested_stage_input? stage)))
+				false))
+			(neumann_fail phase "nested stage input survived recursive decorrelation")
+			true)
+		ir)))
+
 (define join_reorder (lambda (ir)
-	ir))
+	(make_ir
+		(ir_kind ir)
+		(join_reorder_node (ir_root ir))
+		(map (ir_stages ir) join_reorder_stage)
+		(ir_context_of ir)
+		(ir_return ir))))
 
 /* ------------------------------------------------------------------------- */
 /* Physical lowering scaffold                                                 */
@@ -2886,23 +3510,29 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define group_stage_schema (lambda (stage)
 	(begin
 		(define input (gs_input stage))
-		(if (query_block? input)
+		(if (union_block? input)
+			(qb_schema (car (union_branches input)))
+			(if (query_block? input)
 			(qb_schema input)
-			(source_schema input)))))
+				(source_schema input))))))
 
 (define group_stage_input_alias (lambda (stage)
 	(begin
 		(define input (gs_input stage))
-		(if (query_block? input)
+		(if (union_block? input)
+			(qassoc_get (union_facts input) (quote alias) "__union")
+			(if (query_block? input)
 			(source_alias (car (qb_sources input)))
-			(source_alias input)))))
+				(source_alias input))))))
 
 (define group_stage_input_name (lambda (stage)
 	(begin
 		(define input (gs_input stage))
-		(if (query_block? input)
+		(if (union_block? input)
+			(concat "union:" (fnv_hash (string input)))
+			(if (query_block? input)
 			(concat "query:" (fnv_hash (string input)))
-			(source_relation input)))))
+				(source_relation input))))))
 
 (define group_stage_default_carrier (lambda (stage)
 	(begin
@@ -3469,6 +4099,69 @@ PostgreSQL parsers should both lower to the same combined operators.
 				finish_expr)
 			false))))
 
+(define union_branch_group_row_fields (lambda (candidate_alias branch keys key_names ags value_cols)
+	(begin
+		(define projection (qb_fields branch))
+		(define key_fields (map (produceN (count keys)) (lambda (i)
+			(list (nth key_names i)
+				(rewrite_derived_ref candidate_alias projection (nth keys i))))))
+		(define value_fields (map (produceN (count ags)) (lambda (i)
+			(match (nth ags i)
+				'(agg_expr _agg_reduce _agg_neutral)
+				(list (nth value_cols i)
+					(if (equal? (nth ags i) aggregate_count_descriptor)
+						(if (empty_list? keys) 1 (rewrite_derived_ref candidate_alias projection (car keys)))
+						(rewrite_derived_ref candidate_alias projection agg_expr)))
+				_ (neumann_fail "build_queryplan" "union-input aggregate insert expects aggregate descriptor")))))
+		(merge (list (merge key_fields) (merge value_fields))))))
+
+(define lower_union_block_as_dataset_rows (lambda (block keys key_names ags value_cols)
+	(begin
+		(define candidate_alias (qassoc_get (union_facts block) (quote alias) "__union"))
+		(define branches (union_branches block))
+		(if (empty_list? branches)
+			(quoted_runtime_list '())
+			(list (quote merge)
+				(cons (quote list) (map branches (lambda (branch)
+					(lower_query_block_as_dataset_rows branch
+						(union_branch_group_row_fields candidate_alias branch keys key_names ags value_cols))))))))))
+
+(define build_union_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags)
+	(begin
+		(define schema (qb_schema (car (union_branches input))))
+		(define row_key_names key_names)
+		(define value_cols (map (produceN (count ags)) (lambda (i) (concat "__agg" i))))
+		(define rows_plan (lower_union_block_as_dataset_rows input keys row_key_names ags value_cols))
+		(define key_symbols (map row_key_names (lambda (col) (symbol col))))
+		(define value_symbols (map value_cols (lambda (col) (symbol col))))
+		(define key_expr (runtime_cons_list_expr key_symbols))
+		(define payload_expr (runtime_cons_list_expr (map (produceN (count ags)) (lambda (i)
+			(if (equal? (nth ags i) aggregate_count_descriptor)
+				1
+				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
+		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
+			(aggregate_payload_merge_expr ags 0)))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name)))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			rows_plan
+			(quoted_runtime_list '())
+			(list (quote lambda) '() true)
+			(cons (quote list) (merge (list row_key_names value_cols)))
+			(list (quote lambda)
+				(merge (list key_symbols value_symbols))
+				(runtime_cons_list_expr (list key_expr payload_expr)))
+			(list (quote lambda) (list (quote acc) (quote rowvals))
+				(list (quote set_assoc)
+					(quote acc)
+					(list (quote car) (quote rowvals))
+					(list (quote cadr) (quote rowvals))
+					merge_payload))
+			(quoted_runtime_list '())
+			(list (quote lambda) (list (quote acc) (quote grouped))
+				finish_expr)
+			false))))
+
 (define build_scalar_single_query_stage_fill_plan (lambda (input grouptbl keys key_names value_ag count_ag)
 	(match value_ag '(value_expr _value_reduce _value_neutral) (begin
 		(define schema (qb_schema input))
@@ -3577,10 +4270,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(map (coalesceNil sources '()) (lambda (src)
 		(physicalize_stage_output_source stages src)))))
 
-(define query_block_without_stages_after_prepare (lambda (block)
+(define query_block_without_stages_after_prepare_using (lambda (stages block)
 	(make_query_block
 		(qb_schema block)
-		(physicalize_stage_output_sources (qb_stages block) (qb_sources block))
+		(physicalize_stage_output_sources stages (qb_sources block))
 		(qb_fields block)
 		(qb_where block)
 		(qb_group block)
@@ -3592,10 +4285,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 		'()
 		(qb_facts block))))
 
-(define query_block_with_prepared_sources (lambda (block)
+(define query_block_without_stages_after_prepare (lambda (block)
+	(query_block_without_stages_after_prepare_using (qb_stages block) block)))
+
+(define query_block_with_prepared_sources_using (lambda (stages block)
 	(make_query_block
 		(qb_schema block)
-		(physicalize_stage_output_sources (qb_stages block) (qb_sources block))
+		(physicalize_stage_output_sources stages (qb_sources block))
 		(qb_fields block)
 		(qb_where block)
 		(qb_group block)
@@ -3606,6 +4302,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(qb_hidden block)
 		(qb_stages block)
 		(qb_facts block))))
+
+(define query_block_with_prepared_sources (lambda (block)
+	(query_block_with_prepared_sources_using (qb_stages block) block)))
 
 (define group_stage_final_block (lambda (stage extra_sources)
 	(begin
@@ -3646,20 +4345,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(gs_offset stage)
 			'() '() '()))))
 
-(define group_stage_final_extra_sources (lambda (stage)
+(define group_stage_final_extra_sources_using (lambda (stages stage)
 	(begin
 		(define src (gs_input stage))
 		(if (query_block? src)
-			(physicalize_stage_output_sources (qb_stages src)
+			(physicalize_stage_output_sources stages
 				(filter (cdr (qb_sources src)) (lambda (extra)
 					(source_needed_after_group_stage? (group_stage_input_alias stage) stage extra))))
 			'()))))
 
-(define lower_group_stage_prepare (lambda (stage)
+(define group_stage_final_extra_sources (lambda (stage)
+	(group_stage_final_extra_sources_using (if (query_block? (gs_input stage)) (qb_stages (gs_input stage)) '()) stage)))
+
+(define lower_group_stage_prepare_using (lambda (all_stages stage)
 	(begin
 		(define src (gs_input stage))
-		(if (and (not (query_block? src)) (not (source_is_base_table? src)))
-			(neumann_fail "build_queryplan" "group-stage lowering expects a base table or query-block input")
+		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
+			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
 			true)
 		(define carrier (group_stage_carrier stage))
 		(if (not (equal? (group_carrier_kind carrier) (quote group-keytable)))
@@ -3670,15 +4372,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
-		(define query_input_carrier (query_block? src))
+		(define query_input_carrier (or (query_block? src) (union_block? src)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
 		(define grouptbl (group_carrier_relation carrier))
 		(define scalar_query_stage (and (query_block? src)
 			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
 				(equal? (count ags) 2))))
-		(define prepared_src (if (query_block? src) (query_block_without_stages_after_prepare src) src))
-		(define nested_prepare (if (query_block? src) (map (qb_stages src) lower_stage_prepare) '()))
+		(define prepared_src (if (query_block? src) (query_block_without_stages_after_prepare_using all_stages src) src))
+		(define nested_prepare (if (query_block? src) (map (qb_stages src) (lambda (nested_stage)
+			(lower_stage_prepare_using all_stages nested_stage))) '()))
 		(define nested_materialize (if (query_block? src) (lower_stage_materialize_all (qb_stages src)) '()))
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
 			nil
@@ -3699,14 +4402,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote or)
 				(list (quote not) (list (quote has?) (list (quote show) schema) grouptbl))
 				(list (quote table_empty?) (list (quote table) schema grouptbl)))))
-		(define collect_plan (if (query_block? src)
-			(build_query_group_collect_plan prepared_src grouptbl keys key_names)
+		(define collect_plan (if query_input_carrier
+			(if (union_block? src)
+				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
+				(build_query_group_collect_plan prepared_src grouptbl keys key_names))
 			(build_group_collect_plan schema tbl alias grouptbl keys key_names condition)))
 		(define cleanup_plan (if (query_block? src)
 			nil
 			(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
-		(define agg_plans (if (query_block? src)
-			(if (empty_list? ags) '() (list (build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags)))
+		(define agg_plans (if query_input_carrier
+			(if (empty_list? ags)
+				'()
+				(list (if (union_block? src)
+					(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags)
+					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags))))
 			(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names condition ag)))))
 		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr _dir) (begin
@@ -3802,14 +4511,17 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(filter (map (coalesceNil stages '()) lower_stage_materialize)
 		(lambda (plan) (not (nil? plan))))))
 
-(define lower_stage_prepare (lambda (stage)
+(define lower_stage_prepare_using (lambda (all_stages stage)
 	(if (group_stage? stage)
-		(lower_group_stage_prepare stage)
+		(lower_group_stage_prepare_using all_stages stage)
 		(if (orc_stage? stage)
 			(lower_orc_stage_prepare stage)
 			(if (window_stage? stage)
 				(lower_window_stage_prepare stage)
 				(neumann_fail "build_queryplan" "unknown logical stage"))))))
+
+(define lower_stage_prepare (lambda (stage)
+	(lower_stage_prepare_using (list stage) stage)))
 
 (define query_block_has_only_window_stages? (lambda (block)
 	(and
@@ -3830,7 +4542,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
 		(list (quote begin)
-			(lower_group_stage_prepare stage)
+			(lower_group_stage_prepare_using (list stage) stage)
 			(lower_query_block_core (group_stage_final_block stage (group_stage_final_extra_sources stage)))))))
 
 (define row_number_get_column? (lambda (col expr)
@@ -4146,9 +4858,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define main_stage (make_group_stage_for_query_block grouped_input_block))
 				(cons (quote !begin)
 					(merge (list
-						(map (qb_stages block) lower_stage_prepare)
+						(map (qb_stages block) (lambda (stage)
+							(lower_stage_prepare_using (qb_stages block) stage)))
 						(lower_stage_materialize_all (qb_stages block))
-						(list (lower_group_stage_prepare main_stage))
+						(list (lower_group_stage_prepare_using (cons main_stage (qb_stages block)) main_stage))
 						(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources)))))))))))
 
 (define query_block_without_stages (lambda (block)
@@ -4205,10 +4918,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 						fused_row_number
 						(cons (quote !begin)
 							(merge (list
-								(map (query_block_stages_to_prepare block) lower_stage_prepare)
+								(map (query_block_stages_to_prepare block) (lambda (stage)
+									(lower_stage_prepare_using (qb_stages block) stage)))
 								(list (lower_query_block_core (if (single_source? (qb_sources block))
-									(query_block_without_stages_after_prepare block)
-									(query_block_with_prepared_sources block))))))))))))))
+									(query_block_without_stages_after_prepare_using (qb_stages block) block)
+									(query_block_with_prepared_sources_using (qb_stages block) block))))))))))))))
 
 (define source_is_base_table? (lambda (src)
 	(string? (source_relation src))))
@@ -4681,9 +5395,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(lower_group_stage (make_group_stage_for_query_block block))
 			(begin
 				(define sources (qb_sources block))
-				(define first_alias (source_alias (car sources)))
+				(define first_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
 				(define order_items (coalesceNil (qb_order block) '()))
-				(define direct_order (order_items_belong_to_source? (car sources) order_items))
+				(define direct_order (and (equal? first_alias (source_alias (car sources)))
+					(order_items_belong_to_source? (car sources) order_items)))
 				(define needed_exprs (merge (list
 					(extract_assoc fields (lambda (_title expr) expr))
 					(list (coalesceNil (qb_where block) true))
@@ -4857,8 +5572,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(lower_dml_query_block_core block target_schema target_tbl)
 		(cons (quote begin)
 			(merge (list
-				(map (qb_stages block) lower_stage_prepare)
-				(list (lower_dml_query_block_core (query_block_without_stages_after_prepare block) target_schema target_tbl))))))))
+				(map (qb_stages block) (lambda (stage)
+					(lower_stage_prepare_using (qb_stages block) stage)))
+				(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using (qb_stages block) block) target_schema target_tbl))))))))
 
 (define projection_titles (lambda (fields)
 	(match (coalesceNil fields '())
@@ -5104,7 +5820,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define neumann_compile_ir_pipeline (lambda (ir)
 	(build_queryplan
-		(join_reorder ir))))
+		(join_reorder
+			(require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir))))))
 
 /* ------------------------------------------------------------------------- */
 /* Parser-facing adapters                                                     */

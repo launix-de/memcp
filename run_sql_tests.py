@@ -271,6 +271,7 @@ class SQLTestRunner:
         self.suite_metadata = {}
         self._restart_handler = None  # callable to restart memcp between tests
         self.suite_syntax = None
+        self._test_context = threading.local()
         self.perf_baselines = {}  # test_name -> {"time_ms": float, "rows": int}
         self.perf_results = {}  # test_name -> {"time_ms": float, "rows": int}
         self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
@@ -416,6 +417,9 @@ class SQLTestRunner:
         time_info = f" ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms)" if elapsed_ms is not None else ""
         print(f"{'⚠️' if is_noncritical else '❌'} {name}{' (noncritical)' if is_noncritical else ''}{time_info}")
         print(f"    Reason: {reason}")
+        fail_comment = getattr(self._test_context, "fail_comment", None)
+        if fail_comment:
+            print(f"    Comment: {fail_comment}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
         if response is not None:
@@ -559,6 +563,7 @@ class SQLTestRunner:
     # ----------------------
     def run_test_case(self, test_case: Dict, database: str) -> bool:
         name = test_case.get("name", f"Test {self.test_count + 1}")
+        self._test_context.fail_comment = test_case.get("fail_comment")
         if test_case.get("disabled"):
             print(f"⏭️  Skipped (disabled): {name}")
             return True
