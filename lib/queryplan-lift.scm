@@ -1035,6 +1035,20 @@ derived. */
 											(qpp-tuple-condition sub)
 											sub-inner-aliases
 											wrap-alias))
+									(define wrapper-key-fields
+										(reduce passthrough-cols (lambda (acc col-ref) (match col-ref
+											'(tv col)
+											(begin
+												(define kt-name (if (and (string? col) (>= (strlen col) 5)
+													(equal? (substr col 0 5) "__kt_"))
+													col
+													(concat "__kt_" col)))
+												(if (has? acc kt-name)
+													acc
+													(merge acc (list kt-name
+														(list (quote get_column) wrap-alias false col false)))))
+											acc))
+										'()))
 									(define wrapper-where
 										(qpl-and-cond
 											(qpl-and-cond rn-condition
@@ -1044,8 +1058,10 @@ derived. */
 										schema
 										(list (list wrap-alias schema inner-sub-lowered false nil))
 										/* FLAT fields for wrapper too. */
-										(list orig-field-name
-											(list (quote get_column) wrap-alias false "__value" false))
+										(merge
+											(list orig-field-name
+												(list (quote get_column) wrap-alias false "__value" false))
+											wrapper-key-fields)
 										wrapper-where
 										nil nil nil nil nil))))))))))))
 
@@ -2496,12 +2512,24 @@ original SQL alias. */
 		'("__qpl_dropped_limit" _) true
 		_ false)))
 
+(define qpl-boundary-key-marker-field? (lambda (pair)
+	(match pair
+		'(name _expr)
+		(and (string? name) (>= (strlen name) 5)
+			(equal? (substr name 0 5) "__kt_"))
+		false)))
+
+(define qpl-internal-scalar-field? (lambda (pair)
+	(or
+		(qpl-dropped-limit-marker-field? pair)
+		(qpl-boundary-key-marker-field? pair))))
+
 (define qpl-visible-scalar-fields (lambda (fields)
 	(filter (qpp-fields-to-pairs fields)
-		(lambda (pair) (not (qpl-dropped-limit-marker-field? pair))))))
+		(lambda (pair) (not (qpl-internal-scalar-field? pair))))))
 
 (define qpl-internal-marker-fields (lambda (fields)
-	(filter (qpp-fields-to-pairs fields) qpl-dropped-limit-marker-field?)))
+	(filter (qpp-fields-to-pairs fields) qpl-internal-scalar-field?)))
 
 (define qpl-rename-first-field-to-value (lambda (sub) (begin
 	/* Sub's fields can be EITHER flat (name1 expr1 …) (parser shape) or
