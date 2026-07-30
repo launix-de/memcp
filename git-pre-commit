@@ -132,14 +132,14 @@ printf '%s\n' "${test_files_arr[@]}"
 echo ""
 
 test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
-test_data_dir="${MEMCP_TEST_DATA_DIR:-./data}"
+test_data_dir="${MEMCP_TEST_DATA_DIR:-/tmp/memcp-sql-tests-$test_port}"
 tmpdir=""
 supervisor_pid=""
 
 # Runner contract:
 # - All suites use one shared data directory so restart/persistence tests see
-#   the same state. The default is repository-local ./data; callers may set
-#   MEMCP_TEST_DATA_DIR to use an isolated temporary test store.
+#   the same state. The default is a port-scoped temporary store; callers may
+#   set MEMCP_TEST_DATA_DIR to pin a specific test store.
 # - The selected data directory must never be deleted by this hook.
 # - "isolated" means serialized execution on the same shared database, not
 #   storage isolation.

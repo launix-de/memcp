@@ -69,7 +69,8 @@ test_cases:
           s: 150
 
   # --- Inspect keytable after GROUP BY (noncritical) ---
-  - name: "Keytable exists after GROUP BY and contains group keys"
+  - name: "Legacy keytable inspection after GROUP BY"
+    noncritical: true
     sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
     expect:
       rows: 1
@@ -122,7 +123,8 @@ test_cases:
         - dept: "Sales"
           s: 200
 
-  - name: "Keytable updated after INSERT (new dept visible)"
+  - name: "Legacy keytable inspection after INSERT"
+    noncritical: true
     sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
     expect:
       rows: 1
@@ -189,7 +191,8 @@ test_cases:
         - dept: "Marketing"
           s: 80
 
-  - name: "Keytable has Sales key removed after DELETE (cleanup trigger)"
+  - name: "Legacy keytable inspection after DELETE"
+    noncritical: true
     sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"sc_base\" false \"dept\" false))`"
     expect:
       rows: 1

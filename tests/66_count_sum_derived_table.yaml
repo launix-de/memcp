@@ -95,13 +95,15 @@ test_cases:
         FROM csd_main m
       ) t
     expect:
-      rows: 8
       contains:
-        - "\"t\\u0000m\" \"memcp-tests\" \"csd_main\" false nil"
+        - "\"m\" \"memcp-tests\" \"csd_main\" false nil"
+        - "(stage-output"
+        - "(purpose scalar_aggregate)"
+        - "(domain ((get_column \"m\" true \"ID\" true)))"
         - "(aggregate 1 + 0)"
-        - "(aggregate (coalesceNil (scan"
       not_contains:
         - "__mat:"
+        - "(scan"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS csd_main"

@@ -539,6 +539,7 @@ func Init(en scm.Env) {
 			return t.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
 		},
 		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list", ParamName: "table", ParamDesc: "table handle or a list for temporary data"},
@@ -1125,6 +1126,7 @@ func Init(en scm.Env) {
 			// Extract ORC params from the options assoc list.
 			var orcSortCols []string
 			var orcSortDirs []bool
+			var orcPartCount int
 			var orcMapCols []string
 			var orcMapFn, orcReduceFn, orcReduceInit scm.Scmer
 			for i := 0; i+1 < len(typeparams); i += 2 {
@@ -1139,6 +1141,8 @@ func Init(en scm.Env) {
 					for j, d := range dirs {
 						orcSortDirs[j] = scm.ToBool(d)
 					}
+				case "partitioncount":
+					orcPartCount = scm.ToInt(val)
 				case "mapcols":
 					orcMapCols = scmerSliceToStrings(mustScmerSlice(val, "mapcols"))
 				case "mapfn":
@@ -1169,7 +1173,7 @@ func Init(en scm.Env) {
 			// 4. filtercols/filter further narrow which keys need eager materialization;
 			//    they do not change the identity of the canonical temp column itself.
 			if len(orcSortCols) > 0 {
-				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, 0, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
+				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, orcPartCount, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
 				return scm.NewBool(true)
 			}
 
