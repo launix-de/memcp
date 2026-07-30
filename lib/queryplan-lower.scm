@@ -1056,11 +1056,13 @@ or pairs (pipeline). */
 					nil)
 				_ nil)))
 				(lambda (x) (not (nil? x))))
-			'())
-		'()))))))
+		'())
+	'()))))))
 
 (define qpu-low-rewrite-exists-default-refs (lambda (expr default-refs)
 	(match expr
+		'((symbol coalesceNil) inner true) expr
+		'((quote coalesceNil) inner true) expr
 		'((symbol get_column) alias_ ti col ci)
 		(if (has? default-refs (list alias_ col))
 			(list (quote coalesceNil) expr false)
@@ -1090,6 +1092,8 @@ or pairs (pipeline). */
 				td))))
 			(define default-refs (qpu-low-exists-default-refs-for-tables normalized-tables))
 			(define rewrite-default-ref (lambda (expr) (match expr
+				'((symbol coalesceNil) inner true) expr
+				'((quote coalesceNil) inner true) expr
 				'((symbol get_column) alias_ ti col ci)
 				(if (has? default-refs (list alias_ col))
 					(list (quote coalesceNil) expr false)
@@ -1900,6 +1904,8 @@ Layout:
 
 (define qpu-low-replace-sq-field-expr (lambda (expr rhs-alias field-name target-expr)
 	(match expr
+		'((symbol coalesceNil) inner true) expr
+		'((quote coalesceNil) inner true) expr
 		'((symbol get_column) tv _ col _)
 		(if (and (equal? tv rhs-alias) (equal? col field-name))
 			target-expr expr)

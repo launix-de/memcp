@@ -14799,6 +14799,69 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 				(define wf_resolved (map window_funcs_all (lambda (wf) (match wf '(fn args over)
 					(list fn (map args replace_find_column) over)))))
 				(if neumann_pipeline_trace (print "[neumann] build_inner: window after wf resolved") nil)
+				(define row_number_singleton_partition? (lambda ()
+					(begin
+						(define all_row_number
+							(reduce wf_resolved (lambda (ok wf)
+								(and ok (match wf '("ROW_NUMBER" _ _) true _ false)))
+								true))
+						(define primary_partition_ref? (lambda (expr)
+							(match expr
+								'((symbol get_column) tv _ col _)
+								(reduce tables (lambda (found td)
+									(or found (match td
+										'(alias tschema (string? ttbl) _ _)
+										(and (equal? alias tv)
+											(reduce
+												(coalesceNil
+													(try (lambda () (get_schema tschema ttbl))
+														(lambda (e) '()))
+													'())
+												(lambda (col_found coldef)
+													(or col_found
+														(and
+															(equal?? (coldef "Field") col)
+															(equal? (coldef "Key") "PRI"))))
+												false))
+										false)))
+									false)
+								'((quote get_column) tv _ col _)
+								(reduce tables (lambda (found td)
+									(or found (match td
+										'(alias tschema (string? ttbl) _ _)
+										(and (equal? alias tv)
+											(reduce
+												(coalesceNil
+													(try (lambda () (get_schema tschema ttbl))
+														(lambda (e) '()))
+													'())
+												(lambda (col_found coldef)
+													(or col_found
+														(and
+															(equal?? (coldef "Field") col)
+															(equal? (coldef "Key") "PRI"))))
+												false))
+										false)))
+									false)
+								_ false)))
+						(and
+							all_row_number
+							(equal? over_order '())
+							(> (count over_partition) 0)
+							(reduce over_partition (lambda (found expr)
+								(or found (primary_partition_ref? expr)))
+								false)))))
+				(define replace_singleton_row_number (lambda (expr) (match expr
+					(cons (symbol window_func) wf_rest)
+					(match wf_rest '("ROW_NUMBER" _ _) 1 _ expr)
+					(cons (quote window_func) wf_rest)
+					(match wf_rest '("ROW_NUMBER" _ _) 1 _ expr)
+					(cons '(quote window_func) wf_rest)
+					(match wf_rest '("ROW_NUMBER" _ _) 1 _ expr)
+					(cons sym args_) (if (list? args_)
+						(cons sym (map args_ replace_singleton_row_number))
+						expr)
+					expr)))
 				/* ========= ORC window function descriptors ========= */
 				/* Build a mapfn that passes $set + N extra values through as (list $set composite).
 				For 1 col: composite = scalar; for N>1: composite = (list v0 v1 ...). */
@@ -14900,6 +14963,11 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 					true))
 				/* agg window: non-ordered aggs always, OR ordered aggs WITHOUT ORDER BY (keytable, not ORC) */
 				(define all_agg_window (and (not all_orc_window) (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf) (or (not (is_ordered_agg wf)) (not has_over_order)))) true)))
+				(if (row_number_singleton_partition?)
+					(build_queryplan schema tables
+						(map_assoc fields (lambda (k v) (replace_singleton_row_number v)))
+						(replace_singleton_row_number condition)
+						groups schemas replace_find_column nil)
 				(if all_orc_window
 					(match tables
 						/* ========= ORC materialization (ROW_NUMBER, RANK, DENSE_RANK, ...) ========= */
@@ -15186,8 +15254,8 @@ When set, the scan on tblalias includes $update in mapcols and the mapfn applies
 											scan_plan
 									))
 								)
-								(error "window functions on joined tables not yet supported")
-				))))
+									(error "window functions on joined tables not yet supported")
+					)))))
 			) (if (coalesce stage_order stage_limit stage_offset) (begin
 					/* ordered or limited scan */
 					/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
