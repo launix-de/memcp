@@ -1216,7 +1216,7 @@ return r.json();
 }
 
 var SCM_SERVICES='(if (nil? service_registry) "[]" (dashboard_json_array (map (service_registry) (lambda (name) (begin (set v (service_registry name)) (json_encode_assoc (list "name" name "port" (car v) "route" (car (cdr v)) "protocols" (car (cdr (cdr v))))))))))';
-var SCM_USERS='(begin (set j (scan nil "system" "user" \'() (lambda () true) \'("username" "admin") (lambda (u adm) (begin (set dbs_str (scan nil "system" "access" \'("username") (lambda (au) (equal?? au u)) \'("database") (lambda (db) (json_encode db)) (lambda (a b) (if (equal? a "") b (concat a "," b))) "")) (concat "{\\"username\\":" (json_encode u) ",\\"admin\\":" (if (equal? adm 0) "false" "true") ",\\"databases\\":[" dbs_str "]}")) ) (lambda (acc item) (if (or (nil? item) (equal? item "")) acc (if (equal? acc "") item (concat acc "," item)))) "")) (concat "[" j "]"))';
+var SCM_USERS='(begin (set j (scan nil (table "system" "user") (list) (lambda () true) (list "username" "admin") (lambda (u adm) (begin (set dbs_str (scan nil (table "system" "access") (list "username") (lambda (au) (equal?? au u)) (list "database") (lambda (db) (json_encode db)) (lambda (a b) (if (equal? a "") b (concat a "," b))) "")) (concat "{\\"username\\":" (json_encode u) ",\\"admin\\":" (if (equal? adm 0) "false" "true") ",\\"databases\\":[" dbs_str "]}")) ) (lambda (acc item) (if (or (nil? item) (equal? item "")) acc (if (equal? acc "") item (concat acc "," item)))) "")) (concat "[" j "]"))';
 
 function scmFetch(expr,cb){
 fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:expr})
@@ -1621,7 +1621,7 @@ var eng=this.value;
 var engSpec=engines.filter(function(e){return e.v===eng})[0];
 var engSql=engSpec?engSpec.sql:eng.toUpperCase();
 var sel=this;
-fetch(base+"/dashboard/api/sql",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:dbname,sql:"ALTER TABLE `"+tblname+"` ENGINE="+engSql})}).then(function(r){
+fetch(base+"/sql/"+encodeURIComponent(dbname),{method:"POST",credentials:"same-origin",body:"ALTER TABLE `"+tblname+"` ENGINE="+engSql}).then(function(r){
 if(!r.ok)return r.text().then(function(t){throw new Error(t)});
 return r.text();
 }).then(function(){origEngine=eng}).catch(function(e){window.alert("Error: "+e.message);sel.value=origEngine});
@@ -2270,7 +2270,7 @@ var nowTs=Math.floor(Date.now()/1000);
 var whereClause=since>0?"WHERE time >= '"+(nowTs-since)+"' OR time >= '"+fmtDateTime(nowTs-since)+"'":"";
 /* query perf_metrics sorted oldest-first */
 var sql="SELECT time,rps,eps,cpu,connections,mem_available FROM perf_metrics ORDER BY time ASC LIMIT 2000";
-fetch(base+"/dashboard/api/query",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:"system_statistic",sql:sql})})
+fetch(base+"/sql/system_statistic",{method:"POST",credentials:"same-origin",body:sql})
 .then(function(r){if(!r.ok)throw new Error(r.status);return r.text()})
 .then(function(text){
 /* NDJSON: one JSON object per line */
