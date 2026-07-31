@@ -22,6 +22,7 @@ import "fmt"
 import "bufio"
 import "bytes"
 import "strings"
+import "errors"
 import "path/filepath"
 import "crypto/sha256"
 import "encoding/json"
@@ -194,16 +195,25 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 	if fi.Size() > 0 {
 		go func() {
 			defer close(replay)
-			scanner := bufio.NewScanner(f)
-			for scanner.Scan() {
-				b := scanner.Bytes()
-				if string(b) == "" {
+			reader := bufio.NewReaderSize(f, 256*1024)
+			for {
+				b, err := reader.ReadBytes('\n')
+				if len(b) == 0 && errors.Is(err, io.EOF) {
+					break
+				}
+				if len(b) > 0 && b[len(b)-1] == '\n' {
+					b = b[:len(b)-1]
+				}
+				if len(b) > 0 && b[len(b)-1] == '\r' {
+					b = b[:len(b)-1]
+				}
+				if len(b) == 0 && err == nil {
 					// nop
-				} else if string(b[0:7]) == "delete " {
+				} else if len(b) >= 7 && string(b[0:7]) == "delete " {
 					var idx uint32
 					json.Unmarshal(b[7:], &idx)
 					replay <- LogEntryDelete{idx}
-				} else if string(b[0:7]) == "insert " {
+				} else if len(b) >= 7 && string(b[0:7]) == "insert " {
 					body := string(b[7:])
 					if pos := strings.Index(body, "]["); pos >= 0 {
 						// new format: columns ][ values
@@ -236,6 +246,12 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 					}
 				} else {
 					panic("unknown log sequence: " + string(b))
+				}
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					panic(err)
 				}
 			}
 		}()
