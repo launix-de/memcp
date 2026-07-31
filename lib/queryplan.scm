@@ -3540,6 +3540,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define extract_columns_for_alias (lambda (src expr)
 	(match expr
+		((symbol exists_probe) _stage lookup_keys)
+		(merge_unique (map lookup_keys (lambda (key) (extract_columns_for_alias src key))))
+		((quote exists_probe) _stage lookup_keys)
+		(extract_columns_for_alias src (list (quote exists_probe) _stage lookup_keys))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
@@ -3547,6 +3551,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_alias (lambda (src expr)
 	(match expr
+		((symbol exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr (list src) (source_alias src) stage lookup_keys)
+		((quote exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr (list src) (source_alias src) stage lookup_keys)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias src item))))
