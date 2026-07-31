@@ -1,8 +1,13 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
 metadata:
   version: "1.0"
   description: "Trigger body parsing compatibility tests (Bug 4a: backtick table names + BEGIN-less, Bug 4b: column notation)"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS derived_src"
+  - sql: "DROP TABLE IF EXISTS derived_assoc"
+  - sql: "DROP TABLE IF EXISTS derived_target"
   - sql: "DROP TABLE IF EXISTS trig_log"
   - sql: "DROP TABLE IF EXISTS trig_items"
   - sql: "DROP TABLE IF EXISTS `bill`"
@@ -20,6 +25,15 @@ setup:
   - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
   - sql: "DROP TRIGGER IF EXISTS `trig_main.ia`"
   - sql: "DROP TRIGGER IF EXISTS `trig_year.ia`"
+  - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
+  - sql: "DROP TRIGGER IF EXISTS `derived_src.au`"
+  - sql: "CREATE TABLE derived_src (id INT PRIMARY KEY, group_id INT)"
+  - sql: "CREATE TABLE derived_assoc (id INT PRIMARY KEY, src_id INT, marker INT)"
+  - sql: "CREATE TABLE derived_target (assoc_id INT PRIMARY KEY, marker INT)"
+  - sql: "INSERT INTO derived_assoc (id, src_id, marker) VALUES (10, 1, 100)"
+  - sql: "INSERT INTO derived_assoc (id, src_id, marker) VALUES (20, 2, 200)"
+  - sql: "INSERT INTO derived_assoc (id, src_id, marker) VALUES (30, 3, 300)"
+  - sql: "INSERT INTO derived_target (assoc_id, marker) VALUES (10, 50)"
   - sql: "CREATE TABLE trig_log (id int, msg text)"
   - sql: "CREATE TABLE trig_items (id int, name text, val float)"
   - sql: "CREATE TABLE `billElement` (id int, name text, amount float)"
@@ -34,12 +48,17 @@ setup:
   - sql: "CREATE TABLE trig_year (ID INT AUTO_INCREMENT PRIMARY KEY, xstart INT, xend INT, mode INT)"
 
 cleanup:
+  - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
+  - sql: "DROP TRIGGER IF EXISTS `derived_src.au`"
   - sql: "DROP TRIGGER IF EXISTS after_items_insert"
   - sql: "DROP TRIGGER IF EXISTS after_bill_insert"
   - sql: "DROP TRIGGER IF EXISTS after_billelement_insert"
   - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
   - sql: "DROP TRIGGER IF EXISTS `trig_main.ia`"
   - sql: "DROP TRIGGER IF EXISTS `trig_year.ia`"
+  - sql: "DROP TABLE IF EXISTS derived_target"
+  - sql: "DROP TABLE IF EXISTS derived_assoc"
+  - sql: "DROP TABLE IF EXISTS derived_src"
   - sql: "DROP TABLE IF EXISTS trig_log"
   - sql: "DROP TABLE IF EXISTS trig_items"
   - sql: "DROP TABLE IF EXISTS `bill`"
@@ -212,3 +231,92 @@ test_cases:
       rows: 1
       data:
         - {"invoice:year:debit": 1, "invoice:debit": 1, "item:debit": 1, amount: 100.5}
+
+  # --- Derived table UNION in trigger-maintained DML ---
+
+  - name: "CREATE trigger with derived table in DELETE USING without union"
+    sql: |
+      CREATE TRIGGER `derived_src.au` AFTER UPDATE ON `derived_src` FOR EACH ROW BEGIN
+        DELETE FROM `derived_target`
+        USING `derived_target`,
+          (SELECT `id` AS `parent_id` FROM `derived_assoc` AS `a` WHERE NEW.`id` = `a`.`src_id`) AS `parents`,
+          `derived_assoc` AS `a`
+        WHERE `derived_target`.`assoc_id` = `a`.`id`
+          AND `a`.`id` = `parents`.`parent_id`;
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE trigger with derived table in DELETE USING"
+    sql: |
+      CREATE TRIGGER `derived_src.ai` AFTER INSERT ON `derived_src` FOR EACH ROW BEGIN
+        DELETE FROM `derived_target`
+        USING `derived_target`,
+          (SELECT `id` AS `parent_id` FROM `derived_assoc` AS `a` WHERE NEW.`id` = `a`.`src_id`
+           UNION
+           SELECT `id` AS `parent_id` FROM `derived_assoc` AS `a` WHERE NEW.`group_id` = `a`.`src_id`) AS `parents`,
+          `derived_assoc` AS `a`
+        WHERE `derived_target`.`assoc_id` = `a`.`id`
+          AND `a`.`id` = `parents`.`parent_id`;
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "Derived DELETE USING trigger fires"
+    sql: "INSERT INTO derived_src (id, group_id) VALUES (1, 99)"
+    expect:
+      affected_rows: 1
+
+  - name: "Target row deleted by derived DELETE USING trigger"
+    sql: "SELECT COUNT(*) AS cnt FROM derived_target"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 0}
+
+  - name: "Derived INSERT SELECT trigger writes rows"
+    setup:
+      - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
+      - sql: "DELETE FROM derived_src"
+      - sql: "DELETE FROM derived_target"
+      - sql: |
+          CREATE TRIGGER `derived_src.ai` AFTER INSERT ON `derived_src` FOR EACH ROW BEGIN
+            INSERT IGNORE INTO `derived_target` (`assoc_id`, `marker`)
+            SELECT `a`.`id`, `a`.`marker`
+            FROM
+              (SELECT `id` AS `parent_id` FROM `derived_assoc` AS `a` WHERE NEW.`id` = `a`.`src_id`
+               UNION
+               SELECT `id` AS `parent_id` FROM `derived_assoc` AS `a` WHERE NEW.`group_id` = `a`.`src_id`) AS `parents`
+              JOIN `derived_assoc` AS `a` ON `a`.`id` = `parents`.`parent_id`;
+          END
+      - sql: "INSERT INTO derived_src (id, group_id) VALUES (2, 3)"
+    sql: "SELECT COUNT(*) AS cnt, SUM(marker) AS total_marker FROM derived_target"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 2, total_marker: 500}
+
+  - name: "Derived UPDATE trigger updates rows"
+    setup:
+      - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
+      - sql: "DELETE FROM derived_src"
+      - sql: "DELETE FROM derived_target"
+      - sql: "INSERT INTO derived_target (assoc_id, marker) VALUES (20, 1)"
+      - sql: "INSERT INTO derived_target (assoc_id, marker) VALUES (30, 1)"
+      - sql: |
+          CREATE TRIGGER `derived_src.ai` AFTER INSERT ON `derived_src` FOR EACH ROW BEGIN
+            UPDATE `derived_target`,
+              (SELECT `id` AS `parent_id` FROM `derived_assoc` AS `a` WHERE NEW.`id` = `a`.`src_id`
+               UNION
+               SELECT `id` AS `parent_id` FROM `derived_assoc` AS `a` WHERE NEW.`group_id` = `a`.`src_id`) AS `parents`,
+              `derived_assoc` AS `a`
+            SET `derived_target`.`marker` = `a`.`marker`
+            WHERE `derived_target`.`assoc_id` = `a`.`id`
+              AND `a`.`id` = `parents`.`parent_id`;
+          END
+      - sql: "INSERT INTO derived_src (id, group_id) VALUES (2, 3)"
+    sql: "SELECT COUNT(*) AS cnt, SUM(marker) AS total_marker FROM derived_target"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 2, total_marker: 500}

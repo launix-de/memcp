@@ -2736,6 +2736,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 				nil))
 		_ nil)))
 
+(define first_embedded_union_source (lambda (sources)
+	(reduce (coalesceNil sources '()) (lambda (found src)
+		(if (not (nil? found))
+			found
+			(begin
+				(define relation (normalize_query_ast (source_relation src)))
+				(if (and (union_block? relation)
+					(and (not (source_outer? src)) (nil? (source_join_expr src))))
+					src
+					nil))))
+		nil)))
+
 (define union_wrapper_rewrite_allowed? (lambda (block)
 	(and (empty_list? (qb_group block))
 		(and (nil? (qb_having block))
@@ -2806,6 +2818,42 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(union_offset relation)
 					(union_facts relation)))))))
 
+(define replace_union_source_branch (lambda (sources union_src branch)
+	(map (coalesceNil sources '()) (lambda (src)
+		(if (equal?? (source_alias src) (source_alias union_src))
+			(source_with_relation src branch)
+			src)))))
+
+(define wrap_embedded_union_branch_query (lambda (outer union_src branch)
+	(make_query_block
+		(qb_schema outer)
+		(replace_union_source_branch (qb_sources outer) union_src (normalize_query_ast branch))
+		(qb_fields outer)
+		(qb_where outer)
+		(qb_group outer)
+		(qb_having outer)
+		(qb_order outer)
+		(qb_limit outer)
+		(qb_offset outer)
+		(qb_hidden outer)
+		(qb_stages outer)
+		(qb_facts outer))))
+
+(define rewrite_query_block_over_embedded_union_source (lambda (block src)
+	(begin
+		(if (not (union_wrapper_rewrite_allowed? block))
+			nil
+			(begin
+				(define relation (normalize_query_ast (source_relation src)))
+				(make_union_block
+					(union_mode relation)
+					(map (union_branches relation) (lambda (branch)
+						(wrap_embedded_union_branch_query block src branch)))
+					(union_order relation)
+					(union_limit relation)
+					(union_offset relation)
+					(union_facts relation)))))))
+
 (define untangle_query_block (lambda (block ctx)
 	(begin
 		(define child_ctx (make_uctx ctx
@@ -2821,54 +2869,59 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if (not (nil? union_count_rewrite))
 					union_count_rewrite
 					(begin
-						(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
-						(define sources (nth flattened_sources 0))
-						(define rewrites (nth flattened_sources 1))
-						(define source_where_terms (nth flattened_sources 2))
-						(define source_stages (nth flattened_sources 3))
-						(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
-						(define expr_outer_sources (merge (list inherited_outer_sources sources)))
-						(define expr_ctx (make_uctx child_ctx (list
-							(list (quote outer-sources) expr_outer_sources)
-							(list (quote local-sources) sources))))
-						(define source_join_result (untangle_source_join_exprs_with_stages sources expr_outer_sources expr_ctx))
-						(define untangled_sources (nth source_join_result 0))
-						(define source_join_stage_sources (nth source_join_result 2))
-						(define joined_expr_outer_sources (merge (list inherited_outer_sources untangled_sources source_join_stage_sources)))
-						(define joined_expr_ctx (make_uctx child_ctx (list
-							(list (quote outer-sources) joined_expr_outer_sources)
-							(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources))))))
-						(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
-						(if (expr_contains_window? rewritten_where)
-							(neumann_fail "untangle_query" "window function is not allowed in WHERE")
-							true)
-						(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
-						(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) joined_expr_outer_sources joined_expr_ctx))
-						(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) joined_expr_outer_sources joined_expr_ctx))
-						(define stage_sources (merge_unique (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
-						(define group_result (untangle_expr_list_with_stages
-							(map (coalesceNil (qb_group block) '()) (lambda (item) (rewrite_derived_ref_chain rewrites item)))
-							joined_expr_outer_sources
-							joined_expr_ctx))
-						(define order_result (untangle_order_with_stages
-							(rewrite_derived_order_chain rewrites (qb_order block))
-							joined_expr_outer_sources
-							joined_expr_ctx))
-						(define hidden_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_hidden block)) joined_expr_outer_sources joined_expr_ctx))
-						(define delayed_block (make_query_block
-							(qb_schema block)
-							(merge_unique (list untangled_sources source_join_stage_sources stage_sources (nth group_result 2) (nth order_result 2) (nth hidden_result 2)))
-							(nth field_result 0)
-							(nth where_result 0)
-							(nth group_result 0)
-							(nth having_result 0)
-							(nth order_result 0)
-							(qb_limit block)
-							(qb_offset block)
-							(nth hidden_result 0)
-							(merge_unique (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
-							(qb_facts block)))
-						(btw2025_decorrelate_query_block delayed_block child_ctx)))))))))
+						(define embedded_union_src (first_embedded_union_source (qb_sources block)))
+						(define embedded_union_rewrite (if (nil? embedded_union_src) nil (rewrite_query_block_over_embedded_union_source block embedded_union_src)))
+						(if (not (nil? embedded_union_rewrite))
+							(untangle_union_block embedded_union_rewrite child_ctx)
+							(begin
+								(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
+								(define sources (nth flattened_sources 0))
+								(define rewrites (nth flattened_sources 1))
+								(define source_where_terms (nth flattened_sources 2))
+								(define source_stages (nth flattened_sources 3))
+								(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
+								(define expr_outer_sources (merge (list inherited_outer_sources sources)))
+								(define expr_ctx (make_uctx child_ctx (list
+									(list (quote outer-sources) expr_outer_sources)
+									(list (quote local-sources) sources))))
+								(define source_join_result (untangle_source_join_exprs_with_stages sources expr_outer_sources expr_ctx))
+								(define untangled_sources (nth source_join_result 0))
+								(define source_join_stage_sources (nth source_join_result 2))
+								(define joined_expr_outer_sources (merge (list inherited_outer_sources untangled_sources source_join_stage_sources)))
+								(define joined_expr_ctx (make_uctx child_ctx (list
+									(list (quote outer-sources) joined_expr_outer_sources)
+									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources))))))
+								(define rewritten_where (combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block))))
+								(if (expr_contains_window? rewritten_where)
+									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
+									true)
+								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
+								(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) joined_expr_outer_sources joined_expr_ctx))
+								(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) joined_expr_outer_sources joined_expr_ctx))
+								(define stage_sources (merge_unique (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
+								(define group_result (untangle_expr_list_with_stages
+									(map (coalesceNil (qb_group block) '()) (lambda (item) (rewrite_derived_ref_chain rewrites item)))
+									joined_expr_outer_sources
+									joined_expr_ctx))
+								(define order_result (untangle_order_with_stages
+									(rewrite_derived_order_chain rewrites (qb_order block))
+									joined_expr_outer_sources
+									joined_expr_ctx))
+								(define hidden_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_hidden block)) joined_expr_outer_sources joined_expr_ctx))
+								(define delayed_block (make_query_block
+									(qb_schema block)
+									(merge_unique (list untangled_sources source_join_stage_sources stage_sources (nth group_result 2) (nth order_result 2) (nth hidden_result 2)))
+									(nth field_result 0)
+									(nth where_result 0)
+									(nth group_result 0)
+									(nth having_result 0)
+									(nth order_result 0)
+									(qb_limit block)
+									(qb_offset block)
+									(nth hidden_result 0)
+									(merge_unique (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
+									(qb_facts block)))
+								(btw2025_decorrelate_query_block delayed_block child_ctx))))))))))
 
 (define untangle_union_block (lambda (block ctx)
 	(make_union_block
@@ -3513,7 +3566,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (union_block? input)
 			(qb_schema (car (union_branches input)))
 			(if (query_block? input)
-			(qb_schema input)
+				(qb_schema input)
 				(source_schema input))))))
 
 (define group_stage_input_alias (lambda (stage)
@@ -3522,7 +3575,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (union_block? input)
 			(qassoc_get (union_facts input) (quote alias) "__union")
 			(if (query_block? input)
-			(source_alias (car (qb_sources input)))
+				(source_alias (car (qb_sources input)))
 				(source_alias input))))))
 
 (define group_stage_input_name (lambda (stage)
@@ -3531,7 +3584,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (union_block? input)
 			(concat "union:" (fnv_hash (string input)))
 			(if (query_block? input)
-			(concat "query:" (fnv_hash (string input)))
+				(concat "query:" (fnv_hash (string input)))
 				(source_relation input))))))
 
 (define group_stage_default_carrier (lambda (stage)
@@ -5576,6 +5629,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(lower_stage_prepare_using (qb_stages block) stage)))
 				(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using (qb_stages block) block) target_schema target_tbl))))))))
 
+(define lower_dml_union_block_with_stages (lambda (block target_schema target_tbl)
+	(cons (quote begin)
+		(map (union_branches block) (lambda (branch)
+			(if (not (query_block? branch))
+				(neumann_fail "build_queryplan" "DML UNION branch lowering expects query-block branches")
+				(lower_dml_query_block_with_stages branch target_schema target_tbl)))))))
+
 (define projection_titles (lambda (fields)
 	(match (coalesceNil fields '())
 		(cons title (cons _expr rest)) (cons title (projection_titles rest))
@@ -5810,6 +5870,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				_ (neumann_fail "build_queryplan" "unknown logical root"))
 			((symbol dml) target_schema target_tbl) (match (logical_op (ir_root ir))
 				(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
+				(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
 				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))))
 

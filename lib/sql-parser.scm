@@ -304,26 +304,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 											((quote get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 											(cons h t) (cons (transform_new_old h) (map t transform_new_old))
 											expr)))
-										/* Transform the SELECT 9-tuple to handle NEW/OLD refs */
-										/* fields is a flat assoc (k1 v1 k2 v2 ...), order is list of (expr dir) pairs */
-										(define inner_t (match inner
-											((symbol query-block) s tables fields condition group having order limit offset hidden stages facts)
-											(list (quote query-block) s tables
-												(map_assoc fields (lambda (k v) (transform_new_old v)))
-												(transform_new_old condition)
-												(if (nil? group) nil (map group transform_new_old))
-												(if (nil? having) nil (transform_new_old having))
-												(if (nil? order) nil (map order (lambda (o) (match o '(e d) (list (transform_new_old e) d) o))))
-												limit offset hidden stages facts)
-											'(s tables fields condition group having order limit offset)
-											(list s tables
-												(map_assoc fields (lambda (k v) (transform_new_old v)))
-												(transform_new_old condition)
-												(if (nil? group) nil (map group transform_new_old))
-												(if (nil? having) nil (transform_new_old having))
-												(if (nil? order) nil (map order (lambda (o) (match o '(e d) (list (transform_new_old e) d) o))))
-												limit offset)
-											inner))
+										(define inner_t (transform_new_old inner))
 										/* Extract SELECT field names from the 9-tuple (fields is a flat assoc list) */
 										(define select_fields (match inner_t
 											((symbol query-block) _ _ fields _ _ _ _ _ _ _ _ _) fields
@@ -384,42 +365,42 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 												(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) nil t_cond nil nil nil)))
 											(if (equal? tag '!delete_using)
 												/* DELETE FROM target USING target, other [AS alias] WHERE condition */
-												/* stmt is (!delete_using target tbls where) */
+												/* stmt is (!delete_using target tabledefs where) */
 												(begin
 													(define target (car (cdr stmt)))
-													(define tbls (car (cdr (cdr stmt))))
+													(define raw_defs (car (cdr (cdr stmt))))
 													(define where_raw (car (cdr (cdr (cdr stmt)))))
-													(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
-													(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-														'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
-														acc)) nil))
-													(define target_alias (match target_def '(id _ _ _ _) id))
-													(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 													(define transform_dml (lambda (expr) (match expr
 														'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 														'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 														(cons head tail) (cons (transform_dml head) (map tail transform_dml))
 														expr
 													)))
+													(define all_defs (transform_dml raw_defs))
+													(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
+														'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+														acc)) nil))
+													(define target_alias (match target_def '(id _ _ _ _) id))
+													(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 													(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 													(list (build_dml_plan schema target_tbl target_alias all_defs nil t_where nil nil nil)))
 												(if (equal? tag '!update_multi)
 													/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
 													/* stmt is (!update_multi tbls assignments where) */
 													(begin
-														(define tbls (car (cdr stmt)))
+														(define raw_defs (car (cdr stmt)))
 														(define assignments_raw (merge (car (cdr (cdr stmt)))))
 														(define where_raw (car (cdr (cdr (cdr stmt)))))
-														(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
-														(define target_def (car all_defs))
-														(define target_alias (match target_def '(id _ _ _ _) id))
-														(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 														(define transform_dml (lambda (expr) (match expr
 															'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 															'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 															(cons head tail) (cons (transform_dml head) (map tail transform_dml))
 															expr
 														)))
+														(define all_defs (transform_dml raw_defs))
+														(define target_def (car all_defs))
+														(define target_alias (match target_def '(id _ _ _ _) id))
+														(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 														(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 														(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
 														(list (build_dml_plan schema target_tbl target_alias all_defs t_cols t_where nil nil nil)))
@@ -511,32 +492,27 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE ...[;] (multi-table in trigger) */
 		(parser '(
 			(atom "UPDATE" true)
-			(define tbls (+ (parser (or
-				(parser '((define tbl sql_identifier) (atom "AS" true) (define alias sql_identifier)) '(alias tbl))
-				(parser '((define tbl sql_identifier) (define alias sql_identifier)) '(alias tbl))
-				(parser (define tbl sql_identifier) '(tbl tbl))
-			)) ","))
+			(define tbldefs (+ tabledefs ","))
 			(atom "SET" true) (define assignments (+ (or
 				(parser '(sql_identifier "." (define col sql_identifier) "=" (define expr sql_expression)) '(col expr))
 				(parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr))
 			) ","))
 			(? (atom "WHERE" true) (define where sql_expression))
 			(? (atom ";" false))
-		) (if (> (count tbls) 1)
-				(list '!update_multi tbls assignments where)
-				(list '!update (match (car tbls) '(alias _) alias) assignments where)))
+		) (begin
+				(define defs (merge tbldefs))
+				(if (> (count defs) 1)
+					(list '!update_multi defs assignments where)
+					(list '!update (match (car defs) '(alias _ _ _ _) alias) assignments where))))
 		/* DELETE FROM table USING table, table2 [AS alias] WHERE condition[;] (multi-table in trigger) */
 		/* Must be before simple DELETE FROM — otherwise the simple variant greedily matches the table name */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define target sql_identifier)
 			(atom "USING" true)
-			(define tbls (+ (parser (or
-				(parser '((define tbl sql_identifier) (atom "AS" true) (define alias sql_identifier)) '(alias tbl))
-				(parser (define tbl sql_identifier) '(tbl tbl))
-			)) ","))
+			(define tbldefs (+ tabledefs ","))
 			(? (atom "WHERE" true) (define where sql_expression))
 			(? (atom ";" false))
-		) (list '!delete_using target tbls where))
+		) (list '!delete_using target (merge tbldefs) where))
 		/* DELETE FROM table WHERE condition[;] */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
