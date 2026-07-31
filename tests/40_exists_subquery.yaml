@@ -64,6 +64,14 @@ test_cases:
             - "__mat:_uncorr_cnt_"
             - "touch_keytable"
 
+  - name: "EXPLAIN correlated EXISTS uses direct storage probe"
+    sql: "EXPLAIN SELECT ID, name FROM exists_customers c WHERE EXISTS (SELECT 1 FROM exists_orders o WHERE o.customer_id = c.ID) ORDER BY ID"
+    expect:
+      contains:
+        - "probe_exists"
+      not_contains:
+        - "touch_keytable"
+
   - name: "NOT EXISTS - customers without orders"
     sql: |
       SELECT ID, name FROM exists_customers c

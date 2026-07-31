@@ -793,6 +793,68 @@ PostgreSQL parsers should both lower to the same combined operators.
 					nil
 					true))))))
 
+(define direct_probe_column (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(if (equal? (resolve_column_alias tblvar alias) alias) col nil)
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(direct_probe_column alias (list (quote get_column) tblvar false col false))
+		_ nil)))
+
+(define exists_probe_condition_binding (lambda (alias term)
+	(match term
+		((symbol equal??) a b) (begin
+			(define acol (direct_probe_column alias a))
+			(define bcol (direct_probe_column alias b))
+			(if (and (not (nil? acol)) (nil? bcol))
+				(list acol b)
+				(if (and (nil? acol) (not (nil? bcol)))
+					(list bcol a)
+					false)))
+		((quote equal??) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
+		((symbol equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
+		((quote equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
+		((symbol nil?) expr) (begin
+			(define col (direct_probe_column alias expr))
+			(if (nil? col) false (list col nil)))
+		((quote nil?) expr) (exists_probe_condition_binding alias (list (quote nil?) expr))
+		_ false)))
+
+(define exists_probe_condition_bindings (lambda (alias condition)
+	(match (coalesceNil condition true)
+		(symbol true) '()
+		((symbol and) a b) (begin
+			(define aa (exists_probe_condition_bindings alias a))
+			(define bb (exists_probe_condition_bindings alias b))
+			(if (or (equal? aa false) (equal? bb false))
+				false
+				(merge (list aa bb))))
+		((quote and) a b) (exists_probe_condition_bindings alias (list (quote and) a b))
+		_ (exists_probe_condition_binding alias condition))))
+
+(define direct_probe_key_columns (lambda (alias keys)
+	(begin
+		(define cols (map keys (lambda (key) (direct_probe_column alias key))))
+		(if (reduce cols (lambda (bad col) (or bad (nil? col))) false)
+			false
+			cols))))
+
+(define exists_probe_supported? (lambda (stage)
+	(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
+		(and (source_is_base_table? (gs_input stage))
+			(and (equal? (gs_aggregates stage) (list aggregate_count_descriptor))
+				(and (nil? (gs_having stage))
+					(and (empty_list? (gs_order stage))
+						(and (nil? (gs_limit stage))
+							(and (not (equal? (direct_probe_key_columns (group_stage_input_alias stage) (gs_keys stage)) false))
+								(not (equal? (exists_probe_condition_bindings
+									(group_stage_input_alias stage)
+									(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+									false)))))))))))
+
+(define exists_probe_expr (lambda (stage lookup_keys)
+	(list (quote exists_probe) stage lookup_keys)))
+
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
 		(make_exists_stage_join_condition stage_alias key_names outer_domain)
@@ -1038,10 +1100,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
-		(list
-			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
-			(list stage)
-			(list source)))))
+		(if (exists_probe_supported? stage)
+			(list
+				(exists_probe_expr stage lookup_keys)
+				'()
+				'())
+			(list
+				(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
+				(list stage)
+				(list source))))))
 
 (define combine_exists_union_results (lambda (results)
 	(match (coalesceNil results '())
@@ -3030,6 +3097,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(map (qb_sources block) left_join_strategy_options)
 			(lambda (item) (not (nil? item))))))))
 
+(define query_block_needs_reorder_facts? (lambda (block)
+	(or (not (empty_list? (qb_stages block)))
+		(reduce (qb_sources block) (lambda (needed src)
+			(or needed
+				(or (source_outer? src)
+					(source_join_present? src))))
+			false))))
+
 (define planner_add_estimates (lambda (values)
 	(reduce (coalesceNil values '()) (lambda (acc value)
 		(if (nil? value) acc (+ acc value)))
@@ -3182,21 +3257,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define sources (qb_sources block))
 		(define candidate (first_candidate_source (qb_stages block) sources))
 		(if (nil? candidate)
-			(query_block_with_reorder_facts
-				(make_query_block
-					(qb_schema block)
-					(qb_sources block)
-					(qb_fields block)
-					(qb_where block)
-					(qb_group block)
-					(qb_having block)
-					(qb_order block)
-					(qb_limit block)
-					(qb_offset block)
-					(qb_hidden block)
-					(map (qb_stages block) join_reorder_stage)
-					(qb_facts block))
-				(query_block_reorder_telemetry block))
+			(if (query_block_needs_reorder_facts? block)
+				(query_block_with_reorder_facts
+					(make_query_block
+						(qb_schema block)
+						(qb_sources block)
+						(qb_fields block)
+						(qb_where block)
+						(qb_group block)
+						(qb_having block)
+						(qb_order block)
+						(qb_limit block)
+						(qb_offset block)
+						(qb_hidden block)
+						(map (qb_stages block) join_reorder_stage)
+						(qb_facts block))
+					(query_block_reorder_telemetry block))
+				block)
 			(begin
 				(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
 				(define strategy (candidate_reorder_strategy stage sources block))
@@ -3475,8 +3552,34 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias src item))))
 		_ expr)))
 
+(define lower_exists_probe_expr (lambda (sources default_alias stage lookup_keys)
+	(begin
+		(define src (gs_input stage))
+		(define alias (group_stage_input_alias stage))
+		(define keys (gs_keys stage))
+		(define key_cols (direct_probe_key_columns alias keys))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define condition_bindings (exists_probe_condition_bindings alias condition))
+		(if (or (equal? key_cols false) (equal? condition_bindings false))
+			(neumann_fail "build_queryplan" "EXISTS probe lowering expects direct equality/null bindings")
+			true)
+		(define condition_cols (map condition_bindings (lambda (binding) (nth binding 0))))
+		(define condition_values (map condition_bindings (lambda (binding) (nth binding 1))))
+		(list (quote probe_exists)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(quoted_runtime_list (merge (list key_cols condition_cols)))
+			(cons (quote list)
+				(merge (list
+					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
+					(map condition_values (lambda (value) (lower_column_expr_for_join sources default_alias value))))))))))
+
 (define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(match expr
+		((symbol exists_probe) _stage lookup_keys)
+		(merge_unique (map lookup_keys (lambda (key) (extract_columns_for_join_alias sources default_alias alias key))))
+		((quote exists_probe) _stage lookup_keys)
+		(extract_columns_for_join_alias sources default_alias alias (list (quote exists_probe) _stage lookup_keys))
 		((symbol driver_membership_probe) _stage probe)
 		(extract_columns_for_join_alias sources default_alias alias probe)
 		((quote driver_membership_probe) _stage probe)
@@ -3496,6 +3599,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_join (lambda (sources default_alias expr)
 	(match expr
+		((symbol exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr sources default_alias stage lookup_keys)
+		((quote exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr sources default_alias stage lookup_keys)
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr sources default_alias stage probe)
 		((quote driver_membership_probe) stage probe)

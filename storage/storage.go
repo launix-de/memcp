@@ -464,6 +464,34 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "probe_exists",
+		Desc: "returns true if a table contains at least one visible row matching equality values for the given columns; uses storage indexes directly without scan lambda setup",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			t := TableFromScmer(a[1])
+			columns := scmerSliceToStrings(mustScmerSlice(a[2], "columns"))
+			values := mustScmerSlice(a[3], "values")
+			if len(columns) != len(values) {
+				panic("probe_exists: columns and values must have the same length")
+			}
+			for _, shard := range t.ActiveShards() {
+				if shard != nil && shard.ProbeExists(columns, values, currentTx) {
+					return scm.NewBool(true)
+				}
+			}
+			return scm.NewBool(false)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table", ParamName: "table"},
+				{Kind: "list", ParamName: "columns"},
+				{Kind: "list", ParamName: "values"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",
@@ -2070,6 +2098,9 @@ func Init(en scm.Env) {
 							rowCount += int64(s.main_count) + int64(len(s.inserts)) - int64(s.deletions.Count())
 							sizeBytes += int64(s.ComputeSize())
 							s.mu.RUnlock()
+						}
+						if rowCount == 0 {
+							rowCount = int64(t.CountEstimate())
 						}
 						rows = append(rows, scm.NewSlice([]scm.Scmer{
 							scm.NewString("name"), scm.NewString(t.Name),
