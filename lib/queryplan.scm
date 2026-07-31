@@ -830,7 +830,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 				false
 				(merge (list aa bb))))
 		((quote and) a b) (exists_probe_condition_bindings alias (list (quote and) a b))
-		_ (exists_probe_condition_binding alias condition))))
+		_ (begin
+			(define binding (exists_probe_condition_binding alias condition))
+			(if (equal? binding false) false (list binding))))))
 
 (define direct_probe_key_columns (lambda (alias keys)
 	(begin
@@ -3022,6 +3024,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(expr_contains_broad_text_match? head))
 		_ false)))
 
+(define expr_contains_text_match? (lambda (expr)
+	(match expr
+		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation) true
+		(cons head tail)
+		(reduce tail (lambda (found item)
+			(or found (expr_contains_text_match? item)))
+			(expr_contains_text_match? head))
+		_ false)))
+
 (define stage_input_contains_broad_membership_filter? (lambda (input)
 	(if (union_block? input)
 		(reduce (union_branches input) (lambda (found branch)
@@ -3055,6 +3067,25 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(cons col _rest) (col "RowEstimate")
 					_ live_count)))
 		(lambda (_e) nil))))
+
+(define planner_source_filter_estimate (lambda (src condition max_rows)
+	(if (or (not (source_is_base_table? src)) (expr_contains_text_match? condition))
+		nil
+		(try
+			(lambda ()
+				(begin
+					(define alias (source_alias src))
+					(define filtercols (extract_columns_for_alias src condition))
+					(define filter_expr (list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat alias "." col))))
+						(list (quote optimize) (lower_column_expr_for_alias src condition))))
+					(scan_selectivity_estimate
+						(session "__memcp_tx")
+						(table (source_schema src) (source_relation src))
+						filtercols
+						(eval filter_expr)
+						max_rows)))
+			(lambda (_e) nil)))))
 
 (define planner_source_row_count (lambda (src)
 	(if (source_is_base_table? src)
@@ -3120,17 +3151,56 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(planner_query_block_input_rows input)
 			nil))))
 
+(define planner_stage_filter_estimate (lambda (input max_rows)
+	(if (union_block? input)
+		(begin
+			(define branch_estimates (map (union_branches input) (lambda (branch)
+				(planner_stage_filter_estimate branch max_rows))))
+			(define available (filter branch_estimates (lambda (estimate) (not (nil? estimate)))))
+			(if (empty_list? available)
+				nil
+				(begin
+					(define rows (planner_add_estimates (map available (lambda (estimate)
+						(qassoc_get estimate (quote rows) nil)))))
+					(define input_rows (planner_add_estimates (map available (lambda (estimate)
+						(qassoc_get estimate (quote input) nil)))))
+					(define capped (or (>= rows max_rows)
+						(reduce available (lambda (found estimate)
+							(or found (qassoc_get estimate (quote capped) false)))
+							false)))
+					(list
+						(list (quote rows) rows)
+						(list (quote capped) capped)
+						(list (quote input) input_rows)))))
+		(if (query_block? input)
+			(if (single_source? (qb_sources input))
+				(begin
+					(define src (car (qb_sources input)))
+					(planner_source_filter_estimate src (combine_where (qb_where input) (source_join_expr src)) max_rows))
+				nil)
+			nil))))
+
 (define candidate_reorder_telemetry (lambda (stage sources block)
 	(begin
 		(define driver (if (empty_list? sources) nil (car sources)))
 		(define driver_rows (if (nil? driver) nil (planner_source_row_count driver)))
 		(define candidate_rows (planner_stage_input_rows (gs_input stage)))
-		(define class (if (candidate_stage_broad? stage) (quote broad) (quote selective)))
+		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 2048))
+		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
+		(define estimate_capped (qassoc_get candidate_estimate (quote capped) false))
+		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
+		(define estimate_ratio_broad (and
+			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
+			(>= (* estimate_rows 4) estimate_input)))
+		(define class (if (or estimate_capped (or estimate_ratio_broad (and (nil? candidate_estimate) (candidate_stage_broad? stage)))) (quote broad) (quote selective)))
 		(define ordered_driver (if (nil? driver) false (source_order_limit_driver? driver (qb_order block) (qb_limit block))))
 		(list
 			(list (quote membership_selectivity_class) class)
 			(list (quote membership_driver_rows) driver_rows)
 			(list (quote membership_candidate_input_rows) candidate_rows)
+			(list (quote membership_candidate_estimated_rows) estimate_rows)
+			(list (quote membership_candidate_estimate_capped) estimate_capped)
+			(list (quote membership_candidate_estimate_input) estimate_input)
 			(list (quote membership_order_limit) (qb_limit block))
 			(list (quote membership_order_limit_driver) ordered_driver)
 			(list (quote membership_cost_reason) (if (and (equal? class (quote broad)) ordered_driver)
@@ -3177,8 +3247,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define candidate_reorder_strategy (lambda (stage sources block)
 	(begin
 		(define driver (if (empty_list? sources) nil (car sources)))
+		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 2048))
+		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
+		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
+		(define estimate_ratio_broad (and
+			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
+			(>= (* estimate_rows 4) estimate_input)))
+		(define broad (or
+			(qassoc_get candidate_estimate (quote capped) false)
+			(or estimate_ratio_broad
+				(and (nil? candidate_estimate) (candidate_stage_broad? stage)))))
 		(if (and (not (nil? driver))
-			(and (candidate_stage_broad? stage)
+			(and broad
 				(source_order_limit_driver? driver (qb_order block) (qb_limit block))))
 			(quote driver_order_membership_probe)
 			(quote candidate_keyset)))))
@@ -4206,11 +4286,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(begin
 			(define src (list alias schema tbl false nil))
 			(define keycols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+			(define condition_cols (extract_columns_for_alias src condition))
+			(define filtercols (merge_unique (list keycols condition_cols)))
 			(list (quote scan)
 				'(session "__memcp_tx")
 				(list (quote table) schema tbl)
-				(quoted_runtime_list '())
-				(list (quote lambda) '() true)
+				(cons (quote list) filtercols)
+				(list (quote lambda)
+					(map filtercols (lambda (col) (symbol (concat alias "." col))))
+					(list (quote optimize) (lower_column_expr_for_alias src condition)))
 				(cons (quote list) keycols)
 				(list (quote lambda)
 					(map keycols (lambda (col) (symbol (concat alias "." col))))

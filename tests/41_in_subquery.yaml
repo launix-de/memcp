@@ -458,16 +458,18 @@ test_cases:
             JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
           ) t
           WHERE t.file_id IN (
-            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%c%'
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
             UNION
-            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%c%'
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
           )
           ORDER BY t.sort_key
           LIMIT 10
         expect:
-          rows: 1
+          rows: 3
           data:
+            - ID: 2
             - ID: 1
+            - ID: 3
       - sql: |
           EXPLAIN REORDER
           SELECT t.ID
@@ -533,9 +535,9 @@ test_cases:
             JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
           ) t
           WHERE t.file_id IN (
-            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%c%'
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
             UNION
-            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%c%'
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
           )
           ORDER BY t.sort_key
           LIMIT 10
@@ -567,9 +569,9 @@ test_cases:
             JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
           ) t
           WHERE t.file_id IN (
-            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%c%'
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
             UNION
-            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%c%'
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
           )
           ORDER BY t.sort_key
           LIMIT 10
