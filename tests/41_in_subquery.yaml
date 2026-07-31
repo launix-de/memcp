@@ -451,7 +451,25 @@ test_cases:
             - ID: 2
             - ID: 1
       - sql: |
-          EXPLAIN IR
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%c%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%c%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          rows: 1
+          data:
+            - ID: 1
+      - sql: |
+          EXPLAIN REORDER
           SELECT t.ID
           FROM (
             SELECT d.ID, d.file_id, d.tenant, d.sort_key
@@ -469,6 +487,11 @@ test_cases:
           contains:
             - "in_candidate"
             - "candidate"
+            - "membership_plan_strategy"
+            - "candidate_keyset"
+            - "membership_driver_rows"
+            - "membership_candidate_input_rows"
+            - "membership_cost_reason"
             - "stage-output"
             - "lookup-keys"
           not_contains:
@@ -498,6 +521,59 @@ test_cases:
           not_contains:
             - "__union_distinct_rows"
             - "__union_distinct_seen"
+      - sql: |
+          EXPLAIN REORDER
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%c%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%c%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "membership_plan_strategy"
+            - "driver_order_membership_probe"
+            - "membership_selectivity_class"
+            - "broad"
+            - "membership_driver_rows"
+            - "membership_candidate_input_rows"
+            - "membership_cost_reason"
+            - "broad_membership_preserve_driver_order_limit"
+            - "driver_membership_probe"
+          not_contains:
+            - "inner_select"
+            - "dependent-subquery"
+            - ".grp:"
+            - "touch_keytable"
+      - sql: |
+          EXPLAIN
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%c%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%c%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "in_dv_file"
+            - "scan_order"
+          not_contains:
+            - ".grp:in_dv_file"
+            - "touch_keytable"
 
   - name: "EXPLAIN NOT IN with UNION without ALL skips duplicate materialization"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"

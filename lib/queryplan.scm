@@ -2912,6 +2912,153 @@ PostgreSQL parsers should both lower to the same combined operators.
 /* ------------------------------------------------------------------------- */
 /* Reorder/optimise scaffold                                                  */
 
+(define planner_literal_value (lambda (expr)
+	(match expr
+		((symbol session) key) (try
+			(lambda () (session key))
+			(lambda (_e) nil))
+		((quote session) key) (planner_literal_value (list (quote session) key))
+		_ expr)))
+
+(define planner_string_expr_value (lambda (expr)
+	(begin
+		(define value (planner_literal_value expr))
+		(if (string? value)
+			value
+			(match expr
+				((symbol concat) a b) (begin
+					(define av (planner_string_expr_value a))
+					(define bv (planner_string_expr_value b))
+					(if (and (string? av) (string? bv)) (concat av bv) nil))
+				((quote concat) a b) (planner_string_expr_value (list (quote concat) a b))
+				_ nil)))))
+
+(define like_pattern_core (lambda (pattern)
+	(replace (replace (coalesceNil pattern "") "%" "") "_" "")))
+
+(define broad_like_pattern? (lambda (pattern)
+	(if (not (string? pattern))
+		false
+		(begin
+			(define core (like_pattern_core pattern))
+			(<= (strlen core) 1)))))
+
+(define expr_contains_broad_text_match? (lambda (expr)
+	(match expr
+		((symbol strlike) _value pattern _collation)
+		(broad_like_pattern? (planner_string_expr_value pattern))
+		((quote strlike) _value pattern _collation)
+		(expr_contains_broad_text_match? (list (quote strlike) _value pattern _collation))
+		(cons head tail)
+		(reduce tail (lambda (found item)
+			(or found (expr_contains_broad_text_match? item)))
+			(expr_contains_broad_text_match? head))
+		_ false)))
+
+(define stage_input_contains_broad_membership_filter? (lambda (input)
+	(if (union_block? input)
+		(reduce (union_branches input) (lambda (found branch)
+			(or found (stage_input_contains_broad_membership_filter? branch)))
+			false)
+		(if (query_block? input)
+			(expr_contains_broad_text_match? (qb_where input))
+			false))))
+
+(define candidate_stage_broad? (lambda (stage)
+	(or (equal? (qassoc_get (gs_facts stage) (quote selectivity_class) nil) (quote broad))
+		(stage_input_contains_broad_membership_filter? (gs_input stage)))))
+
+(define source_order_limit_driver? (lambda (src order_items limit_value)
+	(and (query_limit_active? nil limit_value)
+		(order_items_belong_to_source? src order_items))))
+
+(define planner_table_row_count (lambda (schema relation)
+	(try
+		(lambda ()
+			(define live_count (reduce (show schema true) (lambda (found row)
+				(if (not (nil? found))
+					found
+					(if (equal?? (row "name") relation)
+						(row "row_count")
+						nil)))
+				nil))
+			(if (and (not (nil? live_count)) (> live_count 0))
+				live_count
+				(match (show schema relation)
+					(cons col _rest) (col "RowEstimate")
+					_ live_count)))
+		(lambda (_e) nil))))
+
+(define planner_source_row_count (lambda (src)
+	(if (source_is_base_table? src)
+		(planner_table_row_count (source_schema src) (source_relation src))
+		nil)))
+
+(define planner_add_estimates (lambda (values)
+	(reduce (coalesceNil values '()) (lambda (acc value)
+		(if (nil? value) acc (+ acc value)))
+		0)))
+
+(define planner_query_block_input_rows (lambda (block)
+	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
+
+(define planner_stage_input_rows (lambda (input)
+	(if (union_block? input)
+		(planner_add_estimates (map (union_branches input) planner_stage_input_rows))
+		(if (query_block? input)
+			(planner_query_block_input_rows input)
+			nil))))
+
+(define candidate_reorder_telemetry (lambda (stage sources block)
+	(begin
+		(define driver (if (empty_list? sources) nil (car sources)))
+		(define driver_rows (if (nil? driver) nil (planner_source_row_count driver)))
+		(define candidate_rows (planner_stage_input_rows (gs_input stage)))
+		(define class (if (candidate_stage_broad? stage) (quote broad) (quote selective)))
+		(define ordered_driver (if (nil? driver) false (source_order_limit_driver? driver (qb_order block) (qb_limit block))))
+		(list
+			(list (quote membership_selectivity_class) class)
+			(list (quote membership_driver_rows) driver_rows)
+			(list (quote membership_candidate_input_rows) candidate_rows)
+			(list (quote membership_order_limit) (qb_limit block))
+			(list (quote membership_order_limit_driver) ordered_driver)
+			(list (quote membership_cost_reason) (if (and (equal? class (quote broad)) ordered_driver)
+				(quote broad_membership_preserve_driver_order_limit)
+				(quote selective_membership_build_candidate_keyset)))))))
+
+(define candidate_reorder_strategy (lambda (stage sources block)
+	(begin
+		(define driver (if (empty_list? sources) nil (car sources)))
+		(if (and (not (nil? driver))
+			(and (candidate_stage_broad? stage)
+				(source_order_limit_driver? driver (qb_order block) (qb_limit block))))
+			(quote driver_order_membership_probe)
+			(quote candidate_keyset)))))
+
+(define query_block_with_reorder_facts (lambda (block facts)
+	(make_query_block
+		(qb_schema block)
+		(qb_sources block)
+		(qb_fields block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		(qb_stages block)
+		(merge (list facts (qb_facts block))))))
+
+(define driver_membership_probe_expr (lambda (stage probe)
+	(list (quote and)
+		(list (quote not) (list (quote nil?) probe))
+		(list (quote driver_membership_probe) stage probe))))
+
+(define candidate_stage_without_source (lambda (stages stage_id)
+	(filter (coalesceNil stages '()) (lambda (stage)
+		(not (and (group_stage? stage) (equal? (gs_id stage) stage_id)))))))
+
 (define candidate_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
 		(begin
@@ -2957,25 +3104,54 @@ PostgreSQL parsers should both lower to the same combined operators.
 							candidate_join
 							rest))))))))
 
+(define reorder_query_block_with_candidate_strategy (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define candidate (first_candidate_source (qb_stages block) sources))
+		(if (nil? candidate)
+			block
+			(begin
+				(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
+				(define strategy (candidate_reorder_strategy stage sources block))
+				(define facts (cons
+					(list (quote membership_plan_strategy) strategy)
+					(candidate_reorder_telemetry stage sources block)))
+				(match strategy
+					(symbol driver_order_membership_probe) (begin
+						(define stage_id (gs_id stage))
+						(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+						(query_block_with_reorder_facts
+							(make_query_block
+								(qb_schema block)
+								(without_source_alias sources (source_alias candidate))
+								(qb_fields block)
+								(combine_where (qb_where block) (driver_membership_probe_expr stage probe))
+								(qb_group block)
+								(qb_having block)
+								(qb_order block)
+								(qb_limit block)
+								(qb_offset block)
+								(qb_hidden block)
+								(map (candidate_stage_without_source (qb_stages block) stage_id) join_reorder_stage)
+								(qb_facts block))
+							facts))
+					_ (make_query_block
+						(qb_schema block)
+						(reorder_candidate_sources (qb_stages block) sources)
+						(qb_fields block)
+						(qb_where block)
+						(qb_group block)
+						(qb_having block)
+						(qb_order block)
+						(qb_limit block)
+						(qb_offset block)
+						(qb_hidden block)
+						(map (qb_stages block) join_reorder_stage)
+						(merge (list facts (qassoc_set (qb_facts block) (quote default_alias) (source_alias (car sources))))))))))))
+
 (define join_reorder_node (lambda (node)
 	(if (query_block? node)
-		(begin
-			(define reordered_sources (reorder_candidate_sources (qb_stages node) (qb_sources node)))
-			(if (equal? reordered_sources (qb_sources node))
-				node
-				(make_query_block
-					(qb_schema node)
-					reordered_sources
-					(qb_fields node)
-					(qb_where node)
-					(qb_group node)
-					(qb_having node)
-					(qb_order node)
-					(qb_limit node)
-					(qb_offset node)
-					(qb_hidden node)
-					(map (qb_stages node) join_reorder_stage)
-					(qassoc_set (qb_facts node) (quote default_alias) (source_alias (car (qb_sources node)))))))
+		(reorder_query_block_with_candidate_strategy node)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -3211,6 +3387,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(match expr
+		((symbol driver_membership_probe) _stage probe)
+		(extract_columns_for_join_alias sources default_alias alias probe)
+		((quote driver_membership_probe) _stage probe)
+		(extract_columns_for_join_alias sources default_alias alias probe)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
 			(if (and (not (nil? src)) (equal?? (source_alias src) alias))
@@ -3226,6 +3406,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_join (lambda (sources default_alias expr)
 	(match expr
+		((symbol driver_membership_probe) stage probe)
+		(lower_driver_membership_probe_expr sources default_alias stage probe)
+		((quote driver_membership_probe) stage probe)
+		(lower_driver_membership_probe_expr sources default_alias stage probe)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
 			(if (nil? src)
@@ -3355,6 +3539,50 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(if (not (equal? (union_mode block) (quote all)))
 		(neumann_fail "build_queryplan" "COUNT over UNION currently supports UNION ALL only")
 		(cons (quote +) (map (union_branches block) lower_union_count_branch_expr)))))
+
+(define driver_membership_probe_branch_expr (lambda (sources default_alias branch probe)
+	(begin
+		(if (not (and (query_block? branch) (single_source? (qb_sources branch))))
+			(neumann_fail "build_queryplan" "driver membership probe expects simple query-block branches")
+			true)
+		(define src (car (qb_sources branch)))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "driver membership probe expects base table branches")
+			true)
+		(define rhs_expr (query_block_first_expr branch))
+		(define condition (combine_where (qb_where branch) (source_join_expr src)))
+		(define filtercols (merge_unique (list
+			(extract_columns_for_alias src condition)
+			(extract_columns_for_alias src rhs_expr))))
+		(define lowered_condition (list (quote and)
+			(lower_column_expr_for_alias src condition)
+			(list (quote equal??)
+				(lower_column_expr_for_alias src rhs_expr)
+				(lower_column_expr_for_join sources default_alias probe))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(list (quote optimize) lowered_condition))
+			(quoted_runtime_list '())
+			(list (quote lambda) '() 1)
+			(quote +)
+			0
+			nil
+			false))))
+
+(define lower_driver_membership_probe_expr (lambda (sources default_alias stage probe)
+	(begin
+		(define input (gs_input stage))
+		(if (not (union_block? input))
+			(neumann_fail "build_queryplan" "driver membership probe currently expects UNION candidate input")
+			true)
+		(list (quote >)
+			(cons (quote +) (map (union_branches input) (lambda (branch)
+				(driver_membership_probe_branch_expr sources default_alias branch probe))))
+			0))))
 
 (define lower_scalar_marker_expr (lambda (expr)
 	(match expr
