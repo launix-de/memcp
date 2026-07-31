@@ -1,0 +1,40 @@
+metadata:
+  version: "1.0"
+  description: "Large file-backed WAL rows survive restart"
+  isolated: true
+
+setup:
+  - scm: (settings "ShardSize" 3)
+  - sql: "DROP TABLE IF EXISTS safe_large_log"
+  - sql: "CREATE TABLE safe_large_log (id INT PRIMARY KEY, note TEXT) ENGINE=SAFE"
+
+test_cases:
+  - name: "Insert row larger than scanner token"
+    scm: |
+      (begin
+        (define big (apply concat (map (produceN 70000) (lambda (i) "x"))))
+        (insert (table "memcp-tests" "safe_large_log") '("id" "note")
+          (list (list 1 big))))
+
+  - name: "Large row is visible before restart"
+    sql: "SELECT LENGTH(note) AS len FROM safe_large_log WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - len: 70000
+
+  - name: "Restart after large WAL row"
+    sql: "SHUTDOWN"
+
+  - name: "Large row survives restart"
+    sql: "SELECT LENGTH(note) AS len FROM safe_large_log WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - len: 70000
+
+  - name: "Restore default shard size"
+    scm: (settings "ShardSize" 60000)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS safe_large_log"
