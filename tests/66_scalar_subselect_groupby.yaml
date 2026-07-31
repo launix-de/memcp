@@ -80,6 +80,19 @@ test_cases:
           driver_id: 2
           driver_name: "Bob"
 
+  - name: "EXPLAIN scalar LIMIT 1 uses late bounded probe"
+    sql: |
+      EXPLAIN SELECT t.ID, t.driver_id,
+        (SELECT d.name FROM ssg_drivers d WHERE d.ID = t.driver_id LIMIT 1) AS driver_name
+      FROM ssg_trips t
+      ORDER BY t.ID
+    expect:
+      contains:
+        - "scan_order"
+        - "\"ssg_drivers\""
+      not_contains:
+        - ".grp:ssg_drivers"
+
   - name: "scalar subselect returning NULL for no match"
     sql: |
       SELECT t.driver_id,

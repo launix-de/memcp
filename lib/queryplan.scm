@@ -793,6 +793,73 @@ PostgreSQL parsers should both lower to the same combined operators.
 					nil
 					true))))))
 
+(define direct_probe_column (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(if (equal? (resolve_column_alias tblvar alias) alias) col nil)
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(direct_probe_column alias (list (quote get_column) tblvar false col false))
+		_ nil)))
+
+(define exists_probe_condition_binding (lambda (alias term)
+	(match term
+		((symbol equal??) a b) (begin
+			(define acol (direct_probe_column alias a))
+			(define bcol (direct_probe_column alias b))
+			(if (and (not (nil? acol)) (nil? bcol))
+				(list acol b)
+				(if (and (nil? acol) (not (nil? bcol)))
+					(list bcol a)
+					false)))
+		((quote equal??) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
+		((symbol equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
+		((quote equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
+		((symbol nil?) expr) (begin
+			(define col (direct_probe_column alias expr))
+			(if (nil? col) false (list col nil)))
+		((quote nil?) expr) (exists_probe_condition_binding alias (list (quote nil?) expr))
+		_ false)))
+
+(define exists_probe_condition_bindings (lambda (alias condition)
+	(match (coalesceNil condition true)
+		(symbol true) '()
+		((symbol and) a b) (begin
+			(define aa (exists_probe_condition_bindings alias a))
+			(define bb (exists_probe_condition_bindings alias b))
+			(if (or (equal? aa false) (equal? bb false))
+				false
+				(merge (list aa bb))))
+		((quote and) a b) (exists_probe_condition_bindings alias (list (quote and) a b))
+		_ (begin
+			(define binding (exists_probe_condition_binding alias condition))
+			(if (equal? binding false) false (list binding))))))
+
+(define direct_probe_key_columns (lambda (alias keys)
+	(begin
+		(define cols (map keys (lambda (key) (direct_probe_column alias key))))
+		(if (reduce cols (lambda (bad col) (or bad (nil? col))) false)
+			false
+			cols))))
+
+(define exists_probe_supported? (lambda (stage)
+	(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
+		(and (source_is_base_table? (gs_input stage))
+			(and (equal? (gs_aggregates stage) (list aggregate_count_descriptor))
+				(and (nil? (gs_having stage))
+					(and (empty_list? (gs_order stage))
+						(and (nil? (gs_limit stage))
+							(and (not (equal? (direct_probe_key_columns (group_stage_input_alias stage) (gs_keys stage)) false))
+								(not (equal? (exists_probe_condition_bindings
+									(group_stage_input_alias stage)
+									(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+									false)))))))))))
+
+(define exists_probe_expr (lambda (stage lookup_keys)
+	(list (quote exists_probe) stage lookup_keys)))
+
+(define scalar_first_probe_expr (lambda (stage col)
+	(list (quote scalar_first_probe) stage col)))
+
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
 		(make_exists_stage_join_condition stage_alias key_names outer_domain)
@@ -908,6 +975,31 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(list
 		(scalar_once_descriptor value_expr '() nil)
 		aggregate_count_descriptor)))
+
+(define expr_refs_stage_output_alias? (lambda (expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
+		((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (expr_refs_stage_output_alias? item)))
+			false)
+		_ false)))
+
+(define scalar_first_probe_stage? (lambda (stage)
+	(and (group_stage? stage)
+		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
+			(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote first))
+				(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+					(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
+						(and (not (reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (found key)
+							(or found (expr_refs_stage_output_alias? key)))
+							false))
+							(and (source_is_base_table? (gs_input stage))
+								(and (equal? (count (gs_aggregates stage)) 1)
+									(and (equal? (nth (car (gs_aggregates stage)) 1) (scalar_once_reduce_first))
+										(not (scalar_once_ordered_payload? (car (gs_aggregates stage)))))))))))))))
 
 (define scalar_once_descriptor (lambda (value_expr order_items offset_value)
 	(if (empty_list? order_items)
@@ -1038,10 +1130,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
-		(list
-			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
-			(list stage)
-			(list source)))))
+		(if (exists_probe_supported? stage)
+			(list
+				(exists_probe_expr stage lookup_keys)
+				'()
+				'())
+			(list
+				(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
+				(list stage)
+				(list source))))))
 
 (define combine_exists_union_results (lambda (results)
 	(match (coalesceNil results '())
@@ -2912,6 +3009,312 @@ PostgreSQL parsers should both lower to the same combined operators.
 /* ------------------------------------------------------------------------- */
 /* Reorder/optimise scaffold                                                  */
 
+(define planner_literal_value (lambda (expr)
+	(match expr
+		((symbol session) key) (try
+			(lambda () (session key))
+			(lambda (_e) nil))
+		((quote session) key) (planner_literal_value (list (quote session) key))
+		_ expr)))
+
+(define planner_string_expr_value (lambda (expr)
+	(begin
+		(define value (planner_literal_value expr))
+		(if (string? value)
+			value
+			(match expr
+				((symbol concat) a b) (begin
+					(define av (planner_string_expr_value a))
+					(define bv (planner_string_expr_value b))
+					(if (and (string? av) (string? bv)) (concat av bv) nil))
+				((quote concat) a b) (planner_string_expr_value (list (quote concat) a b))
+				_ nil)))))
+
+(define like_pattern_core (lambda (pattern)
+	(replace (replace (coalesceNil pattern "") "%" "") "_" "")))
+
+(define broad_like_pattern? (lambda (pattern)
+	(if (not (string? pattern))
+		false
+		(begin
+			(define core (like_pattern_core pattern))
+			(<= (strlen core) 1)))))
+
+(define expr_contains_broad_text_match? (lambda (expr)
+	(match expr
+		((symbol strlike) _value pattern _collation)
+		(broad_like_pattern? (planner_string_expr_value pattern))
+		((quote strlike) _value pattern _collation)
+		(expr_contains_broad_text_match? (list (quote strlike) _value pattern _collation))
+		(cons head tail)
+		(reduce tail (lambda (found item)
+			(or found (expr_contains_broad_text_match? item)))
+			(expr_contains_broad_text_match? head))
+		_ false)))
+
+(define expr_contains_text_match? (lambda (expr)
+	(match expr
+		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation) true
+		(cons head tail)
+		(reduce tail (lambda (found item)
+			(or found (expr_contains_text_match? item)))
+			(expr_contains_text_match? head))
+		_ false)))
+
+(define stage_input_contains_broad_membership_filter? (lambda (input)
+	(if (union_block? input)
+		(reduce (union_branches input) (lambda (found branch)
+			(or found (stage_input_contains_broad_membership_filter? branch)))
+			false)
+		(if (query_block? input)
+			(expr_contains_broad_text_match? (qb_where input))
+			false))))
+
+(define candidate_stage_broad? (lambda (stage)
+	(or (equal? (qassoc_get (gs_facts stage) (quote selectivity_class) nil) (quote broad))
+		(stage_input_contains_broad_membership_filter? (gs_input stage)))))
+
+(define source_order_limit_driver? (lambda (src order_items limit_value)
+	(and (query_limit_active? nil limit_value)
+		(order_items_belong_to_source? src order_items))))
+
+(define planner_table_row_count (lambda (schema relation)
+	(try
+		(lambda ()
+			(define live_count (reduce (show schema true) (lambda (found row)
+				(if (not (nil? found))
+					found
+					(if (equal?? (row "name") relation)
+						(row "row_count")
+						nil)))
+				nil))
+			(if (and (not (nil? live_count)) (> live_count 0))
+				live_count
+				(match (show schema relation)
+					(cons col _rest) (col "RowEstimate")
+					_ live_count)))
+		(lambda (_e) nil))))
+
+(define planner_source_filter_estimate (lambda (src condition max_rows)
+	(if (or (not (source_is_base_table? src)) (expr_contains_text_match? condition))
+		nil
+		(try
+			(lambda ()
+				(begin
+					(define alias (source_alias src))
+					(define filtercols (extract_columns_for_alias src condition))
+					(define filter_expr (list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat alias "." col))))
+						(list (quote optimize) (lower_column_expr_for_alias src condition))))
+					(scan_selectivity_estimate
+						(session "__memcp_tx")
+						(table (source_schema src) (source_relation src))
+						filtercols
+						(eval filter_expr)
+						max_rows)))
+			(lambda (_e) nil)))))
+
+(define planner_source_row_count (lambda (src)
+	(if (source_is_base_table? src)
+		(planner_table_row_count (source_schema src) (source_relation src))
+		nil)))
+
+(define source_join_present? (lambda (src)
+	(begin
+		(define join_expr (source_join_expr src))
+		(not (or (nil? join_expr) (equal? join_expr true))))))
+
+(define source_reorder_estimate (lambda (src)
+	(list
+		(source_alias src)
+		(list (quote relation) (source_relation src))
+		(list (quote row_count) (planner_source_row_count src))
+		(list (quote outer_join) (source_outer? src))
+		(list (quote join_filter) (source_join_present? src)))))
+
+(define left_join_strategy_options (lambda (src)
+	(if (not (source_outer? src))
+		nil
+		(begin
+			(define rows (planner_source_row_count src))
+			(list
+				(source_alias src)
+				(list (quote preferred) (if (and (not (nil? rows)) (< rows 1000))
+					(quote subscan)
+					(quote tempcol_materialize_reusable)))
+				(list (quote alternatives) (list
+					(quote subscan)
+					(quote group_cache_read)
+					(quote tempcol_materialize_reusable)))
+				(list (quote row_count) rows))))))
+
+(define query_block_reorder_telemetry (lambda (block)
+	(list
+		(list (quote source_estimates) (map (qb_sources block) source_reorder_estimate))
+		(list (quote left_join_plan_options) (filter
+			(map (qb_sources block) left_join_strategy_options)
+			(lambda (item) (not (nil? item))))))))
+
+(define query_block_needs_reorder_facts? (lambda (block)
+	(or (not (empty_list? (qb_stages block)))
+		(reduce (qb_sources block) (lambda (needed src)
+			(or needed
+				(or (source_outer? src)
+					(source_join_present? src))))
+			false))))
+
+(define planner_add_estimates (lambda (values)
+	(reduce (coalesceNil values '()) (lambda (acc value)
+		(if (nil? value) acc (+ acc value)))
+		0)))
+
+(define planner_query_block_input_rows (lambda (block)
+	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
+
+(define planner_stage_input_rows (lambda (input)
+	(if (union_block? input)
+		(planner_add_estimates (map (union_branches input) planner_stage_input_rows))
+		(if (query_block? input)
+			(planner_query_block_input_rows input)
+			nil))))
+
+(define planner_stage_filter_estimate (lambda (input max_rows)
+	(if (union_block? input)
+		(begin
+			(define branch_estimates (map (union_branches input) (lambda (branch)
+				(planner_stage_filter_estimate branch max_rows))))
+			(define available (filter branch_estimates (lambda (estimate) (not (nil? estimate)))))
+			(if (empty_list? available)
+				nil
+				(begin
+					(define rows (planner_add_estimates (map available (lambda (estimate)
+						(qassoc_get estimate (quote rows) nil)))))
+					(define input_rows (planner_add_estimates (map available (lambda (estimate)
+						(qassoc_get estimate (quote input) nil)))))
+					(define capped (or (>= rows max_rows)
+						(reduce available (lambda (found estimate)
+							(or found (qassoc_get estimate (quote capped) false)))
+							false)))
+					(list
+						(list (quote rows) rows)
+						(list (quote capped) capped)
+						(list (quote input) input_rows)))))
+		(if (query_block? input)
+			(if (single_source? (qb_sources input))
+				(begin
+					(define src (car (qb_sources input)))
+					(planner_source_filter_estimate src (combine_where (qb_where input) (source_join_expr src)) max_rows))
+				nil)
+			nil))))
+
+(define candidate_reorder_telemetry (lambda (stage sources block)
+	(begin
+		(define driver (if (empty_list? sources) nil (car sources)))
+		(define driver_rows (if (nil? driver) nil (planner_source_row_count driver)))
+		(define candidate_rows (planner_stage_input_rows (gs_input stage)))
+		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 2048))
+		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
+		(define estimate_capped (qassoc_get candidate_estimate (quote capped) false))
+		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
+		(define estimate_ratio_broad (and
+			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
+			(>= (* estimate_rows 4) estimate_input)))
+		(define class (if (or estimate_capped (or estimate_ratio_broad (and (nil? candidate_estimate) (candidate_stage_broad? stage)))) (quote broad) (quote selective)))
+		(define ordered_driver (if (nil? driver) false (source_order_limit_driver? driver (qb_order block) (qb_limit block))))
+		(list
+			(list (quote membership_selectivity_class) class)
+			(list (quote membership_driver_rows) driver_rows)
+			(list (quote membership_candidate_input_rows) candidate_rows)
+			(list (quote membership_candidate_estimated_rows) estimate_rows)
+			(list (quote membership_candidate_estimate_capped) estimate_capped)
+			(list (quote membership_candidate_estimate_input) estimate_input)
+			(list (quote membership_order_limit) (qb_limit block))
+			(list (quote membership_order_limit_driver) ordered_driver)
+			(list (quote membership_cost_reason) (if (and (equal? class (quote broad)) ordered_driver)
+				(quote broad_membership_preserve_driver_order_limit)
+				(quote selective_membership_build_candidate_keyset)))))))
+
+(define stage_reorder_strategy (lambda (stage)
+	(match (qassoc_get (gs_facts stage) (quote purpose) nil)
+		(symbol exists) (quote group_cache_read)
+		(symbol not_exists) (quote group_cache_read)
+		(symbol in_membership) (quote group_cache_read)
+		(symbol in_candidate) (quote candidate_keyset)
+		(symbol scalar_aggregate) (quote group_cache_read)
+		(symbol scalar_single) (if (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote first))
+			(quote subscan_partition_limit)
+			(quote group_cache_read))
+		_ (quote group_cache_read))))
+
+(define stage_reorder_telemetry (lambda (stage)
+	(list
+		(list (quote group_stage_strategy) (stage_reorder_strategy stage))
+		(list (quote group_input_rows) (planner_stage_input_rows (gs_input stage)))
+		(list (quote group_domain_count) (count (gs_domain stage)))
+		(list (quote group_key_count) (count (gs_keys stage)))
+		(list (quote group_plan_options) (list
+			(quote subscan)
+			(quote group_cache_read)
+			(quote tempcol_materialize_reusable))))))
+
+(define group_stage_with_reorder_facts (lambda (stage)
+	(make_group_stage
+		(gs_id stage)
+		(gs_input stage)
+		(gs_domain stage)
+		(gs_keys stage)
+		(gs_aggregates stage)
+		(gs_having stage)
+		(gs_output stage)
+		(gs_order stage)
+		(gs_limit stage)
+		(gs_offset stage)
+		(merge (list (stage_reorder_telemetry stage) (gs_facts stage))))))
+
+(define candidate_reorder_strategy (lambda (stage sources block)
+	(begin
+		(define driver (if (empty_list? sources) nil (car sources)))
+		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 2048))
+		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
+		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
+		(define estimate_ratio_broad (and
+			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
+			(>= (* estimate_rows 4) estimate_input)))
+		(define broad (or
+			(qassoc_get candidate_estimate (quote capped) false)
+			(or estimate_ratio_broad
+				(and (nil? candidate_estimate) (candidate_stage_broad? stage)))))
+		(if (and (not (nil? driver))
+			(and broad
+				(source_order_limit_driver? driver (qb_order block) (qb_limit block))))
+			(quote driver_order_membership_probe)
+			(quote candidate_keyset)))))
+
+(define query_block_with_reorder_facts (lambda (block facts)
+	(make_query_block
+		(qb_schema block)
+		(qb_sources block)
+		(qb_fields block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		(qb_stages block)
+		(merge (list facts (qb_facts block))))))
+
+(define driver_membership_probe_expr (lambda (stage probe)
+	(list (quote and)
+		(list (quote not) (list (quote nil?) probe))
+		(list (quote driver_membership_probe) stage probe))))
+
+(define candidate_stage_without_source (lambda (stages stage_id)
+	(filter (coalesceNil stages '()) (lambda (stage)
+		(not (and (group_stage? stage) (equal? (gs_id stage) stage_id)))))))
+
 (define candidate_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
 		(begin
@@ -2957,25 +3360,72 @@ PostgreSQL parsers should both lower to the same combined operators.
 							candidate_join
 							rest))))))))
 
+(define reorder_query_block_with_candidate_strategy (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define candidate (first_candidate_source (qb_stages block) sources))
+		(if (nil? candidate)
+			(if (query_block_needs_reorder_facts? block)
+				(query_block_with_reorder_facts
+					(make_query_block
+						(qb_schema block)
+						(qb_sources block)
+						(qb_fields block)
+						(qb_where block)
+						(qb_group block)
+						(qb_having block)
+						(qb_order block)
+						(qb_limit block)
+						(qb_offset block)
+						(qb_hidden block)
+						(map (qb_stages block) join_reorder_stage)
+						(qb_facts block))
+					(query_block_reorder_telemetry block))
+				block)
+			(begin
+				(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
+				(define strategy (candidate_reorder_strategy stage sources block))
+				(define facts (merge (list
+					(query_block_reorder_telemetry block)
+					(cons
+						(list (quote membership_plan_strategy) strategy)
+						(candidate_reorder_telemetry stage sources block)))))
+				(match strategy
+					(symbol driver_order_membership_probe) (begin
+						(define stage_id (gs_id stage))
+						(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+						(query_block_with_reorder_facts
+							(make_query_block
+								(qb_schema block)
+								(without_source_alias sources (source_alias candidate))
+								(qb_fields block)
+								(combine_where (qb_where block) (driver_membership_probe_expr stage probe))
+								(qb_group block)
+								(qb_having block)
+								(qb_order block)
+								(qb_limit block)
+								(qb_offset block)
+								(qb_hidden block)
+								(map (candidate_stage_without_source (qb_stages block) stage_id) join_reorder_stage)
+								(qb_facts block))
+							facts))
+					_ (make_query_block
+						(qb_schema block)
+						(reorder_candidate_sources (qb_stages block) sources)
+						(qb_fields block)
+						(qb_where block)
+						(qb_group block)
+						(qb_having block)
+						(qb_order block)
+						(qb_limit block)
+						(qb_offset block)
+						(qb_hidden block)
+						(map (qb_stages block) join_reorder_stage)
+						(merge (list facts (qassoc_set (qb_facts block) (quote default_alias) (source_alias (car sources))))))))))))
+
 (define join_reorder_node (lambda (node)
 	(if (query_block? node)
-		(begin
-			(define reordered_sources (reorder_candidate_sources (qb_stages node) (qb_sources node)))
-			(if (equal? reordered_sources (qb_sources node))
-				node
-				(make_query_block
-					(qb_schema node)
-					reordered_sources
-					(qb_fields node)
-					(qb_where node)
-					(qb_group node)
-					(qb_having node)
-					(qb_order node)
-					(qb_limit node)
-					(qb_offset node)
-					(qb_hidden node)
-					(map (qb_stages node) join_reorder_stage)
-					(qassoc_set (qb_facts node) (quote default_alias) (source_alias (car (qb_sources node)))))))
+		(reorder_query_block_with_candidate_strategy node)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -2988,18 +3438,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define join_reorder_stage (lambda (stage)
 	(if (group_stage? stage)
-		(make_group_stage
-			(gs_id stage)
-			(join_reorder_node (gs_input stage))
-			(gs_domain stage)
-			(gs_keys stage)
-			(gs_aggregates stage)
-			(gs_having stage)
-			(gs_output stage)
-			(gs_order stage)
-			(gs_limit stage)
-			(gs_offset stage)
-			(gs_facts stage))
+		(group_stage_with_reorder_facts
+			(make_group_stage
+				(gs_id stage)
+				(join_reorder_node (gs_input stage))
+				(gs_domain stage)
+				(gs_keys stage)
+				(gs_aggregates stage)
+				(gs_having stage)
+				(gs_output stage)
+				(gs_order stage)
+				(gs_limit stage)
+				(gs_offset stage)
+				(gs_facts stage)))
 		stage)))
 
 (define query_block_without_logical_stages (lambda (block)
@@ -3197,6 +3648,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define extract_columns_for_alias (lambda (src expr)
 	(match expr
+		((symbol exists_probe) _stage lookup_keys)
+		(merge_unique (map lookup_keys (lambda (key) (extract_columns_for_alias src key))))
+		((quote exists_probe) _stage lookup_keys)
+		(extract_columns_for_alias src (list (quote exists_probe) _stage lookup_keys))
+		((symbol scalar_first_probe) stage _requested_col)
+		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
+			(extract_columns_for_alias src key))))
+		((quote scalar_first_probe) stage requested_col)
+		(extract_columns_for_alias src (list (quote scalar_first_probe) stage requested_col))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
@@ -3204,13 +3664,136 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_alias (lambda (src expr)
 	(match expr
+		((symbol exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr (list src) (source_alias src) stage lookup_keys)
+		((quote exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr (list src) (source_alias src) stage lookup_keys)
+		((symbol scalar_first_probe) stage requested_col)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col)
+		((quote scalar_first_probe) stage requested_col)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias src item))))
 		_ expr)))
 
+(define lower_exists_probe_expr (lambda (sources default_alias stage lookup_keys)
+	(begin
+		(define src (gs_input stage))
+		(define alias (group_stage_input_alias stage))
+		(define keys (gs_keys stage))
+		(define key_cols (direct_probe_key_columns alias keys))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define condition_bindings (exists_probe_condition_bindings alias condition))
+		(if (or (equal? key_cols false) (equal? condition_bindings false))
+			(neumann_fail "build_queryplan" "EXISTS probe lowering expects direct equality/null bindings")
+			true)
+		(define condition_cols (map condition_bindings (lambda (binding) (nth binding 0))))
+		(define condition_values (map condition_bindings (lambda (binding) (nth binding 1))))
+		(list (quote probe_exists)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(quoted_runtime_list (merge (list key_cols condition_cols)))
+			(cons (quote list)
+				(merge (list
+					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
+					(map condition_values (lambda (value) (lower_column_expr_for_join sources default_alias value))))))))))
+
+(define scalar_first_probe_parts (lambda (ag)
+	(match ag
+		'(((symbol scalar_order_value) value_expr order_exprs dirs offset_value) _reduce _neutral)
+		(list value_expr order_exprs dirs offset_value)
+		'(((quote scalar_order_value) value_expr order_exprs dirs offset_value) _reduce _neutral)
+		(list value_expr order_exprs dirs offset_value)
+		'(((symbol scalar_order_value) value_expr order_expr dir) _reduce _neutral)
+		(list value_expr (list order_expr) (list dir) 0)
+		'(((quote scalar_order_value) value_expr order_expr dir) _reduce _neutral)
+		(list value_expr (list order_expr) (list dir) 0)
+		'(value_expr _reduce _neutral)
+		(list value_expr '() '() 0)
+		_ (neumann_fail "build_queryplan" "scalar-first probe expects aggregate descriptor"))))
+
+(define scalar_first_probe_aggregate (lambda (stage requested_col)
+	(reduce (gs_aggregates stage) (lambda (found ag)
+		(if (not (nil? found))
+			found
+			(if (equal? (aggregate_col_name ag) requested_col) ag nil)))
+		nil)))
+
+(define scalar_first_probe_key_terms (lambda (sources default_alias src keys lookup_keys)
+	(begin
+		(define alias (source_alias src))
+		(map (produceN (count keys)) (lambda (i)
+			(list (quote equal??)
+				(lower_column_expr_for_alias src (nth keys i))
+				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))))
+
+(define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col)
+	(begin
+		(if (not (scalar_first_probe_stage? stage))
+			(neumann_fail "build_queryplan" "scalar-first probe requires scalar_single first stage")
+			true)
+		(define src (gs_input stage))
+		(define keys (gs_keys stage))
+		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(if (not (equal? (count keys) (count lookup_keys)))
+			(neumann_fail "build_queryplan" "scalar-first probe key/domain mismatch")
+			true)
+		(define ag (scalar_first_probe_aggregate stage requested_col))
+		(if (nil? ag)
+			(neumann_fail "build_queryplan" "scalar-first probe references unknown aggregate column")
+			true)
+		(define parts (scalar_first_probe_parts ag))
+		(define value_expr (nth parts 0))
+		(define order_exprs (nth parts 1))
+		(define dirs (nth parts 2))
+		(define offset_value (nth parts 3))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define condition_cols (extract_columns_for_alias src condition))
+		(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define value_cols (extract_columns_for_alias src value_expr))
+		(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
+		(define mapcols (merge_unique (list value_cols)))
+		(list (quote scan_order)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(list (quote optimize)
+					(cons (quote and)
+						(cons
+							(lower_column_expr_for_alias src condition)
+							(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+			(cons (quote list) order_cols)
+			(cons (quote list) dirs)
+			0
+			(coalesceNil offset_value 0)
+			1
+			(cons (quote list) mapcols)
+			(list (quote lambda)
+				(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(lower_column_expr_for_alias src value_expr))
+			(scalar_once_reduce_first)
+			nil
+			false))))
+
 (define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(match expr
+		((symbol exists_probe) _stage lookup_keys)
+		(merge_unique (map lookup_keys (lambda (key) (extract_columns_for_join_alias sources default_alias alias key))))
+		((quote exists_probe) _stage lookup_keys)
+		(extract_columns_for_join_alias sources default_alias alias (list (quote exists_probe) _stage lookup_keys))
+		((symbol driver_membership_probe) _stage probe)
+		(extract_columns_for_join_alias sources default_alias alias probe)
+		((quote driver_membership_probe) _stage probe)
+		(extract_columns_for_join_alias sources default_alias alias probe)
+		((symbol scalar_first_probe) stage _requested_col)
+		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
+			(extract_columns_for_join_alias sources default_alias alias key))))
+		((quote scalar_first_probe) stage requested_col)
+		(extract_columns_for_join_alias sources default_alias alias (list (quote scalar_first_probe) stage requested_col))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
 			(if (and (not (nil? src)) (equal?? (source_alias src) alias))
@@ -3226,6 +3809,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_join (lambda (sources default_alias expr)
 	(match expr
+		((symbol exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr sources default_alias stage lookup_keys)
+		((quote exists_probe) stage lookup_keys)
+		(lower_exists_probe_expr sources default_alias stage lookup_keys)
+		((symbol driver_membership_probe) stage probe)
+		(lower_driver_membership_probe_expr sources default_alias stage probe)
+		((quote driver_membership_probe) stage probe)
+		(lower_driver_membership_probe_expr sources default_alias stage probe)
+		((symbol scalar_first_probe) stage requested_col)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col)
+		((quote scalar_first_probe) stage requested_col)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
 			(if (nil? src)
@@ -3355,6 +3950,50 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(if (not (equal? (union_mode block) (quote all)))
 		(neumann_fail "build_queryplan" "COUNT over UNION currently supports UNION ALL only")
 		(cons (quote +) (map (union_branches block) lower_union_count_branch_expr)))))
+
+(define driver_membership_probe_branch_expr (lambda (sources default_alias branch probe)
+	(begin
+		(if (not (and (query_block? branch) (single_source? (qb_sources branch))))
+			(neumann_fail "build_queryplan" "driver membership probe expects simple query-block branches")
+			true)
+		(define src (car (qb_sources branch)))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "driver membership probe expects base table branches")
+			true)
+		(define rhs_expr (query_block_first_expr branch))
+		(define condition (combine_where (qb_where branch) (source_join_expr src)))
+		(define filtercols (merge_unique (list
+			(extract_columns_for_alias src condition)
+			(extract_columns_for_alias src rhs_expr))))
+		(define lowered_condition (list (quote and)
+			(lower_column_expr_for_alias src condition)
+			(list (quote equal??)
+				(lower_column_expr_for_alias src rhs_expr)
+				(lower_column_expr_for_join sources default_alias probe))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(list (quote optimize) lowered_condition))
+			(quoted_runtime_list '())
+			(list (quote lambda) '() 1)
+			(quote +)
+			0
+			nil
+			false))))
+
+(define lower_driver_membership_probe_expr (lambda (sources default_alias stage probe)
+	(begin
+		(define input (gs_input stage))
+		(if (not (union_block? input))
+			(neumann_fail "build_queryplan" "driver membership probe currently expects UNION candidate input")
+			true)
+		(list (quote >)
+			(cons (quote +) (map (union_branches input) (lambda (branch)
+				(driver_membership_probe_branch_expr sources default_alias branch probe))))
+			0))))
 
 (define lower_scalar_marker_expr (lambda (expr)
 	(match expr
@@ -3773,11 +4412,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(begin
 			(define src (list alias schema tbl false nil))
 			(define keycols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+			(define condition_cols (extract_columns_for_alias src condition))
+			(define filtercols (merge_unique (list keycols condition_cols)))
 			(list (quote scan)
 				'(session "__memcp_tx")
 				(list (quote table) schema tbl)
-				(quoted_runtime_list '())
-				(list (quote lambda) '() true)
+				(cons (quote list) filtercols)
+				(list (quote lambda)
+					(map filtercols (lambda (col) (symbol (concat alias "." col))))
+					(list (quote optimize) (lower_column_expr_for_alias src condition)))
 				(cons (quote list) keycols)
 				(list (quote lambda)
 					(map keycols (lambda (col) (symbol (concat alias "." col))))
@@ -4270,7 +4913,116 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(map (coalesceNil sources '()) (lambda (src)
 		(physicalize_stage_output_source stages src)))))
 
+(define stage_outputs_from_sources_using (lambda (stages sources)
+	(merge_unique (list (filter (map (coalesceNil sources '()) (lambda (src)
+		(match src
+			'(_alias _schema relation _outer _join_expr)
+			(if (not (stage_output_relation? relation))
+				nil
+				(begin
+					(define stage (stage_by_id stages (stage_output_relation_id relation)))
+					(if (nil? stage)
+						(neumann_fail "build_queryplan" "stage-output source references unknown stage")
+						stage)))
+			_ nil)))
+		(lambda (stage) (not (nil? stage))))))))
+
+(define scalar_first_stage_output_source? (lambda (stages src)
+	(and (stage_output_relation? (source_relation src))
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(scalar_first_probe_stage? stage)))))
+
+(define scalar_first_stage_for_alias (lambda (stages sources default_alias tblvar tbl_ignorecase)
+	(reduce (coalesceNil sources '()) (lambda (found src)
+			(if (not (nil? found))
+				found
+				(if (and (scalar_first_stage_output_source? stages src)
+					(source_alias_matches? src default_alias tblvar tbl_ignorecase))
+					(stage_by_id stages (stage_output_relation_id (source_relation src)))
+					nil)))
+		nil)))
+
+(define rewrite_scalar_first_probe_expr (lambda (stages sources default_alias expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define stage (scalar_first_stage_for_alias stages sources default_alias tblvar tbl_ignorecase))
+			(if (nil? stage)
+				expr
+				(scalar_first_probe_expr stage col)))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(rewrite_scalar_first_probe_expr stages sources default_alias (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(rewrite_scalar_first_probe_expr stages sources default_alias item))))
+		_ expr)))
+
+(define rewrite_scalar_first_probe_fields (lambda (stages sources default_alias fields)
+	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
+		(rewrite_scalar_first_probe_expr stages sources default_alias expr)))))
+
+(define rewrite_scalar_first_probe_order (lambda (stages sources default_alias order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr dir) (list (rewrite_scalar_first_probe_expr stages sources default_alias expr) dir)
+			_ item)))))
+
+(define rewrite_scalar_first_probe_sources (lambda (stages sources default_alias)
+	(map (coalesceNil sources '()) (lambda (src)
+		(list
+			(source_alias src)
+			(source_schema src)
+			(source_relation src)
+			(source_outer? src)
+			(rewrite_scalar_first_probe_expr stages sources default_alias (source_join_expr src)))))))
+
+(define sources_without_scalar_first_outputs (lambda (stages sources)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(not (scalar_first_stage_output_source? stages src))))))
+
+(define stages_without_scalar_first_probes (lambda (stages)
+	(filter (coalesceNil stages '()) (lambda (stage)
+		(not (scalar_first_probe_stage? stage))))))
+
+(define query_block_with_scalar_first_probes_using (lambda (stages block)
+	(begin
+		(define sources (qb_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
+		(define rewritten_sources (rewrite_scalar_first_probe_sources stages sources default_alias))
+		(make_query_block
+			(qb_schema block)
+			(sources_without_scalar_first_outputs stages rewritten_sources)
+			(rewrite_scalar_first_probe_fields stages sources default_alias (qb_fields block))
+			(rewrite_scalar_first_probe_expr stages sources default_alias (qb_where block))
+			(qb_group block)
+			(rewrite_scalar_first_probe_expr stages sources default_alias (qb_having block))
+			(rewrite_scalar_first_probe_order stages sources default_alias (qb_order block))
+			(qb_limit block)
+			(qb_offset block)
+			(rewrite_scalar_first_probe_fields stages sources default_alias (qb_hidden block))
+			(stages_without_scalar_first_probes (qb_stages block))
+			(qb_facts block)))))
+
 (define query_block_without_stages_after_prepare_using (lambda (stages block)
+	(begin
+		(define rewritten (query_block_with_scalar_first_probes_using stages block))
+		(make_query_block
+			(qb_schema rewritten)
+			(physicalize_stage_output_sources stages (qb_sources rewritten))
+			(qb_fields rewritten)
+			(qb_where rewritten)
+			(qb_group rewritten)
+			(qb_having rewritten)
+			(qb_order rewritten)
+			(qb_limit rewritten)
+			(qb_offset rewritten)
+			(qb_hidden rewritten)
+			'()
+			(qb_facts rewritten)))))
+
+(define query_block_without_stages_after_prepare (lambda (block)
+	(query_block_without_stages_after_prepare_using (qb_stages block) block)))
+
+(define query_block_without_stages_after_eager_prepare_using (lambda (stages block)
 	(make_query_block
 		(qb_schema block)
 		(physicalize_stage_output_sources stages (qb_sources block))
@@ -4285,23 +5037,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 		'()
 		(qb_facts block))))
 
-(define query_block_without_stages_after_prepare (lambda (block)
-	(query_block_without_stages_after_prepare_using (qb_stages block) block)))
-
 (define query_block_with_prepared_sources_using (lambda (stages block)
-	(make_query_block
-		(qb_schema block)
-		(physicalize_stage_output_sources stages (qb_sources block))
-		(qb_fields block)
-		(qb_where block)
-		(qb_group block)
-		(qb_having block)
-		(qb_order block)
-		(qb_limit block)
-		(qb_offset block)
-		(qb_hidden block)
-		(qb_stages block)
-		(qb_facts block))))
+	(begin
+		(define rewritten (query_block_with_scalar_first_probes_using stages block))
+		(make_query_block
+			(qb_schema rewritten)
+			(physicalize_stage_output_sources stages (qb_sources rewritten))
+			(qb_fields rewritten)
+			(qb_where rewritten)
+			(qb_group rewritten)
+			(qb_having rewritten)
+			(qb_order rewritten)
+			(qb_limit rewritten)
+			(qb_offset rewritten)
+			(qb_hidden rewritten)
+			(qb_stages rewritten)
+			(qb_facts rewritten)))))
 
 (define query_block_with_prepared_sources (lambda (block)
 	(query_block_with_prepared_sources_using (qb_stages block) block)))
@@ -4379,10 +5130,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define scalar_query_stage (and (query_block? src)
 			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
 				(equal? (count ags) 2))))
-		(define prepared_src (if (query_block? src) (query_block_without_stages_after_prepare_using all_stages src) src))
-		(define nested_prepare (if (query_block? src) (map (qb_stages src) (lambda (nested_stage)
+		(define prepared_src (if (query_block? src) (query_block_without_stages_after_eager_prepare_using all_stages src) src))
+		(define nested_stages (if (query_block? src)
+			(merge_unique (list
+				(qb_stages src)
+				(stage_outputs_from_sources_using all_stages (qb_sources src))))
+			'()))
+		(define nested_prepare (if (query_block? src) (map nested_stages (lambda (nested_stage)
 			(lower_stage_prepare_using all_stages nested_stage))) '()))
-		(define nested_materialize (if (query_block? src) (lower_stage_materialize_all (qb_stages src)) '()))
+		(define nested_materialize (if (query_block? src) (lower_stage_materialize_all nested_stages) '()))
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
 			nil
 			(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
@@ -4901,10 +5657,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 		false)))
 
 (define query_block_stages_to_prepare (lambda (block)
-	(if (single_source? (qb_sources block))
-		(qb_stages block)
-		(filter (qb_stages block) (lambda (stage)
-			(not (row_number_stage_consumed_by_join? stage (qb_sources block))))))))
+	(filter
+		(if (single_source? (qb_sources block))
+			(qb_stages block)
+			(filter (qb_stages block) (lambda (stage)
+				(not (row_number_stage_consumed_by_join? stage (qb_sources block))))))
+		(lambda (stage)
+			(not (scalar_first_probe_stage? stage))))))
 
 (define lower_query_block_with_stages (lambda (block)
 	(if (empty_list? (qb_stages block))

@@ -2216,6 +2216,136 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	return
 }
 
+func (t *storageShard) ProbeExists(columns []string, values []scm.Scmer, currentTx *TxContext) bool {
+	t.ensureMainCount(false)
+	mcols := make([]ColumnStorage, len(columns))
+	for i, col := range columns {
+		mcols[i] = t.getColumnStorageOrPanic(col)
+	}
+
+	bounds := make(boundaries, len(columns))
+	for i, col := range columns {
+		bounds[i] = columnboundaries{col: col, matcher: EqualMatcher, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
+	}
+	lower, upperLast := indexFromBoundaries(bounds)
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	mainCount := t.main_count
+	found := false
+
+	var buf [8]uint32
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
+		for _, idx := range batch {
+			matched := true
+			if idx < mainCount {
+				for j, v := range values {
+					if !scm.Equal(mcols[j].GetValue(idx), v) {
+						matched = false
+						break
+					}
+				}
+			} else {
+				for j, v := range values {
+					if !scm.Equal(t.getDelta(int(idx-mainCount), columns[j]), v) {
+						matched = false
+						break
+					}
+				}
+			}
+			if !matched {
+				continue
+			}
+			if acidMode {
+				if currentTx.IsVisible(t, idx) {
+					found = true
+					return false
+				}
+			} else if !t.deletions.Get(uint(idx)) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+
+	return found
+}
+
+func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext) (int64, bool) {
+	if limit <= 0 {
+		limit = 1024
+	}
+	t.ensureMainCount(false)
+	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
+	for i, col := range conditionCols {
+		ccols[i] = t.getColumnStorageOrPanic(col)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
+	}
+
+	bounds := extractBoundaries(conditionCols, condition)
+	lower, upperLast := indexFromBoundaries(bounds)
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	mainCount := t.main_count
+	count := int64(0)
+	capped := false
+	cdataset := make([]scm.Scmer, len(conditionCols))
+
+	var buf [256]uint32
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
+		for _, idx := range batch {
+			if acidMode {
+				if !currentTx.IsVisible(t, idx) {
+					continue
+				}
+			} else if t.deletions.Get(uint(idx)) {
+				continue
+			}
+			if idx < mainCount {
+				for i, c := range ccols {
+					if cNeedsTxReader[i] {
+						cdataset[i] = cReaders[i].GetValue(idx)
+					} else {
+						cdataset[i] = c.GetValue(idx)
+					}
+				}
+			} else {
+				for i, col := range conditionCols {
+					if cNeedsTxReader[i] {
+						cdataset[i] = cReaders[i].GetValue(idx)
+					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						cdataset[i] = ccols[i].GetValue(idx)
+					} else {
+						cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					}
+				}
+			}
+			if scm.ToBool(conditionFn(cdataset...)) {
+				count++
+				if count >= int64(limit) {
+					capped = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+
+	return count, capped
+}
+
 func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 	item := t.inserts[idx]
 	colidx, ok := t.deltaColumns[col]
