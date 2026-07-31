@@ -100,16 +100,16 @@ MemCP is designed to run alongside other services on the same machine without bl
 
 **Automatic compression** — MemCP stores each column in the most compact format that fits the data: small integers get bit-packed, repeated strings become dictionary-encoded, sequential IDs are stored as ranges. A table that takes 10 GB in MySQL often fits in 1–3 GB in MemCP.
 
-**Configurable memory budget** — by default MemCP uses at most 50% of your server's RAM. You can set an exact limit via the dashboard or the settings API:
+**Configurable memory budget** — by default MemCP uses at most 50% of your server's RAM. You can set an exact limit via the dashboard or the Scheme API:
 
 ```bash
 # Limit to 4 GB total
-curl -u root:admin -X POST http://localhost:4321/dashboard/api/settings \
-  -d '{"key":"MaxRamBytes","value":4294967296}'
+curl -u root:admin -X POST http://localhost:4321/scm \
+  -d '(settings "MaxRamBytes" 4294967296)'
 
 # Or as a percentage of total RAM (default: 50)
-curl -u root:admin -X POST http://localhost:4321/dashboard/api/settings \
-  -d '{"key":"MaxRamPercent","value":40}'
+curl -u root:admin -X POST http://localhost:4321/scm \
+  -d '(settings "MaxRamPercent" 40)'
 ```
 
 **Automatic eviction** — when MemCP approaches its memory limit, it automatically unloads the least recently used data from RAM. That data stays safe on disk and is transparently reloaded the next time a query needs it. Frequently accessed hot data stays in memory; cold data steps aside.
