@@ -492,6 +492,9 @@ test_cases:
             - "membership_driver_rows"
             - "membership_candidate_input_rows"
             - "membership_cost_reason"
+            - "source_estimates"
+            - "group_stage_strategy"
+            - "group_plan_options"
             - "stage-output"
             - "lookup-keys"
           not_contains:
@@ -546,6 +549,9 @@ test_cases:
             - "membership_candidate_input_rows"
             - "membership_cost_reason"
             - "broad_membership_preserve_driver_order_limit"
+            - "source_estimates"
+            - "group_stage_strategy"
+            - "group_plan_options"
             - "driver_membership_probe"
           not_contains:
             - "inner_select"

@@ -64,6 +64,16 @@ test_cases:
         - id: 2
           note: null
 
+  - name: "EXPLAIN REORDER exposes LEFT JOIN plan options"
+    sql: "EXPLAIN REORDER SELECT m.id, c.note FROM cov_main m LEFT JOIN cov_child c ON m.id = c.pid WHERE m.id = 2 ORDER BY m.id"
+    expect:
+      contains:
+        - "source_estimates"
+        - "left_join_plan_options"
+        - "tempcol_materialize_reusable"
+        - "group_cache_read"
+        - "subscan"
+
   # ==========================================================
   # Statistics logging paths — needs >50 rows
   # Exercises scan.go lines 100-114, 139-155, 174-189

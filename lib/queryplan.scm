@@ -2994,6 +2994,42 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(planner_table_row_count (source_schema src) (source_relation src))
 		nil)))
 
+(define source_join_present? (lambda (src)
+	(begin
+		(define join_expr (source_join_expr src))
+		(not (or (nil? join_expr) (equal? join_expr true))))))
+
+(define source_reorder_estimate (lambda (src)
+	(list
+		(source_alias src)
+		(list (quote relation) (source_relation src))
+		(list (quote row_count) (planner_source_row_count src))
+		(list (quote outer_join) (source_outer? src))
+		(list (quote join_filter) (source_join_present? src)))))
+
+(define left_join_strategy_options (lambda (src)
+	(if (not (source_outer? src))
+		nil
+		(begin
+			(define rows (planner_source_row_count src))
+			(list
+				(source_alias src)
+				(list (quote preferred) (if (and (not (nil? rows)) (< rows 1000))
+					(quote subscan)
+					(quote tempcol_materialize_reusable)))
+				(list (quote alternatives) (list
+					(quote subscan)
+					(quote group_cache_read)
+					(quote tempcol_materialize_reusable)))
+				(list (quote row_count) rows))))))
+
+(define query_block_reorder_telemetry (lambda (block)
+	(list
+		(list (quote source_estimates) (map (qb_sources block) source_reorder_estimate))
+		(list (quote left_join_plan_options) (filter
+			(map (qb_sources block) left_join_strategy_options)
+			(lambda (item) (not (nil? item))))))))
+
 (define planner_add_estimates (lambda (values)
 	(reduce (coalesceNil values '()) (lambda (acc value)
 		(if (nil? value) acc (+ acc value)))
@@ -3025,6 +3061,43 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote membership_cost_reason) (if (and (equal? class (quote broad)) ordered_driver)
 				(quote broad_membership_preserve_driver_order_limit)
 				(quote selective_membership_build_candidate_keyset)))))))
+
+(define stage_reorder_strategy (lambda (stage)
+	(match (qassoc_get (gs_facts stage) (quote purpose) nil)
+		(symbol exists) (quote group_cache_read)
+		(symbol not_exists) (quote group_cache_read)
+		(symbol in_membership) (quote group_cache_read)
+		(symbol in_candidate) (quote candidate_keyset)
+		(symbol scalar_aggregate) (quote group_cache_read)
+		(symbol scalar_single) (if (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote first))
+			(quote subscan_partition_limit)
+			(quote group_cache_read))
+		_ (quote group_cache_read))))
+
+(define stage_reorder_telemetry (lambda (stage)
+	(list
+		(list (quote group_stage_strategy) (stage_reorder_strategy stage))
+		(list (quote group_input_rows) (planner_stage_input_rows (gs_input stage)))
+		(list (quote group_domain_count) (count (gs_domain stage)))
+		(list (quote group_key_count) (count (gs_keys stage)))
+		(list (quote group_plan_options) (list
+			(quote subscan)
+			(quote group_cache_read)
+			(quote tempcol_materialize_reusable))))))
+
+(define group_stage_with_reorder_facts (lambda (stage)
+	(make_group_stage
+		(gs_id stage)
+		(gs_input stage)
+		(gs_domain stage)
+		(gs_keys stage)
+		(gs_aggregates stage)
+		(gs_having stage)
+		(gs_output stage)
+		(gs_order stage)
+		(gs_limit stage)
+		(gs_offset stage)
+		(merge (list (stage_reorder_telemetry stage) (gs_facts stage))))))
 
 (define candidate_reorder_strategy (lambda (stage sources block)
 	(begin
@@ -3109,13 +3182,29 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define sources (qb_sources block))
 		(define candidate (first_candidate_source (qb_stages block) sources))
 		(if (nil? candidate)
-			block
+			(query_block_with_reorder_facts
+				(make_query_block
+					(qb_schema block)
+					(qb_sources block)
+					(qb_fields block)
+					(qb_where block)
+					(qb_group block)
+					(qb_having block)
+					(qb_order block)
+					(qb_limit block)
+					(qb_offset block)
+					(qb_hidden block)
+					(map (qb_stages block) join_reorder_stage)
+					(qb_facts block))
+				(query_block_reorder_telemetry block))
 			(begin
 				(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
 				(define strategy (candidate_reorder_strategy stage sources block))
-				(define facts (cons
-					(list (quote membership_plan_strategy) strategy)
-					(candidate_reorder_telemetry stage sources block)))
+				(define facts (merge (list
+					(query_block_reorder_telemetry block)
+					(cons
+						(list (quote membership_plan_strategy) strategy)
+						(candidate_reorder_telemetry stage sources block)))))
 				(match strategy
 					(symbol driver_order_membership_probe) (begin
 						(define stage_id (gs_id stage))
@@ -3164,18 +3253,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define join_reorder_stage (lambda (stage)
 	(if (group_stage? stage)
-		(make_group_stage
-			(gs_id stage)
-			(join_reorder_node (gs_input stage))
-			(gs_domain stage)
-			(gs_keys stage)
-			(gs_aggregates stage)
-			(gs_having stage)
-			(gs_output stage)
-			(gs_order stage)
-			(gs_limit stage)
-			(gs_offset stage)
-			(gs_facts stage))
+		(group_stage_with_reorder_facts
+			(make_group_stage
+				(gs_id stage)
+				(join_reorder_node (gs_input stage))
+				(gs_domain stage)
+				(gs_keys stage)
+				(gs_aggregates stage)
+				(gs_having stage)
+				(gs_output stage)
+				(gs_order stage)
+				(gs_limit stage)
+				(gs_offset stage)
+				(gs_facts stage)))
 		stage)))
 
 (define query_block_without_logical_stages (lambda (block)
