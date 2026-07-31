@@ -51,6 +51,25 @@ test_cases:
       data:
         - v: "t"
 
+  - name: "String numerals follow SQL boolean truthiness"
+    sql: |
+      SELECT
+        IF('0', 't', 'f') AS zero_string,
+        IF(' 0 ', 't', 'f') AS spaced_zero_string,
+        IF('0.0', 't', 'f') AS decimal_zero_string,
+        IF('1', 't', 'f') AS one_string,
+        IF('0.1', 't', 'f') AS decimal_string,
+        IF('FALSE', 't', 'f') AS false_string
+    expect:
+      rows: 1
+      data:
+        - zero_string: "f"
+          spaced_zero_string: "f"
+          decimal_zero_string: "f"
+          one_string: "t"
+          decimal_string: "t"
+          false_string: "f"
+
   - name: "SELECT WHERE without FROM"
     # Avoids aggregate over derived table; checks filter semantics directly
     sql: |

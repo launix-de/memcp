@@ -544,7 +544,13 @@ func (s Scmer) Bool() bool {
 		return math.Float64frombits(s.aux) != 0.0
 	case tagString, tagSymbol, tagCString, tagBString:
 		str := s.String()
-		return str != "" && str != "false"
+		if str == "" || strings.EqualFold(str, "false") {
+			return false
+		}
+		if n, err := strconv.ParseFloat(strings.TrimSpace(str), 64); err == nil {
+			return n != 0.0
+		}
+		return true
 	case tagSlice:
 		return len(s.Slice()) > 0
 	case tagVector:
