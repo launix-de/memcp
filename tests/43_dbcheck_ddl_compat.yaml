@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "DDL compatibility for dbcheck.php migration tool"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS dbc_child"

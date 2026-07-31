@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "Campaign state grouping over derived table with permission-style joins"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS camp_company"

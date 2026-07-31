@@ -47,6 +47,7 @@ test_cases:
           c2: null
 
   - name: "EXPLAIN IR deduplicates identical scalar LEFT JOIN helpers"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT id,
@@ -62,6 +63,7 @@ test_cases:
         - "(cardinality_mode single_or_error)"
         - "jd_ref"
       not_contains:
+        - "dependent-subquery"
         - "_unn_jd_ref_"
         - "scan-tagged-table"
         - "inner_select"
@@ -108,6 +110,7 @@ test_cases:
           sc: null
 
   - name: "EXPLAIN IR reuses one LEFT JOIN helper for different projected fields"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT id,
@@ -123,6 +126,7 @@ test_cases:
         - "(cardinality_mode single_or_error)"
         - "jd_ref"
       not_contains:
+        - "dependent-subquery"
         - "_unn_jd_ref_"
         - "scan-tagged-table"
         - "inner_select"

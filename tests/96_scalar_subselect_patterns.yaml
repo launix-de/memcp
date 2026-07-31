@@ -295,6 +295,7 @@ test_cases:
           state: scaled
 
   - name: "Derived table pruning drops unused scalar projection for outer count"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT COUNT(*) AS cnt FROM (
@@ -309,6 +310,8 @@ test_cases:
       contains:
         - "sq_doc"
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - "_unn_sq_uconf_0"
 
   - name: "Derived table pruning keeps join key columns used only in outer ON"
@@ -328,6 +331,7 @@ test_cases:
         - ID: 3
 
   - name: "EXPLAIN IR reuses uncorrelated scalar helper in CASE WHEN"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT
@@ -349,6 +353,7 @@ test_cases:
         - "stage-output"
         - "scalar-once"
       not_contains:
+        - "dependent-subquery"
         - "inner_select"
 
   # Pattern 3: GROUP BY with MIN(CONCAT(...)) (6s in prod)

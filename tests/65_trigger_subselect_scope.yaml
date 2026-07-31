@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Trigger INSERT SELECT with correlated subselect column scope"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS tss_log"

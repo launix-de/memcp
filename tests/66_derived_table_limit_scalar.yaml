@@ -112,6 +112,7 @@ test_cases:
           total: 500
 
   - name: "EXPLAIN IR keeps derived ORDER BY LIMIT as flattened stage"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
       SELECT t.ID, t.latest_val FROM (
@@ -129,6 +130,8 @@ test_cases:
         - 'desc'
         - 'latest_val'
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - '__mat:'
 
 

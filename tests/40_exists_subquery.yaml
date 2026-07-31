@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "EXISTS and NOT EXISTS subquery tests"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS exists_orders"
@@ -39,6 +40,30 @@ test_cases:
         - ID: 2
           name: "Bob"
 
+  - name: "EXPLAIN correlated EXISTS lowers to COUNT group stage"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
+    steps:
+      - sql: |
+          EXPLAIN IR SELECT ID, name FROM exists_customers c
+          WHERE EXISTS (SELECT 1 FROM exists_orders o WHERE o.customer_id = c.ID)
+          ORDER BY ID
+        expect:
+          contains:
+            - "group-stage"
+            - "stage-output"
+            - "exists"
+            - "presence_only"
+            - "max_needed_per_domain"
+            - "domain"
+            - "lookup-keys"
+            - "cardinality_mode"
+          not_contains:
+            - "neumann_exists"
+            - "inner_select"
+            - ".grp:"
+            - "__mat:_uncorr_cnt_"
+            - "touch_keytable"
+
   - name: "NOT EXISTS - customers without orders"
     sql: |
       SELECT ID, name FROM exists_customers c
@@ -74,6 +99,7 @@ test_cases:
       rows: 0
 
   - name: "EXPLAIN uncorrelated EXISTS avoids materialized count cache"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     steps:
       - sql: |
           EXPLAIN IR SELECT ID, name FROM exists_customers
@@ -84,6 +110,8 @@ test_cases:
             - "group-stage"
             - "stage-output"
             - "exists"
+            - "presence_only"
+            - "max_needed_per_domain"
             - "domain"
             - "lookup-keys"
             - "cardinality_mode"
@@ -142,6 +170,7 @@ test_cases:
           name: "Charlie"
 
   - name: "EXPLAIN EXISTS ignores session state in projection without count materialization"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     steps:
       - sql: |
           EXPLAIN IR SELECT ID, name FROM exists_customers
@@ -152,6 +181,8 @@ test_cases:
             - "group-stage"
             - "stage-output"
             - "exists"
+            - "presence_only"
+            - "max_needed_per_domain"
             - "domain"
             - "lookup-keys"
             - "cardinality_mode"

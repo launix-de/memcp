@@ -56,6 +56,7 @@ test_cases:
       rows_affected: 15
 
   - name: "EXPLAIN IR does not emit bogus helper call inside ordered scalar"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     session_id: "u3_sess"
     sql: |
       EXPLAIN IR
@@ -75,6 +76,8 @@ test_cases:
     expect:
       rows: 1
       not_contains:
+        - "inner_select"
+        - "dependent-subquery"
         - "(\"_unn_u3_main_0\" \"_unn_u3_main_1\")"
 
   - name: "ordered scalar with duplicate self helper returns one row"
