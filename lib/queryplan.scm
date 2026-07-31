@@ -807,16 +807,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define acol (direct_probe_column alias a))
 			(define bcol (direct_probe_column alias b))
 			(if (and (not (nil? acol)) (nil? bcol))
-				(list acol b)
+				(list (list acol b))
 				(if (and (nil? acol) (not (nil? bcol)))
-					(list bcol a)
+					(list (list bcol a))
 					false)))
 		((quote equal??) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
 		((symbol equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
 		((quote equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
 		((symbol nil?) expr) (begin
 			(define col (direct_probe_column alias expr))
-			(if (nil? col) false (list col nil)))
+			(if (nil? col) false (list (list col nil))))
 		((quote nil?) expr) (exists_probe_condition_binding alias (list (quote nil?) expr))
 		_ false)))
 
@@ -830,9 +830,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				false
 				(merge (list aa bb))))
 		((quote and) a b) (exists_probe_condition_bindings alias (list (quote and) a b))
-		_ (begin
-			(define binding (exists_probe_condition_binding alias condition))
-			(if (equal? binding false) false (list binding))))))
+		_ (exists_probe_condition_binding alias condition))))
 
 (define direct_probe_key_columns (lambda (alias keys)
 	(begin
@@ -3290,7 +3288,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define stage_reorder_strategy (lambda (stage)
 	(match (qassoc_get (gs_facts stage) (quote purpose) nil)
-		(symbol exists) (quote group_cache_read)
+		(symbol exists) (if (exists_probe_supported? stage)
+			(quote storage_index_probe)
+			(quote group_cache_read))
 		(symbol not_exists) (quote group_cache_read)
 		(symbol in_membership) (quote group_cache_read)
 		(symbol in_candidate) (quote candidate_keyset)
@@ -3743,7 +3743,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			true)
 		(define condition_cols (map condition_bindings (lambda (binding) (nth binding 0))))
 		(define condition_values (map condition_bindings (lambda (binding) (nth binding 1))))
-		(list (quote probe_exists)
+		(list (quote scan_exists)
 			'(session "__memcp_tx")
 			(source_table_expr src)
 			(quoted_runtime_list (merge (list key_cols condition_cols)))

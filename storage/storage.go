@@ -508,7 +508,7 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		Name: "probe_exists",
+		Name: "scan_exists",
 		Desc: "returns true if a table contains at least one visible row matching equality values for the given columns; uses storage indexes directly without scan lambda setup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
@@ -516,7 +516,7 @@ func Init(en scm.Env) {
 			columns := scmerSliceToStrings(mustScmerSlice(a[2], "columns"))
 			values := mustScmerSlice(a[3], "values")
 			if len(columns) != len(values) {
-				panic("probe_exists: columns and values must have the same length")
+				panic("scan_exists: columns and values must have the same length")
 			}
 			for _, shard := range t.ActiveShards() {
 				if shard != nil && shard.ProbeExists(columns, values, currentTx) {
