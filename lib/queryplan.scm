@@ -4966,6 +4966,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'(expr dir) (list (rewrite_scalar_first_probe_expr stages sources default_alias expr) dir)
 			_ item)))))
 
+(define rewrite_scalar_first_probe_sources (lambda (stages sources default_alias)
+	(map (coalesceNil sources '()) (lambda (src)
+		(list
+			(source_alias src)
+			(source_schema src)
+			(source_relation src)
+			(source_outer? src)
+			(rewrite_scalar_first_probe_expr stages sources default_alias (source_join_expr src)))))))
+
 (define sources_without_scalar_first_outputs (lambda (stages sources)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(not (scalar_first_stage_output_source? stages src))))))
@@ -4978,9 +4987,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
+		(define rewritten_sources (rewrite_scalar_first_probe_sources stages sources default_alias))
 		(make_query_block
 			(qb_schema block)
-			(sources_without_scalar_first_outputs stages sources)
+			(sources_without_scalar_first_outputs stages rewritten_sources)
 			(rewrite_scalar_first_probe_fields stages sources default_alias (qb_fields block))
 			(rewrite_scalar_first_probe_expr stages sources default_alias (qb_where block))
 			(qb_group block)
