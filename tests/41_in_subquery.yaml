@@ -491,9 +491,12 @@ test_cases:
             - "candidate"
             - "membership_plan_strategy"
             - "candidate_keyset"
+            - "membership_selectivity_class"
+            - "selective"
             - "membership_driver_rows"
             - "membership_candidate_input_rows"
             - "membership_cost_reason"
+            - "selective_membership_build_candidate_keyset"
             - "source_estimates"
             - "group_stage_strategy"
             - "group_plan_options"
@@ -503,6 +506,8 @@ test_cases:
             - "inner_select"
             - "dependent-subquery"
             - "in_membership"
+            - "driver_order_membership_probe"
+            - "driver_membership_probe"
             - ".grp:"
             - "touch_keytable"
       - sql: |
@@ -524,6 +529,7 @@ test_cases:
           contains:
             - "scan"
           not_contains:
+            - "driver_membership_probe"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
       - sql: |
@@ -558,6 +564,7 @@ test_cases:
           not_contains:
             - "inner_select"
             - "dependent-subquery"
+            - "selective_membership_build_candidate_keyset"
             - ".grp:"
             - "touch_keytable"
       - sql: |

@@ -41,6 +41,25 @@ test_cases:
           name: "Golf"
           driver_name: "Bob"
 
+  - name: "EXPLAIN correlated ON keeps bounded scalar probe in join expression"
+    sql: |
+      EXPLAIN SELECT v.ID, v.name,
+        ref_d.dname AS driver_name
+      FROM ljco_vehicle v
+      LEFT JOIN ljco_driver ref_d ON ref_d.ID = COALESCE(
+        (SELECT h.driver FROM ljco_hist h WHERE h.parent = v.ID ORDER BY h.ts DESC LIMIT 1), NULL)
+      ORDER BY v.ID
+    expect:
+      rows: 1
+      contains:
+        - "scan_order"
+        - "ljco_hist"
+        - "coalesceNil"
+      not_contains:
+        - "__exists_"
+        - ".grp:ljco_hist"
+        - "touch_keytable"
+
   - name: "derived table LEFT JOIN with correlated ON"
     sql: |
       SELECT v.ID, v.name,
