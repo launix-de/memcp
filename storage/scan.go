@@ -360,7 +360,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	var buf [1024]uint32
 	hadValue := false
 
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 		// filter in-place: overwrite batch with passing IDs
 		outN := 0
 		for _, idx := range batch {
@@ -597,7 +597,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			activeLower, activeUpperLast = indexFromBoundaries(activeBoundaries)
 		}
 
-		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			if ss != nil && ss.IsKilled() {
 				panic("query killed")
 			}

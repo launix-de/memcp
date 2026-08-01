@@ -597,6 +597,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
+		GlobalCache.removeIndexChildrenInternal(idx, freedByType)
 		GlobalCache.removeInternal(idx, freedByType)
 		idx.baseState = storageIndexState{}
 		idx.variants = nil
@@ -626,6 +627,7 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
+		GlobalCache.removeIndexChildrenInternal(idx, freedByType)
 		GlobalCache.removeInternal(idx, freedByType)
 		idx.baseState = storageIndexState{}
 		idx.variants = nil
@@ -2172,7 +2174,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
 	var buf [8]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], true, func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
@@ -2237,7 +2239,7 @@ func (t *storageShard) ProbeExists(columns []string, values []scm.Scmer, current
 	found := false
 
 	var buf [8]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], true, func(batch []uint32) bool {
 		for _, idx := range batch {
 			matched := true
 			if idx < mainCount {
@@ -2304,7 +2306,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	var buf [256]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], false, func(batch []uint32) bool {
 		for _, idx := range batch {
 			if acidMode {
 				if !currentTx.IsVisible(t, idx) {
