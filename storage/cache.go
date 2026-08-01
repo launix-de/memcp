@@ -544,6 +544,18 @@ func (cm *CacheManager) removeInternal(pointer any, freedByType *[numEvictableTy
 	delete(cm.itemMap, pointer)
 }
 
+// removeIndexChildrenInternal removes eviction records for soft sub-items owned
+// by an index. The parent index owns the actual references and is responsible
+// for clearing them; this only keeps CacheManager bookkeeping in sync when the
+// parent is evicted or deregistered.
+func (cm *CacheManager) removeIndexChildrenInternal(index *StorageIndex, freedByType *[numEvictableTypes]int64) {
+	for pointer := range cm.itemMap {
+		if entry, ok := pointer.(*skipListCacheEntry); ok && entry.index == index {
+			cm.removeInternal(pointer, freedByType)
+		}
+	}
+}
+
 // updateSizeInternal adjusts size and recomputes heap position.
 func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 	item, ok := cm.itemMap[pointer]
@@ -698,12 +710,10 @@ func (cs CacheStat) FormatStat() string {
 	if shardColsOnly < 0 {
 		shardColsOnly = 0
 	}
-	var totalEvictable int64
-	for i := range cs.SizeByType {
-		totalEvictable += cs.SizeByType[i]
-	}
-	// subtract index double-count for display
-	totalEvictable -= cs.SizeByType[TypeIndex]
+	// Index sub-items, such as LIKE skip lists, may be registered separately so
+	// eviction can assign them their own weight and age. Those registrations are
+	// eviction records, not additional raw RAM copies, so aggregate RAM displays
+	// must avoid reading them as a second live allocation.
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("TotalBudget = %s\tPersistedBudget = %s\tTracked = %s\tPersisted = %s\n",

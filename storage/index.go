@@ -190,8 +190,28 @@ func (idx *StorageIndex) ComputeSize() uint {
 				sz += sl.ComputeSize()
 			}
 		}
+		sz += idx.computeDeltaBtreeSize(state)
 	}
-	// TODO: deltaBtree
+	return sz
+}
+
+func (idx *StorageIndex) computeDeltaBtreeSize(state *storageIndexState) uint {
+	if state == nil || state.deltaBtree == nil {
+		return 0
+	}
+	// The B-tree owns nodes and indexPair values. For normal delta rows,
+	// indexPair.data points at shard inserts that are already counted by the
+	// shard; count only the slice header there. Session-sensitive indexes store
+	// precomputed values and own that slice payload as well.
+	var sz uint = 64 + uint(state.deltaBtree.Len())*64
+	state.deltaBtree.Ascend(func(item indexPair) bool {
+		if state.precomputedDelta {
+			sz += scm.ComputeSize(scm.NewAny(item.data))
+		} else {
+			sz += 24
+		}
+		return true
+	})
 	return sz
 }
 
@@ -324,7 +344,7 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 // The callback receives batches of record IDs and returns false to stop iteration.
 // Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
 // for existence checks, large buffers (e.g. [1024]uint32) for full scans.
-func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
 	// extract inclusiveness for the range column (last boundary)
@@ -353,7 +373,7 @@ func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.
 					}
 				}
 				// this index fits!
-				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, callback)
 				return
 			}
 		skip_index:
@@ -382,7 +402,7 @@ func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, callback)
 					return
 				}
 			}
@@ -438,7 +458,7 @@ func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.
 		index.t = t
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
+		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, callback)
 		return
 	}
 
@@ -734,8 +754,10 @@ func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, colIdx int, 
 	}
 	state.skipLists[colIdx][pattern] = sl
 	s.mu.Unlock()
-	// Register skip list with CacheManager at 1/100 of the index priority,
-	// so rarely used patterns are evicted before the whole index.
+	// Register skip lists as soft sub-items of the parent index. Their bytes
+	// are already included in StorageIndex.ComputeSize for total live-RAM
+	// reporting; the separate CacheManager entry exists only so eviction can
+	// choose a cheaper sub-item before dropping the whole index.
 	if sl != nil {
 		entry := &skipListCacheEntry{index: s, colIdx: colIdx, pattern: pattern}
 		GlobalCache.AddItem(entry, int64(sl.ComputeSize()), TypeIndex, skipListCleanup, skipListLastUsed, skipListGetScore)
@@ -744,7 +766,7 @@ func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, colIdx int, 
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -755,8 +777,10 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 	state := s.stateForTx(tx, true)
 	// no collation-specific helpers in the current implementation
 
-	savings_threshold := 2.0    // building an index costs 1x the time as traversing the list
-	s.Savings = s.Savings + 1.0 // mark that we could save time
+	savings_threshold := 2.0 // building an index costs 1x the time as traversing the list
+	if countUsage {
+		s.Savings = s.Savings + 1.0 // mark that a real query could save time
+	}
 	if !state.active {
 		// index is not built yet
 		if s.Savings < savings_threshold {
@@ -1042,6 +1066,7 @@ func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !idx.mu.TryLock() {
 		return false // index is in use, skip eviction
 	}
+	GlobalCache.removeIndexChildrenInternal(idx, freedByType)
 	idx.baseState = storageIndexState{}
 	idx.variants = nil
 	idx.mu.Unlock()
