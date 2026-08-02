@@ -760,7 +760,8 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			result.scols[i] = t.ColumnReaderTx(currentTx, colname)
 			continue
 		}
-		if proc, ok := scol.Any().(scm.Proc); ok {
+		if scol.IsProc() {
+			proc := scol.Proc()
 			var params []scm.Scmer
 			if proc.Params.IsSlice() {
 				params = proc.Params.Slice()

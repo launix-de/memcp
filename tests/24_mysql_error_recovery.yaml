@@ -1,0 +1,61 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+metadata:
+  version: "1.0"
+  description: "MySQL protocol recovers after scan-time SQL errors"
+  requires_mysql: true
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS state_items"
+  - sql: "CREATE TABLE state_items (id INT PRIMARY KEY, mode INT)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS state_items"
+
+test_cases:
+  - name: "HTTP scan error is client-safe"
+    sql: |
+      UPDATE state_items s1
+      SET mode = CASE
+        WHEN dropped_ref IS NOT NULL THEN 1
+        WHEN EXISTS (
+          SELECT * FROM state_items s2
+          WHERE s2.dropped_ref = s1.id
+        ) THEN 2
+        ELSE 0
+      END
+    expect:
+      error: true
+      contains: "Column does not exist"
+      not_contains:
+        - "goroutine "
+        - "runtime/debug.Stack"
+        - "storage/scan.go"
+
+  - name: "MySQL connection remains usable after scan error"
+    mysql:
+      statements:
+        - sql: |
+            UPDATE state_items s1
+            SET mode = CASE
+              WHEN dropped_ref IS NOT NULL THEN 1
+              WHEN EXISTS (
+                SELECT * FROM state_items s2
+                WHERE s2.dropped_ref = s1.id
+              ) THEN 2
+              ELSE 0
+            END
+          expect:
+            error: true
+            contains:
+              - "Column does not exist"
+            not_contains:
+              - "goroutine "
+              - "runtime/debug.Stack"
+              - "storage/scan.go"
+        - sql: "SELECT 1 AS ok"
+          expect:
+            rows: 1
+            data:
+              - ok: 1

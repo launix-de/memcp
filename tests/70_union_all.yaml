@@ -356,7 +356,11 @@ test_cases:
       ) AS branch_b
       ORDER BY ID
     expect:
-      error: true
+      rows: 3
+      data:
+        - ID: 1
+        - ID: 4
+        - ID: 5
 
   - name: "UNION ALL with grouped branch"
     sql: |
@@ -368,7 +372,14 @@ test_cases:
       HAVING result = 3
       ORDER BY ID
     expect:
-      error: true
+      rows: 3
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 2
+          name: "image2.png"
+        - ID: 3
+          name: "r2"
 
   - name: "UNION ALL with derived branch filtering"
     sql: |
@@ -379,7 +390,12 @@ test_cases:
       ) AS picked
       ORDER BY ID
     expect:
-      error: true
+      rows: 2
+      data:
+        - ID: 2
+          name: "image2.png"
+        - ID: 5
+          name: "image5.png"
 
   - name: "UNION ALL with NULL payload in one branch"
     sql: |
