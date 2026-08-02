@@ -2893,7 +2893,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(combine_where (qb_where inner) (rewrite_derived_ref alias projection (qb_where outer)))
 			(qb_group inner)
 			(qb_having inner)
-			(rewrite_derived_order alias projection (qb_order outer))
+			'()
 			(qb_limit inner)
 			(qb_offset inner)
 			(qb_hidden inner)
@@ -2910,9 +2910,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(union_mode relation)
 					(map (union_branches relation) (lambda (branch)
 						(wrap_union_branch_query block (source_alias src) branch)))
-					(union_order relation)
-					(union_limit relation)
-					(union_offset relation)
+					(if (empty_list? (qb_order block)) (union_order relation) (qb_order block))
+					(coalesceNil (qb_limit block) (union_limit relation))
+					(coalesceNil (qb_offset block) (union_offset relation))
 					(union_facts relation)))))))
 
 (define replace_union_source_branch (lambda (sources union_src branch)
@@ -3908,6 +3908,35 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(map (coalesceNil order_items '()) (lambda (item)
 		(match item
 			'(expr _dir) (order_column_for_alias src expr)
+			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
+
+(define lower_scan_order_sort_expr_for_alias (lambda (src expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			(symbol (resolve_physical_column_name src col col_ignorecase))
+			(neumann_fail "build_queryplan" "ORDER BY references a different source"))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(lower_scan_order_sort_expr_for_alias src (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item) (lower_scan_order_sort_expr_for_alias src item))))
+		_ expr)))
+
+(define scan_order_sort_column_for_alias (lambda (src expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			(resolve_physical_column_name src col col_ignorecase)
+			(neumann_fail "build_queryplan" "ORDER BY references a different source"))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(scan_order_sort_column_for_alias src (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		_ (begin
+			(define cols (extract_columns_for_alias src expr))
+			(list (quote lambda)
+				(map cols (lambda (col) (symbol col)))
+				(lower_scan_order_sort_expr_for_alias src expr))))))
+
+(define scan_order_sort_columns_for_alias (lambda (src order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr _dir) (scan_order_sort_column_for_alias src expr)
 			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
 
 (define order_dirs (lambda (order_items)
@@ -4988,12 +5017,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define scalar_first_stage_for_alias (lambda (stages sources default_alias tblvar tbl_ignorecase)
 	(reduce (coalesceNil sources '()) (lambda (found src)
-			(if (not (nil? found))
-				found
-				(if (and (scalar_first_stage_output_source? stages src)
-					(source_alias_matches? src default_alias tblvar tbl_ignorecase))
-					(stage_by_id stages (stage_output_relation_id (source_relation src)))
-					nil)))
+		(if (not (nil? found))
+			found
+			(if (and (scalar_first_stage_output_source? stages src)
+				(source_alias_matches? src default_alias tblvar tbl_ignorecase))
+				(stage_by_id stages (stage_output_relation_id (source_relation src)))
+				nil)))
 		nil)))
 
 (define rewrite_scalar_first_probe_expr (lambda (stages sources default_alias expr)
@@ -5803,12 +5832,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define alias (source_alias src))
 				(define condition (combine_where (qb_where block) (source_join_expr src)))
 				(define order_items (coalesceNil (qb_order block) '()))
-				(define direct_order (direct_order_items_for_source? src order_items))
+				(define scan_order_supported (order_items_belong_to_source? src order_items))
 				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
 				(define filtercols (extract_columns_for_alias src condition))
 				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 					(extract_columns_for_alias src expr)))))
-				(define ordercols (if (or (empty_list? order_items) (not direct_order)) '() (order_cols_for_alias src order_items)))
+				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
 				(define mapcols (merge_unique (list filtercols fieldcols)))
 				(define table_expr (source_table_expr src))
 				(define filter_expr (list (quote lambda)
@@ -5831,7 +5860,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 						nil
 						nil
 						(source_outer? src))
-					(if direct_order
+					(if scan_order_supported
 						(list (quote scan_order)
 							'(session "__memcp_tx")
 							table_expr
@@ -5957,14 +5986,32 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(lower_dataset_row_assoc all_sources default_alias rest)))
 		_ (list (quote list)))))
 
+(define safe_get_assoc_expr (lambda (row key)
+	(list (quote if)
+		(list (quote or)
+			(list (quote nil?) row)
+			(list (quote list?) row))
+		(list (quote get_assoc) row key)
+		nil)))
+
+(define sorted_row_key_expr (lambda (row key)
+	(list (quote coalesceNil)
+		(safe_get_assoc_expr row key)
+		(list (quote if)
+			(list (quote and)
+				(list (quote list?) row)
+				(list (quote >) (list (quote count) row) 0))
+			(safe_get_assoc_expr (list (quote car) row) key)
+			nil))))
+
 (define join_order_compare_expr (lambda (order_items idx)
 	(if (>= idx (count (coalesceNil order_items '())))
 		false
 		(match (nth order_items idx)
 			'(_expr dir) (begin
 				(define key (concat "__order_" idx))
-				(define left (list (quote get_assoc) (symbol "a") key))
-				(define right (list (quote get_assoc) (symbol "b") key))
+				(define left (sorted_row_key_expr (symbol "a") key))
+				(define right (sorted_row_key_expr (symbol "b") key))
 				(list (quote if)
 					(list (quote equal??) left right)
 					(join_order_compare_expr order_items (+ idx 1))
@@ -5977,7 +6024,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(list (quote cons)
 			(string title)
 			(list (quote cons)
-				(list (quote get_assoc) (symbol "row") (string title))
+				(list (quote coalesceNil)
+					(safe_get_assoc_expr (symbol "row") (string title))
+					(list (quote coalesceNil)
+						(safe_get_assoc_expr (symbol "row") title)
+						(list (quote if)
+							(list (quote and)
+								(list (quote list?) (symbol "row"))
+								(list (quote >) (list (quote count) (symbol "row")) 0))
+							(safe_get_assoc_expr (list (quote car) (symbol "row")) (string title))
+							nil)))
 				(sorted_row_result_assoc_expr rest)))
 		_ (list (quote list)))))
 
@@ -6135,7 +6191,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 						table_expr
 						(cons (quote list) filtercols)
 						filter_expr
-						(cons (quote list) (if (empty_list? order_items) '() (order_cols_for_alias src order_items)))
+						(cons (quote list) (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
 						(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
 						0
 						(coalesceNil offset_value 0)
@@ -6544,6 +6600,62 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 4)))))
 			(cons (quote list) (map specs (lambda (spec) (nth spec 5))))))))
 
+(define union_materialized_order_fields (lambda (branch order_positions)
+	(begin
+		(define exprs (projection_exprs (qb_fields branch)))
+		(merge (list
+			(qb_fields branch)
+			(merge (map (produceN (count order_positions)) (lambda (i)
+				(list (concat "__order_" i) (nth exprs (nth order_positions i)))))))))))
+
+(define query_block_with_fields (lambda (block fields)
+	(make_query_block
+		(qb_schema block)
+		(qb_sources block)
+		fields
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		(qb_stages block)
+		(qb_facts block))))
+
+(define lower_query_block_capture_rows (lambda (block)
+	(begin
+		(define state (symbol "__union_rows"))
+		(define emit (symbol "__union_emit"))
+		(define row (symbol "__union_row"))
+		(list
+			(list (quote lambda) (list state emit)
+				(list (quote begin)
+					(list state "rows" (list (quote list)))
+					(list (quote define) (quote resultrow)
+						(list (quote lambda) (list row)
+							(list state "rows"
+								(list (quote append) (list state "rows") (list (quote cons) row (list (quote list)))))))
+					(lower_query_block_with_stages block)
+					(list state "rows")))
+			(list (quote newsession))
+			(quote resultrow)))))
+
+(define lower_union_all_materialized_ordered (lambda (block titles width)
+	(begin
+		(define branches (union_branches block))
+		(define aligned (map branches (lambda (branch) (union_align_branch_fields branch titles width))))
+		(define order_positions (union_order_positions titles (union_order block)))
+		(define rows_plan (cons (quote merge) (map aligned (lambda (branch)
+			(lower_query_block_capture_rows
+				(query_block_with_fields branch (union_materialized_order_fields branch order_positions)))))))
+		(join_sorted_rows_plan
+			rows_plan
+			(qb_fields (car aligned))
+			(union_order block)
+			(union_offset block)
+			(union_limit block)))))
+
 (define union_direct_order_supported? (lambda (block)
 	(begin
 		(define branches (union_branches block))
@@ -6581,7 +6693,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define titles (projection_titles (qb_fields first_branch)))
 				(define width (count (qb_fields first_branch)))
 				(if (not (empty_list? (union_order block)))
-					(lower_union_all_ordered block titles width)
+					(if (reduce branches (lambda (ok branch)
+						(and ok (union_ordered_branch_supported? branch)))
+						true)
+						(lower_union_all_ordered block titles width)
+						(lower_union_all_materialized_ordered block titles width))
 					(if (or (not (nil? (union_limit block))) (not (nil? (union_offset block))))
 						(lower_union_all_ordered block titles width)
 						(cons (quote begin)

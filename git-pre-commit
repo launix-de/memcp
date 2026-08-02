@@ -135,6 +135,21 @@ test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
 test_data_dir="${MEMCP_TEST_DATA_DIR:-/tmp/memcp-sql-tests-$test_port}"
 tmpdir=""
 supervisor_pid=""
+enable_mysql=0
+
+for tf in "${test_files_arr[@]}"; do
+  if python3 - "$tf" <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    spec = yaml.safe_load(f) or {}
+metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
+raise SystemExit(0 if metadata.get("requires_mysql") else 1)
+PY
+  then
+    enable_mysql=1
+    break
+  fi
+done
 
 # Runner contract:
 # - All suites use one shared data directory so restart/persistence tests see
@@ -153,7 +168,11 @@ run_memcp_forever() {
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
     memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
-    ./memcp --no-repl -data "$test_data_dir" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
+    mysql_args=()
+    if [ "$enable_mysql" -ne 1 ]; then
+      mysql_args+=(--disable-mysql)
+    fi
+    ./memcp --no-repl -data "$test_data_dir" --api-port=$test_port --mysql-port=$((test_port + 1000)) "${mysql_args[@]}" lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
     wait $memcp_pid
     rc=$?
@@ -246,7 +265,7 @@ import sys, yaml
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     spec = yaml.safe_load(f) or {}
 metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
-if metadata.get("isolated"):
+if metadata.get("isolated") or metadata.get("requires_mysql"):
     print("isolated")
     raise SystemExit(0)
 for test_case in spec.get("test_cases", []) if isinstance(spec, dict) else []:

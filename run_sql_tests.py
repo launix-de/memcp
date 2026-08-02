@@ -56,6 +56,7 @@ import time
 import multiprocessing
 import re
 import random
+import tempfile
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
@@ -460,6 +461,37 @@ class SQLTestRunner:
                 parts.append(f"[DIAG ERROR] {e}")
         return "\n    ".join(parts) if parts else None
 
+    def execute_mysql_probe(self, database: str, probe: Dict[str, Any]) -> Tuple[bool, str]:
+        mysql_port = int(probe.get("port") or self.suite_metadata.get("mysql_port") or (int(self.base_url.rsplit(":", 1)[1]) + 1000))
+        payload = {
+            "host": probe.get("host", "127.0.0.1"),
+            "port": mysql_port,
+            "database": probe.get("database", database),
+            "username": probe.get("username", self.username),
+            "password": probe.get("password", self.password),
+            "statements": probe.get("statements", []),
+        }
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+            json.dump(payload, f)
+            path = f.name
+        try:
+            proc = subprocess.run(
+                ["go", "run", "./tools/mysql_probe.go", path],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True,
+                text=True,
+                timeout=int(probe.get("timeout", 30)),
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        output = proc.stdout
+        if proc.stderr:
+            output = f"{output}{proc.stderr}"
+        return proc.returncode == 0, output.strip()
+
     # ----------------------
     # Core execution
     # ----------------------
@@ -739,6 +771,14 @@ class SQLTestRunner:
                 return self._record_fail(name, f"SCM error ({resp.status_code}): {resp.text[:200]}", scm_code, None, None, is_noncritical)
             self._record_success(name, is_noncritical)
             return True
+
+        mysql_probe = test_case.get("mysql")
+        if mysql_probe:
+            ok, output = self.execute_mysql_probe(database, mysql_probe)
+            if ok:
+                self._record_success(name, is_noncritical)
+                return True
+            return self._record_fail(name, "MySQL probe failed", json.dumps(mysql_probe), None, test_case.get("expect"), is_noncritical, on_fail_diag=output)
 
         # Multi-step test case: steps list with per-step session_id + optional background
         steps = test_case.get("steps")
@@ -1292,7 +1332,7 @@ def wait_for_memcp(port=4321, timeout=30) -> bool:
 
 _memcp_log_file: str = ""
 
-def start_memcp_process(port: int) -> subprocess.Popen | None:
+def start_memcp_process(port: int, enable_mysql: bool = False) -> subprocess.Popen | None:
     global _memcp_log_file
     try:
         # Test-runner contract: every managed runner owns one data directory for
@@ -1303,11 +1343,14 @@ def start_memcp_process(port: int) -> subprocess.Popen | None:
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
         logfile = open(_memcp_log_file, 'w')
-        proc = subprocess.Popen([
+        cmd = [
             memcp_bin, "-data", datadir,
             f"--api-port={port}", f"--mysql-port={port+1000}",
-            "--disable-mysql", "lib/main.scm"
-        ], cwd=os.path.dirname(os.path.abspath(__file__)),
+        ]
+        if not enable_mysql:
+            cmd.append("--disable-mysql")
+        cmd.append("lib/main.scm")
+        proc = subprocess.Popen(cmd, cwd=os.path.dirname(os.path.abspath(__file__)),
            env=env, stdin=subprocess.PIPE, stdout=logfile, stderr=logfile, text=True)
         if not wait_for_memcp(port, timeout=MEMCP_START_TIMEOUT):
             print_memcp_log(tail=50)
@@ -1502,7 +1545,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
         #   connect-only worker pool.
         if suite_requires_managed_restart(spec_file):
             sequential_specs.append(("direct", spec_file))
-        elif metadata.get("isolated"):
+        elif metadata.get("isolated") or metadata.get("requires_mysql"):
             sequential_specs.append(("subprocess", spec_file))
         else:
             parallel_specs.append(spec_file)
@@ -1630,6 +1673,7 @@ def main():
     base_url = f"http://localhost:{port}"
     global is_connect_only_mode
     is_connect_only_mode = connect_only
+    enable_mysql = any(load_suite_metadata(spec_file).get("requires_mysql") for spec_file in spec_files)
 
     memcp_process = None
     if connect_only:
@@ -1640,7 +1684,7 @@ def main():
         try:
             requests.get(base_url, timeout=2)
         except:
-            memcp_process = start_memcp_process(port)
+            memcp_process = start_memcp_process(port, enable_mysql=enable_mysql)
             if not memcp_process:
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
@@ -1652,7 +1696,7 @@ def main():
             if memcp_process:
                 stop_memcp_process(memcp_process)
                 memcp_process = None
-            memcp_process = start_memcp_process(port)
+            memcp_process = start_memcp_process(port, enable_mysql=enable_mysql)
             return memcp_process is not None
         runner.set_restart_handler(restart_handler)
     if len(spec_files) == 1:

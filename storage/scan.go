@@ -27,7 +27,7 @@ type scanError struct {
 }
 
 func (s scanError) Error() string {
-	return fmt.Sprint(s.r) + "\n" + s.stack // room for improvement
+	return fmt.Sprint(s.r)
 }
 
 func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
