@@ -1,10 +1,11 @@
-# scan_batch optimizer hook tests
-# Verifies that nested-loop joins are automatically rewritten to scan_batch
-# by the Go optimizer (tryScanBatchRewrite).
+# scan_batch optimizer regression tests
+# Verifies that ordinary SQL joins stay correct without the automatic
+# scan_batch rewrite pass. scan_batch remains available as an explicit storage
+# primitive, but the optimizer must not substitute joins into it implicitly.
 
 metadata:
   version: "1.0"
-  description: "scan_batch optimizer hook for nested-loop join batching"
+  description: "scan_batch rewrite pass is disabled for SQL join plans"
 
 setup:
   - sql: "DROP TABLE IF EXISTS sb_orders"
@@ -29,7 +30,7 @@ setup:
 
 test_cases:
 
-  # === Functional: join results must be correct with batching ===
+  # === Functional: join results must stay correct without automatic batching ===
 
   - name: "Correlated join produces correct results"
     sql: |
@@ -107,16 +108,16 @@ test_cases:
       data:
         - cnt: 15
 
-  # === EXPLAIN: verify scan_batch appears in plan ===
+  # === EXPLAIN: automatic scan_batch rewrite must stay disabled ===
 
-  - name: "EXPLAIN correlated join uses scan_batch"
+  - name: "EXPLAIN correlated join does NOT use scan_batch"
     sql: |
       EXPLAIN SELECT c.name, o.amount
       FROM sb_customers c, sb_orders o
       WHERE o.cid = c.cid
     expect:
       rows: 1
-      data_contains:
+      data_not_contains:
         - code: "scan_batch"
 
   - name: "EXPLAIN cross-join does NOT use scan_batch"
