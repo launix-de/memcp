@@ -509,28 +509,35 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_exists",
-		Desc: "returns true if a table contains at least one visible row matching equality values for the given columns; uses storage indexes directly without scan lambda setup",
+		Desc: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
-			t := TableFromScmer(a[1])
-			columns := scmerSliceToStrings(mustScmerSlice(a[2], "columns"))
-			values := mustScmerSlice(a[3], "values")
-			if len(columns) != len(values) {
-				panic("scan_exists: columns and values must have the same length")
-			}
-			for _, shard := range t.ActiveShards() {
-				if shard != nil && shard.ProbeExists(columns, values, currentTx) {
-					return scm.NewBool(true)
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			tableArg := a[1]
+			if list, ok := scmerSlice(tableArg); ok {
+				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterparams := make([]scm.Scmer, len(filtercols))
+				for _, val := range list {
+					row := mustScmerSlice(val, "scan_exists list row")
+					ds := dataset(row)
+					for i, col := range filtercols {
+						filterparams[i], _ = ds.GetI(col)
+					}
+					if scm.ToBool(filterfn(filterparams...)) {
+						return scm.NewBool(true)
+					}
 				}
+				return scm.NewBool(false)
 			}
-			return scm.NewBool(false)
+			t := TableFromScmer(tableArg)
+			return scm.NewBool(t.scanExists(currentTx, filtercols, a[3]))
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table", ParamName: "table"},
-				{Kind: "list", ParamName: "columns"},
-				{Kind: "list", ParamName: "values"},
+				{Kind: "table|list", ParamName: "table"},
+				{Kind: "list", ParamName: "filterColumns"},
+				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row exists", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

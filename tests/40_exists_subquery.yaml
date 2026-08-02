@@ -115,6 +115,35 @@ test_cases:
       not_contains:
         - "touch_keytable"
 
+  - name: "Correlated EXISTS probe supports scan-style range filters"
+    steps:
+      - sql: |
+          SELECT ID, name FROM exists_customers c
+          WHERE EXISTS (
+            SELECT 1 FROM exists_orders o
+            WHERE o.customer_id = c.ID
+              AND o.total > 150
+          )
+          ORDER BY ID
+        expect:
+          rows: 1
+          data:
+            - ID: 1
+              name: "Alice"
+      - sql: |
+          EXPLAIN SELECT ID, name FROM exists_customers c
+          WHERE EXISTS (
+            SELECT 1 FROM exists_orders o
+            WHERE o.customer_id = c.ID
+              AND o.total > 150
+          )
+          ORDER BY ID
+        expect:
+          contains:
+            - "scan_exists"
+          not_contains:
+            - "touch_keytable"
+
   - name: "NOT EXISTS - customers without orders"
     sql: |
       SELECT ID, name FROM exists_customers c
