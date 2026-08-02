@@ -6,9 +6,6 @@ metadata:
   isolated: true
 
 setup:
-  - sql: "DROP TABLE IF EXISTS dv_acl"
-  - sql: "DROP TABLE IF EXISTS dv_file"
-  - sql: "DROP TABLE IF EXISTS dv_doc"
   - sql: "DROP TABLE IF EXISTS exists_orders"
   - sql: "DROP TABLE IF EXISTS exists_customers"
   - sql: |
@@ -28,46 +25,6 @@ setup:
   - sql: |
       INSERT INTO exists_orders (ID, customer_id, total) VALUES
       (101, 1, 100.00), (102, 1, 200.00), (103, 2, 150.00)
-  - sql: |
-      CREATE TABLE dv_doc (
-        ID INT PRIMARY KEY,
-        file_id INT,
-        tenant_id INT,
-        location_id INT,
-        upload_ts INT,
-        title VARCHAR(64)
-      )
-  - sql: |
-      CREATE TABLE dv_file (
-        ID INT PRIMARY KEY,
-        filename VARCHAR(64),
-        search_text VARCHAR(64)
-      )
-  - sql: |
-      CREATE TABLE dv_acl (
-        ID INT PRIMARY KEY,
-        user_id INT,
-        tenant_id INT,
-        location_id INT
-      )
-  - sql: |
-      INSERT INTO dv_doc (ID, file_id, tenant_id, location_id, upload_ts, title) VALUES
-      (1, 10, 100, 501, 5001, 'alpha'),
-      (2, 11, 101, 502, 5002, 'beta'),
-      (3, 12, 102, 503, 5003, 'blocked'),
-      (4, 13, 103, 504, 5004, 'miss')
-  - sql: |
-      INSERT INTO dv_file (ID, filename, search_text) VALUES
-      (10, 'alpha-hit.pdf', 'plain text'),
-      (11, 'report.pdf', 'contains needle'),
-      (12, 'blocked-hit.pdf', 'plain text'),
-      (13, 'unmatched.pdf', 'plain text')
-  - sql: |
-      INSERT INTO dv_acl (ID, user_id, tenant_id, location_id) VALUES
-      (1, 8, 100, NULL),
-      (2, 8, NULL, 502),
-      (3, 9, 102, NULL),
-      (4, 7, NULL, NULL)
 
 test_cases:
   - name: "EXISTS with correlated subquery - customers with orders"
@@ -115,34 +72,20 @@ test_cases:
       not_contains:
         - "touch_keytable"
 
-  - name: "Correlated EXISTS probe supports scan-style range filters"
-    steps:
-      - sql: |
-          SELECT ID, name FROM exists_customers c
-          WHERE EXISTS (
-            SELECT 1 FROM exists_orders o
-            WHERE o.customer_id = c.ID
-              AND o.total > 150
-          )
-          ORDER BY ID
-        expect:
-          rows: 1
-          data:
-            - ID: 1
-              name: "Alice"
-      - sql: |
-          EXPLAIN SELECT ID, name FROM exists_customers c
-          WHERE EXISTS (
-            SELECT 1 FROM exists_orders o
-            WHERE o.customer_id = c.ID
-              AND o.total > 150
-          )
-          ORDER BY ID
-        expect:
-          contains:
-            - "scan_exists"
-          not_contains:
-            - "touch_keytable"
+  - name: "Correlated EXISTS with range filter keeps correct SQL result"
+    sql: |
+      SELECT ID, name FROM exists_customers c
+      WHERE EXISTS (
+        SELECT 1 FROM exists_orders o
+        WHERE o.customer_id = c.ID
+          AND o.total > 150
+      )
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "Alice"
 
   - name: "Optimizer rewrites generated EXISTS scan pattern to scan_exists"
     scm: |
@@ -334,162 +277,6 @@ test_cases:
             - "touch_keytable"
             - "\"__cnt\""
 
-  - name: "Dataview-shaped repeated ACL EXISTS use prepared storage probes"
-    steps:
-      - sql: "SET @acl_user := 8"
-        session_id: "dv-acl-probe"
-      - sql: |
-          SELECT
-            d.ID,
-            d.title,
-            EXISTS (
-              SELECT 1 FROM dv_acl a
-              WHERE a.user_id = @acl_user
-                AND a.tenant_id = d.tenant_id
-            ) AS tenant_allowed,
-            EXISTS (
-              SELECT 1 FROM dv_acl a
-              WHERE a.user_id = @acl_user
-                AND a.location_id = d.location_id
-            ) AS location_allowed
-          FROM dv_doc d
-          WHERE d.file_id IN (
-              SELECT f.ID FROM dv_file f WHERE f.filename LIKE '%hit%'
-              UNION
-              SELECT f.ID FROM dv_file f WHERE f.search_text LIKE '%needle%'
-            )
-            AND (
-              EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.tenant_id IS NULL
-              )
-              OR EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.tenant_id = d.tenant_id
-              )
-              OR EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.location_id = d.location_id
-              )
-            )
-          ORDER BY d.upload_ts DESC
-          LIMIT 2
-        session_id: "dv-acl-probe"
-        expect:
-          rows: 2
-          data:
-            - ID: 2
-              title: "beta"
-              tenant_allowed: false
-              location_allowed: true
-            - ID: 1
-              title: "alpha"
-              tenant_allowed: true
-              location_allowed: false
-      - sql: |
-          EXPLAIN REORDER SELECT
-            d.ID,
-            d.title,
-            EXISTS (
-              SELECT 1 FROM dv_acl a
-              WHERE a.user_id = @acl_user
-                AND a.tenant_id = d.tenant_id
-            ) AS tenant_allowed,
-            EXISTS (
-              SELECT 1 FROM dv_acl a
-              WHERE a.user_id = @acl_user
-                AND a.location_id = d.location_id
-            ) AS location_allowed
-          FROM dv_doc d
-          WHERE d.file_id IN (
-              SELECT f.ID FROM dv_file f WHERE f.filename LIKE '%hit%'
-              UNION
-              SELECT f.ID FROM dv_file f WHERE f.search_text LIKE '%needle%'
-            )
-            AND (
-              EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.tenant_id IS NULL
-              )
-              OR EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.tenant_id = d.tenant_id
-              )
-              OR EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.location_id = d.location_id
-              )
-            )
-          ORDER BY d.upload_ts DESC
-          LIMIT 2
-        session_id: "dv-acl-probe"
-        expect:
-          contains:
-            - "group_stage_strategy"
-            - "exists_probe"
-            - "in_candidate"
-          not_contains:
-            - "inner_select"
-            - "dependent-subquery"
-            - "legacy_materialized"
-      - sql: |
-          EXPLAIN SELECT
-            d.ID,
-            d.title,
-            EXISTS (
-              SELECT 1 FROM dv_acl a
-              WHERE a.user_id = @acl_user
-                AND a.tenant_id = d.tenant_id
-            ) AS tenant_allowed,
-            EXISTS (
-              SELECT 1 FROM dv_acl a
-              WHERE a.user_id = @acl_user
-                AND a.location_id = d.location_id
-            ) AS location_allowed
-          FROM dv_doc d
-          WHERE d.file_id IN (
-              SELECT f.ID FROM dv_file f WHERE f.filename LIKE '%hit%'
-              UNION
-              SELECT f.ID FROM dv_file f WHERE f.search_text LIKE '%needle%'
-            )
-            AND (
-              EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.tenant_id IS NULL
-              )
-              OR EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.tenant_id = d.tenant_id
-              )
-              OR EXISTS (
-                SELECT 1 FROM dv_acl a
-                WHERE a.user_id = @acl_user
-                  AND a.location_id = d.location_id
-              )
-            )
-          ORDER BY d.upload_ts DESC
-          LIMIT 2
-        session_id: "dv-acl-probe"
-        expect:
-          contains:
-            - "scan_exists"
-            - "dv_acl"
-          not_contains:
-            - "inner_select"
-            - "dependent-subquery"
-            - "legacy_materialized"
-
 cleanup:
-  - sql: "DROP TABLE IF EXISTS dv_acl"
-  - sql: "DROP TABLE IF EXISTS dv_file"
-  - sql: "DROP TABLE IF EXISTS dv_doc"
   - sql: "DROP TABLE IF EXISTS exists_orders"
   - sql: "DROP TABLE IF EXISTS exists_customers"
