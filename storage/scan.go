@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "time"
 import "runtime/debug"
+import "strings"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
@@ -68,10 +69,179 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	if rewritten := tryScanExistsRewrite(v); !rewritten.IsNil() {
+		return oc.OptimizeSub(rewritten, useResult)
+	}
 	if rewritten := tryScanBatchRewrite(v); !rewritten.IsNil() {
 		return oc.OptimizeSub(rewritten, useResult)
 	}
 	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
+}
+
+func tryScanExistsRewrite(v []scm.Scmer) scm.Scmer {
+	// scan: [fn, tx, table, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
+	if len(v) < 9 {
+		return scm.NewNil()
+	}
+	if len(v) > 10 && scm.ToBool(v[10]) {
+		return scm.NewNil()
+	}
+	if len(v) > 9 && !v[9].IsNil() {
+		return scm.NewNil()
+	}
+	if !scanFalseNeutral(v[8]) || !scanExistsMap(v[6]) || !scanExistsOrReducer(v[7]) {
+		return scm.NewNil()
+	}
+	if scanMapColsHaveSideEffects(v[5]) || scanExprMayHaveSideEffects(v[4]) {
+		return scm.NewNil()
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("scan_exists"),
+		v[1],
+		v[2],
+		v[3],
+		v[4],
+	})
+}
+
+func scanFalseNeutral(v scm.Scmer) bool {
+	if v.IsBool() {
+		return !v.Bool()
+	}
+	return false
+}
+
+func scanExistsMap(v scm.Scmer) bool {
+	_, body, ok := scanLambdaParts(v)
+	return ok && scanExprIsTrue(body)
+}
+
+func scanExistsOrReducer(v scm.Scmer) bool {
+	params, body, ok := scanLambdaParts(v)
+	if !ok || len(params) != 2 {
+		return false
+	}
+	left, ok1 := scanSymbolName(params[0])
+	right, ok2 := scanSymbolName(params[1])
+	if !ok1 || !ok2 {
+		return false
+	}
+	return scanExprIsOrOf(body, left, right)
+}
+
+func scanLambdaParts(v scm.Scmer) ([]scm.Scmer, scm.Scmer, bool) {
+	if !v.IsSlice() {
+		return nil, scm.NewNil(), false
+	}
+	items := v.Slice()
+	if len(items) < 3 || !scanSymbolIs(items[0], "lambda") {
+		return nil, scm.NewNil(), false
+	}
+	paramsExpr := items[1]
+	if paramsExpr.IsNil() {
+		return []scm.Scmer{}, items[2], true
+	}
+	if !paramsExpr.IsSlice() {
+		return nil, scm.NewNil(), false
+	}
+	return paramsExpr.Slice(), items[2], true
+}
+
+func scanExprIsTrue(v scm.Scmer) bool {
+	return v.IsBool() && v.Bool()
+}
+
+func scanExprIsOrOf(v scm.Scmer, left, right string) bool {
+	if !v.IsSlice() {
+		return false
+	}
+	items := v.Slice()
+	if len(items) < 3 || !scanSymbolIs(items[0], "or") {
+		return false
+	}
+	seenLeft := false
+	seenRight := false
+	for _, item := range items[1:] {
+		if item.IsBool() && !item.Bool() {
+			continue
+		}
+		if scanExprIsLambdaParam(item, left, 0) {
+			seenLeft = true
+			continue
+		}
+		if scanExprIsLambdaParam(item, right, 1) {
+			seenRight = true
+			continue
+		}
+		return false
+	}
+	return seenLeft && seenRight
+}
+
+func scanExprIsLambdaParam(v scm.Scmer, name string, idx int) bool {
+	if v.IsNthLocalVar() {
+		return int(v.NthLocalVar()) == idx
+	}
+	s, ok := scanSymbolName(v)
+	return ok && s == name
+}
+
+func scanSymbolIs(v scm.Scmer, name string) bool {
+	s, ok := scanSymbolName(v)
+	return ok && s == name
+}
+
+func scanSymbolName(v scm.Scmer) (string, bool) {
+	if v.GetTag() == scm.TagSymbol {
+		return v.String(), true
+	}
+	if !v.IsSlice() {
+		return "", false
+	}
+	items := v.Slice()
+	if len(items) == 2 && items[0].GetTag() == scm.TagSymbol && items[0].String() == "quote" && items[1].GetTag() == scm.TagSymbol {
+		return items[1].String(), true
+	}
+	return "", false
+}
+
+func scanMapColsHaveSideEffects(v scm.Scmer) bool {
+	if v.IsNil() {
+		return false
+	}
+	if !v.IsSlice() {
+		return true
+	}
+	for _, item := range v.Slice() {
+		if !item.IsString() {
+			return true
+		}
+		col := item.String()
+		if strings.HasPrefix(col, "$") {
+			return true
+		}
+	}
+	return false
+}
+
+func scanExprMayHaveSideEffects(v scm.Scmer) bool {
+	if name, ok := scanSymbolName(v); ok {
+		switch name {
+		case "set", "define", "insert", "update", "delete", "createcolumn", "dropcolumn", "createtable", "droptable", "createkey", "dropkey", "resultrow", "print", "error", "$update":
+			return true
+		default:
+			return false
+		}
+	}
+	if !v.IsSlice() {
+		return false
+	}
+	for _, item := range v.Slice() {
+		if scanExprMayHaveSideEffects(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
@@ -362,7 +532,7 @@ func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, uppe
 	found := false
 
 	var buf [8]uint32
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
 		}
