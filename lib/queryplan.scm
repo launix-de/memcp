@@ -353,6 +353,71 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
 		_ (list expr))))
 
+(define expr_contains_session_ref? (lambda (expr)
+	(match expr
+		((symbol session) _key) true
+		((symbol session) _key _value) true
+		((quote session) _key) true
+		((quote session) _key _value) true
+		((symbol context) "session") true
+		((quote context) "session") true
+		((symbol scalar_first_probe) stage _requested_col)
+		(group_stage_session_dependent? stage)
+		((quote scalar_first_probe) stage requested_col)
+		(expr_contains_session_ref? (list (quote scalar_first_probe) stage requested_col))
+		((symbol driver_membership_probe) stage probe)
+		(or (group_stage_session_dependent? stage)
+			(expr_contains_session_ref? probe))
+		((quote driver_membership_probe) stage probe)
+		(expr_contains_session_ref? (list (quote driver_membership_probe) stage probe))
+		(cons head tail)
+		(reduce tail (lambda (found item)
+			(or found (expr_contains_session_ref? item)))
+			(expr_contains_session_ref? head))
+		_ false)))
+
+(define order_contains_session_ref? (lambda (order_items)
+	(reduce (coalesceNil order_items '()) (lambda (found item)
+		(or found (match item
+			'(expr _dir) (expr_contains_session_ref? expr)
+			_ (expr_contains_session_ref? item))))
+		false)))
+
+(define fields_contain_session_ref? (lambda (fields)
+	(reduce (coalesceNil fields '()) (lambda (found field)
+		(or found (match field
+			'(_title expr) (expr_contains_session_ref? expr)
+			_ (expr_contains_session_ref? field))))
+		false)))
+
+(define query_input_contains_session_ref? (lambda (input)
+	(if (union_block? input)
+		(reduce (union_branches input) (lambda (found branch)
+			(or found (query_input_contains_session_ref? branch)))
+			false)
+		(if (query_block? input)
+			(or (fields_contain_session_ref? (qb_fields input))
+				(or (expr_contains_session_ref? (qb_where input))
+					(or (expr_contains_session_ref? (qb_having input))
+						(or (order_contains_session_ref? (qb_order input))
+							(or (fields_contain_session_ref? (qb_hidden input))
+								(reduce (qb_stages input) (lambda (found stage)
+									(or found (group_stage_session_dependent? stage)))
+									false))))))
+			false))))
+
+(define group_stage_session_dependent? (lambda (stage)
+	(if (not (group_stage? stage))
+		false
+		(or (query_input_contains_session_ref? (gs_input stage))
+			(or (expr_contains_session_ref? (qassoc_get (gs_facts stage) (quote condition) true))
+				(or (expr_contains_session_ref? (gs_having stage))
+					(or (expr_contains_session_ref? (gs_domain stage))
+						(or (expr_contains_session_ref? (gs_keys stage))
+							(or (expr_contains_session_ref? (gs_aggregates stage))
+								(or (fields_contain_session_ref? (gs_output stage))
+									(order_contains_session_ref? (gs_order stage))))))))))))
+
 (define neumann_fail (lambda (phase msg)
 	(error (concat phase ": " msg))))
 
@@ -634,6 +699,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define correlation_domain (lambda (pairs)
 	(merge_unique (list (correlation_lookup_keys pairs)))))
+
+(define correlation_pairs_reference_stage_output? (lambda (pairs)
+	(reduce (coalesceNil pairs '()) (lambda (found pair)
+		(or found (expr_refs_stage_output_alias? (nth pair 0))))
+		false)))
 
 (define btw2025_cclasses_for_pairs (lambda (pairs)
 	(map (coalesceNil pairs '()) (lambda (pair)
@@ -1626,30 +1696,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(lambda (pair) (not (nil? pair)))))
 		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
 		(define lookup_pairs (unique_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
-		(define keys (if (empty_list? lookup_pairs)
-			'(1)
-			(correlation_inner_keys inner_default lookup_pairs)))
+		(define domain_join_fill (and (not (empty_list? (qb_stages inner)))
+			(correlation_pairs_reference_stage_output? source_corr_pairs)))
+		(define local_terms (if domain_join_fill
+			terms
+			(filter terms (lambda (term)
+				(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term))))))
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+		(define keys (if domain_join_fill
+			(if (empty_list? lookup_keys) '(1) lookup_keys)
+			(if (empty_list? lookup_pairs)
+				'(1)
+				(correlation_inner_keys inner_default lookup_pairs))))
 		(define condition (combine_where_terms local_terms true))
 		(define value_for_inner (canonical_column_expr_for_alias inner_default value_expr))
 		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
 			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default expr) dir)))))
 		(define ag (scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner)))
 		(define ags (list ag))
-		(define stage_input (if (empty_list? (qb_stages inner))
-			inner_src
+		(define stage_input (if domain_join_fill
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				(merge (list outer_sources (qb_sources inner)))
 				'()
 				condition
 				'() nil '() nil nil
 				'()
 				(qb_stages inner)
-				(qb_facts inner))))
+				(qb_facts inner))
+			(if (empty_list? (qb_stages inner))
+				inner_src
+				(make_query_block
+					(qb_schema inner)
+					(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+					'()
+					condition
+					'() nil '() nil nil
+					'()
+					(qb_stages inner)
+					(qb_facts inner)))))
 		(define stage_condition (if (query_block? stage_input) true condition))
 		(define stage_id (concat "scalar-once:" (fnv_hash (string (list subquery keys outer_domain condition ag)))))
 		(define stage (make_group_stage
@@ -5258,6 +5344,32 @@ PostgreSQL parsers should both lower to the same combined operators.
 			_ nil)))
 		(lambda (stage) (not (nil? stage))))))))
 
+(define stage_output_source_session_dependent_using (lambda (stages src)
+	(if (not (stage_output_relation? (source_relation src)))
+		false
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(if (nil? stage)
+				false
+				(group_stage_session_dependent_using stages stage))))))
+
+(define query_input_contains_session_ref_using (lambda (stages input)
+	(or (query_input_contains_session_ref? input)
+		(if (union_block? input)
+			(reduce (union_branches input) (lambda (found branch)
+				(or found (query_input_contains_session_ref_using stages branch)))
+				false)
+			(if (query_block? input)
+				(reduce (qb_sources input) (lambda (found src)
+					(or found (stage_output_source_session_dependent_using stages src)))
+					false)
+				false)))))
+
+(define group_stage_session_dependent_using (lambda (stages stage)
+	(and (group_stage? stage)
+		(or (group_stage_session_dependent? stage)
+			(query_input_contains_session_ref_using stages (gs_input stage))))))
+
 (define scalar_first_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
 		(begin
@@ -5458,6 +5570,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
 		(define grouptbl (group_carrier_relation carrier))
+		(define rebuild_each_execution (group_stage_session_dependent_using all_stages stage))
 		(define preserve_empty_domain (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
 		(define domain_sources (coalesceNil (qassoc_get (gs_facts stage) (quote domain-sources) '()) '()))
 		(define domain_lookup_keys (coalesceNil (qassoc_get (gs_facts stage) (quote lookup-keys) '()) '()))
@@ -5487,6 +5600,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
 				(merge (list key_columns agg_columns)))))
 		(define keytable_init (list (quote !begin)
+			(if rebuild_each_execution
+				(list (quote droptable) schema grouptbl true)
+				nil)
 			(list (quote if)
 				(list (quote createtable) schema grouptbl create_cols (quoted_runtime_list '("engine" "sloppy")) true)
 				nil
