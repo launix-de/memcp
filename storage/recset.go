@@ -33,6 +33,14 @@ type recSetShard struct {
 	count  int64
 }
 
+func (s *recSetShard) contains(recid uint32) bool {
+	if s == nil {
+		return false
+	}
+	pos := sort.Search(len(s.recids), func(i int) bool { return s.recids[i] >= recid })
+	return pos < len(s.recids) && s.recids[pos] == recid
+}
+
 // recSet is a query-local, non-persistent subset of one table represented by
 // physical record IDs. It is intentionally table-shaped so the planner can swap
 // repeated scans over the same filtered base relation for a scan over this value.
@@ -58,29 +66,43 @@ func (r *recSet) String() string {
 	return fmt.Sprintf("(recset %q %q %d)", r.table.schema.Name, r.table.Name, r.count)
 }
 
-func (r *recSet) contains(shard *storageShard, recid uint32) bool {
+func (r *recSet) shardEntry(shard *storageShard) *recSetShard {
 	if r == nil || shard == nil || r.table != shard.t {
-		return false
+		return nil
 	}
 	for i := range r.shards {
 		rs := &r.shards[i]
-		if rs.shard != shard {
-			continue
+		if rs.shard == shard {
+			return rs
 		}
-		pos := sort.Search(len(rs.recids), func(i int) bool { return rs.recids[i] >= recid })
-		return pos < len(rs.recids) && rs.recids[pos] == recid
 	}
-	return false
+	return nil
+}
+
+func (r *recSet) contains(shard *storageShard, recid uint32) bool {
+	return r.shardEntry(shard).contains(recid)
 }
 
 func recSetContainsClosure(shard *storageShard) *func(uint32, ...scm.Scmer) scm.Scmer {
+	var cachedRecSet *recSet
+	var cachedShard *recSetShard
 	fn := func(recid uint32, args ...scm.Scmer) scm.Scmer {
 		if len(args) != 1 || !args[0].IsCustom(TagRecSet) {
 			return scm.NewBool(false)
 		}
-		return scm.NewBool(RecSetFromScmer(args[0]).contains(shard, recid))
+		rs := RecSetFromScmer(args[0])
+		if rs != cachedRecSet {
+			cachedRecSet = rs
+			cachedShard = rs.shardEntry(shard)
+		}
+		return scm.NewBool(cachedShard.contains(recid))
 	}
 	return &fn
+}
+
+type recSetBuildResult struct {
+	part recSetShard
+	err  scanError
 }
 
 func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer) *recSet {
@@ -88,21 +110,53 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	result := &recSet{tx: currentTx, table: t}
 
-	for _, shard := range t.ActiveShards() {
+	values := make(chan recSetBuildResult, 4)
+	done := t.iterateShardsParallel(boundaries, func(shard *storageShard, solo bool) {
 		if ss != nil && ss.IsKilled() {
 			panic("query killed")
 		}
-		rsShard := shard.collectRecSet(boundaries, lower, upperLast, conditionCols, conditionFn, currentTx, ss)
-		result.count += rsShard.count
-		result.shards = append(result.shards, rsShard)
+		defer func() {
+			if rec := recover(); rec != nil {
+				values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+			}
+		}()
+		values <- recSetBuildResult{
+			part: shard.collectRecSet(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss),
+		}
+	})
+	if done == nil {
+		close(values)
+	} else {
+		go func() {
+			<-done
+			close(values)
+		}()
+	}
+
+	var buildErr scanError
+	for msg := range values {
+		if msg.err.r != nil {
+			if buildErr.r == nil {
+				buildErr = msg.err
+			}
+			continue
+		}
+		if buildErr.r != nil {
+			continue
+		}
+		result.count += msg.part.count
+		result.shards = append(result.shards, msg.part)
+	}
+	if buildErr.r != nil {
+		panic(buildErr)
 	}
 	return result
 }
 
-func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwner()
 	t.ensureMainCount(skipShardReadLock)

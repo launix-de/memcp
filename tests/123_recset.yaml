@@ -88,6 +88,28 @@ test_cases:
           "ok"
           (error "$recset_contains returned wrong membership")))
 
+  - name: "$recset_contains handles multiple recsets in one scan"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define tenant1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl
+          '("active")
+          (lambda (active) (equal? active 1))))
+        (define sum_ids
+          (scan nil tbl
+            '("$recset_contains" "$recset_contains")
+            (lambda (in_tenant1 in_active) (and (in_tenant1 tenant1) (in_active active)))
+            '("id")
+            (lambda (id) id)
+            (lambda (acc id) (+ acc id))
+            0))
+        (if (equal? sum_ids 6)
+          "ok"
+          (error "$recset_contains did not switch between recset handles")))
+
   - name: "$recset_contains is table-scoped"
     scm: |
       (begin
