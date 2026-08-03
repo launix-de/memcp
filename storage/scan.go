@@ -19,6 +19,8 @@ package storage
 import "fmt"
 import "time"
 import "runtime/debug"
+import "strings"
+import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
@@ -67,10 +69,179 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	if rewritten := tryScanExistsRewrite(v); !rewritten.IsNil() {
+		return oc.OptimizeSub(rewritten, useResult)
+	}
 	if rewritten := tryScanBatchRewrite(v); !rewritten.IsNil() {
 		return oc.OptimizeSub(rewritten, useResult)
 	}
 	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
+}
+
+func tryScanExistsRewrite(v []scm.Scmer) scm.Scmer {
+	// scan: [fn, tx, table, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
+	if len(v) < 9 {
+		return scm.NewNil()
+	}
+	if len(v) > 10 && scm.ToBool(v[10]) {
+		return scm.NewNil()
+	}
+	if len(v) > 9 && !v[9].IsNil() {
+		return scm.NewNil()
+	}
+	if !scanFalseNeutral(v[8]) || !scanExistsMap(v[6]) || !scanExistsOrReducer(v[7]) {
+		return scm.NewNil()
+	}
+	if scanMapColsHaveSideEffects(v[5]) || scanExprMayHaveSideEffects(v[4]) {
+		return scm.NewNil()
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("scan_exists"),
+		v[1],
+		v[2],
+		v[3],
+		v[4],
+	})
+}
+
+func scanFalseNeutral(v scm.Scmer) bool {
+	if v.IsBool() {
+		return !v.Bool()
+	}
+	return false
+}
+
+func scanExistsMap(v scm.Scmer) bool {
+	_, body, ok := scanLambdaParts(v)
+	return ok && scanExprIsTrue(body)
+}
+
+func scanExistsOrReducer(v scm.Scmer) bool {
+	params, body, ok := scanLambdaParts(v)
+	if !ok || len(params) != 2 {
+		return false
+	}
+	left, ok1 := scanSymbolName(params[0])
+	right, ok2 := scanSymbolName(params[1])
+	if !ok1 || !ok2 {
+		return false
+	}
+	return scanExprIsOrOf(body, left, right)
+}
+
+func scanLambdaParts(v scm.Scmer) ([]scm.Scmer, scm.Scmer, bool) {
+	if !v.IsSlice() {
+		return nil, scm.NewNil(), false
+	}
+	items := v.Slice()
+	if len(items) < 3 || !scanSymbolIs(items[0], "lambda") {
+		return nil, scm.NewNil(), false
+	}
+	paramsExpr := items[1]
+	if paramsExpr.IsNil() {
+		return []scm.Scmer{}, items[2], true
+	}
+	if !paramsExpr.IsSlice() {
+		return nil, scm.NewNil(), false
+	}
+	return paramsExpr.Slice(), items[2], true
+}
+
+func scanExprIsTrue(v scm.Scmer) bool {
+	return v.IsBool() && v.Bool()
+}
+
+func scanExprIsOrOf(v scm.Scmer, left, right string) bool {
+	if !v.IsSlice() {
+		return false
+	}
+	items := v.Slice()
+	if len(items) < 3 || !scanSymbolIs(items[0], "or") {
+		return false
+	}
+	seenLeft := false
+	seenRight := false
+	for _, item := range items[1:] {
+		if item.IsBool() && !item.Bool() {
+			continue
+		}
+		if scanExprIsLambdaParam(item, left, 0) {
+			seenLeft = true
+			continue
+		}
+		if scanExprIsLambdaParam(item, right, 1) {
+			seenRight = true
+			continue
+		}
+		return false
+	}
+	return seenLeft && seenRight
+}
+
+func scanExprIsLambdaParam(v scm.Scmer, name string, idx int) bool {
+	if v.IsNthLocalVar() {
+		return int(v.NthLocalVar()) == idx
+	}
+	s, ok := scanSymbolName(v)
+	return ok && s == name
+}
+
+func scanSymbolIs(v scm.Scmer, name string) bool {
+	s, ok := scanSymbolName(v)
+	return ok && s == name
+}
+
+func scanSymbolName(v scm.Scmer) (string, bool) {
+	if v.GetTag() == scm.TagSymbol {
+		return v.String(), true
+	}
+	if !v.IsSlice() {
+		return "", false
+	}
+	items := v.Slice()
+	if len(items) == 2 && items[0].GetTag() == scm.TagSymbol && items[0].String() == "quote" && items[1].GetTag() == scm.TagSymbol {
+		return items[1].String(), true
+	}
+	return "", false
+}
+
+func scanMapColsHaveSideEffects(v scm.Scmer) bool {
+	if v.IsNil() {
+		return false
+	}
+	if !v.IsSlice() {
+		return true
+	}
+	for _, item := range v.Slice() {
+		if !item.IsString() {
+			return true
+		}
+		col := item.String()
+		if strings.HasPrefix(col, "$") {
+			return true
+		}
+	}
+	return false
+}
+
+func scanExprMayHaveSideEffects(v scm.Scmer) bool {
+	if name, ok := scanSymbolName(v); ok {
+		switch name {
+		case "set", "define", "insert", "update", "delete", "createcolumn", "dropcolumn", "createtable", "droptable", "createkey", "dropkey", "resultrow", "print", "error", "$update":
+			return true
+		default:
+			return false
+		}
+	}
+	if !v.IsSlice() {
+		return false
+	}
+	for _, item := range v.Slice() {
+		if scanExprMayHaveSideEffects(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
@@ -83,6 +254,65 @@ type scanResult struct {
 	outCount   int64
 	inputCount int64
 	err        scanError // err.r != nil indicates an error
+}
+
+func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
+	ss := SessionStateFromTx(currentTx)
+	if ss != nil && ss.IsKilled() {
+		panic("query killed")
+	}
+	touchTempColumns(t, conditionCols, nil)
+	boundaries := extractBoundaries(conditionCols, condition)
+	reorderByFrequency(boundaries, t)
+	lower, upperLast := indexFromBoundaries(boundaries)
+	for _, b := range boundaries {
+		t.AddPartitioningScore([]string{b.col})
+	}
+
+	values := make(chan scanResult, 4)
+	var found atomic.Bool
+	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+		if found.Load() {
+			values <- scanResult{}
+			return
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				values <- scanResult{err: scanError{r, string(debug.Stack())}}
+			}
+		}()
+		if s.scanExists(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, &found) {
+			found.Store(true)
+			values <- scanResult{outCount: 1}
+			return
+		}
+		values <- scanResult{}
+	})
+	if done == nil {
+		close(values)
+	} else {
+		go func() {
+			<-done
+			close(values)
+		}()
+	}
+
+	var scanErr scanError
+	for msg := range values {
+		if msg.err.r != nil {
+			if scanErr.r == nil {
+				scanErr = msg.err
+			}
+			continue
+		}
+		if msg.outCount > 0 {
+			found.Store(true)
+		}
+	}
+	if scanErr.r != nil {
+		panic(scanErr)
+	}
+	return found.Load()
 }
 
 // map reduce implementation based on scheme scripts
@@ -253,6 +483,101 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 		}(analyzeNs, execNs)
 	}
 	return akkumulator
+}
+
+func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
+	if ss == nil {
+		ss = SessionStateFromTx(currentTx)
+	}
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+
+	t.ensureLoaded()
+	skipShardReadLock := t.hasWriteOwner()
+	t.ensureMainCount(skipShardReadLock)
+
+	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
+	cNeedsTxReader := make([]bool, len(conditionCols))
+	for i, k := range conditionCols {
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+			cNeedsTxReader[i] = true
+		}
+	}
+	cdataset := make([]scm.Scmer, len(conditionCols))
+
+	locked := false
+	if !skipShardReadLock {
+		t.mu.RLock()
+		locked = true
+		if t.t.tableLockOwner.Load() != nil {
+			t.mu.RUnlock()
+			locked = false
+			t.t.waitTableLock(ss, false)
+			t.mu.RLock()
+			locked = true
+		}
+	}
+	defer func() {
+		if locked {
+			t.mu.RUnlock()
+		}
+	}()
+
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	mainCount := t.main_count
+	maxInsertIndex := len(t.inserts)
+	visibleUpper := mainCount + uint32(maxInsertIndex)
+	found := false
+
+	var buf [8]uint32
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		if stop != nil && stop.Load() {
+			return false
+		}
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
+		for _, idx := range batch {
+			if idx >= visibleUpper {
+				continue
+			}
+			if acidMode {
+				if !currentTx.IsVisible(t, idx) {
+					continue
+				}
+			} else if t.deletions.Get(uint(idx)) {
+				continue
+			}
+			if idx < mainCount {
+				for i, c := range cReaders {
+					if cNeedsTxReader[i] {
+						cdataset[i] = c.GetValue(idx)
+					} else {
+						cdataset[i] = ccols[i].GetValue(idx)
+					}
+				}
+			} else {
+				for i, col := range conditionCols {
+					if cNeedsTxReader[i] {
+						cdataset[i] = cReaders[i].GetValue(idx)
+					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						cdataset[i] = ccols[i].GetValue(idx)
+					} else {
+						cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					}
+				}
+			}
+			if scm.ToBool(conditionFn(cdataset...)) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+
+	return found
 }
 
 func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {

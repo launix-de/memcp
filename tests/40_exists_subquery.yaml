@@ -64,13 +64,80 @@ test_cases:
             - "__mat:_uncorr_cnt_"
             - "touch_keytable"
 
-  - name: "EXPLAIN correlated EXISTS uses direct storage probe"
-    sql: "EXPLAIN SELECT ID, name FROM exists_customers c WHERE EXISTS (SELECT 1 FROM exists_orders o WHERE o.customer_id = c.ID) ORDER BY ID"
+  - name: "Correlated EXISTS with range filter keeps correct SQL result"
+    sql: |
+      SELECT ID, name FROM exists_customers c
+      WHERE EXISTS (
+        SELECT 1 FROM exists_orders o
+        WHERE o.customer_id = c.ID
+          AND o.total > 150
+      )
+      ORDER BY ID
     expect:
-      contains:
-        - "probe_exists"
-      not_contains:
-        - "touch_keytable"
+      rows: 1
+      data:
+        - ID: 1
+          name: "Alice"
+
+  - name: "Optimizer rewrites generated EXISTS scan pattern to scan_exists"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'scan
+            nil
+            (list 'table "memcp-tests" "exists_orders")
+            (list "customer_id" "total")
+            (list 'lambda (list 'customer_id 'total)
+              (list 'and (list 'equal?? 'customer_id 1) (list '> 'total 150)))
+            (list)
+            (list 'lambda (list) true)
+            (list 'lambda (list 'acc 'row) (list 'or 'acc 'row))
+            false
+            nil
+            false))))
+        (if (not (match plan (regex "scan_exists" _) true false))
+          (error (concat "expected scan_exists rewrite, got " plan)))
+        (if (match plan (regex "^\\(scan " _) true false)
+          (error (concat "old scan survived EXISTS rewrite: " plan)))
+        true)
+
+  - name: "Optimizer rewrites generated EXISTS scan even with ignored map columns"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'scan
+            nil
+            (list 'table "memcp-tests" "exists_orders")
+            (list "customer_id")
+            (list 'lambda (list 'customer_id) (list 'equal?? 'customer_id 1))
+            (list "ID")
+            (list 'lambda (list 'ID) true)
+            (list 'lambda (list 'a 'b) (list 'or 'b 'a))
+            false
+            nil
+            false))))
+        (if (not (match plan (regex "scan_exists" _) true false))
+          (error (concat "expected scan_exists rewrite with ignored map column, got " plan)))
+        true)
+
+  - name: "Optimizer keeps non-EXISTS scan with projected map value"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'scan
+            nil
+            (list 'table "memcp-tests" "exists_orders")
+            (list "customer_id")
+            (list 'lambda (list 'customer_id) (list 'equal?? 'customer_id 1))
+            (list "ID")
+            (list 'lambda (list 'ID) 'ID)
+            (list 'lambda (list 'a 'b) (list 'or 'a 'b))
+            false
+            nil
+            false))))
+        (if (match plan (regex "scan_exists" _) true false)
+          (error (concat "projecting scan must not become scan_exists: " plan)))
+        true)
 
   - name: "NOT EXISTS - customers without orders"
     sql: |
