@@ -332,6 +332,21 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(cons _title (cons expr _rest)) expr
 		_ nil)))
 
+(define exists_scalar_aggregate_block (lambda (inner)
+	(make_query_block
+		(qb_schema inner)
+		(qb_sources inner)
+		(list "__exists" (list (quote aggregate) true (quote max) nil))
+		(qb_where inner)
+		(qb_group inner)
+		(qb_having inner)
+		(qb_order inner)
+		(qb_limit inner)
+		(qb_offset inner)
+		(qb_hidden inner)
+		(qb_stages inner)
+		(qb_facts inner))))
+
 (define split_and_terms (lambda (expr)
 	(match (coalesceNil expr true)
 		((symbol and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
@@ -682,7 +697,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(source_alias src)
 			(source_schema src)
 			(source_relation src)
-			false
+			(source_outer? src)
 			(combine_where_terms local_terms true)))))
 
 (define sources_without_outer_join_terms (lambda (inner_default inner_aliases outer_aliases sources)
@@ -1024,6 +1039,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 		'(((quote scalar_first_payload) _order_expr _value_expr) _reduce _neutral) true
 		_ false)))
 
+(define scalar_value_requires_payload? (lambda (expr)
+	(or
+		(expr_refs_stage_output_alias? expr)
+		(match expr
+			((symbol coalesceNil) _inner false) true
+			((quote coalesceNil) _inner false) true
+			_ false))))
+
 (define scalar_once_value_expr (lambda (stage_alias ag)
 	(begin
 		(define stored (list (quote get_column) stage_alias false (aggregate_col_name ag) false))
@@ -1045,7 +1068,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(list (quote if)
 			(list (quote >) count_expr 1)
 			(list (quote error) "scalar subselect returned more than one row")
-			value_expr))))
+			(scalar_once_value_expr stage_alias value_ag)))))
 
 (define scalar_single_aggregates (lambda (value_expr)
 	(list
@@ -1079,7 +1102,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define scalar_once_descriptor (lambda (value_expr order_items offset_value)
 	(if (empty_list? order_items)
-		(list value_expr (scalar_once_reduce_first) nil)
+		(list
+			(if (scalar_value_requires_payload? value_expr)
+				(list (quote scalar_first_payload) 1 value_expr)
+				value_expr)
+			(scalar_once_reduce_first)
+			nil)
 		(begin
 			(define order_exprs (map order_items (lambda (item)
 				(match item
@@ -1206,15 +1234,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
-		(if (exists_probe_supported? stage)
-			(list
-				(exists_probe_expr stage lookup_keys)
-				'()
-				'())
-			(list
-				(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
-				(list stage)
-				(list source))))))
+		(list
+			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
+			(list stage)
+			(list source)))))
 
 (define combine_exists_union_results (lambda (results)
 	(match (coalesceNil results '())
@@ -1560,6 +1583,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
+					(list (quote domain-sources) outer_sources)
 					(list (quote null_semantics) (quote aggregate))
 					(list (quote cardinality_mode) (quote many)))
 				(btw2025_stage_facts inner outer_sources all_corr_pairs)))))
@@ -1570,7 +1594,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
-			(or (stage_source_outer? outer_sources) (not (equal? local_having true)))
+			(or (not (empty_list? outer_domain)) (not (equal? local_having true)))
 			(make_stage_lookup_condition stage_alias key_names lookup_keys post_condition)))
 		(define presence_expr (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false))
 		(define scalar_value_expr (replace_group_expr inner_default stage_alias keys key_names ags value_expr))
@@ -1645,6 +1669,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
+					(list (quote domain-sources) outer_sources)
 					(list (quote null_semantics) (quote scalar))
 					(list (quote cardinality_mode) (quote first))
 					(list (quote partition_by) outer_domain)
@@ -1868,6 +1893,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
+					(list (quote domain-sources) outer_sources)
 					(list (quote null_semantics) (quote scalar))
 					(list (quote cardinality_mode) (quote single_or_error))
 					(list (quote partition_by) outer_domain)
@@ -2321,7 +2347,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(make_exists_union_stage_rewrite inner (list outer_sources subquery))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
-				(make_exists_stage_rewrite inner (list outer_sources subquery)))))))
+				(begin
+					(define rewritten (make_scalar_aggregate_stage_rewrite
+						(exists_scalar_aggregate_block inner)
+						(list outer_sources (list (quote exists) subquery))))
+					(list
+						(list (quote coalesceNil) (nth rewritten 0) false)
+						(nth rewritten 1)
+						(nth rewritten 2))))))))
 
 (define untangle_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
 	(begin
@@ -4616,6 +4649,21 @@ PostgreSQL parsers should both lower to the same combined operators.
 					true))
 			false))))
 
+(define build_group_domain_seed_plan (lambda (schema grouptbl key_names lookup_keys domain_sources)
+	(if (or (empty_list? lookup_keys) (empty_list? domain_sources))
+		nil
+		(begin
+			(define key_fields (merge (map (produceN (count lookup_keys)) (lambda (i)
+				(list (nth key_names i) (nth lookup_keys i))))))
+			(define input (make_query_block
+				schema
+				domain_sources
+				key_fields
+				true
+				'() nil '() nil nil
+				'() '() '()))
+			(build_query_group_collect_plan input grouptbl lookup_keys key_names)))))
+
 (define build_group_ordered_scalar_column (lambda (schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
 	(begin
 		(define src (list alias schema tbl false nil))
@@ -4783,7 +4831,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					merge_payload))
 			(quoted_runtime_list '())
 			(list (quote lambda) (list (quote acc) (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names (list agg_col)))
+				(group_insert_finish_expr schema grouptbl key_names (list agg_col) true))
 			false))
 		_ (neumann_fail "build_queryplan" "query-input aggregate insert expects aggregate descriptor"))))
 
@@ -4964,9 +5012,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil
 			false))))
 
-(define group_insert_finish_expr (lambda (schema grouptbl key_names value_cols)
+(define group_insert_finish_expr (lambda (schema grouptbl key_names value_cols cleanup_missing)
 	(list (quote !begin)
-		(group_cleanup_missing_keys_plan schema grouptbl key_names)
+		(if cleanup_missing
+			(group_cleanup_missing_keys_plan schema grouptbl key_names)
+			nil)
 		(list (quote insert)
 			(list (quote table) schema grouptbl)
 			(cons (quote list) (merge (list key_names value_cols)))
@@ -4975,7 +5025,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(group_upsert_collision_lambda value_cols)
 			true))))
 
-(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags)
+(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags cleanup_missing)
 	(begin
 		(define schema (qb_schema input))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
@@ -5001,7 +5051,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name)))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name) cleanup_missing))
 		(list (quote scan)
 			'(session "__memcp_tx")
 			rows_plan
@@ -5049,7 +5099,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(lower_query_block_as_dataset_rows branch
 						(union_branch_group_row_fields candidate_alias branch keys key_names ags value_cols))))))))))
 
-(define build_union_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags)
+(define build_union_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags cleanup_missing)
 	(begin
 		(define schema (qb_schema (car (union_branches input))))
 		(define row_key_names key_names)
@@ -5064,7 +5114,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name)))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name) cleanup_missing))
 		(list (quote scan)
 			'(session "__memcp_tx")
 			rows_plan
@@ -5085,7 +5135,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				finish_expr)
 			false))))
 
-(define build_scalar_single_query_stage_fill_plan (lambda (input grouptbl keys key_names value_ag count_ag)
+(define build_scalar_single_query_stage_fill_plan (lambda (input grouptbl keys key_names value_ag count_ag cleanup_missing)
 	(match value_ag '(value_expr _value_reduce _value_neutral) (begin
 		(define schema (qb_schema input))
 		(define value_col (aggregate_col_name value_ag))
@@ -5125,7 +5175,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					merge_payload))
 			(quoted_runtime_list '())
 			(list (quote lambda) (list (quote acc) (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names (list value_col count_col)))
+				(group_insert_finish_expr schema grouptbl key_names (list value_col count_col) cleanup_missing))
 			false))
 		_ (neumann_fail "build_queryplan" "scalar-single stage expects aggregate descriptor"))))
 
@@ -5407,6 +5457,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
 		(define grouptbl (group_carrier_relation carrier))
+		(define preserve_empty_domain (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
+		(define domain_sources (coalesceNil (qassoc_get (gs_facts stage) (quote domain-sources) '()) '()))
+		(define domain_lookup_keys (coalesceNil (qassoc_get (gs_facts stage) (quote lookup-keys) '()) '()))
+		(define domain_seed_plan (if preserve_empty_domain
+			(build_group_domain_seed_plan schema grouptbl key_names domain_lookup_keys domain_sources)
+			nil))
 		(define scalar_query_stage (and (query_block? src)
 			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
 				(equal? (count ags) 2))))
@@ -5440,7 +5496,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (quote table_empty?) (list (quote table) schema grouptbl)))))
 		(define collect_plan (if query_input_carrier
 			(if (union_block? src)
-				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
+				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor) true)
 				(build_query_group_collect_plan prepared_src grouptbl keys key_names))
 			(build_group_collect_plan schema tbl alias grouptbl keys key_names condition)))
 		(define cleanup_plan (if (query_block? src)
@@ -5450,8 +5506,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(if (empty_list? ags)
 				'()
 				(list (if (union_block? src)
-					(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags)
-					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags))))
+					(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags (not preserve_empty_domain))
+					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags (not preserve_empty_domain)))))
 			(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names condition ag)))))
 		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr _dir) (begin
@@ -5466,13 +5522,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote !begin)
 				nested_prepare_expr
 				keytable_init
-				(build_scalar_single_query_stage_fill_plan prepared_src grouptbl keys key_names (car ags) (cadr ags)))
+				(if (nil? domain_seed_plan) nil domain_seed_plan)
+				(build_scalar_single_query_stage_fill_plan prepared_src grouptbl keys key_names (car ags) (cadr ags) (not preserve_empty_domain)))
 			(if query_input_carrier
 				(cons (quote !begin)
 					(merge (list
 						nested_prepare
 						nested_materialize
 						(list keytable_init)
+						(if (nil? domain_seed_plan) '() (list domain_seed_plan))
 						(if (empty_list? ags) (list collect_plan) '())
 						agg_plans
 						computed_order_plans)))
@@ -5481,9 +5539,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(if (nil? cleanup_plan)
 						(list (quote !begin)
 							keytable_init
+							(if (nil? domain_seed_plan) nil domain_seed_plan)
 							collect_plan)
 						(list (quote if) keytable_init
 							(list (quote !begin)
+								(if (nil? domain_seed_plan) nil domain_seed_plan)
 								collect_plan
 								cleanup_plan)
 							nil))
