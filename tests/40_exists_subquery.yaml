@@ -59,6 +59,7 @@ test_cases:
             - "cardinality_mode"
           not_contains:
             - "neumann_exists"
+            - "exists_probe"
             - "inner_select"
             - ".grp:"
             - "__mat:_uncorr_cnt_"

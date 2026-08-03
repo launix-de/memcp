@@ -352,7 +352,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(quote neumann_scalar)
 		(quote neumann_exists)
 		(quote neumann_in)
-		(quote dependent-subquery)) head)
+		(quote dependent-subquery)
+		(quote exists_probe)) head)
 		true
 		(match head
 			((quote quote) sym) (subquery_head? sym)
@@ -793,70 +794,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 					nil
 					true))))))
 
-(define direct_probe_column (lambda (alias expr)
-	(match expr
-		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase)
-		(if (equal? (resolve_column_alias tblvar alias) alias) col nil)
-		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase)
-		(direct_probe_column alias (list (quote get_column) tblvar false col false))
-		_ nil)))
-
-(define exists_probe_condition_binding (lambda (alias term)
-	(match term
-		((symbol equal??) a b) (begin
-			(define acol (direct_probe_column alias a))
-			(define bcol (direct_probe_column alias b))
-			(if (and (not (nil? acol)) (nil? bcol))
-				(list acol b)
-				(if (and (nil? acol) (not (nil? bcol)))
-					(list bcol a)
-					false)))
-		((quote equal??) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
-		((symbol equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
-		((quote equal?) a b) (exists_probe_condition_binding alias (list (quote equal??) a b))
-		((symbol nil?) expr) (begin
-			(define col (direct_probe_column alias expr))
-			(if (nil? col) false (list col nil)))
-		((quote nil?) expr) (exists_probe_condition_binding alias (list (quote nil?) expr))
-		_ false)))
-
-(define exists_probe_condition_bindings (lambda (alias condition)
-	(match (coalesceNil condition true)
-		(symbol true) '()
-		((symbol and) a b) (begin
-			(define aa (exists_probe_condition_bindings alias a))
-			(define bb (exists_probe_condition_bindings alias b))
-			(if (or (equal? aa false) (equal? bb false))
-				false
-				(merge (list aa bb))))
-		((quote and) a b) (exists_probe_condition_bindings alias (list (quote and) a b))
-		_ (begin
-			(define binding (exists_probe_condition_binding alias condition))
-			(if (equal? binding false) false (list binding))))))
-
-(define direct_probe_key_columns (lambda (alias keys)
-	(begin
-		(define cols (map keys (lambda (key) (direct_probe_column alias key))))
-		(if (reduce cols (lambda (bad col) (or bad (nil? col))) false)
-			false
-			cols))))
-
-(define exists_probe_supported? (lambda (stage)
-	(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
-		(and (source_is_base_table? (gs_input stage))
-			(and (equal? (gs_aggregates stage) (list aggregate_count_descriptor))
-				(and (nil? (gs_having stage))
-					(and (empty_list? (gs_order stage))
-						(and (nil? (gs_limit stage))
-							(and (not (equal? (direct_probe_key_columns (group_stage_input_alias stage) (gs_keys stage)) false))
-								(not (equal? (exists_probe_condition_bindings
-									(group_stage_input_alias stage)
-									(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-									false)))))))))))
-
-(define exists_probe_expr (lambda (stage lookup_keys)
-	(list (quote exists_probe) stage lookup_keys)))
-
 (define scalar_first_probe_expr (lambda (stage col)
 	(list (quote scalar_first_probe) stage col)))
 
@@ -1130,15 +1067,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
-		(if (exists_probe_supported? stage)
-			(list
-				(exists_probe_expr stage lookup_keys)
-				'()
-				'())
-			(list
-				(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
-				(list stage)
-				(list source))))))
+		(list
+			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
+			(list stage)
+			(list source)))))
 
 (define combine_exists_union_results (lambda (results)
 	(match (coalesceNil results '())
@@ -3691,10 +3623,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define extract_columns_for_alias (lambda (src expr)
 	(match expr
-		((symbol exists_probe) _stage lookup_keys)
-		(merge_unique (map lookup_keys (lambda (key) (extract_columns_for_alias src key))))
-		((quote exists_probe) _stage lookup_keys)
-		(extract_columns_for_alias src (list (quote exists_probe) _stage lookup_keys))
 		((symbol scalar_first_probe) stage _requested_col)
 		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
 			(extract_columns_for_alias src key))))
@@ -3707,10 +3635,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_alias (lambda (src expr)
 	(match expr
-		((symbol exists_probe) stage lookup_keys)
-		(lower_exists_probe_expr (list src) (source_alias src) stage lookup_keys)
-		((quote exists_probe) stage lookup_keys)
-		(lower_exists_probe_expr (list src) (source_alias src) stage lookup_keys)
 		((symbol scalar_first_probe) stage requested_col)
 		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col)
 		((quote scalar_first_probe) stage requested_col)
@@ -3719,30 +3643,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias src item))))
 		_ expr)))
-
-(define lower_exists_probe_expr (lambda (sources default_alias stage lookup_keys)
-	(begin
-		(define src (gs_input stage))
-		(define alias (group_stage_input_alias stage))
-		(define keys (gs_keys stage))
-		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(define key_terms (if (equal? (count keys) (count lookup_keys))
-			(map (produceN (count keys)) (lambda (i)
-				(list (quote equal??)
-					(nth keys i)
-					(nth lookup_keys i))))
-			'()))
-		(define filter_expr (combine_where
-			condition
-			(combine_where_terms key_terms true)))
-		(define filtercols (extract_columns_for_alias src filter_expr))
-		(list (quote scan_exists)
-			'(session "__memcp_tx")
-			(source_table_expr src)
-			(cons (quote list) filtercols)
-			(list (quote lambda)
-				(map filtercols (lambda (col) (symbol (concat alias "." col))))
-				(list (quote optimize) (lower_column_expr_for_join (cons src sources) alias filter_expr)))))))
 
 (define scalar_first_probe_parts (lambda (ag)
 	(match ag
@@ -3826,10 +3726,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(match expr
-		((symbol exists_probe) _stage lookup_keys)
-		(merge_unique (map lookup_keys (lambda (key) (extract_columns_for_join_alias sources default_alias alias key))))
-		((quote exists_probe) _stage lookup_keys)
-		(extract_columns_for_join_alias sources default_alias alias (list (quote exists_probe) _stage lookup_keys))
 		((symbol driver_membership_probe) _stage probe)
 		(extract_columns_for_join_alias sources default_alias alias probe)
 		((quote driver_membership_probe) _stage probe)
@@ -3854,10 +3750,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_join (lambda (sources default_alias expr)
 	(match expr
-		((symbol exists_probe) stage lookup_keys)
-		(lower_exists_probe_expr sources default_alias stage lookup_keys)
-		((quote exists_probe) stage lookup_keys)
-		(lower_exists_probe_expr sources default_alias stage lookup_keys)
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr sources default_alias stage probe)
 		((quote driver_membership_probe) stage probe)
