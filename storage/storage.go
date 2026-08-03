@@ -2155,9 +2155,15 @@ func Init(en scm.Env) {
 		Name: "show",
 		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			// table-based overloads: (show table) → columns, (show table "statistics") → index stats, etc.
-			if len(a) >= 1 && a[0].IsCustom(TagTable) {
-				t := TableFromScmer(a[0])
+			// table-based overloads: (show table) / (show recset) → columns,
+			// (show table "statistics") / (show recset "statistics") → index stats, etc.
+			if len(a) >= 1 && (a[0].IsCustom(TagTable) || a[0].IsCustom(TagRecSet)) {
+				t := (*table)(nil)
+				if a[0].IsCustom(TagRecSet) {
+					t = RecSetFromScmer(a[0]).table
+				} else {
+					t = TableFromScmer(a[0])
+				}
 				if len(a) == 1 {
 					return t.ShowColumns()
 				}

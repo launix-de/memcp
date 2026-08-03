@@ -179,6 +179,20 @@ test_cases:
           "ok"
           (error "scan_order_multi over recsets returned wrong order")))
 
+  - name: "show forwards recset to base table metadata"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (if (and
+              (equal? (show rs) (show tbl))
+              (equal? (show rs true) (show tbl true))
+              (equal? (show rs "statistics") (show tbl "statistics")))
+          "ok"
+          (error "show did not forward recset to base table")))
+
   - name: "recset scan rejects mutation callbacks"
     scm: |
       (begin
