@@ -841,18 +841,76 @@ PostgreSQL parsers should both lower to the same combined operators.
 			false
 			cols))))
 
+(define source_list_shape (lambda (sources)
+	(begin
+		(define items (coalesceNil sources '()))
+		(define first_source (match items (cons src _rest) src _ nil))
+		(define helper_sources (match items (cons _src rest) rest _ '()))
+		(list
+			(list (quote has_sources) (not (empty_list? items)))
+			(list (quote single_source) (single_source? items))
+			(list (quote first_source) first_source)
+			(list (quote first_is_base_table) (and (not (nil? first_source)) (source_is_base_table? first_source)))
+			(list (quote helpers_are_stage_outputs) (reduce helper_sources (lambda (ok src)
+				(and ok (source_is_stage_output? src)))
+				true))))))
+
+(define query_block_shape (lambda (block)
+	(if (not (query_block? block))
+		nil
+		(begin
+			(define sources_shape (source_list_shape (qb_sources block)))
+			(list
+				(list (quote query_block) true)
+				(list (quote has_sources) (qassoc_get sources_shape (quote has_sources) false))
+				(list (quote single_source) (qassoc_get sources_shape (quote single_source) false))
+				(list (quote first_is_base_table) (qassoc_get sources_shape (quote first_is_base_table) false))
+				(list (quote helpers_are_stage_outputs) (qassoc_get sources_shape (quote helpers_are_stage_outputs) false))
+				(list (quote has_stages) (not (empty_list? (qb_stages block))))
+				(list (quote no_stages) (empty_list? (qb_stages block)))
+				(list (quote has_group) (not (empty_list? (qb_group block))))
+				(list (quote no_group) (empty_list? (qb_group block)))
+				(list (quote has_having) (not (nil? (qb_having block))))
+				(list (quote no_having) (nil? (qb_having block)))
+				(list (quote has_order) (not (empty_list? (qb_order block))))
+				(list (quote no_order) (empty_list? (qb_order block)))
+				(list (quote has_limit) (not (nil? (qb_limit block))))
+				(list (quote no_limit) (nil? (qb_limit block)))
+				(list (quote limit_one) (equal? (qb_limit block) 1))
+				(list (quote limit_nil_or_one) (or (nil? (qb_limit block)) (equal? (qb_limit block) 1)))
+				(list (quote has_offset) (not (nil? (qb_offset block))))
+				(list (quote no_offset) (nil? (qb_offset block)))
+				(list (quote has_aggregates) (query_block_has_aggregates? block))
+				(list (quote no_aggregates) (not (query_block_has_aggregates? block))))))))
+
+(define shape_fact? (lambda (shape key)
+	(equal? (qassoc_get shape key false) true)))
+
+(define shape_has_all? (lambda (shape facts)
+	(reduce (coalesceNil facts '()) (lambda (ok fact)
+		(and ok (shape_fact? shape fact)))
+		true)))
+
+(define shape_has_any? (lambda (shape facts)
+	(reduce (coalesceNil facts '()) (lambda (found fact)
+		(or found (shape_fact? shape fact)))
+		false)))
+
 (define exists_probe_supported? (lambda (stage)
-	(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
-		(and (source_is_base_table? (gs_input stage))
-			(and (equal? (gs_aggregates stage) (list aggregate_count_descriptor))
-				(and (nil? (gs_having stage))
-					(and (empty_list? (gs_order stage))
-						(and (nil? (gs_limit stage))
-							(and (not (equal? (direct_probe_key_columns (group_stage_input_alias stage) (gs_keys stage)) false))
-								(not (equal? (exists_probe_condition_bindings
-									(group_stage_input_alias stage)
-									(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-									false)))))))))))
+	(begin
+		(define alias (group_stage_input_alias stage))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define key_columns (direct_probe_key_columns alias (gs_keys stage)))
+		(define bindings (exists_probe_condition_bindings alias condition))
+		(and
+			(equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
+			(source_is_base_table? (gs_input stage))
+			(equal? (gs_aggregates stage) (list aggregate_count_descriptor))
+			(nil? (gs_having stage))
+			(empty_list? (gs_order stage))
+			(nil? (gs_limit stage))
+			(not (equal? key_columns false))
+			(not (equal? bindings false))))))
 
 (define exists_probe_expr (lambda (stage lookup_keys)
 	(list (quote exists_probe) stage lookup_keys)))
@@ -872,56 +930,74 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(not (source_is_stage_output? src))))
 
 (define scalar_source_shape_supported? (lambda (sources)
-	(match (coalesceNil sources '())
-		(cons base helpers)
-		(and (source_is_base_table? base)
-			(reduce helpers (lambda (ok src)
-				(and ok (source_is_stage_output? src)))
-				true))
-		_ false)))
+	(begin
+		(define shape (source_list_shape sources))
+		(shape_has_all? shape (list
+			(quote has_sources)
+			(quote first_is_base_table)
+			(quote helpers_are_stage_outputs))))))
 
 (define exists_inner_supported? (lambda (inner)
-	(and (query_block? inner)
-		(and (not (empty_list? (qb_sources inner)))
-			(and (empty_list? (qb_group inner))
-				(and (nil? (qb_having inner))
-					(and (empty_list? (qb_order inner))
-						(and (or (nil? (qb_limit inner)) (equal? (qb_limit inner) 1))
-							(nil? (qb_offset inner))))))))))
+	(begin
+		(define shape (query_block_shape inner))
+		(shape_has_all? shape (list
+			(quote query_block)
+			(quote has_sources)
+			(quote no_group)
+			(quote no_having)
+			(quote no_order)
+			(quote limit_nil_or_one)
+			(quote no_offset))))))
 
 (define scalar_once_supported? (lambda (inner)
-	(and (query_block? inner)
-		(and (scalar_source_shape_supported? (qb_sources inner))
-			(and (empty_list? (qb_group inner))
-				(and (nil? (qb_having inner))
-					(and (or (nil? (qb_offset inner)) (not (empty_list? (qb_order inner))))
-						(equal? (qb_limit inner) 1))))))))
+	(begin
+		(define shape (query_block_shape inner))
+		(and
+			(shape_has_all? shape (list
+				(quote query_block)
+				(quote no_group)
+				(quote no_having)
+				(quote limit_one)))
+			(scalar_source_shape_supported? (qb_sources inner))
+			(shape_has_any? shape (list
+				(quote no_offset)
+				(quote has_order)))))))
 
 (define scalar_aggregate_supported? (lambda (inner)
-	(and (query_block? inner)
-		(and (not (empty_list? (qb_sources inner)))
-			(and (empty_list? (qb_order inner))
-				(and (or (nil? (qb_limit inner)) (equal? (qb_limit inner) 1))
-					(nil? (qb_offset inner))))))))
+	(begin
+		(define shape (query_block_shape inner))
+		(shape_has_all? shape (list
+			(quote query_block)
+			(quote has_sources)
+			(quote no_order)
+			(quote limit_nil_or_one)
+			(quote no_offset))))))
 
 (define scalar_single_supported? (lambda (inner)
-	(and (query_block? inner)
-		(and (not (empty_list? (qb_sources inner)))
-			(and (empty_list? (qb_group inner))
-				(and (nil? (qb_having inner))
-					(and (empty_list? (qb_order inner))
-						(and (nil? (qb_limit inner))
-							(nil? (qb_offset inner))))))))))
+	(begin
+		(define shape (query_block_shape inner))
+		(shape_has_all? shape (list
+			(quote query_block)
+			(quote has_sources)
+			(quote no_group)
+			(quote no_having)
+			(quote no_order)
+			(quote no_limit)
+			(quote no_offset))))))
 
 (define grouped_scalar_top_supported? (lambda (inner outer_sources)
-	(and (empty_list? outer_sources)
-		(and (query_block? inner)
-			(and (scalar_source_shape_supported? (qb_sources inner))
-				(and (not (empty_list? (qb_group inner)))
-					(and (nil? (qb_having inner))
-						(and (not (empty_list? (qb_order inner)))
-							(and (equal? (qb_limit inner) 1)
-								(nil? (qb_offset inner)))))))))))
+	(begin
+		(define shape (query_block_shape inner))
+		(and
+			(empty_list? outer_sources)
+			(scalar_source_shape_supported? (qb_sources inner))
+			(shape_has_all? shape (list
+				(quote query_block)
+				(quote has_group)
+				(quote no_having)
+				(quote has_order)
+				(quote limit_one)
+				(quote no_offset)))))))
 
 (define scalar_once_reduce_first (lambda ()
 	(list (quote lambda)
