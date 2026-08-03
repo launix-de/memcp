@@ -4649,15 +4649,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 					true))
 			false))))
 
-(define build_group_domain_seed_plan (lambda (schema grouptbl key_names lookup_keys domain_sources)
+(define build_group_domain_seed_plan (lambda (schema grouptbl key_names lookup_keys domain_sources all_stages)
 	(if (or (empty_list? lookup_keys) (empty_list? domain_sources))
 		nil
 		(begin
+			(define prepared_sources (physicalize_stage_output_sources all_stages domain_sources))
 			(define key_fields (merge (map (produceN (count lookup_keys)) (lambda (i)
 				(list (nth key_names i) (nth lookup_keys i))))))
 			(define input (make_query_block
 				schema
-				domain_sources
+				prepared_sources
 				key_fields
 				true
 				'() nil '() nil nil
@@ -5461,7 +5462,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define domain_sources (coalesceNil (qassoc_get (gs_facts stage) (quote domain-sources) '()) '()))
 		(define domain_lookup_keys (coalesceNil (qassoc_get (gs_facts stage) (quote lookup-keys) '()) '()))
 		(define domain_seed_plan (if preserve_empty_domain
-			(build_group_domain_seed_plan schema grouptbl key_names domain_lookup_keys domain_sources)
+			(build_group_domain_seed_plan schema grouptbl key_names domain_lookup_keys domain_sources all_stages)
 			nil))
 		(define scalar_query_stage (and (query_block? src)
 			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
