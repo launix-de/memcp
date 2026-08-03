@@ -3105,16 +3105,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(expr_contains_broad_text_match? head))
 		_ false)))
 
-(define expr_contains_text_match? (lambda (expr)
-	(match expr
-		((symbol strlike) _value _pattern _collation) true
-		((quote strlike) _value _pattern _collation) true
-		(cons head tail)
-		(reduce tail (lambda (found item)
-			(or found (expr_contains_text_match? item)))
-			(expr_contains_text_match? head))
-		_ false)))
-
 (define stage_input_contains_broad_membership_filter? (lambda (input)
 	(if (union_block? input)
 		(reduce (union_branches input) (lambda (found branch)
@@ -3150,7 +3140,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(lambda (_e) nil))))
 
 (define planner_source_filter_estimate (lambda (src condition max_rows)
-	(if (or (not (source_is_base_table? src)) (expr_contains_text_match? condition))
+	(if (not (source_is_base_table? src))
 		nil
 		(try
 			(lambda ()
@@ -3266,7 +3256,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define driver (if (empty_list? sources) nil (car sources)))
 		(define driver_rows (if (nil? driver) nil (planner_source_row_count driver)))
 		(define candidate_rows (planner_stage_input_rows (gs_input stage)))
-		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 2048))
+		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 512))
 		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
 		(define estimate_capped (qassoc_get candidate_estimate (quote capped) false))
 		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
@@ -3328,7 +3318,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define candidate_reorder_strategy (lambda (stage sources block)
 	(begin
 		(define driver (if (empty_list? sources) nil (car sources)))
-		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 2048))
+		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 512))
 		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
 		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
 		(define estimate_ratio_broad (and
@@ -6533,8 +6523,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(and (nil? (qb_having branch))
 						(and (not (query_block_has_aggregates? branch))
 							(and (empty_list? (qb_order branch))
-									(and (nil? (qb_limit branch))
-										(nil? (qb_offset branch))))))))))))
+								(and (nil? (qb_limit branch))
+									(nil? (qb_offset branch))))))))))))
 
 (define grouped_union_branch? (lambda (branch)
 	(and (query_block? branch)
