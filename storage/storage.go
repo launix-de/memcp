@@ -402,6 +402,9 @@ func Init(en scm.Env) {
 	scm.CustomStringer[TagTable] = func(ptr unsafe.Pointer) string {
 		return (*table)(ptr).String()
 	}
+	scm.CustomStringer[TagRecSet] = func(ptr unsafe.Pointer) string {
+		return (*recSet)(ptr).String()
+	}
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table",
@@ -508,6 +511,39 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_recset",
+		Desc: "builds a query-local record-set handle from one table scan; the returned value is not persisted and can be scanned like a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			t := TableFromScmer(a[1])
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			return NewRecSetScmer(t.scanRecSet(currentTx, filtercols, a[3]))
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table", ParamName: "table"},
+				{Kind: "list", ParamName: "filterColumns"},
+				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row enters the recset", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_count",
+		Desc: "returns the number of currently stored recids in a query-local recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(RecSetFromScmer(a[0]).count)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "recset", ParamName: "recset"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_exists",
 		Desc: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -600,6 +636,23 @@ func Init(en scm.Env) {
 				return result
 			}
 
+			if tableArg.IsCustom(TagRecSet) {
+				rs := RecSetFromScmer(tableArg)
+				aggregate := scm.NewNil()
+				if len(a) > layout.reduceIdx {
+					aggregate = a[layout.reduceIdx]
+				}
+				neutral := scm.NewNil()
+				if len(a) > layout.neutralIdx {
+					neutral = a[layout.neutralIdx]
+				}
+				reduce2 := scm.NewNil()
+				if len(a) > layout.reduce2Idx {
+					reduce2 = a[layout.reduce2Idx]
+				}
+				return rs.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
+			}
+
 			t := TableFromScmer(a[layout.tableIdx])
 
 			aggregate := scm.NewNil()
@@ -620,7 +673,7 @@ func Init(en scm.Env) {
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list", ParamName: "table", ParamDesc: "table handle or a list for temporary data"},
+				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local recset, or a list for temporary data"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},

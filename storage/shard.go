@@ -1393,6 +1393,15 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.deltaGetters[i] = getter
 			continue
 		}
+		if col == "$recset_contains" {
+			fnptr := recSetContainsClosure(t)
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(fnptr, id)
+			}
+			mr.mainGetters[i] = getter
+			mr.deltaGetters[i] = getter
+			continue
+		}
 		if col == "$update" {
 			mr.isUpdate[i] = true
 			mr.hasUpdateCol = true

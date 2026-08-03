@@ -639,7 +639,16 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
 	cNeedsTxReader := make([]bool, len(conditionCols))
+	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	for i, k := range conditionCols {
+		if k == "$recset_contains" {
+			fnptr := recSetContainsClosure(t)
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(fnptr, id)
+			}
+			conditionGetters[i] = getter
+			continue
+		}
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
@@ -719,11 +728,17 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			// condition check
 			if effectiveIdx < t.main_count {
 				for i, k := range cReaders {
-					cdataset[i] = k.GetValue(effectiveIdx)
+					if getter := conditionGetters[i]; getter != nil {
+						cdataset[i] = getter(effectiveIdx, 0)
+					} else {
+						cdataset[i] = k.GetValue(effectiveIdx)
+					}
 				}
 			} else {
 				for i, k := range conditionCols {
-					if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+					if getter := conditionGetters[i]; getter != nil {
+						cdataset[i] = getter(effectiveIdx, 0)
+					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 						cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 					} else {
 						cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
