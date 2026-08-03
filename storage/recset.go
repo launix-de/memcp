@@ -294,6 +294,110 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 	return akkumulator
 }
 
+func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
+	if r == nil {
+		return false
+	}
+	if currentTx == nil {
+		currentTx = r.tx
+	}
+	ss := SessionStateFromTx(currentTx)
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	for i := range r.shards {
+		part := &r.shards[i]
+		if part.count == 0 {
+			continue
+		}
+		if part.shard.recSetPartExists(part.recids, conditionCols, conditionFn, currentTx, ss) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState) bool {
+	t.ensureLoaded()
+	skipShardReadLock := t.hasWriteOwner()
+	t.ensureMainCount(skipShardReadLock)
+
+	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
+	conditionGetters := make([]mapArgGetter, len(conditionCols))
+	for i, k := range conditionCols {
+		if k == "$recset_contains" {
+			fnptr := recSetContainsClosure(t)
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(fnptr, id)
+			}
+			conditionGetters[i] = getter
+			continue
+		}
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+	}
+	cdataset := make([]scm.Scmer, len(conditionCols))
+
+	locked := false
+	if !skipShardReadLock {
+		t.mu.RLock()
+		locked = true
+		if t.t.tableLockOwner.Load() != nil {
+			t.mu.RUnlock()
+			locked = false
+			t.t.waitTableLock(ss, false)
+			t.mu.RLock()
+			locked = true
+		}
+	}
+	defer func() {
+		if locked {
+			t.mu.RUnlock()
+		}
+	}()
+
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	mainCount := t.main_count
+	visibleUpper := mainCount + uint32(len(t.inserts))
+	for _, idx := range recids {
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
+		if idx >= visibleUpper {
+			continue
+		}
+		if acidMode {
+			if !currentTx.IsVisible(t, idx) {
+				continue
+			}
+		} else if t.deletions.Get(uint(idx)) {
+			continue
+		}
+		if idx < mainCount {
+			for i, c := range cReaders {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else {
+					cdataset[i] = c.GetValue(idx)
+				}
+			}
+		} else {
+			for i, col := range conditionCols {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+					cdataset[i] = cReaders[i].GetValue(idx)
+				} else {
+					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+				}
+			}
+		}
+		if scm.ToBool(conditionFn(cdataset...)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
@@ -411,4 +515,202 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 		return scm.NewNil(), 0
 	}
 	return akkumulator, outCount
+}
+
+func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) *shardqueue {
+	result := &shardqueue{shard: t}
+	if ss == nil {
+		ss = SessionStateFromTx(currentTx)
+	}
+	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
+		if len(args) < 2 {
+			return scm.NewBool(false)
+		}
+		return scm.NewBool(scm.Less(args[0], args[1]))
+	}
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+
+	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
+	for i, scol := range sortcols {
+		if scol.IsString() {
+			result.scols[i] = t.ColumnReaderTx(currentTx, scol.String())
+			continue
+		}
+		if scol.IsProc() {
+			proc := scol.Proc()
+			var params []scm.Scmer
+			if proc.Params.IsSlice() {
+				params = proc.Params.Slice()
+			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+				params = arr
+			}
+			largs := make([]func(uint32) scm.Scmer, len(params))
+			for j, param := range params {
+				name := ""
+				if param.IsSymbol() {
+					name = param.String()
+				} else if sym, ok := param.Any().(scm.Symbol); ok {
+					name = string(sym)
+				} else {
+					name = scm.String(param)
+				}
+				largs[j] = t.ColumnReaderTx(currentTx, name)
+			}
+			procFn := scm.OptimizeProcToSerialFunction(scol)
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				vals := make([]scm.Scmer, len(largs))
+				for j, getter := range largs {
+					vals[j] = getter(idx)
+				}
+				return procFn(vals...)
+			}
+			continue
+		}
+		panic("unknown sort criteria: " + scm.String(scol))
+	}
+	result.sortdirs = make([]func(...scm.Scmer) scm.Scmer, len(sortcols))
+	for i := range sortcols {
+		if i < len(sortdirs) && sortdirs[i] != nil {
+			result.sortdirs[i] = sortdirs[i]
+		} else {
+			result.sortdirs[i] = defaultSortDir
+		}
+	}
+
+	t.ensureLoaded()
+	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
+	t.ensureMainCount(skipShardReadLock)
+	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
+	conditionGetters := make([]mapArgGetter, len(conditionCols))
+	for i, k := range conditionCols {
+		if k == "$recset_contains" {
+			fnptr := recSetContainsClosure(t)
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(fnptr, id)
+			}
+			conditionGetters[i] = getter
+			continue
+		}
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+	}
+	cdataset := make([]scm.Scmer, len(conditionCols))
+
+	locked := false
+	if !skipShardReadLock {
+		t.mu.RLock()
+		locked = true
+		if t.t.tableLockOwner.Load() != nil {
+			t.mu.RUnlock()
+			locked = false
+			t.t.waitTableLock(ss, false)
+			t.mu.RLock()
+			locked = true
+		}
+	}
+	defer func() {
+		if locked {
+			t.mu.RUnlock()
+		}
+	}()
+
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	mainCount := t.main_count
+	visibleUpper := mainCount + uint32(len(t.inserts))
+	result.items = make([]uint32, 0, len(recids))
+	for _, idx := range recids {
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
+		if idx >= visibleUpper {
+			continue
+		}
+		if acidMode {
+			if !currentTx.IsVisible(t, idx) {
+				continue
+			}
+		} else if t.deletions.Get(uint(idx)) {
+			continue
+		}
+		if idx < mainCount {
+			for i, c := range cReaders {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else {
+					cdataset[i] = c.GetValue(idx)
+				}
+			}
+		} else {
+			for i, col := range conditionCols {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+					cdataset[i] = cReaders[i].GetValue(idx)
+				} else {
+					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+				}
+			}
+		}
+		if scm.ToBool(conditionFn(cdataset...)) {
+			result.items = append(result.items, idx)
+		}
+	}
+
+	itemPos := make(map[uint32]int, len(result.items))
+	for i, idx := range result.items {
+		itemPos[idx] = i
+	}
+	lessByID := func(a, b uint32) bool {
+		cmpCount := len(result.scols)
+		if len(result.sortdirs) < cmpCount {
+			cmpCount = len(result.sortdirs)
+		}
+		for c := 0; c < cmpCount; c++ {
+			av := result.scols[c](a)
+			bv := result.scols[c](b)
+			if scm.ToBool(result.sortdirs[c](av, bv)) {
+				return true
+			}
+			if scm.ToBool(result.sortdirs[c](bv, av)) {
+				return false
+			}
+		}
+		return itemPos[a] < itemPos[b]
+	}
+	if len(sortcols) > 0 {
+		if limit >= 0 && limitPartitionCols == 0 {
+			result.items = topKByOrder(result.items, offset+limit, lessByID)
+		} else {
+			sort.Slice(result.items, func(i, j int) bool {
+				return lessByID(result.items[i], result.items[j])
+			})
+		}
+	}
+	if limit >= 0 {
+		perPart := offset + limit
+		if perPart < 0 {
+			perPart = len(result.items)
+		}
+		var pruned []uint32
+		var prevPK []scm.Scmer
+		partCount := 0
+		for _, idx := range result.items {
+			curPK := make([]scm.Scmer, limitPartitionCols)
+			for c := 0; c < limitPartitionCols; c++ {
+				curPK[c] = result.scols[c](idx)
+			}
+			if prevPK == nil || !pkEqual(prevPK, curPK) {
+				partCount = 0
+				prevPK = curPK
+			}
+			if partCount < perPart {
+				pruned = append(pruned, idx)
+			}
+			partCount++
+		}
+		result.items = pruned
+	}
+	_ = callbackCols
+	return result
 }

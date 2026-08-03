@@ -565,13 +565,16 @@ func Init(en scm.Env) {
 				}
 				return scm.NewBool(false)
 			}
+			if tableArg.IsCustom(TagRecSet) {
+				return scm.NewBool(RecSetFromScmer(tableArg).scanExists(currentTx, filtercols, a[3]))
+			}
 			t := TableFromScmer(tableArg)
 			return scm.NewBool(t.scanExists(currentTx, filtercols, a[3]))
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list", ParamName: "table"},
+				{Kind: "table|list|recset", ParamName: "table"},
 				{Kind: "list", ParamName: "filterColumns"},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row exists", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 			},
@@ -783,7 +786,7 @@ func Init(en scm.Env) {
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list", ParamName: "table", ParamDesc: "table handle or a list for temporary data"},
+				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local recset, or a list for temporary data"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter; #0, #1, ... address batchdata slots"},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map; #0, #1, ... address batchdata slots"},
@@ -916,6 +919,10 @@ func Init(en scm.Env) {
 				return result
 			}
 
+			if tableArg.IsCustom(TagRecSet) {
+				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
+			}
+
 			t := TableFromScmer(a[layout.tableIdx])
 
 			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
@@ -998,9 +1005,7 @@ func Init(en scm.Env) {
 
 			specs := make([]scanOrderTableSpec, n)
 			for i := 0; i < n; i++ {
-				t := TableFromScmer(tables[i])
 				specs[i] = scanOrderTableSpec{
-					table:          t,
 					conditionCols:  scmerSliceToStrings(mustScmerSlice(filterColsArr[i], "filterColumns[i]")),
 					condition:      filterFnArr[i],
 					sortcols:       mustScmerSlice(sortcolsArr[i], "sortcols[i]"),
@@ -1008,6 +1013,11 @@ func Init(en scm.Env) {
 					callback:       mapFnArr[i],
 					perTableOffset: perTableOffsets[i],
 					perTableLimit:  perTableLimits[i],
+				}
+				if tables[i].IsCustom(TagRecSet) {
+					specs[i].recset = RecSetFromScmer(tables[i])
+				} else {
+					specs[i].table = TableFromScmer(tables[i])
 				}
 			}
 
