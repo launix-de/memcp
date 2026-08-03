@@ -1,0 +1,39 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+# Regression test for large lookup-style GROUP BY queries observed in manual
+# build traces. Data and names are synthetic and anonymized.
+
+metadata:
+  version: "1.0"
+  description: "Large lookup GROUP BY performance"
+  max_time: 5
+
+setup:
+  - sql: "DROP TABLE IF EXISTS lookup_group_items"
+  - sql: |
+      CREATE TABLE lookup_group_items (
+        id INT PRIMARY KEY,
+        code VARCHAR(16),
+        label VARCHAR(64)
+      )
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "lookup_group_items") '("id" "code" "label")
+          (map (produceN 20000) (lambda (i)
+            (list i (concat "c" i) (concat "label " i)))))
+        20000)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS lookup_group_items"
+
+test_cases:
+  - name: "large lookup group by without order"
+    timeout: 30
+    max_time: 5
+    sql: |
+      SELECT code AS value, MIN(label) AS description
+      FROM lookup_group_items
+      WHERE TRUE
+      GROUP BY code
+      LIMIT 20000
+    expect:
+      rows: 20000
