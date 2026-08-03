@@ -6531,8 +6531,43 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(and (nil? (qb_having branch))
 						(and (not (query_block_has_aggregates? branch))
 							(and (empty_list? (qb_order branch))
-								(and (nil? (qb_limit branch))
-									(nil? (qb_offset branch))))))))))))
+									(and (nil? (qb_limit branch))
+										(nil? (qb_offset branch))))))))))))
+
+(define grouped_union_branch? (lambda (branch)
+	(and (query_block? branch)
+		(and (single_source? (qb_sources branch))
+			(and (empty_list? (qb_stages branch))
+				(and (empty_list? (qb_order branch))
+					(and (nil? (qb_limit branch))
+						(and (nil? (qb_offset branch))
+							(or (not (empty_list? (qb_group branch)))
+								(or (not (nil? (qb_having branch)))
+									(query_block_has_aggregates? branch)))))))))))
+
+(define grouped_union_branch_stream_plan (lambda (branch)
+	(begin
+		(define src (car (qb_sources branch)))
+		(if (not (source_is_base_table? src))
+			nil
+			(begin
+				(define stage (make_group_stage_for_block branch src))
+				(define final_block (group_stage_final_block stage (group_stage_final_extra_sources stage)))
+				(if (union_ordered_branch_supported? final_block)
+					(list (list (lower_group_stage_prepare_using (list stage) stage)) final_block)
+					nil))))))
+
+(define union_ordered_branch_stream_plan (lambda (branch)
+	(if (not (query_block? branch))
+		nil
+		(if (union_ordered_branch_supported? branch)
+			(list '() branch)
+			(if (grouped_union_branch? branch)
+				(grouped_union_branch_stream_plan branch)
+				nil)))))
+
+(define union_ordered_branch_streamable? (lambda (branch)
+	(not (nil? (union_ordered_branch_stream_plan branch)))))
 
 (define union_sort_column_for_alias (lambda (src expr)
 	(match expr
@@ -6584,21 +6619,30 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define branches (union_branches block))
 		(define aligned (map branches (lambda (branch) (union_align_branch_fields branch titles width))))
 		(define order_positions (union_order_positions titles (union_order block)))
-		(define specs (map aligned (lambda (branch) (union_ordered_scan_spec branch titles order_positions))))
-		(list (quote scan_order_multi)
-			'(session "__memcp_tx")
-			(cons (quote list) (map specs (lambda (spec) (nth spec 0))))
-			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
-			(cons (quote list) (map specs (lambda (spec) (nth spec 2))))
-			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 3)))))
-			(cons (quote list) (union_order_dirs (union_order block)))
-			nil
-			nil
-			0
-			(coalesceNil (union_offset block) 0)
-			(coalesceNil (union_limit block) -1)
-			(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 4)))))
-			(cons (quote list) (map specs (lambda (spec) (nth spec 5))))))))
+		(define plans (map aligned union_ordered_branch_stream_plan))
+		(if (reduce plans (lambda (ok plan) (and ok (not (nil? plan)))) true)
+			(begin
+				(define prepared (map plans (lambda (plan) (nth plan 1))))
+				(define prepares (merge (map plans (lambda (plan) (nth plan 0)))))
+				(define specs (map prepared (lambda (branch) (union_ordered_scan_spec branch titles order_positions))))
+				(define scan_plan (list (quote scan_order_multi)
+					'(session "__memcp_tx")
+					(cons (quote list) (map specs (lambda (spec) (nth spec 0))))
+					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
+					(cons (quote list) (map specs (lambda (spec) (nth spec 2))))
+					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 3)))))
+					(cons (quote list) (union_order_dirs (union_order block)))
+					nil
+					nil
+					0
+					(coalesceNil (union_offset block) 0)
+					(coalesceNil (union_limit block) -1)
+					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 4)))))
+					(cons (quote list) (map specs (lambda (spec) (nth spec 5))))))
+				(if (empty_list? prepares)
+					scan_plan
+					(cons (quote begin) (merge (list prepares (list scan_plan))))))
+			(neumann_fail "build_queryplan" "UNION ALL ORDER BY requires streamable branches")))))
 
 (define union_materialized_order_fields (lambda (branch order_positions)
 	(begin
@@ -6694,7 +6738,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define width (count (qb_fields first_branch)))
 				(if (not (empty_list? (union_order block)))
 					(if (reduce branches (lambda (ok branch)
-						(and ok (union_ordered_branch_supported? branch)))
+						(and ok (union_ordered_branch_streamable? (union_align_branch_fields branch titles width))))
 						true)
 						(lower_union_all_ordered block titles width)
 						(lower_union_all_materialized_ordered block titles width))

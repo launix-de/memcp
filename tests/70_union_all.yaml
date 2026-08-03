@@ -381,6 +381,22 @@ test_cases:
         - ID: 3
           name: "r2"
 
+  - name: "EXPLAIN UNION ALL with grouped branch streams stage output"
+    sql: |
+      EXPLAIN SELECT ID, name FROM fop_files WHERE ID <= 2
+      UNION ALL
+      SELECT result AS ID, CONCAT('r', CAST(COUNT(*) AS VARCHAR)) AS name
+      FROM renderjob
+      GROUP BY result
+      HAVING result = 3
+      ORDER BY ID
+    expect:
+      rows: 1
+      data_contains:
+        - code: "scan_order_multi"
+      not_contains:
+        - "__union_rows"
+
   - name: "UNION ALL with derived branch filtering"
     sql: |
       SELECT ID, name FROM fop_files WHERE ID = 5
