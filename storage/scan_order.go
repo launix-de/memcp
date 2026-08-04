@@ -274,6 +274,7 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
 	table         *table
+	recset        *recSet
 	conditionCols []string
 	condition     scm.Scmer
 	sortcols      []scm.Scmer
@@ -286,6 +287,13 @@ type scanOrderTableSpec struct {
 	// merge direction (shared sortdirs). Callers must enforce this.
 	perTableOffset int
 	perTableLimit  int
+}
+
+func (s *scanOrderTableSpec) carrierTable() *table {
+	if s.recset != nil {
+		return s.recset.table
+	}
+	return s.table
 }
 
 // extendBoundariesWithSortCols appends sort columns to the boundaries when all
@@ -412,7 +420,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	// Launch shard-parallel scans for each table
 	for ti := range tables {
 		spec := &tables[ti]
-		t := spec.table
+		t := spec.carrierTable()
 		touchTempColumns(t, spec.conditionCols, spec.callbackCols)
 
 		// Per-table top-K hint: when perTableLimit is set, each shard only
@@ -461,27 +469,53 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		tableIdx := ti
 		shardLimit := shardTotalLimit
 
-		done := t.iterateShardsParallel(tableBounds, func(s *storageShard, solo bool) {
-			if ss != nil && ss.IsKilled() {
-				panic("query killed")
-			}
-			defer func() {
-				if r := recover(); r != nil {
-					q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
+		if spec.recset != nil {
+			for i := range spec.recset.shards {
+				part := spec.recset.shards[i]
+				if part.count == 0 {
+					continue
 				}
-			}()
-			res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
-			res.callbackCols = callbackCols
-			res.callback = callback
-			res.tableIdx = tableIdx
-			q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
-		})
-		if done != nil {
-			wg.Add(1)
-			go func(ch <-chan struct{}) {
-				<-ch
-				wg.Done()
-			}(done)
+				wg.Add(1)
+				go func(part recSetShard) {
+					defer wg.Done()
+					if ss != nil && ss.IsKilled() {
+						panic("query killed")
+					}
+					defer func() {
+						if r := recover(); r != nil {
+							q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
+						}
+					}()
+					res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+					res.callbackCols = callbackCols
+					res.callback = callback
+					res.tableIdx = tableIdx
+					q_ <- scanOrderResult{res: res, inputCount: part.count, scanCount: int64(len(res.items))}
+				}(part)
+			}
+		} else {
+			done := t.iterateShardsParallel(tableBounds, func(s *storageShard, solo bool) {
+				if ss != nil && ss.IsKilled() {
+					panic("query killed")
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
+					}
+				}()
+				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+				res.callbackCols = callbackCols
+				res.callback = callback
+				res.tableIdx = tableIdx
+				q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
+			})
+			if done != nil {
+				wg.Add(1)
+				go func(ch <-chan struct{}) {
+					<-ch
+					wg.Done()
+				}(done)
+			}
 		}
 
 		// Per-table logging (best-effort, async) — inputCount is 0 here (set
@@ -703,6 +737,22 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		table:          t,
+		conditionCols:  conditionCols,
+		condition:      condition,
+		sortcols:       sortcols,
+		callbackCols:   callbackCols,
+		callback:       callback,
+		perTableOffset: -1,
+		perTableLimit:  -1,
+	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter)
+}
+
+func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	if currentTx == nil {
+		currentTx = r.tx
+	}
+	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
+		recset:         r,
 		conditionCols:  conditionCols,
 		condition:      condition,
 		sortcols:       sortcols,

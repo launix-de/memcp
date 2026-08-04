@@ -402,6 +402,9 @@ func Init(en scm.Env) {
 	scm.CustomStringer[TagTable] = func(ptr unsafe.Pointer) string {
 		return (*table)(ptr).String()
 	}
+	scm.CustomStringer[TagRecSet] = func(ptr unsafe.Pointer) string {
+		return (*recSet)(ptr).String()
+	}
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table",
@@ -508,6 +511,39 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_recset",
+		Desc: "builds a query-local record-set handle from one table scan; the returned value is not persisted and can be scanned like a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			t := TableFromScmer(a[1])
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			return NewRecSetScmer(t.scanRecSet(currentTx, filtercols, a[3]))
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table", ParamName: "table"},
+				{Kind: "list", ParamName: "filterColumns"},
+				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row enters the recset", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_count",
+		Desc: "returns the number of currently stored recids in a query-local recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(RecSetFromScmer(a[0]).count)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "recset", ParamName: "recset"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_exists",
 		Desc: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -529,13 +565,16 @@ func Init(en scm.Env) {
 				}
 				return scm.NewBool(false)
 			}
+			if tableArg.IsCustom(TagRecSet) {
+				return scm.NewBool(RecSetFromScmer(tableArg).scanExists(currentTx, filtercols, a[3]))
+			}
 			t := TableFromScmer(tableArg)
 			return scm.NewBool(t.scanExists(currentTx, filtercols, a[3]))
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list", ParamName: "table"},
+				{Kind: "table|list|recset", ParamName: "table"},
 				{Kind: "list", ParamName: "filterColumns"},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row exists", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 			},
@@ -600,6 +639,23 @@ func Init(en scm.Env) {
 				return result
 			}
 
+			if tableArg.IsCustom(TagRecSet) {
+				rs := RecSetFromScmer(tableArg)
+				aggregate := scm.NewNil()
+				if len(a) > layout.reduceIdx {
+					aggregate = a[layout.reduceIdx]
+				}
+				neutral := scm.NewNil()
+				if len(a) > layout.neutralIdx {
+					neutral = a[layout.neutralIdx]
+				}
+				reduce2 := scm.NewNil()
+				if len(a) > layout.reduce2Idx {
+					reduce2 = a[layout.reduce2Idx]
+				}
+				return rs.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
+			}
+
 			t := TableFromScmer(a[layout.tableIdx])
 
 			aggregate := scm.NewNil()
@@ -620,7 +676,7 @@ func Init(en scm.Env) {
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list", ParamName: "table", ParamDesc: "table handle or a list for temporary data"},
+				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local recset, or a list for temporary data"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},
@@ -730,7 +786,7 @@ func Init(en scm.Env) {
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list", ParamName: "table", ParamDesc: "table handle or a list for temporary data"},
+				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local recset, or a list for temporary data"},
 				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter; #0, #1, ... address batchdata slots"},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map; #0, #1, ... address batchdata slots"},
@@ -863,6 +919,10 @@ func Init(en scm.Env) {
 				return result
 			}
 
+			if tableArg.IsCustom(TagRecSet) {
+				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
+			}
+
 			t := TableFromScmer(a[layout.tableIdx])
 
 			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
@@ -945,9 +1005,7 @@ func Init(en scm.Env) {
 
 			specs := make([]scanOrderTableSpec, n)
 			for i := 0; i < n; i++ {
-				t := TableFromScmer(tables[i])
 				specs[i] = scanOrderTableSpec{
-					table:          t,
 					conditionCols:  scmerSliceToStrings(mustScmerSlice(filterColsArr[i], "filterColumns[i]")),
 					condition:      filterFnArr[i],
 					sortcols:       mustScmerSlice(sortcolsArr[i], "sortcols[i]"),
@@ -955,6 +1013,11 @@ func Init(en scm.Env) {
 					callback:       mapFnArr[i],
 					perTableOffset: perTableOffsets[i],
 					perTableLimit:  perTableLimits[i],
+				}
+				if tables[i].IsCustom(TagRecSet) {
+					specs[i].recset = RecSetFromScmer(tables[i])
+				} else {
+					specs[i].table = TableFromScmer(tables[i])
 				}
 			}
 
@@ -2092,9 +2155,15 @@ func Init(en scm.Env) {
 		Name: "show",
 		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			// table-based overloads: (show table) → columns, (show table "statistics") → index stats, etc.
-			if len(a) >= 1 && a[0].IsCustom(TagTable) {
-				t := TableFromScmer(a[0])
+			// table-based overloads: (show table) / (show recset) → columns,
+			// (show table "statistics") / (show recset "statistics") → index stats, etc.
+			if len(a) >= 1 && (a[0].IsCustom(TagTable) || a[0].IsCustom(TagRecSet)) {
+				t := (*table)(nil)
+				if a[0].IsCustom(TagRecSet) {
+					t = RecSetFromScmer(a[0]).table
+				} else {
+					t = TableFromScmer(a[0])
+				}
 				if len(a) == 1 {
 					return t.ShowColumns()
 				}

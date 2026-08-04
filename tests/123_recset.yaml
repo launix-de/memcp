@@ -1,0 +1,233 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Query-local RecSet storage primitive tests. RecSets are intentionally SCM
+# values only; the tests exercise public scans without exposing recids.
+
+metadata:
+  version: "1.0"
+  description: "Query-local RecSet scans and contains probes"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS recset_items"
+  - sql: "DROP TABLE IF EXISTS recset_other"
+  - sql: |
+      CREATE TABLE recset_items (
+        id INT PRIMARY KEY,
+        tenant INT,
+        active INT
+      )
+  - sql: |
+      CREATE TABLE recset_other (
+        id INT PRIMARY KEY,
+        tenant INT
+      )
+  - sql: |
+      INSERT INTO recset_items VALUES
+        (1, 1, 1),
+        (2, 1, 0),
+        (3, 2, 1),
+        (4, 2, 0),
+        (5, 1, 1)
+  - sql: |
+      INSERT INTO recset_other VALUES
+        (1, 1),
+        (2, 1)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS recset_other"
+  - sql: "DROP TABLE IF EXISTS recset_items"
+
+test_cases:
+  - name: "scan_recset builds a query-local subset"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (if (equal? (recset_count rs) 3)
+          "ok"
+          (error "scan_recset returned wrong cardinality")))
+
+  - name: "scan accepts recset as table-like source"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define sum_active
+          (scan nil rs
+            '("active")
+            (lambda (active) (equal? active 1))
+            '("id")
+            (lambda (id) id)
+            (lambda (acc id) (+ acc id))
+            0))
+        (if (equal? sum_active 6)
+          "ok"
+          (error "recset scan returned wrong row set")))
+
+  - name: "$recset_contains probes current table row without exposing recid"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define sum_active
+          (scan nil tbl
+            '("$recset_contains" "active")
+            (lambda (in_recset active) (and (in_recset rs) (equal? active 1)))
+            '("id")
+            (lambda (id) id)
+            (lambda (acc id) (+ acc id))
+            0))
+        (if (equal? sum_active 6)
+          "ok"
+          (error "$recset_contains returned wrong membership")))
+
+  - name: "$recset_contains handles multiple recsets in one scan"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define tenant1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl
+          '("active")
+          (lambda (active) (equal? active 1))))
+        (define sum_ids
+          (scan nil tbl
+            '("$recset_contains" "$recset_contains")
+            (lambda (in_tenant1 in_active) (and (in_tenant1 tenant1) (in_active active)))
+            '("id")
+            (lambda (id) id)
+            (lambda (acc id) (+ acc id))
+            0))
+        (if (equal? sum_ids 6)
+          "ok"
+          (error "$recset_contains did not switch between recset handles")))
+
+  - name: "$recset_contains is table-scoped"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "recset_items"))
+        (define other (table "memcp-tests" "recset_other"))
+        (define rs (scan_recset nil source
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define matches
+          (scan nil other
+            '("$recset_contains")
+            (lambda (in_recset) (if (in_recset rs) true false))
+            '("id")
+            (lambda (id) 1)
+            (lambda (acc one) (+ acc one))
+            0))
+        (if (equal? matches 0)
+          "ok"
+          (error "$recset_contains matched a different table")))
+
+  - name: "scan_exists accepts recset as table-like source"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (if (and
+              (scan_exists nil rs
+                '("active")
+                (lambda (active) (equal? active 0)))
+              (not (scan_exists nil rs
+                '("id")
+                (lambda (id) (equal? id 3)))))
+          "ok"
+          (error "scan_exists over recset returned wrong result")))
+
+  - name: "scan_order accepts recset as table-like source"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define ordered
+          (scan_order nil rs
+            '("active")
+            (lambda (active) true)
+            '("id") '(<)
+            0 0 2
+            '("id")
+            (lambda (id) (list id))
+            (lambda (acc row) (append acc row))
+            '()
+            false))
+        (if (equal? ordered (list (list 1) (list 2)))
+          "ok"
+          (error "scan_order over recset returned wrong order")))
+
+  - name: "scan_order_multi accepts recset branches"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define rs2 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 2))))
+        (define ordered
+          (scan_order_multi nil
+            (list rs1 rs2)
+            (list (list "active") (list "active"))
+            (list
+              (lambda (active) (equal? active 1))
+              (lambda (active) (equal? active 1)))
+            (list (list "id") (list "id"))
+            '(<)
+            nil nil
+            0 0 10
+            (list (list "id") (list "id"))
+            (list
+              (lambda (id) (list id))
+              (lambda (id) (list id)))
+            (lambda (acc row) (append acc row))
+            '()
+            false))
+        (if (equal? ordered (list (list 1) (list 3) (list 5)))
+          "ok"
+          (error "scan_order_multi over recsets returned wrong order")))
+
+  - name: "show forwards recset to base table metadata"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (if (and
+              (equal? (show rs) (show tbl))
+              (equal? (show rs true) (show tbl true))
+              (equal? (show rs "statistics") (show tbl "statistics")))
+          "ok"
+          (error "show did not forward recset to base table")))
+
+  - name: "recset scan rejects mutation callbacks"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (scan nil rs
+          '()
+          (lambda () true)
+          '("$update")
+          (lambda (update) (update))
+          (lambda (acc ignored) acc)
+          nil))
+    expect:
+      error: true
