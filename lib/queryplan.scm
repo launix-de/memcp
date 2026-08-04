@@ -2611,15 +2611,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(map_assoc (coalesceNil fields '()) (lambda (_title expr)
 				(list (quote if) (list (quote nil?) presence) nil expr)))))))
 
-(define combine_where (lambda (a b)
+(define literal_true? (lambda (expr)
+	(match expr
+		true true
+		_ false)))
+
+(define build_and_terms (lambda (terms)
 	(begin
-		(define aa (coalesceNil a true))
-		(define bb (coalesceNil b true))
-		(if (equal? aa true)
-			bb
-			(if (equal? bb true)
-				aa
-				(list (quote and) aa bb))))))
+		(define filtered (filter (coalesceNil terms '()) (lambda (term) (not (literal_true? (coalesceNil term true))))))
+		(if (empty_list? filtered)
+			true
+			(if (single_source? filtered)
+				(car filtered)
+				(cons (quote and) filtered))))))
+
+(define combine_where (lambda (a b)
+	(combine_where_terms (list a b) true)))
 
 (define derived_block_needs_operator? (lambda (block)
 	(or (not (empty_list? (qb_group block)))
@@ -2758,7 +2765,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 ))))))
 
 (define combine_where_terms (lambda (terms seed)
-	(reduce (coalesceNil terms '()) combine_where seed)))
+	(build_and_terms (merge (list
+		(split_and_terms (coalesceNil seed true))
+		(merge (map (coalesceNil terms '()) (lambda (term) (split_and_terms (coalesceNil term true))))))))))
 
 (define untangle_source (lambda (src ctx)
 	(begin
@@ -3377,19 +3386,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote not) _expr) true
 		_ false)))
 
-(define positive_condition_refs_source? (lambda (default_alias alias condition)
-	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
-		(or found
-			(and (not (negated_term? term))
-				(expr_refs_alias_after_group? default_alias alias term))))
-		false)))
+(define exists_recset_probe_term? (lambda (alias term)
+	(match term
+		((symbol >) ((symbol coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		((symbol >) ((quote coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		((symbol >) ((symbol coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		((symbol >) ((quote coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		((quote >) ((symbol coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		((quote >) ((quote coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		((quote >) ((symbol coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		((quote >) ((quote coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) 0) 0)
+		(equal? tblvar alias)
+		_ false)))
+
+(define condition_has_exists_recset_probe? (lambda (alias condition)
+	(match condition
+		(cons head tail) (or
+			(exists_recset_probe_term? alias condition)
+			(reduce tail (lambda (found item) (or found (condition_has_exists_recset_probe? alias item))) false))
+		_ false)))
+
+(define rewrite_exists_recset_probe_refs (lambda (alias stage probe expr)
+	(if (exists_recset_probe_term? alias expr)
+		(driver_membership_probe_expr stage probe)
+		(match expr
+			(cons head tail) (cons head (map tail (lambda (item) (rewrite_exists_recset_probe_refs alias stage probe item))))
+			_ expr))))
 
 (define first_exists_recset_source (lambda (stages sources default_alias condition)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(if (not (nil? found))
 			found
 			(if (and (exists_recset_stage_output_source? stages src)
-				(positive_condition_refs_source? default_alias (source_alias src) condition))
+				(condition_has_exists_recset_probe? (source_alias src) condition))
 				src
 				nil)))
 		nil)))
@@ -3476,16 +3512,17 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation exists_src))))
 						(define stage_id (gs_id stage))
 						(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-						(define base_where (strip_condition_for_source_alias
-							default_alias
+						(define base_where (rewrite_exists_recset_probe_refs
 							(source_alias exists_src)
+							stage
+							probe
 							(qb_where block)))
 						(query_block_with_reorder_facts
 							(make_query_block
 								(qb_schema block)
 								(without_source_alias sources (source_alias exists_src))
 								(qb_fields block)
-								(combine_where base_where (driver_membership_probe_expr stage probe))
+								base_where
 								(qb_group block)
 								(qb_having block)
 								(qb_order block)
@@ -3785,6 +3822,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define extract_columns_for_alias (lambda (src expr)
 	(match expr
+		((symbol driver_membership_probe) _stage probe)
+		(extract_columns_for_alias src probe)
+		((quote driver_membership_probe) _stage probe)
+		(extract_columns_for_alias src probe)
 		((symbol dml_driver_membership_probe) _fallback_schema _stage probe)
 		(extract_columns_for_alias src probe)
 		((quote dml_driver_membership_probe) _fallback_schema _stage probe)
@@ -3801,6 +3842,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_alias (lambda (src expr)
 	(match expr
+		((symbol driver_membership_probe) stage probe)
+		(lower_driver_membership_probe_expr (list src) (source_alias src) stage probe)
+		((quote driver_membership_probe) stage probe)
+		(lower_driver_membership_probe_expr (list src) (source_alias src) stage probe)
 		((symbol dml_driver_membership_probe) fallback_schema stage probe)
 		(lower_dml_driver_membership_probe_expr (list src) (source_alias src) fallback_schema stage probe)
 		((quote dml_driver_membership_probe) fallback_schema stage probe)
@@ -4139,13 +4184,42 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define lower_driver_membership_probe_expr (lambda (sources default_alias stage probe)
 	(begin
 		(define input (gs_input stage))
-		(if (not (union_block? input))
-			(neumann_fail "build_queryplan" "driver membership probe currently expects UNION candidate input")
-			true)
-		(list (quote >)
-			(cons (quote +) (map (union_branches input) (lambda (branch)
-				(driver_membership_probe_branch_expr sources default_alias branch probe))))
-			0))))
+		(if (union_block? input)
+			(list (quote >)
+				(cons (quote +) (map (union_branches input) (lambda (branch)
+					(driver_membership_probe_branch_expr sources default_alias branch probe))))
+				0)
+			(begin
+				(define input_src (if (query_block? input)
+					(if (single_source? (qb_sources input)) (car (qb_sources input)) nil)
+					input))
+				(if (or (nil? input_src) (not (source_is_base_table? input_src)))
+					(neumann_fail "build_queryplan" "driver membership probe expects UNION or simple base-table input")
+					true)
+				(define keys (gs_keys stage))
+				(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+				(if (not (equal? (count keys) (count lookup_keys)))
+					(neumann_fail "build_queryplan" "driver membership probe key/domain mismatch")
+					true)
+				(define condition (if (query_block? input)
+					(combine_where (qb_where input) (source_join_expr input_src))
+					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+				(define key_terms (map (produceN (count keys)) (lambda (i)
+					(list (quote equal??)
+						(lower_column_expr_for_alias input_src (nth keys i))
+						(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
+				(define filtercols (merge_unique (list
+					(extract_columns_for_alias input_src condition)
+					(merge_unique (map keys (lambda (key) (extract_columns_for_alias input_src key)))))))
+				(list (quote scan_exists)
+					'(session "__memcp_tx")
+					(source_table_expr input_src)
+					(cons (quote list) filtercols)
+					(list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
+						(list (quote optimize)
+							(cons (quote and)
+								(cons (lower_column_expr_for_alias input_src condition) key_terms)))))))))))
 
 (define lower_dml_driver_membership_probe_expr (lambda (sources default_alias fallback_schema stage _probe)
 	(begin
