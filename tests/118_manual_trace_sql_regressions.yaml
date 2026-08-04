@@ -18,6 +18,10 @@ metadata:
   description: "Anonymized SQL regressions captured from manual trace output"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trace_config"
+  - sql: "DROP TABLE IF EXISTS trace_doc"
+  - sql: "DROP TABLE IF EXISTS trace_revision"
+  - sql: "DROP TABLE IF EXISTS trace_file"
   - sql: "DROP TABLE IF EXISTS trace_item"
   - sql: "DROP TABLE IF EXISTS trace_group"
   - sql: "DROP TABLE IF EXISTS trace_box"
@@ -72,6 +76,45 @@ setup:
   - sql: "INSERT INTO trace_folder (id, box_id, name) VALUES (1001, 100, 'inbox'), (1002, 100, 'archive'), (2001, 200, 'other')"
   - sql: "INSERT INTO trace_message (id, box_id, folder_id, seen) VALUES (1, 100, 1001, FALSE), (2, 100, 1002, TRUE), (3, 200, 2001, FALSE)"
   - sql: "INSERT INTO trace_share (id, box_id, owner_id) VALUES (1, 100, 7)"
+  - sql: |
+      CREATE TABLE trace_config (
+        id INT PRIMARY KEY,
+        default_type INT
+      )
+  - sql: |
+      CREATE TABLE trace_doc (
+        id INT PRIMARY KEY,
+        type INT,
+        archived BOOL,
+        parent INT
+      )
+  - sql: |
+      CREATE TABLE trace_revision (
+        id INT PRIMARY KEY,
+        doc_id INT,
+        file_id INT,
+        created INT
+      )
+  - sql: |
+      CREATE TABLE trace_file (
+        id INT PRIMARY KEY,
+        filename VARCHAR(64),
+        mime VARCHAR(64)
+      )
+  - sql: "INSERT INTO trace_config (id, default_type) VALUES (1, 10)"
+  - sql: "INSERT INTO trace_file (id, filename, mime) VALUES (1, 'one.txt', 'text/plain'), (2, 'two.pdf', 'application/pdf')"
+  - sql: "INSERT INTO trace_doc (id, type, archived, parent) VALUES (1, 10, FALSE, NULL)"
+  - sql: "INSERT INTO trace_doc SELECT id + 1, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 2, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 4, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 8, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 16, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 32, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 64, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 128, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 256, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 512, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_revision SELECT id, id, CASE WHEN id % 2 = 0 THEN 2 ELSE 1 END, id FROM trace_doc"
 
 test_cases:
   - name: "ORDER BY RAND supports filtered table scan with IN subquery"
@@ -136,9 +179,60 @@ test_cases:
           label: "inbox"
           kind: "folder"
           item_id: 1001
-          unseen: 0
+          unseen: 1
+
+  - name: "Derived doc list applies outer ID filter before expensive projection"
+    max_time: 2.2
+    max_plan_size: 60000
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT
+          CASE
+            WHEN (
+              (((SELECT default_type FROM trace_config WHERE id = 1 LIMIT 1) IS NULL) AND d.type IS NULL)
+              OR d.type = (SELECT default_type FROM trace_config WHERE id = 1 LIMIT 1)
+            )
+            THEN '#hit'
+            ELSE NULL
+          END AS color,
+          d.id AS id,
+          d.archived AS archived,
+          (SELECT r.file_id FROM trace_revision r WHERE r.doc_id = d.id ORDER BY r.created DESC, r.id DESC LIMIT 1) AS file_id,
+          (SELECT f.filename FROM trace_file f WHERE f.id = (
+            SELECT r.file_id FROM trace_revision r WHERE r.doc_id = d.id ORDER BY r.created DESC, r.id DESC LIMIT 1
+          ) LIMIT 1) AS filename,
+          (SELECT MIN(r.created) FROM trace_revision r WHERE r.doc_id = d.id LIMIT 1) AS first_seen,
+          (SELECT MAX(r.created) FROM trace_revision r WHERE r.doc_id = d.id LIMIT 1) AS last_seen,
+          EXISTS (
+            SELECT TRUE
+            FROM trace_revision r
+            WHERE r.doc_id = d.id
+              AND (SELECT f.mime FROM trace_file f WHERE f.id = r.file_id LIMIT 1) = 'application/pdf'
+            LIMIT 1
+          ) AS has_pdf
+        FROM trace_doc d
+      ) t
+      WHERE t.id IN (1)
+        AND (t.archived IS NULL OR t.archived IN (FALSE))
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - color: "#hit"
+          id: 1
+          archived: false
+          file_id: 1
+          filename: "one.txt"
+          first_seen: 1
+          last_seen: 1
+          has_pdf: false
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_config"
+  - sql: "DROP TABLE IF EXISTS trace_doc"
+  - sql: "DROP TABLE IF EXISTS trace_revision"
+  - sql: "DROP TABLE IF EXISTS trace_file"
   - sql: "DROP TABLE IF EXISTS trace_item"
   - sql: "DROP TABLE IF EXISTS trace_group"
   - sql: "DROP TABLE IF EXISTS trace_box"
