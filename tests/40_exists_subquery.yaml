@@ -80,6 +80,24 @@ test_cases:
         - ID: 1
           name: "Alice"
 
+  - name: "EXPLAIN correlated EXISTS can use RecSet projection carrier"
+    sql: |
+      EXPLAIN SELECT ID, name FROM exists_customers c
+      WHERE EXISTS (
+        SELECT 1 FROM exists_orders o
+        WHERE o.customer_id = c.ID
+          AND o.total > 150
+      )
+      ORDER BY ID
+    expect:
+      contains:
+        - "recset_project_join"
+        - "scan_recset"
+      not_contains:
+        - "exists_probe"
+        - "driver_membership_probe"
+        - "touch_keytable"
+
   - name: "Optimizer rewrites generated EXISTS scan pattern to scan_exists"
     scm: |
       (begin

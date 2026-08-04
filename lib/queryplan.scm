@@ -3316,11 +3316,48 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(and (not (nil? stage))
 				(equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_candidate)))))))
 
+(define exists_recset_stage? (lambda (stage)
+	(and (group_stage? stage)
+		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
+			(and (equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
+				(and (single_source? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+					(and (single_source? (gs_keys stage))
+						(source_is_base_table? (gs_input stage)))))))))
+
+(define exists_recset_stage_output_source? (lambda (stages src)
+	(and (stage_output_relation? (source_relation src))
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(exists_recset_stage? stage)))))
+
 (define first_candidate_source (lambda (stages sources)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(if (not (nil? found))
 			found
 			(if (candidate_stage_output_source? stages src) src nil)))
+		nil)))
+
+(define negated_term? (lambda (term)
+	(match term
+		((symbol not) _expr) true
+		((quote not) _expr) true
+		_ false)))
+
+(define positive_condition_refs_source? (lambda (default_alias alias condition)
+	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
+		(or found
+			(and (not (negated_term? term))
+				(expr_refs_alias_after_group? default_alias alias term))))
+		false)))
+
+(define first_exists_recset_source (lambda (stages sources default_alias condition)
+	(reduce (coalesceNil sources '()) (lambda (found src)
+		(if (not (nil? found))
+			found
+			(if (and (exists_recset_stage_output_source? stages src)
+				(positive_condition_refs_source? default_alias (source_alias src) condition))
+				src
+				nil)))
 		nil)))
 
 (define without_source_alias (lambda (sources alias)
@@ -3334,6 +3371,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (source_with_join_expr src (combine_where (source_join_expr src) condition)) rest)
 			(cons src (attach_candidate_join_condition default_alias candidate_alias condition rest)))
 		_ '())))
+
+(define strip_condition_for_source_alias (lambda (default_alias alias condition)
+	(combine_where_terms
+		(filter (split_and_terms (coalesceNil condition true)) (lambda (term)
+			(not (expr_refs_alias_after_group? default_alias alias term))))
+		true)))
 
 (define reorder_candidate_sources (lambda (stages sources)
 	(begin
@@ -3359,23 +3402,52 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define sources (qb_sources block))
 		(define candidate (first_candidate_source (qb_stages block) sources))
 		(if (nil? candidate)
-			(if (query_block_needs_reorder_facts? block)
-				(query_block_with_reorder_facts
-					(make_query_block
-						(qb_schema block)
-						(qb_sources block)
-						(qb_fields block)
-						(qb_where block)
-						(qb_group block)
-						(qb_having block)
-						(qb_order block)
-						(qb_limit block)
-						(qb_offset block)
-						(qb_hidden block)
-						(map (qb_stages block) join_reorder_stage)
-						(qb_facts block))
-					(query_block_reorder_telemetry block))
-				block)
+			(begin
+				(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
+				(define exists_src (first_exists_recset_source (qb_stages block) sources default_alias (qb_where block)))
+				(if (nil? exists_src)
+					(if (query_block_needs_reorder_facts? block)
+						(query_block_with_reorder_facts
+							(make_query_block
+								(qb_schema block)
+								(qb_sources block)
+								(qb_fields block)
+								(qb_where block)
+								(qb_group block)
+								(qb_having block)
+								(qb_order block)
+								(qb_limit block)
+								(qb_offset block)
+								(qb_hidden block)
+								(map (qb_stages block) join_reorder_stage)
+								(qb_facts block))
+							(query_block_reorder_telemetry block))
+						block)
+					(begin
+						(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation exists_src))))
+						(define stage_id (gs_id stage))
+						(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+						(define base_where (strip_condition_for_source_alias
+							default_alias
+							(source_alias exists_src)
+							(qb_where block)))
+						(query_block_with_reorder_facts
+							(make_query_block
+								(qb_schema block)
+								(without_source_alias sources (source_alias exists_src))
+								(qb_fields block)
+								(combine_where base_where (driver_membership_probe_expr stage probe))
+								(qb_group block)
+								(qb_having block)
+								(qb_order block)
+								(qb_limit block)
+								(qb_offset block)
+								(qb_hidden block)
+								(map (candidate_stage_without_source (qb_stages block) stage_id) join_reorder_stage)
+								(qb_facts block))
+							(merge (list
+								(query_block_reorder_telemetry block)
+								(list (list (quote exists_plan_strategy) (quote recset_project_join)))))))))
 			(begin
 				(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
 				(define strategy (candidate_reorder_strategy stage sources block))
@@ -4063,14 +4135,35 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define stage (nth membership 0))
 		(define target_col (nth membership 2))
 		(define input (gs_input stage))
-		(if (not (union_block? input))
-			nil
+		(if (union_block? input)
 			(begin
 				(define projected (map (union_branches input) (lambda (branch)
 					(recset_project_join_branch_expr src branch target_col))))
 				(if (single_source? projected)
 					(car projected)
-					(list (quote recset_union) (cons (quote list) projected))))))))
+					(list (quote recset_union) (cons (quote list) projected))))
+			(if (exists_recset_stage? stage)
+				(begin
+					(define source_col (direct_column_name_for_alias input (car (gs_keys stage))))
+					(if (nil? source_col)
+						nil
+						(begin
+							(define alias (source_alias input))
+							(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+							(define filtercols (extract_columns_for_alias input condition))
+							(list (quote recset_project_join)
+								'(session "__memcp_tx")
+								(list (quote scan_recset)
+									'(session "__memcp_tx")
+									(source_table_expr input)
+									(cons (quote list) filtercols)
+									(list (quote lambda)
+										(map filtercols (lambda (col) (symbol (concat alias "." col))))
+										(list (quote optimize) (lower_column_expr_for_alias input condition))))
+								(quoted_runtime_list (list source_col))
+								(source_table_expr src)
+								(quoted_runtime_list (list target_col))))))
+				nil)))))
 
 (define lower_scalar_marker_expr (lambda (expr)
 	(match expr
@@ -5966,21 +6059,24 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if (direct_base_group_stage_supported? block group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_offset block) (qb_limit block))
 					(lower_group_stage group_stage)))
-			(begin
-				(define alias (source_alias src))
-				(define condition (combine_where (qb_where block) (source_join_expr src)))
-				(define order_items (coalesceNil (qb_order block) '()))
-				(define scan_order_supported (order_items_belong_to_source? src order_items))
-				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
-				(define filtercols (extract_columns_for_alias src condition))
-				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
-					(extract_columns_for_alias src expr)))))
-				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
-				(define mapcols (merge_unique (list filtercols fieldcols)))
-				(define table_expr (source_table_expr src))
-				(define filter_expr (list (quote lambda)
-					(map filtercols (lambda (col) (symbol (concat alias "." col))))
-					(list (quote optimize) (lower_column_expr_for_alias src condition))))
+				(begin
+					(define alias (source_alias src))
+					(define condition (combine_where (qb_where block) (source_join_expr src)))
+					(define membership (driver_membership_for_source src condition))
+					(define membership_table_expr (if (nil? membership) nil (recset_project_join_expr_for_membership src membership)))
+					(define effective_condition (strip_driver_membership_for_source src condition membership))
+					(define order_items (coalesceNil (qb_order block) '()))
+					(define scan_order_supported (order_items_belong_to_source? src order_items))
+					(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
+					(define filtercols (extract_columns_for_alias src effective_condition))
+					(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
+						(extract_columns_for_alias src expr)))))
+					(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
+					(define mapcols (merge_unique (list filtercols fieldcols)))
+					(define table_expr (coalesceNil membership_table_expr (source_table_expr src)))
+					(define filter_expr (list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat alias "." col))))
+						(list (quote optimize) (lower_column_expr_for_alias src effective_condition))))
 				(define map_expr (list (quote lambda)
 					(map mapcols (lambda (col) (symbol (concat alias "." col))))
 					(list (quote resultrow)
@@ -6021,10 +6117,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(qb_sources block)
 								alias
 								(merge (list
-									(extract_assoc fields (lambda (_title expr) expr))
-									(list condition)
-									(order_exprs order_items)))
-								condition
+										(extract_assoc fields (lambda (_title expr) expr))
+										(list effective_condition)
+										(order_exprs order_items)))
+									effective_condition
 								(lower_join_result_row_assoc (qb_sources block) alias fields order_items)
 								'()
 								0
