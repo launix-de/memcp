@@ -679,12 +679,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
-		(list
-			(source_alias src)
-			(source_schema src)
-			(source_relation src)
-			false
-			(combine_where_terms local_terms true)))))
+			(list
+				(source_alias src)
+				(source_schema src)
+				(source_relation src)
+				(source_outer? src)
+				(combine_where_terms local_terms true)))))
 
 (define sources_without_outer_join_terms (lambda (inner_default inner_aliases outer_aliases sources)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -1061,14 +1061,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
-			stage_alias
-			(group_stage_schema stage)
-			(make_stage_output_relation stage_id)
-			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+				stage_alias
+				(group_stage_schema stage)
+				(make_stage_output_relation stage_id)
+				(stage_source_outer? outer_sources)
+				(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(list
-			(list (quote >) (list (quote get_column) stage_alias false count_col false) 0)
+			(list (quote >)
+				(list (quote coalesceNil)
+					(list (quote get_column) stage_alias false count_col false)
+					0)
+				0)
 			(list stage)
 			(list source)))))
 
@@ -2175,9 +2179,17 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define inner (untangle_query normalized sub_ctx))
 		(if (union_block? inner)
 			(make_exists_union_stage_rewrite inner (list outer_sources subquery))
-			(if (query_block_no_from? inner)
-				(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
-				(make_exists_stage_rewrite inner (list outer_sources subquery)))))))
+				(if (query_block_no_from? inner)
+					(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
+					(make_exists_stage_rewrite inner (list outer_sources subquery)))))))
+
+(define untangle_not_exists_subquery_with_stages (lambda (subquery outer_sources ctx)
+	(begin
+		(define rewritten (untangle_exists_subquery_with_stages subquery outer_sources ctx))
+		(list
+			(list (quote not) (nth rewritten 0))
+			(nth rewritten 1)
+			(nth rewritten 2)))))
 
 (define untangle_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
 	(begin
@@ -2277,12 +2289,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
 			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
 			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
-		((quote inner_select_in) probe subquery)
-		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
-			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
-		((symbol not) ((symbol inner_select_in) probe subquery))
-		(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
+			((quote inner_select_in) probe subquery)
+			(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+				(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
+				(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
+			((symbol not) ((symbol inner_select_exists) subquery))
+			(untangle_not_exists_subquery_with_stages subquery outer_sources ctx)
+			((quote not) ((quote inner_select_exists) subquery))
+			(untangle_not_exists_subquery_with_stages subquery outer_sources ctx)
+			((symbol not) ((quote inner_select_exists) subquery))
+			(untangle_not_exists_subquery_with_stages subquery outer_sources ctx)
+			((quote not) ((symbol inner_select_exists) subquery))
+			(untangle_not_exists_subquery_with_stages subquery outer_sources ctx)
+			((symbol not) ((symbol inner_select_in) probe subquery))
+			(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
 		((quote not) ((quote inner_select_in) probe subquery))
 		(untangle_not_in_subquery_with_stages probe subquery outer_sources ctx)
 		((symbol not) ((quote inner_select_in) probe subquery))

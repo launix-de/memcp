@@ -207,6 +207,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	(define psql_expression5 (parser (or
+		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
 		(parser '((atom "NOT" true) (define expr psql_expression6)) '('not expr))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr psql_expression6)) '((quote -) 0 expr))
