@@ -474,20 +474,49 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			if len(sortcols) > 0 {
 				wg.Add(1)
 				go func(parts []recSetShard) {
-					defer wg.Done()
-					defer func() {
-						if r := recover(); r != nil {
-							q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
+					withTxSession(currentTx, func() scm.Scmer {
+						defer wg.Done()
+						defer func() {
+							if r := recover(); r != nil {
+								q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
+							}
+						}()
+						for _, part := range parts {
+							if part.count == 0 {
+								continue
+							}
+							if ss != nil && ss.IsKilledSeq(querySeq) {
+								panic("query killed")
+							}
+							func(part recSetShard) {
+								defer func() {
+									if r := recover(); r != nil {
+										q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
+									}
+								}()
+								res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, querySeq)
+								res.callbackCols = callbackCols
+								res.callback = callback
+								res.tableIdx = tableIdx
+								q_ <- scanOrderResult{res: res, inputCount: part.count, scanCount: int64(len(res.items))}
+							}(part)
 						}
-					}()
-					for _, part := range parts {
-						if part.count == 0 {
-							continue
-						}
-						if ss != nil && ss.IsKilledSeq(querySeq) {
-							panic("query killed")
-						}
-						func(part recSetShard) {
+						return scm.NewNil()
+					})
+				}(spec.recset.shards)
+			} else {
+				for i := range spec.recset.shards {
+					part := spec.recset.shards[i]
+					if part.count == 0 {
+						continue
+					}
+					wg.Add(1)
+					go func(part recSetShard) {
+						withTxSession(currentTx, func() scm.Scmer {
+							defer wg.Done()
+							if ss != nil && ss.IsKilledSeq(querySeq) {
+								panic("query killed")
+							}
 							defer func() {
 								if r := recover(); r != nil {
 									q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
@@ -498,31 +527,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 							res.callback = callback
 							res.tableIdx = tableIdx
 							q_ <- scanOrderResult{res: res, inputCount: part.count, scanCount: int64(len(res.items))}
-						}(part)
-					}
-				}(spec.recset.shards)
-			} else {
-				for i := range spec.recset.shards {
-					part := spec.recset.shards[i]
-					if part.count == 0 {
-						continue
-					}
-					wg.Add(1)
-					go func(part recSetShard) {
-						defer wg.Done()
-						if ss != nil && ss.IsKilledSeq(querySeq) {
-							panic("query killed")
-						}
-						defer func() {
-							if r := recover(); r != nil {
-								q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
-							}
-						}()
-						res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, querySeq)
-						res.callbackCols = callbackCols
-						res.callback = callback
-						res.tableIdx = tableIdx
-						q_ <- scanOrderResult{res: res, inputCount: part.count, scanCount: int64(len(res.items))}
+							return scm.NewNil()
+						})
 					}(part)
 				}
 			}

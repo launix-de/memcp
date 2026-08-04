@@ -187,17 +187,20 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 
 	values := make(chan recSetBuildResult, t.recSetShardResultBufferSize())
 	done := t.iterateShardsParallel(boundaries, func(shard *storageShard, solo bool) {
-		if ss != nil && ss.IsKilled() {
-			panic("query killed")
-		}
-		defer func() {
-			if rec := recover(); rec != nil {
-				values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+		withTxSession(currentTx, func() scm.Scmer {
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
 			}
-		}()
-		values <- recSetBuildResult{
-			part: shard.collectRecSet(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss),
-		}
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			values <- recSetBuildResult{
+				part: shard.collectRecSet(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss),
+			}
+			return scm.NewNil()
+		})
 	})
 	if done == nil {
 		close(values)
@@ -348,12 +351,15 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 		}
 		closeAfter++
 		go func(part recSetShard) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					values <- recSetKeyResult{err: scanError{rec, string(debug.Stack())}}
-				}
-			}()
-			values <- recSetKeyResult{keys: part.shard.collectProjectJoinKeys(part.recids, sourceKeyCols, currentTx, ss)}
+			withTxSession(currentTx, func() scm.Scmer {
+				defer func() {
+					if rec := recover(); rec != nil {
+						values <- recSetKeyResult{err: scanError{rec, string(debug.Stack())}}
+					}
+				}()
+				values <- recSetKeyResult{keys: part.shard.collectProjectJoinKeys(part.recids, sourceKeyCols, currentTx, ss)}
+				return scm.NewNil()
+			})
 		}(part)
 	}
 	keys := make([][]scm.Scmer, 0, r.count)
@@ -471,12 +477,15 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 	}
 	values := make(chan targetPartResult, t.recSetShardResultBufferSize())
 	done := t.iterateShardsParallel(nil, func(shard *storageShard, solo bool) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				values <- targetPartResult{err: scanError{rec, string(debug.Stack())}}
-			}
-		}()
-		values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss)}
+		withTxSession(currentTx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- targetPartResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss)}
+			return scm.NewNil()
+		})
 	})
 	if done == nil {
 		close(values)
@@ -633,13 +642,16 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 			continue
 		}
 		go func(part recSetShard) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					values <- scanResult{err: scanError{rec, string(debug.Stack())}}
-				}
-			}()
-			res, cnt := part.shard.scanRecSetPart(part.recids, conditionCols, condition, callbackCols, callback, aggregate, neutral, currentTx, ss)
-			values <- scanResult{res: res, outCount: cnt, inputCount: part.count}
+			withTxSession(currentTx, func() scm.Scmer {
+				defer func() {
+					if rec := recover(); rec != nil {
+						values <- scanResult{err: scanError{rec, string(debug.Stack())}}
+					}
+				}()
+				res, cnt := part.shard.scanRecSetPart(part.recids, conditionCols, condition, callbackCols, callback, aggregate, neutral, currentTx, ss)
+				values <- scanResult{res: res, outCount: cnt, inputCount: part.count}
+				return scm.NewNil()
+			})
 		}(rsShard)
 	}
 	closeAfter := 0
@@ -734,16 +746,19 @@ func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condit
 		}
 		closeAfter++
 		go func(part recSetShard) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					values <- existsResult{err: scanError{rec, string(debug.Stack())}}
+			withTxSession(currentTx, func() scm.Scmer {
+				defer func() {
+					if rec := recover(); rec != nil {
+						values <- existsResult{err: scanError{rec, string(debug.Stack())}}
+					}
+				}()
+				found := part.shard.recSetPartExists(part.recids, conditionCols, conditionFn, currentTx, ss, &stop)
+				if found {
+					stop.Store(true)
 				}
-			}()
-			found := part.shard.recSetPartExists(part.recids, conditionCols, conditionFn, currentTx, ss, &stop)
-			if found {
-				stop.Store(true)
-			}
-			values <- existsResult{found: found}
+				values <- existsResult{found: found}
+				return scm.NewNil()
+			})
 		}(*part)
 	}
 	var existsErr scanError

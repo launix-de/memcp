@@ -1599,6 +1599,15 @@ func (m *ShardMapReducer) checkKilled() {
 	}
 }
 
+func withTxSession(currentTx *TxContext, fn func() scm.Scmer) scm.Scmer {
+	if currentTx == nil || currentTx.Session.IsNil() {
+		return fn()
+	}
+	return scm.WithSession(currentTx.Session, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		return fn()
+	}))
+}
+
 // Stream applies map+reduce over a batch of record IDs. The recid list is
 // partitioned order-preserving into runs of main-storage IDs and delta IDs.
 // batchids is optional and, when present, must align 1:1 with recids.
