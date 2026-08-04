@@ -11,6 +11,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS recset_items"
   - sql: "DROP TABLE IF EXISTS recset_other"
+  - sql: "DROP TABLE IF EXISTS recset_link"
   - sql: |
       CREATE TABLE recset_items (
         id INT PRIMARY KEY,
@@ -20,6 +21,12 @@ setup:
   - sql: |
       CREATE TABLE recset_other (
         id INT PRIMARY KEY,
+        tenant INT
+      )
+  - sql: |
+      CREATE TABLE recset_link (
+        id INT PRIMARY KEY,
+        item_id INT,
         tenant INT
       )
   - sql: |
@@ -33,8 +40,16 @@ setup:
       INSERT INTO recset_other VALUES
         (1, 1),
         (2, 1)
+  - sql: |
+      INSERT INTO recset_link VALUES
+        (1, 1, 1),
+        (2, 5, 1),
+        (3, 1, 1),
+        (4, 3, 2),
+        (5, NULL, 1)
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS recset_link"
   - sql: "DROP TABLE IF EXISTS recset_other"
   - sql: "DROP TABLE IF EXISTS recset_items"
 
@@ -200,6 +215,78 @@ test_cases:
         (if (equal? ordered (list (list 1) (list 3) (list 5)))
           "ok"
           (error "scan_order_multi over recsets returned wrong order")))
+
+  - name: "recset_project_join projects source keys to target recids"
+    scm: |
+      (begin
+        (define links (table "memcp-tests" "recset_link"))
+        (define items (table "memcp-tests" "recset_items"))
+        (define link_rs (scan_recset nil links
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define item_rs (recset_project_join nil link_rs '("item_id") items '("id")))
+        (define sum_ids
+          (scan nil item_rs
+            '()
+            (lambda () true)
+            '("id")
+            (lambda (id) id)
+            (lambda (acc id) (+ acc id))
+            0))
+        (if (and
+              (equal? (recset_count item_rs) 2)
+              (equal? sum_ids 6))
+          "ok"
+          (error "recset_project_join returned wrong target recset")))
+
+  - name: "recset_project_join output can be ordered"
+    scm: |
+      (begin
+        (define links (table "memcp-tests" "recset_link"))
+        (define items (table "memcp-tests" "recset_items"))
+        (define link_rs (scan_recset nil links
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define item_rs (recset_project_join nil link_rs '("item_id") items '("id")))
+        (define ordered
+          (scan_order nil item_rs
+            '()
+            (lambda () true)
+            '("id") '(<)
+            0 0 10
+            '("id" "active")
+            (lambda (id active) (list (list id active)))
+            (lambda (acc row) (append acc row))
+            '()
+            false))
+        (if (equal? ordered (list (list (list 1 1)) (list (list 5 1))))
+          "ok"
+          (error "recset_project_join output did not scan_order correctly")))
+
+  - name: "recset_union combines same-table recsets without duplicates"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define tenant1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl
+          '("active")
+          (lambda (active) (equal? active 1))))
+        (define combined (recset_union (list tenant1 active)))
+        (define sum_ids
+          (scan nil combined
+            '()
+            (lambda () true)
+            '("id")
+            (lambda (id) id)
+            (lambda (acc id) (+ acc id))
+            0))
+        (if (and
+              (equal? (recset_count combined) 4)
+              (equal? sum_ids 11))
+          "ok"
+          (error "recset_union returned wrong row set")))
 
   - name: "show forwards recset to base table metadata"
     scm: |

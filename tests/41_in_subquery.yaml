@@ -497,24 +497,20 @@ test_cases:
             - "in_candidate"
             - "candidate"
             - "membership_plan_strategy"
-            - "candidate_keyset"
+            - "driver_order_membership_probe"
             - "membership_selectivity_class"
             - "selective"
             - "membership_driver_rows"
             - "membership_candidate_input_rows"
             - "membership_cost_reason"
-            - "selective_membership_build_candidate_keyset"
             - "source_estimates"
             - "group_stage_strategy"
             - "group_plan_options"
-            - "stage-output"
             - "lookup-keys"
           not_contains:
             - "inner_select"
             - "dependent-subquery"
             - "in_membership"
-            - "driver_order_membership_probe"
-            - "driver_membership_probe"
             - ".grp:"
             - "touch_keytable"
       - sql: |
@@ -534,11 +530,13 @@ test_cases:
           LIMIT 10
         expect:
           contains:
-            - "scan"
+            - "recset_project_join"
+            - "scan_order"
           not_contains:
             - "driver_membership_probe"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
+            - "touch_keytable"
       - sql: |
           EXPLAIN REORDER
           SELECT t.ID

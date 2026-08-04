@@ -3261,8 +3261,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(or estimate_ratio_broad
 				(and (nil? candidate_estimate) (candidate_stage_broad? stage)))))
 		(if (and (not (nil? driver))
-			(and broad
-				(source_order_limit_driver? driver (qb_order block) (qb_limit block))))
+			(source_order_limit_driver? driver (qb_order block) (qb_limit block)))
 			(quote driver_order_membership_probe)
 			(quote candidate_keyset)))))
 
@@ -3960,6 +3959,98 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (quote +) (map (union_branches input) (lambda (branch)
 				(driver_membership_probe_branch_expr sources default_alias branch probe))))
 			0))))
+
+(define direct_column_name_for_alias (lambda (src expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			(resolve_physical_column_name src col col_ignorecase)
+			nil)
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (direct_column_name_for_alias src (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		_ nil)))
+
+(define driver_membership_probe_term (lambda (expr)
+	(match expr
+		((symbol driver_membership_probe) stage probe) (list stage probe)
+		((quote driver_membership_probe) stage probe) (list stage probe)
+		_ nil)))
+
+(define driver_membership_nil_guard? (lambda (probe expr)
+	(match expr
+		((symbol not) ((symbol nil?) guarded)) (equal? guarded probe)
+		((quote not) ((quote nil?) guarded)) (equal? guarded probe)
+		((symbol not) ((quote nil?) guarded)) (equal? guarded probe)
+		((quote not) ((symbol nil?) guarded)) (equal? guarded probe)
+		_ false)))
+
+(define driver_membership_for_source (lambda (src condition)
+	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
+		(if (not (nil? found))
+			found
+			(begin
+				(define probe_term (driver_membership_probe_term term))
+				(if (nil? probe_term)
+					nil
+					(begin
+						(define probe_col (direct_column_name_for_alias src (nth probe_term 1)))
+						(if (nil? probe_col)
+							nil
+							(list (nth probe_term 0) (nth probe_term 1) probe_col term)))))))
+		nil)))
+
+(define strip_driver_membership_for_source (lambda (src condition membership)
+	(if (nil? membership)
+		condition
+		(begin
+			(define probe (nth membership 1))
+			(define marker_term (nth membership 3))
+			(combine_where_terms
+				(filter (split_and_terms (coalesceNil condition true)) (lambda (term)
+					(and (not (equal? term marker_term))
+						(not (driver_membership_nil_guard? probe term)))))
+				true)))))
+
+(define recset_project_join_branch_expr (lambda (target_src branch target_col)
+	(begin
+		(if (not (and (query_block? branch) (single_source? (qb_sources branch))))
+			(neumann_fail "build_queryplan" "recset project membership expects simple query-block branches")
+			true)
+		(define src (car (qb_sources branch)))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "recset project membership expects base table branches")
+			true)
+		(define source_col (direct_column_name_for_alias src (query_block_first_expr branch)))
+		(if (nil? source_col)
+			(neumann_fail "build_queryplan" "recset project membership expects direct RHS column")
+			true)
+		(define alias (source_alias src))
+		(define condition (combine_where (qb_where branch) (source_join_expr src)))
+		(define filtercols (extract_columns_for_alias src condition))
+		(list (quote recset_project_join)
+			'(session "__memcp_tx")
+			(list (quote scan_recset)
+				'(session "__memcp_tx")
+				(source_table_expr src)
+				(cons (quote list) filtercols)
+				(list (quote lambda)
+					(map filtercols (lambda (col) (symbol (concat alias "." col))))
+					(list (quote optimize) (lower_column_expr_for_alias src condition))))
+			(quoted_runtime_list (list source_col))
+			(source_table_expr target_src)
+			(quoted_runtime_list (list target_col))))))
+
+(define recset_project_join_expr_for_membership (lambda (src membership)
+	(begin
+		(define stage (nth membership 0))
+		(define target_col (nth membership 2))
+		(define input (gs_input stage))
+		(if (not (union_block? input))
+			nil
+			(begin
+				(define projected (map (union_branches input) (lambda (branch)
+					(recset_project_join_branch_expr src branch target_col))))
+				(if (single_source? projected)
+					(car projected)
+					(list (quote recset_union) (cons (quote list) projected))))))))
 
 (define lower_scalar_marker_expr (lambda (expr)
 	(match expr
@@ -6184,23 +6275,26 @@ PostgreSQL parsers should both lower to the same combined operators.
 				true)
 			(define alias (source_alias src))
 			(define condition (coalesceNil (source_join_expr src) true))
+			(define membership (driver_membership_for_source src final_condition))
+			(define membership_table_expr (if (nil? membership) nil (recset_project_join_expr_for_membership src membership)))
+			(define effective_final_condition (strip_driver_membership_for_source src final_condition membership))
 			(define row_number_stage_filter (row_number_stage_for_source stages src condition))
 			(define filtercols (join_filter_cols_for_alias all_sources default_alias alias condition))
 			(define mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
-			(define table_expr (source_table_expr src))
+			(define table_expr (coalesceNil membership_table_expr (source_table_expr src)))
 			(define filter_expr (list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
 				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias condition))))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs final_condition row_expr '() 0 -1 stages)))
+				(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs effective_final_condition row_expr '() 0 -1 stages)))
 			(define reduce_expr (list (quote lambda) (list (quote acc) (quote subrows))
 				(list (quote if)
 					(list (quote nil?) (quote subrows))
 					(quote acc)
 					(list (quote merge) (quote acc) (quote subrows)))))
 			(if (not (nil? row_number_stage_filter))
-				(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs final_condition row_expr row_number_stage_filter)
+				(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs effective_final_condition row_expr row_number_stage_filter)
 				(if (and (empty_list? order_items) (not (query_limit_active? offset_value limit_value)))
 					(list (quote scan)
 						'(session "__memcp_tx")
