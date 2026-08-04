@@ -22,6 +22,11 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_doc"
   - sql: "DROP TABLE IF EXISTS trace_revision"
   - sql: "DROP TABLE IF EXISTS trace_file"
+  - sql: "DROP TABLE IF EXISTS trace_asset"
+  - sql: "DROP TABLE IF EXISTS trace_ref_a"
+  - sql: "DROP TABLE IF EXISTS trace_ref_b"
+  - sql: "DROP TABLE IF EXISTS trace_ref_c"
+  - sql: "DROP TABLE IF EXISTS trace_ref_d"
   - sql: "DROP TABLE IF EXISTS trace_item"
   - sql: "DROP TABLE IF EXISTS trace_group"
   - sql: "DROP TABLE IF EXISTS trace_box"
@@ -101,6 +106,37 @@ setup:
         filename VARCHAR(64),
         mime VARCHAR(64)
       )
+  - sql: |
+      CREATE TABLE trace_asset (
+        id INT PRIMARY KEY,
+        filename VARCHAR(64),
+        kind INT,
+        payload VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE trace_ref_a (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_ref_b (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_ref_c (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_ref_d (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
   - sql: "INSERT INTO trace_config (id, default_type) VALUES (1, 10)"
   - sql: "INSERT INTO trace_file (id, filename, mime) VALUES (1, 'one.txt', 'text/plain'), (2, 'two.pdf', 'application/pdf')"
   - sql: "INSERT INTO trace_doc (id, type, archived, parent) VALUES (1, 10, FALSE, NULL)"
@@ -115,6 +151,22 @@ setup:
   - sql: "INSERT INTO trace_doc SELECT id + 256, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
   - sql: "INSERT INTO trace_doc SELECT id + 512, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
   - sql: "INSERT INTO trace_revision SELECT id, id, CASE WHEN id % 2 = 0 THEN 2 ELSE 1 END, id FROM trace_doc"
+  - sql: "INSERT INTO trace_asset (id, filename, kind, payload) VALUES (1, 'asset-1.dat', 1, 'p1')"
+  - sql: "INSERT INTO trace_asset SELECT id + 1, CONCAT('asset-', CAST(id + 1 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 1 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 2, CONCAT('asset-', CAST(id + 2 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 2 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 4, CONCAT('asset-', CAST(id + 4 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 4 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 8, CONCAT('asset-', CAST(id + 8 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 8 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 16, CONCAT('asset-', CAST(id + 16 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 16 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 32, CONCAT('asset-', CAST(id + 32 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 32 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 64, CONCAT('asset-', CAST(id + 64 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 64 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 128, CONCAT('asset-', CAST(id + 128 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 128 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 256, CONCAT('asset-', CAST(id + 256 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 256 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 512, CONCAT('asset-', CAST(id + 512 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 512 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 1024, CONCAT('asset-', CAST(id + 1024 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 1024 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_ref_a SELECT id, id, TRUE FROM trace_asset WHERE id % 997 = 0"
+  - sql: "INSERT INTO trace_ref_b SELECT id, id, TRUE FROM trace_asset WHERE id IN (1, 17, 257)"
+  - sql: "INSERT INTO trace_ref_c SELECT id, id, FALSE FROM trace_asset WHERE id % 257 = 0"
+  - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
 
 test_cases:
   - name: "ORDER BY RAND supports filtered table scan with IN subquery"
@@ -228,11 +280,45 @@ test_cases:
           last_seen: 1
           has_pdf: false
 
+  - name: "UNION EXISTS projection probes only selected outer rows"
+    max_time: 0.4
+    max_plan_size: 60000
+    sql: |
+      SELECT
+        a.id,
+        a.filename,
+        EXISTS (
+          SELECT r.id FROM trace_ref_a r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_b r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_c r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_d r WHERE r.enabled AND r.asset_id = a.id
+        ) AS referenced
+      FROM trace_asset a
+      WHERE a.id IN (1, 2)
+      ORDER BY a.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          filename: "asset-1.dat"
+          referenced: true
+        - id: 2
+          filename: "asset-2.dat"
+          referenced: false
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_config"
   - sql: "DROP TABLE IF EXISTS trace_doc"
   - sql: "DROP TABLE IF EXISTS trace_revision"
   - sql: "DROP TABLE IF EXISTS trace_file"
+  - sql: "DROP TABLE IF EXISTS trace_asset"
+  - sql: "DROP TABLE IF EXISTS trace_ref_a"
+  - sql: "DROP TABLE IF EXISTS trace_ref_b"
+  - sql: "DROP TABLE IF EXISTS trace_ref_c"
+  - sql: "DROP TABLE IF EXISTS trace_ref_d"
   - sql: "DROP TABLE IF EXISTS trace_item"
   - sql: "DROP TABLE IF EXISTS trace_group"
   - sql: "DROP TABLE IF EXISTS trace_box"
