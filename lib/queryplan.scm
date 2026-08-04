@@ -5993,7 +5993,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define probe_output_sources_for_block (lambda (stages sources default_alias)
 	(filter (coalesceNil sources '()) (lambda (src)
-		(probeable_stage_output_source_for_block? stages sources default_alias src)))))
+		(or
+			(probeable_stage_output_source_for_block? stages sources default_alias src)
+			(scalar_aggregate_probe_stage_output_source? stages src))))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -6075,7 +6077,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define consumed_ids (map
 			(merge_unique (map (stage_outputs_from_sources_using stages probe_sources) (lambda (stage)
-				(scalar_first_probe_consumed_stages stages stage))))
+				(scalar_probe_consumed_stages stages stage))))
 			gs_id))
 		(filter (coalesceNil stages '()) (lambda (stage)
 			(not (contains? consumed_ids (gs_id stage))))))))
