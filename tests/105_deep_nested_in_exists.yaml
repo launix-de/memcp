@@ -89,7 +89,58 @@ test_cases:
         - "lookup-keys"
       not_contains:
         - "inner_select"
+        - "inner_select_exists"
         - "dependent-subquery"
+        - "neumann_exists"
+        - "exists_probe"
+        - "fetch"
+        - "legacy_materialized"
+        - ".mat:"
+        - ".grp:"
+        - "touch_keytable"
+
+  - name: "EXPLAIN IR flattens deeply nested EXISTS into stage joins"
+    fail_comment: "deep nested EXISTS must stay in logical join/group-stage form without fetch or dependent-subquery markers"
+    sql: |
+      EXPLAIN IR SELECT a.id
+      FROM dn_a a
+      WHERE EXISTS (
+        SELECT 1 FROM dn_b b
+        WHERE b.id = a.ref_b
+          AND EXISTS (
+            SELECT 1 FROM dn_c c
+            WHERE c.id = b.ref_c
+              AND EXISTS (
+                SELECT 1 FROM dn_d d
+                WHERE d.id = c.ref_d
+                  AND EXISTS (
+                    SELECT 1 FROM dn_e e
+                    WHERE e.id = d.ref_e
+                  )
+              )
+          )
+      )
+      ORDER BY a.id
+    expect:
+      rows: 1
+      contains:
+        - "query-block"
+        - "group-stage"
+        - "stage-output"
+        - "btw2025_accessing"
+        - "btw2025_domain"
+        - "presence_only"
+        - "max_needed_per_domain"
+        - "lookup-keys"
+      not_contains:
+        - "inner_select"
+        - "inner_select_exists"
+        - "dependent-subquery"
+        - "neumann_exists"
+        - "exists_probe"
+        - "fetch"
+        - "legacy_materialized"
+        - ".mat:"
         - ".grp:"
         - "touch_keytable"
 
@@ -113,6 +164,39 @@ test_cases:
           active_d: 20
         - id: 3
           active_d: null
+
+  - name: "EXPLAIN IR flattens deeply nested scalar scans into stage joins"
+    fail_comment: "deep scalar subselect nesting must be represented as logical stages, not fetch/dependent-subquery markers"
+    sql: |
+      EXPLAIN IR SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT
+              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS deep_val
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 1
+      contains:
+        - "query-block"
+        - "group-stage"
+        - "stage-output"
+        - "btw2025_accessing"
+        - "btw2025_domain"
+        - "lookup-keys"
+        - "scalar-once"
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
+        - "neumann_scalar"
+        - "fetch"
+        - "legacy_materialized"
+        - ".mat:"
+        - ".grp:"
+        - "touch_keytable"
 
   - name: "Depth 3: EXISTS references outermost table (skip 2 levels)"
     sql: |
