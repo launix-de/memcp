@@ -3305,6 +3305,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(list (quote not) (list (quote nil?) probe))
 		(list (quote driver_membership_probe) stage probe))))
 
+(define dml_preserve_driver_membership_probe (lambda (fallback_schema expr)
+	(match expr
+		((symbol driver_membership_probe) stage probe)
+		(list (quote dml_driver_membership_probe) fallback_schema stage probe)
+		((quote driver_membership_probe) stage probe)
+		(list (quote dml_driver_membership_probe) fallback_schema stage probe)
+		(cons head tail) (cons head (map tail (lambda (item) (dml_preserve_driver_membership_probe fallback_schema item))))
+		_ expr)))
+
 (define candidate_stage_without_source (lambda (stages stage_id)
 	(filter (coalesceNil stages '()) (lambda (stage)
 		(not (and (group_stage? stage) (equal? (gs_id stage) stage_id)))))))
@@ -3399,6 +3408,21 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define reorder_query_block_with_candidate_strategy (lambda (block)
 	(begin
+		(if (equal? (qassoc_get (qb_facts block) (quote dml) false) true)
+			(make_query_block
+				(qb_schema block)
+				(qb_sources block)
+				(qb_fields block)
+				(qb_where block)
+				(qb_group block)
+				(qb_having block)
+				(qb_order block)
+				(qb_limit block)
+				(qb_offset block)
+				(qb_hidden block)
+				(map (qb_stages block) join_reorder_stage)
+				(qb_facts block))
+			(begin
 		(define sources (qb_sources block))
 		(define candidate (first_candidate_source (qb_stages block) sources))
 		(if (nil? candidate)
@@ -3487,7 +3511,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(qb_offset block)
 						(qb_hidden block)
 						(map (qb_stages block) join_reorder_stage)
-						(merge (list facts (qassoc_set (qb_facts block) (quote default_alias) (source_alias (car sources))))))))))))
+						(merge (list facts (qassoc_set (qb_facts block) (quote default_alias) (source_alias (car sources)))))))))))))))
 
 (define join_reorder_node (lambda (node)
 	(if (query_block? node)
@@ -3714,6 +3738,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define extract_columns_for_alias (lambda (src expr)
 	(match expr
+		((symbol dml_driver_membership_probe) _fallback_schema _stage probe)
+		(extract_columns_for_alias src probe)
+		((quote dml_driver_membership_probe) _fallback_schema _stage probe)
+		(extract_columns_for_alias src probe)
 		((symbol scalar_first_probe) stage _requested_col)
 		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
 			(extract_columns_for_alias src key))))
@@ -3726,6 +3754,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lower_column_expr_for_alias (lambda (src expr)
 	(match expr
+		((symbol dml_driver_membership_probe) fallback_schema stage probe)
+		(lower_dml_driver_membership_probe_expr (list src) (source_alias src) fallback_schema stage probe)
+		((quote dml_driver_membership_probe) fallback_schema stage probe)
+		(lower_dml_driver_membership_probe_expr (list src) (source_alias src) fallback_schema stage probe)
 		((symbol scalar_first_probe) stage requested_col)
 		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col)
 		((quote scalar_first_probe) stage requested_col)
@@ -3821,6 +3853,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(extract_columns_for_join_alias sources default_alias alias probe)
 		((quote driver_membership_probe) _stage probe)
 		(extract_columns_for_join_alias sources default_alias alias probe)
+		((symbol dml_driver_membership_probe) _fallback_schema _stage probe)
+		(extract_columns_for_join_alias sources default_alias alias probe)
+		((quote dml_driver_membership_probe) _fallback_schema _stage probe)
+		(extract_columns_for_join_alias sources default_alias alias probe)
 		((symbol scalar_first_probe) stage _requested_col)
 		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
 			(extract_columns_for_join_alias sources default_alias alias key))))
@@ -3845,6 +3881,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(lower_driver_membership_probe_expr sources default_alias stage probe)
 		((quote driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr sources default_alias stage probe)
+		((symbol dml_driver_membership_probe) fallback_schema stage probe)
+		(lower_dml_driver_membership_probe_expr sources default_alias fallback_schema stage probe)
+		((quote dml_driver_membership_probe) fallback_schema stage probe)
+		(lower_dml_driver_membership_probe_expr sources default_alias fallback_schema stage probe)
 		((symbol scalar_first_probe) stage requested_col)
 		(lower_scalar_first_probe_expr sources default_alias stage requested_col)
 		((quote scalar_first_probe) stage requested_col)
@@ -4051,6 +4091,28 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (quote +) (map (union_branches input) (lambda (branch)
 				(driver_membership_probe_branch_expr sources default_alias branch probe))))
 			0))))
+
+(define lower_dml_driver_membership_probe_expr (lambda (sources default_alias fallback_schema stage _probe)
+	(begin
+		(define keys (gs_keys stage))
+		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(if (< (count keys) (count lookup_keys))
+			(neumann_fail "build_queryplan" "DML membership probe key/domain mismatch")
+			true)
+		(define key_names (group_key_cols keys))
+		(define filter_key_names (map (produceN (count lookup_keys)) (lambda (i) (nth key_names i))))
+		(define carrier_schema (coalesceNil (group_stage_carrier_schema stage) fallback_schema))
+		(define key_terms (map (produceN (count lookup_keys)) (lambda (i)
+			(list (quote equal??)
+				(symbol (nth key_names i))
+				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
+		(list (quote scan_exists)
+			'(session "__memcp_tx")
+			(list (quote table) carrier_schema (group_stage_carrier_relation stage))
+			(cons (quote list) filter_key_names)
+			(list (quote lambda)
+				(map filter_key_names symbol)
+				(list (quote optimize) (if (empty_list? key_terms) true (cons (quote and) key_terms))))))))
 
 (define direct_column_name_for_alias (lambda (src expr)
 	(match expr
@@ -4302,19 +4364,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(list (quote group-keytable) schema relation)))
 
 (define group_carrier_kind (lambda (carrier)
-	(match carrier
-		'(kind _schema _relation) kind
-		_ nil)))
+	(if (list? carrier) (nth carrier 0) nil)))
 
 (define group_carrier_schema (lambda (carrier)
-	(match carrier
-		'(_kind schema _relation) schema
-		_ nil)))
+	(if (list? carrier) (nth carrier 1) nil)))
 
 (define group_carrier_relation (lambda (carrier)
-	(match carrier
-		'(_kind _schema relation) relation
-		_ nil)))
+	(if (list? carrier) (nth carrier 2) nil)))
 
 (define group_stage_schema (lambda (stage)
 	(begin
@@ -6574,7 +6630,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define cols (qb_fields block))
 		(define delete_mode (empty_list? (coalesceNil cols '())))
 		(define update_ref (list (quote get_column) target_alias false "$update" false))
-		(define cond (coalesceNil (qb_where block) true))
+		(define cond (dml_preserve_driver_membership_probe target_schema (coalesceNil (qb_where block) true)))
 		(define needed_exprs (merge (list
 			(dml_assignment_exprs cols)
 			(list cond)
@@ -6619,7 +6675,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define alias (source_alias src))
 		(define cols (qb_fields block))
 		(define delete_mode (empty_list? (coalesceNil cols '())))
-		(define cond (coalesceNil (qb_where block) true))
+		(define cond (dml_preserve_driver_membership_probe target_schema (coalesceNil (qb_where block) true)))
 		(define order_items (coalesceNil (qb_order block) '()))
 		(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
 		(define filtercols (extract_columns_for_alias src cond))
@@ -7068,7 +7124,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(coalesceNil order '())
 			limit
 			offset
-			'() '() '()))
+			'() '()
+			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
 			(ir_with_return (untangle_query_term query nil) (list (quote dml) schema tbl))))))
 
