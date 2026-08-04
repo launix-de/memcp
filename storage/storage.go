@@ -544,6 +544,48 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_project_join",
+		Desc: "projects a source recset through key columns into a query-local target-table recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			source := RecSetFromScmer(a[1])
+			sourceKeyCols := scmerSliceToStrings(mustScmerSlice(a[2], "sourceKeyColumns"))
+			target := TableFromScmer(a[3])
+			targetKeyCols := scmerSliceToStrings(mustScmerSlice(a[4], "targetKeyColumns"))
+			return NewRecSetScmer(source.projectJoin(currentTx, sourceKeyCols, target, targetKeyCols))
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "recset", ParamName: "source_recset"},
+				{Kind: "list", ParamName: "source_key_columns"},
+				{Kind: "table", ParamName: "target_table"},
+				{Kind: "list", ParamName: "target_key_columns"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_union",
+		Desc: "combines query-local recsets from the same table and removes duplicate record IDs",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			values := mustScmerSlice(a[0], "recsets")
+			recsets := make([]*recSet, 0, len(values))
+			for _, value := range values {
+				recsets = append(recsets, RecSetFromScmer(value))
+			}
+			return NewRecSetScmer(recSetUnion(recsets))
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "list", ParamName: "recsets"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_exists",
 		Desc: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
