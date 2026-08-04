@@ -868,7 +868,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(and (query_block? inner)
 		(and (not (empty_list? (qb_sources inner)))
 			(and (empty_list? (qb_order inner))
-				(and (or (nil? (qb_limit inner)) (equal? (qb_limit inner) 1))
+				(and (or (nil? (qb_limit inner))
+					(or (equal? (qb_limit inner) 1)
+						(and (empty_list? (qb_group inner))
+							(query_block_has_aggregates? inner))))
 					(nil? (qb_offset inner))))))))
 
 (define scalar_single_supported? (lambda (inner)

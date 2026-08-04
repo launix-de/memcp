@@ -409,6 +409,22 @@ test_cases:
         - badgeDoc: 2
           revCount: 3
 
+  - name: "GROUP_CONCAT scalar aggregate with nested scalar and nonrestrictive LIMIT"
+    sql: |
+      SELECT
+        sq_doc.ID,
+        (SELECT GROUP_CONCAT(CONCAT((SELECT sq_ptype.type FROM sq_ptype WHERE sq_ptype.ID = sq_prop.type LIMIT 1), ':', sq_prop.ID) SEPARATOR ';')
+         FROM sq_prop
+         WHERE sq_prop.doc = sq_doc.ID AND sq_prop.ID = 1
+         LIMIT 21) AS labels
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          labels: "date:1"
+
   # Pattern 6: Nested COALESCE with scalar subselect fallback
   - name: "Nested COALESCE permission check pattern"
     sql: |
