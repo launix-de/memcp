@@ -336,6 +336,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(match (coalesceNil expr true)
 		((symbol and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
 		((quote and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
+		(cons head tail) (if (or (equal? head (quote and)) (equal? head (symbol "and")))
+			(merge (map tail split_and_terms))
+			(list expr))
 		_ (list expr))))
 
 (define neumann_fail (lambda (phase msg)
@@ -587,21 +590,48 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote get_column) _ _ _ _) true
 		_ false)))
 
-(define exists_correlation_pair (lambda (inner_default inner_aliases outer_aliases term)
+(define expr_refs_sources? (lambda (default_alias sources expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (nil? tblvar)
+			(not (nil? (source_for_unqualified_column sources default_alias col col_ignorecase)))
+			(not (nil? (source_for_alias sources default_alias tblvar tbl_ignorecase))))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(expr_refs_sources? default_alias sources (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (expr_refs_sources? default_alias sources item)))
+			false)
+		_ false)))
+
+(define qualify_unqualified_column_for_sources (lambda (sources expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (nil? tblvar)
+			(begin
+				(define src (source_for_unqualified_column sources nil col col_ignorecase))
+				(if (nil? src)
+					expr
+					(list (quote get_column) (source_alias src) false col col_ignorecase)))
+			expr)
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(qualify_unqualified_column_for_sources sources (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(qualify_unqualified_column_for_sources sources item))))
+		_ expr)))
+
+(define exists_correlation_pair (lambda (inner_default inner_sources outer_sources term)
 	(match term
 		((symbol equal??) a b) (begin
-			(define a_inner (expr_refs_any_alias? inner_default inner_aliases a))
-			(define b_inner (expr_refs_any_alias? inner_default inner_aliases b))
-			(define a_outer (and (not a_inner) (expr_refs_any_alias? nil outer_aliases a)))
-			(define b_outer (and (not b_inner) (expr_refs_any_alias? nil outer_aliases b)))
+			(define a_inner (expr_refs_sources? inner_default inner_sources a))
+			(define b_inner (expr_refs_sources? inner_default inner_sources b))
+			(define a_outer (and (not a_inner) (expr_refs_sources? nil outer_sources a)))
+			(define b_outer (and (not b_inner) (expr_refs_sources? nil outer_sources b)))
 			(if (and a_inner b_outer)
-				(list a b)
+				(list a (qualify_unqualified_column_for_sources outer_sources b))
 				(if (and b_inner a_outer)
-					(list b a)
+					(list b (qualify_unqualified_column_for_sources outer_sources a))
 					nil)))
-		((quote equal??) a b) (exists_correlation_pair inner_default inner_aliases outer_aliases (list (quote equal??) a b))
-		((symbol equal?) a b) (exists_correlation_pair inner_default inner_aliases outer_aliases (list (quote equal??) a b))
-		((quote equal?) a b) (exists_correlation_pair inner_default inner_aliases outer_aliases (list (quote equal??) a b))
+		((quote equal??) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
+		((symbol equal?) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
+		((quote equal?) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
 		_ nil)))
 
 (define unique_correlation_pairs (lambda (pairs)
@@ -661,7 +691,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(merge acc (list key))))
 				corr_keys)))))
 
-(define source_join_correlation_pairs (lambda (inner_default inner_aliases outer_aliases sources)
+(define source_join_correlation_pairs (lambda (inner_default inner_sources outer_sources sources)
 	(merge
 		(map
 			(coalesceNil sources '())
@@ -670,15 +700,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(map
 						(split_and_terms (coalesceNil (source_join_expr src) true))
 						(lambda (term)
-							(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+							(exists_correlation_pair inner_default inner_sources outer_sources term)))
 					(lambda (pair)
 						(not (nil? pair)))))))))
 
-(define source_without_outer_join_terms (lambda (inner_default inner_aliases outer_aliases src)
+(define source_without_outer_join_terms (lambda (inner_default inner_sources outer_sources src)
 	(begin
 		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
 		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 			(list
 				(source_alias src)
 				(source_schema src)
@@ -686,25 +716,25 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(source_outer? src)
 				(combine_where_terms local_terms true)))))
 
-(define sources_without_outer_join_terms (lambda (inner_default inner_aliases outer_aliases sources)
+(define sources_without_outer_join_terms (lambda (inner_default inner_sources outer_sources sources)
 	(map (coalesceNil sources '()) (lambda (src)
-		(source_without_outer_join_terms inner_default inner_aliases outer_aliases src)))))
+		(source_without_outer_join_terms inner_default inner_sources outer_sources src)))))
 
-(define btw2025_local_where_terms_after_simple (lambda (inner_default inner_aliases outer_aliases block)
+(define btw2025_local_where_terms_after_simple (lambda (inner_default inner_sources outer_sources block)
 	(filter
 		(split_and_terms (coalesceNil (qb_where block) true))
 		(lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term))))))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term))))))
 
 (define btw2025_accessing_after_simple (lambda (block outer_sources)
 	(if (not (query_block? block))
 		'()
 		(begin
 			(define inner_default (if (empty_list? (qb_sources block)) nil (source_alias (car (qb_sources block)))))
-			(define inner_aliases (source_aliases (qb_sources block)))
+			(define inner_sources (qb_sources block))
 			(define outer_aliases (source_aliases outer_sources))
-			(define local_terms (btw2025_local_where_terms_after_simple inner_default inner_aliases outer_aliases block))
-			(define local_sources (sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources block)))
+			(define local_terms (btw2025_local_where_terms_after_simple inner_default inner_sources outer_sources block))
+			(define local_sources (sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources block)))
 			(merge_unique (list
 				(btw2025_sources_accessing_aliases local_sources outer_aliases)
 				(btw2025_fields_accessing_aliases (qb_fields block) outer_aliases)
@@ -1006,17 +1036,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(neumann_fail "untangle_query" "EXISTS group-stage(D) currently supports one plain inner query-block")
 			true)
 		(define inner_src (car (qb_sources inner)))
-		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_sources (qb_sources inner))
 		(define inner_default (source_alias inner_src))
-		(define outer_aliases (source_aliases outer_sources))
 		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
 		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
 		(define lookup_pairs (unique_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
 		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(correlation_inner_keys inner_default lookup_pairs)))
@@ -1027,7 +1056,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
 				'()
 				condition
 				'() nil '() nil nil
@@ -1250,16 +1279,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(neumann_fail "untangle_query" "IN subquery must expose exactly one column")
 			true)
 		(define inner_src (car (qb_sources inner)))
-		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_sources (qb_sources inner))
 		(define inner_default (source_alias inner_src))
-		(define outer_aliases (source_aliases outer_sources))
 		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
 		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define lookup_pairs (unique_correlation_pairs corr_pairs))
 		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define rhs_expr (canonical_column_expr_for_alias inner_default (query_block_first_expr inner)))
 		(define keys (cons rhs_expr
 			(correlation_inner_keys inner_default lookup_pairs)))
@@ -1274,7 +1302,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
 				'()
 				condition
 				'() nil '() nil nil
@@ -1366,22 +1394,21 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs cardinality_mode single_or_error lowering")
 			true)
 		(define inner_src (car (qb_sources inner)))
-		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_sources (qb_sources inner))
 		(define inner_default (source_alias inner_src))
-		(define outer_aliases (source_aliases outer_sources))
 		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
 		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define having_terms (split_and_terms (coalesceNil (qb_having inner) true)))
 		(define having_corr_pairs (filter (map having_terms (lambda (term)
-			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define local_having_terms (filter having_terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
 		(define all_corr_pairs (unique_correlation_pairs (merge (list corr_pairs having_corr_pairs source_corr_pairs))))
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
@@ -1394,7 +1421,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
 				'()
 				condition
 				'() nil '() nil nil
@@ -1453,17 +1480,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (source_is_base_table? inner_src))
 			(neumann_fail "untangle_query" "scalar once_limit stage requires a base inner source after FROM flattening")
 			true)
-		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_sources (qb_sources inner))
 		(define inner_default (source_alias inner_src))
-		(define outer_aliases (source_aliases outer_sources))
 		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
 		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
 		(define lookup_pairs (unique_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
 		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(correlation_inner_keys inner_default lookup_pairs)))
@@ -1479,7 +1505,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
 				'()
 				condition
 				'() nil '() nil nil
@@ -1677,17 +1703,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			true)
 		(define value_expr (query_block_first_expr inner))
 		(define inner_src (car (qb_sources inner)))
-		(define inner_aliases (source_aliases (qb_sources inner)))
+		(define inner_sources (qb_sources inner))
 		(define inner_default (source_alias inner_src))
-		(define outer_aliases (source_aliases outer_sources))
 		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
 		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_aliases outer_aliases term)))
+			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_aliases outer_aliases (qb_sources inner)))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
 		(define lookup_pairs (unique_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
 		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_aliases outer_aliases term)))))
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(correlation_inner_keys inner_default lookup_pairs)))
@@ -1702,7 +1727,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_aliases outer_aliases (qb_sources inner))
+				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
 				'()
 				condition
 				'() nil '() nil nil
@@ -3714,11 +3739,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(if (source_alias_matches? src default_alias tblvar tbl_ignorecase) src nil)))
 		nil)))
 
-(define resolve_physical_column_name (lambda (src col col_ignorecase)
+(define source_column_name (lambda (src col col_ignorecase)
 	(if (not (string? col))
 		col
 		(if (not (source_is_base_table? src))
-			col
+			nil
 			(begin
 				(define cols (get_schema (source_schema src) (source_relation src)))
 				(define exact (reduce cols (lambda (found row)
@@ -3728,13 +3753,35 @@ PostgreSQL parsers should both lower to the same combined operators.
 					nil))
 				(if (not (nil? exact))
 					exact
-					(coalesceNil
+					(if col_ignorecase
 						(reduce cols (lambda (found row)
 							(if (not (nil? found))
 								found
 								(if (equal?? (row "Field") col) (row "Field") nil)))
 							nil)
-						col)))))))
+						nil)))))))
+
+(define source_has_column? (lambda (src col col_ignorecase)
+	(not (nil? (source_column_name src col col_ignorecase)))))
+
+(define source_for_unqualified_column (lambda (sources default_alias col col_ignorecase)
+	(begin
+		(define matches (filter (coalesceNil sources '()) (lambda (src)
+			(source_has_column? src col col_ignorecase))))
+		(if (equal? (count matches) 1)
+			(car matches)
+			(if (nil? default_alias)
+				nil
+				(begin
+					(define default_src (source_for_alias matches default_alias nil false))
+					(if (nil? default_src) nil default_src)))))))
+
+(define resolve_physical_column_name (lambda (src col col_ignorecase)
+	(if (not (string? col))
+		col
+		(if (not (source_is_base_table? src))
+			col
+			(coalesceNil (source_column_name src col true) col)))))
 
 (define extract_columns_for_alias (lambda (src expr)
 	(match expr
@@ -3863,12 +3910,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote scalar_first_probe) stage requested_col)
 		(extract_columns_for_join_alias sources default_alias alias (list (quote scalar_first_probe) stage requested_col))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
-			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(define src (if (nil? tblvar)
+				(source_for_unqualified_column sources default_alias col col_ignorecase)
+				(source_for_alias sources default_alias tblvar tbl_ignorecase)))
 			(if (and (not (nil? src)) (equal?? (source_alias src) alias))
 				(list (resolve_physical_column_name src col col_ignorecase))
 				'()))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
-			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(define src (if (nil? tblvar)
+				(source_for_unqualified_column sources default_alias col col_ignorecase)
+				(source_for_alias sources default_alias tblvar tbl_ignorecase)))
 			(if (and (not (nil? src)) (equal?? (source_alias src) alias))
 				(list (resolve_physical_column_name src col col_ignorecase))
 				'()))
@@ -3890,12 +3941,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote scalar_first_probe) stage requested_col)
 		(lower_scalar_first_probe_expr sources default_alias stage requested_col)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
-			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(define src (if (nil? tblvar)
+				(source_for_unqualified_column sources default_alias col col_ignorecase)
+				(source_for_alias sources default_alias tblvar tbl_ignorecase)))
 			(if (nil? src)
 				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
 				(symbol (concat (source_alias src) "." (resolve_physical_column_name src col col_ignorecase)))))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
-			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(define src (if (nil? tblvar)
+				(source_for_unqualified_column sources default_alias col col_ignorecase)
+				(source_for_alias sources default_alias tblvar tbl_ignorecase)))
 			(if (nil? src)
 				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
 				(symbol (concat (source_alias src) "." (resolve_physical_column_name src col col_ignorecase)))))

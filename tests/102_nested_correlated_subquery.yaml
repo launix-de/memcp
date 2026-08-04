@@ -8,16 +8,34 @@ metadata:
   description: "Doubly-nested correlated scalar subquery returns NULL instead of value"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nc_alias_ref"
+  - sql: "DROP TABLE IF EXISTS nc_alias_outer"
+  - sql: "DROP TABLE IF EXISTS nc_folder_ref"
+  - sql: "DROP TABLE IF EXISTS nc_item_ref"
+  - sql: "DROP TABLE IF EXISTS nc_outer_ref"
+  - sql: "DROP TABLE IF EXISTS nc_lookup_ref"
   - sql: "DROP TABLE IF EXISTS nc_doc"
   - sql: "DROP TABLE IF EXISTS nc_revision"
   - sql: "DROP TABLE IF EXISTS nc_files"
   - sql: "DROP TABLE IF EXISTS nc_config"
 
 setup:
+  - sql: "CREATE TABLE nc_alias_ref (ID INT PRIMARY KEY, active BOOL, valid_from INT, valid_to INT)"
+  - sql: "CREATE TABLE nc_alias_outer (ID INT PRIMARY KEY, ref_alias INT)"
+  - sql: "CREATE TABLE nc_folder_ref (ID INT PRIMARY KEY, mailbox INT)"
+  - sql: "CREATE TABLE nc_item_ref (ID INT PRIMARY KEY, directory INT, boxid INT, seen BOOL)"
+  - sql: "INSERT INTO nc_alias_ref VALUES (7, TRUE, NULL, NULL), (8, FALSE, NULL, NULL)"
+  - sql: "INSERT INTO nc_alias_outer VALUES (1, 7), (2, 8)"
+  - sql: "CREATE TABLE nc_lookup_ref (ID INT PRIMARY KEY, flag INT)"
+  - sql: "CREATE TABLE nc_outer_ref (ID INT PRIMARY KEY, lookup_id INT)"
+  - sql: "INSERT INTO nc_folder_ref VALUES (1, 10), (2, 20)"
+  - sql: "INSERT INTO nc_item_ref VALUES (1, 1, 10, FALSE), (2, 1, 20, FALSE), (3, 2, 20, TRUE)"
   - sql: "CREATE TABLE nc_doc (ID INT PRIMARY KEY)"
   - sql: "CREATE TABLE nc_revision (id INT, doc INT, file INT, created INT)"
   - sql: "CREATE TABLE nc_files (ID INT, filename VARCHAR(100))"
   - sql: "CREATE TABLE nc_config (ID INT PRIMARY KEY, default_file INT)"
+  - sql: "INSERT INTO nc_lookup_ref VALUES (10, 1), (20, 0)"
+  - sql: "INSERT INTO nc_outer_ref VALUES (1, 10), (2, 20)"
   - sql: "INSERT INTO nc_doc VALUES (10)"
   - sql: "INSERT INTO nc_revision VALUES (1, 10, 99, 1000)"
   - sql: "INSERT INTO nc_files VALUES (99, 'report.pdf')"
@@ -51,3 +69,71 @@ test_cases:
       rows: 1
       data:
         - {ID: 10}
+
+  - name: "Correlated scalar subquery resolves unqualified outer column"
+    sql: |
+      SELECT o.ID
+      FROM nc_outer_ref o
+      WHERE (SELECT l.flag FROM nc_lookup_ref l WHERE l.ID = lookup_id LIMIT 1) = 1
+      ORDER BY o.ID
+    expect:
+      rows: 1
+      data:
+        - {ID: 1}
+
+  - name: "Correlated aggregate subquery resolves unqualified outer column"
+    sql: |
+      SELECT o.ID,
+        (SELECT COUNT(*) FROM nc_lookup_ref l WHERE l.flag = 1 AND l.ID = lookup_id) AS match_count
+      FROM nc_outer_ref o
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, match_count: 1}
+        - {ID: 2, match_count: 0}
+
+  - name: "Derived correlated aggregate prefers nearest unqualified outer column"
+    sql: |
+      SELECT d.ID, d.match_count
+      FROM nc_outer_ref wrapper
+      JOIN (
+        SELECT o.ID,
+          (SELECT COUNT(*) FROM nc_lookup_ref l WHERE l.flag = 1 AND l.ID = lookup_id) AS match_count
+        FROM nc_outer_ref o
+      ) d ON d.ID = wrapper.ID
+      ORDER BY d.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, match_count: 1}
+        - {ID: 2, match_count: 0}
+
+  - name: "Correlated aggregate resolves unqualified outer column in multi-term predicate"
+    sql: |
+      SELECT f.ID,
+        (SELECT COUNT(*) FROM nc_item_ref i WHERE i.directory = f.ID AND NOT i.seen AND i.boxid = mailbox) AS unseen_count
+      FROM nc_folder_ref f
+      ORDER BY f.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, unseen_count: 1}
+        - {ID: 2, unseen_count: 0}
+
+  - name: "Correlated scalar resolves unqualified outer column beside local range predicate"
+    sql: |
+      SELECT o.ID
+      FROM nc_alias_outer o
+      WHERE (SELECT r.active FROM nc_alias_ref r
+        WHERE r.ID = ref_alias
+          AND CASE WHEN 1 IS NULL THEN TRUE ELSE
+            CASE WHEN r.valid_from IS NULL THEN 1 ELSE r.valid_from END <= 1
+            AND CASE WHEN r.valid_to IS NULL THEN 1 ELSE r.valid_to END >= 1
+          END
+        LIMIT 1)
+      ORDER BY o.ID
+    expect:
+      rows: 1
+      data:
+        - {ID: 1}
