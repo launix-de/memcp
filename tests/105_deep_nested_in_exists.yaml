@@ -424,6 +424,27 @@ test_cases:
         - id: 3
           is_important: false
 
+  - name: "EXPLAIN IR projected EXISTS keeps false-domain scalar semantics"
+    fail_comment: "projected EXISTS must stay a decorrelated presence aggregate with domain miss semantics, not a logical probe"
+    sql: |
+      EXPLAIN IR SELECT a.id,
+        (SELECT EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = a.id AND t.tag = 'important')
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS is_important
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 1
+      contains:
+        - "group-stage"
+        - "purpose exists"
+        - "presence_only"
+        - "preserve_empty_domain"
+        - "scalar-once"
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
+        - "exists_probe"
+
   - name: "Depth 3: EXISTS result propagated through 2 scalar levels"
     sql: |
       SELECT a.id,
