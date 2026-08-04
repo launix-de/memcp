@@ -4939,12 +4939,47 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote count) read_expr)
 			(list (quote coalesceNil) read_expr 0)))))
 
+(define replace_group_probe_stage_lookup_keys (lambda (alias grouptbl keys key_names ags stage)
+	(if (not (group_stage? stage))
+		stage
+		(begin
+			(define facts (gs_facts stage))
+			(define lookup_keys (qassoc_get facts (quote lookup-keys) '()))
+			(make_group_stage
+				(gs_id stage)
+				(gs_input stage)
+				(gs_domain stage)
+				(gs_keys stage)
+				(gs_aggregates stage)
+				(gs_having stage)
+				(gs_output stage)
+				(gs_order stage)
+				(gs_limit stage)
+				(gs_offset stage)
+				(qassoc_set facts (quote lookup-keys)
+					(map lookup_keys (lambda (expr)
+						(replace_group_expr alias grouptbl keys key_names ags expr)))))))))
+
+(define replace_group_probe_stages_lookup_keys (lambda (alias grouptbl keys key_names ags stages)
+	(map (coalesceNil stages '()) (lambda (stage)
+		(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)))))
+
 (define replace_group_expr (lambda (alias grouptbl keys key_names ags expr)
 	(begin
 		(define key_idx (group_key_index alias keys expr))
 		(if (not (nil? key_idx))
 			(list (quote get_column) grouptbl false (nth key_names key_idx) false)
 			(match expr
+				((symbol scalar_first_probe) stage requested_col stages)
+				(list (quote scalar_first_probe)
+					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)
+					requested_col
+					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags stages))
+				((quote scalar_first_probe) stage requested_col stages)
+				(list (quote scalar_first_probe)
+					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)
+					requested_col
+					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags stages))
 				((symbol count_distinct) agg_expr)
 				(count_distinct_read_expr grouptbl agg_expr)
 				((quote count_distinct) agg_expr)
