@@ -439,6 +439,17 @@ test_cases:
           (2, 2, 0)
     steps:
       - sql: |
+          SELECT d.ID
+          FROM in_dv_doc d
+          JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ORDER BY d.sort_key
+          LIMIT 2
+        expect:
+          rows: 2
+          data:
+            - ID: 2
+            - ID: 1
+      - sql: |
           SELECT t.ID
           FROM (
             SELECT d.ID, d.file_id, d.tenant, d.sort_key
@@ -497,7 +508,7 @@ test_cases:
             - "in_candidate"
             - "candidate"
             - "membership_plan_strategy"
-            - "candidate_keyset"
+            - "driver_order_membership_probe"
             - "membership_selectivity_class"
             - "selective"
             - "membership_driver_rows"
@@ -511,7 +522,6 @@ test_cases:
             - "inner_select"
             - "dependent-subquery"
             - "in_membership"
-            - "driver_order_membership_probe"
             - ".grp:"
             - "touch_keytable"
       - sql: |
@@ -550,13 +560,34 @@ test_cases:
           LIMIT 10
         expect:
           contains:
-            - "touch_keytable"
-            - ".grp:"
-          not_contains:
             - "recset_project_join"
+            - "recset_union"
+            - "$break"
+          not_contains:
             - "driver_membership_probe"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
+            - "touch_keytable"
+            - ".grp:"
+      - sql: |
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 2
+        expect:
+          rows: 2
+          data:
+            - ID: 2
+            - ID: 1
       - sql: |
           EXPLAIN REORDER
           SELECT t.ID
@@ -639,7 +670,9 @@ test_cases:
         expect:
           contains:
             - "in_dv_file"
-            - "scan_order"
+            - "recset_project_join"
+            - "recset_union"
+            - "$break"
           not_contains:
             - ".grp:in_dv_file"
             - "touch_keytable"

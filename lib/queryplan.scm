@@ -3318,8 +3318,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(or estimate_ratio_broad
 				(and (nil? candidate_estimate) (candidate_stage_broad? stage)))))
 		(if (and (not (nil? driver))
-			(and (or broad (<= (count sources) 2))
-				(source_order_limit_driver? driver (qb_order block) (qb_limit block))))
+			(source_order_limit_driver? driver (qb_order block) (qb_limit block)))
 			(quote driver_order_membership_probe)
 			(quote candidate_keyset)))))
 
@@ -6232,6 +6231,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(or (and (not (nil? offset_value)) (not (equal? offset_value 0)))
 		(and (not (nil? limit_value)) (not (equal? limit_value -1))))))
 
+(define downstream_sources_preserve_driver_rows? (lambda (sources default_alias final_condition)
+	(begin
+		(define rest_sources (cdr sources))
+		(and
+			(reduce rest_sources (lambda (ok src) (and ok (source_outer? src))) true)
+			(not (expr_refs_any_alias? default_alias (source_aliases rest_sources) final_condition))))))
+
+(define ordered_join_limit_requires_complete_rows? (lambda (sources default_alias final_condition offset_value limit_value)
+	(and
+		(query_limit_active? offset_value limit_value)
+		(and (not (empty_list? (cdr sources)))
+			(not (downstream_sources_preserve_driver_rows? sources default_alias final_condition))))))
+
 (define lower_single_source_query_block (lambda (block)
 	(begin
 		(define src (car (qb_sources block)))
@@ -6306,15 +6318,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(qb_sources block)
 								(qb_sources block)
 								alias
-								(merge (list
-										(extract_assoc fields (lambda (_title expr) expr))
-										(list effective_condition)
-										(order_exprs order_items)))
-									effective_condition
+							(merge (list
+									(extract_assoc fields (lambda (_title expr) expr))
+									(list effective_condition)
+									(order_exprs order_items)))
+								effective_condition
 								(lower_join_result_row_assoc (qb_sources block) alias fields order_items)
 								'()
 								0
 								-1
+								true
 								'())
 							fields
 							order_items
@@ -6470,15 +6483,109 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote count) (quote sorted))
 			(list (quote min) (list (quote count) (quote sorted)) (list (quote +) offset_expr limit_expr))))
 		(list
-			(list (quote lambda) (list (quote sorted))
-				(list (quote map)
-					(list (quote slice) (quote sorted) offset_expr end_expr)
-					(list (quote lambda) (list (quote row))
-						(list (quote resultrow)
-							(sorted_row_result_assoc_expr fields)))))
-			(list (quote sort) rows_plan
-				(list (quote lambda) (list (quote a) (quote b))
-					(join_order_compare_expr order_items 0)))))))
+			(list (quote lambda) (list (quote rows))
+				(list
+					(list (quote lambda) (list (quote sorted))
+						(list (quote map)
+							(list (quote slice) (quote sorted) offset_expr end_expr)
+							(list (quote lambda) (list (quote row))
+								(list (quote resultrow)
+									(sorted_row_result_assoc_expr fields)))))
+					(list (quote sort) (quote rows)
+						(list (quote lambda) (list (quote a) (quote b))
+							(join_order_compare_expr order_items 0)))))
+			rows_plan))))
+
+(define emit_join_ordered_rows_expr (lambda (fields)
+	(list (quote map) (quote emit_rows)
+		(list (quote lambda) (list (quote row))
+			(list (quote resultrow)
+				(sorted_row_result_assoc_expr fields))))))
+
+(define scan_callback_symbol_for_alias (lambda (alias col)
+	(if (and (string? col) (and (> (strlen col) 0) (equal? (substr col 0 1) "$")))
+		(symbol col)
+		(symbol (concat alias "." col)))))
+
+(define join_ordered_filtered_stream_plan (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
+	(begin
+		(define src (car sources))
+		(define alias (source_alias src))
+		(define condition (coalesceNil (source_join_expr src) true))
+		(define membership (coalesceNil
+			(driver_membership_for_source src final_condition)
+			(driver_membership_for_source src condition)))
+		(define membership_table_expr (if (nil? membership)
+			nil
+			(recset_project_join_expr_for_membership src membership)))
+		(define effective_membership (if (nil? membership_table_expr) nil membership))
+		(define effective_final_condition (strip_driver_membership_for_source src final_condition effective_membership))
+		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define filtercols (join_filter_cols_for_alias sources default_alias alias effective_condition))
+		(define raw_mapcols (join_cols_for_alias sources default_alias alias needed_exprs))
+		(define mapcols (merge_unique (list raw_mapcols (list "$break"))))
+		(define table_expr (coalesceNil membership_table_expr (source_table_expr src)))
+		(define offset_expr (coalesceNil offset_value 0))
+		(define limit_expr (coalesceNil limit_value -1))
+		(define has_limit_expr (list (quote not) (list (quote equal?) limit_expr -1)))
+		(define end_expr (list (quote +) offset_expr limit_expr))
+		(define rest_rows_expr (build_join_scan_rows_with_mapper
+			schema
+			sources
+			(cdr sources)
+			default_alias
+			needed_exprs
+			effective_final_condition
+			(lower_join_result_row_assoc sources default_alias fields order_items)
+			'()
+			0
+			-1
+			true
+			stages))
+		(define filter_expr (list (quote lambda)
+			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+			(list (quote optimize) (lower_column_expr_for_join sources default_alias effective_condition))))
+		(define map_expr (list (quote lambda)
+			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+			(list (quote if)
+				(list (quote and) has_limit_expr (list (quote >=) (quote __seen) end_expr))
+				(list (symbol "$break"))
+				(list (quote !begin)
+					(list (quote define) (quote joined_rows) rest_rows_expr)
+					(list (quote define) (quote joined_count) (list (quote count) (quote joined_rows)))
+					(list (quote if)
+						(list (quote equal?) (quote joined_count) 0)
+						(list (quote list))
+						(list (quote !begin)
+							(list (quote define) (quote start_idx) (list (quote max) 0 (list (quote -) offset_expr (quote __seen))))
+							(list (quote define) (quote stop_idx) (list (quote if)
+								has_limit_expr
+								(list (quote min) (quote joined_count) (list (quote -) end_expr (quote __seen)))
+								(quote joined_count)))
+							(list (quote define) (quote emit_rows) (list (quote if)
+								(list (quote <) (quote start_idx) (quote stop_idx))
+								(list (quote slice) (quote joined_rows) (quote start_idx) (quote stop_idx))
+								(list (quote list))))
+							(list (quote set) (quote __seen) (list (quote +) (quote __seen) (quote joined_count)))
+							(emit_join_ordered_rows_expr fields)))))))
+		(list
+			(list (quote lambda) (list (quote __seen))
+				(list (quote scan_order)
+					'(session "__memcp_tx")
+					table_expr
+					(cons (quote list) filtercols)
+					filter_expr
+					(cons (quote list) (scan_order_sort_columns_for_alias src order_items))
+					(cons (quote list) (order_dirs order_items))
+					0
+					0
+					-1
+					(cons (quote list) mapcols)
+					map_expr
+					(list (quote lambda) (list (quote acc) (quote _rows)) (quote acc))
+					(list (quote list))
+					(source_outer? src)))
+			0))))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -6526,7 +6633,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(map filtercols (lambda (filter_col) (symbol (concat alias "." filter_col))))
 					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias stripped_condition))))
 				(define continuation_expr (list (quote lambda) (list (quote __row_number))
-					(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 '())))
+					(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 true '())))
 				(define map_expr (list (quote lambda)
 					(map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))
 					(list (quote list)
@@ -6566,7 +6673,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(source_outer? src))))
 			_ (neumann_fail "build_queryplan" "malformed ROW_NUMBER stage")))))
 
-(define build_join_scan_rows_with_mapper (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value stages)
+(define build_join_scan_rows_with_mapper (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier stages)
 	(if (empty_list? sources)
 		(if (equal? (coalesceNil final_condition true) true)
 			(runtime_cons_list_expr (list row_expr))
@@ -6584,9 +6691,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define final_membership (driver_membership_for_source src final_condition))
 			(define condition_membership (driver_membership_for_source src condition))
 			(define membership (coalesceNil final_membership condition_membership))
-			(define delay_limit_after_join (and (not (empty_list? (cdr sources)))
-				(query_limit_active? offset_value limit_value)))
-			(define membership_table_expr (if (or (nil? membership) delay_limit_after_join)
+			(define delay_limit_after_join (ordered_join_limit_requires_complete_rows? sources default_alias final_condition offset_value limit_value))
+			(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_carrier)))
 				nil
 				(recset_project_join_expr_for_membership src membership)))
 			(define effective_membership (if (nil? membership_table_expr) nil membership))
@@ -6601,7 +6707,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias effective_condition))))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs effective_final_condition row_expr '() 0 -1 stages)))
+				(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs effective_final_condition row_expr '() 0 -1 allow_membership_carrier stages)))
 			(define reduce_expr (list (quote lambda) (list (quote acc) (quote subrows))
 				(list (quote if)
 					(list (quote nil?) (quote subrows))
@@ -6650,6 +6756,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		order_items
 		offset_value
 		limit_value
+		true
 		stages)))
 
 (define lower_query_block_as_dataset_rows (lambda (block fields)
@@ -6689,6 +6796,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			0
 			-1
+			true
 			(qb_stages block)))))
 
 (define lower_multi_source_query_block (lambda (block)
@@ -6702,30 +6810,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define order_items (coalesceNil (qb_order block) '()))
 				(define direct_order (and (equal? first_alias (source_alias (car sources)))
 					(order_items_belong_to_source? (car sources) order_items)))
+				(define final_condition (coalesceNil (qb_where block) true))
+				(define direct_order_safe (and direct_order
+					(not (ordered_join_limit_requires_complete_rows? sources first_alias final_condition (qb_offset block) (qb_limit block)))))
 				(define needed_exprs (merge (list
 					(extract_assoc fields (lambda (_title expr) expr))
-					(list (coalesceNil (qb_where block) true))
+					(list final_condition)
 					(order_exprs order_items)
 					(source_join_exprs sources))))
-				(if direct_order
-					(build_join_scan_rows (qb_schema block) sources first_alias needed_exprs (coalesceNil (qb_where block) true) fields order_items (qb_offset block) (qb_limit block) (qb_stages block))
-					(join_sorted_rows_plan
-						(build_join_scan_rows_with_mapper
+				(if direct_order_safe
+					(build_join_scan_rows (qb_schema block) sources first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) (qb_stages block))
+					(if direct_order
+						(join_ordered_filtered_stream_plan
 							(qb_schema block)
-							sources
 							sources
 							first_alias
 							needed_exprs
-							(coalesceNil (qb_where block) true)
-							(lower_join_result_row_assoc sources first_alias fields order_items)
-							'()
-							0
-							-1
+							final_condition
+							fields
+							order_items
+							(qb_offset block)
+							(qb_limit block)
 							(qb_stages block))
-						fields
-						order_items
-						(qb_offset block)
-						(qb_limit block)))))
+						(join_sorted_rows_plan
+							(build_join_scan_rows_with_mapper
+								(qb_schema block)
+								sources
+								sources
+								first_alias
+								needed_exprs
+								final_condition
+								(lower_join_result_row_assoc sources first_alias fields order_items)
+								'()
+								0
+								-1
+								(not (ordered_join_limit_requires_complete_rows? sources first_alias final_condition (qb_offset block) (qb_limit block)))
+								(qb_stages block))
+							fields
+							order_items
+							(qb_offset block)
+							(qb_limit block))))))
 )))
 
 (define lower_zero_source_query_block (lambda (block)
@@ -6798,6 +6922,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				'()
 				0
 				-1
+				true
 				(qb_stages block))
 			(quote +)
 			0))))
