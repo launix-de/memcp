@@ -180,6 +180,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (ir_context_get (ir_context_of simple_ir) 'compile-budget-ms nil) 1000) true "untangle_query carries compile budget in context")
 	(assert (equal? (join_reorder simple_ir) simple_ir) true "join_reorder is an IR-only phase")
 	(assert (equal? (logical_op (build_queryplan_term simple_select_ast)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
+	(assert (equal? (split_and_terms (combine_where_terms
+		(list
+			(list (quote and) "a" "b")
+			"c"
+			(list (quote and) "d" (list (quote and) "e" "f")))
+		true)) '("a" "b" "c" "d" "e" "f")) true "combine_where_terms flattens nested AND terms")
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
@@ -782,6 +788,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (optimize '('and '(equal? 1 1) 'x)) 'x "and hook: removes true constant")
 	(assert (optimize '('and '(equal? 1 1) '(equal? 1 1))) true "and hook: all true constants fold")
 	(assert (serialize (optimize '('and 'x 'y))) "(and x y)" "and hook: non-const args preserved")
+	(assert (serialize (optimize '('and 'x '('and 'y '('and 'z 'w))))) "(and x y z w)" "and hook: flattens nested AND terms")
 
 	/* +/* hooks: associative flattening with symbolic args */
 	(assert (serialize (optimize '('+ 'a '('+ 'b 'c)))) "(+ a b c)" "+ hook: flattens nested +")

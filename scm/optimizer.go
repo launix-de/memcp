@@ -1207,10 +1207,37 @@ func optimizeIf(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDe
 
 // optimizeAnd is the Optimize hook for the (and ...) special form.
 // It short-circuits on constant-false and removes constant-true arguments.
+func appendFlattenedAndArgs(out []Scmer, arg Scmer) ([]Scmer, bool) {
+	inner, ok := scmerSlice(arg)
+	if !ok || len(inner) <= 1 || !scmerIsSymbol(inner[0], "and") {
+		return append(out, arg), false
+	}
+	changed := true
+	for i := 1; i < len(inner); i++ {
+		var nested bool
+		out, nested = appendFlattenedAndArgs(out, inner[i])
+		changed = changed || nested
+	}
+	return out, changed
+}
+
 func optimizeAnd(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	// Optimize all args
 	for i := 1; i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
+	}
+	// Flatten nested AND calls so downstream pattern matchers can inspect one
+	// top-level list of conjunctive terms.
+	flattened := make([]Scmer, 0, len(v))
+	flattened = append(flattened, v[0])
+	changed := false
+	for i := 1; i < len(v); i++ {
+		var argChanged bool
+		flattened, argChanged = appendFlattenedAndArgs(flattened, v[i])
+		changed = changed || argChanged
+	}
+	if changed {
+		v = flattened
 	}
 	// Single arg: unwrap
 	if len(v) == 2 {

@@ -6,6 +6,8 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS exists_doc_shares"
+  - sql: "DROP TABLE IF EXISTS exists_docs"
   - sql: "DROP TABLE IF EXISTS exists_orders"
   - sql: "DROP TABLE IF EXISTS exists_customers"
   - sql: |
@@ -25,6 +27,24 @@ setup:
   - sql: |
       INSERT INTO exists_orders (ID, customer_id, total) VALUES
       (101, 1, 100.00), (102, 1, 200.00), (103, 2, 150.00)
+  - sql: |
+      CREATE TABLE exists_docs (
+        ID INT PRIMARY KEY,
+        owner_id INT,
+        title VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE exists_doc_shares (
+        ID INT PRIMARY KEY,
+        doc_id INT,
+        user_id INT
+      )
+  - sql: |
+      INSERT INTO exists_docs (ID, owner_id, title) VALUES
+      (1, 1, 'own row'), (2, 2, 'shared row'), (3, 2, 'blocked row')
+  - sql: |
+      INSERT INTO exists_doc_shares (ID, doc_id, user_id) VALUES
+      (10, 2, 1)
 
 test_cases:
   - name: "EXISTS with correlated subquery - customers with orders"
@@ -290,6 +310,100 @@ test_cases:
             - "touch_keytable"
             - "\"__cnt\""
 
+  - name: "Correlated NOT EXISTS access expression projects true"
+    sql: |
+      SELECT ID,
+        NOT (
+          owner_id <> 1
+          AND NOT EXISTS (
+            SELECT TRUE
+            FROM exists_doc_shares s
+            WHERE s.doc_id = d.ID
+              AND s.user_id = 1
+            LIMIT 1
+          )
+        ) AS can_read
+      FROM exists_docs d
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - {ID: 1, can_read: true}
+        - {ID: 2, can_read: true}
+        - {ID: 3, can_read: false}
+
+  - name: "Correlated NOT EXISTS access expression filters rows without CASE"
+    sql: |
+      SELECT ID
+      FROM exists_docs d
+      WHERE NOT (
+        owner_id <> 1
+        AND NOT EXISTS (
+          SELECT TRUE
+          FROM exists_doc_shares s
+          WHERE s.doc_id = d.ID
+            AND s.user_id = 1
+          LIMIT 1
+        )
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "CASE in WHERE keeps correlated NOT EXISTS access expression"
+    sql: |
+      SELECT ID
+      FROM exists_docs d
+      WHERE CASE
+        WHEN FALSE THEN TRUE
+        ELSE NOT (
+          owner_id <> 1
+          AND NOT EXISTS (
+            SELECT TRUE
+            FROM exists_doc_shares s
+            WHERE s.doc_id = d.ID
+              AND s.user_id = 1
+            LIMIT 1
+          )
+        )
+      END
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "CASE in SELECT projects correlated NOT EXISTS access expression"
+    sql: |
+      SELECT ID,
+        CASE
+          WHEN FALSE THEN TRUE
+          ELSE NOT (
+            owner_id <> 1
+            AND NOT EXISTS (
+              SELECT TRUE
+              FROM exists_doc_shares s
+              WHERE s.doc_id = d.ID
+                AND s.user_id = 1
+              LIMIT 1
+            )
+          )
+        END AS can_read
+      FROM exists_docs d
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - {ID: 1, can_read: true}
+        - {ID: 2, can_read: true}
+        - {ID: 3, can_read: false}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS exists_doc_shares"
+  - sql: "DROP TABLE IF EXISTS exists_docs"
   - sql: "DROP TABLE IF EXISTS exists_orders"
   - sql: "DROP TABLE IF EXISTS exists_customers"
