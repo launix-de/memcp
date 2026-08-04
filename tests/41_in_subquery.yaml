@@ -390,7 +390,7 @@ test_cases:
             - "__union_distinct_rows"
             - "__union_distinct_seen"
 
-  - name: "IN UNION dataview-shaped filter exposes joinable candidate relation"
+  - name: "IN UNION joined order limit uses guarded keyset fallback"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     setup:
       - sql: "DROP TABLE IF EXISTS in_dv_doc"
@@ -497,7 +497,7 @@ test_cases:
             - "in_candidate"
             - "candidate"
             - "membership_plan_strategy"
-            - "driver_order_membership_probe"
+            - "candidate_keyset"
             - "membership_selectivity_class"
             - "selective"
             - "membership_driver_rows"
@@ -511,8 +511,28 @@ test_cases:
             - "inner_select"
             - "dependent-subquery"
             - "in_membership"
+            - "driver_order_membership_probe"
             - ".grp:"
             - "touch_keytable"
+      - sql: |
+          EXPLAIN
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "recset_project_join"
+            - "scan_order"
+          not_contains:
+            - "touch_keytable"
+            - "__union_distinct_rows"
+            - "__union_distinct_seen"
       - sql: |
           EXPLAIN
           SELECT t.ID
@@ -530,13 +550,13 @@ test_cases:
           LIMIT 10
         expect:
           contains:
-            - "recset_project_join"
-            - "scan_order"
+            - "touch_keytable"
+            - ".grp:"
           not_contains:
+            - "recset_project_join"
             - "driver_membership_probe"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
-            - "touch_keytable"
       - sql: |
           EXPLAIN REORDER
           SELECT t.ID
