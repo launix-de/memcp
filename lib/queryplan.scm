@@ -5913,6 +5913,44 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(not (probeable_stage_output_source? stages src))
 			(not (scalar_aggregate_probe_stage_output_source? stages src)))))))
 
+(define stage_lookup_expr_resolves_in_sources? (lambda (sources default_alias expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase _col _col_ignorecase)
+		(not (nil? (source_for_alias sources default_alias tblvar tbl_ignorecase)))
+		((quote get_column) tblvar tbl_ignorecase _col _col_ignorecase)
+		(not (nil? (source_for_alias sources default_alias tblvar tbl_ignorecase)))
+		(cons _head tail) (reduce tail (lambda (ok item)
+			(and ok (stage_lookup_expr_resolves_in_sources? sources default_alias item)))
+			true)
+		_ true)))
+
+(define stage_lookup_keys_resolve_in_sources? (lambda (stage sources default_alias)
+	(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (ok key)
+		(and ok (stage_lookup_expr_resolves_in_sources? sources default_alias key)))
+		true)))
+
+(define probeable_stage_output_source_for_block? (lambda (stages sources default_alias src)
+	(if (scalar_first_stage_output_source? stages src)
+		true
+		(if (not (presence_stage_output_source? stages src))
+			false
+			(begin
+				(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+				(stage_lookup_keys_resolve_in_sources?
+					stage
+					(filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src)))))
+					default_alias))))))
+
+(define probe_output_sources_for_block (lambda (stages sources default_alias)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(probeable_stage_output_source_for_block? stages sources default_alias src)))))
+
+(define sources_without_probe_outputs (lambda (sources probe_sources)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(not (reduce probe_sources (lambda (found probe_src)
+			(or found (equal? (source_alias src) (source_alias probe_src))))
+			false))))))
+
 (define presence_probe_output_sources (lambda (stages sources)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(presence_stage_output_source? stages src)))))
@@ -5971,19 +6009,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(define rewritten_sources (rewrite_scalar_first_probe_sources stages sources default_alias))
+		(define probe_sources (probe_output_sources_for_block stages sources default_alias))
+		(define rewritten_sources (rewrite_scalar_first_probe_sources_using stages sources probe_sources default_alias))
 		(make_query_block
 			(qb_schema block)
-			(sources_without_scalar_first_outputs stages rewritten_sources)
-			(rewrite_scalar_first_probe_fields stages sources default_alias (qb_fields block))
-			(rewrite_scalar_first_probe_expr stages sources default_alias (qb_where block))
+			(sources_without_probe_outputs rewritten_sources probe_sources)
+			(rewrite_scalar_first_probe_fields stages probe_sources default_alias (qb_fields block))
+			(rewrite_scalar_first_probe_expr stages probe_sources default_alias (qb_where block))
 			(qb_group block)
-			(rewrite_scalar_first_probe_expr stages sources default_alias (qb_having block))
-			(rewrite_scalar_first_probe_order stages sources default_alias (qb_order block))
+			(rewrite_scalar_first_probe_expr stages probe_sources default_alias (qb_having block))
+			(rewrite_scalar_first_probe_order stages probe_sources default_alias (qb_order block))
 			(qb_limit block)
 			(qb_offset block)
-			(rewrite_scalar_first_probe_fields stages sources default_alias (qb_hidden block))
-			(stages_without_scalar_first_probes (qb_stages block))
+			(rewrite_scalar_first_probe_fields stages probe_sources default_alias (qb_hidden block))
+			(stages_without_probe_sources (qb_stages block) probe_sources)
 			(qb_facts block)))))
 
 (define query_block_with_presence_probes_using (lambda (stages block)
