@@ -654,6 +654,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	)))
 
 	(define sql_expression5 (parser (or
+		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
 		/* NOT has lower precedence than IS NULL: NOT expr IS NULL == NOT (expr IS NULL) */
 		(parser '((atom "NOT" true) (define expr sql_expression5)) '('not expr))
 		/* unary minus: -(expr) */

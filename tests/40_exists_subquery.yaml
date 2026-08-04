@@ -194,6 +194,7 @@ test_cases:
           not_contains:
             - "neumann_exists"
             - "inner_select"
+            - "exists_probe"
             - ".grp:"
             - "__mat:_uncorr_cnt_"
             - "touch_keytable"
@@ -265,6 +266,7 @@ test_cases:
           not_contains:
             - "neumann_exists"
             - "inner_select"
+            - "exists_probe"
             - ".grp:"
             - "__mat:_uncorr_cnt_"
             - "touch_keytable"
