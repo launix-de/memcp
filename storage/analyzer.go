@@ -367,7 +367,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	// Handles both symbol params (linear scan, no alloc) and NthLocalVar(i).
 	resolveColVar := func(node scm.Scmer) (string, bool) {
 		if name, ok := resolveParamName(node); ok {
-			if _, isBatch := parseBatchPseudoColName(name); !isBatch {
+			if !isScanPseudoColName(name) {
 				return name, true
 			}
 		}

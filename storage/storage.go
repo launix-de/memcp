@@ -335,6 +335,14 @@ func parseBatchPseudoColName(name string) (int, bool) {
 	return n, true
 }
 
+func isScanPseudoColName(name string) bool {
+	if name == "$recset_contains" {
+		return true
+	}
+	_, isBatch := parseBatchPseudoColName(name)
+	return isBatch
+}
+
 // lockTable acquires a user-level read or write lock on the named table.
 // The session's State is updated while waiting, and the unlock callback is
 // registered with the session so that ReleaseAllLocks() can free it later.

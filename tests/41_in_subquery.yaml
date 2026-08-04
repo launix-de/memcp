@@ -562,13 +562,37 @@ test_cases:
           contains:
             - "recset_project_join"
             - "recset_union"
-            - "$break"
+            - "sort"
           not_contains:
             - "driver_membership_probe"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
             - "touch_keytable"
             - ".grp:"
+      - sql: |
+          EXPLAIN
+          SELECT x.ID, r.tenant
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            WHERE d.file_id IN (
+              SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%'
+              UNION
+              SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%'
+            )
+            ORDER BY d.sort_key
+            LIMIT 2
+          ) x
+          LEFT JOIN in_dv_acl r ON r.tenant = x.tenant
+        expect:
+          contains:
+            - "scan_order"
+            - "recset_project_join"
+            - "$recset_contains"
+            - "in_dv_doc"
+          not_contains:
+            - ".grp:union"
+            - "touch_keytable"
       - sql: |
           SELECT t.ID
           FROM (

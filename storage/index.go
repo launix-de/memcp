@@ -345,6 +345,14 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 // Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
 // for existence checks, large buffers (e.g. [1024]uint32) for full scans.
 func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, countUsage, false, callback)
+}
+
+func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, countUsage, true, callback)
+}
+
+func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, forceBuild bool, callback func([]uint32) bool) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
 	// extract inclusiveness for the range column (last boundary)
@@ -373,7 +381,7 @@ func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.
 					}
 				}
 				// this index fits!
-				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, callback)
+				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, forceBuild, callback)
 				return
 			}
 		skip_index:
@@ -402,7 +410,7 @@ func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, callback)
+					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, forceBuild, callback)
 					return
 				}
 			}
@@ -458,7 +466,7 @@ func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.
 		index.t = t
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, callback)
+		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, forceBuild, callback)
 		return
 	}
 
@@ -766,7 +774,7 @@ func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, colIdx int, 
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, countUsage bool, forceBuild bool, callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -783,7 +791,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 	}
 	if !state.active {
 		// index is not built yet
-		if s.Savings < savings_threshold {
+		if s.Savings < savings_threshold && !forceBuild {
 			// iterate over all items because we don't want to store the index
 			s.fullScan(maxInsertIndex, buf, callback)
 			return

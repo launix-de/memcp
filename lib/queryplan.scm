@@ -1691,11 +1691,55 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define lower_filter (if (> offset_value 0) (list (quote >) rn_expr offset_value) true))
 		(define limit_filter (combine_where lower_filter (list (quote <=) rn_expr upper_bound)))
 		(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
+		(define derived_filter (combine_where inner_where limit_filter))
 		(list
-			(cons derived_src helper_sources)
+			(cons (source_with_join_expr derived_src derived_filter) helper_sources)
 			(requalify_single_source_fields inner_alias alias (qb_fields inner))
-			(combine_where inner_where limit_filter)
+			true
 			rn_stage))))
+
+(define requalify_stage_fact_for_derived (lambda (old_alias new_alias fact)
+	(match fact
+		((symbol condition) expr)
+		(list (quote condition) (requalify_single_source_expr old_alias new_alias expr))
+		((quote condition) expr)
+		(list (quote condition) (requalify_single_source_expr old_alias new_alias expr))
+		((symbol domain) exprs)
+		(list (quote domain) (map (coalesceNil exprs '()) (lambda (expr)
+			(requalify_single_source_expr old_alias new_alias expr))))
+		((quote domain) exprs)
+		(list (quote domain) (map (coalesceNil exprs '()) (lambda (expr)
+			(requalify_single_source_expr old_alias new_alias expr))))
+		((symbol lookup-keys) exprs)
+		(list (quote lookup-keys) (map (coalesceNil exprs '()) (lambda (expr)
+			(requalify_single_source_expr old_alias new_alias expr))))
+		((quote lookup-keys) exprs)
+		(list (quote lookup-keys) (map (coalesceNil exprs '()) (lambda (expr)
+			(requalify_single_source_expr old_alias new_alias expr))))
+		_ fact)))
+
+(define requalify_stage_for_derived (lambda (old_alias new_alias stage)
+	(if (group_stage? stage)
+		(make_group_stage
+			(gs_id stage)
+			(gs_input stage)
+			(map (gs_domain stage) (lambda (expr)
+				(requalify_single_source_expr old_alias new_alias expr)))
+			(map (gs_keys stage) (lambda (expr)
+				(requalify_single_source_expr old_alias new_alias expr)))
+			(gs_aggregates stage)
+			(requalify_single_source_expr old_alias new_alias (gs_having stage))
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			(map (gs_facts stage) (lambda (fact)
+				(requalify_stage_fact_for_derived old_alias new_alias fact))))
+		stage)))
+
+(define requalify_stages_for_derived (lambda (old_alias new_alias stages)
+	(map (coalesceNil stages '()) (lambda (stage)
+		(requalify_stage_for_derived old_alias new_alias stage)))))
 
 (define make_scalar_single_stage_rewrite (lambda (inner args)
 	(begin
@@ -2682,11 +2726,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(if (ordered_limited_derived_supported? inner src)
 									(begin
 										(define staged (make_ordered_limited_derived_rewrite src alias inner))
+										(define requalified_inner_stages (requalify_stages_for_derived (source_alias (car (qb_sources inner))) alias (qb_stages inner)))
 										(list
 											(merge (list (nth staged 0) tail_sources))
 											(cons (list alias (nth staged 1)) tail_rewrites)
 											(cons (nth staged 2) tail_wheres)
-											(cons (nth staged 3) (merge (list (qb_stages inner) tail_stages)))))
+											(cons (nth staged 3) (merge (list requalified_inner_stages tail_stages)))))
 									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
 										(neumann_fail "untangle_query" "derived relation stage with outer join needs relation-unit lowering")
 										(begin
@@ -3111,6 +3156,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(and (query_limit_active? nil limit_value)
 		(order_items_belong_to_source? src order_items))))
 
+(define source_row_number_limit_driver? (lambda (stages src)
+	(reduce (coalesceNil stages '()) (lambda (found stage)
+		(or found
+			(and (row_number_stage? stage)
+				(and (source_alias_matches? (os_source stage) (source_alias src) (source_alias src) false)
+					(not (nil? (extract_row_number_filter src (os_column stage) (source_join_expr src))))))))
+		false)))
+
 (define planner_table_row_count (lambda (schema relation)
 	(try
 		(lambda ()
@@ -3253,7 +3306,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
 			(>= (* estimate_rows 4) estimate_input)))
 		(define class (if (or estimate_capped (or estimate_ratio_broad (and (nil? candidate_estimate) (candidate_stage_broad? stage)))) (quote broad) (quote selective)))
-		(define ordered_driver (if (nil? driver) false (source_order_limit_driver? driver (qb_order block) (qb_limit block))))
+		(define ordered_driver (if (nil? driver) false
+			(or (source_order_limit_driver? driver (qb_order block) (qb_limit block))
+				(source_row_number_limit_driver? (qb_stages block) driver))))
 		(list
 			(list (quote membership_selectivity_class) class)
 			(list (quote membership_driver_rows) driver_rows)
@@ -3318,7 +3373,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(or estimate_ratio_broad
 				(and (nil? candidate_estimate) (candidate_stage_broad? stage)))))
 		(if (and (not (nil? driver))
-			(source_order_limit_driver? driver (qb_order block) (qb_limit block)))
+			(or (source_order_limit_driver? driver (qb_order block) (qb_limit block))
+				(source_row_number_limit_driver? (qb_stages block) driver)))
 			(quote driver_order_membership_probe)
 			(quote candidate_keyset)))))
 
@@ -4492,6 +4548,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define group_table_name (lambda (schema tbl alias keys condition ags)
 	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v2" schema tbl alias keys condition ags))))))
 
+(define canonical_group_stage_alias "__grp")
+
+(define canonicalize_group_stage_local_expr (lambda (alias expr)
+	(requalify_single_source_expr alias canonical_group_stage_alias expr)))
+
+(define canonicalize_group_stage_local_exprs (lambda (alias exprs)
+	(map (coalesceNil exprs '()) (lambda (expr) (canonicalize_group_stage_local_expr alias expr)))))
+
 (define make_group_keytable_carrier (lambda (schema relation)
 	(list (quote group-keytable) schema relation)))
 
@@ -4539,7 +4603,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(make_group_keytable_carrier schema (group_table_name schema tbl alias keys condition ags)))))
+		(make_group_keytable_carrier schema (group_table_name
+			schema
+			tbl
+			canonical_group_stage_alias
+			(canonicalize_group_stage_local_exprs alias keys)
+			(canonicalize_group_stage_local_expr alias condition)
+			(canonicalize_group_stage_local_exprs alias ags))))))
 
 (define group_stage_carrier (lambda (stage)
 	(coalesceNil
@@ -5596,6 +5666,30 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define group_stage_final_extra_sources (lambda (stage)
 	(group_stage_final_extra_sources_using (if (query_block? (gs_input stage)) (qb_stages (gs_input stage)) '()) stage)))
 
+(define stage_prepare_identity (lambda (stage)
+	(if (group_stage? stage)
+		(begin
+			(define carrier (group_stage_carrier stage))
+			(list (quote group) (group_carrier_schema carrier) (group_carrier_relation carrier)))
+		stage)))
+
+(define stage_prepare_seen? (lambda (seen stage)
+	(begin
+		(define identity (stage_prepare_identity stage))
+		(reduce seen (lambda (found item)
+			(or found (equal? item identity)))
+			false))))
+
+(define dedupe_stages_for_prepare (lambda (stages)
+	(nth (reduce (coalesceNil stages '()) (lambda (acc stage)
+		(begin
+			(define kept (nth acc 0))
+			(define seen (nth acc 1))
+			(define identity (stage_prepare_identity stage))
+			(if (stage_prepare_seen? seen stage)
+				acc
+				(list (merge kept (list stage)) (merge seen (list identity)))))) (list '() '())) 0)))
+
 (define lower_group_stage_prepare_using (lambda (all_stages stage)
 	(begin
 		(define src (gs_input stage))
@@ -5624,7 +5718,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(qb_stages src)
 				(stage_outputs_from_sources_using all_stages (qb_sources src))))
 			'()))
-		(define nested_prepare (if (query_block? src) (map nested_stages (lambda (nested_stage)
+		(define nested_prepare (if (query_block? src) (map (dedupe_stages_for_prepare nested_stages) (lambda (nested_stage)
 			(lower_stage_prepare_using all_stages nested_stage))) '()))
 		(define nested_materialize (if (query_block? src) (lower_stage_materialize_all nested_stages) '()))
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
@@ -5975,20 +6069,34 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 								(define condition (combine_where (qb_where block) (source_join_expr src)))
 								(define row_number_filter (extract_row_number_filter src col condition))
-								(if (not (row_number_order_compatible? src (coalesceNil (qb_order block) '()) sortcols sortdirs))
+								(if (expr_contains_driver_membership? condition)
+									nil
+									(if (not (row_number_order_compatible? src (coalesceNil (qb_order block) '()) sortcols sortdirs))
 									(if (nil? row_number_filter)
 										nil
 										(lower_fused_row_number_sorted_block block stage src fields (coalesceNil (qb_order block) '()) condition row_number_filter))
 									(begin
 										(define pre_condition (if (nil? row_number_filter) condition (nth row_number_filter 2)))
-										(define rewritten_condition (replace_row_number_expr src col condition))
-										(define filtercols (extract_columns_for_alias src pre_condition))
+										(define membership (driver_membership_for_source src pre_condition))
+										(define membership_table_expr (if (nil? membership) nil (recset_project_join_expr_for_membership src membership)))
+										(define effective_membership (if (nil? membership_table_expr) nil membership))
+										(define effective_pre_condition (strip_driver_membership_for_source src pre_condition effective_membership))
+										(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+										(define membership_var (symbol "__membership_recset"))
+										(define membership_filter_expr (if (nil? membership_table_expr)
+											true
+											(recset_contains_call_expr membership_var)))
+										(define filter_condition (combine_where membership_filter_expr effective_pre_condition))
+										(define rewritten_condition (replace_row_number_expr src col effective_condition))
+										(define filtercols (merge_unique (list
+											(if (nil? membership_table_expr) '() (list "$recset_contains"))
+											(extract_columns_for_alias src effective_pre_condition))))
 										(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 											(extract_columns_for_alias src expr)))))
 										(define scan_mapcols (merge_unique (list (without_col fieldcols col) mapcols)))
 										(define filter_expr (list (quote lambda)
-											(map filtercols (lambda (filter_col) (symbol (concat (source_alias src) "." filter_col))))
-											(list (quote optimize) (lower_column_expr_for_alias src pre_condition))))
+											(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias (source_alias src) filter_col)))
+											(list (quote optimize) (lower_column_expr_for_alias src filter_condition))))
 										(define row_expr (list (quote resultrow)
 											(cons (quote list) (lower_row_number_result_fields src col fields))))
 										(define continuation_expr (list (quote lambda) (list (quote __row_number))
@@ -6013,7 +6121,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 												(list (quote define) (quote next_rownum) (list (quote if) (quote same_partition) (list (quote +) (quote prev_rownum) 1) 1))
 												(list (quote continuation) (quote next_rownum))
 												(list (quote list) (quote row_partition) (quote next_rownum)))))
-										(list (quote scan_order)
+										(define scan_expr (list (quote scan_order)
 											'(session "__memcp_tx")
 											(source_table_expr src)
 											(cons (quote list) filtercols)
@@ -6027,7 +6135,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 											map_expr
 											reduce_expr
 											(list (quote list) nil 0)
-											(source_outer? src))))))
+											(source_outer? src)))
+										(if (nil? membership_table_expr)
+											scan_expr
+											(list
+												(list (quote lambda) (list membership_var) scan_expr)
+												membership_table_expr)))))))
 						_ nil))
 				_ nil))
 		_ nil)))
@@ -6102,7 +6215,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define main_stage (make_group_stage_for_query_block grouped_input_block))
 				(cons (quote !begin)
 					(merge (list
-						(map (qb_stages block) (lambda (stage)
+						(map (dedupe_stages_for_prepare (qb_stages block)) (lambda (stage)
 							(lower_stage_prepare_using (qb_stages block) stage)))
 						(lower_stage_materialize_all (qb_stages block))
 						(list (lower_group_stage_prepare_using (cons main_stage (qb_stages block)) main_stage))
@@ -6144,12 +6257,44 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(or found (row_number_stage_consumed_by_source? stage src)))
 		false)))
 
+(define stage_used_as_driver_membership? (lambda (stage expr)
+	(match expr
+		((symbol driver_membership_probe) used_stage _probe)
+		(and (group_stage? stage) (equal? (gs_id stage) (gs_id used_stage)))
+		((quote driver_membership_probe) used_stage _probe)
+		(and (group_stage? stage) (equal? (gs_id stage) (gs_id used_stage)))
+		(cons head tail) (or
+			(stage_used_as_driver_membership? stage head)
+			(reduce tail (lambda (found item)
+				(or found (stage_used_as_driver_membership? stage item)))
+				false))
+		_ false)))
+
+(define expr_contains_driver_membership? (lambda (expr)
+	(match expr
+		((symbol driver_membership_probe) _stage _probe) true
+		((quote driver_membership_probe) _stage _probe) true
+		(cons head tail) (or
+			(expr_contains_driver_membership? head)
+			(reduce tail (lambda (found item)
+				(or found (expr_contains_driver_membership? item)))
+				false))
+		_ false)))
+
+(define stage_consumed_by_driver_membership? (lambda (stage sources where_expr)
+	(or (stage_used_as_driver_membership? stage where_expr)
+		(reduce (coalesceNil sources '()) (lambda (found src)
+			(or found (stage_used_as_driver_membership? stage (source_join_expr src))))
+			false))))
+
 (define query_block_stages_to_prepare (lambda (block)
 	(filter
 		(if (single_source? (qb_sources block))
 			(qb_stages block)
 			(filter (qb_stages block) (lambda (stage)
-				(not (row_number_stage_consumed_by_join? stage (qb_sources block))))))
+				(not (or
+					(row_number_stage_consumed_by_join? stage (qb_sources block))
+					(stage_consumed_by_driver_membership? stage (qb_sources block) (qb_where block)))))))
 		(lambda (stage)
 			(not (scalar_first_probe_stage? stage))))))
 
@@ -6165,7 +6310,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 						fused_row_number
 						(cons (quote !begin)
 							(merge (list
-								(map (query_block_stages_to_prepare block) (lambda (stage)
+								(map (dedupe_stages_for_prepare (query_block_stages_to_prepare block)) (lambda (stage)
 									(lower_stage_prepare_using (qb_stages block) stage)))
 								(list (lower_query_block_core (if (single_source? (qb_sources block))
 									(query_block_without_stages_after_prepare_using (qb_stages block) block)
@@ -6502,10 +6647,30 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote resultrow)
 				(sorted_row_result_assoc_expr fields))))))
 
+(define recset_contains_callback_symbol (symbol "__recset_contains"))
+
 (define scan_callback_symbol_for_alias (lambda (alias col)
-	(if (and (string? col) (and (> (strlen col) 0) (equal? (substr col 0 1) "$")))
-		(symbol col)
-		(symbol (concat alias "." col)))))
+	(if (equal? col "$recset_contains")
+		recset_contains_callback_symbol
+		(if (and (string? col) (and (> (strlen col) 0) (equal? (substr col 0 1) "$")))
+			(symbol col)
+			(symbol (concat alias "." col))))))
+
+(define recset_contains_call_expr (lambda (recset_expr)
+	(list recset_contains_callback_symbol recset_expr)))
+
+(define special_scan_col_expr? (lambda (expr)
+	(or (equal? expr recset_contains_callback_symbol)
+		(equal? expr (symbol "$recset_contains")))))
+
+(define lower_special_scan_col_exprs (lambda (expr)
+	(match expr
+		(cons head tail) (cons
+			(if (special_scan_col_expr? head) recset_contains_callback_symbol head)
+			(map tail lower_special_scan_col_exprs))
+		_ (if (special_scan_col_expr? expr)
+			recset_contains_callback_symbol
+			expr))))
 
 (define join_ordered_filtered_stream_plan (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(begin
@@ -6521,14 +6686,37 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
 		(define effective_final_condition (strip_driver_membership_for_source src final_condition effective_membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
-		(define filtercols (join_filter_cols_for_alias sources default_alias alias effective_condition))
+		(define membership_var (symbol "__membership_recset"))
+		(define membership_filter_expr (if (nil? membership_table_expr)
+			true
+			(recset_contains_call_expr membership_var)))
+		(define filter_condition (combine_where membership_filter_expr effective_condition))
+		(define filtercols (merge_unique (list
+			(if (nil? membership_table_expr) '() (list "$recset_contains"))
+			(join_filter_cols_for_alias sources default_alias alias effective_condition))))
 		(define raw_mapcols (join_cols_for_alias sources default_alias alias needed_exprs))
 		(define mapcols (merge_unique (list raw_mapcols (list "$break"))))
-		(define table_expr (coalesceNil membership_table_expr (source_table_expr src)))
+		(define table_expr (source_table_expr src))
 		(define offset_expr (coalesceNil offset_value 0))
 		(define limit_expr (coalesceNil limit_value -1))
 		(define has_limit_expr (list (quote not) (list (quote equal?) limit_expr -1)))
 		(define end_expr (list (quote +) offset_expr limit_expr))
+		(define match_needed_exprs (merge (list
+			(list effective_final_condition)
+			(source_join_exprs sources))))
+		(define match_rows_expr (build_join_scan_rows_with_mapper
+			schema
+			sources
+			(cdr sources)
+			default_alias
+			match_needed_exprs
+			effective_final_condition
+			true
+			'()
+			0
+			-1
+			true
+			stages))
 		(define rest_rows_expr (build_join_scan_rows_with_mapper
 			schema
 			sources
@@ -6544,19 +6732,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 			stages))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote optimize) (lower_column_expr_for_join sources default_alias effective_condition))))
+			(list (quote optimize) (lower_column_expr_for_join sources default_alias filter_condition))))
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(list (quote if)
 				(list (quote and) has_limit_expr (list (quote >=) (quote __seen) end_expr))
 				(list (symbol "$break"))
 				(list (quote !begin)
-					(list (quote define) (quote joined_rows) rest_rows_expr)
-					(list (quote define) (quote joined_count) (list (quote count) (quote joined_rows)))
+					(list (quote define) (quote joined_matches) match_rows_expr)
+					(list (quote define) (quote joined_count) (list (quote count) (quote joined_matches)))
 					(list (quote if)
 						(list (quote equal?) (quote joined_count) 0)
 						(list (quote list))
 						(list (quote !begin)
+							(list (quote define) (quote joined_rows) rest_rows_expr)
 							(list (quote define) (quote start_idx) (list (quote max) 0 (list (quote -) offset_expr (quote __seen))))
 							(list (quote define) (quote stop_idx) (list (quote if)
 								has_limit_expr
@@ -6568,23 +6757,29 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(list (quote list))))
 							(list (quote set) (quote __seen) (list (quote +) (quote __seen) (quote joined_count)))
 							(emit_join_ordered_rows_expr fields)))))))
+		(define scan_expr (list (quote scan_order)
+			'(session "__memcp_tx")
+			table_expr
+			(cons (quote list) filtercols)
+			filter_expr
+			(cons (quote list) (scan_order_sort_columns_for_alias src order_items))
+			(cons (quote list) (order_dirs order_items))
+			0
+			0
+			-1
+			(cons (quote list) mapcols)
+			map_expr
+			(list (quote lambda) (list (quote acc) (quote _rows)) (quote acc))
+			(list (quote list))
+			(source_outer? src)))
+		(define prepared_scan_expr (if (nil? membership_table_expr)
+			scan_expr
+			(list
+				(list (quote lambda) (list membership_var) scan_expr)
+				membership_table_expr)))
 		(list
 			(list (quote lambda) (list (quote __seen))
-				(list (quote scan_order)
-					'(session "__memcp_tx")
-					table_expr
-					(cons (quote list) filtercols)
-					filter_expr
-					(cons (quote list) (scan_order_sort_columns_for_alias src order_items))
-					(cons (quote list) (order_dirs order_items))
-					0
-					0
-					-1
-					(cons (quote list) mapcols)
-					map_expr
-					(list (quote lambda) (list (quote acc) (quote _rows)) (quote acc))
-					(list (quote list))
-					(source_outer? src)))
+				prepared_scan_expr)
 			0))))
 
 (define without_col (lambda (cols col)
@@ -6612,7 +6807,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(map tail (lambda (item) (replace_lowered_row_number_symbol alias col item))))
 			_ expr))))
 
-(define build_join_row_number_scan_rows (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr stage_filter)
+(define build_join_row_number_scan_rows (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr stage_filter membership_var membership_filter)
 	(begin
 		(define src (car sources))
 		(define alias (source_alias src))
@@ -6624,14 +6819,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(match stage
 			'(_ _id _stage_src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
 			(begin
-				(define filtercols (join_filter_cols_for_alias all_sources default_alias alias stripped_condition))
+				(define membership_filter_expr (if membership_filter
+					(recset_contains_call_expr membership_var)
+					true))
+				(define filter_condition (combine_where membership_filter_expr stripped_condition))
+				(define filtercols (merge_unique (list
+					(if membership_filter (list "$recset_contains") '())
+					(join_filter_cols_for_alias all_sources default_alias alias stripped_condition))))
 				(define raw_mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
 				(define scan_mapcols (merge_unique (list (without_col raw_mapcols col) mapcols)))
 				(define table_expr (source_table_expr src))
 				(define rewritten_row_expr (replace_lowered_row_number_symbol alias col row_expr))
 				(define filter_expr (list (quote lambda)
-					(map filtercols (lambda (filter_col) (symbol (concat alias "." filter_col))))
-					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias stripped_condition))))
+					(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias alias filter_col)))
+					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias filter_condition))))
 				(define continuation_expr (list (quote lambda) (list (quote __row_number))
 					(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 true '())))
 				(define map_expr (list (quote lambda)
@@ -6695,16 +6896,25 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_carrier)))
 				nil
 				(recset_project_join_expr_for_membership src membership)))
+			(define membership_driver (and (not (nil? membership_table_expr)) (empty_list? (cdr sources))))
+			(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
 			(define effective_membership (if (nil? membership_table_expr) nil membership))
 			(define effective_final_condition (strip_driver_membership_for_source src final_condition effective_membership))
 			(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+			(define membership_var (symbol "__membership_recset"))
+			(define membership_filter_expr (if membership_filter
+				(recset_contains_call_expr membership_var)
+				true))
+			(define filter_condition (combine_where membership_filter_expr effective_condition))
 			(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
-			(define filtercols (join_filter_cols_for_alias all_sources default_alias alias effective_condition))
+			(define filtercols (merge_unique (list
+				(if membership_filter (list "$recset_contains") '())
+				(join_filter_cols_for_alias all_sources default_alias alias effective_condition))))
 			(define mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
-			(define table_expr (coalesceNil membership_table_expr (source_table_expr src)))
+			(define table_expr (if membership_driver membership_table_expr (source_table_expr src)))
 			(define filter_expr (list (quote lambda)
-				(map filtercols (lambda (col) (symbol (concat alias "." col))))
-				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias effective_condition))))
+				(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias filter_condition))))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
 				(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs effective_final_condition row_expr '() 0 -1 allow_membership_carrier stages)))
@@ -6713,35 +6923,41 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote nil?) (quote subrows))
 					(quote acc)
 					(list (quote merge) (quote acc) (quote subrows)))))
-			(if (not (nil? row_number_stage_filter))
-				(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs effective_final_condition row_expr row_number_stage_filter)
-				(if (and (empty_list? order_items) (not (query_limit_active? offset_value limit_value)))
-					(list (quote scan)
-						'(session "__memcp_tx")
-						table_expr
-						(cons (quote list) filtercols)
-						filter_expr
-						(cons (quote list) mapcols)
-						map_expr
-						reduce_expr
-						(list (quote list))
-						nil
-						(source_outer? src))
-					(list (quote scan_order)
-						'(session "__memcp_tx")
-						table_expr
-						(cons (quote list) filtercols)
-						filter_expr
-						(cons (quote list) (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
-						(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
-						0
-						(coalesceNil offset_value 0)
-						(coalesceNil limit_value -1)
-						(cons (quote list) mapcols)
-						map_expr
-						reduce_expr
-						(list (quote list))
-						(source_outer? src))))))))
+			(define scan_expr
+				(if (not (nil? row_number_stage_filter))
+					(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs effective_final_condition row_expr row_number_stage_filter membership_var membership_filter)
+					(if (and (empty_list? order_items) (not (query_limit_active? offset_value limit_value)))
+						(list (quote scan)
+							'(session "__memcp_tx")
+							table_expr
+							(cons (quote list) filtercols)
+							filter_expr
+							(cons (quote list) mapcols)
+							map_expr
+							reduce_expr
+							(list (quote list))
+							nil
+							(source_outer? src))
+						(list (quote scan_order)
+							'(session "__memcp_tx")
+							table_expr
+							(cons (quote list) filtercols)
+							filter_expr
+							(cons (quote list) (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
+							(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
+							0
+							(coalesceNil offset_value 0)
+							(coalesceNil limit_value -1)
+							(cons (quote list) mapcols)
+							map_expr
+							reduce_expr
+							(list (quote list))
+							(source_outer? src)))))
+			(if membership_filter
+				(list
+					(list (quote lambda) (list membership_var) scan_expr)
+					membership_table_expr)
+				scan_expr)))))
 
 (define build_join_scan_rows (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(build_join_scan_rows_with_mapper
@@ -6813,6 +7029,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define final_condition (coalesceNil (qb_where block) true))
 				(define direct_order_safe (and direct_order
 					(not (ordered_join_limit_requires_complete_rows? sources first_alias final_condition (qb_offset block) (qb_limit block)))))
+				(define membership_candidate_sort_plan
+					(equal? (qassoc_get (qb_facts block) (quote membership_selectivity_class) nil) (quote selective)))
 				(define needed_exprs (merge (list
 					(extract_assoc fields (lambda (_title expr) expr))
 					(list final_condition)
@@ -6821,17 +7039,36 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if direct_order_safe
 					(build_join_scan_rows (qb_schema block) sources first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) (qb_stages block))
 					(if direct_order
-						(join_ordered_filtered_stream_plan
-							(qb_schema block)
-							sources
-							first_alias
-							needed_exprs
-							final_condition
-							fields
-							order_items
-							(qb_offset block)
-							(qb_limit block)
-							(qb_stages block))
+						(if membership_candidate_sort_plan
+							(join_sorted_rows_plan
+								(build_join_scan_rows_with_mapper
+									(qb_schema block)
+									sources
+									sources
+									first_alias
+									needed_exprs
+									final_condition
+									(lower_join_result_row_assoc sources first_alias fields order_items)
+									'()
+									0
+									-1
+									true
+									(qb_stages block))
+								fields
+								order_items
+								(qb_offset block)
+								(qb_limit block))
+							(join_ordered_filtered_stream_plan
+								(qb_schema block)
+								sources
+								first_alias
+								needed_exprs
+								final_condition
+								fields
+								order_items
+								(qb_offset block)
+								(qb_limit block)
+								(qb_stages block)))
 						(join_sorted_rows_plan
 							(build_join_scan_rows_with_mapper
 								(qb_schema block)
@@ -7000,7 +7237,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(lower_dml_query_block_core block target_schema target_tbl)
 		(cons (quote begin)
 			(merge (list
-				(map (qb_stages block) (lambda (stage)
+				(map (dedupe_stages_for_prepare (qb_stages block)) (lambda (stage)
 					(lower_stage_prepare_using (qb_stages block) stage)))
 				(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using (qb_stages block) block) target_schema target_tbl))))))))
 
