@@ -6008,7 +6008,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(begin
 				(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 				(define probe_sources (filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src))))))
-				(stage_probe_allowed_in_context? stage probe_sources)))))))
+				(and
+					(stage_probe_allowed_in_context? stage probe_sources)
+					(or
+						(stage_has_residual_outer_refs? stage)
+						(or
+							(literal_true? (coalesceNil (source_join_expr src) true))
+							(or
+								(not (stage_keys_are_input_local? stage))
+								(stage_lookup_keys_resolve_in_sources?
+									stage
+									probe_sources
+									default_alias)))))))))))
 
 (define stage_output_source_ids (lambda (sources)
 	(filter (map (coalesceNil sources '()) (lambda (src)
@@ -6112,7 +6123,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(quote consumed_presence_probe_stage_ids)
 				(merge_unique (list
 					(qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '())
-					(stage_output_source_ids probe_sources)))))))
+					(stage_output_source_ids probe_sources))))))))
 
 (define query_block_without_stages_after_prepare_using (lambda (stages block)
 	(begin
@@ -6810,9 +6821,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(qb_stages block)
 				(filter (qb_stages block) (lambda (stage)
 					(not
-							(or
-								(row_number_stage_consumed_by_join? stage sources)
-								(stage_consumed_by_probe_source? stage (qb_stages block) sources default_alias))))))
+						(or
+							(row_number_stage_consumed_by_join? stage sources)
+							(stage_consumed_by_probe_source? stage (qb_stages block) sources default_alias))))))
 			(lambda (stage)
 				(and
 					(not (contains? consumed_probe_ids (gs_id stage)))
