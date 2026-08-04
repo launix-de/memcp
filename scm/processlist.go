@@ -176,15 +176,30 @@ func (s *SessionState) ClearCancel(seq uint64) {
 
 // IsKilled returns true if this session has been killed.
 func (s *SessionState) IsKilled() bool {
+	return s.IsKilledSeq(CurrentQuerySeq())
+}
+
+// CurrentQuerySeq returns the query generation installed in the current
+// execution context. Storage workers should capture this once in the parent
+// goroutine and use IsKilledSeq instead of reading GLS concurrently.
+func CurrentQuerySeq() uint64 {
 	if mgr == nil {
-		return false
+		return 0
 	}
 	v, ok := mgr.GetValue("querySeq")
 	if !ok {
-		return false
+		return 0
 	}
 	seq, ok := v.(uint64)
 	if !ok || seq == 0 {
+		return 0
+	}
+	return seq
+}
+
+// IsKilledSeq returns true if the given query generation has been killed.
+func (s *SessionState) IsKilledSeq(seq uint64) bool {
+	if seq == 0 {
 		return false
 	}
 	s.cancelMu.Lock()

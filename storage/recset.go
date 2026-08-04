@@ -970,7 +970,7 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 	return akkumulator, outCount
 }
 
-func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) *shardqueue {
+func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState, querySeq uint64) *shardqueue {
 	result := &shardqueue{shard: t}
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
@@ -1073,7 +1073,7 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 	visibleUpper := mainCount + uint32(len(t.inserts))
 	result.items = make([]uint32, 0, len(recids))
 	for _, idx := range recids {
-		if ss != nil && ss.IsKilled() {
+		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
 		if idx >= visibleUpper {
