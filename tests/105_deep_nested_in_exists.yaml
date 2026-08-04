@@ -464,6 +464,27 @@ test_cases:
         - id: 3
           is_urgent: false
 
+  - name: "Depth 4: projected EXISTS propagates false through 3 scalar levels"
+    sql: |
+      SELECT a.id,
+        (SELECT
+          (SELECT
+            (SELECT EXISTS (SELECT 1 FROM dn_tags t WHERE t.ref_id = a.id AND t.tag = 'urgent')
+             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS is_urgent
+      FROM dn_a a
+      ORDER BY a.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          is_urgent: true
+        - id: 2
+          is_urgent: false
+        - id: 3
+          is_urgent: false
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS dn_tags"
   - sql: "DROP TABLE IF EXISTS dn_a"
