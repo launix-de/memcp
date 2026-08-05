@@ -571,6 +571,19 @@ test_cases:
           archived: false
           can_view: true
 
+  - name: "Constant CASE prunes dead scalar aggregate"
+    max_time: 0.2
+    max_plan_size: 2000
+    sql: |
+      SELECT CASE
+        WHEN TRUE THEN 7
+        ELSE (SELECT SUM(1) FROM trace_wide_parent dead_parent WHERE dead_parent.id = 1)
+      END AS value
+    expect:
+      rows: 1
+      data:
+        - value: 7
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_config"
   - sql: "DROP TABLE IF EXISTS trace_doc"
