@@ -3598,6 +3598,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define driver_order_membership_strategy? (lambda (facts)
 	(equal? (qassoc_get facts (quote membership_plan_strategy) nil) (quote driver_order_membership_probe))))
 
+(define broad_driver_order_membership_probe? (lambda (facts)
+	(begin
+		(define estimated_rows (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
+		(define estimate_input (qassoc_get facts (quote membership_candidate_estimate_input) nil))
+		(define capped (qassoc_get facts (quote membership_candidate_estimate_capped) false))
+		(define broad_by_count (and
+			(and (not (nil? estimated_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
+			(>= (* estimated_rows 4) estimate_input)))
+		(and
+			(driver_order_membership_strategy? facts)
+			(or
+				capped
+				(or
+					broad_by_count
+					(equal? (qassoc_get facts (quote membership_selectivity_class) nil) (quote broad))))))))
+
 (define stage_consumed_by_driver_order_membership_source? (lambda (stage stages sources facts)
 	(if (not (driver_order_membership_strategy? facts))
 		false
@@ -8015,17 +8031,32 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
 				(define membership (driver_membership_for_source src condition))
 				(define membership_table_expr (if (nil? membership) nil (recset_project_join_expr_for_membership src membership)))
+				(define membership_filter (and
+					(not (nil? membership_table_expr))
+					(and scan_order_supported
+						(and bounded
+							(broad_driver_order_membership_probe? (qb_facts block))))))
 				(define effective_membership (if (nil? membership_table_expr) nil membership))
 				(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
-				(define filtercols (extract_columns_for_alias src effective_condition))
+				(define membership_var (symbol "__membership_recset"))
+				(define membership_filter_expr (if membership_filter
+					(recset_contains_call_expr membership_var)
+					true))
+				(define filter_condition (combine_where membership_filter_expr effective_condition))
+				(define filtercols (merge_unique (list
+					(if membership_filter (list "$recset_contains") '())
+					(extract_columns_for_alias src effective_condition))))
 				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 					(extract_columns_for_alias src expr)))))
 				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
-				(define mapcols (merge_unique (list filtercols fieldcols)))
-				(define table_expr (coalesceNil membership_table_expr (source_table_expr_using (query_block_stage_catalog block) src)))
+				(define mapcols fieldcols)
+				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
+				(define table_expr (if membership_filter
+					source_table
+					(coalesceNil membership_table_expr source_table)))
 				(define filter_expr (list (quote lambda)
-					(map filtercols (lambda (col) (symbol (concat alias "." col))))
-					(list (quote optimize) (lower_column_expr_for_alias src effective_condition))))
+					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+					(list (quote optimize) (lower_column_expr_for_alias src filter_condition))))
 				(define map_expr (list (quote lambda)
 					(map mapcols (lambda (col) (symbol (concat alias "." col))))
 					(list (quote resultrow)
@@ -8044,21 +8075,27 @@ PostgreSQL parsers should both lower to the same combined operators.
 						nil
 						(source_outer? src))
 					(if scan_order_supported
-						(list (quote scan_order)
-							'(session "__memcp_tx")
-							table_expr
-							(cons (quote list) filtercols)
-							filter_expr
-							(cons (quote list) ordercols)
-							(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
-							0
-							(coalesceNil (qb_offset block) 0)
-							(coalesceNil (qb_limit block) -1)
-							(cons (quote list) mapcols)
-							map_expr
-							nil
-							nil
-							(source_outer? src))
+						(begin
+							(define scan_expr (list (quote scan_order)
+								'(session "__memcp_tx")
+								table_expr
+								(cons (quote list) filtercols)
+								filter_expr
+								(cons (quote list) ordercols)
+								(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
+								0
+								(coalesceNil (qb_offset block) 0)
+								(coalesceNil (qb_limit block) -1)
+								(cons (quote list) mapcols)
+								map_expr
+								nil
+								nil
+								(source_outer? src)))
+							(if membership_filter
+								(list
+									(list (quote lambda) (list membership_var) scan_expr)
+									membership_table_expr)
+								scan_expr))
 						(join_sorted_rows_plan
 							(build_join_scan_rows_with_mapper
 								(qb_schema block)

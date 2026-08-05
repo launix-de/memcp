@@ -107,13 +107,14 @@ func (s *SkipList) ComputeSize() uint {
 //   - VectorDistanceMatcher: IsSorted=false, ORDER BY vector_distance(col, query)
 //     (query varies per query → cluster-based SkipList, not sort-order based)
 var (
-	EqualMatcher BoundaryMatcher = &equalMatcher{}
-	RangeMatcher BoundaryMatcher = &rangeMatcher{}
-	LikeMatcher  BoundaryMatcher = &likeMatcher{}
+	EqualMatcher  BoundaryMatcher = &equalMatcher{}
+	RangeMatcher  BoundaryMatcher = &rangeMatcher{}
+	LikeMatcher   BoundaryMatcher = &likeMatcher{}
+	RecSetMatcher BoundaryMatcher = &recSetMatcher{}
 )
 
 // boundaryMatchers lists all known matcher types.
-var boundaryMatchers = []BoundaryMatcher{EqualMatcher, RangeMatcher, LikeMatcher}
+var boundaryMatchers = []BoundaryMatcher{EqualMatcher, RangeMatcher, LikeMatcher, RecSetMatcher}
 
 // --- Equal ---
 
@@ -214,6 +215,17 @@ func (m *likeMatcher) BuildSkipList(pattern string, count uint32, getRecid func(
 	return sl
 }
 
+// --- RecSet ---
+
+type recSetMatcher struct{}
+
+func (m *recSetMatcher) Kind() string      { return "recset" }
+func (m *recSetMatcher) IsSorted() bool    { return false }
+func (m *recSetMatcher) IsPointLike() bool { return true }
+func (m *recSetMatcher) BuildSkipList(_ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
+	return nil
+}
+
 type columnboundaries struct {
 	col              string
 	matcher          BoundaryMatcher // always set: EqualMatcher, RangeMatcher, LikeMatcher, ...
@@ -249,6 +261,9 @@ func boundaryIsPoint(b columnboundaries) bool {
 func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 	for i, b := range in {
 		if b.col == b2.col {
+			if matcherKindEqual(b.matcher, RecSetMatcher) || matcherKindEqual(b2.matcher, RecSetMatcher) {
+				return in
+			}
 			// matcher promotion: more selective matcher wins (equal > like > range)
 			if b2.matcher.IsPointLike() && !b.matcher.IsPointLike() {
 				in[i].matcher = b2.matcher
@@ -386,12 +401,12 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
-		if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() {
+		if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() || v.IsCustom(TagRecSet) {
 			return v, true
 		}
 		if v.IsSymbol() {
 			if val2, ok := p.En.Vars[scm.Symbol(v.String())]; ok {
-				if val2.IsInt() || val2.IsFloat() || val2.IsString() {
+				if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
 					return val2, true
 				}
 			}
@@ -402,7 +417,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				if val[1].IsSymbol() {
 					sym := scm.Symbol(val[1].String())
 					if val2, ok := p.En.Vars[sym]; ok {
-						if val2.IsInt() || val2.IsFloat() || val2.IsString() {
+						if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
 							return val2, true
 						}
 					}
@@ -411,7 +426,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					idx := int(val[1].NthLocalVar())
 					if p.En.VarsNumbered != nil && idx < len(p.En.VarsNumbered) {
 						val2 := p.En.VarsNumbered[idx]
-						if val2.IsInt() || val2.IsFloat() || val2.IsString() {
+						if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
 							return val2, true
 						}
 					}
@@ -420,7 +435,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 		if isIndependent(params, v) {
 			if val2, ok := evalIndependentScmer(v, p.En); ok {
-				if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsBool() || val2.IsNil() {
+				if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsBool() || val2.IsNil() || val2.IsCustom(TagRecSet) {
 					return val2, true
 				}
 			}
@@ -450,6 +465,11 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 		if funcIs(v[0], "optimize") && len(v) == 2 {
 			return traverseCondition(v[1])
+		}
+		if col, ok := resolveParamName(v[0]); ok && col == "$recset_contains" && len(v) == 2 {
+			if rs, ok := extractConstant(v[1]); ok && rs.IsCustom(TagRecSet) {
+				return boundaries{columnboundaries{col: col, matcher: RecSetMatcher, lower: rs, lowerInclusive: true, upper: rs, upperInclusive: true}}
+			}
 		}
 		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
 			if col, ok := resolveColVar(v[1]); ok {
@@ -693,6 +713,11 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						return nil
 					}
 				}
+				for _, cb := range result {
+					if matcherKindEqual(cb.matcher, RecSetMatcher) {
+						return nil
+					}
+				}
 			}
 			return result
 		}
@@ -710,12 +735,18 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	cols := traverseCondition(p.Body)
 
-	// Sort columns: point-like (equal + like) first, then range, alphabetically within
-	// each group. LIKE columns are treated as point-like because the index sort treats
-	// them like any other column; the LIKE pattern is a query-level overlay that filters
-	// via rowWithinBounds, not via sort order. The binary search skips LIKE columns.
+	// Keep transient RecSet boundaries in a prefix so scans can remove them by
+	// slicing. Sort real columns point-like (equal + like) first, then range,
+	// alphabetically within each group. LIKE columns are treated as point-like because
+	// the index sort treats them like any other column; the LIKE pattern is a query-level
+	// overlay that filters via rowWithinBounds, not via sort order.
 	if len(cols) > 1 {
 		hybridsort.Slice(cols, func(i, j int) bool {
+			iRecSet := matcherKindEqual(cols[i].matcher, RecSetMatcher)
+			jRecSet := matcherKindEqual(cols[j].matcher, RecSetMatcher)
+			if iRecSet != jRecSet {
+				return iRecSet
+			}
 			iPoint := boundaryIsPoint(cols[i])
 			jPoint := boundaryIsPoint(cols[j])
 			if iPoint != jPoint {
@@ -726,6 +757,21 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 
 	return cols
+}
+
+func splitRecSetBoundary(b boundaries, carrier *table) (boundaries, *recSet) {
+	var rs *recSet
+	prefixLen := 0
+	for prefixLen < len(b) && matcherKindEqual(b[prefixLen].matcher, RecSetMatcher) {
+		if rs == nil && b[prefixLen].lower.IsCustom(TagRecSet) {
+			candidate := RecSetFromScmer(b[prefixLen].lower)
+			if candidate != nil && candidate.table == carrier {
+				rs = candidate
+			}
+		}
+		prefixLen++
+	}
+	return b[prefixLen:], rs
 }
 
 func hasBatchBoundaries(bounds boundaries) bool {

@@ -300,10 +300,7 @@ func (s *scanOrderTableSpec) carrierTable() *table {
 // existing filter boundaries are point lookups and the comparators are
 // index-order compatible (ASC). This lets the shard return rows already sorted
 // by ORDER BY, reducing the cross-shard merge to merging pre-sorted runs.
-func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) boundaries {
-	if len(b) == 0 {
-		return b
-	}
+func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (boundaries, bool) {
 	allEq := true
 	for _, bi := range b {
 		if !boundaryIsPoint(bi) {
@@ -335,8 +332,9 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 		}
 	}
 	if !allEq || !canAppendSortPrefix {
-		return b
+		return b, false
 	}
+	addedSortCols := 0
 	for _, scol := range sortcols {
 		if scol.IsString() {
 			col := scol.String()
@@ -349,6 +347,7 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			}
 			if !already {
 				b = append(b, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil()})
+				addedSortCols++
 			}
 			continue
 		}
@@ -392,9 +391,59 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 		}
 		if !already {
 			b = append(b, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
+			addedSortCols++
 		}
 	}
-	return b
+	return b, addedSortCols > 0
+}
+
+func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
+	var p scm.Proc
+	if condition.IsProc() {
+		p = *condition.Proc()
+	} else if si, ok := condition.Any().(scm.Proc); ok {
+		p = si
+	} else {
+		return 0
+	}
+	var params []scm.Scmer
+	if p.Params.IsSlice() {
+		params = p.Params.Slice()
+	}
+	paramIsRecSetContains := func(node scm.Scmer) bool {
+		if node.IsSymbol() {
+			name := node.String()
+			for i, sym := range params {
+				if i < len(conditionCols) && sym.IsSymbol() && sym.String() == name {
+					return conditionCols[i] == "$recset_contains"
+				}
+			}
+		}
+		if node.IsNthLocalVar() {
+			idx := int(node.NthLocalVar())
+			return idx < len(conditionCols) && conditionCols[idx] == "$recset_contains"
+		}
+		return false
+	}
+	var walk func(scm.Scmer) int
+	walk = func(node scm.Scmer) int {
+		if !node.IsSlice() {
+			return 0
+		}
+		items := node.Slice()
+		if len(items) == 0 {
+			return 0
+		}
+		count := 0
+		if paramIsRecSetContains(items[0]) {
+			count++
+		}
+		for _, item := range items[1:] {
+			count += walk(item)
+		}
+		return count
+	}
+	return walk(p.Body)
 }
 
 // scanOrderMulti performs an ordered scan across one or more tables, merging
@@ -442,8 +491,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// Boundary analysis per table
 		analyzeStart := time.Now()
 		bounds := extractBoundaries(spec.conditionCols, spec.condition)
+		bounds, recsetBoundary := splitRecSetBoundary(bounds, t)
 		reorderByFrequency(bounds, t)
-		bounds = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
+		bounds, indexCoversOrder := extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		lower, upperLast := indexFromBoundaries(bounds)
 
 		if Settings.ScanDebugging {
@@ -469,6 +519,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		tableBounds := bounds
 		tableIdx := ti
 		shardLimit := shardTotalLimit
+		orderedEarlyLimit := indexCoversOrder && shardLimit >= 0 && limitPartitionCols == 0
+		recsetFilter := recsetBoundary
 
 		if spec.recset != nil {
 			if len(sortcols) > 0 {
@@ -542,7 +594,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 						q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 					}
 				}()
-				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, orderedEarlyLimit, recsetFilter)
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
@@ -820,12 +872,21 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState, orderedEarlyLimit bool, recsetFilter *recSet) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
+	var recsetPart *recSetShard
+	if recsetFilter != nil {
+		recsetPart = recsetFilter.shardEntry(t)
+		if recsetPart == nil || recsetPart.count == 0 {
+			result.items = nil
+			return
+		}
+	}
+	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
 	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
 		if len(args) < 2 {
 			return scm.NewBool(false)
@@ -962,6 +1023,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	for i, k := range conditionCols { // iterate over columns
 		if k == "$recset_contains" {
 			fnptr := recSetContainsClosure(t)
+			if recsetBoundaryCoversCondition {
+				fnptr = recSetAlreadyMatchedClosure()
+			}
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				return scm.NewClosure(fnptr, id)
 			}
@@ -1013,6 +1077,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			// filter in-place: overwrite batch with passing IDs
 			outN := 0
 			for _, idx := range batch {
+				if recsetPart != nil && !recsetPart.contains(idx) {
+					continue
+				}
 				if idx >= visibleUpper {
 					continue
 				}
@@ -1068,6 +1135,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			}
 			copy(result.items[resultN:], batch[:outN])
 			resultN += outN
+			if orderedEarlyLimit && resultN >= limit {
+				return false
+			}
 			return true
 		})
 		result.items = result.items[:resultN]

@@ -2244,7 +2244,28 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
 	cNeedsTxReader := make([]bool, len(conditionCols))
+	conditionGetters := make([]mapArgGetter, len(conditionCols))
+	bounds := extractBoundaries(conditionCols, condition)
+	bounds, recsetFilter := splitRecSetBoundary(bounds, t.t)
+	var recsetPart *recSetShard
+	if recsetFilter != nil {
+		recsetPart = recsetFilter.shardEntry(t)
+		if recsetPart == nil || recsetPart.count == 0 {
+			return 0, false
+		}
+	}
+	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
 	for i, col := range conditionCols {
+		if col == "$recset_contains" {
+			fnptr := recSetContainsClosure(t)
+			if recsetBoundaryCoversCondition {
+				fnptr = recSetAlreadyMatchedClosure()
+			}
+			conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
+				return scm.NewClosure(fnptr, id)
+			}
+			continue
+		}
 		ccols[i] = t.getColumnStorageOrPanic(col)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
@@ -2252,7 +2273,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		}
 	}
 
-	bounds := extractBoundaries(conditionCols, condition)
 	lower, upperLast := indexFromBoundaries(bounds)
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
@@ -2268,6 +2288,9 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	var buf [256]uint32
 	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], false, func(batch []uint32) bool {
 		for _, idx := range batch {
+			if recsetPart != nil && !recsetPart.contains(idx) {
+				continue
+			}
 			if acidMode {
 				if !currentTx.IsVisible(t, idx) {
 					continue
@@ -2277,7 +2300,9 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 			}
 			if idx < mainCount {
 				for i, c := range ccols {
-					if cNeedsTxReader[i] {
+					if getter := conditionGetters[i]; getter != nil {
+						cdataset[i] = getter(idx, 0)
+					} else if cNeedsTxReader[i] {
 						cdataset[i] = cReaders[i].GetValue(idx)
 					} else {
 						cdataset[i] = c.GetValue(idx)
@@ -2285,7 +2310,9 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 				}
 			} else {
 				for i, col := range conditionCols {
-					if cNeedsTxReader[i] {
+					if getter := conditionGetters[i]; getter != nil {
+						cdataset[i] = getter(idx, 0)
+					} else if cNeedsTxReader[i] {
 						cdataset[i] = cReaders[i].GetValue(idx)
 					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 						cdataset[i] = ccols[i].GetValue(idx)
