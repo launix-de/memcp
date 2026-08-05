@@ -1396,6 +1396,7 @@ test_cases:
 
   - name: "IN UNION with nested reference scalar prepares query carriers"
     fail_comment: "nested stage-output carriers must be prepared before physical reads"
+    max_plan_size: 60000
     setup:
       - sql: "DROP TABLE IF EXISTS in_stage_dep_doc"
       - sql: "DROP TABLE IF EXISTS in_stage_dep_file"
