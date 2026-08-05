@@ -18,6 +18,16 @@ setup:
       (1, 'Alice', 10), (2, 'Bob', 30), (3, 'Charlie', 50), (4, 'Alice', 20)
 
 test_cases:
+  - name: "EXPLAIN COMPILE exposes PostgreSQL planner metrics"
+    sql: "EXPLAIN COMPILE SELECT id FROM psql_data WHERE val BETWEEN 20 AND 40 ORDER BY id"
+    expect:
+      rows: 1
+      contains:
+        - "planner_total_ns"
+        - "plan_bytes"
+        - "query_blocks"
+        - "scans"
+
   # === pg_dump compatibility no-ops ===
   - name: "ALTER STATISTICS is ignored"
     sql: "ALTER STATISTICS public.psql_data_stats OWNER TO postgres"
