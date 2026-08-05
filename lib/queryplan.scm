@@ -151,6 +151,29 @@ PostgreSQL parsers should both lower to the same combined operators.
 		'(_ stage_id) stage_id
 		_ nil)))
 
+(define logical_stage_key (lambda (stage)
+	(if (group_stage? stage)
+		(concat "group:" (gs_id stage))
+		(if (orc_stage? stage)
+			(concat "orc:" (nth stage 1))
+			(if (window_stage? stage)
+				(concat "window:" (nth stage 1))
+				nil)))))
+
+(define unique_stages_by_id_acc (lambda (stages seen)
+	(match (coalesceNil stages '())
+		(cons stage rest) (begin
+			(define key (logical_stage_key stage))
+			(if (and (not (nil? key)) (has_assoc? seen key))
+				(unique_stages_by_id_acc rest seen)
+				(cons stage
+					(unique_stages_by_id_acc rest
+						(if (nil? key) seen (set_assoc seen key true))))))
+		_ '())))
+
+(define unique_stages_by_id (lambda (stages)
+	(unique_stages_by_id_acc stages '())))
+
 (define qb_schema (lambda (node) (nth node 1)))
 (define qb_sources (lambda (node) (nth node 2)))
 (define qb_fields (lambda (node) (nth node 3)))
@@ -6194,7 +6217,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(begin
 				(define stage (stage_by_id stages (stage_output_relation_id relation)))
 				(if (nil? stage)
-					(neumann_fail "build_queryplan" "stage-output source references unknown stage")
+					(neumann_fail "build_queryplan" (concat "physicalize stage-output source references unknown stage " (stage_output_relation_id relation)))
 					true)
 				(source_with_schema_relation
 					src
@@ -6214,10 +6237,30 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(begin
 					(define stage (stage_by_id stages (stage_output_relation_id relation)))
 					(if (nil? stage)
-						(neumann_fail "build_queryplan" "stage-output source references unknown stage")
+						(neumann_fail "build_queryplan" (concat "dependency stage-output source references unknown stage " (stage_output_relation_id relation)))
 						stage)))
 			_ nil)))
 		(lambda (stage) (not (nil? stage))))))))
+
+(define source_stage_output_stage (lambda (stages src)
+	(if (not (stage_output_relation? (source_relation src)))
+		nil
+		(stage_by_id stages (stage_output_relation_id (source_relation src))))))
+
+(define constant_scalar_stage_output_source? (lambda (stages src)
+	(begin
+		(define stage (source_stage_output_stage stages src))
+			(and (group_stage? stage)
+				(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
+					(and (empty_list? (gs_domain stage))
+						(not (stage_has_residual_outer_refs? stage))))))))
+
+(define constant_scalar_stage_outputs_first (lambda (stages sources)
+	(merge (list
+		(filter (coalesceNil sources '()) (lambda (src)
+			(constant_scalar_stage_output_source? stages src)))
+		(filter (coalesceNil sources '()) (lambda (src)
+			(not (constant_scalar_stage_output_source? stages src))))))))
 
 (define scalar_first_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
@@ -6599,6 +6642,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 		'()
 		(qb_facts block))))
 
+(define query_block_without_stages_after_eager_prepare_with_constant_scalars_first (lambda (stages block)
+	(begin
+		(define available_stages (unique_stages_by_id (merge (list stages (qb_stages block)))))
+		(make_query_block
+			(qb_schema block)
+			(physicalize_stage_output_sources available_stages (constant_scalar_stage_outputs_first available_stages (qb_sources block)))
+			(qb_fields block)
+			(qb_where block)
+			(qb_group block)
+			(qb_having block)
+			(qb_order block)
+			(qb_limit block)
+			(qb_offset block)
+			(qb_hidden block)
+			'()
+			(qb_facts block)))))
+
 (define query_block_with_prepared_sources_using (lambda (stages block)
 	(begin
 		(define scalar_rewritten (query_block_with_scalar_first_probes_using stages block))
@@ -6715,8 +6775,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(equal? (count ags) 2))))
 		(define scalar_order_base_stage (and (not query_input_carrier)
 			(compatible_scalar_order_aggregates? ags)))
+		(define scalar_aggregate_stage (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate)))
 		(define prepared_src (if (query_block? rewritten_src)
-			(query_block_without_stages_after_eager_prepare_using all_stages rewritten_src)
+			(if scalar_aggregate_stage
+				(begin
+					(define constant_reorder_stages (unique_stages_by_id (merge (list all_stages (qb_stages rewritten_src)))))
+					(if (not (empty_list? (filter (qb_sources rewritten_src) (lambda (src)
+						(constant_scalar_stage_output_source? constant_reorder_stages src)))))
+						(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages rewritten_src)
+						(query_block_without_stages_after_eager_prepare_using all_stages rewritten_src)))
+				(query_block_without_stages_after_eager_prepare_using all_stages rewritten_src))
 			rewritten_src))
 			(define nested_stages (if (query_block? rewritten_src)
 				(merge_unique (list

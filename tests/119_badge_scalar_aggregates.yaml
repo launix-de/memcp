@@ -1,0 +1,111 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Badge scalar aggregate regressions for constant scalar stage lookups"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS badge_config"
+  - sql: "DROP TABLE IF EXISTS badge_doc"
+  - sql: "DROP TABLE IF EXISTS badge_task"
+  - sql: "DROP TABLE IF EXISTS badge_message"
+  - sql: "DROP TABLE IF EXISTS badge_ticket"
+  - sql: "CREATE TABLE badge_config (id INT PRIMARY KEY, default_type INT, actor_id INT)"
+  - sql: "CREATE TABLE badge_doc (id INT PRIMARY KEY, type INT, archived BOOL, flag INT)"
+  - sql: "CREATE TABLE badge_task (id INT PRIMARY KEY, due_at INT, done BOOL, actor_id INT)"
+  - sql: "CREATE TABLE badge_message (id INT PRIMARY KEY, box_id INT, seen BOOL, owner_id INT)"
+  - sql: "CREATE TABLE badge_ticket (id INT PRIMARY KEY, state INT, assignee INT, creator INT, effort INT)"
+  - sql: "INSERT INTO badge_config (id, default_type, actor_id) VALUES (1, 10, 7)"
+  - sql: "INSERT INTO badge_doc (id, type, archived, flag) VALUES (1, 10, FALSE, 1)"
+  - sql: "INSERT INTO badge_task (id, due_at, done, actor_id) VALUES (1, 100, FALSE, 7)"
+  - sql: "INSERT INTO badge_message (id, box_id, seen, owner_id) VALUES (1, 1, FALSE, 7)"
+  - sql: "INSERT INTO badge_ticket (id, state, assignee, creator, effort) VALUES (1, 1, 7, 8, 5)"
+  - sql: "INSERT INTO badge_doc SELECT id + 1, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 2, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 4, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 8, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 16, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 32, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 64, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 128, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 256, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 512, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 1024, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_doc SELECT id + 2048, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, id % 3 FROM badge_doc"
+  - sql: "INSERT INTO badge_task SELECT id + 1, due_at + 1, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_task SELECT id + 2, due_at + 2, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_task SELECT id + 4, due_at + 4, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_task SELECT id + 8, due_at + 8, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_task SELECT id + 16, due_at + 16, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_task SELECT id + 32, due_at + 32, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_task SELECT id + 64, due_at + 64, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_task SELECT id + 128, due_at + 128, FALSE, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_task"
+  - sql: "INSERT INTO badge_message SELECT id + 1, box_id, id % 2 = 0, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_message"
+  - sql: "INSERT INTO badge_message SELECT id + 2, box_id, id % 2 = 0, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_message"
+  - sql: "INSERT INTO badge_message SELECT id + 4, box_id, id % 2 = 0, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_message"
+  - sql: "INSERT INTO badge_message SELECT id + 8, box_id, id % 2 = 0, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_message"
+
+test_cases:
+  - name: "Badge scalar aggregates hoist constant stage lookups"
+    max_time: 0.5
+    sql: |
+      SELECT
+        1 AS marker,
+        (
+          SELECT COUNT(1)
+          FROM badge_doc d
+          WHERE (
+              (((SELECT default_type FROM badge_config WHERE id = 1 LIMIT 1) IS NULL) AND d.type IS NULL)
+              OR d.type = (SELECT default_type FROM badge_config WHERE id = 1 LIMIT 1)
+            )
+            AND NOT d.archived
+          LIMIT 1
+        ) AS doc_badge,
+        (
+          SELECT SUM(1)
+          FROM badge_task t
+          WHERE NOT t.done
+            AND t.actor_id = (SELECT actor_id FROM badge_config WHERE id = 1 LIMIT 1)
+          LIMIT 1
+        ) AS task_badge,
+        (
+          SELECT SUM(1)
+          FROM badge_message m
+          WHERE NOT m.seen
+            AND m.owner_id = (SELECT actor_id FROM badge_config WHERE id = 1 LIMIT 1)
+          LIMIT 1
+        ) AS message_badge,
+        (
+          SELECT SUM(effort)
+          FROM badge_ticket k
+          WHERE k.assignee = (SELECT actor_id FROM badge_config WHERE id = 1 LIMIT 1)
+          LIMIT 1
+        ) AS ticket_effort
+    expect:
+      rows: 1
+      data:
+        - marker: 1
+          doc_badge: 2048
+          task_badge: 128
+          message_badge: 1
+          ticket_effort: 5
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS badge_config"
+  - sql: "DROP TABLE IF EXISTS badge_doc"
+  - sql: "DROP TABLE IF EXISTS badge_task"
+  - sql: "DROP TABLE IF EXISTS badge_message"
+  - sql: "DROP TABLE IF EXISTS badge_ticket"
