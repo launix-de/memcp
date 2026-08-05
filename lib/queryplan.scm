@@ -6576,7 +6576,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define rows (probe_context_row_count sources))
 		(or (nil? rows) (< rows 1000)))))
 
-(define scalar_aggregate_probe_limit_small_enough? (lambda (limit_value)
+(define probe_limit_small_enough? (lambda (limit_value)
 	(and (number? limit_value)
 		(and (> limit_value 0)
 			(<= limit_value 512)))))
@@ -6609,11 +6609,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(probe_context_small_enough? sources)
 					true))))))
 
-(define probeable_stage_output_source_for_block? (lambda (stages sources default_alias src)
+(define probeable_stage_output_source_for_block? (lambda (stages sources default_alias limit_value src)
 	(if (scalar_first_stage_output_source? stages src)
-		(stage_probe_allowed_in_context?
-			(stage_by_id stages (stage_output_relation_id (source_relation src)))
-			(filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src))))))
+		(or
+			(probe_limit_small_enough? limit_value)
+			(stage_probe_allowed_in_context?
+				(stage_by_id stages (stage_output_relation_id (source_relation src)))
+				(filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src)))))))
 		(if (not (presence_stage_output_source? stages src))
 			false
 			(begin
@@ -6640,14 +6642,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(scalar_aggregate_probe_stage_safe? stage)
 				(and
 					(or
-						(scalar_aggregate_probe_limit_small_enough? limit_value)
+						(probe_limit_small_enough? limit_value)
 						(probe_context_small_enough? probe_sources))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
 
 (define probe_output_sources_for_block (lambda (stages sources default_alias limit_value)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(or
-			(probeable_stage_output_source_for_block? stages sources default_alias src)
+			(probeable_stage_output_source_for_block? stages sources default_alias limit_value src)
 			(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src))))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
@@ -7710,14 +7712,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 				false))
 		_ false)))
 
-(define stage_consumed_by_probe_source? (lambda (stage stages sources default_alias)
+(define stage_consumed_by_probe_source? (lambda (stage stages sources default_alias limit_value)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(or found
 			(and (stage_output_relation? (source_relation src))
 				(and (equal? (stage_output_relation_id (source_relation src)) (gs_id stage))
 					(and
 						(probeable_stage_output_source? stages src)
-						(probeable_stage_output_source_for_block? stages sources default_alias src))))))
+						(probeable_stage_output_source_for_block? stages sources default_alias limit_value src))))))
 		false)))
 
 (define scalar_first_inline_only_stage? (lambda (stage)
@@ -7761,7 +7763,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(not (or
 			(row_number_stage_consumed_by_join? stage sources)
 			(stage_consumed_by_driver_order_membership_source? stage (qb_stages block) sources (qb_facts block))
-			(stage_consumed_by_probe_source? stage (qb_stages block) sources default_alias))))))
+			(stage_consumed_by_probe_source? stage (qb_stages block) sources default_alias (qb_limit block)))))))
 
 (define stage_direct_prepare_semantic_candidate? (lambda (consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)
 	(and
