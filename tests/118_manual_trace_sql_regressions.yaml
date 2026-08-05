@@ -34,6 +34,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_folder"
   - sql: "DROP TABLE IF EXISTS trace_message"
   - sql: "DROP TABLE IF EXISTS trace_share"
+  - sql: "DROP TABLE IF EXISTS trace_profile"
+  - sql: "DROP TABLE IF EXISTS trace_metric"
   - sql: |
       CREATE TABLE trace_group (
         id INT PRIMARY KEY
@@ -74,6 +76,24 @@ setup:
         box_id INT,
         owner_id INT
       )
+  - sql: |
+      CREATE TABLE trace_profile (
+        id INT PRIMARY KEY
+      )
+  - sql: |
+      CREATE TABLE trace_metric (
+        id INT PRIMARY KEY,
+        profile_id INT,
+        valid_from INT,
+        value_a INT,
+        value_b INT,
+        value_c INT,
+        value_d INT,
+        value_e INT,
+        value_f INT,
+        value_g INT,
+        value_h INT
+      )
   - sql: "INSERT INTO trace_group (id) VALUES (10), (20)"
   - sql: "INSERT INTO trace_item (id, group_id, state) VALUES (1, 10, 1), (2, 20, NULL), (3, 30, 0)"
   - sql: "INSERT INTO trace_host (id, kind) VALUES (1, 1), (2, 2)"
@@ -81,6 +101,19 @@ setup:
   - sql: "INSERT INTO trace_folder (id, box_id, name) VALUES (1001, 100, 'inbox'), (1002, 100, 'archive'), (2001, 200, 'other')"
   - sql: "INSERT INTO trace_message (id, box_id, folder_id, seen) VALUES (1, 100, 1001, FALSE), (2, 100, 1002, TRUE), (3, 200, 2001, FALSE)"
   - sql: "INSERT INTO trace_share (id, box_id, owner_id) VALUES (1, 100, 7)"
+  - sql: "INSERT INTO trace_profile (id) VALUES (1)"
+  - sql: "INSERT INTO trace_metric (id, profile_id, valid_from, value_a, value_b, value_c, value_d, value_e, value_f, value_g, value_h) VALUES (1, 1, 1, 10, 20, 30, 40, 50, 60, 70, 80)"
+  - sql: "INSERT INTO trace_metric SELECT id + 1, profile_id, valid_from + 1, value_a + 1, value_b + 1, value_c + 1, value_d + 1, value_e + 1, value_f + 1, value_g + 1, value_h + 1 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 2, profile_id, valid_from + 2, value_a + 2, value_b + 2, value_c + 2, value_d + 2, value_e + 2, value_f + 2, value_g + 2, value_h + 2 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 4, profile_id, valid_from + 4, value_a + 4, value_b + 4, value_c + 4, value_d + 4, value_e + 4, value_f + 4, value_g + 4, value_h + 4 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 8, profile_id, valid_from + 8, value_a + 8, value_b + 8, value_c + 8, value_d + 8, value_e + 8, value_f + 8, value_g + 8, value_h + 8 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 16, profile_id, valid_from + 16, value_a + 16, value_b + 16, value_c + 16, value_d + 16, value_e + 16, value_f + 16, value_g + 16, value_h + 16 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 32, profile_id, valid_from + 32, value_a + 32, value_b + 32, value_c + 32, value_d + 32, value_e + 32, value_f + 32, value_g + 32, value_h + 32 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 64, profile_id, valid_from + 64, value_a + 64, value_b + 64, value_c + 64, value_d + 64, value_e + 64, value_f + 64, value_g + 64, value_h + 64 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 128, profile_id, valid_from + 128, value_a + 128, value_b + 128, value_c + 128, value_d + 128, value_e + 128, value_f + 128, value_g + 128, value_h + 128 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 256, profile_id, valid_from + 256, value_a + 256, value_b + 256, value_c + 256, value_d + 256, value_e + 256, value_f + 256, value_g + 256, value_h + 256 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 512, profile_id, valid_from + 512, value_a + 512, value_b + 512, value_c + 512, value_d + 512, value_e + 512, value_f + 512, value_g + 512, value_h + 512 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 1024, profile_id, valid_from + 1024, value_a + 1024, value_b + 1024, value_c + 1024, value_d + 1024, value_e + 1024, value_f + 1024, value_g + 1024, value_h + 1024 FROM trace_metric"
   - sql: |
       CREATE TABLE trace_config (
         id INT PRIMARY KEY,
@@ -309,6 +342,60 @@ test_cases:
           filename: "asset-2.dat"
           referenced: false
 
+  - name: "EXPLAIN uses one ordered scan for repeated scalar latest projections"
+    sql: |
+      EXPLAIN
+      SELECT
+        p.id,
+        COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+        COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+        COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c,
+        COALESCE((SELECT m.value_d FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_d,
+        COALESCE((SELECT m.value_e FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_e,
+        COALESCE((SELECT m.value_f FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_f,
+        COALESCE((SELECT m.value_g FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_g,
+        COALESCE((SELECT m.value_h FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_h
+      FROM trace_profile p
+      WHERE p.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "value_h"
+        - "scan_order"
+      result_occurrences:
+        - text: "scan_order"
+          count: 1
+      result_not_contains:
+        - "scalar-once:b1ecb2795b4bbb34"
+        - "__exists_2ff8679a7aafb8ea"
+
+  - name: "Repeated scalar latest projections reuse one key carrier"
+    sql: |
+      SELECT
+        p.id,
+        COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+        COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+        COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c,
+        COALESCE((SELECT m.value_d FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_d,
+        COALESCE((SELECT m.value_e FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_e,
+        COALESCE((SELECT m.value_f FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_f,
+        COALESCE((SELECT m.value_g FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_g,
+        COALESCE((SELECT m.value_h FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_h
+      FROM trace_profile p
+      WHERE p.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          value_a: 2057
+          value_b: 2067
+          value_c: 2077
+          value_d: 2087
+          value_e: 2097
+          value_f: 2107
+          value_g: 2117
+          value_h: 2127
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_config"
   - sql: "DROP TABLE IF EXISTS trace_doc"
@@ -326,3 +413,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS trace_folder"
   - sql: "DROP TABLE IF EXISTS trace_message"
   - sql: "DROP TABLE IF EXISTS trace_share"
+  - sql: "DROP TABLE IF EXISTS trace_profile"
+  - sql: "DROP TABLE IF EXISTS trace_metric"

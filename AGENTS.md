@@ -10,6 +10,12 @@
 - `docs/`: generated API/reference docs.
 - if you work on files, update/add the copyright notice's current year
 
+## Query Planner Invariants
+- Before changing SQL parsing, `lib/queryplan.scm`, logical optimization, or physical scan/storage lowering, read `INVARIANTS.md`.
+- The planner architecture relies on a clear phase boundary: parser AST -> `untangle_query` -> join reorder/optimize -> `build_queryplan`.
+- Logical planning must keep the combined operator model (`query-block`, `group-stage`, `union-block`) and must not leak physical artifacts such as `scan`, `.grp:*`, ORC columns, RecSets, or temp tables before physical lowering.
+- Do not add scalar/correlated subquery fallback paths. Unsupported logical shapes must fail explicitly until they are decorrelated correctly.
+
 ## Development Workflow
 
 Every change — bugfix, feature, refactor — must go through a **branch + PR** cycle. Direct commits to `master` are blocked by GitHub branch protection.

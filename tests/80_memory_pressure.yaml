@@ -112,7 +112,6 @@ test_cases:
   - name: "MP: GROUP BY creates temp keytable + computed columns"
     sql: "SELECT a, SUM(b) AS sb FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 5"
     timeout: 300
-    noncritical: true
     expect:
       rows: 5
 
@@ -135,7 +134,6 @@ test_cases:
   - name: "MP: GROUP BY still works after temp keytable eviction"
     sql: "SELECT a, SUM(b) AS sb FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 3"
     timeout: 300
-    noncritical: true
     expect:
       rows: 3
 
@@ -152,7 +150,6 @@ test_cases:
   - name: "MP: GROUP BY after shard eviction (forces reload + temp keytable)"
     sql: "SELECT a, COUNT(*) AS cnt FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 3"
     timeout: 300
-    noncritical: true
     expect:
       rows: 3
 
@@ -188,7 +185,6 @@ test_cases:
   - name: "MP: GROUP BY to create temp keytable for drop test"
     sql: "SELECT a, SUM(c) AS sc FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 1"
     timeout: 300
-    noncritical: true
     expect:
       rows: 1
 
