@@ -2514,6 +2514,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(and (uctx_get ctx (quote defer-subquery-rewrites) false)
 		(not (empty_list? (btw2025_subquery_accessing_aliases subquery outer_sources))))))
 
+(define untangle_if_expr_with_stages (lambda (head args outer_sources ctx)
+	(match args
+		(cons condition (cons branch rest))
+		(if (equal? condition true)
+			(untangle_expr_with_stages branch outer_sources ctx)
+			(if (or (equal? condition false) (nil? condition))
+				(match rest
+					(cons fallback '()) (untangle_expr_with_stages fallback outer_sources ctx)
+					_ (untangle_if_expr_with_stages head rest outer_sources ctx))
+				(combine_stage_rewrite_results head
+					(map args (lambda (item) (untangle_expr_with_stages item outer_sources ctx))))))
+		_ (combine_stage_rewrite_results head
+			(map args (lambda (item) (untangle_expr_with_stages item outer_sources ctx)))))))
+
 (define untangle_expr_with_stages (lambda (expr outer_sources ctx)
 	(match expr
 		((symbol inner_select) subquery)
@@ -2566,7 +2580,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(if (or (equal? fn "RANK") (equal? fn "DENSE_RANK"))
 						(make_window_rank_orc_stage_rewrite fn args over window_sources ctx)
 						(make_window_aggregate_stage_rewrite fn args over window_sources ctx)))))
-		(cons head tail) (combine_stage_rewrite_results head (map tail (lambda (item) (untangle_expr_with_stages item outer_sources ctx))))
+		(cons head tail) (if (equal? head (quote if))
+			(untangle_if_expr_with_stages head tail outer_sources ctx)
+			(combine_stage_rewrite_results head (map tail (lambda (item) (untangle_expr_with_stages item outer_sources ctx)))))
 		_ (list expr '() '()))))
 
 (define untangle_expr (lambda (expr ctx)
