@@ -1260,7 +1260,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain unordered branches")
 			(combine_exists_union_results
 				(map (union_branches inner) (lambda (branch)
-					(make_exists_stage_rewrite branch args))))))))
+					(make_exists_stage_rewrite branch (list (nth args 0) branch)))))))))
 
 (define combine_in_union_results (lambda (results negate)
 	(match (coalesceNil results '())
