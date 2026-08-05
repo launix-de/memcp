@@ -148,7 +148,10 @@ test_cases:
       data:
         - cnt: 30000
 
-  # --- Deterministic cache/lowering gates plus repeated correctness warmup ---
+  # --- Deterministic lowering gates plus repeated speedup checks ---
+  # Speedup helper: run each query 8x, compare first 2 scans with later warmed scans.
+  # Minimum speedup: 3x (late total must be <= early total * 2 / 3).
+  # early = runs 1-2, late = runs 5-8.
 
   # -- Test 1: LIKE needle-in-haystack (5 matches in 30k) --
   - name: "EXPLAIN LIKE aggregate uses canonical group carrier"
@@ -161,6 +164,15 @@ test_cases:
         - "strlike"
       not_contains:
         - "inner_select"
+
+  - name: "Enable scan debugging for LIKE test"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - scm: '(sleep 0.1)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'"
+    sql: "SELECT 1 AS ok"
+    expect:
+      rows: 1
 
   - name: "LIKE run 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
@@ -187,6 +199,27 @@ test_cases:
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect: { rows: 1, data: [{ cnt: 5 }] }
 
+  - name: "Wait for LIKE scan logs"
+    setup:
+      - scm: '(sleep 0.2)'
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
+
+  - name: "LIKE speedup >= 3x"
+    sql: |
+      SELECT full_ns, carrier_ns,
+        CASE WHEN full_ns > 0 AND carrier_ns > 0 AND carrier_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
+      FROM (
+        SELECT
+          SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN exec_ns ELSE 0 END) AS full_ns,
+          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS carrier_ns
+        FROM `system_statistic`.`scans`
+        WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'
+      ) s
+    expect: { rows: 1, data: [{ result: "ok" }] }
+    on_fail:
+      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, `table`, index_cols, inputCount, outputCount, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%' ORDER BY timestamp LIMIT 16"
+
   # -- Test 2: Equal id=42 (regression test, must not be slower) --
   - name: "EXPLAIN Equal uses direct id scan"
     sql: "EXPLAIN SELECT name FROM ft_large WHERE id = 42"
@@ -198,6 +231,13 @@ test_cases:
         - "equal??"
       not_contains:
         - ".grp:ft_large:"
+
+  - name: "Clear log for Equal test"
+    setup:
+      - scm: '(sleep 0.1)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'"
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
 
   - name: "Equal run 1"
     sql: "SELECT name FROM ft_large WHERE id = 42"
@@ -224,6 +264,27 @@ test_cases:
     sql: "SELECT name FROM ft_large WHERE id = 42"
     expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
 
+  - name: "Wait for Equal scan logs"
+    setup:
+      - scm: '(sleep 0.2)'
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
+
+  - name: "Equal speedup >= 3x"
+    sql: |
+      SELECT slow_ns, fast_ns,
+        CASE WHEN fast_ns > 0 AND slow_ns * 3 >= fast_ns * 10 THEN 'ok' ELSE 'FAIL' END AS result
+      FROM (
+        SELECT
+          MAX(exec_ns) AS slow_ns,
+          MIN(exec_ns) AS fast_ns
+        FROM `system_statistic`.`scans`
+        WHERE `table` = 'ft_large' AND index_cols = 'id'
+      ) s
+    expect: { rows: 1, data: [{ result: "ok" }] }
+    on_fail:
+      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, `table`, index_cols, inputCount, outputCount, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%' ORDER BY timestamp LIMIT 16"
+
   # -- Test 3: LIKE + Range (must be >= 3x faster) --
   - name: "EXPLAIN LIKE+Range aggregate uses canonical group carrier"
     sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
@@ -236,6 +297,13 @@ test_cases:
         - "15000"
       not_contains:
         - "inner_select"
+
+  - name: "Clear log for LIKE+Range test"
+    setup:
+      - scm: '(sleep 0.1)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'"
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
 
   - name: "LIKE+Range run 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
@@ -261,6 +329,33 @@ test_cases:
   - name: "LIKE+Range run 8"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
     expect: { rows: 1, data: [{ cnt: 2 }] }
+
+  - name: "Wait for LIKE+Range scan logs"
+    setup:
+      - scm: '(sleep 0.2)'
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
+
+  - name: "LIKE+Range speedup >= 3x"
+    sql: |
+      SELECT full_ns, carrier_ns,
+        CASE WHEN full_ns > 0 AND carrier_ns > 0 AND carrier_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
+      FROM (
+        SELECT
+          SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN exec_ns ELSE 0 END) AS full_ns,
+          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS carrier_ns
+        FROM `system_statistic`.`scans`
+        WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'
+      ) s
+    expect: { rows: 1, data: [{ result: "ok" }] }
+    on_fail:
+      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, `table`, index_cols, inputCount, outputCount, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%' ORDER BY timestamp LIMIT 16"
+
+  - name: "Disable scan debugging"
+    setup:
+      - scm: '(settings "ScanDebugging" false)'
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
 
   # --- Range operator corner cases (>, >=, <, <=) with LIKE ---
   # Needles at id: 42, 1337, 15000, 22777, 29999
