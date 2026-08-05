@@ -127,6 +127,45 @@ test_cases:
       data_not_contains:
         - code: "scan_batch"
 
+  - name: "Grouped LEFT JOIN carrier keeps outer key as dynamic lookup"
+    sql: |
+      SELECT c.cid, g.total
+      FROM sb_customers c
+      LEFT JOIN (
+        SELECT cid, SUM(amount) AS total
+        FROM sb_orders
+        GROUP BY cid
+      ) g ON g.cid = c.cid
+      WHERE COALESCE(g.total, 0) > 0
+      ORDER BY c.cid
+    expect:
+      rows: 3
+      data:
+        - cid: 1
+          total: 300
+        - cid: 2
+          total: 150
+        - cid: 3
+          total: 350
+
+  - name: "EXPLAIN grouped LEFT JOIN carrier uses outer key lookup"
+    sql: |
+      EXPLAIN SELECT c.cid, g.total
+      FROM sb_customers c
+      LEFT JOIN (
+        SELECT cid, SUM(amount) AS total
+        FROM sb_orders
+        GROUP BY cid
+      ) g ON g.cid = c.cid
+      WHERE COALESCE(g.total, 0) > 0
+      ORDER BY c.cid
+    expect:
+      rows: 1
+      data_contains:
+        - code: "(outer c.cid)"
+      data_not_contains:
+        - code: "legacy_materialized"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sb_orders"
   - sql: "DROP TABLE IF EXISTS sb_customers"

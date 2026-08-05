@@ -413,6 +413,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 		}
+		if isIndependent(params, v) {
+			if val2, ok := evalIndependentScmer(v, p.En); ok {
+				if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsBool() || val2.IsNil() {
+					return val2, true
+				}
+			}
+		}
 		return scm.NewNil(), false
 	}
 	// traverseCondition returns boundaries for a single AST node.
