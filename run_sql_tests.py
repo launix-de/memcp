@@ -1052,6 +1052,26 @@ class SQLTestRunner:
         if "Error" in response.text or response.status_code != 200:
             return False
 
+        if "result_contains" in expect or "result_not_contains" in expect or "result_occurrences" in expect:
+            result_text = response.text
+            if results is not None:
+                result_text += "\n" + json.dumps(results, sort_keys=True, ensure_ascii=False)
+            if "result_contains" in expect:
+                needles = expect["result_contains"] if isinstance(expect["result_contains"], list) else [expect["result_contains"]]
+                for needle in needles:
+                    if str(needle) not in result_text:
+                        return False
+            if "result_not_contains" in expect:
+                needles = expect["result_not_contains"] if isinstance(expect["result_not_contains"], list) else [expect["result_not_contains"]]
+                for needle in needles:
+                    if str(needle) in result_text:
+                        return False
+            if "result_occurrences" in expect:
+                for item in expect["result_occurrences"]:
+                    needle = str(item["text"])
+                    if response.text.count(needle) != item["count"]:
+                        return False
+
         if "affected_rows" in expect:
             expected = expect["affected_rows"]
             if results and results and "affected_rows" in results[0]:
