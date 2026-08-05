@@ -4528,7 +4528,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(or (not (nil? (qb_limit input))) (not (nil? (qb_offset input)))))
 			(neumann_fail "build_queryplan" "scalar-first query probe cannot preserve nested ORDER/LIMIT yet")
 			(begin
-				(define raw_probe (cons (quote !begin) (merge (list prepare_exprs (list probe_expr)))))
+				(define raw_probe (cons (quote !begin)
+					(merge (list
+						(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
+						prepare_exprs
+						(list probe_expr)))))
 				(if (presence_bool_stage_output_expr? value_expr)
 					(list (quote coalesceNil) raw_probe false)
 					raw_probe))))))
@@ -6250,7 +6254,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (quote +)
 					(list (quote cadr) (quote old))
 					(list (quote cadr) (quote new))))))
-		(list (quote scan)
+		(define stage_catalog (if (query_block? prepared_input) (query_block_stage_catalog prepared_input) '()))
+		(define scan_plan (list (quote scan)
 			'(session "__memcp_tx")
 			rows_plan
 			(quoted_runtime_list '())
@@ -6269,6 +6274,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote lambda) (list (quote acc) (quote grouped))
 				(group_insert_finish_expr schema grouptbl key_names (list value_col count_col)))
 			false))
+		(if (empty_list? stage_catalog)
+			scan_plan
+			(cons (quote !begin)
+				(merge (list
+					(lazy_stage_prepare_bindings stage_catalog (filter stage_catalog group_stage?))
+					(list scan_plan))))))
 		_ (neumann_fail "build_queryplan" "scalar-single stage expects aggregate descriptor"))))
 
 (define build_group_keytable_cleanup (lambda (schema tbl alias grouptbl keys key_names)
@@ -6714,6 +6725,28 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define query_block_facts_with_stage_catalog (lambda (block stages)
 	(qassoc_set (qb_facts block) (quote stage_catalog) stages)))
 
+(define query_block_with_stage_catalog (lambda (block stages)
+	(make_query_block
+		(qb_schema block)
+		(qb_sources block)
+		(qb_fields block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		(qb_stages block)
+		(query_block_facts_with_stage_catalog block stages))))
+
+(define stage_ids (lambda (stages)
+	(map (coalesceNil stages '()) gs_id)))
+
+(define stages_without_ids (lambda (stages ids)
+	(filter (coalesceNil stages '()) (lambda (stage)
+		(not (contains? ids (gs_id stage)))))))
+
 (define scalar_first_probe_consumed_stages (lambda (stages stage)
 	(if (not (scalar_or_presence_probe_stage? stage))
 		'()
@@ -6820,7 +6853,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(qb_offset block)
 		(qb_hidden block)
 		'()
-		(query_block_facts_with_stage_catalog block stages))))
+		(query_block_facts_with_stage_catalog block '()))))
 
 (define query_block_without_stages_after_eager_prepare_with_constant_scalars_first (lambda (stages block)
 	(begin
@@ -7664,15 +7697,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(if (not (nil? fused_row_number))
 						fused_row_number
 						(begin
+							(define eager_stages (query_block_stages_to_prepare block))
 							(define prepared_block (if (single_source? (qb_sources block))
 								(query_block_without_stages_after_prepare_using (qb_stages block) block)
 								(query_block_with_prepared_sources_using (qb_stages block) block)))
+							(define lazy_catalog (stages_without_ids (qb_stages block) (stage_ids eager_stages)))
+							(define core_block (query_block_with_stage_catalog prepared_block lazy_catalog))
+							(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
 							(cons (quote !begin)
 								(merge (list
-									(lazy_stage_prepare_bindings (qb_stages block) (filter (qb_stages block) group_stage?))
-									(map (query_block_stages_to_prepare block) (lambda (stage)
+									(lazy_stage_prepare_bindings lazy_catalog lazy_stages)
+									(map eager_stages (lambda (stage)
 										(lower_stage_prepare_using (qb_stages block) stage)))
-									(list (lower_query_block_core prepared_block))))))))))))))
+									(list (lower_query_block_core core_block))))))))))))))
 
 (define source_is_base_table? (lambda (src)
 	(string? (source_relation src))))
