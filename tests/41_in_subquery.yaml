@@ -545,6 +545,26 @@ test_cases:
             - "__union_distinct_seen"
       - sql: |
           EXPLAIN
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 2
+        expect:
+          contains:
+            - "recset_project_join"
+            - "$recset_contains"
+            - "in_dv_doc"
+          not_contains:
+            - "touch_keytable"
+            - "__union_distinct_rows"
+            - "__union_distinct_seen"
+      - sql: |
+          EXPLAIN
           SELECT t.ID
           FROM (
             SELECT d.ID, d.file_id, d.tenant, d.sort_key
