@@ -6960,9 +6960,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define key_names (group_key_cols keys))
 		(define ags (gs_aggregates stage))
+		(define order_items (coalesceNil (qb_order block) '()))
 		(and (not (empty_list? (qb_group block)))
 			(and (nil? (qb_having block))
-				(and (direct_group_order_supported? alias keys key_names ags (qb_order block))
+				(and (or (empty_list? order_items)
+					(and (query_limit_active? (qb_offset block) (qb_limit block))
+						(direct_group_order_supported? alias keys key_names ags order_items)))
 					(and (query_block_has_aggregates? block)
 						(not (reduce ags
 							(lambda (found ag) (or found (count_distinct_descriptor? ag)))
