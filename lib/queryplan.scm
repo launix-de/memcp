@@ -3831,10 +3831,282 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
 		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
-		(make_ir
+		(merge_compatible_stage_output_left_joins_ir (make_ir
 			(ir_kind ir)
 			(nth root_result 0)
 			(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
+			(ir_context_of ir)
+			(ir_return ir))))))
+
+(define stage_output_left_join_stage_key (lambda (stage)
+	(if (not (and (group_stage? stage)
+			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
+				(and (source_is_base_table? (gs_input stage))
+					(equal? (count (gs_aggregates stage)) 1)))))
+		nil
+		(match (car (gs_aggregates stage))
+			'(((symbol scalar_order_value) _value_expr order_exprs dirs offset_value) reduce neutral)
+			(concat "scalar-once-merge:" (fnv_hash (serialize (list
+				(gs_input stage)
+				(gs_domain stage)
+				(gs_keys stage)
+				(qassoc_get (gs_facts stage) (quote condition) true)
+				order_exprs
+				dirs
+				offset_value
+				reduce
+				neutral
+				(gs_having stage)
+				(gs_output stage)
+				(gs_order stage)
+				(gs_limit stage)
+				(gs_offset stage)))))
+			'(((quote scalar_order_value) _value_expr order_exprs dirs offset_value) reduce neutral)
+			(concat "scalar-once-merge:" (fnv_hash (serialize (list
+				(gs_input stage)
+				(gs_domain stage)
+				(gs_keys stage)
+				(qassoc_get (gs_facts stage) (quote condition) true)
+				order_exprs
+				dirs
+				offset_value
+				reduce
+				neutral
+				(gs_having stage)
+				(gs_output stage)
+				(gs_order stage)
+				(gs_limit stage)
+				(gs_offset stage)))))
+			_ nil))))
+
+(define normalize_stage_output_left_join_expr (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar ignorecase col col_ignorecase)
+		(list (quote get_column)
+			(if (equal? tblvar alias) "__stage_output_join__" tblvar)
+			ignorecase
+			col
+			col_ignorecase)
+		((quote get_column) tblvar ignorecase col col_ignorecase)
+		(list (quote get_column)
+			(if (equal? tblvar alias) "__stage_output_join__" tblvar)
+			ignorecase
+			col
+			col_ignorecase)
+		(cons head tail) (cons (normalize_stage_output_left_join_expr alias head)
+			(map tail (lambda (item) (normalize_stage_output_left_join_expr alias item))))
+		_ expr)))
+
+(define stage_output_left_join_key (lambda (stages src)
+	(begin
+		(define relation (source_relation src))
+		(if (not (and (source_outer? src) (stage_output_relation? relation)))
+			nil
+			(begin
+				(define stage (stage_by_id stages (stage_output_relation_id relation)))
+				(define stage_key (stage_output_left_join_stage_key stage))
+				(if (nil? stage_key)
+					nil
+					(concat "stage-output-left-join:" (fnv_hash (serialize (list
+						stage_key
+						(source_schema src)
+						(normalize_stage_output_left_join_expr (source_alias src) (source_join_expr src))))))))))))
+
+(define stage_output_left_join_stage_with_aggregates (lambda (stage ags)
+	(make_group_stage
+		(gs_id stage)
+		(gs_input stage)
+		(gs_domain stage)
+		(gs_keys stage)
+		(dedupe_aggregates_by_col ags)
+		(gs_having stage)
+		(gs_output stage)
+		(gs_order stage)
+		(gs_limit stage)
+		(gs_offset stage)
+		(gs_facts stage))))
+
+(define stage_output_left_join_entry_key (lambda (entry) (nth entry 0)))
+(define stage_output_left_join_entry_source (lambda (entry) (nth entry 1)))
+(define stage_output_left_join_entry_stage (lambda (entry) (nth entry 2)))
+(define stage_output_left_join_entry_ids (lambda (entry) (nth entry 3)))
+(define stage_output_left_join_entry_aliases (lambda (entry) (nth entry 4)))
+(define stage_output_left_join_entry_ags (lambda (entry) (nth entry 5)))
+
+(define stage_output_left_join_entry_for_source (lambda (key src stage)
+	(list key src stage (list (gs_id stage)) (list (source_alias src)) (gs_aggregates stage))))
+
+(define stage_output_left_join_entry_add_source (lambda (entry src stage)
+	(list
+		(stage_output_left_join_entry_key entry)
+		(stage_output_left_join_entry_source entry)
+		(stage_output_left_join_entry_stage entry)
+		(merge_unique (list (stage_output_left_join_entry_ids entry) (list (gs_id stage))))
+		(merge_unique (list (stage_output_left_join_entry_aliases entry) (list (source_alias src))))
+		(dedupe_aggregates_by_col (merge (list (stage_output_left_join_entry_ags entry) (gs_aggregates stage)))))))
+
+(define stage_output_left_join_upsert_entry (lambda (stages entries src)
+	(begin
+		(define key (stage_output_left_join_key stages src))
+		(if (nil? key)
+			entries
+			(begin
+				(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+				(define matched (reduce entries (lambda (found entry)
+					(or found (equal? (stage_output_left_join_entry_key entry) key)))
+					false))
+				(if matched
+					(map entries (lambda (entry)
+						(if (equal? (stage_output_left_join_entry_key entry) key)
+							(stage_output_left_join_entry_add_source entry src stage)
+							entry)))
+					(merge entries (list (stage_output_left_join_entry_for_source key src stage)))))))))
+
+(define stage_output_left_join_entries (lambda (stages sources)
+	(reduce (coalesceNil sources '()) (lambda (entries src)
+		(stage_output_left_join_upsert_entry stages entries src))
+		'())))
+
+(define stage_output_left_join_entries_have_duplicates? (lambda (entries)
+	(reduce (coalesceNil entries '()) (lambda (found entry)
+		(or found (> (count (stage_output_left_join_entry_ids entry)) 1)))
+		false)))
+
+(define stage_output_left_join_id_map_for_entry (lambda (entry)
+	(begin
+		(define primary (gs_id (stage_output_left_join_entry_stage entry)))
+		(map (stage_output_left_join_entry_ids entry) (lambda (id) (list id primary))))))
+
+(define stage_output_left_join_alias_map_for_entry (lambda (entry)
+	(begin
+		(define primary (source_alias (stage_output_left_join_entry_source entry)))
+		(map (stage_output_left_join_entry_aliases entry) (lambda (alias) (list alias primary))))))
+
+(define stage_output_left_join_candidate_ids (lambda (entries)
+	(merge_unique (map (coalesceNil entries '()) stage_output_left_join_entry_ids))))
+
+(define stage_merge_lookup (lambda (mapping key default)
+	(if (empty_list? mapping)
+		default
+		(coalesceNil
+			(reduce mapping (lambda (found entry)
+				(if (not (nil? found))
+					found
+					(match entry
+						'(k v) (if (equal? k key) v nil)
+						_ nil)))
+				nil)
+			default))))
+
+(define rewrite_stage_output_left_join_expr (lambda (alias_map id_map expr)
+	(match expr
+		((symbol get_column) tblvar ignorecase col col_ignorecase)
+		(list (quote get_column)
+			(stage_merge_lookup alias_map tblvar tblvar)
+			ignorecase
+			col
+			col_ignorecase)
+		((quote get_column) tblvar ignorecase col col_ignorecase)
+		(list (quote get_column)
+			(stage_merge_lookup alias_map tblvar tblvar)
+			ignorecase
+			col
+			col_ignorecase)
+		((symbol stage-output) stage_id)
+		(list (quote stage-output) (stage_merge_lookup id_map stage_id stage_id))
+		((quote stage-output) stage_id)
+		(list (quote stage-output) (stage_merge_lookup id_map stage_id stage_id))
+		(cons head tail) (cons (rewrite_stage_output_left_join_expr alias_map id_map head)
+			(map tail (lambda (item) (rewrite_stage_output_left_join_expr alias_map id_map item))))
+		_ expr)))
+
+(define rewrite_stage_output_left_join_source (lambda (alias_map id_map src)
+	(match src
+		'(alias schema relation outer join)
+		(list
+			(stage_merge_lookup alias_map alias alias)
+			schema
+			(rewrite_stage_output_left_join_expr alias_map id_map relation)
+			outer
+			(rewrite_stage_output_left_join_expr alias_map id_map join))
+		_ src)))
+
+(define rewrite_stage_output_left_join_stage (lambda (alias_map id_map stage)
+	(if (not (group_stage? stage))
+		stage
+		(make_group_stage
+			(gs_id stage)
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_input stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_domain stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_keys stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_aggregates stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_having stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_output stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_order stage))
+			(gs_limit stage)
+			(gs_offset stage)
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_facts stage))))))
+
+(define stage_id_in_list? (lambda (ids stage_id)
+	(reduce (coalesceNil ids '()) (lambda (found id)
+		(or found (equal? id stage_id)))
+		false)))
+
+(define stage_not_in_id_list? (lambda (ids stage)
+	(not (and (group_stage? stage) (stage_id_in_list? ids (gs_id stage))))))
+
+(define merge_compatible_stage_output_left_joins_block (lambda (block)
+	(if (or (empty_list? (qb_stages block)) (empty_list? (qb_sources block)))
+		block
+		(begin
+			(define entries (stage_output_left_join_entries (qb_stages block) (qb_sources block)))
+			(if (not (stage_output_left_join_entries_have_duplicates? entries))
+				block
+				(begin
+					(define id_map (merge (map entries stage_output_left_join_id_map_for_entry)))
+					(define alias_map (merge (map entries stage_output_left_join_alias_map_for_entry)))
+					(define candidate_ids (stage_output_left_join_candidate_ids entries))
+					(define untouched_stages (filter (qb_stages block) (lambda (stage)
+						(stage_not_in_id_list? candidate_ids stage))))
+					(define merged_stages (map entries (lambda (entry)
+						(rewrite_stage_output_left_join_stage alias_map id_map
+							(stage_output_left_join_stage_with_aggregates
+								(stage_output_left_join_entry_stage entry)
+								(stage_output_left_join_entry_ags entry))))))
+					(make_query_block
+						(qb_schema block)
+						(merge_unique (list (map (qb_sources block) (lambda (src) (rewrite_stage_output_left_join_source alias_map id_map src)))))
+						(rewrite_stage_output_left_join_expr alias_map id_map (qb_fields block))
+						(rewrite_stage_output_left_join_expr alias_map id_map (qb_where block))
+						(rewrite_stage_output_left_join_expr alias_map id_map (qb_group block))
+						(rewrite_stage_output_left_join_expr alias_map id_map (qb_having block))
+						(rewrite_stage_output_left_join_expr alias_map id_map (qb_order block))
+						(qb_limit block)
+						(qb_offset block)
+						(rewrite_stage_output_left_join_expr alias_map id_map (qb_hidden block))
+						(merge_unique (list untouched_stages merged_stages))
+						(rewrite_stage_output_left_join_expr alias_map id_map (qb_facts block)))))))))
+
+(define merge_compatible_stage_output_left_joins_node (lambda (node)
+	(if (query_block? node)
+		(merge_compatible_stage_output_left_joins_block node)
+		(if (union_block? node)
+			(make_union_block
+				(union_mode node)
+				(map (union_branches node) merge_compatible_stage_output_left_joins_node)
+				(union_order node)
+				(union_limit node)
+				(union_offset node)
+				(union_facts node))
+			node))))
+
+(define merge_compatible_stage_output_left_joins_ir (lambda (ir)
+	(begin
+		(define root (merge_compatible_stage_output_left_joins_node (ir_root ir)))
+		(make_ir
+			(ir_kind ir)
+			root
+			(if (query_block? root) (qb_stages root) (ir_stages ir))
 			(ir_context_of ir)
 			(ir_return ir)))))
 
