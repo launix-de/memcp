@@ -1721,6 +1721,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (contains? cm_keys "k1") true "cachemap lists key k1")
 	(assert (contains? cm_keys "a") true "cachemap lists key a")
 	(assert (contains? cm_keys "b") true "cachemap lists key b")
+	/* concurrent misses run exactly one producer and share its value */
+	(define sf_cm (newcachemap))
+	(define sf_calls (newsession))
+	(define sf_values (parallelN 8 (lambda (i)
+		(sf_cm "get_or_compute" "shared" (lambda () (begin
+			(sf_calls (string i) true)
+			(sleep 0.02)
+			123))))))
+	(assert sf_values '(123 123 123 123 123 123 123 123) "cachemap singleflight shares producer value")
+	(assert (count (sf_calls)) 1 "cachemap singleflight runs one producer")
+	/* failed producers are not cached and a later caller can retry */
+	(assert (try
+		(lambda () (begin (sf_cm "get_or_compute" "retry" (lambda () (car (sf_calls "missing")))) false))
+		(lambda (e) true)) true "cachemap singleflight forwards producer panic")
+	(assert (sf_cm "get_or_compute" "retry" (lambda () 77)) 77 "cachemap singleflight retries after panic")
 
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))

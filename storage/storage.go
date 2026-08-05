@@ -2830,7 +2830,7 @@ func Init(en scm.Env) {
 	initMetricsDeclarations(en)
 	scm.DeclareInSection("Sync", &en, &scm.Declaration{
 		Name: "newcachemap",
-		Desc: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
+		Desc: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys, (cachemap \"get_or_compute\" key producer) computes one value for concurrent misses of the same key.",
 		Fn:   NewCacheMap,
 		Type: &scm.TypeDescriptor{
 			Return: &scm.TypeDescriptor{Kind: "func"},

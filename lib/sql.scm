@@ -30,10 +30,10 @@ fulltext-ish SELECTs. It replaces string literals directly following LIKE or
 inside MATCH...AGAINST(...) with ? placeholders and returns (normalized-query bindings). Other string
 literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 (define sql_parameterize_select_like_strings (lambda (query enabled) (begin
-		(define starts_like_select (lambda (q)
-			(or
-				(match q (regex "^\\s*SELECT\\b" _) true false)
-				(match q (regex "^\\s*EXPLAIN\\s+(?:(?:IR|REORDER)\\s+)?SELECT\\b" _) true false))))
+	(define starts_like_select (lambda (q)
+		(or
+			(match q (regex "^\\s*SELECT\\b" _) true false)
+			(match q (regex "^\\s*EXPLAIN\\s+(?:(?:IR|REORDER)\\s+)?SELECT\\b" _) true false))))
 	(define parameterized_rhs_literal? (lambda (q pos) (begin
 		(define prefix (toUpper (strrtrim (substr q 0 pos))))
 		(or
@@ -80,12 +80,12 @@ literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 /* cached_parse: wraps a parser with cachemap-based caching.
 cache_key = username:schema:hash(query) — per-user isolation (policy checked at parse time).
 The query is hashed with FNV-1a (fnv_hash) so long SQL strings don't bloat the cache index.
-	LIKE/AGAINST strings may be parameterized into session variables, but their
-	bindings still participate in the key because the planner may choose different
-	physical strategies from their selectivity.
-	Session-sensitive plans must not be reused under a binding-blind key because
-	their lowered runtime helper names and cache domains may depend on current
-	session variables.
+LIKE/AGAINST strings may be parameterized into session variables, but their
+bindings still participate in the key because the planner may choose different
+physical strategies from their selectivity.
+Session-sensitive plans must not be reused under a binding-blind key because
+their lowered runtime helper names and cache domains may depend on current
+session variables.
 On parse error the result is not cached (e.g. table does not exist yet). */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_like_strings)
 	(begin
@@ -94,16 +94,12 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
 				nil)
-				(define cache_payload (if (not (equal? bindings '()))
-					(serialize (list parse_query bindings))
-					parse_query))
-				(define cache_key (concat username ":" schema ":" (fnv_hash cache_payload)))
-			(define cached (queryplan_cache cache_key))
-			(if cached cached
-				(begin
-					(define formula (with_session session (lambda () (parse_fn schema parse_query policy))))
-					(queryplan_cache cache_key formula)
-					formula)))))))
+			(define cache_payload (if (not (equal? bindings '()))
+				(serialize (list parse_query bindings))
+				parse_query))
+			(define cache_key (concat username ":" schema ":" (fnv_hash cache_payload)))
+			(queryplan_cache "get_or_compute" cache_key
+				(lambda () (with_session session (lambda () (parse_fn schema parse_query policy))))))))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),
