@@ -207,6 +207,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
 	(assert (equal? (serialize (build_queryplan_term scalar_no_from_ast))
 		"(resultrow '(\"x\" 8 \"in_ok\" (if (nil? 8) nil (if (nil? 8) nil (equal?? 8 8))) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
+	(define nested_catalog_stage (make_group_stage
+		"nested-catalog-stage"
+		(list "n" "memcp-tests" "nested_source" false nil)
+		'() '(1) '() nil '() '() nil nil '()))
+	(define nested_catalog_input (make_query_block
+		"memcp-tests"
+		(list
+			(list "o" "memcp-tests" "outer_source" false nil)
+			(list "nested" "memcp-tests" (make_stage_output_relation "nested-catalog-stage") false true))
+		'() true '() nil '() nil nil '() '() '()))
+	(define outer_catalog_stage (make_group_stage
+		"outer-catalog-stage"
+		nested_catalog_input
+		'() '(1) '() nil '() '() nil nil
+		(list (list 'stage_catalog (list nested_catalog_stage)))))
+	(assert (list? (lower_group_stage_prepare_using (list outer_catalog_stage) outer_catalog_stage))
+		true "group-stage lowering keeps nested stage-output metadata from the full catalog")
 	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil)))
 	(define btw_inner_sources (list (list "i" "memcp-tests" "inner_t" false nil)))
 	(define btw_outer_id (list 'get_column "o" false "id" false))
