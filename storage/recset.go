@@ -155,6 +155,13 @@ func recSetContainsClosure(shard *storageShard) *func(uint32, ...scm.Scmer) scm.
 	return &fn
 }
 
+func recSetAlreadyMatchedClosure() *func(uint32, ...scm.Scmer) scm.Scmer {
+	fn := func(_ uint32, _ ...scm.Scmer) scm.Scmer {
+		return scm.NewBool(true)
+	}
+	return &fn
+}
+
 type recSetBuildResult struct {
 	part recSetShard
 	err  scanError

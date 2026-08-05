@@ -167,6 +167,56 @@ test_cases:
           "ok"
           (error "scan_order $recset_contains returned wrong order")))
 
+  - name: "scan_order keeps repeated $recset_contains calls exact"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define tenant1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl
+          '("active")
+          (lambda (active) (equal? active 1))))
+        (define ordered
+          (scan_order nil tbl
+            '("$recset_contains")
+            (lambda (in_recset) (and (in_recset tenant1) (in_recset active)))
+            '("id") '(<)
+            0 0 10
+            '("id")
+            (lambda (id) (list id))
+            (lambda (acc row) (append acc row))
+            '()
+            false))
+        (if (equal? ordered (list (list 1) (list 5)))
+          "ok"
+          (error "scan_order repeated $recset_contains calls lost a predicate")))
+
+  - name: "scan_order keeps $recset_contains OR semantics exact"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define tenant1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl
+          '("active")
+          (lambda (active) (equal? active 1))))
+        (define ordered
+          (scan_order nil tbl
+            '("$recset_contains")
+            (lambda (in_recset) (or (in_recset tenant1) (in_recset active)))
+            '("id") '(<)
+            0 0 10
+            '("id")
+            (lambda (id) (list id))
+            (lambda (acc row) (append acc row))
+            '()
+            false))
+        (if (equal? ordered (list (list 1) (list 2) (list 3) (list 5)))
+          "ok"
+          (error "scan_order $recset_contains OR semantics changed")))
+
   - name: "scan_exists accepts recset as table-like source"
     scm: |
       (begin
