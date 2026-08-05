@@ -653,6 +653,7 @@ class SQLTestRunner:
             plan_size_limit = int(self.suite_metadata["max_plan_size"])
         else:
             plan_size_limit = DEFAULT_MAX_PLAN_SIZE
+        planner_time_limit_ms = float(test_case.get("max_planner_time_ms", 0))
         perf_rows = PERF_DEFAULT_ROWS  # default row count
         if is_perf_test:
             # Get baseline data if available
@@ -925,6 +926,32 @@ class SQLTestRunner:
                     print(f"    📋 Query plan for {name}:")
                     for line in explain_resp.text.strip().split('\n')[:10]:
                         print(f"       {line[:120]}")
+
+            # Explicit cold planner budget. Unlike max_time, this reads the
+            # compile-only phase metric before EXPLAIN warms the plan cache.
+            if (planner_time_limit_ms > 0 and not is_perf_test and not is_sparql
+                    and not test_case.get("expect", {}).get("error")):
+                qhead = query.lstrip().upper()
+                if qhead.startswith("SELECT") or qhead.startswith("WITH"):
+                    try:
+                        compile_resp = self.execute_sql(database, "EXPLAIN COMPILE " + query, auth_header,
+                                                        active_syntax, session_id=session_id, timeout=sql_timeout)
+                    except Exception:
+                        compile_resp = None
+                    if compile_resp is None or compile_resp.status_code != 200 or "Error" in compile_resp.text[:64]:
+                        return self._record_fail(name, "EXPLAIN COMPILE failed", query, compile_resp,
+                                                 test_case.get("expect"), is_noncritical)
+                    compile_rows = self.parse_jsonl_response(compile_resp)
+                    metrics = compile_rows[0] if compile_rows else {}
+                    planner_time_ms = float(metrics.get("planner_total_ns", 0)) / 1_000_000.0
+                    if planner_time_ms > planner_time_limit_ms:
+                        diag = self._run_on_fail(test_case, database)
+                        return self._record_fail(
+                            name,
+                            f"Planner too slow: {planner_time_ms:.1f}ms > {planner_time_limit_ms:.0f}ms",
+                            query, compile_resp, test_case.get("expect"), is_noncritical,
+                            planner_time_ms, planner_time_limit_ms, diag,
+                        )
 
             # Hard plan-size limit — the hardware-independent compile-time-blowup
             # detector. Runs BEFORE the timed query so it is not preempted by
