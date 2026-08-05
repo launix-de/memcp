@@ -121,6 +121,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 )))
 
 (define parse_sql (lambda (schema s policy) (begin
+	(define parse_started_ns (nanotime))
 
 	/* counter for positional ? placeholders: each ? compiles to (session "vN") */
 	(define placeholder_counter (newsession))
@@ -1443,7 +1444,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (define query sql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile query))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile query parse_started_ns (strlen s)))
 		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
 		sql_insert_set
 		sql_insert_values_select

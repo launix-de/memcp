@@ -98,8 +98,15 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 				(serialize (list parse_query bindings))
 				parse_query))
 			(define cache_key (concat username ":" schema ":" (fnv_hash cache_payload)))
-			(queryplan_cache "get_or_compute" cache_key
-				(lambda () (with_session session (lambda () (parse_fn schema parse_query policy))))))))))
+			(define compile_diagnostic (match (toUpper parse_query)
+				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
+				_ false))
+			/* Compile diagnostics measure true misses and must not turn their own
+			previous result into a cache hit. The inspected query is never run. */
+			(if compile_diagnostic
+				(with_session session (lambda () (parse_fn schema parse_query policy)))
+				(queryplan_cache "get_or_compute" cache_key
+					(lambda () (with_session session (lambda () (parse_fn schema parse_query policy)))))))))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),

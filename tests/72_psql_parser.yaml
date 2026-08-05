@@ -23,7 +23,12 @@ test_cases:
     expect:
       rows: 1
       contains:
+        - "parse_ns"
+        - "physical_prepare_ns"
+        - "recipe_emit_ns"
+        - "serialize_ns"
         - "planner_total_ns"
+        - "compile_total_ns"
         - "plan_bytes"
         - "query_blocks"
         - "scans"
