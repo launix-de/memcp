@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 # Subselects in expressions (IN/EXISTS/scalar)
 
 metadata:
@@ -162,6 +177,7 @@ test_cases:
       error: true
 
   - name: "Scalar correlated subselect ORDER BY LIMIT 1"
+    max_plan_size: 30000
     sql: "SELECT id, (SELECT val FROM t2 WHERE owner = t3.id ORDER BY val DESC LIMIT 1) AS v FROM t3 ORDER BY id"
     expect:
       rows: 4
@@ -174,6 +190,31 @@ test_cases:
           v: 42
         - id: 4
           v: 55
+
+  - name: "Depth 4 correlated scalar chain stays bounded"
+    max_plan_size: 120000
+    sql: |
+      SELECT outer_t.id,
+        (SELECT
+          (SELECT
+            (SELECT
+              (SELECT l4.id FROM t3 l4 WHERE l4.id = l3.id LIMIT 1)
+             FROM t3 l3 WHERE l3.id = l2.id LIMIT 1)
+           FROM t3 l2 WHERE l2.id = l1.id LIMIT 1)
+         FROM t3 l1 WHERE l1.id = outer_t.id LIMIT 1) AS deep_id
+      FROM t3 outer_t
+      ORDER BY outer_t.id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          deep_id: 1
+        - id: 2
+          deep_id: 2
+        - id: 3
+          deep_id: 3
+        - id: 4
+          deep_id: 4
 
   - name: "EXPLAIN IR exposes correlated scalar unnest reason"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
@@ -192,6 +233,7 @@ test_cases:
         - "inline-grouped-non-domain-correlation"
 
   - name: "Derived table with scalar aggregate subselect"
+    max_plan_size: 50000
     sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM t2 WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
     expect:
       rows: 4
@@ -286,6 +328,7 @@ test_cases:
         - badgeDoc: 1
 
   - name: "Sibling scalar subselects in outer projection stay isolated"
+    max_plan_size: 100000
     sql: >
       SELECT
       (SELECT COUNT(1) FROM doc
@@ -302,6 +345,7 @@ test_cases:
           siblingCount: 2
 
   - name: "Derived table star keeps aliases built from doubly nested scalar subselects"
+    max_plan_size: 100000
     sql: >
       SELECT t.* FROM (
         SELECT
