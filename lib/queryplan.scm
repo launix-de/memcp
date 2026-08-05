@@ -7266,15 +7266,21 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define nested_stage_catalog (lambda (stage)
 	(begin
 		(define input (if (group_stage? stage) (gs_input stage) nil))
-		(define direct (if (query_block? input)
+		(define catalog (if (query_block? input)
 			(merge_unique (list
 				(qassoc_get (gs_facts stage) (quote stage_catalog) '())
-				(query_block_stage_catalog input)
+				(query_block_stage_catalog input)))
+			'()))
+		(define nested (if (query_block? input)
+			(merge_unique (list
 				(qb_stages input)
 				(query_block_probe_expr_stages input)))
 			'()))
 		(unique_stages_by_id
-			(cons stage (merge (map direct nested_stage_catalog)))))))
+			(merge (list
+				(list stage)
+				catalog
+				(merge (map nested nested_stage_catalog))))))))
 
 (define stage_catalog_with_nested (lambda (stages)
 	(unique_stages_by_id
