@@ -145,6 +145,28 @@ test_cases:
           "ok"
           (error "$recset_contains matched a different table")))
 
+  - name: "scan_order supports $recset_contains filter"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define rs (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define ordered
+          (scan_order nil tbl
+            '("$recset_contains" "active")
+            (lambda (in_recset active) (and (in_recset rs) (equal? active 1)))
+            '("id") '(<)
+            0 0 10
+            '("id")
+            (lambda (id) (list id))
+            (lambda (acc row) (append acc row))
+            '()
+            false))
+        (if (equal? ordered (list (list 1) (list 5)))
+          "ok"
+          (error "scan_order $recset_contains returned wrong order")))
+
   - name: "scan_exists accepts recset as table-like source"
     scm: |
       (begin

@@ -390,7 +390,7 @@ test_cases:
             - "__union_distinct_rows"
             - "__union_distinct_seen"
 
-  - name: "IN UNION dataview-shaped filter exposes joinable candidate relation"
+  - name: "IN UNION joined order limit uses guarded keyset fallback"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     setup:
       - sql: "DROP TABLE IF EXISTS in_dv_doc"
@@ -438,6 +438,17 @@ test_cases:
           (1, 1, 1),
           (2, 2, 0)
     steps:
+      - sql: |
+          SELECT d.ID
+          FROM in_dv_doc d
+          JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ORDER BY d.sort_key
+          LIMIT 2
+        expect:
+          rows: 2
+          data:
+            - ID: 2
+            - ID: 1
       - sql: |
           SELECT t.ID
           FROM (
@@ -515,6 +526,25 @@ test_cases:
             - "touch_keytable"
       - sql: |
           EXPLAIN
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "recset_project_join"
+            - "scan_order"
+          not_contains:
+            - "touch_keytable"
+            - "__union_distinct_rows"
+            - "__union_distinct_seen"
+      - sql: |
+          EXPLAIN
           SELECT t.ID
           FROM (
             SELECT d.ID, d.file_id, d.tenant, d.sort_key
@@ -531,12 +561,57 @@ test_cases:
         expect:
           contains:
             - "recset_project_join"
-            - "scan_order"
+            - "recset_union"
+            - "sort"
           not_contains:
             - "driver_membership_probe"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
             - "touch_keytable"
+            - ".grp:"
+      - sql: |
+          EXPLAIN
+          SELECT x.ID, r.tenant
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            WHERE d.file_id IN (
+              SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%'
+              UNION
+              SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%'
+            )
+            ORDER BY d.sort_key
+            LIMIT 2
+          ) x
+          LEFT JOIN in_dv_acl r ON r.tenant = x.tenant
+        expect:
+          contains:
+            - "scan_order"
+            - "recset_project_join"
+            - "$recset_contains"
+            - "in_dv_doc"
+          not_contains:
+            - ".grp:union"
+            - "touch_keytable"
+      - sql: |
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 2
+        expect:
+          rows: 2
+          data:
+            - ID: 2
+            - ID: 1
       - sql: |
           EXPLAIN REORDER
           SELECT t.ID
@@ -594,11 +669,11 @@ test_cases:
             - "source_estimates"
             - "group_stage_strategy"
             - "group_plan_options"
-            - "driver_membership_probe"
           not_contains:
             - "inner_select"
             - "dependent-subquery"
             - "selective_membership_build_candidate_keyset"
+            - "driver_membership_probe"
             - ".grp:"
             - "touch_keytable"
       - sql: |
@@ -619,7 +694,9 @@ test_cases:
         expect:
           contains:
             - "in_dv_file"
-            - "scan_order"
+            - "recset_project_join"
+            - "recset_union"
+            - "$break"
           not_contains:
             - ".grp:in_dv_file"
             - "touch_keytable"
@@ -1169,7 +1246,140 @@ test_cases:
         - ".grp:"
         - "touch_keytable"
 
+  - name: "IN UNION with nested reference EXISTS prepares query carriers"
+    fail_comment: "nested reference-style EXISTS carriers must be prepared before physical scans reference them"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_ref_doc"
+      - sql: "DROP TABLE IF EXISTS in_ref_file"
+      - sql: "DROP TABLE IF EXISTS in_ref_site"
+      - sql: "DROP TABLE IF EXISTS in_ref_tenant"
+      - sql: "DROP TABLE IF EXISTS in_ref_acl"
+      - sql: |
+          CREATE TABLE in_ref_file (
+            id INT PRIMARY KEY,
+            filename VARCHAR(64),
+            search VARCHAR(128)
+          )
+      - sql: |
+          CREATE TABLE in_ref_doc (
+            id INT PRIMARY KEY,
+            file_id INT,
+            site_id INT,
+            tenant_id INT
+          )
+      - sql: |
+          CREATE TABLE in_ref_site (
+            id INT PRIMARY KEY,
+            tenant_id INT,
+            name VARCHAR(64)
+          )
+      - sql: |
+          CREATE TABLE in_ref_tenant (
+            id INT PRIMARY KEY,
+            name VARCHAR(64)
+          )
+      - sql: |
+          CREATE TABLE in_ref_acl (
+            id INT PRIMARY KEY,
+            user_id INT,
+            tenant_id INT
+          )
+      - sql: "INSERT INTO in_ref_file VALUES (10, 'needle-a.pdf', 'x'), (20, 'b.pdf', 'needle text'), (30, 'c.pdf', 'x')"
+      - sql: "INSERT INTO in_ref_tenant VALUES (1, 'Tenant A'), (2, 'Tenant B')"
+      - sql: "INSERT INTO in_ref_site VALUES (100, 1, 'Alpha'), (200, 2, 'Beta')"
+      - sql: "INSERT INTO in_ref_doc VALUES (1, 10, 100, 1), (2, 20, 100, 1), (3, 30, 200, 2)"
+      - sql: "INSERT INTO in_ref_acl VALUES (1, 7, 1)"
+    steps:
+      - sql: |
+          SELECT t.id, t.site_can_view
+          FROM (
+            SELECT d.id, d.file_id, d.site_id, d.tenant_id,
+              ref_site.can_view AS site_can_view
+            FROM in_ref_doc d
+            LEFT JOIN (
+              SELECT s.id, s.name,
+                COALESCE((
+                  SELECT EXISTS (
+                    SELECT TRUE FROM in_ref_acl a
+                    WHERE a.user_id = 7 AND a.tenant_id = ten.id
+                    LIMIT 1
+                  )
+                  FROM in_ref_tenant ten
+                  WHERE ten.id = s.tenant_id
+                  LIMIT 1
+                ), FALSE) AS can_view
+              FROM in_ref_site s
+            ) ref_site ON ref_site.id = d.site_id
+            WHERE EXISTS (
+              SELECT TRUE FROM in_ref_acl a
+              WHERE a.user_id = 7 AND a.tenant_id = d.tenant_id
+              LIMIT 1
+            )
+          ) t
+          LEFT JOIN in_ref_site sorter_site ON sorter_site.id = t.site_id
+          WHERE t.file_id IN (
+            SELECT f.id FROM in_ref_file f WHERE f.filename LIKE '%needle%'
+            UNION
+            SELECT f.id FROM in_ref_file f WHERE f.search LIKE '%needle%'
+          )
+          ORDER BY sorter_site.name, t.id
+          LIMIT 10
+        expect:
+          rows: 2
+          data:
+            - id: 1
+              site_can_view: true
+            - id: 2
+              site_can_view: true
+      - sql: |
+          EXPLAIN
+          SELECT t.id, t.site_can_view
+          FROM (
+            SELECT d.id, d.file_id, d.site_id, d.tenant_id,
+              ref_site.can_view AS site_can_view
+            FROM in_ref_doc d
+            LEFT JOIN (
+              SELECT s.id, s.name,
+                COALESCE((
+                  SELECT EXISTS (
+                    SELECT TRUE FROM in_ref_acl a
+                    WHERE a.user_id = 7 AND a.tenant_id = ten.id
+                    LIMIT 1
+                  )
+                  FROM in_ref_tenant ten
+                  WHERE ten.id = s.tenant_id
+                  LIMIT 1
+                ), FALSE) AS can_view
+              FROM in_ref_site s
+            ) ref_site ON ref_site.id = d.site_id
+            WHERE EXISTS (
+              SELECT TRUE FROM in_ref_acl a
+              WHERE a.user_id = 7 AND a.tenant_id = d.tenant_id
+              LIMIT 1
+            )
+          ) t
+          LEFT JOIN in_ref_site sorter_site ON sorter_site.id = t.site_id
+          WHERE t.file_id IN (
+            SELECT f.id FROM in_ref_file f WHERE f.filename LIKE '%needle%'
+            UNION
+            SELECT f.id FROM in_ref_file f WHERE f.search LIKE '%needle%'
+          )
+          ORDER BY sorter_site.name, t.id
+          LIMIT 10
+        expect:
+          contains:
+            - "createtable"
+            - ".grp:"
+          not_contains:
+            - "inner_select"
+            - "dependent-subquery"
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS in_ref_acl"
+  - sql: "DROP TABLE IF EXISTS in_ref_tenant"
+  - sql: "DROP TABLE IF EXISTS in_ref_site"
+  - sql: "DROP TABLE IF EXISTS in_ref_file"
+  - sql: "DROP TABLE IF EXISTS in_ref_doc"
   - sql: "DROP TABLE IF EXISTS in_nullable_rhs"
   - sql: "DROP TABLE IF EXISTS in_renderjob"
   - sql: "DROP TABLE IF EXISTS in_fop_files"

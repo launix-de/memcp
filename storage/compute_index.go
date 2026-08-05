@@ -222,7 +222,7 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 		e := env.FindRead(scm.Symbol(expr.String()))
 		if e != nil {
 			if val, exists := e.Vars[scm.Symbol(expr.String())]; exists {
-				if val.IsInt() || val.IsFloat() || val.IsString() {
+				if val.IsInt() || val.IsFloat() || val.IsString() || val.IsBool() {
 					return val, true
 				}
 			}
@@ -237,7 +237,7 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 			e := env.FindRead(sym)
 			if e != nil {
 				if val, exists := e.Vars[sym]; exists {
-					if val.IsInt() || val.IsFloat() || val.IsString() {
+					if val.IsInt() || val.IsFloat() || val.IsString() || val.IsBool() {
 						return val, true
 					}
 				}

@@ -188,14 +188,14 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 	values := make(chan recSetBuildResult, t.recSetShardResultBufferSize())
 	done := t.iterateShardsParallel(boundaries, func(shard *storageShard, solo bool) {
 		withTxSession(currentTx, func() scm.Scmer {
-			if ss != nil && ss.IsKilled() {
-				panic("query killed")
-			}
 			defer func() {
 				if rec := recover(); rec != nil {
 					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
 				}
 			}()
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
 			values <- recSetBuildResult{
 				part: shard.collectRecSet(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss),
 			}
@@ -571,7 +571,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		}
 		reorderByFrequency(bounds, t.t)
 		lower, upperLast := indexFromBoundaries(bounds)
-		t.iterateIndex(currentTx, bounds, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		t.iterateIndexForce(currentTx, bounds, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue

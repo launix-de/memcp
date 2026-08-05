@@ -158,10 +158,15 @@ func (m *likeMatcher) BuildSkipList(pattern string, count uint32, getRecid func(
 	missCount := 0
 	const maxMiss = 3
 
+	patternCI := strings.ToLower(pattern)
 	for pos := uint32(0); pos < count; pos++ {
 		recid := getRecid(pos)
 		v := colStorage.GetValue(recid)
-		hit := v.IsString() && scm.StrLike(v.String(), pattern)
+		hit := false
+		if v.IsString() {
+			value := v.String()
+			hit = scm.StrLike(value, pattern) || scm.StrLike(strings.ToLower(value), patternCI)
+		}
 
 		if hit {
 			if !inInterval {
@@ -367,7 +372,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	// Handles both symbol params (linear scan, no alloc) and NthLocalVar(i).
 	resolveColVar := func(node scm.Scmer) (string, bool) {
 		if name, ok := resolveParamName(node); ok {
-			if _, isBatch := parseBatchPseudoColName(name); !isBatch {
+			if !isScanPseudoColName(name) {
 				return name, true
 			}
 		}
@@ -410,6 +415,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							return val2, true
 						}
 					}
+				}
+			}
+		}
+		if isIndependent(params, v) {
+			if val2, ok := evalIndependentScmer(v, p.En); ok {
+				if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsBool() || val2.IsNil() {
+					return val2, true
 				}
 			}
 		}
