@@ -5249,6 +5249,38 @@ PostgreSQL parsers should both lower to the same combined operators.
 		'(expr (quote +) 0) true
 		_ false)))
 
+(define scalar_order_aggregate_parts (lambda (ag)
+	(match ag
+		'(((symbol scalar_order_value) value_expr order_exprs dirs offset_value) agg_reduce agg_neutral)
+		(list value_expr order_exprs dirs (coalesceNil offset_value 0) agg_reduce agg_neutral)
+		'(((quote scalar_order_value) value_expr order_exprs dirs offset_value) agg_reduce agg_neutral)
+		(list value_expr order_exprs dirs (coalesceNil offset_value 0) agg_reduce agg_neutral)
+		'(((symbol scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
+		(list value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
+		'(((quote scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
+		(list value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
+		_ nil)))
+
+(define scalar_order_signature (lambda (parts)
+	(list (nth parts 1) (nth parts 2) (nth parts 3) (nth parts 4) (nth parts 5))))
+
+(define compatible_scalar_order_aggregates? (lambda (ags)
+	(if (< (count ags) 2)
+		false
+		(begin
+			(define first_parts (scalar_order_aggregate_parts (car ags)))
+			(if (nil? first_parts)
+				false
+				(begin
+					(define signature (scalar_order_signature first_parts))
+					(reduce ags (lambda (ok ag)
+						(and ok
+							(begin
+								(define parts (scalar_order_aggregate_parts ag))
+								(and (not (nil? parts))
+									(equal? (scalar_order_signature parts) signature)))))
+						true)))))))
+
 (define group_aggregate_read_expr (lambda (grouptbl ag)
 	(begin
 		(define col (aggregate_col_name ag))
@@ -5504,6 +5536,55 @@ PostgreSQL parsers should both lower to the same combined operators.
 					agg_reduce
 					agg_neutral
 					false))))))
+
+(define build_group_ordered_scalar_columns_insert_plan (lambda (schema tbl alias grouptbl keys key_names condition ags)
+	(begin
+		(define src (list alias schema tbl false nil))
+		(define parts (map ags scalar_order_aggregate_parts))
+		(define first_parts (car parts))
+		(define value_exprs (map parts (lambda (part) (nth part 0))))
+		(define order_exprs (nth first_parts 1))
+		(define dirs (nth first_parts 2))
+		(define offset_value (nth first_parts 3))
+		(define agg_cols (map ags aggregate_col_name))
+		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define condition_cols (extract_columns_for_alias src condition))
+		(define order_cols (map order_exprs (lambda (order_expr) (order_column_for_alias src order_expr))))
+		(define valuecols (merge_unique (map value_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols order_cols)))
+		(define mapcols (merge_unique (list group_key_cols_for_scan valuecols)))
+		(define key_expr (runtime_cons_list_expr (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
+		(define payload_expr (runtime_cons_list_expr (map value_exprs (lambda (expr) (lower_column_expr_for_alias src expr)))))
+		(define key_sortcols (map keys (lambda (expr) (order_column_for_alias src expr))))
+		(define key_dirs (map keys (lambda (_key) (quote <))))
+		(define keep_first (list (quote lambda) (list (quote old) (quote new)) (quote old)))
+		(list
+			(list (quote lambda) (list (quote grouped))
+				(group_insert_finish_expr schema grouptbl key_names agg_cols))
+			(list (quote scan_order)
+				'(session "__memcp_tx")
+				(list (quote table) schema tbl)
+				(cons (quote list) filtercols)
+				(list (quote lambda)
+					(map filtercols (lambda (col) (symbol (concat alias "." col))))
+					(list (quote optimize) (lower_column_expr_for_alias src condition)))
+				(cons (quote list) (merge (list key_sortcols order_cols)))
+				(cons (quote list) (merge (list key_dirs dirs)))
+				0
+				(coalesceNil offset_value 0)
+				-1
+				(cons (quote list) mapcols)
+				(list (quote lambda)
+					(map mapcols (lambda (col) (symbol (concat alias "." col))))
+					(runtime_cons_list_expr (list key_expr payload_expr)))
+				(list (quote lambda) (list (quote acc) (quote rowvals))
+					(list (quote set_assoc)
+						(quote acc)
+						(list (quote car) (quote rowvals))
+						(list (quote cadr) (quote rowvals))
+						keep_first))
+				(quoted_runtime_list '())
+				false)))))
 
 (define build_group_aggregate_column (lambda (schema tbl alias grouptbl keys key_names condition ag)
 	(match ag
@@ -6556,6 +6637,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define scalar_query_stage (and (query_block? src)
 			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
 				(equal? (count ags) 2))))
+		(define scalar_order_base_stage (and (not query_input_carrier)
+			(compatible_scalar_order_aggregates? ags)))
 		(define prepared_src (if (query_block? rewritten_src)
 			(query_block_without_stages_after_eager_prepare_using all_stages rewritten_src)
 			rewritten_src))
@@ -6571,7 +6654,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil
 			(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
 		(define key_columns (map key_names (lambda (col) (list (quote list) "column" col "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))
-		(define agg_columns (if query_input_carrier
+		(define agg_columns (if (or query_input_carrier scalar_order_base_stage)
 			(map ags (lambda (ag) (list (quote list) "column" (aggregate_col_name ag) "any" (quoted_runtime_list '()) (quoted_runtime_list '()))))
 			'()))
 		(define create_cols (cons (quote list)
@@ -6600,7 +6683,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (if (union_block? src)
 					(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags)
 					(build_query_group_aggregates_insert_plan_using prepared_src grouptbl keys key_names lowering_ags ags))))
-			(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names condition ag)))))
+			(if scalar_order_base_stage
+				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
+				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names condition ag))))))
 		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr _dir) (begin
 				(define replaced_order_expr (replace_group_order_expr alias grouptbl keys key_names ags expr))
@@ -6624,18 +6709,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(if (empty_list? ags) (list collect_plan) '())
 						agg_plans
 						computed_order_plans)))
-				(list (quote !begin)
-					nested_prepare_expr
-					(if (nil? cleanup_plan)
-						(list (quote !begin)
-							keytable_init
-							collect_plan)
-						(list (quote if) keytable_init
+				(if scalar_order_base_stage
+					(list (quote !begin)
+						nested_prepare_expr
+						keytable_init
+						aggregate_prepare_expr)
+					(list (quote !begin)
+						nested_prepare_expr
+						(if (nil? cleanup_plan)
 							(list (quote !begin)
-								collect_plan
-								cleanup_plan)
-							nil))
-					aggregate_prepare_expr))))))
+								keytable_init
+								collect_plan)
+							(list (quote if) keytable_init
+								(list (quote !begin)
+									collect_plan
+									cleanup_plan)
+								nil))
+						aggregate_prepare_expr)))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
 	(begin

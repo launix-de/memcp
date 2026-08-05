@@ -342,9 +342,9 @@ test_cases:
           filename: "asset-2.dat"
           referenced: false
 
-  - name: "EXPLAIN IR merges repeated scalar latest projection stages"
+  - name: "EXPLAIN uses one ordered scan for repeated scalar latest projections"
     sql: |
-      EXPLAIN IR
+      EXPLAIN
       SELECT
         p.id,
         COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
@@ -360,8 +360,11 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scalar-once"
         - "value_h"
+        - "scan_order"
+      result_occurrences:
+        - text: "scan_order"
+          count: 1
       result_not_contains:
         - "scalar-once:b1ecb2795b4bbb34"
         - "__exists_2ff8679a7aafb8ea"
