@@ -158,10 +158,15 @@ func (m *likeMatcher) BuildSkipList(pattern string, count uint32, getRecid func(
 	missCount := 0
 	const maxMiss = 3
 
+	patternCI := strings.ToLower(pattern)
 	for pos := uint32(0); pos < count; pos++ {
 		recid := getRecid(pos)
 		v := colStorage.GetValue(recid)
-		hit := v.IsString() && scm.StrLike(v.String(), pattern)
+		hit := false
+		if v.IsString() {
+			value := v.String()
+			hit = scm.StrLike(value, pattern) || scm.StrLike(strings.ToLower(value), patternCI)
+		}
 
 		if hit {
 			if !inInterval {
