@@ -5363,12 +5363,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		_ (neumann_fail "build_queryplan" "query-input aggregate insert expects aggregate descriptor"))))
 
 (define direct_group_assoc_expr (lambda (key_names ags)
-	(cons (quote list)
-		(merge (list
-			(merge (map (produceN (count key_names)) (lambda (i)
-				(list (nth key_names i) (list (quote nth) (quote row) i)))))
-			(merge (map (produceN (count ags)) (lambda (i)
-				(list (aggregate_col_name (nth ags i)) (list (quote nth) (quote row) (+ (count key_names) i)))))))))))
+	(begin
+		(define key_pairs (merge (map (produceN (count key_names)) (lambda (i)
+			(list (nth key_names i) (list (quote nth) (quote row) i))))))
+		(define agg_pairs (merge (map (produceN (count ags)) (lambda (i)
+			(list (aggregate_col_name (nth ags i)) (list (quote nth) (quote row) (+ (count key_names) i)))))))
+		(runtime_cons_list_expr (merge (list key_pairs agg_pairs))))))
 
 (define direct_group_aggregate_read_expr (lambda (ag)
 	(begin
@@ -5411,6 +5411,45 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(replace_direct_group_expr alias keys key_names ags expr)
 				(direct_group_result_assoc_expr alias keys key_names ags rest)))
 		_ (list (quote list)))))
+
+(define direct_group_agg_index (lambda (ags expr)
+	(reduce (produceN (count ags)) (lambda (found i)
+		(if (not (nil? found))
+			found
+			(if (equal? expr (nth ags i)) i nil)))
+		nil)))
+
+(define direct_group_order_column (lambda (alias keys key_names ags expr)
+	(begin
+		(define key_idx (group_key_index alias keys expr))
+		(if (not (nil? key_idx))
+			(nth key_names key_idx)
+			(match expr
+				((symbol aggregate) agg_expr agg_reduce agg_neutral)
+				(begin
+					(define agg_idx (direct_group_agg_index ags (list agg_expr agg_reduce agg_neutral)))
+					(if (nil? agg_idx) nil (aggregate_col_name (nth ags agg_idx))))
+				((quote aggregate) agg_expr agg_reduce agg_neutral)
+				(direct_group_order_column alias keys key_names ags (list (quote aggregate) agg_expr agg_reduce agg_neutral))
+				_ nil)))))
+
+(define direct_group_order_columns (lambda (alias keys key_names ags order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr _dir)
+			(begin
+				(define col (direct_group_order_column alias keys key_names ags expr))
+				(if (nil? col)
+					(neumann_fail "build_queryplan" (concat "direct GROUP BY cannot order by " (serialize expr)))
+					col))
+			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
+
+(define direct_group_order_supported? (lambda (alias keys key_names ags order_items)
+	(reduce (coalesceNil order_items '()) (lambda (ok item)
+		(and ok (match item
+			'(expr _dir) (not (nil? (direct_group_order_column alias keys key_names ags expr)))
+			_ false)))
+		true)))
 
 (define build_base_group_scan_assoc_plan (lambda (schema tbl alias keys condition ags)
 	(begin
@@ -5459,7 +5498,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 			merge_groups
 			false))))
 
-(define lower_direct_base_group_stage (lambda (stage fields offset_value limit_value)
+(define direct_group_rowassoc_from_params_expr (lambda (key_names ags)
+	(begin
+		(define key_pairs (merge (map key_names (lambda (col) (list col (symbol col))))))
+		(define agg_pairs (merge (map ags (lambda (ag)
+			(begin
+				(define col (aggregate_col_name ag))
+				(list col (symbol col)))))))
+		(runtime_cons_list_expr (merge (list key_pairs agg_pairs))))))
+
+(define direct_group_map_params (lambda (key_names ags)
+	(map (merge (list key_names (map ags aggregate_col_name))) symbol)))
+
+(define lower_direct_base_group_stage (lambda (stage fields order_items offset_value limit_value)
 	(begin
 		(define src (gs_input stage))
 		(define schema (source_schema src))
@@ -5471,25 +5522,52 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define offset_expr (coalesceNil offset_value 0))
 		(define limit_expr (coalesceNil limit_value -1))
+		(define normalized_order (coalesceNil order_items '()))
+		(define raw_rows_expr (list (quote assoc_keys_values_as_dataset_rows) (quote grouped) (count key_names)))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(list
-					(list (quote lambda) (list (quote rows))
+				(if (empty_list? normalized_order)
+					(list
+						(list (quote lambda) (list (quote rows))
+							(list (quote map)
+								(list (quote slice)
+									(quote rows)
+									offset_expr
+									(list (quote if)
+										(list (quote equal?) limit_expr -1)
+										(list (quote count) (quote rows))
+										(list (quote min) (list (quote count) (quote rows)) (list (quote +) offset_expr limit_expr))))
+								(list (quote lambda) (list (quote row))
+									(list
+										(list (quote lambda) (list (quote rowassoc))
+											(list (quote resultrow)
+												(direct_group_result_assoc_expr alias keys key_names ags fields)))
+										(direct_group_assoc_expr key_names ags)))))
+						raw_rows_expr)
+					(list (quote scan_order)
+						'(session "__memcp_tx")
 						(list (quote map)
-							(list (quote slice)
-								(quote rows)
-								offset_expr
-								(list (quote if)
-									(list (quote equal?) limit_expr -1)
-									(list (quote count) (quote rows))
-									(list (quote min) (list (quote count) (quote rows)) (list (quote +) offset_expr limit_expr))))
+							raw_rows_expr
 							(list (quote lambda) (list (quote row))
-								(list
-									(list (quote lambda) (list (quote rowassoc))
-										(list (quote resultrow)
-											(direct_group_result_assoc_expr alias keys key_names ags fields)))
-									(direct_group_assoc_expr key_names ags)))))
-					(list (quote assoc_keys_values_as_dataset_rows) (quote grouped) (count key_names))))
+								(direct_group_assoc_expr key_names ags)))
+						(quoted_runtime_list '())
+						(list (quote lambda) '() true)
+						(cons (quote list) (direct_group_order_columns alias keys key_names ags normalized_order))
+						(cons (quote list) (order_dirs normalized_order))
+						0
+						offset_expr
+						limit_expr
+						(cons (quote list) (merge (list key_names (map ags aggregate_col_name))))
+						(list (quote lambda)
+							(direct_group_map_params key_names ags)
+							(list
+								(list (quote lambda) (list (quote rowassoc))
+									(list (quote resultrow)
+										(direct_group_result_assoc_expr alias keys key_names ags fields)))
+								(direct_group_rowassoc_from_params_expr key_names ags)))
+						nil
+						nil
+						false)))
 			(build_base_group_scan_assoc_plan schema tbl alias keys condition ags)))))
 
 (define aggregate_payload_merge_expr (lambda (ags idx)
@@ -6876,13 +6954,19 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
 
 (define direct_base_group_stage_supported? (lambda (block stage)
-	(and (not (empty_list? (qb_group block)))
-		(and (nil? (qb_having block))
-			(and (empty_list? (qb_order block))
-				(and (query_block_has_aggregates? block)
-					(not (reduce (gs_aggregates stage)
-						(lambda (found ag) (or found (count_distinct_descriptor? ag)))
-						false))))))))
+	(begin
+		(define src (gs_input stage))
+		(define alias (source_alias src))
+		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define key_names (group_key_cols keys))
+		(define ags (gs_aggregates stage))
+		(and (not (empty_list? (qb_group block)))
+			(and (nil? (qb_having block))
+				(and (direct_group_order_supported? alias keys key_names ags (qb_order block))
+					(and (query_block_has_aggregates? block)
+						(not (reduce ags
+							(lambda (found ag) (or found (count_distinct_descriptor? ag)))
+							false)))))))))
 
 (define table_column_names (lambda (schema tbl)
 	(map (get_schema schema tbl) (lambda (col) (col "Field")))))
@@ -6933,7 +7017,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(begin
 				(define group_stage (make_group_stage_for_block block src))
 				(if (direct_base_group_stage_supported? block group_stage)
-					(lower_direct_base_group_stage group_stage fields (qb_offset block) (qb_limit block))
+					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
 					(lower_group_stage group_stage)))
 				(begin
 					(define alias (source_alias src))
