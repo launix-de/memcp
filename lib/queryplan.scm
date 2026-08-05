@@ -6548,6 +6548,21 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define rows (probe_context_row_count sources))
 		(or (nil? rows) (< rows 1000)))))
 
+(define scalar_aggregate_probe_limit_small_enough? (lambda (limit_value)
+	(and (number? limit_value)
+		(and (> limit_value 0)
+			(<= limit_value 512)))))
+
+(define scalar_aggregate_probe_aggregate_safe? (lambda (ag)
+	(or
+		(aggregate_count_like? ag)
+		(nil? (nth ag 2)))))
+
+(define scalar_aggregate_probe_stage_safe? (lambda (stage)
+	(reduce (gs_aggregates stage) (lambda (ok ag)
+		(and ok (scalar_aggregate_probe_aggregate_safe? ag)))
+		true)))
+
 (define stage_input_small_enough? (lambda (stage)
 	(begin
 		(define rows (planner_stage_input_rows (gs_input stage)))
@@ -6587,9 +6602,25 @@ PostgreSQL parsers should both lower to the same combined operators.
 								probe_sources
 									default_alias)))))))))
 
-(define probe_output_sources_for_block (lambda (stages sources default_alias)
+(define scalar_aggregate_probe_output_source_for_block? (lambda (stages sources default_alias limit_value src)
+	(if (not (scalar_aggregate_probe_stage_output_source? stages src))
+		false
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(define probe_sources (filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src))))))
+			(and
+				(scalar_aggregate_probe_stage_safe? stage)
+				(and
+					(or
+						(scalar_aggregate_probe_limit_small_enough? limit_value)
+						(probe_context_small_enough? probe_sources))
+					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
+
+(define probe_output_sources_for_block (lambda (stages sources default_alias limit_value)
 	(filter (coalesceNil sources '()) (lambda (src)
-		(probeable_stage_output_source_for_block? stages sources default_alias src)))))
+		(or
+			(probeable_stage_output_source_for_block? stages sources default_alias src)
+			(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src))))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -6680,7 +6711,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(define probe_sources (probe_output_sources_for_block stages sources default_alias))
+		(define probe_sources (probe_output_sources_for_block stages sources default_alias (qb_limit block)))
 		(define rewritten_sources (rewrite_scalar_first_probe_sources_using stages sources probe_sources default_alias))
 		(make_query_block
 			(qb_schema block)
@@ -7538,6 +7569,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define sources (qb_sources block))
 			(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 			(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '()))
+			(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block (qb_stages block) sources default_alias (qb_limit block))))
 			(define stage_output_ids (stage_output_source_ids sources))
 			(filter
 				(if (single_source? sources)
@@ -7551,13 +7583,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(lambda (stage)
 					(and
 						(not (contains? consumed_probe_ids (gs_id stage)))
-						(and
-							(not (scalar_first_inline_only_stage? stage))
+						(and (not (contains? consumed_source_probe_ids (gs_id stage)))
 							(and
-								(not (scalar_first_probe_stage? stage))
-								(or
-									(not (scalar_aggregate_probe_stage? stage))
-									(contains? stage_output_ids (gs_id stage)))))))))))
+								(not (scalar_first_inline_only_stage? stage))
+								(and
+									(not (scalar_first_probe_stage? stage))
+									(or
+										(not (scalar_aggregate_probe_stage? stage))
+										(contains? stage_output_ids (gs_id stage))))))))))))
 
 	(define query_block_stages_to_prepare (lambda (block)
 		(begin
