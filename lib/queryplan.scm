@@ -6079,9 +6079,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define probe_output_sources_for_block (lambda (stages sources default_alias)
 	(filter (coalesceNil sources '()) (lambda (src)
-		(or
-			(probeable_stage_output_source_for_block? stages sources default_alias src)
-			(scalar_aggregate_probe_stage_output_source? stages src))))))
+		(probeable_stage_output_source_for_block? stages sources default_alias src)))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -6904,6 +6902,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '()))
+		(define stage_output_ids (stage_output_source_ids sources))
 		(filter
 			(if (single_source? sources)
 				(qb_stages block)
@@ -6917,7 +6916,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(not (contains? consumed_probe_ids (gs_id stage)))
 					(and
 						(not (scalar_first_probe_stage? stage))
-						(not (scalar_aggregate_probe_stage? stage)))))))))
+						(or
+							(not (scalar_aggregate_probe_stage? stage))
+							(contains? stage_output_ids (gs_id stage))))))))))
 
 (define lower_query_block_with_stages (lambda (block)
 	(if (empty_list? (qb_stages block))
