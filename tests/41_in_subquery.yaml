@@ -1394,12 +1394,104 @@ test_cases:
             - "inner_select"
             - "dependent-subquery"
 
+  - name: "IN UNION with nested reference scalar prepares query carriers"
+    fail_comment: "nested stage-output carriers must be prepared before physical reads"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_stage_dep_doc"
+      - sql: "DROP TABLE IF EXISTS in_stage_dep_file"
+      - sql: "DROP TABLE IF EXISTS in_stage_dep_ref"
+      - sql: "DROP TABLE IF EXISTS in_stage_dep_tenant"
+      - sql: "DROP TABLE IF EXISTS in_stage_dep_acl"
+      - sql: |
+          CREATE TABLE in_stage_dep_file (
+            ID INT PRIMARY KEY,
+            filename VARCHAR(64),
+            search VARCHAR(64)
+          )
+      - sql: |
+          CREATE TABLE in_stage_dep_doc (
+            ID INT PRIMARY KEY,
+            file_id INT,
+            ref_id INT,
+            sort_key INT
+          )
+      - sql: |
+          CREATE TABLE in_stage_dep_ref (
+            ID INT PRIMARY KEY,
+            tenant INT,
+            label VARCHAR(64)
+          )
+      - sql: |
+          CREATE TABLE in_stage_dep_tenant (
+            ID INT PRIMARY KEY,
+            label VARCHAR(64)
+          )
+      - sql: |
+          CREATE TABLE in_stage_dep_acl (
+            ID INT PRIMARY KEY,
+            usr INT,
+            tenant INT
+          )
+      - sql: "INSERT INTO in_stage_dep_file (ID, filename, search) VALUES (10, 'hit-a', 'x'), (11, 'miss', 'needle-b'), (12, 'miss', 'x')"
+      - sql: "INSERT INTO in_stage_dep_doc (ID, file_id, ref_id, sort_key) VALUES (1, 10, 100, 2), (2, 11, 101, 1), (3, 12, 102, 3)"
+      - sql: "INSERT INTO in_stage_dep_ref (ID, tenant, label) VALUES (100, 7, 'a'), (101, 8, 'b'), (102, 9, 'c')"
+      - sql: "INSERT INTO in_stage_dep_tenant (ID, label) VALUES (7, 'tenant-a'), (8, 'tenant-b'), (9, 'tenant-c')"
+      - sql: "INSERT INTO in_stage_dep_acl (ID, usr, tenant) VALUES (1, 105, 7), (2, 105, 8)"
+    sql: |
+      SELECT t.ID, t.`ref:canView`, t.global_can_view
+      FROM (
+        SELECT d.ID, d.file_id, d.sort_key, `ref:r`.`ref:canView` AS `ref:canView`,
+          COALESCE((
+            SELECT EXISTS (
+              SELECT TRUE FROM in_stage_dep_acl global_acl
+              WHERE global_acl.usr = 999 AND global_acl.tenant IS NULL
+              LIMIT 1
+            )
+          ), FALSE) AS global_can_view
+        FROM in_stage_dep_doc d
+        LEFT JOIN (
+          SELECT r.ID AS `ref:ID`,
+            COALESCE((
+              SELECT CASE WHEN EXISTS (
+                SELECT TRUE FROM in_stage_dep_acl a
+                WHERE a.usr = 999 AND a.tenant = m.ID
+                LIMIT 1
+              ) THEN TRUE ELSE FALSE END
+              FROM in_stage_dep_tenant m
+              WHERE m.ID = r.tenant
+              LIMIT 1
+            ), FALSE) AS `ref:canView`
+          FROM in_stage_dep_ref r
+        ) `ref:r` ON `ref:r`.`ref:ID` = d.ref_id
+      ) t
+      WHERE t.file_id IN (
+        SELECT f.ID FROM in_stage_dep_file f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.ID FROM in_stage_dep_file f WHERE f.search LIKE '%needle%'
+      )
+      ORDER BY t.sort_key
+      LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          "ref:canView": false
+          global_can_view: false
+        - ID: 1
+          "ref:canView": false
+          global_can_view: false
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS in_ref_acl"
   - sql: "DROP TABLE IF EXISTS in_ref_tenant"
   - sql: "DROP TABLE IF EXISTS in_ref_site"
   - sql: "DROP TABLE IF EXISTS in_ref_file"
   - sql: "DROP TABLE IF EXISTS in_ref_doc"
+  - sql: "DROP TABLE IF EXISTS in_stage_dep_acl"
+  - sql: "DROP TABLE IF EXISTS in_stage_dep_tenant"
+  - sql: "DROP TABLE IF EXISTS in_stage_dep_ref"
+  - sql: "DROP TABLE IF EXISTS in_stage_dep_file"
+  - sql: "DROP TABLE IF EXISTS in_stage_dep_doc"
   - sql: "DROP TABLE IF EXISTS in_nullable_rhs"
   - sql: "DROP TABLE IF EXISTS in_renderjob"
   - sql: "DROP TABLE IF EXISTS in_fop_files"
