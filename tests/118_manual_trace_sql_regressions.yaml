@@ -39,6 +39,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_wide_prop"
   - sql: "DROP TABLE IF EXISTS trace_wide_parent"
   - sql: "DROP TABLE IF EXISTS trace_wide_assignment"
+  - sql: "DROP TABLE IF EXISTS trace_limit_output"
+  - sql: "DROP TABLE IF EXISTS trace_limit_parent"
+  - sql: "DROP TABLE IF EXISTS trace_limit_label"
   - sql: |
       CREATE TABLE trace_group (
         id INT PRIMARY KEY
@@ -116,6 +119,21 @@ setup:
         parent_id INT,
         archived BOOL
       )
+  - sql: |
+      CREATE TABLE trace_limit_parent (
+        id INT PRIMARY KEY,
+        label_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_limit_label (
+        id INT PRIMARY KEY,
+        label VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE trace_limit_output (
+        id INT PRIMARY KEY,
+        label VARCHAR(64)
+      )
   - sql: "INSERT INTO trace_group (id) VALUES (10), (20)"
   - sql: "INSERT INTO trace_item (id, group_id, state) VALUES (1, 10, 1), (2, 20, NULL), (3, 30, 0)"
   - sql: "INSERT INTO trace_host (id, kind) VALUES (1, 1), (2, 2)"
@@ -139,6 +157,8 @@ setup:
   - sql: "INSERT INTO trace_wide_parent (id, owner_id, is_public, team_id) VALUES (1, 7, FALSE, 10), (2, 8, TRUE, 20)"
   - sql: "INSERT INTO trace_wide_assignment (id, team_id, member_id) VALUES (1, 10, 7), (2, 20, 9)"
   - sql: "INSERT INTO trace_wide_prop (id, parent_id, archived) VALUES (1, 1, FALSE)"
+  - sql: "INSERT INTO trace_limit_parent (id, label_id) VALUES (1, 10), (2, 20)"
+  - sql: "INSERT INTO trace_limit_label (id, label) VALUES (10, 'zeta'), (20, 'alpha')"
   - sql: "INSERT INTO trace_wide_prop SELECT id + 1, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
   - sql: "INSERT INTO trace_wide_prop SELECT id + 2, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
   - sql: "INSERT INTO trace_wide_prop SELECT id + 4, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
@@ -237,6 +257,86 @@ setup:
   - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
 
 test_cases:
+  - name: "INSERT SELECT preserves a multi-source derived ORDER LIMIT relation"
+    max_time: 1.0
+    max_plan_size: 20000
+    sql: |
+      INSERT INTO trace_limit_output (id, label)
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY label.label DESC
+        LIMIT 1
+      ) candidate
+      WHERE NOT EXISTS (
+        SELECT TRUE
+        FROM trace_limit_output present
+        WHERE present.id = candidate.id
+      )
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT SELECT derived ORDER LIMIT stores the selected joined row"
+    sql: "SELECT id, label FROM trace_limit_output"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          label: "zeta"
+
+  - name: "Multi-source derived ORDER LIMIT preserves OFFSET"
+    sql: |
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY label.label ASC
+        LIMIT 1 OFFSET 1
+      ) candidate
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          label: "zeta"
+
+  - name: "Empty multi-source derived LIMIT returns no row"
+    sql: |
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        WHERE parent.id > 100
+        ORDER BY label.label DESC
+        LIMIT 1
+      ) candidate
+    expect:
+      rows: 0
+
+  - name: "Multi-source derived LIMIT stays a logical one-row carrier"
+    sql: |
+      EXPLAIN IR
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY label.label DESC
+        LIMIT 1
+      ) candidate
+    expect:
+      contains:
+        - "group-stage"
+        - "cardinality_mode first"
+        - "physical_max_rows 1"
+      not_contains:
+        - "legacy_materialized"
+        - "inner_select"
+        - "__mat:"
+
   - name: "ORDER BY RAND supports filtered table scan with IN subquery"
     sql: |
       SELECT id
@@ -493,3 +593,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS trace_wide_prop"
   - sql: "DROP TABLE IF EXISTS trace_wide_parent"
   - sql: "DROP TABLE IF EXISTS trace_wide_assignment"
+  - sql: "DROP TABLE IF EXISTS trace_limit_output"
+  - sql: "DROP TABLE IF EXISTS trace_limit_parent"
+  - sql: "DROP TABLE IF EXISTS trace_limit_label"

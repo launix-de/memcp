@@ -958,6 +958,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(and (or (nil? (qb_offset inner)) (not (empty_list? (qb_order inner))))
 						(equal? (qb_limit inner) 1))))))))
 
+(define single_row_derived_supported? (lambda (inner)
+	(and (query_block? inner)
+		(and (not (empty_list? (qb_sources inner)))
+			(and (empty_list? (qb_group inner))
+				(and (nil? (qb_having inner))
+					(and (not (query_block_has_aggregates? inner))
+						(and (or (nil? (qb_offset inner)) (not (empty_list? (qb_order inner))))
+							(equal? (qb_limit inner) 1)))))))))
+
 (define scalar_aggregate_supported? (lambda (inner)
 	(and (query_block? inner)
 		(and (not (empty_list? (qb_sources inner)))
@@ -1710,37 +1719,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define make_limited_derived_stage_source (lambda (alias inner original_relation)
 	(begin
-		(if (not (scalar_once_supported? inner))
-			(neumann_fail "untangle_query" "derived relation stage currently supports ORDER/LIMIT scalar shape only")
+		(if (not (single_row_derived_supported? inner))
+			(neumann_fail "untangle_query" "derived relation stage currently supports a non-grouped LIMIT 1 relation")
 			true)
-		(if (not (equal? (count (qb_fields inner)) 2))
-			(neumann_fail "untangle_query" "derived relation stage currently supports one projected column")
-			true)
-		(define value_expr (query_block_first_expr inner))
 		(define inner_src (car (qb_sources inner)))
 		(if (not (source_is_base_table? inner_src))
 			(neumann_fail "untangle_query" "derived relation stage requires a base inner source")
 			true)
 		(define inner_default (source_alias inner_src))
 		(define keys '(1))
-		(define condition (coalesceNil (qb_where inner) true))
-		(define value_for_inner (canonical_column_expr_for_alias inner_default value_expr))
-		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
-			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default expr) dir)))))
-		(define ag (scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner)))
-		(define stage_id (concat "derived-once:" (fnv_hash (string (list original_relation alias condition ag)))))
+		(define ags (dedupe_aggregates_by_col
+			(merge_unique (extract_assoc (qb_fields inner) (lambda (_title expr)
+				(list (list
+					(canonical_column_expr_for_alias inner_default expr)
+					(scalar_once_reduce_first)
+					nil)))))))
+		(define stage_input (make_query_block
+			(qb_schema inner)
+			(qb_sources inner)
+			'()
+			(coalesceNil (qb_where inner) true)
+			'() nil
+			(qb_order inner)
+			(qb_limit inner)
+			(qb_offset inner)
+			'()
+			(qb_stages inner)
+			(qb_facts inner)))
+		(define stage_id (concat "derived-once:" (fnv_hash (string (list original_relation alias ags)))))
 		(define stage (make_group_stage
 			stage_id
-			inner_src
+			stage_input
 			'()
 			keys
-			(list ag)
+			ags
 			nil
 			'()
 			'()
 			nil nil
 			(list
-				(list (quote condition) condition)
+				(list (quote condition) true)
 				(list (quote purpose) (quote scalar_single))
 				(list (quote domain) '())
 				(list (quote lookup-keys) '())
@@ -1750,9 +1768,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (quote partition_by) '())
 				(list (quote physical_max_rows) 1)
 				(list (quote on_overflow) (quote ignore)))))
-		(define projection (match (qb_fields inner)
-			'(title _expr) (list title (scalar_once_value_expr alias ag))
-			_ (neumann_fail "untangle_query" "malformed derived relation projection")))
+		(define projection (map_assoc (qb_fields inner) (lambda (_title expr)
+			(begin
+				(define value_expr (canonical_column_expr_for_alias inner_default expr))
+				(define ag (list value_expr (scalar_once_reduce_first) nil))
+				(scalar_once_value_expr alias ag)))))
 		(list
 			(list alias (group_stage_schema stage) (make_stage_output_relation stage_id) false nil)
 			projection
@@ -7107,7 +7127,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define grouptbl (group_carrier_relation carrier))
 		(define scalar_query_stage (and (query_block? src)
 			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
-				(equal? (count ags) 2))))
+				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote single_or_error))
+					(and (equal? (count ags) 2)
+						(equal? (cadr ags) aggregate_count_descriptor))))))
 		(define scalar_order_base_stage (and (not query_input_carrier)
 			(compatible_scalar_order_aggregates? ags)))
 		(define scalar_aggregate_stage (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate)))
@@ -8296,7 +8318,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(sorted_row_result_assoc_expr rest)))
 		_ (list (quote list)))))
 
-	(define join_sorted_rows_plan (lambda (rows_plan fields order_items offset_value limit_value)
+(define join_sorted_rows_plan_with_mapper (lambda (rows_plan order_items offset_value limit_value mapper)
 		(begin
 			(define offset_expr (coalesceNil offset_value 0))
 			(define limit_expr (coalesceNil limit_value -1))
@@ -8310,13 +8332,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote lambda) (list (quote sorted))
 						(list (quote map)
 							(list (quote slice) (quote sorted) offset_expr end_expr)
-							(list (quote lambda) (list (quote row))
-								(list (quote resultrow)
-									(sorted_row_result_assoc_expr fields)))))
+							mapper))
 					(list (quote sort) (quote rows)
 							(list (quote lambda) (list (quote a) (quote b))
 								(join_order_compare_expr order_items 0)))))
 				rows_plan))))
+
+(define join_sorted_rows_plan (lambda (rows_plan fields order_items offset_value limit_value)
+	(join_sorted_rows_plan_with_mapper
+		rows_plan order_items offset_value limit_value
+		(list (quote lambda) (list (quote row))
+			(list (quote resultrow) (sorted_row_result_assoc_expr fields))))))
+
+(define join_sorted_dataset_rows_plan (lambda (rows_plan fields order_items offset_value limit_value)
+	(join_sorted_rows_plan_with_mapper
+		rows_plan order_items offset_value limit_value
+		(list (quote lambda) (list (quote row))
+			(sorted_row_result_assoc_expr fields)))))
 
 	(define join_sorted_rows_late_projection_plan (lambda (rows_plan project_prepare_expr project_rows_expr fields order_items offset_value limit_value)
 		(begin
@@ -8697,9 +8729,6 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(neumann_fail "build_queryplan" "dataset query-block lowering cannot consume grouped input")
 			true)
-		(if (or (not (empty_list? (qb_order block))) (or (not (nil? (qb_limit block))) (not (nil? (qb_offset block)))))
-			(neumann_fail "build_queryplan" "dataset query-block lowering cannot preserve ORDER/LIMIT yet")
-			true)
 		(define sources (qb_sources block))
 		(define first_alias (source_alias (car sources)))
 		(define where_expr (coalesceNil (qb_where block) true))
@@ -8711,23 +8740,48 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons (source_with_join_expr (car sources) (combine_where (source_join_expr (car sources)) where_expr)) (cdr sources))
 			sources))
 		(define final_condition (if push_first_where true where_expr))
+		(define order_items (coalesceNil (qb_order block) '()))
+		(define direct_order (order_items_belong_to_source? (car scan_sources) order_items))
+		(define direct_order_safe (and direct_order
+			(not (ordered_join_limit_requires_complete_rows?
+				scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
 		(define needed_exprs (merge (list
 			(extract_assoc fields (lambda (_title expr) expr))
 			(list final_condition)
+			(order_exprs order_items)
 			(source_join_exprs scan_sources))))
-		(build_join_scan_rows_with_mapper
-			(qb_schema block)
-			scan_sources
-			scan_sources
-			first_alias
-			needed_exprs
-			final_condition
-			(lower_dataset_row_assoc scan_sources first_alias fields)
-			'()
-			0
-			-1
-			true
-			(query_block_stage_catalog block)))))
+		(if direct_order_safe
+			(build_join_scan_rows_with_mapper
+				(qb_schema block)
+				scan_sources
+				scan_sources
+				first_alias
+				needed_exprs
+				final_condition
+				(lower_dataset_row_assoc scan_sources first_alias fields)
+				order_items
+				(coalesceNil (qb_offset block) 0)
+				(coalesceNil (qb_limit block) -1)
+				true
+				(query_block_stage_catalog block))
+			(join_sorted_dataset_rows_plan
+				(build_join_scan_rows_with_mapper
+					(qb_schema block)
+					scan_sources
+					scan_sources
+					first_alias
+					needed_exprs
+					final_condition
+					(lower_join_result_row_assoc scan_sources first_alias fields order_items)
+					'()
+					0
+					-1
+					true
+					(query_block_stage_catalog block))
+				fields
+				order_items
+				(qb_offset block)
+				(qb_limit block))))))
 
 (define lower_multi_source_query_block (lambda (block)
 	(begin
