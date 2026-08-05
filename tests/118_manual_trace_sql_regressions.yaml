@@ -42,6 +42,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_limit_output"
   - sql: "DROP TABLE IF EXISTS trace_limit_parent"
   - sql: "DROP TABLE IF EXISTS trace_limit_label"
+  - sql: "DROP TABLE IF EXISTS trace_count_access"
+  - sql: "DROP TABLE IF EXISTS trace_count_reference"
+  - sql: "DROP TABLE IF EXISTS trace_count_parent"
   - sql: |
       CREATE TABLE trace_group (
         id INT PRIMARY KEY
@@ -134,6 +137,22 @@ setup:
         id INT PRIMARY KEY,
         label VARCHAR(64)
       )
+  - sql: |
+      CREATE TABLE trace_count_parent (
+        id INT PRIMARY KEY,
+        reference_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_count_reference (
+        id INT PRIMARY KEY,
+        label VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE trace_count_access (
+        id INT PRIMARY KEY,
+        reference_id INT,
+        actor_id INT
+      )
   - sql: "INSERT INTO trace_group (id) VALUES (10), (20)"
   - sql: "INSERT INTO trace_item (id, group_id, state) VALUES (1, 10, 1), (2, 20, NULL), (3, 30, 0)"
   - sql: "INSERT INTO trace_host (id, kind) VALUES (1, 1), (2, 2)"
@@ -159,6 +178,9 @@ setup:
   - sql: "INSERT INTO trace_wide_prop (id, parent_id, archived) VALUES (1, 1, FALSE)"
   - sql: "INSERT INTO trace_limit_parent (id, label_id) VALUES (1, 10), (2, 20)"
   - sql: "INSERT INTO trace_limit_label (id, label) VALUES (10, 'zeta'), (20, 'alpha')"
+  - sql: "INSERT INTO trace_count_parent (id, reference_id) VALUES (1, 10), (2, 20), (3, 30)"
+  - sql: "INSERT INTO trace_count_reference (id, label) VALUES (10, 'north'), (20, 'south'), (30, 'west')"
+  - sql: "INSERT INTO trace_count_access (id, reference_id, actor_id) VALUES (1, 10, 7), (2, 30, 8)"
   - sql: "INSERT INTO trace_wide_prop SELECT id + 1, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
   - sql: "INSERT INTO trace_wide_prop SELECT id + 2, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
   - sql: "INSERT INTO trace_wide_prop SELECT id + 4, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
@@ -257,6 +279,58 @@ setup:
   - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
 
 test_cases:
+  - name: "COUNT lowers a grouped derived stage with an outer presence stage"
+    max_plan_size: 20000
+    sql: |
+      SELECT COUNT(*) AS total, SUM(candidate.member_count) AS memberships
+      FROM (
+        SELECT reference.id, COUNT(access_row.id) AS member_count
+        FROM trace_count_reference reference
+        LEFT JOIN trace_count_access access_row
+          ON access_row.reference_id = reference.id
+        GROUP BY reference.id
+      ) candidate
+      WHERE EXISTS (
+        SELECT TRUE
+        FROM trace_count_parent parent
+        WHERE parent.reference_id = candidate.id
+        LIMIT 1
+      )
+    expect:
+      rows: 1
+      data:
+        - total: 3
+          memberships: 2
+
+  - name: "Grouped derived COUNT keeps carriers out of logical IR"
+    max_plan_size: 20000
+    sql: |
+      EXPLAIN IR
+      SELECT COUNT(*) AS total, SUM(candidate.member_count) AS memberships
+      FROM (
+        SELECT reference.id, COUNT(access_row.id) AS member_count
+        FROM trace_count_reference reference
+        LEFT JOIN trace_count_access access_row
+          ON access_row.reference_id = reference.id
+        GROUP BY reference.id
+      ) candidate
+      WHERE EXISTS (
+        SELECT TRUE
+        FROM trace_count_parent parent
+        WHERE parent.reference_id = candidate.id
+        LIMIT 1
+      )
+    expect:
+      contains:
+        - "group-stage"
+        - "stage-output"
+      not_contains:
+        - "legacy_materialized"
+        - "inner_select"
+        - "dependent-subquery"
+        - ".grp:"
+        - "(scan"
+
   - name: "INSERT SELECT preserves a multi-source derived ORDER LIMIT relation"
     max_time: 1.0
     max_plan_size: 20000
@@ -596,3 +670,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS trace_limit_output"
   - sql: "DROP TABLE IF EXISTS trace_limit_parent"
   - sql: "DROP TABLE IF EXISTS trace_limit_label"
+  - sql: "DROP TABLE IF EXISTS trace_count_access"
+  - sql: "DROP TABLE IF EXISTS trace_count_reference"
+  - sql: "DROP TABLE IF EXISTS trace_count_parent"
