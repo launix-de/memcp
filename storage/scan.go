@@ -369,16 +369,16 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	var inputCount int64
 	values := make(chan scanResult, 4)
 	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
-		// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
-		// This keeps the worker pool draining quickly on tables with many shards.
-		if ss != nil && ss.IsKilled() {
-			panic("query killed")
-		}
 		defer func() {
 			if r := recover(); r != nil {
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
+		// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
+		// This keeps the worker pool draining quickly on tables with many shards.
+		if ss != nil && ss.IsKilled() {
+			panic("query killed")
+		}
 		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
 		values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 	})
