@@ -201,6 +201,24 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "EXPLAIN COMPILE exposes planner phase and shape metrics"
+    sql: "EXPLAIN COMPILE SELECT id FROM rs_data WHERE val BETWEEN 50 AND 150 ORDER BY id LIMIT 5"
+    expect:
+      rows: 1
+      contains:
+        - "untangle_ns"
+        - "reorder_ns"
+        - "lower_ns"
+        - "planner_total_ns"
+        - "plan_bytes"
+        - "query_blocks"
+        - "group_stages"
+        - "union_blocks"
+        - "scans"
+        - "ordered_scans"
+        - "exists_scans"
+        - "group_carriers"
+
   - name: "EXPLAIN IR exposes planner stages"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT id FROM rs_data WHERE val BETWEEN 50 AND 150 ORDER BY id LIMIT 5"
