@@ -735,12 +735,18 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	cols := traverseCondition(p.Body)
 
-	// Sort columns: point-like (equal + like) first, then range, alphabetically within
-	// each group. LIKE columns are treated as point-like because the index sort treats
-	// them like any other column; the LIKE pattern is a query-level overlay that filters
-	// via rowWithinBounds, not via sort order. The binary search skips LIKE columns.
+	// Keep transient RecSet boundaries in a prefix so scans can remove them by
+	// slicing. Sort real columns point-like (equal + like) first, then range,
+	// alphabetically within each group. LIKE columns are treated as point-like because
+	// the index sort treats them like any other column; the LIKE pattern is a query-level
+	// overlay that filters via rowWithinBounds, not via sort order.
 	if len(cols) > 1 {
 		hybridsort.Slice(cols, func(i, j int) bool {
+			iRecSet := matcherKindEqual(cols[i].matcher, RecSetMatcher)
+			jRecSet := matcherKindEqual(cols[j].matcher, RecSetMatcher)
+			if iRecSet != jRecSet {
+				return iRecSet
+			}
 			iPoint := boundaryIsPoint(cols[i])
 			jPoint := boundaryIsPoint(cols[j])
 			if iPoint != jPoint {
@@ -751,6 +757,21 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 
 	return cols
+}
+
+func splitRecSetBoundary(b boundaries, carrier *table) (boundaries, *recSet) {
+	var rs *recSet
+	prefixLen := 0
+	for prefixLen < len(b) && matcherKindEqual(b[prefixLen].matcher, RecSetMatcher) {
+		if rs == nil && b[prefixLen].lower.IsCustom(TagRecSet) {
+			candidate := RecSetFromScmer(b[prefixLen].lower)
+			if candidate != nil && candidate.table == carrier {
+				rs = candidate
+			}
+		}
+		prefixLen++
+	}
+	return b[prefixLen:], rs
 }
 
 func hasBatchBoundaries(bounds boundaries) bool {

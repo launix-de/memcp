@@ -397,28 +397,6 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	return b, addedSortCols > 0
 }
 
-func splitRecSetBoundary(b boundaries, carrier *table) (boundaries, *recSet) {
-	if len(b) == 0 {
-		return b, nil
-	}
-	write := 0
-	var rs *recSet
-	for i := range b {
-		if matcherKindEqual(b[i].matcher, RecSetMatcher) {
-			if rs == nil && b[i].lower.IsCustom(TagRecSet) {
-				candidate := RecSetFromScmer(b[i].lower)
-				if candidate != nil && candidate.table == carrier {
-					rs = candidate
-				}
-			}
-			continue
-		}
-		b[write] = b[i]
-		write++
-	}
-	return b[:write], rs
-}
-
 func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 	var p scm.Proc
 	if condition.IsProc() {

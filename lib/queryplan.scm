@@ -7776,7 +7776,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 					(extract_columns_for_alias src expr)))))
 				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
-				(define mapcols (merge_unique (list filtercols fieldcols)))
+				(define mapcols fieldcols)
 				(define table_expr (if membership_filter
 					(source_table_expr src)
 					(coalesceNil membership_table_expr (source_table_expr src))))
