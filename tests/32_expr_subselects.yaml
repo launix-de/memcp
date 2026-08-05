@@ -216,6 +216,7 @@ test_cases:
       not_contains:
         - "inner_select"
         - "dependent-subquery"
+        - "scalar_aggregate_probe"
   - name: "EXPLAIN IR exposes grouped scalar fallback reason"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT (SELECT COUNT(1) FROM t2 GROUP BY owner HAVING owner = t1.id) AS cnt FROM t1"
