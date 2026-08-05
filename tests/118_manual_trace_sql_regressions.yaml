@@ -36,6 +36,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_share"
   - sql: "DROP TABLE IF EXISTS trace_profile"
   - sql: "DROP TABLE IF EXISTS trace_metric"
+  - sql: "DROP TABLE IF EXISTS trace_wide_prop"
+  - sql: "DROP TABLE IF EXISTS trace_wide_parent"
+  - sql: "DROP TABLE IF EXISTS trace_wide_assignment"
   - sql: |
       CREATE TABLE trace_group (
         id INT PRIMARY KEY
@@ -94,6 +97,25 @@ setup:
         value_g INT,
         value_h INT
       )
+  - sql: |
+      CREATE TABLE trace_wide_parent (
+        id INT PRIMARY KEY,
+        owner_id INT,
+        is_public BOOL,
+        team_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_wide_assignment (
+        id INT PRIMARY KEY,
+        team_id INT,
+        member_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_wide_prop (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        archived BOOL
+      )
   - sql: "INSERT INTO trace_group (id) VALUES (10), (20)"
   - sql: "INSERT INTO trace_item (id, group_id, state) VALUES (1, 10, 1), (2, 20, NULL), (3, 30, 0)"
   - sql: "INSERT INTO trace_host (id, kind) VALUES (1, 1), (2, 2)"
@@ -114,6 +136,19 @@ setup:
   - sql: "INSERT INTO trace_metric SELECT id + 256, profile_id, valid_from + 256, value_a + 256, value_b + 256, value_c + 256, value_d + 256, value_e + 256, value_f + 256, value_g + 256, value_h + 256 FROM trace_metric"
   - sql: "INSERT INTO trace_metric SELECT id + 512, profile_id, valid_from + 512, value_a + 512, value_b + 512, value_c + 512, value_d + 512, value_e + 512, value_f + 512, value_g + 512, value_h + 512 FROM trace_metric"
   - sql: "INSERT INTO trace_metric SELECT id + 1024, profile_id, valid_from + 1024, value_a + 1024, value_b + 1024, value_c + 1024, value_d + 1024, value_e + 1024, value_f + 1024, value_g + 1024, value_h + 1024 FROM trace_metric"
+  - sql: "INSERT INTO trace_wide_parent (id, owner_id, is_public, team_id) VALUES (1, 7, FALSE, 10), (2, 8, TRUE, 20)"
+  - sql: "INSERT INTO trace_wide_assignment (id, team_id, member_id) VALUES (1, 10, 7), (2, 20, 9)"
+  - sql: "INSERT INTO trace_wide_prop (id, parent_id, archived) VALUES (1, 1, FALSE)"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 1, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 2, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 4, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 8, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 16, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 32, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 64, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 128, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 256, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 512, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
   - sql: |
       CREATE TABLE trace_config (
         id INT PRIMARY KEY,
@@ -396,6 +431,46 @@ test_cases:
           value_g: 2117
           value_h: 2127
 
+  - name: "Wide bounded scalar projection probes nested presence stage on cold cache"
+    max_time: 1.0
+    max_plan_size: 30000
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT
+          p.id,
+          p.archived,
+          COALESCE((
+            SELECT CASE
+              WHEN par.owner_id = 7 THEN TRUE
+              ELSE NOT (
+                (NOT par.is_public)
+                AND COALESCE(par.owner_id <> 7, TRUE)
+                AND NOT EXISTS (
+                  SELECT TRUE
+                  FROM trace_wide_assignment a
+                  WHERE a.team_id = par.team_id
+                    AND a.member_id = 7
+                  LIMIT 1
+                )
+              )
+            END
+            FROM trace_wide_parent par
+            WHERE par.id = p.parent_id
+            LIMIT 1
+          ), TRUE) AS can_view
+        FROM trace_wide_prop p
+      ) t
+      WHERE t.id IN (1)
+        AND (t.archived IS NULL OR t.archived IN (FALSE))
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          archived: false
+          can_view: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_config"
   - sql: "DROP TABLE IF EXISTS trace_doc"
@@ -415,3 +490,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS trace_share"
   - sql: "DROP TABLE IF EXISTS trace_profile"
   - sql: "DROP TABLE IF EXISTS trace_metric"
+  - sql: "DROP TABLE IF EXISTS trace_wide_prop"
+  - sql: "DROP TABLE IF EXISTS trace_wide_parent"
+  - sql: "DROP TABLE IF EXISTS trace_wide_assignment"
