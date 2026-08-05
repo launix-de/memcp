@@ -6708,6 +6708,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(expr_probe_stages (qb_order block))
 		(expr_probe_stages (qb_hidden block))))))
 
+(define query_block_stage_catalog (lambda (block)
+	(qassoc_get (qb_facts block) (quote stage_catalog) (qb_stages block))))
+
+(define query_block_facts_with_stage_catalog (lambda (block stages)
+	(qassoc_set (qb_facts block) (quote stage_catalog) stages)))
+
 (define scalar_first_probe_consumed_stages (lambda (stages stage)
 	(if (not (scalar_or_presence_probe_stage? stage))
 		'()
@@ -6796,7 +6802,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(qb_offset rewritten)
 			(qb_hidden rewritten)
 			'()
-			(qb_facts rewritten)))))
+			(query_block_facts_with_stage_catalog rewritten stages)))))
 
 (define query_block_without_stages_after_prepare (lambda (block)
 	(query_block_without_stages_after_prepare_using (qb_stages block) block)))
@@ -6814,7 +6820,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(qb_offset block)
 		(qb_hidden block)
 		'()
-		(qb_facts block))))
+		(query_block_facts_with_stage_catalog block stages))))
 
 (define query_block_without_stages_after_eager_prepare_with_constant_scalars_first (lambda (stages block)
 	(begin
@@ -6853,7 +6859,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(qb_offset rewritten)
 			(qb_hidden rewritten)
 			(stages_without_probe_sources (qb_stages rewritten) presence_probe_sources)
-			(qb_facts rewritten)))))
+			(query_block_facts_with_stage_catalog rewritten stages)))))
 
 (define query_block_with_prepared_sources (lambda (block)
 	(query_block_with_prepared_sources_using (qb_stages block) block)))
@@ -7167,7 +7173,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define key_names (group_key_cols keys))
 		(list (quote begin)
 			(lower_group_stage_prepare_using (list stage) stage)
-			(lower_query_block_core (group_stage_final_block stage (group_stage_final_extra_sources stage)))))))
+			(lower_query_block_core_with_lazy_prepares (list stage) (group_stage_final_block stage (group_stage_final_extra_sources stage)))))))
 
 (define row_number_get_column? (lambda (col expr)
 	(match expr
@@ -7629,13 +7635,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(and
 				(stage_direct_prepare_source_visible? block sources default_alias stage)
 				(stage_direct_prepare_semantic_candidate? consumed_probe_ids stage_output_ids stage)))))
-		(merge_unique (list
-			direct
-			(stage_prepare_dependency_closure_all all_stages
-				(merge_unique (list
-					(stage_outputs_from_sources_using all_stages sources)
-					(carrier_stages_from_sources all_stages sources)
-					(query_block_probe_expr_stages block)))))))))
+		direct)))
 
 (define query_block_stages_to_prepare_base (lambda (block)
 	(query_block_stages_to_prepare_base_using (qb_stages block) block)))
@@ -7663,13 +7663,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(define fused_row_number (lower_fused_row_number_block block))
 					(if (not (nil? fused_row_number))
 						fused_row_number
-						(cons (quote !begin)
-							(merge (list
-								(map (query_block_stages_to_prepare block) (lambda (stage)
-									(lower_stage_prepare_using (qb_stages block) stage)))
-								(list (lower_query_block_core (if (single_source? (qb_sources block))
-									(query_block_without_stages_after_prepare_using (qb_stages block) block)
-									(query_block_with_prepared_sources_using (qb_stages block) block))))))))))))))
+						(begin
+							(define prepared_block (if (single_source? (qb_sources block))
+								(query_block_without_stages_after_prepare_using (qb_stages block) block)
+								(query_block_with_prepared_sources_using (qb_stages block) block)))
+							(cons (quote !begin)
+								(merge (list
+									(lazy_stage_prepare_bindings (qb_stages block) (filter (qb_stages block) group_stage?))
+									(map (query_block_stages_to_prepare block) (lambda (stage)
+										(lower_stage_prepare_using (qb_stages block) stage)))
+									(list (lower_query_block_core prepared_block))))))))))))))
 
 (define source_is_base_table? (lambda (src)
 	(string? (source_relation src))))
@@ -7683,6 +7686,50 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(if (information_schema_source? (source_schema src) (source_relation src))
 		(list (quote information_schema_rows) (source_schema src) (source_relation src))
 		(list (quote table) (source_schema src) (source_relation src)))))
+
+(define source_table_expr_using (lambda (stages src)
+	(begin
+		(define table_expr (source_table_expr src))
+		(define carrier_stage (stage_for_carrier_source stages src))
+		(if (nil? carrier_stage)
+			table_expr
+			(list (quote !begin)
+				(stage_prepare_call_expr carrier_stage)
+				table_expr)))))
+
+(define stage_prepare_key (lambda (stage)
+	(concat "__prepare_stage_" (fnv_hash (gs_id stage)))))
+
+(define stage_prepare_call_expr (lambda (stage)
+	(list (quote apply)
+		(list (list (quote context) "session") (stage_prepare_key stage))
+		(quoted_runtime_list '()))))
+
+(define lazy_stage_prepare_binding (lambda (stages stage)
+	(list
+		(list (quote context) "session")
+		(stage_prepare_key stage)
+		(list (quote once)
+			(list (quote lambda)
+				'()
+				(list (quote !begin)
+					(lower_stage_prepare_using stages stage)
+					true))))))
+
+(define lazy_stage_prepare_bindings (lambda (stages selected)
+	(map (coalesceNil selected '()) (lambda (stage)
+		(lazy_stage_prepare_binding stages stage)))))
+
+(define lower_query_block_core_with_lazy_prepares (lambda (stage_catalog block)
+	(begin
+		(define lazy_stages (carrier_stages_from_sources stage_catalog (qb_sources block)))
+		(define core_plan (lower_query_block_core block))
+		(if (empty_list? lazy_stages)
+			core_plan
+			(cons (quote !begin)
+				(merge (list
+					(lazy_stage_prepare_bindings stage_catalog lazy_stages)
+					(list core_plan))))))))
 
 (define query_block_has_aggregates? (lambda (block)
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
@@ -7818,9 +7865,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if (direct_base_group_stage_supported? block group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
 					(lower_group_stage group_stage)))
-			(begin
-				(define alias (source_alias src))
-				(define condition (combine_where (qb_where block) (source_join_expr src)))
+				(begin
+					(define alias (source_alias src))
+					(define condition (combine_where (qb_where block) (source_join_expr src)))
 				(define order_items (coalesceNil (qb_order block) '()))
 				(define scan_order_supported (order_items_belong_to_source? src order_items))
 				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
@@ -7831,12 +7878,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define filtercols (extract_columns_for_alias src effective_condition))
 				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 					(extract_columns_for_alias src expr)))))
-				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
-				(define mapcols (merge_unique (list filtercols fieldcols)))
-				(define table_expr (coalesceNil membership_table_expr (source_table_expr src)))
-				(define filter_expr (list (quote lambda)
-					(map filtercols (lambda (col) (symbol (concat alias "." col))))
-					(list (quote optimize) (lower_column_expr_for_alias src effective_condition))))
+					(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
+					(define mapcols (merge_unique (list filtercols fieldcols)))
+					(define table_expr (coalesceNil membership_table_expr (source_table_expr_using (query_block_stage_catalog block) src)))
+					(define filter_expr (list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat alias "." col))))
+						(list (quote optimize) (lower_column_expr_for_alias src effective_condition))))
 				(define map_expr (list (quote lambda)
 					(map mapcols (lambda (col) (symbol (concat alias "." col))))
 					(list (quote resultrow)
@@ -7886,7 +7933,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 								0
 								-1
 								true
-								'())
+									(query_block_stage_catalog block))
 							fields
 							order_items
 							(qb_offset block)
@@ -8304,13 +8351,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(join_filter_cols_for_alias all_sources default_alias alias stripped_condition))))
 				(define raw_mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
 				(define scan_mapcols (merge_unique (list (without_col raw_mapcols col) mapcols)))
-				(define table_expr (source_table_expr src))
+				(define table_expr (source_table_expr_using stages src))
 				(define rewritten_row_expr (replace_lowered_row_number_symbol alias col row_expr))
-				(define filter_expr (list (quote lambda)
-					(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias alias filter_col)))
-					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias filter_condition))))
-				(define continuation_expr (list (quote lambda) (list (quote __row_number))
-					(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 true '())))
+					(define filter_expr (list (quote lambda)
+						(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias alias filter_col)))
+						(list (quote optimize) (lower_column_expr_for_join all_sources default_alias filter_condition))))
+					(define continuation_expr (list (quote lambda) (list (quote __row_number))
+						(build_join_scan_rows_with_mapper schema all_sources (cdr sources) default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 true stages)))
 				(define map_expr (list (quote lambda)
 					(map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))
 					(list (quote list)
@@ -8387,11 +8434,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if membership_filter (list "$recset_contains") '())
 				(join_filter_cols_for_alias all_sources default_alias alias effective_condition))))
 			(define mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
-			(define table_expr (if membership_driver membership_table_expr (source_table_expr src)))
-			(define lowered_filter_condition (mark_outer_join_symbols
-				all_sources
-				alias
-				(lower_column_expr_for_join all_sources default_alias filter_condition)))
+				(define table_expr (if membership_driver membership_table_expr (source_table_expr_using stages src)))
+				(define lowered_filter_condition (mark_outer_join_symbols
+					all_sources
+					alias
+					(lower_column_expr_for_join all_sources default_alias filter_condition)))
 			(define filter_expr (list (quote lambda)
 				(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 				(list (quote optimize) lowered_filter_condition)))
@@ -8492,8 +8539,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'()
 			0
 			-1
-			true
-			(qb_stages block)))))
+				true
+				(query_block_stage_catalog block)))))
 
 (define lower_multi_source_query_block (lambda (block)
 	(begin
@@ -8514,91 +8561,92 @@ PostgreSQL parsers should both lower to the same combined operators.
 					sources))
 				(define final_condition (if push_first_where true where_expr))
 				(define order_items (coalesceNil (qb_order block) '()))
-					(define direct_order (and (equal? first_alias (source_alias (car scan_sources)))
-						(order_items_belong_to_source? (car scan_sources) order_items)))
-					(define direct_order_safe (and direct_order
-						(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
-						(define membership_candidate_sort_plan
-							(equal? (qassoc_get (qb_facts block) (quote membership_selectivity_class) nil) (quote selective)))
-					(define needed_exprs (merge (list
-						(extract_assoc fields (lambda (_title expr) expr))
-						(list final_condition)
-						(order_exprs order_items)
-						(source_join_exprs scan_sources))))
-					(define prelimit_sources (if (empty_list? scan_sources)
-						'()
-						(cons (car scan_sources)
-							(filter (cdr scan_sources) (lambda (src)
-								(expr_refs_alias? first_alias (source_alias src) final_condition))))))
-					(define late_projection_safe (late_projection_sources_preserve_rows? scan_sources prelimit_sources))
-					(if direct_order_safe
-							(build_join_scan_rows (qb_schema block) scan_sources first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) (qb_stages block))
-							(if direct_order
-								(if (and membership_candidate_sort_plan late_projection_safe)
-									(begin
-									(define project_needed_exprs (merge (list
-										(extract_assoc fields (lambda (_title expr) expr))
-										(order_exprs order_items)
-										(source_join_exprs scan_sources))))
-									(define driver_needed_exprs (merge (list
-										(list final_condition)
-										(order_exprs order_items)
-										(map project_needed_exprs (lambda (expr)
-											(extract_columns_for_join_alias scan_sources first_alias first_alias expr))))))
-									(define driver_cols (join_cols_for_alias scan_sources first_alias first_alias project_needed_exprs))
-									(define prelimit_stage_ids (stage_ids_for_sources_with_closure (qb_stages block) prelimit_sources))
-									(define project_stages (filter (query_block_stages_to_prepare_base block) (lambda (stage)
-										(not (stage_id_in? stage prelimit_stage_ids)))))
-									(define project_prepare_expr (cons (quote !begin)
-										(map project_stages (lambda (stage)
-											(lower_stage_prepare_using (qb_stages block) stage)))))
-									(define project_row_expr
-										(lower_join_result_row_assoc scan_sources first_alias fields order_items))
-									(define project_rows_expr (replace_lowered_driver_symbols_with_row first_alias driver_cols
-										(build_join_scan_rows_with_mapper
-											(qb_schema block)
-											scan_sources
-											(cdr scan_sources)
-											first_alias
-											project_needed_exprs
-											true
-											project_row_expr
-											'()
-											0
-											-1
-											true
-											(qb_stages block))))
-									(join_sorted_rows_late_projection_plan
-										(build_join_scan_rows_with_mapper
-											(qb_schema block)
-											scan_sources
-											prelimit_sources
-											first_alias
-											driver_needed_exprs
-											final_condition
-											(lower_join_driver_sort_row_assoc scan_sources first_alias (car scan_sources) driver_cols order_items)
-											'()
-											0
-											-1
-											true
-											(qb_stages block))
-										project_prepare_expr
-										project_rows_expr
-										fields
-										order_items
-										(qb_offset block)
-										(qb_limit block)))
-								(join_ordered_filtered_stream_plan
-									(qb_schema block)
-									scan_sources
-									first_alias
+				(define stage_catalog (query_block_stage_catalog block))
+				(define direct_order (and (equal? first_alias (source_alias (car scan_sources)))
+					(order_items_belong_to_source? (car scan_sources) order_items)))
+				(define direct_order_safe (and direct_order
+					(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
+				(define membership_candidate_sort_plan
+					(equal? (qassoc_get (qb_facts block) (quote membership_selectivity_class) nil) (quote selective)))
+				(define needed_exprs (merge (list
+					(extract_assoc fields (lambda (_title expr) expr))
+					(list final_condition)
+					(order_exprs order_items)
+					(source_join_exprs scan_sources))))
+				(define prelimit_sources (if (empty_list? scan_sources)
+					'()
+					(cons (car scan_sources)
+						(filter (cdr scan_sources) (lambda (src)
+							(expr_refs_alias? first_alias (source_alias src) final_condition))))))
+				(define late_projection_safe (late_projection_sources_preserve_rows? scan_sources prelimit_sources))
+				(if direct_order_safe
+					(build_join_scan_rows (qb_schema block) scan_sources first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
+					(if direct_order
+						(if (and membership_candidate_sort_plan late_projection_safe)
+							(begin
+								(define project_needed_exprs (merge (list
+									(extract_assoc fields (lambda (_title expr) expr))
+									(order_exprs order_items)
+									(source_join_exprs scan_sources))))
+								(define driver_needed_exprs (merge (list
+									(list final_condition)
+									(order_exprs order_items)
+									(map project_needed_exprs (lambda (expr)
+										(extract_columns_for_join_alias scan_sources first_alias first_alias expr))))))
+								(define driver_cols (join_cols_for_alias scan_sources first_alias first_alias project_needed_exprs))
+								(define prelimit_stage_ids (stage_ids_for_sources_with_closure stage_catalog prelimit_sources))
+								(define project_stages (filter (query_block_stages_to_prepare_base_using stage_catalog block) (lambda (stage)
+									(not (stage_id_in? stage prelimit_stage_ids)))))
+								(define project_prepare_expr (cons (quote !begin)
+									(map project_stages (lambda (stage)
+										(lower_stage_prepare_using stage_catalog stage)))))
+								(define project_row_expr
+									(lower_join_result_row_assoc scan_sources first_alias fields order_items))
+								(define project_rows_expr (replace_lowered_driver_symbols_with_row first_alias driver_cols
+									(build_join_scan_rows_with_mapper
+										(qb_schema block)
+										scan_sources
+										(cdr scan_sources)
+										first_alias
+										project_needed_exprs
+										true
+										project_row_expr
+										'()
+										0
+										-1
+										true
+										stage_catalog)))
+								(join_sorted_rows_late_projection_plan
+									(build_join_scan_rows_with_mapper
+										(qb_schema block)
+										scan_sources
+										prelimit_sources
+										first_alias
+										driver_needed_exprs
+										final_condition
+										(lower_join_driver_sort_row_assoc scan_sources first_alias (car scan_sources) driver_cols order_items)
+										'()
+										0
+										-1
+										true
+										stage_catalog)
+									project_prepare_expr
+									project_rows_expr
+									fields
+									order_items
+									(qb_offset block)
+									(qb_limit block)))
+							(join_ordered_filtered_stream_plan
+								(qb_schema block)
+								scan_sources
+								first_alias
 								needed_exprs
 								final_condition
 								fields
 								order_items
 								(qb_offset block)
 								(qb_limit block)
-								(qb_stages block)))
+								stage_catalog))
 						(join_sorted_rows_plan
 							(build_join_scan_rows_with_mapper
 								(qb_schema block)
@@ -8612,7 +8660,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 								0
 								-1
 								(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))
-								(qb_stages block))
+								stage_catalog)
 							fields
 							order_items
 							(qb_offset block)
