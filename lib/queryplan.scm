@@ -6630,6 +6630,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(or found (equal? (source_alias src) (source_alias probe_src))))
 			false))))))
 
+(define stage_for_carrier_source (lambda (stages src)
+	(reduce (coalesceNil stages '()) (lambda (found stage)
+		(if (not (nil? found))
+			found
+			(if (and (group_stage? stage)
+				(and (equal? (group_stage_carrier_schema stage) (source_schema src))
+					(equal? (group_stage_carrier_relation stage) (source_relation src))))
+				stage
+				nil)))
+		nil)))
+
+(define carrier_stages_from_sources (lambda (stages sources)
+	(filter (map (coalesceNil sources '()) (lambda (src)
+		(stage_for_carrier_source stages src)))
+		(lambda (stage) (not (nil? stage))))))
+
 (define group_stage_nested_dependencies (lambda (stages stage)
 	(begin
 		(define input (gs_input stage))
@@ -6637,7 +6653,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(merge_unique (list
 				(qb_stages input)
 				(stage_outputs_from_sources_using stages (qb_sources input))))
-			'()))))
+			(if (source_is_base_table? input)
+				(begin
+					(define carrier_stage (stage_for_carrier_source stages input))
+					(if (nil? carrier_stage) '() (list carrier_stage)))
+				'())))))
 
 (define consumed_stage_closure (lambda (stages stage)
 	(begin
@@ -6647,6 +6667,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 			direct
 			(merge (map direct (lambda (nested)
 				(consumed_stage_closure stages nested)))))))))
+
+(define stage_prepare_dependency_closure (lambda (stages stage)
+	(if (group_stage? stage)
+		(consumed_stage_closure stages stage)
+		(list stage))))
+
+(define stage_prepare_dependency_closure_all (lambda (stages selected)
+	(merge_unique (map (coalesceNil selected '()) (lambda (stage)
+		(stage_prepare_dependency_closure stages stage))))))
+
+(define expr_probe_stages (lambda (expr)
+	(match expr
+		((symbol scalar_first_probe) stage _requested_col)
+		(list stage)
+		((quote scalar_first_probe) stage _requested_col)
+		(list stage)
+		((symbol scalar_first_probe) stage _requested_col stages)
+		(merge_unique (list (list stage) stages))
+		((quote scalar_first_probe) stage _requested_col stages)
+		(merge_unique (list (list stage) stages))
+		((symbol scalar_aggregate_probe) stage _requested_col)
+		(list stage)
+		((quote scalar_aggregate_probe) stage _requested_col)
+		(list stage)
+		((symbol grouped_scalar_top) stage)
+		(list stage)
+		((quote grouped_scalar_top) stage)
+		(list stage)
+		(cons _head tail)
+		(merge_unique (map tail expr_probe_stages))
+		_ '())))
+
+(define query_block_probe_expr_stages (lambda (block)
+	(merge_unique (list
+		(expr_probe_stages (qb_sources block))
+		(expr_probe_stages (qb_fields block))
+		(expr_probe_stages (qb_where block))
+		(expr_probe_stages (qb_having block))
+		(expr_probe_stages (qb_order block))
+		(expr_probe_stages (qb_hidden block))))))
 
 (define scalar_first_probe_consumed_stages (lambda (stages stage)
 	(if (not (scalar_or_presence_probe_stage? stage))
@@ -6837,14 +6897,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(gs_offset stage)
 			'() '() '()))))
 
-(define group_stage_final_extra_sources_using (lambda (stages stage)
+(define group_stage_final_extra_source_refs (lambda (stage)
 	(begin
 		(define src (gs_input stage))
 		(if (query_block? src)
-			(physicalize_stage_output_sources stages
-				(filter (cdr (qb_sources src)) (lambda (extra)
-					(source_needed_after_group_stage? (group_stage_input_alias stage) stage extra))))
+			(filter (cdr (qb_sources src)) (lambda (extra)
+				(source_needed_after_group_stage? (group_stage_input_alias stage) stage extra)))
 			'()))))
+
+(define group_stage_final_extra_sources_using (lambda (stages stage)
+	(physicalize_stage_output_sources stages (group_stage_final_extra_source_refs stage))))
 
 (define group_stage_final_extra_sources (lambda (stage)
 	(group_stage_final_extra_sources_using (if (query_block? (gs_input stage)) (qb_stages (gs_input stage)) '()) stage)))
@@ -6925,11 +6987,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(query_block_without_stages_after_eager_prepare_using all_stages rewritten_src)))
 				(query_block_without_stages_after_eager_prepare_using all_stages rewritten_src))
 			rewritten_src))
-			(define nested_stages (if (query_block? rewritten_src)
-				(merge_unique (list
-					(query_block_stages_to_prepare rewritten_src)
-					(stage_outputs_from_sources_using all_stages (qb_sources rewritten_src))))
-				'()))
+		(define direct_nested_stages (if (query_block? rewritten_src)
+			(merge_unique (list
+				(query_block_stages_to_prepare_using all_stages rewritten_src)
+				(stage_outputs_from_sources_using all_stages (qb_sources rewritten_src))
+				(stage_outputs_from_sources_using all_stages (group_stage_final_extra_source_refs stage))
+				(carrier_stages_from_sources all_stages (qb_sources rewritten_src))
+				(carrier_stages_from_sources all_stages (group_stage_final_extra_source_refs stage))
+				(query_block_probe_expr_stages rewritten_src)))
+			'()))
+		(define nested_stages direct_nested_stages)
 		(define nested_prepare (if (query_block? rewritten_src) (map nested_stages (lambda (nested_stage)
 			(lower_stage_prepare_using all_stages nested_stage))) '()))
 		(define nested_materialize (if (query_block? rewritten_src) (lower_stage_materialize_all nested_stages) '()))
@@ -7533,41 +7600,58 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(filter (cdr sources) (lambda (src)
 					(expr_refs_alias? first_alias (source_alias src) where_expr))))))))
 
-(define query_block_stages_to_prepare_base (lambda (block)
-		(begin
-			(define sources (qb_sources block))
-			(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-			(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '()))
-			(define stage_output_ids (stage_output_source_ids sources))
-			(filter
-				(if (single_source? sources)
-					(qb_stages block)
-				(filter (qb_stages block) (lambda (stage)
-					(not
-						(or
-							(row_number_stage_consumed_by_join? stage sources)
-							(stage_consumed_by_driver_order_membership_source? stage (qb_stages block) sources (qb_facts block))
-							(stage_consumed_by_probe_source? stage (qb_stages block) sources default_alias))))))
-				(lambda (stage)
-					(and
-						(not (contains? consumed_probe_ids (gs_id stage)))
-						(and
-							(not (scalar_first_inline_only_stage? stage))
-							(and
-								(not (scalar_first_probe_stage? stage))
-								(or
-									(not (scalar_aggregate_probe_stage? stage))
-									(contains? stage_output_ids (gs_id stage)))))))))))
+(define stage_direct_prepare_source_visible? (lambda (block sources default_alias stage)
+	(if (single_source? sources)
+		true
+		(not (or
+			(row_number_stage_consumed_by_join? stage sources)
+			(stage_consumed_by_driver_order_membership_source? stage (qb_stages block) sources (qb_facts block))
+			(stage_consumed_by_probe_source? stage (qb_stages block) sources default_alias))))))
 
-	(define query_block_stages_to_prepare (lambda (block)
-		(begin
-		(define prelimit_stage_ids (if (late_projection_candidate_block? block)
-			(stage_ids_for_sources_with_closure (qb_stages block) (query_block_prelimit_sources block))
-			nil))
-			(filter (query_block_stages_to_prepare_base block) (lambda (stage)
+(define stage_direct_prepare_semantic_candidate? (lambda (consumed_probe_ids stage_output_ids stage)
+	(and
+		(not (contains? consumed_probe_ids (gs_id stage)))
+		(and
+			(not (scalar_first_inline_only_stage? stage))
+			(and
+				(not (scalar_first_probe_stage? stage))
 				(or
-					(nil? prelimit_stage_ids)
-					(stage_id_in? stage prelimit_stage_ids)))))))
+					(not (scalar_aggregate_probe_stage? stage))
+					(contains? stage_output_ids (gs_id stage))))))))
+
+(define query_block_stages_to_prepare_base_using (lambda (all_stages block)
+	(begin
+		(define sources (qb_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
+		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '()))
+		(define stage_output_ids (stage_output_source_ids sources))
+		(define direct (filter (qb_stages block) (lambda (stage)
+			(and
+				(stage_direct_prepare_source_visible? block sources default_alias stage)
+				(stage_direct_prepare_semantic_candidate? consumed_probe_ids stage_output_ids stage)))))
+		(merge_unique (list
+			direct
+			(stage_prepare_dependency_closure_all all_stages
+				(merge_unique (list
+					(stage_outputs_from_sources_using all_stages sources)
+					(carrier_stages_from_sources all_stages sources)
+					(query_block_probe_expr_stages block)))))))))
+
+(define query_block_stages_to_prepare_base (lambda (block)
+	(query_block_stages_to_prepare_base_using (qb_stages block) block)))
+
+(define query_block_stages_to_prepare_using (lambda (all_stages block)
+	(begin
+		(define prelimit_stage_ids (if (late_projection_candidate_block? block)
+			(stage_ids_for_sources_with_closure all_stages (query_block_prelimit_sources block))
+			nil))
+		(filter (query_block_stages_to_prepare_base_using all_stages block) (lambda (stage)
+			(or
+				(nil? prelimit_stage_ids)
+				(stage_id_in? stage prelimit_stage_ids)))))))
+
+(define query_block_stages_to_prepare (lambda (block)
+	(query_block_stages_to_prepare_using (qb_stages block) block)))
 
 	(define lower_query_block_with_stages (lambda (block)
 	(if (empty_list? (qb_stages block))
