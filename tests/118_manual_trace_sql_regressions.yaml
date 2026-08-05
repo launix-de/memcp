@@ -645,6 +645,40 @@ test_cases:
           archived: false
           can_view: true
 
+  - name: "Independent nested scalar aggregates compile within a linear budget"
+    max_time: 8.0
+    max_planner_time_ms: 800
+    max_plan_size: 230000
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM trace_wide_prop item_1 WHERE item_1.id = 1 AND COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_1 WHERE parent_1.id = item_1.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_1,
+        (SELECT SUM(1) FROM trace_wide_prop item_2 WHERE item_2.id = 1 AND COALESCE((SELECT (parent_2.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_2 WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_2 WHERE parent_2.id = item_2.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_2,
+        (SELECT SUM(1) FROM trace_wide_prop item_3 WHERE item_3.id = 1 AND COALESCE((SELECT (parent_3.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_3 WHERE member_3.team_id = parent_3.team_id AND member_3.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_3 WHERE parent_3.id = item_3.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_3,
+        (SELECT SUM(1) FROM trace_wide_prop item_4 WHERE item_4.id = 1 AND COALESCE((SELECT (parent_4.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_4 WHERE member_4.team_id = parent_4.team_id AND member_4.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_4 WHERE parent_4.id = item_4.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_4,
+        (SELECT SUM(1) FROM trace_wide_prop item_5 WHERE item_5.id = 1 AND COALESCE((SELECT (parent_5.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_5 WHERE member_5.team_id = parent_5.team_id AND member_5.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_5 WHERE parent_5.id = item_5.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_5,
+        (SELECT SUM(1) FROM trace_wide_prop item_6 WHERE item_6.id = 1 AND COALESCE((SELECT (parent_6.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_6 WHERE member_6.team_id = parent_6.team_id AND member_6.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_6 WHERE parent_6.id = item_6.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_6,
+        (SELECT SUM(1) FROM trace_wide_prop item_7 WHERE item_7.id = 1 AND COALESCE((SELECT (parent_7.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_7 WHERE member_7.team_id = parent_7.team_id AND member_7.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_7 WHERE parent_7.id = item_7.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_7,
+        (SELECT SUM(1) FROM trace_wide_prop item_8 WHERE item_8.id = 1 AND COALESCE((SELECT (parent_8.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_8 WHERE member_8.team_id = parent_8.team_id AND member_8.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_8 WHERE parent_8.id = item_8.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_8,
+        (SELECT SUM(1) FROM trace_wide_prop item_9 WHERE item_9.id = 1 AND COALESCE((SELECT (parent_9.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_9 WHERE member_9.team_id = parent_9.team_id AND member_9.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_9 WHERE parent_9.id = item_9.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_9,
+        (SELECT SUM(1) FROM trace_wide_prop item_10 WHERE item_10.id = 1 AND COALESCE((SELECT (parent_10.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_10 WHERE member_10.team_id = parent_10.team_id AND member_10.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_10 WHERE parent_10.id = item_10.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_10,
+        (SELECT SUM(1) FROM trace_wide_prop item_11 WHERE item_11.id = 1 AND COALESCE((SELECT (parent_11.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_11 WHERE member_11.team_id = parent_11.team_id AND member_11.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_11 WHERE parent_11.id = item_11.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_11,
+        (SELECT SUM(1) FROM trace_wide_prop item_12 WHERE item_12.id = 1 AND COALESCE((SELECT (parent_12.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_12 WHERE member_12.team_id = parent_12.team_id AND member_12.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_12 WHERE parent_12.id = item_12.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_12
+    expect:
+      rows: 1
+      data:
+        - metric_1: 1
+          metric_2: 1
+          metric_3: 1
+          metric_4: 1
+          metric_5: 1
+          metric_6: 1
+          metric_7: 1
+          metric_8: 1
+          metric_9: 1
+          metric_10: 1
+          metric_11: 1
+          metric_12: 1
+
   - name: "Constant CASE prunes dead scalar aggregate"
     max_time: 0.2
     max_plan_size: 2000
