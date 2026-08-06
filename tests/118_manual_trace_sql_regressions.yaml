@@ -522,6 +522,32 @@ test_cases:
           last_seen: 1
           has_pdf: false
 
+  - name: "Late projection recipe preserves columns from every join source"
+    max_time: 2.0
+    max_plan_size: 30000
+    sql: |
+      SELECT q.*
+      FROM (
+        SELECT d.id, d.type, r.created, f.filename
+        FROM trace_doc d
+        LEFT JOIN trace_revision r ON r.doc_id = d.id
+        LEFT JOIN trace_file f ON f.id = r.file_id
+      ) q
+      WHERE q.id IN (
+        SELECT id FROM trace_doc WHERE id = 1
+        UNION
+        SELECT doc_id FROM trace_revision WHERE file_id = 999
+      )
+      ORDER BY q.id
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          type: 10
+          created: 1
+          filename: "one.txt"
+
   - name: "UNION EXISTS projection probes only selected outer rows"
     max_time: 0.4
     max_plan_size: 60000
