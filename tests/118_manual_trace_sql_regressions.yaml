@@ -671,6 +671,30 @@ test_cases:
           metric_7: 1
           metric_8: 1
 
+  - name: "Physical preparation owns each identical nested stage once per query scope"
+    sql: |
+      EXPLAIN SELECT
+        (SELECT SUM(1) FROM trace_wide_prop item_1 WHERE item_1.id = 1 AND COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_1 WHERE parent_1.id = item_1.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_1,
+        (SELECT SUM(1) FROM trace_wide_prop item_2 WHERE item_2.id = 1 AND COALESCE((SELECT (parent_2.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_2 WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_2 WHERE parent_2.id = item_2.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_2
+    expect:
+      rows: 1
+      result_contains:
+        - "touch_keytable"
+      result_occurrences:
+        - text: "touch_keytable"
+          count: 5
+
+  - name: "Physical preparation keeps distinct nested filter formulas"
+    sql: |
+      EXPLAIN SELECT
+        (SELECT SUM(1) FROM trace_wide_prop item_1 WHERE item_1.id = 1 AND COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_1 WHERE parent_1.id = item_1.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_1,
+        (SELECT SUM(1) FROM trace_wide_prop item_2 WHERE item_2.id = 1 AND COALESCE((SELECT (parent_2.owner_id = 8 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_2 WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 8 LIMIT 1)) FROM trace_wide_parent parent_2 WHERE parent_2.id = item_2.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_2
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "touch_keytable"
+          count: 6
+
   - name: "Constant CASE prunes dead scalar aggregate"
     max_time: 0.2
     max_plan_size: 2000
