@@ -75,6 +75,18 @@ func TestBoundaryRange(t *testing.T) {
 	}
 }
 
+func TestEffectiveBoundaryInclusivenessUsesIndexedRange(t *testing.T) {
+	bounds := boundaries{
+		{col: "discount", matcher: RangeMatcher, lowerInclusive: true, upperInclusive: true},
+		{col: "quantity", matcher: RangeMatcher, lowerInclusive: false, upperInclusive: false},
+	}
+	lower, _ := indexFromBoundaries(bounds)
+	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(bounds, lower)
+	if !lowerInclusive || !upperInclusive {
+		t.Fatalf("effective boundary inclusiveness = (%t, %t), want (true, true)", lowerInclusive, upperInclusive)
+	}
+}
+
 // TestBoundaryLikePrefixIsRange verifies that prefix LIKE "foo%" becomes RangeMatcher.
 func TestBoundaryLikePrefixIsRange(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{

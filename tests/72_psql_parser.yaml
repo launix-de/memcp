@@ -1,3 +1,10 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
 # PostgreSQL parser feature tests
 
 metadata:
@@ -7,6 +14,7 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS psql_data"
+  - sql: "DROP TABLE IF EXISTS psql_decimal_range"
   - sql: |
       CREATE TABLE psql_data (
         id INT PRIMARY KEY,
@@ -16,6 +24,19 @@ setup:
   - sql: |
       INSERT INTO psql_data (id, name, val) VALUES
       (1, 'Alice', 10), (2, 'Bob', 30), (3, 'Charlie', 50), (4, 'Alice', 20)
+  - sql: |
+      CREATE TABLE psql_decimal_range (
+        id INT, extended_price DECIMAL(15,2), discount DECIMAL(15,2),
+        quantity DECIMAL(15,2), ship_date DATE
+      )
+  - scm: |
+      (begin
+        (set discounts '(0.04 0.05 0.06 0.07 0.08))
+        (set rows (map (produceN 5000) (lambda (i)
+          (list i 100.01 (nth discounts (- i (* 5 (floor (/ i 5))))) 10.00 "1994-06-15"))))
+        (insert (table "memcp-tests" "psql_decimal_range")
+          '("id" "extended_price" "discount" "quantity" "ship_date") rows)
+        5000)
 
 test_cases:
   - name: "EXPLAIN COMPILE exposes PostgreSQL planner metrics"
@@ -60,6 +81,99 @@ test_cases:
           val: 10
         - id: 3
           val: 50
+
+  - name: "TPC-H Q6 decimal range semantics across scan batches"
+    sql: |
+      SELECT SUM(extended_price * discount) AS revenue
+      FROM psql_decimal_range
+      WHERE ship_date >= DATE '1994-01-01'
+        AND ship_date < DATE '1994-01-01' + INTERVAL '1' YEAR
+        AND discount BETWEEN 0.05 AND 0.07
+        AND quantity < 24
+    expect:
+      rows: 1
+      data:
+        - revenue: 18001.8
+
+  - name: "TPC-H Q1 decimal SUM preserves cents across scan batches"
+    sql: "SELECT SUM(extended_price) BETWEEN 500049.99 AND 500050.01 AS cents_preserved FROM psql_decimal_range"
+    expect:
+      rows: 1
+      data:
+        - cents_preserved: true
+
+  - name: "TPC-H Q1 grouped decimal SUM preserves cents"
+    sql: |
+      SELECT discount,
+        SUM(extended_price) BETWEEN 100009.99 AND 100010.01 AS cents_preserved
+      FROM psql_decimal_range
+      GROUP BY discount
+      ORDER BY discount
+    expect:
+      rows: 5
+      data:
+        - { discount: 0.04, cents_preserved: true }
+        - { discount: 0.05, cents_preserved: true }
+        - { discount: 0.06, cents_preserved: true }
+        - { discount: 0.07, cents_preserved: true }
+        - { discount: 0.08, cents_preserved: true }
+
+  - name: "TPC-H Q6 decimal BETWEEN includes both endpoints"
+    sql: |
+      SELECT discount, COUNT(*) AS rows_per_discount
+      FROM psql_decimal_range
+      WHERE discount BETWEEN 0.05 AND 0.07
+      GROUP BY discount
+      ORDER BY discount
+    expect:
+      rows: 3
+      data:
+        - { discount: 0.05, rows_per_discount: 1000 }
+        - { discount: 0.06, rows_per_discount: 1000 }
+        - { discount: 0.07, rows_per_discount: 1000 }
+
+  - name: "TPC-H Q6 combined predicates retain every matching row"
+    sql: |
+      SELECT COUNT(*) AS matching_rows
+      FROM psql_decimal_range
+      WHERE ship_date >= DATE '1994-01-01'
+        AND ship_date < DATE '1994-01-01' + INTERVAL '1' YEAR
+        AND discount BETWEEN 0.05 AND 0.07
+        AND quantity < 24
+    expect:
+      rows: 1
+      data:
+        - matching_rows: 3000
+
+  - name: "TPC-H Q6 decimal range composes with quantity predicate"
+    sql: "SELECT COUNT(*) AS matching_rows FROM psql_decimal_range WHERE discount BETWEEN 0.05 AND 0.07 AND quantity < 24"
+    on_fail:
+      sql: "EXPLAIN SELECT COUNT(*) AS matching_rows FROM psql_decimal_range WHERE discount BETWEEN 0.05 AND 0.07 AND quantity < 24"
+    expect:
+      rows: 1
+      data:
+        - matching_rows: 3000
+
+  - name: "TPC-H Q6 quantity predicate order does not affect decimal range"
+    sql: "SELECT COUNT(*) AS matching_rows FROM psql_decimal_range WHERE quantity < 24 AND discount BETWEEN 0.05 AND 0.07"
+    expect:
+      rows: 1
+      data:
+        - matching_rows: 3000
+
+  - name: "TPC-H Q6 quantity predicate preserves all qualifying decimals"
+    sql: "SELECT COUNT(*) AS matching_rows FROM psql_decimal_range WHERE quantity < 24"
+    expect:
+      rows: 1
+      data:
+        - matching_rows: 5000
+
+  - name: "TPC-H Q6 decimal range composes with date predicates"
+    sql: "SELECT COUNT(*) AS matching_rows FROM psql_decimal_range WHERE ship_date >= DATE '1994-01-01' AND ship_date < DATE '1995-01-01' AND discount BETWEEN 0.05 AND 0.07"
+    expect:
+      rows: 1
+      data:
+        - matching_rows: 3000
 
   # === :: cast operator ===
   - name: "Cast integer to text"
@@ -250,4 +364,5 @@ test_cases:
           name: "Bob"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS psql_decimal_range"
   - sql: "DROP TABLE IF EXISTS psql_data"
