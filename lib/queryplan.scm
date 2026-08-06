@@ -6938,8 +6938,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define query_block_with_full_stage_catalog (lambda (block)
 	(begin
-		(define stages (query_block_stage_catalog block))
-		(define cataloged_stages (map stages (lambda (stage)
+		(define stages (stage_catalog_with_nested (query_block_stage_catalog block)))
+		(define cataloged_stages (map (qb_stages block) (lambda (stage)
 			(group_stage_with_stage_catalog stage stages))))
 		(make_query_block
 			(qb_schema block)
@@ -6953,7 +6953,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(qb_offset block)
 			(qb_hidden block)
 			cataloged_stages
-			(query_block_facts_with_stage_catalog block cataloged_stages)))))
+			(query_block_facts_with_stage_catalog block stages)))))
 
 (define stage_ids (lambda (stages)
 	(map (coalesceNil stages '()) gs_id)))
@@ -7197,7 +7197,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define src (gs_input stage))
 		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
-		(define stage_catalog (stage_catalog_with_nested
+		(define stage_catalog (unique_stages_by_id
 			(merge (list
 				prepare_catalog
 				lookup_stages
@@ -7769,9 +7769,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (nil? fused_top_count))
 			fused_top_count
 			(begin
-				(define rewritten (query_block_with_scalar_first_probes_using (qb_stages block) block))
+				(define rewritten (query_block_with_scalar_first_probes_using (query_block_stage_catalog block) block))
 				(define sources (qb_sources rewritten))
-				(define stage_catalog (stage_catalog_with_nested (query_block_stage_catalog rewritten)))
+				(define stage_catalog (query_block_stage_catalog rewritten))
 				(define dependency_graph (stage_dependency_graph stage_catalog))
 				(define physical_sources (physicalize_stage_output_sources stage_catalog sources))
 				(define driver_src (car physical_sources))
@@ -7959,7 +7959,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(if (not (nil? fused_row_number))
 						fused_row_number
 						(begin
-							(define stage_catalog (stage_catalog_with_nested (query_block_stage_catalog block)))
+							(define stage_catalog (query_block_stage_catalog block))
 							(define eager_stages (query_block_stages_to_prepare block))
 							(define dependency_graph (stage_dependency_graph stage_catalog))
 							(define prepared_block (if (single_source? (qb_sources block))
@@ -9177,11 +9177,17 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define lower_dml_query_block_with_stages (lambda (block target_schema target_tbl)
 	(if (empty_list? (qb_stages block))
 		(lower_dml_query_block_core block target_schema target_tbl)
-		(cons (quote begin)
-			(merge (list
-				(map (qb_stages block) (lambda (stage)
-					(lower_stage_prepare_using (qb_stages block) (qb_stages block) stage)))
-				(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using (qb_stages block) block) target_schema target_tbl))))))))
+		(begin
+			(define stage_catalog (query_block_stage_catalog block))
+			(define dependency_graph (stage_dependency_graph stage_catalog))
+			(cons (quote begin)
+				(merge (list
+					(map (qb_stages block) (lambda (stage)
+						(lower_stage_prepare_using
+							(stage_dependency_closure_using_graph dependency_graph stage)
+							stage_catalog
+							stage)))
+					(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using stage_catalog block) target_schema target_tbl)))))))))
 
 (define lower_dml_union_block_with_stages (lambda (block target_schema target_tbl)
 	(cons (quote begin)
@@ -9518,22 +9524,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(wrap_plan_with_distinct_resultrow (lower_union_all_successive block)))
 			(neumann_fail "build_queryplan" "unknown UNION mode")))))
 
-/* Physical preparation attaches the canonical stage catalog without emitting
-runtime operators. Keeping this boundary explicit makes analysis and emission
-independently measurable while preserving the normal build_queryplan contract. */
+/* Physical preparation expands and attaches the canonical stage catalog once,
+without emitting runtime operators. Keeping this boundary explicit makes
+analysis and emission independently measurable while preserving the normal
+build_queryplan contract. */
 (define prepare_physical_queryplan (lambda (ir)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
-		(match (ir_return ir)
-			(symbol rows) (match (logical_op (ir_root ir))
-				(symbol query-block) (make_ir
-					(ir_kind ir)
-					(query_block_with_full_stage_catalog (ir_root ir))
-					(ir_stages ir)
-					(ir_context_of ir)
-					(ir_return ir))
-				_ ir)
-			_ ir))))
+		(define root (ir_root ir))
+		(if (query_block? root)
+			(make_ir
+				(ir_kind ir)
+				(query_block_with_full_stage_catalog root)
+				(ir_stages ir)
+				(ir_context_of ir)
+				(ir_return ir))
+			ir))))
 
 (define emit_physical_queryplan (lambda (ir)
 	(begin

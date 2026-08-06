@@ -224,6 +224,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list (list 'stage_catalog (list nested_catalog_stage)))))
 	(assert (list? (lower_group_stage_prepare_using (list outer_catalog_stage) (list outer_catalog_stage) outer_catalog_stage))
 		true "group-stage lowering keeps nested stage-output metadata from the full catalog")
+	(define catalog_root (make_query_block
+		"memcp-tests"
+		(list (list "o" "memcp-tests" "outer_source" false nil))
+		'() true '() nil '() nil nil '() (list outer_catalog_stage) '()))
+	(define prepared_catalog_root (ir_root (prepare_physical_queryplan
+		(make_ir (quote select) catalog_root '() nil (quote rows)))))
+	(assert (count (qb_stages prepared_catalog_root)) 1
+		"physical preparation keeps only direct stages on the query block")
+	(assert (count (query_block_stage_catalog prepared_catalog_root)) 2
+		"physical preparation expands the nested stage catalog once")
+	(assert (group_stage? (stage_by_id (query_block_stage_catalog prepared_catalog_root) "nested-catalog-stage"))
+		true "prepared physical catalog exposes nested stage metadata for emission")
+	(assert (count (qassoc_get (gs_facts (car (qb_stages prepared_catalog_root))) (quote stage_catalog) '())) 2
+		"direct physical stages share the complete prepared catalog")
 	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil)))
 	(define btw_inner_sources (list (list "i" "memcp-tests" "inner_t" false nil)))
 	(define btw_outer_id (list 'get_column "o" false "id" false))
