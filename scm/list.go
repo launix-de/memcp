@@ -406,7 +406,11 @@ func exprMayHaveSideEffects(expr Scmer) bool {
 
 func optimizeListCall(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
-	return result, descriptorWithLength(td, len(v)-1)
+	td = descriptorWithLength(td, len(v)-1)
+	if !td.Const {
+		td.Transfer = true
+	}
+	return result, td
 }
 
 func optimizeCount(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {

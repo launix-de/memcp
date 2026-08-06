@@ -244,6 +244,8 @@ type optimizerMetainfo struct {
 	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
 	loopDepth            int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
+	lambdaDepth          int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
+	beginDepth           int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -267,6 +269,8 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	result.setBlacklist = ome.setBlacklist
 	result.loopDepth = ome.loopDepth
+	result.lambdaDepth = ome.lambdaDepth
+	result.beginDepth = ome.beginDepth
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
 }
@@ -287,6 +291,8 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
 	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
 	result.loopDepth = ome.loopDepth
+	result.lambdaDepth = ome.lambdaDepth
+	result.beginDepth = ome.beginDepth
 	return
 }
 
@@ -664,6 +670,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		ome2 := ome.CopySharedScope()
+		ome2.beginDepth++
 		slotLimit := -1
 		if headSym == Symbol("begin_mut") {
 			slotIndex := 0
@@ -791,6 +798,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		// current lexical scope and cannot see NthLocalVar-only parameters.
 		if expressionContainsEvalCall(v[2]) {
 			ome2 := ome.Copy()
+			ome2.lambdaDepth++
 			if list, ok := scmerSlice(params); ok {
 				for _, param := range list {
 					if sym, ok := scmerSymbol(param); ok {
@@ -800,8 +808,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			} else if sym, ok := scmerSymbol(params); ok {
 				delete(ome2.variableReplacement, sym)
 			}
-			v[2], transferOwnership, _ = optimizeExCompat(v[2], env, &ome2, true)
-			return NewSlice(v), MakeTypeInfo(transferOwnership, false)
+			v[2], _, _ = optimizeExCompat(v[2], env, &ome2, true)
+			return NewSlice(v), tiZero
 		}
 		/* Lambdas with explicit NumVars still execute in numbered-call frames at
 		runtime. Some generated plans keep symbolic parameter references in the
@@ -810,6 +818,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		Otherwise callbacks like $update remain unbound at runtime. */
 		if len(v) > 3 {
 			ome2 := ome.Copy()
+			ome2.lambdaDepth++
 			numVars := int(ToInt(v[3]))
 			if list, ok := scmerSlice(params); ok {
 				for i, param := range list {
@@ -823,11 +832,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			} else if sym, ok := scmerSymbol(params); ok {
 				ome2.variableReplacement[sym] = NewNthLocalVar(0)
 			}
-			v[2], transferOwnership, _ = optimizeExCompat(v[2], env, &ome2, true)
-			return NewSlice(v), MakeTypeInfo(transferOwnership, false)
+			var bodyType TypeInfo
+			v[2], bodyType = OptimizeEx(v[2], env, &ome2, true)
+			return NewSlice(v), bodyType.WithoutConst()
 		}
 		// Auto-number parameters
 		ome2 := ome.Copy()
+		ome2.lambdaDepth++
 		slotIndex := 0
 		if list, ok := scmerSlice(params); ok {
 			for _, param := range list {
@@ -859,17 +870,21 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 			ome.pendingCallbackOwned = nil // consumed
 		}
-		v[2], transferOwnership, _ = optimizeExCompat(v[2], env, &ome2, true)
+		var bodyType TypeInfo
+		v[2], bodyType = OptimizeEx(v[2], env, &ome2, true)
 		// Set NumVars (may have grown due to !list allocations)
 		if slotIndex > 0 {
 			v = append(v[:len(v):len(v)], NewInt(int64(slotIndex)))
 		}
-		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
+		return NewSlice(v), bodyType.WithoutConst()
 	}
 
 	switch {
 	case headOk && (headSym == Symbol("set") || headSym == Symbol("define")) && len(v) == 3:
+		var definedSym Symbol
+		var hasDefinedSym bool
 		if sym, ok := scmerSymbol(v[1]); ok {
+			definedSym, hasDefinedSym = sym, true
 			for _, black := range ome.setBlacklist {
 				if black == sym {
 					if useResult {
@@ -881,11 +896,25 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
 				v[1] = repl
 			}
+			if ome.lambdaDepth == 0 && ome.beginDepth == 0 {
+				env.deleteOptimizerHint(sym)
+			}
 		}
 		if v[1].IsNthLocalVar() {
 			v[0] = NewSymbol("setN")
 		}
-		v[2], transferOwnership, _ = optimizeExCompat(v[2], env, ome, true)
+		var returnType TypeInfo
+		v[2], returnType = OptimizeEx(v[2], env, ome, true)
+		transferOwnership = returnType.Transfer()
+		if hasDefinedSym && ome.lambdaDepth == 0 && ome.beginDepth == 0 {
+			rhs := v[2]
+			if stripped, ok := scmerStripSourceInfo(rhs); ok {
+				rhs = stripped
+			}
+			if items, ok := scmerSlice(rhs); ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda") && returnType.Kind() != KindAny {
+				env.setOptimizerHint(definedSym, returnType.WithoutConst())
+			}
+		}
 	case headOk && (headSym == Symbol("match") || headSym == Symbol("match_mut")):
 		value, valueTransfer, _ := optimizeExCompat(v[1], env, ome, true)
 		v[1] = value
@@ -968,6 +997,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	allConstArgs := true
 	var transferOwnership bool
+	var firstArgType TypeInfo
 
 	// Look up declaration for callback ownership propagation
 	var callDecl *Declaration
@@ -1002,6 +1032,9 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 		var ti TypeInfo
 		v[i], ti = OptimizeEx(v[i], env, ome, true)
+		if i == 1 {
+			firstArgType = ti
+		}
 		transferOwnership = ti.Transfer()
 		if i > 0 && !ti.Const() {
 			allConstArgs = false
@@ -1013,22 +1046,25 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if mutName != "" {
 		firstArgFresh := false
 		if len(v) >= 2 {
+			firstArgFresh = firstArgType.Transfer() && !firstArgType.Const() && (firstArgType.Kind() == KindList || firstArgType.Kind() == KindAssoc)
 			arg1 := v[1]
 			if si, ok := arg1.Any().(SourceInfo); ok {
 				arg1 = si.value
 			}
-			if inner, ok := scmerSlice(arg1); ok && len(inner) > 0 {
-				if d := DeclarationForValue(inner[0]); d != nil {
-					if d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
-						firstArgFresh = true
-					}
-				}
-			} else if arg1.IsNthLocalVar() {
-				for sym, owned := range ome.ownedVars {
-					if owned {
-						if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == arg1.NthLocalVar() {
+			if !firstArgFresh {
+				if inner, ok := scmerSlice(arg1); ok && len(inner) > 0 {
+					if d := DeclarationForValue(inner[0]); d != nil {
+						if d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
 							firstArgFresh = true
-							break
+						}
+					}
+				} else if arg1.IsNthLocalVar() {
+					for sym, owned := range ome.ownedVars {
+						if owned {
+							if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == arg1.NthLocalVar() {
+								firstArgFresh = true
+								break
+							}
 						}
 					}
 				}
@@ -1095,6 +1131,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	// Look up declaration return type for propagation
 	var retTD *TypeDescriptor
+	var procReturn TypeInfo
+	hasProcReturn := false
 	if d := DeclarationForValue(v[0]); d != nil {
 		if d.IsFoldable() && allConstArgs && d.Fn != nil {
 			for i := range v {
@@ -1114,9 +1152,26 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			retTD = d.Type.Return
 		}
 	}
+	if retTD == nil {
+		if sym, ok := scmerSymbol(v[0]); ok {
+			if ti, exists := env.optimizerProcHint(sym); exists {
+				procReturn = ti
+				hasProcReturn = true
+			}
+		}
+	}
 
 	td := &TypeDescriptor{Transfer: transferOwnership}
-	if retTD != nil {
+	if hasProcReturn {
+		td.Transfer = procReturn.Transfer()
+		td.Kind = procReturn.kindName()
+		td.Length = procReturn.Length()
+		if procReturn.Extra != nil {
+			td.Params = procReturn.Extra.Params
+			td.Return = procReturn.Extra.Return
+			td.HasSideEffects = procReturn.Extra.HasSideEffects
+		}
+	} else if retTD != nil {
 		td.Kind = retTD.Kind
 		td.Length = retTD.Length
 		td.Params = retTD.Params
