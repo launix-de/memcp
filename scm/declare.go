@@ -140,6 +140,7 @@ func (ti TypeInfo) Length() int {
 func (ti TypeInfo) WithTransfer() TypeInfo    { ti.flags |= FlagTransfer; return ti }
 func (ti TypeInfo) WithoutTransfer() TypeInfo { ti.flags &^= FlagTransfer; return ti }
 func (ti TypeInfo) WithConst() TypeInfo       { ti.flags |= FlagConst; return ti }
+func (ti TypeInfo) WithoutConst() TypeInfo    { ti.flags &^= FlagConst; return ti }
 func (ti TypeInfo) WithKind(k uint8) TypeInfo { ti.kind = k; return ti }
 func (ti TypeInfo) WithLength(n int) TypeInfo {
 	if n <= 0 {
@@ -217,7 +218,35 @@ func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
 		td.NoEscape = !ti.Escape()
 		td.Length = ti.Length()
 	}
+	if td.Kind == "" {
+		td.Kind = ti.kindName()
+	}
 	return td
+}
+
+func (ti TypeInfo) kindName() string {
+	switch ti.kind {
+	case KindString:
+		return "string"
+	case KindInt:
+		return "int"
+	case KindFloat:
+		return "number"
+	case KindBool:
+		return "bool"
+	case KindNil:
+		return "nil"
+	case KindSymbol:
+		return "symbol"
+	case KindFunc:
+		return "func"
+	case KindList:
+		return "list"
+	case KindAssoc:
+		return "assoc"
+	default:
+		return ""
+	}
 }
 
 // NoEscape is a reusable TypeDescriptor annotation for parameters that
@@ -227,11 +256,6 @@ var NoEscape = &TypeDescriptor{Kind: "any", NoEscape: true, Length: UnknownLengt
 var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)
 var declarations_hash map[string]*Declaration = make(map[string]*Declaration)
-
-// globalFuncTypeInfo stores optimizer type info for Scheme-defined functions.
-// Persists across import boundaries so cross-file ownership propagation works.
-// Not used for arity checks or documentation — only for optimizer type inference.
-var globalFuncTypeInfo = make(map[Symbol]TypeInfo)
 
 func DeclareTitle(title string) {
 	declaration_titles = append(declaration_titles, "#"+title)

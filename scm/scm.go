@@ -757,10 +757,49 @@ type NthLocalVar uint8 // equals to (var i)
 
 type Vars map[Symbol]Scmer
 type Env struct {
-	Vars         Vars
-	VarsNumbered []Scmer // <- for the optimizer
-	Outer        *Env
-	Nodefine     bool // define will write to Outer
+	Vars           Vars
+	VarsNumbered   []Scmer // <- for the optimizer
+	Outer          *Env
+	Nodefine       bool // define will write to Outer
+	optimizerHints map[Symbol]TypeInfo
+}
+
+func (e *Env) definitionTarget() *Env {
+	for e != nil && e.Nodefine {
+		e = e.Outer
+	}
+	if e == nil {
+		return &Globalenv
+	}
+	return e
+}
+
+func (e *Env) optimizerProcHint(s Symbol) (TypeInfo, bool) {
+	binding := e.FindRead(s)
+	if binding == nil || binding.optimizerHints == nil {
+		return tiZero, false
+	}
+	bound, exists := binding.Vars[s]
+	if !exists || bound.GetTag() != tagProc {
+		return tiZero, false
+	}
+	ti, ok := binding.optimizerHints[s]
+	return ti, ok
+}
+
+func (e *Env) setOptimizerHint(s Symbol, ti TypeInfo) {
+	target := e.definitionTarget()
+	if target.optimizerHints == nil {
+		target.optimizerHints = make(map[Symbol]TypeInfo)
+	}
+	target.optimizerHints[s] = ti
+}
+
+func (e *Env) deleteOptimizerHint(s Symbol) {
+	target := e.definitionTarget()
+	if target.optimizerHints != nil {
+		delete(target.optimizerHints, s)
+	}
 }
 
 func (e *Env) FindRead(s Symbol) *Env {
@@ -817,6 +856,7 @@ func init() {
 		nil,
 		nil,
 		false,
+		nil,
 	}
 
 	// system
