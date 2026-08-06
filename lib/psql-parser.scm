@@ -172,9 +172,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a psql_expression3) "<" (define b psql_expression2)) '((quote <) a b))
 		(parser '((define a psql_expression3) ">" (define b psql_expression2)) '((quote >) a b))
 		/* ILIKE is Postgres case-insensitive LIKE. */
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "ILIKE" true) (define b psql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
 		(parser '((define a psql_expression3) (atom "ILIKE" true) (define b psql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a psql_expression3) (atom "COLLATE" true) (define collation psql_identifier) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b collation))
 		/* Postgres LIKE is case-sensitive by default. */
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b psql_expression2)) '('not '('strlike_cs a b)))
 		(parser '((define a psql_expression3) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b))
 		/* REGEXP/RLIKE/~ operator: expr ~ 'pattern' -> regexp_test(expr, pattern) */
 		(parser '((define a psql_expression3) "~" (define b psql_expression2)) '('regexp_test a b))
@@ -332,6 +334,29 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_expression7
 	)))
 
+	/* A derived-table column alias list renames the visible output columns from
+	left to right. PostgreSQL permits a prefix list; specifying more aliases than
+	the query exposes is an error. Keep this transform in the parser so the
+	planner receives the usual neutral query-block/union-block shapes. */
+	(define psql_rename_derived_fields (lambda (fields aliases) (match aliases
+		(cons alias remaining_aliases) (match fields
+			(cons _title (cons expr remaining_fields))
+			(cons alias (cons expr (psql_rename_derived_fields remaining_fields remaining_aliases)))
+			_ (error "derived table has more column aliases than columns"))
+		_ fields
+	)))
+	(define psql_apply_derived_column_aliases (lambda (query aliases) (match query
+		((symbol query-block) schema2 tables fields condition group having order limit offset hidden stages facts)
+		(list (quote query-block) schema2 tables
+			(psql_rename_derived_fields fields aliases)
+			condition group having order limit offset hidden stages facts)
+		((symbol union-block) mode branches order limit offset facts)
+		(list (quote union-block) mode
+			(map branches (lambda (branch) (psql_apply_derived_column_aliases branch aliases)))
+			order limit offset facts)
+		_ (error "derived table column aliases require a SELECT query")
+	)))
+
 	(define tabledefs (parser (or
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
 		(parser '((define l tabledefs) (define x (or
@@ -343,6 +368,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (define t tabledef) '(t))
 	)))
 	(define tabledef (parser (or
+		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (atom "AS" true) (define id psql_identifier) "(" (define aliases (+ psql_identifier ",")) ")")
+			(list id schema (psql_apply_derived_column_aliases query aliases) false nil)) /* inner select with relation and column aliases */
+		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (define id psql_identifier) "(" (define aliases (+ psql_identifier ",")) ")")
+			(list id schema (psql_apply_derived_column_aliases query aliases) false nil)) /* AS is optional */
 		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (atom "AS" true) (define id psql_identifier)) '(id schema query false nil)) /* inner select as from */
 		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (define id psql_identifier)) '(id schema query false nil)) /* inner select as from */
 		/* TODO: case insensititive table search */

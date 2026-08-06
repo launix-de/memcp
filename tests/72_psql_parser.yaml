@@ -82,6 +82,73 @@ test_cases:
         - id: 3
           val: 50
 
+  - name: "NOT LIKE is case-sensitive"
+    sql: "SELECT id FROM psql_data WHERE name NOT LIKE '%li%' ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "NOT ILIKE is case-insensitive"
+    sql: "SELECT id FROM psql_data WHERE name NOT ILIKE '%ALICE%' ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 3
+
+  # === Derived-table column alias lists ===
+  - name: "Derived table exposes explicit column aliases"
+    sql: |
+      SELECT derived.renamed_id, derived.renamed_value
+      FROM (SELECT id, val FROM psql_data) AS derived(renamed_id, renamed_value)
+      ORDER BY derived.renamed_id
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - renamed_id: 1
+          renamed_value: 10
+        - renamed_id: 2
+          renamed_value: 30
+
+  - name: "Derived table accepts a prefix column alias list"
+    sql: |
+      SELECT derived.renamed_id, derived.val
+      FROM (SELECT id, val FROM psql_data) derived(renamed_id)
+      ORDER BY derived.renamed_id
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - renamed_id: 1
+          val: 10
+
+  - name: "TPC-H Q13-shaped derived aggregate column aliases"
+    sql: |
+      SELECT c_count, COUNT(*) AS custdist
+      FROM (
+        SELECT customer.name, COUNT(orders.id)
+        FROM psql_data customer
+        LEFT OUTER JOIN psql_data orders ON customer.name = orders.name
+          AND orders.name NOT LIKE '%special%packages%'
+        GROUP BY customer.name
+      ) AS c_orders(customer_name, c_count)
+      GROUP BY c_count
+      ORDER BY c_count
+    expect:
+      rows: 2
+      data:
+        - c_count: 1
+          custdist: 2
+        - c_count: 4
+          custdist: 1
+
+  - name: "Derived table rejects excess column aliases"
+    sql: "SELECT * FROM (SELECT id FROM psql_data) AS derived(one, two)"
+    expect:
+      error: true
+
   - name: "TPC-H Q6 decimal range semantics across scan batches"
     sql: |
       SELECT SUM(extended_price * discount) AS revenue
