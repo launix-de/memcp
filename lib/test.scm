@@ -308,6 +308,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (dependent_subquery_marker? (nth btw_marker_result 0)) true "BTW2025 deferred expr pass leaves dependent marker")
 	(define btw_marker_resolved (btw2025_decorrelate_expr_with_stages (nth btw_marker_result 0) nil))
 	(assert (expr_contains_subquery? (nth btw_marker_resolved 0)) false "BTW2025 top-down resolver removes dependent marker")
+	(define btw_nested_ctx (make_uctx btw_deferred_ctx (list (list 'btw2025-current-handle "djoin:parent"))))
+	(define btw_nested_resolved (btw2025_decorrelate_expr_with_stages (nth btw_marker_result 0) btw_nested_ctx))
+	(define btw_nested_stage (car (nth btw_nested_resolved 1)))
+	(assert (equal? (qassoc_get (gs_facts btw_nested_stage) 'btw2025_parent nil) "djoin:parent") true "BTW2025 top-down resolver links nested dependent joins to their parent")
+	(assert (not (equal? (qassoc_get (gs_facts btw_nested_stage) 'btw2025_handle nil) "djoin:parent")) true "BTW2025 top-down resolver gives every dependent join its own handle")
 
 	/* nil tblvar */
 	(define expr_gc_nil (list 'get_column nil false "foo" false))

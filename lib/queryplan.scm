@@ -75,17 +75,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(lambda (_e) '()))))
 
 (define qassoc_get (lambda (xs key default)
-	(coalesceNil
-		(reduce (coalesceNil xs '()) (lambda (found entry)
-			(if (not (nil? found))
-				found
-				(match entry
-					(cons k rest) (if (equal? k key)
-						(if (equal? (count rest) 1) (car rest) rest)
-						nil)
-					nil)))
-			nil)
-		default)))
+	(match (coalesceNil xs '())
+		(cons entry rest) (match entry
+			(cons k values) (if (equal? k key)
+				(if (equal? (count values) 1) (car values) values)
+				(qassoc_get rest key default))
+			_ (qassoc_get rest key default))
+		_ default)))
 
 (define qassoc_set (lambda (xs key value)
 	(cons (list key value)
@@ -756,10 +752,12 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(nth pair 1)
 			(canonical_column_expr_for_alias inner_default (nth pair 0)))))))
 
-(define make_btw2025_unnesting_info (lambda (parent outer_refs domain accessing accessing_after_simple cclasses repr)
+(define make_btw2025_unnesting_info (lambda (handle parent ancestors outer_refs domain accessing accessing_after_simple cclasses repr)
 	(list
 		(quote btw2025-unnesting-info)
+		handle
 		parent
+		(coalesceNil ancestors '())
 		(coalesceNil outer_refs '())
 		(coalesceNil domain '())
 		(coalesceNil accessing '())
@@ -767,13 +765,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(coalesceNil cclasses '())
 		(coalesceNil repr '()))))
 
-(define btw2025_info_parent (lambda (info) (nth info 1)))
-(define btw2025_info_outer_refs (lambda (info) (nth info 2)))
-(define btw2025_info_domain (lambda (info) (nth info 3)))
-(define btw2025_info_accessing (lambda (info) (nth info 4)))
-(define btw2025_info_accessing_after_simple (lambda (info) (nth info 5)))
-(define btw2025_info_cclasses (lambda (info) (nth info 6)))
-(define btw2025_info_repr (lambda (info) (nth info 7)))
+(define btw2025_info_handle (lambda (info) (nth info 1)))
+(define btw2025_info_parent (lambda (info) (nth info 2)))
+(define btw2025_info_ancestors (lambda (info) (nth info 3)))
+(define btw2025_info_outer_refs (lambda (info) (nth info 4)))
+(define btw2025_info_domain (lambda (info) (nth info 5)))
+(define btw2025_info_accessing (lambda (info) (nth info 6)))
+(define btw2025_info_accessing_after_simple (lambda (info) (nth info 7)))
+(define btw2025_info_cclasses (lambda (info) (nth info 8)))
+(define btw2025_info_repr (lambda (info) (nth info 9)))
 
 (define group_keys_for_correlations (lambda (inner_default pairs explicit_group_keys)
 	(begin
@@ -838,7 +838,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(btw2025_expr_accessing_aliases (coalesceNil (qb_having block) true) outer_aliases)
 				(btw2025_order_accessing_aliases (qb_order block) outer_aliases)))))))
 
-(define btw2025_stage_facts (lambda (block outer_sources lookup_pairs)
+(define btw2025_stage_facts (lambda (block outer_sources lookup_pairs pending_info)
 	(begin
 		(define inner_default (if (or (not (query_block? block)) (empty_list? (qb_sources block))) nil (source_alias (car (qb_sources block)))))
 		(define outer_aliases (source_aliases outer_sources))
@@ -850,7 +850,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define residual_accessing_after_simple (merge_unique (list accessing_after_simple key_accessing_after_simple)))
 		(define cclasses (btw2025_cclasses_for_pairs lookup_pairs))
 		(define repr (btw2025_repr_for_pairs inner_default lookup_pairs))
-		(define info (make_btw2025_unnesting_info nil domain domain accessing residual_accessing_after_simple cclasses repr))
+		(define handle (if (nil? pending_info) nil (btw2025_info_handle pending_info)))
+		(define parent (if (nil? pending_info) nil (btw2025_info_parent pending_info)))
+		(define ancestors (if (nil? pending_info) '() (btw2025_info_ancestors pending_info)))
+		(define info (make_btw2025_unnesting_info handle parent ancestors domain domain accessing residual_accessing_after_simple cclasses repr))
 		(list
 			(list (quote btw2025_accessing) accessing)
 			(list (quote btw2025_accessing_after_simple) residual_accessing_after_simple)
@@ -858,6 +861,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list (quote btw2025_domain) domain)
 			(list (quote btw2025_cclasses) cclasses)
 			(list (quote btw2025_repr) repr)
+			(list (quote btw2025_handle) handle)
+			(list (quote btw2025_parent) parent)
+			(list (quote btw2025_ancestors) ancestors)
 			(list (quote btw2025_info) info)
 			(list (quote btw2025_lookup_keys) (correlation_lookup_keys lookup_pairs))))))
 
@@ -1232,6 +1238,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
+		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "EXISTS group-stage(D) currently supports one plain inner query-block")
 			true)
@@ -1286,7 +1293,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
 					(list (quote null_semantics) (quote exists))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -1325,7 +1332,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain unordered branches")
 			(combine_exists_union_results
 				(map (union_branches inner) (lambda (branch)
-					(make_exists_stage_rewrite branch (list (nth args 0) branch)))))))))
+					(make_exists_stage_rewrite branch (list
+						(nth args 0)
+						branch
+						(if (>= (count args) 3) (nth args 2) nil))))))))))
 
 (define combine_in_union_results (lambda (results negate)
 	(match (coalesceNil results '())
@@ -1472,6 +1482,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define outer_sources (nth args 0))
 		(define negate (if (>= (count args) 3) (nth args 2) false))
 		(define semijoin_where (and (not negate) (if (>= (count args) 4) (nth args 3) false)))
+		(define pending_info (if (>= (count args) 5) (nth args 4) nil))
 		(define membership_inner (normalize_membership_query_block inner))
 		(if (not (membership_inner_supported? membership_inner))
 			(neumann_fail "untangle_query" "IN group-stage(D) requires an ungrouped membership query-block")
@@ -1539,7 +1550,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote preserve_empty_domain) false)
 					(list (quote null_semantics) (quote in))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts membership_inner outer_sources lookup_pairs)))))
+				(btw2025_stage_facts membership_inner outer_sources lookup_pairs pending_info)))))
 		(define null_stage (make_group_stage
 			null_stage_id
 			stage_input
@@ -1559,7 +1570,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote preserve_empty_domain) false)
 					(list (quote null_semantics) (quote in))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts membership_inner outer_sources lookup_pairs)))))
+				(btw2025_stage_facts membership_inner outer_sources lookup_pairs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define null_stage_alias (exists_stage_alias null_stage_id))
 		(define key_names (group_key_cols keys))
@@ -1592,6 +1603,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
+		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
 		(if (not (scalar_aggregate_supported? inner))
 			(neumann_fail "untangle_query" "scalar aggregate group-stage(D) currently supports one plain inner query-block")
 			true)
@@ -1656,7 +1668,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote aggregate))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts inner outer_sources all_corr_pairs)))))
+				(btw2025_stage_facts inner outer_sources all_corr_pairs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define post_condition (replace_group_expr inner_default stage_alias keys key_names ags local_having))
@@ -1679,6 +1691,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
+		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
 		(if (not (scalar_once_supported? inner))
 			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
 			true)
@@ -1743,7 +1756,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote partition_by) outer_domain)
 					(list (quote physical_max_rows) 1)
 					(list (quote on_overflow) (quote ignore)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -1960,6 +1973,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
+		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
 		(if (not (scalar_single_supported? inner))
 			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
 			true)
@@ -2020,7 +2034,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(list (quote partition_by) outer_domain)
 					(list (quote physical_max_rows) 2)
 					(list (quote on_overflow) (quote error)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -2440,7 +2454,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define combine_stage_rewrite_results (lambda (head rewritten_args)
 	(begin
 		(define expr (cons head (map rewritten_args (lambda (item) (nth item 0)))))
-		(define stages (merge_unique (map rewritten_args (lambda (item) (nth item 1)))))
+		(define stages (unique_stages_by_id (merge (map rewritten_args (lambda (item) (nth item 1))))))
 		(define sources (merge_unique (map rewritten_args (lambda (item) (nth item 2)))))
 		(list expr stages sources))))
 
@@ -2448,6 +2462,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
 		(define inner (untangle_query normalized sub_ctx))
 		(if (query_block_no_from? inner)
 			(list (untangle_zero_domain_subquery (quote inner_select) nil subquery ctx) '() '())
@@ -2455,28 +2470,34 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(make_grouped_scalar_top_rewrite inner subquery)
 				(if (empty_list? (extract_aggregates (query_block_first_expr inner)))
 					(if (scalar_once_supported? inner)
-						(make_scalar_once_stage_rewrite inner (list outer_sources subquery))
-						(make_scalar_single_stage_rewrite inner (list outer_sources subquery)))
-					(make_scalar_aggregate_stage_rewrite inner (list outer_sources subquery))))))))
+						(make_scalar_once_stage_rewrite inner (list outer_sources subquery pending_info))
+						(make_scalar_single_stage_rewrite inner (list outer_sources subquery pending_info)))
+					(make_scalar_aggregate_stage_rewrite inner (list outer_sources subquery pending_info))))))))
 
 (define untangle_exists_subquery_with_stages (lambda (subquery outer_sources ctx)
 	(begin
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
 		(define inner (untangle_query normalized sub_ctx))
 		(if (union_block? inner)
-			(make_exists_union_stage_rewrite inner (list outer_sources subquery))
+			(make_exists_union_stage_rewrite inner (list outer_sources subquery pending_info))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select_exists) nil subquery ctx) '() '())
-				(make_exists_stage_rewrite inner (list outer_sources subquery)))))))
+				(make_exists_stage_rewrite inner (list outer_sources subquery pending_info)))))))
 
 (define untangle_not_exists_subquery_with_stages (lambda (subquery outer_sources ctx)
-	(begin
-		(define rewritten (untangle_exists_subquery_with_stages subquery outer_sources ctx))
+	(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
 		(list
-			(list (quote not) (nth rewritten 0))
-			(nth rewritten 1)
-			(nth rewritten 2)))))
+			(list (quote not) (make_dependent_subquery_marker (quote exists) nil subquery outer_sources))
+			'()
+			'())
+		(begin
+			(define rewritten (untangle_exists_subquery_with_stages subquery outer_sources ctx))
+			(list
+				(list (quote not) (nth rewritten 0))
+				(nth rewritten 1)
+				(nth rewritten 2))))))
 
 (define untangle_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
 	(begin
@@ -2487,35 +2508,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
 		(define inner (untangle_query normalized sub_ctx))
 		(if (union_block? inner)
-			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery false semijoin_where))
+			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery false semijoin_where pending_info))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_subquery (quote inner_select_in) rewritten_probe subquery ctx) '() '())
-				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery false semijoin_where)))))))
+				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery false semijoin_where pending_info)))))))
 
-(define untangle_not_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
+(define resolve_not_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
 	(begin
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
 		(define inner (untangle_query normalized sub_ctx))
 		(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
 		(if (union_block? inner)
-			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery true))
+			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery true false pending_info))
 			(if (query_block_no_from? inner)
 				(list (untangle_zero_domain_not_in_subquery rewritten_probe subquery ctx) '() '())
-				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery true)))))))
+				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery true false pending_info)))))))
+
+(define untangle_not_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
+	(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
+		(list (make_dependent_subquery_marker (quote not-in) probe subquery outer_sources) '() '())
+		(resolve_not_in_subquery_with_stages probe subquery outer_sources ctx))))
 
 (define direct_positive_in_term_rewrite (lambda (expr outer_sources ctx)
 	(match expr
 		((symbol inner_select_in) probe subquery)
-		(begin
-			(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
-			(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true))
+		(if (uctx_get ctx (quote defer-subquery-rewrites) false)
+			(list (make_dependent_subquery_marker (quote in-where) probe subquery outer_sources) '() '())
+			(begin
+				(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+				(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true)))
 		((quote inner_select_in) probe subquery)
-		(begin
-			(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
-			(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true))
+		(if (uctx_get ctx (quote defer-subquery-rewrites) false)
+			(list (make_dependent_subquery_marker (quote in-where) probe subquery outer_sources) '() '())
+			(begin
+				(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+				(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true)))
 		_ nil)))
 
 (define where_conjunct_with_stages (lambda (expr outer_sources ctx)
@@ -2550,9 +2582,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(btw2025_normalized_subquery_accessing_aliases subquery outer_sources)
 			(btw2025_normalized_subquery_accessing_aliases (normalize_query_ast subquery) outer_sources)))))
 
-(define btw2025_defer_subquery_rewrite? (lambda (subquery outer_sources ctx)
-	(and (uctx_get ctx (quote defer-subquery-rewrites) false)
-		(not (empty_list? (btw2025_subquery_accessing_aliases subquery outer_sources))))))
+(define btw2025_defer_subquery_rewrite? (lambda (_subquery _outer_sources ctx)
+	(uctx_get ctx (quote defer-subquery-rewrites) false)))
+
+(define btw2025_pending_unnesting_info (lambda (subquery outer_sources handle parent ancestors)
+	(begin
+		(define normalized (if (or (query_block? subquery) (union_block? subquery))
+			subquery
+			(normalize_query_ast subquery)))
+		(define accessing (btw2025_normalized_subquery_accessing_aliases normalized outer_sources))
+		(make_btw2025_unnesting_info handle parent ancestors accessing '() accessing accessing '() '()))))
 
 (define untangle_if_expr_with_stages (lambda (head args outer_sources ctx)
 	(match args
@@ -2677,18 +2716,44 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define probe (dep_subquery_probe marker))
 		(define subquery (dep_subquery_query marker))
 		(define outer_sources (dep_subquery_outer_sources marker))
+		(define parent (uctx_get ctx (quote btw2025-current-handle) nil))
+		(define parent_ancestors (uctx_get ctx (quote btw2025-ancestor-handles) '()))
+		(define current_ancestors (if (nil? parent) '() (cons parent parent_ancestors)))
+		(define current_handle (concat "djoin:" (fnv_hash (string (list kind subquery outer_sources)))))
+		(define current_info (btw2025_pending_unnesting_info subquery outer_sources current_handle parent current_ancestors))
+		(define resolve_ctx (make_uctx ctx (list
+			(list (quote defer-subquery-rewrites) true)
+			(list (quote btw2025-current-handle) current_handle)
+			(list (quote btw2025-ancestor-handles) current_ancestors)
+			(list (quote btw2025-current-info) current_info))))
 		(match kind
 			(symbol scalar)
-			(untangle_scalar_subquery_with_stages subquery outer_sources ctx)
+			(untangle_scalar_subquery_with_stages subquery outer_sources resolve_ctx)
 			(symbol exists)
-			(untangle_exists_subquery_with_stages subquery outer_sources ctx)
+			(untangle_exists_subquery_with_stages subquery outer_sources resolve_ctx)
 			(symbol in)
 			(begin
 				(define probe_result (btw2025_decorrelate_expr_with_stages probe ctx))
-				(define in_result (resolve_in_subquery_with_stages (nth probe_result 0) subquery outer_sources ctx false))
+				(define in_result (resolve_in_subquery_with_stages (nth probe_result 0) subquery outer_sources resolve_ctx false))
 				(list
 					(nth in_result 0)
-					(merge_unique (list (nth probe_result 1) (nth in_result 1)))
+					(unique_stages_by_id (merge (list (nth probe_result 1) (nth in_result 1))))
+					(merge_unique (list (nth probe_result 2) (nth in_result 2)))))
+			(symbol in-where)
+			(begin
+				(define probe_result (btw2025_decorrelate_expr_with_stages probe ctx))
+				(define in_result (resolve_in_subquery_with_stages (nth probe_result 0) subquery outer_sources resolve_ctx true))
+				(list
+					(nth in_result 0)
+					(unique_stages_by_id (merge (list (nth probe_result 1) (nth in_result 1))))
+					(merge_unique (list (nth probe_result 2) (nth in_result 2)))))
+			(symbol not-in)
+			(begin
+				(define probe_result (btw2025_decorrelate_expr_with_stages probe ctx))
+				(define in_result (resolve_not_in_subquery_with_stages (nth probe_result 0) subquery outer_sources resolve_ctx))
+				(list
+					(nth in_result 0)
+					(unique_stages_by_id (merge (list (nth probe_result 1) (nth in_result 1))))
 					(merge_unique (list (nth probe_result 2) (nth in_result 2)))))
 			_ (neumann_fail "untangle_query" "unknown dependent subquery marker")))))
 
@@ -2703,16 +2768,36 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(btw2025_decorrelate_expr_with_stages item ctx))))
 		_ (list expr '() '()))))
 
-(define btw2025_decorrelate_fields_with_stages (lambda (fields ctx)
+(define btw2025_dependent_marker_key (lambda (expr)
+	(if (dependent_subquery_marker? expr)
+		(concat "dependent:" (fnv_hash (string expr)))
+		nil)))
+
+(define btw2025_decorrelate_field_expr_using (lambda (expr ctx resolved)
+	(begin
+		(define key (btw2025_dependent_marker_key expr))
+		(if (and (not (nil? key)) (has_assoc? resolved key))
+			(list (resolved key) resolved)
+			(begin
+				(define rewritten (btw2025_decorrelate_expr_with_stages expr ctx))
+				(list rewritten
+					(if (nil? key) resolved (set_assoc resolved key rewritten))))))))
+
+(define btw2025_decorrelate_fields_with_stages_using (lambda (fields ctx resolved)
 	(match (coalesceNil fields '())
 		(cons title (cons expr rest)) (begin
-			(define rewritten (btw2025_decorrelate_expr_with_stages expr ctx))
-			(define tail (btw2025_decorrelate_fields_with_stages rest ctx))
+			(define current (btw2025_decorrelate_field_expr_using expr ctx resolved))
+			(define rewritten (nth current 0))
+			(define tail (btw2025_decorrelate_fields_with_stages_using rest ctx (nth current 1)))
 			(list
 				(cons title (cons (nth rewritten 0) (nth tail 0)))
-				(merge_unique (list (nth rewritten 1) (nth tail 1)))
-				(merge_unique (list (nth rewritten 2) (nth tail 2)))))
-		_ (list '() '() '()))))
+				(unique_stages_by_id (merge (list (nth rewritten 1) (nth tail 1))))
+				(merge_unique (list (nth rewritten 2) (nth tail 2)))
+				(nth tail 3)))
+		_ (list '() '() '() resolved))))
+
+(define btw2025_decorrelate_fields_with_stages (lambda (fields ctx)
+	(btw2025_decorrelate_fields_with_stages_using fields ctx '())))
 
 (define btw2025_decorrelate_order_with_stages (lambda (order_items ctx)
 	(match (coalesceNil order_items '())
@@ -2725,7 +2810,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define tail (btw2025_decorrelate_order_with_stages rest ctx))
 			(list
 				(cons (nth rewritten_item 0) (nth tail 0))
-				(merge_unique (list (nth rewritten_item 1) (nth tail 1)))
+				(unique_stages_by_id (merge (list (nth rewritten_item 1) (nth tail 1))))
 				(merge_unique (list (nth rewritten_item 2) (nth tail 2)))))
 		_ (list '() '() '()))))
 
@@ -2736,7 +2821,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define tail (btw2025_decorrelate_expr_list_with_stages rest ctx))
 			(list
 				(cons (nth rewritten 0) (nth tail 0))
-				(merge_unique (list (nth rewritten 1) (nth tail 1)))
+				(unique_stages_by_id (merge (list (nth rewritten 1) (nth tail 1))))
 				(merge_unique (list (nth rewritten 2) (nth tail 2)))))
 		_ (list '() '() '()))))
 
@@ -2755,7 +2840,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(define tail (btw2025_decorrelate_sources_with_stages rest ctx))
 			(list
 				(merge_unique (list (nth rewritten_src 0) (nth tail 0)))
-				(merge_unique (list (nth rewritten_src 1) (nth tail 1)))
+				(unique_stages_by_id (merge (list (nth rewritten_src 1) (nth tail 1))))
 				(merge_unique (list (nth rewritten_src 2) (nth tail 2)))))
 		_ (list '() '() '()))))
 
@@ -2782,7 +2867,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(qb_limit block)
 			(qb_offset block)
 			(nth hidden_result 0)
-			(merge_unique (list (qb_stages block) source_stages (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
+			(unique_stages_by_id (merge (list (qb_stages block) source_stages (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1))))
 			(qb_facts block)))))
 
 (define field_expr_by_title (lambda (fields title ignorecase)
@@ -3221,7 +3306,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define child_ctx (make_uctx ctx
 			(list
 				(list (quote compile-budget-ms) 1000)
-				(list (quote operator-model) (quote combined)))))
+				(list (quote operator-model) (quote combined))
+				(list (quote defer-subquery-rewrites) true))))
 		(define union_src (single_union_source block))
 		(define union_rewrite (if (nil? union_src) nil (rewrite_query_block_over_union_source block union_src)))
 		(if (not (nil? union_rewrite))
@@ -7340,7 +7426,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(carrier_stages_from_sources prepare_catalog (group_stage_final_extra_source_refs stage))
 				(query_block_probe_expr_stages rewritten_src)))
 			'()))
-		(define nested_stages direct_nested_stages)
+		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
+		(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
+		(define nested_stages (if (nil? owner_handle)
+			direct_nested_stages
+			(filter direct_nested_stages (lambda (candidate)
+				(begin
+					(define candidate_handle (qassoc_get (gs_facts candidate) (quote btw2025_handle) nil))
+					(define candidate_parent (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil))
+					(or
+						(nil? candidate_handle)
+						(equal? candidate_parent owner_handle)
+						(and
+							(nil? candidate_parent)
+							(and
+								(not (equal? candidate_handle owner_handle))
+								(not (contains? owner_ancestors candidate_handle))))))))))
 		(define nested_prepare (if (query_block? rewritten_src)
 			(lower_unique_stage_prepares_using prepare_catalog stage_catalog nested_stages)
 			'()))
@@ -7991,6 +8092,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define stage_direct_prepare_semantic_candidate? (lambda (consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)
 	(and
+		(nil? (qassoc_get (gs_facts stage) (quote btw2025_parent) nil))
+		(and
 		(not (contains? consumed_probe_ids (gs_id stage)))
 		(and (not (contains? consumed_source_probe_ids (gs_id stage)))
 			(and
@@ -7999,7 +8102,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(not (scalar_first_probe_stage? stage))
 					(or
 						(not (scalar_aggregate_probe_stage? stage))
-						(contains? stage_output_ids (gs_id stage)))))))))
+						(contains? stage_output_ids (gs_id stage))))))))))
 
 (define query_block_stages_to_prepare_base_using (lambda (all_stages block)
 	(begin
