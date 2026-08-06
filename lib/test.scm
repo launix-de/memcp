@@ -222,7 +222,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		nested_catalog_input
 		'() '(1) '() nil '() '() nil nil
 		(list (list 'stage_catalog (list nested_catalog_stage)))))
-	(assert (list? (lower_group_stage_prepare_using (list outer_catalog_stage) outer_catalog_stage))
+	(assert (list? (lower_group_stage_prepare_using (list outer_catalog_stage) (list outer_catalog_stage) outer_catalog_stage))
 		true "group-stage lowering keeps nested stage-output metadata from the full catalog")
 	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil)))
 	(define btw_inner_sources (list (list "i" "memcp-tests" "inner_t" false nil)))
