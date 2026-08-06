@@ -1,3 +1,10 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
 # Minimal Table Operations Test - JOIN Version
 # Testing just the most basic operations to isolate database corruption issue
 # Includes JOIN operations
@@ -36,6 +43,19 @@ test_cases:
       expected_results:
         - name: 'test'
           description: 'Description for test'
+
+  - name: "Unqualified first GROUP BY and ORDER BY columns resolve across sources"
+    sql: |
+      SELECT name, COUNT(*) AS matching_rows
+      FROM simple_test_09 s, related_data_09 r
+      WHERE s.id = simple_test_id
+      GROUP BY name
+      ORDER BY name
+    expect:
+      rows: 2
+      data:
+        - { name: "another", matching_rows: 1 }
+        - { name: "test", matching_rows: 1 }
 
 
 #  - name: "Complex SELECT JOIN test with filtering"
