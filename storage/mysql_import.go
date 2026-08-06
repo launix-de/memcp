@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -421,6 +421,7 @@ existingLoop:
 		}
 		t.Unique = append(t.Unique, uniqueKey{k.name, colNames})
 	}
+	t.publishShowColumnsSnapshot()
 	t.schema.save()
 	return nil
 }

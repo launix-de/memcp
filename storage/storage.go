@@ -1242,6 +1242,7 @@ func Init(en scm.Env) {
 					panic("unknown column definition: " + head)
 				}
 			}
+			newTable.publishShowColumnsSnapshot()
 
 			db.schemalock.Lock()
 			existing := db.tables.Get(tblName)
@@ -1423,6 +1424,7 @@ func Init(en scm.Env) {
 			}
 
 			t.Unique = append(t.Unique, uniqueKey{name, cols})
+			t.publishShowColumnsSnapshot()
 			t.schema.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
 
 			return scm.NewBool(true)
@@ -1680,10 +1682,12 @@ func Init(en scm.Env) {
 							return scm.NewBool(true)
 						}
 						t.Columns[i].AutoIncrement = scm.ToBool(a[3])
+						t.publishShowColumnsSnapshot()
 						db.save()
 						return scm.NewBool(true)
 					default:
 						ok := t.Columns[i].Alter(scm.String(a[2]), a[3])
+						t.publishShowColumnsSnapshot()
 						db.save()
 						return scm.NewBool(scm.ToBool(ok))
 					}
@@ -2456,7 +2460,7 @@ func Init(en scm.Env) {
 				{Kind: "int|bool", ParamName: "property", ParamDesc: "(optional) shard index (int), true for full table info, or \"statistics\"", Optional: true},
 				{Kind: "bool", ParamName: "full", ParamDesc: "(optional) true to include columns and indexes in shard detail", Optional: true},
 			},
-			Return: &scm.TypeDescriptor{Kind: "any"},
+			Return: &scm.TypeDescriptor{Kind: "any", Transfer: false},
 		},
 	})
 	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)

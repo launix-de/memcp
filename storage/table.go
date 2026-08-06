@@ -327,6 +327,10 @@ type table struct {
 	// unrelated tables behind the database-global schemalock.
 	ddlMu sync.RWMutex
 
+	// showColumnsSnapshot is immutable after publication. SHOW/compiler reads
+	// load it without locking; metadata writers replace the complete snapshot.
+	showColumnsSnapshot atomic.Pointer[tableShowColumnsSnapshot]
+
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode   ShardMode
 	shardModeMu sync.RWMutex    // protects ShardMode reads in iterateShards vs Phase F flip
@@ -803,17 +807,36 @@ func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
 	}
 }
 
-func (t *table) ShowColumns() scm.Scmer {
-	if t == nil {
-		return scm.NewNil()
+type tableShowColumnsSnapshot struct {
+	value             scm.Scmer
+	rowEstimate       uint
+	distinctEstimates []uint64
+}
+
+func (t *table) showColumnsSnapshotMatches(snapshot *tableShowColumnsSnapshot, rowEstimate uint) bool {
+	if snapshot == nil || snapshot.rowEstimate != rowEstimate || len(snapshot.distinctEstimates) != len(t.Columns) {
+		return false
 	}
+	for i, c := range t.Columns {
+		distinctEstimate := atomic.LoadUint64(&c.DistinctEstimate)
+		if distinctEstimate == 0 {
+			distinctEstimate = uint64(rowEstimate)
+		}
+		if snapshot.distinctEstimates[i] != distinctEstimate {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnapshot {
 	result := make([]scm.Scmer, len(t.Columns))
-	for i, v := range t.Columns {
-		// Determine Key type for this column
+	distinctEstimates := make([]uint64, len(t.Columns))
+	for i, c := range t.Columns {
 		keyType := ""
 		for _, uk := range t.Unique {
 			for _, col := range uk.Cols {
-				if col == v.Name {
+				if col == c.Name {
 					if uk.Id == "PRIMARY" {
 						keyType = "PRI"
 					} else if keyType == "" {
@@ -822,12 +845,47 @@ func (t *table) ShowColumns() scm.Scmer {
 				}
 			}
 		}
-		result[i] = v.Show(keyType, t)
+		distinctEstimate := atomic.LoadUint64(&c.DistinctEstimate)
+		if distinctEstimate == 0 {
+			distinctEstimate = uint64(rowEstimate)
+		}
+		distinctEstimates[i] = distinctEstimate
+		result[i] = c.show(keyType, distinctEstimate, rowEstimate)
 	}
-	return scm.NewSlice(result)
+	return &tableShowColumnsSnapshot{
+		value:             scm.NewSlice(result),
+		rowEstimate:       rowEstimate,
+		distinctEstimates: distinctEstimates,
+	}
+}
+
+func (t *table) publishShowColumnsSnapshot() scm.Scmer {
+	snapshot := t.buildShowColumnsSnapshot(t.CountEstimate())
+	t.showColumnsSnapshot.Store(snapshot)
+	return snapshot.value
+}
+
+func (t *table) invalidateShowColumnsSnapshot() {
+	t.showColumnsSnapshot.Store(nil)
+}
+
+func (t *table) ShowColumns() scm.Scmer {
+	if t == nil {
+		return scm.NewNil()
+	}
+	rowEstimate := t.CountEstimate()
+	snapshot := t.showColumnsSnapshot.Load()
+	if t.showColumnsSnapshotMatches(snapshot, rowEstimate) {
+		return snapshot.value
+	}
+	return t.publishShowColumnsSnapshot()
 }
 
 func (c *column) Show(keyType string, t *table) scm.Scmer {
+	return c.show(keyType, uint64(c.distinctEstimateFor(t)), t.CountEstimate())
+}
+
+func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint) scm.Scmer {
 	dims := make([]scm.Scmer, len(c.Typdimensions))
 	for i, v := range c.Typdimensions {
 		dims[i] = scm.NewInt(int64(v))
@@ -862,8 +920,8 @@ func (c *column) Show(keyType string, t *table) scm.Scmer {
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
-		scm.NewString("DistinctEstimate"), scm.NewInt(int64(c.distinctEstimateFor(t))),
-		scm.NewString("RowEstimate"), scm.NewInt(int64(t.CountEstimate())),
+		scm.NewString("DistinctEstimate"), scm.NewInt(int64(distinctEstimate)),
+		scm.NewString("RowEstimate"), scm.NewInt(int64(rowEstimate)),
 	})
 }
 
@@ -1159,6 +1217,7 @@ func (t *table) registerTempColumn(cp *column) {
 					delete(s.columns, colName)
 					s.mu.Unlock()
 				}
+				tbl.invalidateShowColumnsSnapshot()
 				tbl.schema.schemalock.Unlock()
 				return true
 			}
@@ -1181,6 +1240,11 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 	if !ok {
 		t.schema.schemalock.Unlock()
 		return false
+	}
+	if cp.IsTemp {
+		t.invalidateShowColumnsSnapshot()
+	} else {
+		t.publishShowColumnsSnapshot()
 	}
 	t.finishSchemaMutationLocked()
 	if cp.IsTemp {
@@ -1216,6 +1280,11 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			// remove cache invalidation triggers from source tables
 			t.removeComputeTriggers(name)
 
+			if c.IsTemp {
+				t.invalidateShowColumnsSnapshot()
+			} else {
+				t.publishShowColumnsSnapshot()
+			}
 			t.finishSchemaMutationLocked()
 			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
 			// can invalidate without lock-ordering cycles.
