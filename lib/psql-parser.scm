@@ -102,6 +102,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 (define parse_psql (lambda (schema s policy) (begin
+	(define parse_started_ns (nanotime))
 
 	/* counter for positional $N placeholders: each $N compiles to (session "vN") */
 	(define placeholder_counter (newsession))
@@ -766,7 +767,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (define query psql_select) (build_queryplan_term query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir query))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile query))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile query parse_started_ns (strlen s)))
 		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
 		psql_insert_into
 		psql_insert_select

@@ -9506,12 +9506,28 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(wrap_plan_with_distinct_resultrow (lower_union_all_successive block)))
 			(neumann_fail "build_queryplan" "unknown UNION mode")))))
 
-(define build_queryplan (lambda (ir)
+/* Physical preparation attaches the canonical stage catalog without emitting
+runtime operators. Keeping this boundary explicit makes analysis and emission
+independently measurable while preserving the normal build_queryplan contract. */
+(define prepare_physical_queryplan (lambda (ir)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		(match (ir_return ir)
 			(symbol rows) (match (logical_op (ir_root ir))
-				(symbol query-block) (lower_query_block_with_stages (ir_root ir))
+				(symbol query-block) (make_ir
+					(ir_kind ir)
+					(query_block_with_full_stage_catalog (ir_root ir))
+					(ir_stages ir)
+					(ir_context_of ir)
+					(ir_return ir))
+				_ ir)
+			_ ir))))
+
+(define emit_physical_queryplan (lambda (ir)
+	(begin
+		(match (ir_return ir)
+			(symbol rows) (match (logical_op (ir_root ir))
+				(symbol query-block) (lower_query_block_with_cataloged_stages (ir_root ir))
 				(symbol union-block) (lower_union_block (ir_root ir))
 				_ (neumann_fail "build_queryplan" "unknown logical root"))
 			((symbol dml) target_schema target_tbl) (match (logical_op (ir_root ir))
@@ -9519,6 +9535,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
 				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))))
+
+(define build_queryplan (lambda (ir)
+	(emit_physical_queryplan (prepare_physical_queryplan ir))))
 
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan
@@ -9593,7 +9612,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(join_reorder (untangle_query_term query nil))
 				(settings "ExplainWidth"))))))
 
-(define explain_queryplan_compile (lambda (query)
+(define explain_queryplan_compile (lambda (query parse_started_ns sql_bytes)
 	(begin
 		(define logical_count (lambda (node target)
 			(begin
@@ -9615,20 +9634,40 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(reduce tail (lambda (total item)
 						(+ total (plan_count item target))) 0))
 				_ 0)))
+		(define tree_count (lambda (node)
+			(match node
+				(cons head tail) (+ 1
+					(tree_count head)
+					(reduce tail (lambda (total item)
+						(+ total (tree_count item))) 0))
+				_ 1)))
 		(define started_ns (nanotime))
 		(define ir (untangle_query_term query nil))
 		(define untangled_ns (nanotime))
 		(define reordered (join_reorder ir))
 		(define reordered_ns (nanotime))
-		(define plan (build_queryplan reordered))
-		(define lowered_ns (nanotime))
+		(define prepared (prepare_physical_queryplan reordered))
+		(define prepared_ns (nanotime))
+		(define plan (emit_physical_queryplan prepared))
+		(define emitted_ns (nanotime))
 		(define plan_text (pretty_print plan (settings "ExplainWidth")))
+		(define serialized_ns (nanotime))
 		(list (quote resultrow)
 			(list (quote list)
+				"parse_ns" (- started_ns parse_started_ns)
 				"untangle_ns" (- untangled_ns started_ns)
 				"reorder_ns" (- reordered_ns untangled_ns)
-				"lower_ns" (- lowered_ns reordered_ns)
-				"planner_total_ns" (- lowered_ns started_ns)
+				"physical_prepare_ns" (- prepared_ns reordered_ns)
+				"recipe_emit_ns" (- emitted_ns prepared_ns)
+				"lower_ns" (- emitted_ns reordered_ns)
+				"serialize_ns" (- serialized_ns emitted_ns)
+				"planner_total_ns" (- emitted_ns started_ns)
+				"compile_total_ns" (- emitted_ns parse_started_ns)
+				"measured_total_ns" (- serialized_ns parse_started_ns)
+				"sql_bytes" sql_bytes
+				"ast_nodes" (tree_count query)
+				"logical_nodes" (tree_count reordered)
+				"plan_nodes" (tree_count plan)
 				"plan_bytes" (strlen plan_text)
 				"query_blocks" (logical_count (ir_root reordered) (quote query-block))
 				"group_stages" (logical_count (ir_root reordered) (quote group-stage))

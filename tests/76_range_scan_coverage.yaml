@@ -206,10 +206,20 @@ test_cases:
     expect:
       rows: 1
       contains:
+        - "parse_ns"
         - "untangle_ns"
         - "reorder_ns"
+        - "physical_prepare_ns"
+        - "recipe_emit_ns"
         - "lower_ns"
+        - "serialize_ns"
         - "planner_total_ns"
+        - "compile_total_ns"
+        - "measured_total_ns"
+        - "sql_bytes"
+        - "ast_nodes"
+        - "logical_nodes"
+        - "plan_nodes"
         - "plan_bytes"
         - "query_blocks"
         - "group_stages"
