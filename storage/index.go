@@ -352,15 +352,22 @@ func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower [
 	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, countUsage, true, callback)
 }
 
+func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, bool) {
+	if len(lower) == 0 {
+		return true, true
+	}
+	last := cols[len(lower)-1]
+	return last.lowerInclusive, last.upperInclusive
+}
+
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, forceBuild bool, callback func([]uint32) bool) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
-	// extract inclusiveness for the range column (last boundary)
-	lowerIncl, upperIncl := true, true
-	if len(cols) > 0 {
-		lowerIncl = cols[len(cols)-1].lowerInclusive
-		upperIncl = cols[len(cols)-1].upperInclusive
-	}
+	// indexFromBoundaries may shorten lower when more than one range column is
+	// present because an ordered index can use only one range suffix. Read the
+	// flags from that effective last boundary, not from a later condition that
+	// is evaluated only by the scan predicate.
+	lowerIncl, upperIncl := effectiveBoundaryInclusiveness(cols, lower)
 
 	// check if we found conditions
 	if len(lower) > 0 {
