@@ -6494,8 +6494,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lowering_catalog? (lambda (catalog)
 	(match catalog
-		((symbol lowering-catalog) _stages _id_index _carrier_index) true
-		((quote lowering-catalog) _stages _id_index _carrier_index) true
+		((symbol lowering-catalog) _stages _id_index _carrier_index _dependency_graph) true
+		((quote lowering-catalog) _stages _id_index _carrier_index _dependency_graph) true
 		_ false)))
 
 (define lowering_catalog_stages (lambda (catalog)
@@ -6503,6 +6503,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define lowering_catalog_id_index (lambda (catalog) (nth catalog 2)))
 (define lowering_catalog_carrier_index (lambda (catalog) (nth catalog 3)))
+(define lowering_catalog_dependency_graph (lambda (catalog) (nth catalog 4)))
 
 (define make_lowering_catalog (lambda (stages)
 	(begin
@@ -6511,11 +6512,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 		   building and hashing two immutable indexes. */
 		(if (<= (count available_stages) 24)
 			available_stages
-			(list
-				(quote lowering-catalog)
-				available_stages
-				(stage_dependency_id_index available_stages)
-				(stage_dependency_carrier_index available_stages))))))
+			(begin
+				(define id_index (stage_dependency_id_index available_stages))
+				(define carrier_index (stage_dependency_carrier_index available_stages))
+				(list
+					(quote lowering-catalog)
+					available_stages
+					id_index
+					carrier_index
+					(stage_dependency_graph_using_indexes available_stages id_index carrier_index)))))))
 
 (define stage_by_id (lambda (stages stage_id)
 	(if (lowering_catalog? stages)
@@ -6671,7 +6676,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(scalar_aggregate_probe_expr aggregate_stage col)))
 				(coalesceNil
 					(scalar_first_stage_key_lookup_expr stage col)
-					(scalar_first_probe_expr stage col (lowering_catalog_stages stages)))))
+					(scalar_first_probe_expr stage col
+						(stage_dependency_closure_using_graph (stage_dependency_graph stages) stage)))))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
 		(rewrite_scalar_first_probe_expr stages sources default_alias (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
 		(cons head tail) (cons head (map tail (lambda (item)
@@ -6960,16 +6966,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 						'()))
 				'())))))
 
+(define stage_dependency_graph_using_indexes (lambda (stages id_index carrier_index)
+	(reduce stages (lambda (graph stage)
+		(set_assoc graph (logical_stage_key stage)
+			(if (group_stage? stage)
+				(group_stage_direct_dependencies_using_indexes id_index carrier_index stage)
+				'()))) '())))
+
 (define stage_dependency_graph (lambda (stages)
-	(begin
-		(define available_stages (unique_stages_by_id (lowering_catalog_stages stages)))
-		(define id_index (stage_dependency_id_index stages))
-		(define carrier_index (stage_dependency_carrier_index stages))
-		(reduce available_stages (lambda (graph stage)
-			(set_assoc graph (logical_stage_key stage)
-				(if (group_stage? stage)
-					(group_stage_direct_dependencies_using_indexes id_index carrier_index stage)
-					'()))) '()))))
+	(if (lowering_catalog? stages)
+		(lowering_catalog_dependency_graph stages)
+		(begin
+			(define available_stages (unique_stages_by_id (lowering_catalog_stages stages)))
+			(stage_dependency_graph_using_indexes
+				available_stages
+				(stage_dependency_id_index available_stages)
+				(stage_dependency_carrier_index available_stages))))))
 
 (define stage_dependency_closure_visit (lambda (graph stage states)
 	(begin
@@ -7005,9 +7017,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote scalar_first_probe) stage _requested_col)
 		(list stage)
 		((symbol scalar_first_probe) stage _requested_col stages)
-		(merge_unique (list (list stage) stages))
+		(unique_stages_by_id (merge (list (list stage) stages)))
 		((quote scalar_first_probe) stage _requested_col stages)
-		(merge_unique (list (list stage) stages))
+		(unique_stages_by_id (merge (list (list stage) stages)))
 		((symbol scalar_aggregate_probe) stage _requested_col)
 		(list stage)
 		((quote scalar_aggregate_probe) stage _requested_col)
@@ -7017,17 +7029,17 @@ PostgreSQL parsers should both lower to the same combined operators.
 		((quote grouped_scalar_top) stage)
 		(list stage)
 		(cons _head tail)
-		(merge_unique (map tail expr_probe_stages))
+		(unique_stages_by_id (merge (map tail expr_probe_stages)))
 		_ '())))
 
 (define query_block_probe_expr_stages (lambda (block)
-	(merge_unique (list
+	(unique_stages_by_id (merge (list
 		(expr_probe_stages (qb_sources block))
 		(expr_probe_stages (qb_fields block))
 		(expr_probe_stages (qb_where block))
 		(expr_probe_stages (qb_having block))
 		(expr_probe_stages (qb_order block))
-		(expr_probe_stages (qb_hidden block))))))
+		(expr_probe_stages (qb_hidden block)))))))
 
 (define query_block_stage_catalog (lambda (block)
 	(qassoc_get (qb_facts block) (quote stage_catalog) (qb_stages block))))
@@ -7084,8 +7096,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define stages (stage_catalog_with_nested (query_block_stage_catalog block)))
 		(define catalog (make_lowering_catalog stages))
-		(define cataloged_stages (map (qb_stages block) (lambda (stage)
-			(group_stage_with_stage_catalog stage stages))))
+		(define cataloged_stages (if (lowering_catalog? catalog)
+			(qb_stages block)
+			(map (qb_stages block) (lambda (stage)
+				(group_stage_with_stage_catalog stage stages)))))
 		(make_query_block
 			(qb_schema block)
 			(qb_sources block)
@@ -7181,9 +7195,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '())
 					(stage_output_source_ids probe_sources))))))))
 
+(define available_stages_for_block (lambda (stages block)
+	(if (lowering_catalog? stages)
+		(lowering_catalog_stages stages)
+		(unique_stages_by_id (merge (list stages (qb_stages block)))))))
+
 (define query_block_without_stages_after_prepare_using (lambda (stages block)
 	(begin
-		(define available_stages (unique_stages_by_id (merge (list (lowering_catalog_stages stages) (qb_stages block)))))
+		(define available_stages (available_stages_for_block stages block))
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
 		(define rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
 		(make_query_block
@@ -7205,7 +7224,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define query_block_without_stages_after_eager_prepare_using (lambda (stages block)
 	(begin
-		(define available_stages (unique_stages_by_id (merge (list (lowering_catalog_stages stages) (qb_stages block)))))
+		(define available_stages (available_stages_for_block stages block))
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
 		(make_query_block
 			(qb_schema block)
@@ -7223,7 +7242,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define query_block_without_stages_after_eager_prepare_with_constant_scalars_first (lambda (stages block)
 	(begin
-		(define available_stages (unique_stages_by_id (merge (list (lowering_catalog_stages stages) (qb_stages block)))))
+		(define available_stages (available_stages_for_block stages block))
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
 		(make_query_block
 			(qb_schema block)
@@ -7241,7 +7260,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define query_block_with_prepared_sources_using (lambda (stages block)
 	(begin
-		(define available_stages (unique_stages_by_id (merge (list (lowering_catalog_stages stages) (qb_stages block)))))
+		(define available_stages (available_stages_for_block stages block))
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
 		(define scalar_rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
 		(define membership_rewritten (query_block_with_physical_driver_order_membership_using stage_lookup scalar_rewritten))
@@ -7357,11 +7376,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define src (gs_input stage))
 		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
-		(define stage_catalog (unique_stages_by_id
-			(merge (list
-				prepare_catalog
-				(lowering_catalog_stages lookup_stages)
-				(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))
+		/* The indexed catalog resolves global IDs; materialization only needs the
+		stage's dependency closure. */
+		(define stage_catalog (if (lowering_catalog? lookup_stages)
+			prepare_catalog
+			(unique_stages_by_id
+				(merge (list
+					prepare_catalog
+					(lowering_catalog_stages lookup_stages)
+					(qassoc_get (gs_facts stage) (quote stage_catalog) '()))))))
 		(define stage_lookup (if (lowering_catalog? lookup_stages) lookup_stages stage_catalog))
 		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
@@ -7414,17 +7437,17 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(if (not (empty_list? (filter (qb_sources rewritten_src) (lambda (src)
 						(constant_scalar_stage_output_source? constant_reorder_stages src)))))
 						(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages rewritten_src)
-						(query_block_without_stages_after_eager_prepare_using stage_catalog rewritten_src)))
-				(query_block_without_stages_after_eager_prepare_using stage_catalog rewritten_src))
+						(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src)))
+				(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src))
 			rewritten_src))
 		(define direct_nested_stages (if (query_block? rewritten_src)
-			(merge_unique (list
+			(unique_stages_by_id (merge (list
 				(query_block_stages_to_prepare_using prepare_catalog rewritten_src)
 				(available_stage_outputs_from_sources_using prepare_catalog (qb_sources rewritten_src))
 				(available_stage_outputs_from_sources_using prepare_catalog (group_stage_final_extra_source_refs stage))
 				(carrier_stages_from_sources prepare_catalog (qb_sources rewritten_src))
 				(carrier_stages_from_sources prepare_catalog (group_stage_final_extra_source_refs stage))
-				(query_block_probe_expr_stages rewritten_src)))
+				(query_block_probe_expr_stages rewritten_src))))
 			'()))
 		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
 		(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
@@ -7443,7 +7466,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(not (equal? candidate_handle owner_handle))
 								(not (contains? owner_ancestors candidate_handle))))))))))
 		(define nested_prepare (if (query_block? rewritten_src)
-			(lower_unique_stage_prepares_using prepare_catalog stage_catalog nested_stages)
+			(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages)
 			'()))
 		(define nested_materialize (if (query_block? rewritten_src) (lower_stage_materialize_all nested_stages) '()))
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
