@@ -35,15 +35,16 @@ func init() {
 // Implementation uses a flat pairs array plus a lightweight hash index
 // to avoid O(N^2) behavior as it grows.
 type FastDict struct {
-	Pairs []Scmer          // [k0, v0, k1, v1, ...]
-	index map[uint64][]int // hash -> positions (indices into Pairs, even only)
+	Pairs      []Scmer          // [k0, v0, k1, v1, ...]
+	index      map[uint64]int   // hash -> first position in Pairs
+	collisions map[uint64][]int // additional positions, allocated only on hash collision
 }
 
 func NewFastDictValue(capacityPairs int) *FastDict {
 	if capacityPairs < 0 {
 		capacityPairs = 0
 	}
-	return &FastDict{Pairs: make([]Scmer, 0, capacityPairs*2), index: make(map[uint64][]int)}
+	return &FastDict{Pairs: make([]Scmer, 0, capacityPairs*2), index: make(map[uint64]int)}
 }
 
 func (d *FastDict) Iterate(fn func(k, v Scmer) bool) {
@@ -156,10 +157,13 @@ func (d *FastDict) findPos(key Scmer, h uint64) (int, bool) {
 	if d.index == nil {
 		return -1, false
 	}
-	if bucket, ok := d.index[h]; ok {
-		for _, pos := range bucket {
-			if Equal(d.Pairs[pos], key) {
-				return pos, true
+	if pos, ok := d.index[h]; ok {
+		if Equal(d.Pairs[pos], key) {
+			return pos, true
+		}
+		for _, collisionPos := range d.collisions[h] {
+			if Equal(d.Pairs[collisionPos], key) {
+				return collisionPos, true
 			}
 		}
 	}
@@ -177,7 +181,7 @@ func (d *FastDict) Get(key Scmer) (Scmer, bool) {
 // Set sets or merges a value for key. If merge is nil, it overwrites.
 func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 	if d.index == nil {
-		d.index = make(map[uint64][]int)
+		d.index = make(map[uint64]int)
 	}
 	h := HashKey(key)
 	if pos, ok := d.findPos(key, h); ok {
@@ -188,23 +192,36 @@ func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 		}
 		return
 	}
-	// append new
 	pos := len(d.Pairs)
 	d.Pairs = append(d.Pairs, key, value)
-	d.index[h] = append(d.index[h], pos)
+	if _, exists := d.index[h]; exists {
+		if d.collisions == nil {
+			d.collisions = make(map[uint64][]int)
+		}
+		d.collisions[h] = append(d.collisions[h], pos)
+	} else {
+		d.index[h] = pos
+	}
 }
 
 // Copy returns a deep copy of the FastDict (pairs and index).
 func (d *FastDict) Copy() *FastDict {
 	pairs := make([]Scmer, len(d.Pairs))
 	copy(pairs, d.Pairs)
-	idx := make(map[uint64][]int, len(d.index))
-	for h, bucket := range d.index {
-		b := make([]int, len(bucket))
-		copy(b, bucket)
-		idx[h] = b
+	idx := make(map[uint64]int, len(d.index))
+	for h, pos := range d.index {
+		idx[h] = pos
 	}
-	return &FastDict{Pairs: pairs, index: idx}
+	var collisions map[uint64][]int
+	if len(d.collisions) > 0 {
+		collisions = make(map[uint64][]int, len(d.collisions))
+		for h, positions := range d.collisions {
+			copied := make([]int, len(positions))
+			copy(copied, positions)
+			collisions[h] = copied
+		}
+	}
+	return &FastDict{Pairs: pairs, index: idx, collisions: collisions}
 }
 
 func (d *FastDict) ToList() []Scmer { return d.Pairs }
