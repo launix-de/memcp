@@ -263,12 +263,31 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (gs_id (stage_for_carrier_source prepared_lowering_catalog outer_catalog_carrier_source))
 		"outer-catalog-stage")
 		true "indexed physical catalog resolves carrier sources")
+	(define local_catalog_stage (make_group_stage
+		"local-catalog-stage"
+		(list "local" "memcp-tests" "local_source" false nil)
+		'() '(1) '() nil '() '() nil nil '()))
+	(define child_lowering_catalog
+		(lowering_catalog_with_local_stages prepared_lowering_catalog (list local_catalog_stage)))
+	(assert (lowering_catalog? child_lowering_catalog) true
+		"local physical stages create a child lowering catalog")
+	(assert (equal? (gs_id (stage_by_id child_lowering_catalog "local-catalog-stage")) "local-catalog-stage") true
+		"child lowering catalog resolves local stages")
+	(assert (equal? (gs_id (stage_by_id child_lowering_catalog "nested-catalog-stage")) "nested-catalog-stage") true
+		"child lowering catalog inherits root stage lookup")
+	(assert (count (lowering_catalog_stages child_lowering_catalog)) (+ (count indexed_catalog_stages) 1)
+		"child lowering catalog exposes local and inherited stages without changing the root")
 	(assert (equal?
 		(stage_dependency_graph indexed_catalog_stages)
 		(stage_dependency_graph prepared_lowering_catalog))
 		true "indexed physical catalog preserves the dependency graph")
 	(assert (count (qassoc_get (gs_facts (car (qb_stages prepared_catalog_root))) (quote stage_catalog) '())) 2
-		"direct physical stages share the complete prepared catalog")
+		"small physical stages retain the cache-friendly catalog list")
+	(define indexed_catalog_stage (group_stage_with_lowering_catalog outer_catalog_stage prepared_lowering_catalog))
+	(assert (empty_list? (qassoc_get (gs_facts indexed_catalog_stage) (quote stage_catalog) '())) true
+		"indexed physical stages do not copy the complete prepared catalog into their facts")
+	(assert (lowering_catalog? (qassoc_get (gs_facts indexed_catalog_stage) (quote lowering_catalog) nil)) true
+		"indexed physical stages retain only the lowering catalog handle")
 	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil)))
 	(define btw_inner_sources (list (list "i" "memcp-tests" "inner_t" false nil)))
 	(define btw_outer_id (list 'get_column "o" false "id" false))
