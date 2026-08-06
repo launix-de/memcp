@@ -1624,7 +1624,39 @@ test_cases:
           "ref:canView": false
           global_can_view: false
 
+
+  - name: "Nested scalar physical lookup resolves attached presence stages"
+    fail_comment: "physical lookup must resolve attached catalogs without expanding the prepare closure"
+    max_plan_size: 100000
+    setup:
+      - sql: "DROP TABLE IF EXISTS assignment_x"
+      - sql: "DROP TABLE IF EXISTS item_x"
+      - sql: "DROP TABLE IF EXISTS tenant_x"
+      - sql: "DROP TABLE IF EXISTS location_x"
+      - sql: "DROP TABLE IF EXISTS file_x"
+      - sql: "CREATE TABLE assignment_x (ID INT PRIMARY KEY, actor INT, tenant_x INT, location_x INT)"
+      - sql: "CREATE TABLE item_x (ID INT PRIMARY KEY, file INT, tenant_x INT, location_x INT)"
+      - sql: "CREATE TABLE tenant_x (ID INT PRIMARY KEY, name VARCHAR(64))"
+      - sql: "CREATE TABLE location_x (ID INT PRIMARY KEY, tenant_x INT)"
+      - sql: "CREATE TABLE file_x (ID INT PRIMARY KEY, filename VARCHAR(64), search VARCHAR(64))"
+    sql: |
+      EXPLAIN SELECT `item_x`.`ID`, `ref:tenant`.`tenant:canView` FROM `item_x` `item_x`
+      LEFT JOIN (SELECT `ID` AS `tenant:ID`, `tenant_x`.`name` AS `tenant:description`, (((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ('1') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `assignment_x` `tenant_acl` WHERE `tenant_acl`.`tenant_x` = `tenant_x`.`ID` AND ((`tenant_acl`.`actor`) = (999)) LIMIT 1) END)) AS `tenant:canView`, ((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ('1') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `assignment_x` `tenant_acl` WHERE `tenant_acl`.`tenant_x` = `tenant_x`.`ID` AND ((`tenant_acl`.`actor`) = (999)) LIMIT 1) END) AS `tenant:tiar:tenant:view` FROM `tenant_x`) `ref:tenant` ON `ref:tenant`.`tenant:ID` = `tenant_x`
+      WHERE ((((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1)))) OR ('1')) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1)))) OR ('1')) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ('1') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `assignment_x` `location_acl` WHERE TRUE AND (((COALESCE(`location_acl`.`location_x`, `current_location`.`ID`)) = (`current_location`.`ID`)) AND ((`location_acl`.`actor`) = (999))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ((NOT ('1')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_deny` WHERE `global_deny`.`actor` = 999 AND ((`global_deny`.`tenant_x`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `assignment_x` `global_allow` WHERE `global_allow`.`actor` = 999 AND ((`global_allow`.`tenant_x`) IS NULL) LIMIT 1))) OR ('1') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `assignment_x` `tenant_acl` WHERE `tenant_acl`.`tenant_x` = `parent_tenant`.`ID` AND ((`tenant_acl`.`actor`) = (999)) LIMIT 1) END)) FROM `tenant_x` `parent_tenant` WHERE `parent_tenant`.`ID` = `current_location`.`tenant_x` LIMIT 1), FALSE))) FROM `location_x` `current_location` WHERE `current_location`.`ID` = `item_x`.`location_x` LIMIT 1), FALSE))))
+       AND item_x.file IN (SELECT ID FROM file_x WHERE filename LIKE '%x%' UNION SELECT ID FROM file_x WHERE search LIKE '%x%') ORDER BY item_x.ID LIMIT 10
+    expect:
+      rows: 1
+      contains:
+        - "createtable"
+      not_contains:
+        - "unknown stage"
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS assignment_x"
+  - sql: "DROP TABLE IF EXISTS item_x"
+  - sql: "DROP TABLE IF EXISTS tenant_x"
+  - sql: "DROP TABLE IF EXISTS location_x"
+  - sql: "DROP TABLE IF EXISTS file_x"
   - sql: "DROP TABLE IF EXISTS membership_assignment"
   - sql: "DROP TABLE IF EXISTS membership_item"
   - sql: "DROP TABLE IF EXISTS in_ref_acl"

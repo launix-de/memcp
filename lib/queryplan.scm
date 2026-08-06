@@ -4595,7 +4595,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define rows_plan (lower_query_block_as_dataset_rows prepared_input (list "__value" value_expr)))
 		(define prepare_exprs (merge (list
 			(map nested_stages (lambda (nested_stage)
-				(lower_stage_prepare_using nested_stages nested_stage)))
+				(lower_stage_prepare_using nested_stages nested_stages nested_stage)))
 			(lower_stage_materialize_all nested_stages))))
 		(define probe_expr (list (quote scan)
 			'(session "__memcp_tx")
@@ -6418,9 +6418,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(if (not (stage_output_relation? relation))
 			src
 			(begin
-				(define stage (stage_by_id stages (stage_output_relation_id relation)))
+				(define id (stage_output_relation_id relation))
+				(define stage (stage_by_id stages id))
 				(if (nil? stage)
-					(neumann_fail "build_queryplan" (concat "physicalize stage-output source references unknown stage " (stage_output_relation_id relation)))
+					(neumann_fail "build_queryplan" (concat "physicalize stage-output source references unknown stage " id))
 					true)
 				(source_with_schema_relation
 					src
@@ -6438,12 +6439,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(if (not (stage_output_relation? relation))
 				nil
 				(begin
-					(define stage (stage_by_id stages (stage_output_relation_id relation)))
+					(define id (stage_output_relation_id relation))
+					(define stage (stage_by_id stages id))
 					(if (nil? stage)
-						(neumann_fail "build_queryplan" (concat "dependency stage-output source references unknown stage " (stage_output_relation_id relation)))
+						(neumann_fail "build_queryplan" (concat "dependency stage-output source references unknown stage " id))
 						stage)))
 			_ nil)))
 		(lambda (stage) (not (nil? stage))))))))
+
+(define available_stage_outputs_from_sources_using (lambda (stages sources)
+	(filter (map (coalesceNil sources '()) (lambda (src)
+		(if (stage_output_relation? (source_relation src))
+			(stage_by_id stages (stage_output_relation_id (source_relation src)))
+			nil)))
+		(lambda (stage) (not (nil? stage))))))
 
 (define source_stage_output_stage (lambda (stages src)
 	(if (not (stage_output_relation? (source_relation src)))
@@ -7184,12 +7193,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 				acc
 				(list (merge kept (list stage)) (merge seen (list identity)))))) (list '() '())) 0)))
 
-(define lower_group_stage_prepare_using (lambda (all_stages stage)
+(define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage)
 	(begin
 		(define src (gs_input stage))
+		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
 		(define stage_catalog (stage_catalog_with_nested
 			(merge (list
-				all_stages
+				prepare_catalog
+				lookup_stages
 				(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))
 		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
@@ -7244,16 +7255,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 			rewritten_src))
 		(define direct_nested_stages (if (query_block? rewritten_src)
 			(merge_unique (list
-				(query_block_stages_to_prepare_using stage_catalog rewritten_src)
-				(stage_outputs_from_sources_using stage_catalog (qb_sources rewritten_src))
-				(stage_outputs_from_sources_using stage_catalog (group_stage_final_extra_source_refs stage))
-				(carrier_stages_from_sources stage_catalog (qb_sources rewritten_src))
-				(carrier_stages_from_sources stage_catalog (group_stage_final_extra_source_refs stage))
+				(query_block_stages_to_prepare_using prepare_catalog rewritten_src)
+				(available_stage_outputs_from_sources_using prepare_catalog (qb_sources rewritten_src))
+				(available_stage_outputs_from_sources_using prepare_catalog (group_stage_final_extra_source_refs stage))
+				(carrier_stages_from_sources prepare_catalog (qb_sources rewritten_src))
+				(carrier_stages_from_sources prepare_catalog (group_stage_final_extra_source_refs stage))
 				(query_block_probe_expr_stages rewritten_src)))
 			'()))
 		(define nested_stages direct_nested_stages)
 		(define nested_prepare (if (query_block? rewritten_src) (map nested_stages (lambda (nested_stage)
-			(lower_stage_prepare_using stage_catalog nested_stage))) '()))
+			(lower_stage_prepare_using prepare_catalog stage_catalog nested_stage))) '()))
 		(define nested_materialize (if (query_block? rewritten_src) (lower_stage_materialize_all nested_stages) '()))
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
 			nil
@@ -7390,17 +7401,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(filter (map (coalesceNil stages '()) lower_stage_materialize)
 		(lambda (plan) (not (nil? plan))))))
 
-(define lower_stage_prepare_using (lambda (all_stages stage)
+(define lower_stage_prepare_using (lambda (all_stages lookup_stages stage)
 	(if (group_stage? stage)
-		(lower_group_stage_prepare_using all_stages stage)
+		(lower_group_stage_prepare_using all_stages lookup_stages stage)
 		(if (orc_stage? stage)
 			(lower_orc_stage_prepare stage)
 			(if (window_stage? stage)
 				(lower_window_stage_prepare stage)
 				(neumann_fail "build_queryplan" "unknown logical stage"))))))
-
 (define lower_stage_prepare (lambda (stage)
-	(lower_stage_prepare_using (list stage) stage)))
+	(lower_stage_prepare_using (list stage) (list stage) stage)))
 
 (define nested_stage_catalog (lambda (stage)
 	(begin
@@ -7448,7 +7458,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(nested_stage_catalog stage)
 				(if (query_block? src) (query_block_stage_catalog src) '())))))
 		(list (quote begin)
-			(lower_group_stage_prepare_using stage_catalog stage)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
 			(lower_query_block_core_with_lazy_prepares stage_catalog
 				(group_stage_final_block stage (group_stage_final_extra_sources_using stage_catalog stage)))))))
 
@@ -7791,9 +7801,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(map (qb_stages rewritten) (lambda (stage)
 							(lower_stage_prepare_using
 								(stage_dependency_closure_using_graph dependency_graph stage)
+								stage_catalog
 								stage)))
 						(lower_stage_materialize_all (qb_stages rewritten))
-						(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage))
+						(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) (cons main_stage stage_catalog) main_stage))
 						(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources)))))))))))
 
 (define query_block_without_stages (lambda (block)
@@ -7963,6 +7974,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 									(map eager_stages (lambda (stage)
 										(lower_stage_prepare_using
 											(stage_dependency_closure_using_graph dependency_graph stage)
+											stage_catalog
 											stage)))
 									(list (lower_query_block_core core_block))))))))))))))
 
@@ -8000,7 +8012,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(list (list (quote context) "session") (stage_prepare_key stage))
 		(quoted_runtime_list '()))))
 
-(define lazy_stage_prepare_binding (lambda (dependency_graph stage)
+(define lazy_stage_prepare_binding (lambda (dependency_graph stage stage_catalog)
 	(begin
 		(define dependencies (stage_dependency_closure_using_graph dependency_graph stage))
 		(list
@@ -8010,14 +8022,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list (quote lambda)
 					'()
 					(list (quote !begin)
-						(lower_stage_prepare_using dependencies stage)
+						(lower_stage_prepare_using dependencies stage_catalog stage)
 						true)))))))
 
 (define lazy_stage_prepare_bindings (lambda (stages selected)
 	(begin
 		(define dependency_graph (stage_dependency_graph stages))
 		(map (coalesceNil selected '()) (lambda (stage)
-			(lazy_stage_prepare_binding dependency_graph stage))))))
+			(lazy_stage_prepare_binding dependency_graph stage stages))))))
 
 (define lower_query_block_core_with_lazy_prepares (lambda (stage_catalog block)
 	(begin
@@ -8951,7 +8963,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 										(not (stage_id_in? stage prelimit_stage_ids)))))
 									(define project_prepare_expr (cons (quote !begin)
 										(map project_stages (lambda (stage)
-										(lower_stage_prepare_using stage_catalog stage)))))
+										(lower_stage_prepare_using stage_catalog stage_catalog stage)))))
 									(define project_row_expr
 										(lower_join_result_row_assoc scan_sources first_alias fields order_items))
 									(define project_rows_expr (replace_lowered_driver_symbols_with_row first_alias driver_cols
@@ -9168,7 +9180,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(cons (quote begin)
 			(merge (list
 				(map (qb_stages block) (lambda (stage)
-					(lower_stage_prepare_using (qb_stages block) stage)))
+					(lower_stage_prepare_using (qb_stages block) (qb_stages block) stage)))
 				(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using (qb_stages block) block) target_schema target_tbl))))))))
 
 (define lower_dml_union_block_with_stages (lambda (block target_schema target_tbl)
@@ -9281,7 +9293,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define stage (make_group_stage_for_block branch src))
 				(define final_block (group_stage_final_block stage (group_stage_final_extra_sources stage)))
 				(if (union_ordered_branch_supported? final_block)
-					(list (list (lower_group_stage_prepare_using (list stage) stage)) final_block)
+					(list (list (lower_group_stage_prepare_using (list stage) (list stage) stage)) final_block)
 					nil))))))
 
 (define union_ordered_branch_stream_plan (lambda (branch)
