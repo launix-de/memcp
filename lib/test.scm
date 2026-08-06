@@ -1507,6 +1507,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (> (strlen (serialize (_i ser_opt_lam))) 5) true "serialize optimized lambda with NumVars")
 	/* serialize roundtrip: eval serialized code */
 	(assert (equal? (eval (scheme (serialize '(+ 1 2)) "ser-test.scm")) 3) true "serialize roundtrip eval")
+	(define scmer_json_roundtrip '('query-block "db" '(list) nil))
+	(assert (equal? (json_decode_scmer (json_encode scmer_json_roundtrip)) scmer_json_roundtrip) true "Scmer JSON roundtrip preserves symbols and lists")
 
 	/* String() coverage (printer.go:String) */
 	(assert (equal? (string '()) "()") true "string of empty list")

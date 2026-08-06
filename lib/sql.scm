@@ -20,6 +20,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-builtins.scm")
 (import "sql-metadata.scm")
 (import "queryplan.scm")
+(import "sql-views.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
@@ -97,7 +98,7 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 			(define cache_payload (if (not (equal? bindings '()))
 				(serialize (list parse_query bindings))
 				parse_query))
-			(define cache_key (concat username ":" schema ":" (fnv_hash cache_payload)))
+			(define cache_key (concat username ":" schema ":" (sql_view_query_generation parse_query) ":" (fnv_hash cache_payload)))
 			(define compile_diagnostic (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
 				_ false))
@@ -231,6 +232,22 @@ qry    — query text (pass "" when unknown) */
 	(print "creating table system.access")
 	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
+
+/* Logical SQL views. Both the original SELECT and neutral parser IR are kept;
+the latter is expanded before logical planning and never materialized. */
+(if (has? (show "system") "views") true (begin
+	(print "creating table system.views")
+	(eval (parse_sql "system" "CREATE TABLE `views`(`database` text, `name` text, `dialect` text, `sql` text, `ir` text) ENGINE=SAFE" (lambda (schema tblname write) true)))
+))
+
+(try (lambda () (begin
+	(if (has? (show "system") "views")
+		(createkey (table "system" "views") "uniq_database_name" true '("database" "name"))
+		true)
+)) (lambda (e) true))
+
+(sql_view_catalog_set_count
+	(scan nil (table "system" "views") '() (lambda () true) '() (lambda () 1) + 0))
 
 /* migration: ensure unique (username, database) constraint on system.access */
 (try (lambda () (begin

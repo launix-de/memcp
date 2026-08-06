@@ -650,7 +650,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			'('begin
 				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
-				(build_queryplan_term inner)
+				(build_queryplan_term (sql_expand_views inner policy))
 			)
 	)))
 
@@ -659,6 +659,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (atom "CASCADE" true) "cascade")
 		(parser (atom "SET NULL" true) "set null")
 	)))
+
+	(define psql_create_view (parser '(
+		(atom "CREATE" true)
+		(define replace (? (atom "OR" true) (atom "REPLACE" true)))
+		(atom "VIEW" true)
+		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
+		(define target (or
+			(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
+			(parser (define id psql_identifier) '(nil id))))
+		(define aliases (? (parser '("(" (define columns (+ psql_identifier ",")) ")") columns)))
+		(atom "AS" true)
+		(define captured (capture psql_select))
+	) (match target '(schema2 id) (begin
+			(define view_schema (coalesce schema2 schema))
+			(if policy (policy view_schema id true) true)
+			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
+			(list (quote create_sql_view)
+				(list (quote session) "__memcp_tx")
+				view_schema id "psql" (nth captured 0) (list (quote quote) query)
+				(if replace "replace" (if ifnotexists "ignore" "error")))))))
 
 	(define psql_create_table (parser '(
 		(atom "CREATE" true)
@@ -764,13 +784,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(alter auto_increment), not be wrapped as a SELECT projection. */
 		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
-		(parser (define query psql_select) (build_queryplan_term query))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir query))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile query parse_started_ns (strlen s)))
-		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		(parser (define query psql_select) (build_queryplan_term (sql_expand_views query policy)))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder (sql_expand_views query policy)))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s)))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term (sql_expand_views query policy)) (settings "ExplainWidth")))))
 		psql_insert_into
 		psql_insert_select
+		psql_create_view
 		psql_create_table
 		(parser '((atom "ALTER" true) (atom "TABLE" true) (? (atom "ONLY" true))
 			(define target (or
@@ -1011,6 +1032,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id (if if_exists true false))))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
+		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
+			(define target (or
+				(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
+				(parser (define id psql_identifier) '(nil id)))))
+			(match target '(schema2 id) (begin
+				(define view_schema (coalesce schema2 schema))
+				(if policy (policy view_schema id true) true)
+				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) (or "=" (atom ":=" true)) (define value (or
 			(parser (atom "content" true) "content") /* quirks for SET xmloption = content */
