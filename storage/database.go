@@ -385,6 +385,7 @@ func (db *database) ensureLoaded() {
 		} else {
 			t.ShardMode = ShardModeFree
 		}
+		t.publishShowColumnsSnapshot()
 	}
 	// FK enforcement triggers are serializable Procs and persist with the table JSON.
 	// No re-installation needed on load.
@@ -679,6 +680,7 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 				atomic.StoreUint64(&t.Columns[ci].DistinctEstimate, distinctSum)
 				atomic.StoreUint64(&t.Columns[ci].RowEstimate, rowEst)
 			}
+			t.publishShowColumnsSnapshot()
 
 			// Collect replaced shards for deferred cleanup (see comment above).
 			if len(replaced) > 0 {
@@ -1000,6 +1002,7 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	t.Auto_increment = 1
+	t.publishShowColumnsSnapshot()
 	if existing := db.tables.Set(t); existing != nil {
 		panic("Table " + name + " already exists")
 	}
