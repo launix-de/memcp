@@ -2206,6 +2206,34 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "resolve_column_name",
+		Desc: "resolve a physical column name from immutable table metadata",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewNil()
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				return scm.NewNil()
+			}
+			name, ok := t.ResolveColumnName(scm.String(a[2]), scm.ToBool(a[3]))
+			if !ok {
+				return scm.NewNil()
+			}
+			return scm.NewString(name)
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema", ParamDesc: "database name"},
+				{Kind: "string", ParamName: "table", ParamDesc: "table name"},
+				{Kind: "string", ParamName: "column", ParamDesc: "column name"},
+				{Kind: "bool", ParamName: "ignorecase", ParamDesc: "whether identifier case is ignored"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "string|nil", Transfer: false},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "show",
 		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
 		Fn: func(a ...scm.Scmer) scm.Scmer {

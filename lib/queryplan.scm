@@ -4388,22 +4388,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 		col
 		(if (not (source_is_base_table? src))
 			nil
-			(begin
-				(define cols (get_schema (source_schema src) (source_relation src)))
-				(define exact (reduce cols (lambda (found row)
-					(if (not (nil? found))
-						found
-						(if (equal? (row "Field") col) (row "Field") nil)))
-					nil))
-				(if (not (nil? exact))
-					exact
-					(if col_ignorecase
-						(reduce cols (lambda (found row)
-							(if (not (nil? found))
-								found
-								(if (equal?? (row "Field") col) (row "Field") nil)))
-							nil)
-						nil)))))))
+			(resolve_column_name
+				(source_schema src)
+				(source_relation src)
+				col
+				col_ignorecase)))))
 
 (define source_has_column? (lambda (src col col_ignorecase)
 	(not (nil? (source_column_name src col col_ignorecase)))))

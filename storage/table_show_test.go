@@ -96,6 +96,38 @@ func TestShowColumnsRefreshesChangedStatistics(t *testing.T) {
 	}
 }
 
+func TestResolveColumnNameUsesSnapshotIndex(t *testing.T) {
+	tbl := showColumnsTestTable(3)
+	tbl.Columns[1].Name = "MixedCase"
+	tbl.Columns[2].Name = "Σ"
+	tbl.publishShowColumnsSnapshot()
+
+	if got, ok := tbl.ResolveColumnName("MixedCase", false); !ok || got != "MixedCase" {
+		t.Fatalf("exact lookup = %q, %t; want MixedCase, true", got, ok)
+	}
+	if _, ok := tbl.ResolveColumnName("mixedcase", false); ok {
+		t.Fatal("case-sensitive lookup accepted different case")
+	}
+	if got, ok := tbl.ResolveColumnName("mixedcase", true); !ok || got != "MixedCase" {
+		t.Fatalf("case-insensitive lookup = %q, %t; want MixedCase, true", got, ok)
+	}
+	if _, ok := tbl.ResolveColumnName("missing", true); ok {
+		t.Fatal("missing column resolved")
+	}
+	if got, ok := tbl.ResolveColumnName("ς", true); !ok || got != "Σ" {
+		t.Fatalf("Unicode fold lookup = %q, %t; want Σ, true", got, ok)
+	}
+
+	tbl.Columns[1].Name = "Renamed"
+	tbl.invalidateShowColumnsSnapshot()
+	if _, ok := tbl.ResolveColumnName("MixedCase", false); ok {
+		t.Fatal("invalidated column name remained visible")
+	}
+	if got, ok := tbl.ResolveColumnName("Renamed", false); !ok || got != "Renamed" {
+		t.Fatalf("replacement lookup = %q, %t; want Renamed, true", got, ok)
+	}
+}
+
 func BenchmarkShowColumnsCached(b *testing.B) {
 	tbl := showColumnsTestTable(64)
 	_ = tbl.ShowColumns()
@@ -103,5 +135,15 @@ func BenchmarkShowColumnsCached(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		_ = tbl.ShowColumns()
+	}
+}
+
+func BenchmarkResolveColumnNameCached(b *testing.B) {
+	tbl := showColumnsTestTable(256)
+	tbl.publishColumnNamesSnapshot()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, _ = tbl.ResolveColumnName("column_255", false)
 	}
 }
