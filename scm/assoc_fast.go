@@ -184,10 +184,6 @@ func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 		d.index = make(map[uint64]int)
 	}
 	h := HashKey(key)
-	d.setHashed(key, value, merge, h)
-}
-
-func (d *FastDict) setHashed(key, value Scmer, merge func(oldV, newV Scmer) Scmer, h uint64) {
 	if pos, ok := d.findPos(key, h); ok {
 		if merge != nil {
 			d.Pairs[pos+1] = merge(d.Pairs[pos+1], value)

@@ -42,12 +42,15 @@ func benchmarkFastDict(size int) Scmer {
 }
 
 func TestFastDictHashCollisionFallback(t *testing.T) {
-	dict := NewFastDictValue(3)
+	first := NewString("first")
+	second := NewString("second")
+	third := NewString("third")
 	forcedHash := uint64(42)
-	dict.setHashed(NewString("first"), NewInt(1), nil, forcedHash)
-	dict.setHashed(NewString("second"), NewInt(2), nil, forcedHash)
-	dict.setHashed(NewString("third"), NewInt(3), nil, forcedHash)
-	dict.setHashed(NewString("second"), NewInt(20), nil, forcedHash)
+	dict := &FastDict{
+		Pairs:      []Scmer{first, NewInt(1), second, NewInt(20), third, NewInt(3)},
+		index:      map[uint64]int{forcedHash: 0},
+		collisions: map[uint64][]int{forcedHash: {2, 4}},
+	}
 
 	for key, want := range map[string]int64{"first": 1, "second": 20, "third": 3} {
 		got, ok := dict.findPos(NewString(key), forcedHash)
