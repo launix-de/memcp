@@ -1,0 +1,69 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+# Structurally different nested projections must compile with linear growth.
+
+metadata:
+  version: "1.0"
+  description: "Diverse nested dependent projections stay within the compile budget"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS diverse_member"
+  - sql: "DROP TABLE IF EXISTS diverse_item"
+  - sql: "DROP TABLE IF EXISTS diverse_parent"
+  - sql: "CREATE TABLE diverse_parent (id INT PRIMARY KEY, owner_id INT, team_id INT)"
+  - sql: "CREATE TABLE diverse_item (id INT PRIMARY KEY, parent_id INT)"
+  - sql: "CREATE TABLE diverse_member (team_id INT, member_id INT)"
+  - sql: "INSERT INTO diverse_parent (id, owner_id, team_id) VALUES (1, 9, 7), (2, 2, 8)"
+  - sql: "INSERT INTO diverse_item (id, parent_id) VALUES (1, 1), (2, 2)"
+  - sql: "INSERT INTO diverse_member (team_id, member_id) VALUES (7, 1)"
+
+test_cases:
+  - name: "Nested scalar and presence probes preserve aggregate results"
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM diverse_item item_a WHERE item_a.id = 1 AND COALESCE((SELECT (parent_a.owner_id = 1 OR EXISTS (SELECT TRUE FROM diverse_member member_a WHERE member_a.team_id = parent_a.team_id AND member_a.member_id = 1 LIMIT 1)) FROM diverse_parent parent_a WHERE parent_a.id = item_a.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_a,
+        (SELECT SUM(1) FROM diverse_item item_b WHERE item_b.id = 2 AND COALESCE((SELECT (parent_b.owner_id = 2 OR EXISTS (SELECT TRUE FROM diverse_member member_b WHERE member_b.team_id = parent_b.team_id AND member_b.member_id = 2 LIMIT 1)) FROM diverse_parent parent_b WHERE parent_b.id = item_b.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_b
+    expect:
+      rows: 1
+      data:
+        - metric_a: 1
+          metric_b: 1
+
+  - name: "Structurally diverse nested projections compile within one second"
+    max_time: 1.0
+    sql: |
+      EXPLAIN COMPILE SELECT
+        (SELECT SUM(1) FROM diverse_item item_001 WHERE item_001.id = 1 AND COALESCE((SELECT (parent_001.owner_id = 1 OR EXISTS (SELECT TRUE FROM diverse_member member_001 WHERE member_001.team_id = parent_001.team_id AND member_001.member_id = 1 LIMIT 1)) FROM diverse_parent parent_001 WHERE parent_001.id = item_001.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_001,
+        (SELECT SUM(1) FROM diverse_item item_002 WHERE item_002.id = 2 AND COALESCE((SELECT (parent_002.owner_id = 2 OR EXISTS (SELECT TRUE FROM diverse_member member_002 WHERE member_002.team_id = parent_002.team_id AND member_002.member_id = 2 LIMIT 1)) FROM diverse_parent parent_002 WHERE parent_002.id = item_002.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_002,
+        (SELECT SUM(1) FROM diverse_item item_003 WHERE item_003.id = 3 AND COALESCE((SELECT (parent_003.owner_id = 3 OR EXISTS (SELECT TRUE FROM diverse_member member_003 WHERE member_003.team_id = parent_003.team_id AND member_003.member_id = 3 LIMIT 1)) FROM diverse_parent parent_003 WHERE parent_003.id = item_003.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_003,
+        (SELECT SUM(1) FROM diverse_item item_004 WHERE item_004.id = 4 AND COALESCE((SELECT (parent_004.owner_id = 4 OR EXISTS (SELECT TRUE FROM diverse_member member_004 WHERE member_004.team_id = parent_004.team_id AND member_004.member_id = 4 LIMIT 1)) FROM diverse_parent parent_004 WHERE parent_004.id = item_004.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_004,
+        (SELECT SUM(1) FROM diverse_item item_005 WHERE item_005.id = 5 AND COALESCE((SELECT (parent_005.owner_id = 5 OR EXISTS (SELECT TRUE FROM diverse_member member_005 WHERE member_005.team_id = parent_005.team_id AND member_005.member_id = 5 LIMIT 1)) FROM diverse_parent parent_005 WHERE parent_005.id = item_005.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_005,
+        (SELECT SUM(1) FROM diverse_item item_006 WHERE item_006.id = 6 AND COALESCE((SELECT (parent_006.owner_id = 6 OR EXISTS (SELECT TRUE FROM diverse_member member_006 WHERE member_006.team_id = parent_006.team_id AND member_006.member_id = 6 LIMIT 1)) FROM diverse_parent parent_006 WHERE parent_006.id = item_006.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_006,
+        (SELECT SUM(1) FROM diverse_item item_007 WHERE item_007.id = 7 AND COALESCE((SELECT (parent_007.owner_id = 7 OR EXISTS (SELECT TRUE FROM diverse_member member_007 WHERE member_007.team_id = parent_007.team_id AND member_007.member_id = 7 LIMIT 1)) FROM diverse_parent parent_007 WHERE parent_007.id = item_007.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_007,
+        (SELECT SUM(1) FROM diverse_item item_008 WHERE item_008.id = 8 AND COALESCE((SELECT (parent_008.owner_id = 8 OR EXISTS (SELECT TRUE FROM diverse_member member_008 WHERE member_008.team_id = parent_008.team_id AND member_008.member_id = 8 LIMIT 1)) FROM diverse_parent parent_008 WHERE parent_008.id = item_008.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_008,
+        (SELECT SUM(1) FROM diverse_item item_009 WHERE item_009.id = 9 AND COALESCE((SELECT (parent_009.owner_id = 9 OR EXISTS (SELECT TRUE FROM diverse_member member_009 WHERE member_009.team_id = parent_009.team_id AND member_009.member_id = 9 LIMIT 1)) FROM diverse_parent parent_009 WHERE parent_009.id = item_009.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_009,
+        (SELECT SUM(1) FROM diverse_item item_010 WHERE item_010.id = 10 AND COALESCE((SELECT (parent_010.owner_id = 10 OR EXISTS (SELECT TRUE FROM diverse_member member_010 WHERE member_010.team_id = parent_010.team_id AND member_010.member_id = 10 LIMIT 1)) FROM diverse_parent parent_010 WHERE parent_010.id = item_010.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_010,
+        (SELECT SUM(1) FROM diverse_item item_011 WHERE item_011.id = 11 AND COALESCE((SELECT (parent_011.owner_id = 11 OR EXISTS (SELECT TRUE FROM diverse_member member_011 WHERE member_011.team_id = parent_011.team_id AND member_011.member_id = 11 LIMIT 1)) FROM diverse_parent parent_011 WHERE parent_011.id = item_011.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_011,
+        (SELECT SUM(1) FROM diverse_item item_012 WHERE item_012.id = 12 AND COALESCE((SELECT (parent_012.owner_id = 12 OR EXISTS (SELECT TRUE FROM diverse_member member_012 WHERE member_012.team_id = parent_012.team_id AND member_012.member_id = 12 LIMIT 1)) FROM diverse_parent parent_012 WHERE parent_012.id = item_012.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_012,
+        (SELECT SUM(1) FROM diverse_item item_013 WHERE item_013.id = 13 AND COALESCE((SELECT (parent_013.owner_id = 13 OR EXISTS (SELECT TRUE FROM diverse_member member_013 WHERE member_013.team_id = parent_013.team_id AND member_013.member_id = 13 LIMIT 1)) FROM diverse_parent parent_013 WHERE parent_013.id = item_013.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_013,
+        (SELECT SUM(1) FROM diverse_item item_014 WHERE item_014.id = 14 AND COALESCE((SELECT (parent_014.owner_id = 14 OR EXISTS (SELECT TRUE FROM diverse_member member_014 WHERE member_014.team_id = parent_014.team_id AND member_014.member_id = 14 LIMIT 1)) FROM diverse_parent parent_014 WHERE parent_014.id = item_014.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_014,
+        (SELECT SUM(1) FROM diverse_item item_015 WHERE item_015.id = 15 AND COALESCE((SELECT (parent_015.owner_id = 15 OR EXISTS (SELECT TRUE FROM diverse_member member_015 WHERE member_015.team_id = parent_015.team_id AND member_015.member_id = 15 LIMIT 1)) FROM diverse_parent parent_015 WHERE parent_015.id = item_015.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_015,
+        (SELECT SUM(1) FROM diverse_item item_016 WHERE item_016.id = 16 AND COALESCE((SELECT (parent_016.owner_id = 16 OR EXISTS (SELECT TRUE FROM diverse_member member_016 WHERE member_016.team_id = parent_016.team_id AND member_016.member_id = 16 LIMIT 1)) FROM diverse_parent parent_016 WHERE parent_016.id = item_016.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_016,
+        (SELECT SUM(1) FROM diverse_item item_017 WHERE item_017.id = 17 AND COALESCE((SELECT (parent_017.owner_id = 17 OR EXISTS (SELECT TRUE FROM diverse_member member_017 WHERE member_017.team_id = parent_017.team_id AND member_017.member_id = 17 LIMIT 1)) FROM diverse_parent parent_017 WHERE parent_017.id = item_017.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_017,
+        (SELECT SUM(1) FROM diverse_item item_018 WHERE item_018.id = 18 AND COALESCE((SELECT (parent_018.owner_id = 18 OR EXISTS (SELECT TRUE FROM diverse_member member_018 WHERE member_018.team_id = parent_018.team_id AND member_018.member_id = 18 LIMIT 1)) FROM diverse_parent parent_018 WHERE parent_018.id = item_018.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_018,
+        (SELECT SUM(1) FROM diverse_item item_019 WHERE item_019.id = 19 AND COALESCE((SELECT (parent_019.owner_id = 19 OR EXISTS (SELECT TRUE FROM diverse_member member_019 WHERE member_019.team_id = parent_019.team_id AND member_019.member_id = 19 LIMIT 1)) FROM diverse_parent parent_019 WHERE parent_019.id = item_019.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_019,
+        (SELECT SUM(1) FROM diverse_item item_020 WHERE item_020.id = 20 AND COALESCE((SELECT (parent_020.owner_id = 20 OR EXISTS (SELECT TRUE FROM diverse_member member_020 WHERE member_020.team_id = parent_020.team_id AND member_020.member_id = 20 LIMIT 1)) FROM diverse_parent parent_020 WHERE parent_020.id = item_020.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_020,
+        (SELECT SUM(1) FROM diverse_item item_021 WHERE item_021.id = 21 AND COALESCE((SELECT (parent_021.owner_id = 21 OR EXISTS (SELECT TRUE FROM diverse_member member_021 WHERE member_021.team_id = parent_021.team_id AND member_021.member_id = 21 LIMIT 1)) FROM diverse_parent parent_021 WHERE parent_021.id = item_021.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_021,
+        (SELECT SUM(1) FROM diverse_item item_022 WHERE item_022.id = 22 AND COALESCE((SELECT (parent_022.owner_id = 22 OR EXISTS (SELECT TRUE FROM diverse_member member_022 WHERE member_022.team_id = parent_022.team_id AND member_022.member_id = 22 LIMIT 1)) FROM diverse_parent parent_022 WHERE parent_022.id = item_022.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_022,
+        (SELECT SUM(1) FROM diverse_item item_023 WHERE item_023.id = 23 AND COALESCE((SELECT (parent_023.owner_id = 23 OR EXISTS (SELECT TRUE FROM diverse_member member_023 WHERE member_023.team_id = parent_023.team_id AND member_023.member_id = 23 LIMIT 1)) FROM diverse_parent parent_023 WHERE parent_023.id = item_023.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_023,
+        (SELECT SUM(1) FROM diverse_item item_024 WHERE item_024.id = 24 AND COALESCE((SELECT (parent_024.owner_id = 24 OR EXISTS (SELECT TRUE FROM diverse_member member_024 WHERE member_024.team_id = parent_024.team_id AND member_024.member_id = 24 LIMIT 1)) FROM diverse_parent parent_024 WHERE parent_024.id = item_024.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_024
+    expect:
+      rows: 1
+      contains:
+        - "planner_total_ns"
+        - "logical_nodes"
+        - "group_stages"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS diverse_member"
+  - sql: "DROP TABLE IF EXISTS diverse_item"
+  - sql: "DROP TABLE IF EXISTS diverse_parent"
