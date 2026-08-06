@@ -236,6 +236,37 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"physical preparation expands the nested stage catalog once")
 	(assert (group_stage? (stage_by_id (query_block_stage_catalog prepared_catalog_root) "nested-catalog-stage"))
 		true "prepared physical catalog exposes nested stage metadata for emission")
+	(define prepared_stage_lookup (query_block_stage_lookup prepared_catalog_root))
+	(assert (lowering_catalog? prepared_stage_lookup) false
+		"physical preparation keeps small stage catalogs on the list path")
+	(assert (equal? (gs_id (stage_by_id prepared_stage_lookup "nested-catalog-stage")) "nested-catalog-stage")
+		true "physical catalog list path resolves stages by ID")
+	(define indexed_catalog_stages (cons outer_catalog_stage
+		(cons nested_catalog_stage
+			(map (produceN 23) (lambda (i)
+				(make_group_stage
+					(concat "indexed-catalog-stage-" i)
+					(list (concat "s" i) "memcp-tests" (concat "indexed_source_" i) false nil)
+					'() '(1) '() nil '() '() nil nil '()))))))
+	(define prepared_lowering_catalog (make_lowering_catalog indexed_catalog_stages))
+	(assert (lowering_catalog? prepared_lowering_catalog) true
+		"physical preparation indexes stage catalogs above the measured crossover")
+	(assert (equal? (gs_id (stage_for_output_relation prepared_lowering_catalog
+		(make_stage_output_relation "nested-catalog-stage"))) "nested-catalog-stage")
+		true "indexed physical catalog resolves stage-output relations")
+	(define outer_catalog_carrier_source (list
+		"carrier"
+		(group_stage_carrier_schema outer_catalog_stage)
+		(group_stage_carrier_relation outer_catalog_stage)
+		false
+		nil))
+	(assert (equal? (gs_id (stage_for_carrier_source prepared_lowering_catalog outer_catalog_carrier_source))
+		"outer-catalog-stage")
+		true "indexed physical catalog resolves carrier sources")
+	(assert (equal?
+		(stage_dependency_graph indexed_catalog_stages)
+		(stage_dependency_graph prepared_lowering_catalog))
+		true "indexed physical catalog preserves the dependency graph")
 	(assert (count (qassoc_get (gs_facts (car (qb_stages prepared_catalog_root))) (quote stage_catalog) '())) 2
 		"direct physical stages share the complete prepared catalog")
 	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil)))
