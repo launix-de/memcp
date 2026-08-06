@@ -7187,7 +7187,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define lower_group_stage_prepare_using (lambda (all_stages stage)
 	(begin
 		(define src (gs_input stage))
-		(define stage_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
+		(define stage_catalog (stage_catalog_with_nested
+			(merge (list
+				all_stages
+				(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))
 		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
 			true)
@@ -7956,7 +7959,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 							(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
 						(cons (quote !begin)
 							(merge (list
-									(lazy_stage_prepare_bindings lazy_catalog lazy_stages)
+									(lazy_stage_prepare_bindings stage_catalog lazy_stages)
 									(map eager_stages (lambda (stage)
 										(lower_stage_prepare_using
 											(stage_dependency_closure_using_graph dependency_graph stage)
