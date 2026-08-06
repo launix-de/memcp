@@ -1575,11 +1575,13 @@ func fastDictPayloadSize(fd *FastDict) uint {
 	}
 	if len(fd.index) > 0 {
 		sz += goAllocOverhead + uint(len(fd.index))*16
-		for _, bucket := range fd.index {
-			if len(bucket) == 0 {
-				continue
+	}
+	if len(fd.collisions) > 0 {
+		sz += goAllocOverhead + uint(len(fd.collisions))*32
+		for _, positions := range fd.collisions {
+			if len(positions) > 0 {
+				sz += goAllocOverhead + uint(len(positions))*8
 			}
-			sz += goAllocOverhead + uint(len(bucket))*8
 		}
 	}
 	return sz
