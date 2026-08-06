@@ -19,13 +19,15 @@ package storage
 import "fmt"
 import "math"
 import "sync"
-import "sync/atomic"
 import "time"
 import "errors"
-import "strings"
-import "strconv"
-import "encoding/json"
 import "unsafe"
+import "strconv"
+import "strings"
+import "unicode"
+import "sync/atomic"
+import "unicode/utf8"
+import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
@@ -330,6 +332,7 @@ type table struct {
 	// showColumnsSnapshot is immutable after publication. SHOW/compiler reads
 	// load it without locking; metadata writers replace the complete snapshot.
 	showColumnsSnapshot atomic.Pointer[tableShowColumnsSnapshot]
+	columnNamesSnapshot atomic.Pointer[tableColumnNamesSnapshot]
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode   ShardMode
@@ -811,6 +814,32 @@ type tableShowColumnsSnapshot struct {
 	value             scm.Scmer
 	rowEstimate       uint
 	distinctEstimates []uint64
+	columnNames       *tableColumnNamesSnapshot
+}
+
+type tableColumnNamesSnapshot struct {
+	exact  map[string]string
+	folded map[string]string
+}
+
+func foldIdentifier(name string) string {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= utf8.RuneSelf {
+			var b strings.Builder
+			b.Grow(len(name))
+			for _, r := range name {
+				canonical := r
+				for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+					if folded < canonical {
+						canonical = folded
+					}
+				}
+				b.WriteRune(canonical)
+			}
+			return b.String()
+		}
+	}
+	return strings.ToLower(name)
 }
 
 func (t *table) showColumnsSnapshotMatches(snapshot *tableShowColumnsSnapshot, rowEstimate uint) bool {
@@ -832,6 +861,7 @@ func (t *table) showColumnsSnapshotMatches(snapshot *tableShowColumnsSnapshot, r
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnapshot {
 	result := make([]scm.Scmer, len(t.Columns))
 	distinctEstimates := make([]uint64, len(t.Columns))
+	columnNames := t.buildColumnNamesSnapshot()
 	for i, c := range t.Columns {
 		keyType := ""
 		for _, uk := range t.Unique {
@@ -856,17 +886,58 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		value:             scm.NewSlice(result),
 		rowEstimate:       rowEstimate,
 		distinctEstimates: distinctEstimates,
+		columnNames:       columnNames,
 	}
+}
+
+func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
+	exact := make(map[string]string, len(t.Columns))
+	folded := make(map[string]string, len(t.Columns))
+	for _, c := range t.Columns {
+		exact[c.Name] = c.Name
+		foldedName := foldIdentifier(c.Name)
+		if _, exists := folded[foldedName]; !exists {
+			folded[foldedName] = c.Name
+		}
+	}
+	return &tableColumnNamesSnapshot{exact: exact, folded: folded}
+}
+
+func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
+	snapshot := t.buildColumnNamesSnapshot()
+	t.columnNamesSnapshot.Store(snapshot)
+	return snapshot
 }
 
 func (t *table) publishShowColumnsSnapshot() scm.Scmer {
 	snapshot := t.buildShowColumnsSnapshot(t.CountEstimate())
+	t.columnNamesSnapshot.Store(snapshot.columnNames)
 	t.showColumnsSnapshot.Store(snapshot)
 	return snapshot.value
 }
 
 func (t *table) invalidateShowColumnsSnapshot() {
+	t.publishColumnNamesSnapshot()
 	t.showColumnsSnapshot.Store(nil)
+}
+
+// ResolveColumnName reads immutable DDL metadata without scanning SHOW rows.
+func (t *table) ResolveColumnName(name string, ignoreCase bool) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	snapshot := t.columnNamesSnapshot.Load()
+	if snapshot == nil {
+		snapshot = t.publishColumnNamesSnapshot()
+	}
+	if resolved, ok := snapshot.exact[name]; ok {
+		return resolved, true
+	}
+	if ignoreCase {
+		resolved, ok := snapshot.folded[foldIdentifier(name)]
+		return resolved, ok
+	}
+	return "", false
 }
 
 func (t *table) ShowColumns() scm.Scmer {

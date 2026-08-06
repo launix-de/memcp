@@ -654,6 +654,10 @@ class SQLTestRunner:
         else:
             plan_size_limit = DEFAULT_MAX_PLAN_SIZE
         planner_time_limit_ms = float(test_case.get("max_planner_time_ms", 0))
+        compile_phase_limits_ms = test_case.get("max_compile_phase_ms", {})
+        if not isinstance(compile_phase_limits_ms, dict):
+            return self._record_fail(name, "max_compile_phase_ms must be a mapping",
+                                     query, None, None, is_noncritical)
         perf_rows = PERF_DEFAULT_ROWS  # default row count
         if is_perf_test:
             # Get baseline data if available
@@ -929,7 +933,8 @@ class SQLTestRunner:
 
             # Explicit cold planner budget. Unlike max_time, this reads the
             # compile-only phase metric before EXPLAIN warms the plan cache.
-            if (planner_time_limit_ms > 0 and not is_perf_test and not is_sparql
+            if ((planner_time_limit_ms > 0 or compile_phase_limits_ms)
+                    and not is_perf_test and not is_sparql
                     and not test_case.get("expect", {}).get("error")):
                 qhead = query.lstrip().upper()
                 if qhead.startswith("SELECT") or qhead.startswith("WITH"):
@@ -944,7 +949,7 @@ class SQLTestRunner:
                     compile_rows = self.parse_jsonl_response(compile_resp)
                     metrics = compile_rows[0] if compile_rows else {}
                     planner_time_ms = float(metrics.get("planner_total_ns", 0)) / 1_000_000.0
-                    if planner_time_ms > planner_time_limit_ms:
+                    if planner_time_limit_ms > 0 and planner_time_ms > planner_time_limit_ms:
                         diag = self._run_on_fail(test_case, database)
                         return self._record_fail(
                             name,
@@ -952,6 +957,23 @@ class SQLTestRunner:
                             query, compile_resp, test_case.get("expect"), is_noncritical,
                             planner_time_ms, planner_time_limit_ms, diag,
                         )
+                    for phase, limit_ms_value in compile_phase_limits_ms.items():
+                        if phase not in metrics:
+                            return self._record_fail(
+                                name, f"EXPLAIN COMPILE did not report phase {phase}",
+                                query, compile_resp, test_case.get("expect"), is_noncritical,
+                            )
+                        limit_ms = float(limit_ms_value)
+                        phase_time_ms = float(metrics[phase]) / 1_000_000.0
+                        if phase_time_ms > limit_ms:
+                            diag = self._run_on_fail(test_case, database)
+                            return self._record_fail(
+                                name,
+                                f"Compile phase {phase} too slow: "
+                                f"{phase_time_ms:.1f}ms > {limit_ms:.0f}ms",
+                                query, compile_resp, test_case.get("expect"), is_noncritical,
+                                phase_time_ms, limit_ms, diag,
+                            )
 
             # Hard plan-size limit — the hardware-independent compile-time-blowup
             # detector. Runs BEFORE the timed query so it is not preempted by
