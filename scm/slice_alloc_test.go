@@ -17,9 +17,18 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"unsafe"
 )
+
+func serializeSliceAllocTestExpr(t testing.TB, expr Scmer) string {
+	t.Helper()
+	var out bytes.Buffer
+	Serialize(&out, expr, &Globalenv)
+	return out.String()
+}
 
 func TestScmerSlicePreservesCapacity(t *testing.T) {
 	buf := make([]Scmer, 0, 1024)
@@ -89,5 +98,133 @@ func TestOptimizeDoubleBangListAllocatesSlots(t *testing.T) {
 	}
 	if cap(got) != 4 {
 		t.Fatalf("expected cap=4, got %d", cap(got))
+	}
+}
+
+func TestOptimizeGeneratedConsChainToList(t *testing.T) {
+	expr := Read("generated cons chain", `(lambda (a b c) (cons a (cons b (cons c '()))))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if strings.Contains(serialized, "cons") {
+		t.Fatalf("generated cons chain was not flattened: %s", serialized)
+	}
+
+	result := Apply(Eval(optimized, &Globalenv), NewInt(1), NewInt(2), NewInt(3))
+	expected := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
+	if !Equal(result, expected) {
+		t.Fatalf("unexpected result: got %s, want %s", String(result), String(expected))
+	}
+}
+
+func TestOptimizeImproperConsStaysCons(t *testing.T) {
+	expr := Read("improper cons", `(lambda (tail) (cons 1 tail))`)
+	optimized := Optimize(expr, &Globalenv)
+	if serialized := serializeSliceAllocTestExpr(t, optimized); !strings.Contains(serialized, "cons") {
+		t.Fatalf("improper cons was rewritten as a proper list: %s", serialized)
+	}
+}
+
+func TestOptimizeReduceMapFusion(t *testing.T) {
+	expr := Read("reduce map fusion", `(lambda (xs) (reduce (map xs (lambda (x) (* x 2))) (lambda (acc x) (+ acc x)) 0))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if strings.Contains(serialized, "(map ") || strings.Contains(serialized, "(map_mut ") {
+		t.Fatalf("map was not fused into reduce: %s", serialized)
+	}
+
+	fn := Eval(optimized, &Globalenv)
+	result := Apply(fn, NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)}))
+	if !Equal(result, NewInt(20)) {
+		t.Fatalf("unexpected fused result: %s; plan: %s", String(result), serialized)
+	}
+}
+
+func TestInlineSingleUseLambdaDoesNotMutateSharedBody(t *testing.T) {
+	body := NewSlice([]Scmer{NewSymbol("+"), NewSymbol("x"), NewInt(1)})
+	lambda := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("x")}), body})
+	rewritten, ok := inlineSingleUseLambdaCall([]Scmer{lambda, NewInt(4)})
+	if !ok {
+		t.Fatal("single-use lambda was not inlined")
+	}
+	if got := body.Slice()[1]; !got.IsSymbol() || got.String() != "x" {
+		t.Fatalf("shared lambda body was mutated: %s", String(body))
+	}
+	if got := Eval(rewritten, &Globalenv); !Equal(got, NewInt(5)) {
+		t.Fatalf("unexpected inlined result: %s", String(got))
+	}
+}
+
+func benchmarkGeneratedConsChain(b *testing.B, width int) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		tail := NewSlice([]Scmer{NewSymbol("quote"), NewSlice(nil)})
+		for i := width - 1; i >= 0; i-- {
+			tail = NewSlice([]Scmer{NewSymbol("cons"), NewInt(int64(i)), tail})
+		}
+		Optimize(tail, &Globalenv)
+	}
+}
+
+func BenchmarkOptimizeGeneratedConsChain8(b *testing.B) {
+	benchmarkGeneratedConsChain(b, 8)
+}
+
+func BenchmarkOptimizeGeneratedConsChain32(b *testing.B) {
+	benchmarkGeneratedConsChain(b, 32)
+}
+
+func BenchmarkOptimizeImproperCons(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		expr := NewSlice([]Scmer{NewSymbol("cons"), NewInt(1), NewSymbol("tail")})
+		Optimize(expr, &Globalenv)
+	}
+}
+
+func reduceMapBenchmarkExpr() Scmer {
+	return Read("reduce map benchmark", `(lambda (xs) (reduce (map xs (lambda (x) (* x 2))) (lambda (acc x) (+ acc x)) 0))`)
+}
+
+func BenchmarkOptimizeReduceMapPipeline(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Optimize(reduceMapBenchmarkExpr(), &Globalenv)
+	}
+}
+
+func BenchmarkRunReduceMapPipeline(b *testing.B) {
+	fn := OptimizeProcToSerialFunction(Eval(Optimize(reduceMapBenchmarkExpr(), &Globalenv), &Globalenv))
+	items := make([]Scmer, 1024)
+	for i := range items {
+		items[i] = NewInt(int64(i))
+	}
+	input := NewSlice(items)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := fn(input); !Equal(got, NewInt(1047552)) {
+			b.Fatalf("unexpected result: %s", String(got))
+		}
+	}
+}
+
+func BenchmarkRunMapMapPipeline(b *testing.B) {
+	expr := Read("map map benchmark", `(lambda (xs) (map (map xs (lambda (x) (+ x 1))) (lambda (x) (* x 2))))`)
+	fn := OptimizeProcToSerialFunction(Eval(Optimize(expr, &Globalenv), &Globalenv))
+	items := make([]Scmer, 1024)
+	for i := range items {
+		items[i] = NewInt(int64(i))
+	}
+	input := NewSlice(items)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got := fn(input).Slice()
+		if len(got) != 1024 || !Equal(got[1023], NewInt(2048)) {
+			b.Fatal("unexpected result")
+		}
 	}
 }

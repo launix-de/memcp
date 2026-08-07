@@ -394,6 +394,127 @@ func expressionContainsEvalOrImportCall(v Scmer) bool {
 	return false
 }
 
+type inlineParamBinding struct {
+	symbol      Symbol
+	replacement Scmer
+	uses        int
+}
+
+func countInlineParamUses(expr Scmer, bindings []inlineParamBinding) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if sym, ok := scmerSymbol(expr); ok {
+		for i := range bindings {
+			if bindings[i].symbol == sym {
+				bindings[i].uses++
+				break
+			}
+		}
+		return true
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 {
+		return true
+	}
+	if head, ok := scmerSymbol(items[0]); ok {
+		switch head {
+		case "quote":
+			return true
+		case "lambda", "define", "set", "eval", "import", "match", "match_mut", "parser":
+			return false
+		}
+	}
+	for _, item := range items {
+		if !countInlineParamUses(item, bindings) {
+			return false
+		}
+	}
+	return true
+}
+
+func substituteInlineParams(expr Scmer, bindings []inlineParamBinding) Scmer {
+	if expr.IsSourceInfo() {
+		sourceInfo := *expr.SourceInfo()
+		rewritten := substituteInlineParams(sourceInfo.value, bindings)
+		if rewritten == sourceInfo.value {
+			return expr
+		}
+		sourceInfo.value = rewritten
+		return NewSourceInfo(sourceInfo)
+	}
+	if expr.GetTag() == tagAny {
+		if sourceInfo, ok := expr.Any().(SourceInfo); ok {
+			rewritten := substituteInlineParams(sourceInfo.value, bindings)
+			if rewritten == sourceInfo.value {
+				return expr
+			}
+			sourceInfo.value = rewritten
+			return NewSourceInfo(sourceInfo)
+		}
+	}
+	if sym, ok := scmerSymbol(expr); ok {
+		for i := range bindings {
+			if bindings[i].symbol == sym {
+				return bindings[i].replacement
+			}
+		}
+		return expr
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+		return expr
+	}
+	var rewritten []Scmer
+	for i := range items {
+		item := substituteInlineParams(items[i], bindings)
+		if item != items[i] {
+			if rewritten == nil {
+				rewritten = append([]Scmer(nil), items...)
+			}
+			rewritten[i] = item
+		}
+	}
+	if rewritten == nil {
+		return expr
+	}
+	return NewSlice(rewritten)
+}
+
+func inlineSingleUseLambdaCall(call []Scmer) (Scmer, bool) {
+	if len(call) < 1 {
+		return NewNil(), false
+	}
+	lambda, ok := scmerSlice(call[0])
+	if !ok || len(lambda) != 3 || !scmerIsSymbol(lambda[0], "lambda") {
+		return NewNil(), false
+	}
+	params, ok := scmerSlice(lambda[1])
+	if !ok || len(params) != len(call)-1 {
+		return NewNil(), false
+	}
+	if exprMayHaveSideEffects(lambda[2]) {
+		return NewNil(), false
+	}
+	bindings := make([]inlineParamBinding, len(params))
+	for i, param := range params {
+		sym, ok := scmerSymbol(param)
+		if !ok || sym == "_" {
+			return NewNil(), false
+		}
+		bindings[i] = inlineParamBinding{symbol: sym, replacement: call[i+1]}
+	}
+	if !countInlineParamUses(lambda[2], bindings) {
+		return NewNil(), false
+	}
+	for _, binding := range bindings {
+		if binding.uses != 1 {
+			return NewNil(), false
+		}
+	}
+	return substituteInlineParams(lambda[2], bindings), true
+}
+
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
 	if val.ptr == nil && val.aux == 0 {
 		return NewNil(), tiConstTransfer

@@ -512,6 +512,17 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 // (including FirstParameterMutable swap to map_mut), then fuses
 // (map (produceN N) fn) → (produceN N fn) to eliminate the intermediate list.
 func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if len(v) == 3 {
+		if inner, ok := scmerSlice(v[1]); ok && len(inner) == 3 && (scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut")) {
+			item := NewNthLocalVar(0)
+			mapped, mapOK := inlineSingleUseLambdaCall([]Scmer{inner[2], item})
+			composed, outerOK := inlineSingleUseLambdaCall([]Scmer{v[2], mapped})
+			if mapOK && outerOK {
+				lambda := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("_")}), composed})
+				return oc.OptimizeSub(NewSlice([]Scmer{NewSymbol("map"), inner[1], lambda}), useResult)
+			}
+		}
+	}
 	// Run default optimization first (handles map → map_mut swap etc.)
 	result, td := oc.applyDefaultOptimization(v, useResult, "map_mut")
 	// Check if the optimized result is still a call to map/map_mut
@@ -539,6 +550,36 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		return result, descriptorWithLength(td, optimizedExactListLength(rv[1], oc))
 	}
 	return result, td
+}
+
+func fusedReduceLambda(body Scmer) Scmer {
+	return NewSlice([]Scmer{
+		NewSymbol("lambda"),
+		NewSlice([]Scmer{NewSymbol("_"), NewSymbol("_")}),
+		body,
+	})
+}
+
+func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if len(v) == 4 {
+		input := v[1]
+		if stripped, ok := scmerStripSourceInfo(input); ok {
+			input = stripped
+		}
+		if producer, ok := scmerSlice(input); ok && len(producer) > 0 {
+			switch {
+			case len(producer) == 3 && (scmerIsSymbol(producer[0], "map") || scmerIsSymbol(producer[0], "map_mut")):
+				mapped, mapOK := inlineSingleUseLambdaCall([]Scmer{producer[2], NewNthLocalVar(1)})
+				body, reduceOK := inlineSingleUseLambdaCall([]Scmer{v[2], NewNthLocalVar(0), mapped})
+				if !mapOK || !reduceOK {
+					break
+				}
+				rewritten := NewSlice([]Scmer{v[0], producer[1], fusedReduceLambda(body), v[3]})
+				return oc.OptimizeSub(rewritten, useResult)
+			}
+		}
+	}
+	return oc.ApplyDefaultOptimization(v, useResult)
 }
 
 // optimizeProduceN rewrites (produceN ...) to (produceN_mut ... nil) when the
@@ -1245,8 +1286,9 @@ func init_list() {
 				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "any"},
-			Const:  true,
+			Return:   &TypeDescriptor{Kind: "any"},
+			Const:    true,
+			Optimize: optimizeReduce,
 		},
 	})
 
@@ -2448,11 +2490,84 @@ func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer
 	return NewSlice(rv), td
 }
 
+func flattenConsList(v []Scmer) ([]Scmer, bool) {
+	if len(v) != 3 {
+		return nil, false
+	}
+	tail := v[2]
+	if tail.GetTag() != tagSlice && !tail.IsSourceInfo() {
+		return nil, false
+	}
+	if stripped, ok := scmerStripSourceInfo(tail); ok {
+		tail = stripped
+	}
+	tailExpr, ok := scmerSlice(tail)
+	if !ok || len(tailExpr) != 3 || !scmerIsSymbol(tailExpr[0], "cons") {
+		return nil, false
+	}
+
+	headCount := 0
+	tailCount := 0
+	current := v
+	for len(current) == 3 && scmerIsSymbol(current[0], "cons") {
+		headCount++
+		tail := current[2]
+		if stripped, ok := scmerStripSourceInfo(tail); ok {
+			tail = stripped
+		}
+		tailExpr, ok := scmerSlice(tail)
+		if !ok || len(tailExpr) == 0 {
+			return nil, false
+		}
+		if scmerIsSymbol(tailExpr[0], "cons") {
+			current = tailExpr
+			continue
+		}
+		if scmerIsSymbol(tailExpr[0], "list") {
+			tailCount = len(tailExpr) - 1
+			break
+		}
+		if len(tailExpr) == 2 && scmerIsSymbol(tailExpr[0], "quote") {
+			if quoted, ok := scmerSlice(tailExpr[1]); ok && len(quoted) == 0 {
+				break
+			}
+		}
+		return nil, false
+	}
+	if headCount == 0 {
+		return nil, false
+	}
+
+	items := make([]Scmer, 1, 1+headCount+tailCount)
+	items[0] = NewSymbol("list")
+	current = v
+	for len(current) == 3 && scmerIsSymbol(current[0], "cons") {
+		items = append(items, current[1])
+		tail := current[2]
+		if stripped, ok := scmerStripSourceInfo(tail); ok {
+			tail = stripped
+		}
+		tailExpr, _ := scmerSlice(tail)
+		if scmerIsSymbol(tailExpr[0], "cons") {
+			current = tailExpr
+			continue
+		}
+		if scmerIsSymbol(tailExpr[0], "list") {
+			items = append(items, tailExpr[1:]...)
+		}
+		return items, true
+	}
+	return nil, false
+}
+
 // optimizeCons rewrites cons when the tail is a freshly allocated list:
 //
 //	(cons head (map list fn)) → (cons head (map_mut list fn))  — already handled by _mut
 //	(cons head (list a b c))  → (list head a b c)              — avoid double allocation
 func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if flattened, ok := flattenConsList(v); ok {
+		return oc.ApplyDefaultOptimization(flattened, useResult)
+	}
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
 	if rSlice, ok := scmerSlice(result); ok && len(rSlice) == 3 {
 		tail := rSlice[2]
