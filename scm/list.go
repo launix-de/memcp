@@ -512,17 +512,6 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 // (including FirstParameterMutable swap to map_mut), then fuses
 // (map (produceN N) fn) → (produceN N fn) to eliminate the intermediate list.
 func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	if len(v) == 3 {
-		if inner, ok := scmerSlice(v[1]); ok && len(inner) == 3 && (scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut")) {
-			item := NewNthLocalVar(0)
-			mapped, mapOK := inlineSingleUseLambdaCall([]Scmer{inner[2], item})
-			composed, outerOK := inlineSingleUseLambdaCall([]Scmer{v[2], mapped})
-			if mapOK && outerOK {
-				lambda := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("_")}), composed})
-				return oc.OptimizeSub(NewSlice([]Scmer{NewSymbol("map"), inner[1], lambda}), useResult)
-			}
-		}
-	}
 	// Run default optimization first (handles map → map_mut swap etc.)
 	result, td := oc.applyDefaultOptimization(v, useResult, "map_mut")
 	// Check if the optimized result is still a call to map/map_mut
@@ -550,36 +539,6 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		return result, descriptorWithLength(td, optimizedExactListLength(rv[1], oc))
 	}
 	return result, td
-}
-
-func fusedReduceLambda(body Scmer) Scmer {
-	return NewSlice([]Scmer{
-		NewSymbol("lambda"),
-		NewSlice([]Scmer{NewSymbol("_"), NewSymbol("_")}),
-		body,
-	})
-}
-
-func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	if len(v) == 4 {
-		input := v[1]
-		if stripped, ok := scmerStripSourceInfo(input); ok {
-			input = stripped
-		}
-		if producer, ok := scmerSlice(input); ok && len(producer) > 0 {
-			switch {
-			case len(producer) == 3 && (scmerIsSymbol(producer[0], "map") || scmerIsSymbol(producer[0], "map_mut")):
-				mapped, mapOK := inlineSingleUseLambdaCall([]Scmer{producer[2], NewNthLocalVar(1)})
-				body, reduceOK := inlineSingleUseLambdaCall([]Scmer{v[2], NewNthLocalVar(0), mapped})
-				if !mapOK || !reduceOK {
-					break
-				}
-				rewritten := NewSlice([]Scmer{v[0], producer[1], fusedReduceLambda(body), v[3]})
-				return oc.OptimizeSub(rewritten, useResult)
-			}
-		}
-	}
-	return oc.ApplyDefaultOptimization(v, useResult)
 }
 
 // optimizeProduceN rewrites (produceN ...) to (produceN_mut ... nil) when the
@@ -1286,9 +1245,8 @@ func init_list() {
 				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
-			Return:   &TypeDescriptor{Kind: "any"},
-			Const:    true,
-			Optimize: optimizeReduce,
+			Return: &TypeDescriptor{Kind: "any"},
+			Const:  true,
 		},
 	})
 

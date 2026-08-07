@@ -105,9 +105,9 @@ On parse error the result is not cached (e.g. table does not exist yet). */
 			/* Compile diagnostics measure true misses and must not turn their own
 			previous result into a cache hit. The inspected query is never run. */
 			(if compile_diagnostic
-				(with_session session (lambda () (parse_fn schema parse_query policy)))
+				(optimize (with_session session (lambda () (parse_fn schema parse_query policy))))
 				(queryplan_cache "get_or_compute" cache_key
-					(lambda () (with_session session (lambda () (parse_fn schema parse_query policy)))))))))))
+					(lambda () (optimize (with_session session (lambda () (parse_fn schema parse_query policy))))))))))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),

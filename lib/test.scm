@@ -876,23 +876,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (serialize (optimize '('and 'x 'y))) "(and x y)" "and hook: non-const args preserved")
 	(assert (serialize (optimize '('and 'x '('and 'y '('and 'z 'w))))) "(and x y z w)" "and hook: flattens nested AND terms")
 
-	/* list fusion: intermediate map results are not materialized */
-	(define reduce_map_opt (optimize (list 'lambda (list 'xs)
-		(list 'reduce (list 'map 'xs (list 'lambda (list 'x) (list '* 'x 2)))
-			(list 'lambda (list 'acc 'x) (list '+ 'acc 'x)) 0))))
-	(assert ((eval reduce_map_opt) (list 1 2 3 4)) 20 "reduce fusion: map result")
-	(assert (match (serialize reduce_map_opt) (regex "\\(map[_ ]" _) true false) false "reduce fusion: map removed")
-	(define map_map_opt (optimize (list 'lambda (list 'xs)
-		(list 'map
-			(list 'map 'xs (list 'lambda (list 'x) (list '+ 'x 1)))
-			(list 'lambda (list 'x) (list '* 'x 2))))))
-	(assert ((eval map_map_opt) (list 1 2 3)) (list 4 6 8) "map fusion: result")
-	(assert (match (serialize map_map_opt) (regex "map.*map" _) true false) false "map fusion: one traversal")
-	(define reduce_effect_map_opt (optimize (list 'lambda (list 'xs)
-		(list 'reduce (list 'map 'xs (list 'lambda (list 'x) (list 'print 'x)))
-			(list 'lambda (list 'acc 'x) (list '+ 'acc 1)) 0))))
-	(assert (match (serialize reduce_effect_map_opt) (regex "\\(map[_ ]" _) true false) true "reduce fusion: side-effecting map stays separate")
-
 	/* +/* hooks: associative flattening with symbolic args */
 	(assert (serialize (optimize '('+ 'a '('+ 'b 'c)))) "(+ a b c)" "+ hook: flattens nested +")
 	(assert (serialize (optimize '('* 'a '('* 'b 'c)))) "(* a b c)" "* hook: flattens nested *")
