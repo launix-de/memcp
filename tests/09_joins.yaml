@@ -57,6 +57,31 @@ test_cases:
         - { name: "another", matching_rows: 1 }
         - { name: "test", matching_rows: 1 }
 
+  - name: "Unqualified GROUP BY keys resolve to their non-driver sources"
+    sql: |
+      SELECT simple_test_id, name, SUM(r.id) AS id_sum
+      FROM simple_test_09 s
+      JOIN related_data_09 r ON s.id = r.simple_test_id
+      GROUP BY simple_test_id, name
+      ORDER BY simple_test_id
+    expect:
+      rows: 2
+      data:
+        - { simple_test_id: 1, name: "test", id_sum: 101 }
+        - { simple_test_id: 2, name: "another", id_sum: 102 }
+
+  - name: "Unqualified non-driver GROUP BY key remains available to HAVING"
+    sql: |
+      SELECT simple_test_id, COUNT(*) AS matching_rows
+      FROM simple_test_09 s
+      JOIN related_data_09 r ON s.id = r.simple_test_id
+      GROUP BY simple_test_id
+      HAVING simple_test_id >= 2
+      ORDER BY simple_test_id
+    expect:
+      rows: 1
+      data:
+        - { simple_test_id: 2, matching_rows: 1 }
 
 #  - name: "Complex SELECT JOIN test with filtering"
 #    sql: "SELECT s.name, r.description FROM simple_test s JOIN related_data r ON s.id = r.simple_test_id WHERE s.id IN (1, 2) AND r.description LIKE '%description%'"

@@ -110,23 +110,33 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 }
 
 type shardqueue struct {
-	shard        *storageShard
-	items        []uint32 // TODO: refactor to chan, so we can block generating too much entries
-	err          scanError
-	scols        []func(uint32) scm.Scmer // sort criteria column reader
-	sortdirs     []func(...scm.Scmer) scm.Scmer
-	mapper       *ShardMapReducer
-	callbackCols []string  // per-table map columns (for multi-table merge)
-	callback     scm.Scmer // per-table map function (for multi-table merge)
-	tableIdx     int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
+	shard          *storageShard
+	items          []uint32 // TODO: refactor to chan, so we can block generating too much entries
+	candidateCount int64
+	err            scanError
+	scols          []func(uint32) scm.Scmer // sort criteria column reader
+	sortdirs       []func(...scm.Scmer) scm.Scmer
+	mapper         *ShardMapReducer
+	callbackCols   []string  // per-table map columns (for multi-table merge)
+	callback       scm.Scmer // per-table map function (for multi-table merge)
+	tableIdx       int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
 type scanOrderResult struct {
-	res        *shardqueue
-	err        scanError // err.r != nil indicates an error
-	inputCount int64
-	scanCount  int64
+	res            *shardqueue
+	err            scanError // err.r != nil indicates an error
+	inputCount     int64
+	candidateCount int64
+	outputCount    int64
+}
+
+type scanOrderStats struct {
+	boundaries     boundaries
+	inputCount     int64
+	candidateCount int64
+	outputCount    int64
+	analyzeNs      int64
 }
 
 // sort interface for shardqueue (local) (TODO: heap could be more efficient because early-out will be cheaper)
@@ -451,6 +461,7 @@ func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 // Each table has its own filter, sort columns and map function, but sort
 // directions, offset/limit, reduce and neutral are shared.
 func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	execStart := time.Now()
 	ss := SessionStateFromTx(currentTx)
 	if ss != nil && ss.IsKilled() {
 		panic("query killed")
@@ -463,9 +474,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 	var q globalqueue
 	q_ := make(chan scanOrderResult, len(tables)*4)
-	var inputCount int64
 	var wg sync.WaitGroup
 	querySeq := scm.CurrentQuerySeq()
+	stats := make([]scanOrderStats, len(tables))
 
 	// Launch shard-parallel scans for each table
 	for ti := range tables {
@@ -509,6 +520,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			t.AddPartitioningScore([]string{b.col})
 		}
 		analyzeNs := time.Since(analyzeStart).Nanoseconds()
+		stats[ti].boundaries = bounds
+		stats[ti].analyzeNs = analyzeNs
 
 		// Capture closure variables
 		callbackCols := spec.callbackCols
@@ -550,7 +563,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 								res.callbackCols = callbackCols
 								res.callback = callback
 								res.tableIdx = tableIdx
-								q_ <- scanOrderResult{res: res, inputCount: part.count, scanCount: int64(len(res.items))}
+								q_ <- scanOrderResult{res: res, inputCount: part.count, candidateCount: part.count, outputCount: int64(len(res.items))}
 							}(part)
 						}
 						return scm.NewNil()
@@ -578,7 +591,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 							res.callbackCols = callbackCols
 							res.callback = callback
 							res.tableIdx = tableIdx
-							q_ <- scanOrderResult{res: res, inputCount: part.count, scanCount: int64(len(res.items))}
+							q_ <- scanOrderResult{res: res, inputCount: part.count, candidateCount: part.count, outputCount: int64(len(res.items))}
 							return scm.NewNil()
 						})
 					}(part)
@@ -598,7 +611,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
-				q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
+				q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), candidateCount: res.candidateCount, outputCount: int64(len(res.items))}
 			})
 			if done != nil {
 				wg.Add(1)
@@ -609,37 +622,6 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			}
 		}
 
-		// Per-table logging (best-effort, async) — inputCount is 0 here (set
-		// after merge), so this fires only when ScanDebugging is enabled.
-		if Settings.ScanDebugging {
-			go func(tbl *table, cCols []string, cond scm.Scmer, scols []scm.Scmer, bnds boundaries, anNs int64) {
-				defer func() { _ = recover() }()
-				filterEnc := ""
-				if proc, ok := cond.Any().(scm.Proc); ok {
-					var params []scm.Scmer
-					if proc.Params.IsSlice() {
-						params = proc.Params.Slice()
-					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
-						params = arr
-					}
-					filterEnc = encodeScmerToString(proc.Body, cCols, params)
-				}
-				var sb strings.Builder
-				for i, sc := range scols {
-					if i > 0 {
-						sb.WriteByte('|')
-					}
-					if sc.IsString() {
-						sb.WriteString(sc.String())
-					} else {
-						encodeScmer(sc, &sb, nil, nil)
-					}
-				}
-				orderEnc := sb.String()
-				indexColsEnc := boundaryIndexCols(bnds)
-				safeLogScan(tbl.schema.Name, tbl.Name, true, filterEnc, orderEnc, indexColsEnc, 0, 0, anNs, 0)
-			}(t, conditionCols, condition, sortcols, tableBounds, analyzeNs)
-		}
 	}
 
 	// Close result channel when all tables' shard scans complete
@@ -663,7 +645,12 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		if msg.res != nil && len(msg.res.items) > 0 {
 			heap.Push(&q, msg.res)
 		}
-		inputCount += msg.inputCount
+		if msg.res != nil && msg.res.tableIdx >= 0 && msg.res.tableIdx < len(stats) {
+			tableStats := &stats[msg.res.tableIdx]
+			tableStats.inputCount += msg.inputCount
+			tableStats.candidateCount += msg.candidateCount
+			tableStats.outputCount += msg.outputCount
+		}
 	}
 	if scanErr.r != nil {
 		panic(scanErr)
@@ -820,6 +807,39 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		aggregateFn := scm.OptimizeProcToSerialFunction(aggregate)
 		nullRow := buildOuterNullCallbackRow(cbCols)
 		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...))
+	}
+	execNs := time.Since(execStart).Nanoseconds()
+	for i := range tables {
+		tableStats := stats[i]
+		if !Settings.ScanDebugging && tableStats.candidateCount <= int64(Settings.AnalyzeMinItems) {
+			continue
+		}
+		spec := &tables[i]
+		tbl := spec.carrierTable()
+		filterEnc := ""
+		if proc, ok := spec.condition.Any().(scm.Proc); ok {
+			var params []scm.Scmer
+			if proc.Params.IsSlice() {
+				params = proc.Params.Slice()
+			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+				params = arr
+			}
+			filterEnc = encodeScmerToString(proc.Body, spec.conditionCols, params)
+		}
+		var sb strings.Builder
+		for j, sortcol := range spec.sortcols {
+			if j > 0 {
+				sb.WriteByte('|')
+			}
+			if sortcol.IsString() {
+				sb.WriteString(sortcol.String())
+			} else {
+				encodeScmer(sortcol, &sb, nil, nil)
+			}
+		}
+		orderEnc := sb.String()
+		indexColsEnc := boundaryIndexCols(tableStats.boundaries)
+		go safeLogScan(tbl.schema.Name, tbl.Name, true, filterEnc, orderEnc, indexColsEnc, tableStats.inputCount, tableStats.candidateCount, tableStats.outputCount, tableStats.analyzeNs, execNs)
 	}
 	return akkumulator
 }
@@ -1074,6 +1094,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		result.items = make([]uint32, resultCap)
 		resultN := 0
 		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+			result.candidateCount += int64(len(batch))
 			// filter in-place: overwrite batch with passing IDs
 			outN := 0
 			for _, idx := range batch {

@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Complex subquery coverage
 # Targets scan.go subquery evaluation, compute.go expression paths,
 # and scan_helper.go various scan strategies.
@@ -300,6 +315,79 @@ test_cases:
         - "inner_select"
         - "dependent-subquery"
         - "scalar_aggregate_probe"
+
+  - name: "Correlated SUM initializes a condition keytable"
+    sql: |
+      SELECT d.did,
+        (SELECT SUM(e.salary) FROM sq_emp e
+         WHERE e.did = d.did AND e.salary >= 0) AS metric
+      FROM sq_dept d
+      ORDER BY d.did
+    expect:
+      rows: 4
+      data:
+        - did: 1
+          metric: 265000
+        - did: 2
+          metric: 145000
+        - did: 3
+          metric: 125000
+        - did: 4
+          metric: null
+
+  - name: "Correlated COUNT extends the same condition keytable"
+    sql: |
+      SELECT d.did,
+        (SELECT COUNT(e.salary) FROM sq_emp e
+         WHERE e.did = d.did AND e.salary >= 0) AS metric
+      FROM sq_dept d
+      ORDER BY d.did
+    expect:
+      rows: 4
+      data:
+        - did: 1
+          metric: 3
+        - did: 2
+          metric: 2
+        - did: 3
+          metric: 2
+        - did: 4
+          metric: 0
+
+  - name: "Nested aggregate scopes share one keytable initializer"
+    sql: |
+      EXPLAIN SELECT candidate.did, candidate.total_salary
+      FROM (
+        SELECT d.did,
+          (SELECT SUM(e.salary) FROM sq_emp e WHERE e.did = d.did) AS total_salary
+        FROM sq_dept d
+      ) candidate
+      WHERE (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = candidate.did) > 0
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "touch_keytable"
+          count: 1
+
+  - name: "Nested aggregate scopes retain every aggregate column"
+    sql: |
+      SELECT candidate.did, candidate.total_salary
+      FROM (
+        SELECT d.did,
+          (SELECT SUM(e.salary) FROM sq_emp e WHERE e.did = d.did) AS total_salary
+        FROM sq_dept d
+      ) candidate
+      WHERE (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = candidate.did) > 0
+      ORDER BY candidate.did
+    expect:
+      rows: 3
+      data:
+        - did: 1
+          total_salary: 265000
+        - did: 2
+          total_salary: 145000
+        - did: 3
+          total_salary: 125000
 
   - name: "Aggregate correlated subselect with no match returns 0"
     sql: |

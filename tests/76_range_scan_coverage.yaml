@@ -37,6 +37,54 @@ test_cases:
         (insert (table "memcp-tests" "rs_data") '("id" "val" "category" "price") rows)
         200)
 
+  - name: "Clear range scan statistics"
+    setup:
+      - scm: '(settings "ScanDebugging" false)'
+      - sql: "SELECT val FROM rs_data WHERE id = 42"
+      - scm: '(sleep 0.1)'
+    sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
+    expect:
+      affected_rows: 1
+
+  - name: "Point scan stays below automatic logging threshold"
+    setup:
+      - sql: "SELECT val FROM rs_data WHERE id = 42"
+      - scm: '(sleep 0.1)'
+    sql: "SELECT COUNT(*) AS cnt FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  - name: "Scan debugging still records point probes"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "SELECT val FROM rs_data WHERE id = 42"
+      - scm: '(sleep 0.1)'
+    sql: "SELECT inputCount, candidateCount, outputCount FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data' AND index_cols = 'id' ORDER BY timestamp DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - inputCount: 200
+          candidateCount: 1
+          outputCount: 1
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
+  - name: "Ordered scan logs relation, candidate, and output counts"
+    setup:
+      - scm: '(settings "ScanDebugging" false)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
+      - sql: "SELECT id FROM rs_data ORDER BY price LIMIT 5"
+      - scm: '(sleep 0.1)'
+    sql: "SELECT inputCount, candidateCount, outputCount FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data' AND ordered = TRUE ORDER BY timestamp DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - inputCount: 200
+          candidateCount: 200
+          outputCount: 5
+
   # ========================================================================
   # 2. Range scans with various operators (exercises index boundary code)
   # ========================================================================

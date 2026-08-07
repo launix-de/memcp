@@ -14,6 +14,8 @@ metadata:
 
 setup:
   - sql: "DROP VIEW IF EXISTS psql_data_view"
+  - sql: "DROP TABLE IF EXISTS psql_group_item"
+  - sql: "DROP TABLE IF EXISTS psql_group_owner"
   - sql: "DROP TABLE IF EXISTS psql_data"
   - sql: "DROP TABLE IF EXISTS psql_decimal_range"
   - sql: |
@@ -25,6 +27,10 @@ setup:
   - sql: |
       INSERT INTO psql_data (id, name, val) VALUES
       (1, 'Alice', 10), (2, 'Bob', 30), (3, 'Charlie', 50), (4, 'Alice', 20)
+  - sql: "CREATE TABLE psql_group_owner (id INT PRIMARY KEY, owner_name VARCHAR(50))"
+  - sql: "CREATE TABLE psql_group_item (id INT PRIMARY KEY, owner_id INT, amount INT)"
+  - sql: "INSERT INTO psql_group_owner VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO psql_group_item VALUES (10, 1, 4), (11, 1, 6), (12, 2, 7)"
   - sql: |
       CREATE TABLE psql_decimal_range (
         id INT, extended_price DECIMAL(15,2), discount DECIMAL(15,2),
@@ -199,6 +205,16 @@ test_cases:
         - { discount: 0.05, rows_per_discount: 1000 }
         - { discount: 0.06, rows_per_discount: 1000 }
         - { discount: 0.07, rows_per_discount: 1000 }
+
+  - name: "TPC-H Q6 accepts leading-dot decimal bounds"
+    sql: |
+      SELECT COUNT(*) AS matching_rows
+      FROM psql_decimal_range
+      WHERE discount BETWEEN .05 AND .07
+    expect:
+      rows: 1
+      data:
+        - { matching_rows: 3000 }
 
   - name: "TPC-H Q6 combined predicates retain every matching row"
     sql: |
@@ -392,6 +408,13 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "TPC-H Q1 interval leading field precision"
+    sql: "SELECT DATE '1998-12-01' - INTERVAL '90' DAY (3) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "1998-09-02 00:00:00"
+
   # === CONVERT ===
   - name: "CONVERT to SIGNED"
     sql: "SELECT CONVERT('123', SIGNED) AS v"
@@ -431,6 +454,19 @@ test_cases:
         - id: 2
           name: "Bob"
 
+  - name: "PostgreSQL grouped join resolves unqualified keys from every source"
+    sql: |
+      SELECT owner_id, owner_name, SUM(amount) AS total
+      FROM psql_group_owner o
+      JOIN psql_group_item i ON o.id = i.owner_id
+      GROUP BY owner_id, owner_name
+      ORDER BY owner_id
+    expect:
+      rows: 2
+      data:
+        - { owner_id: 1, owner_name: "Alice", total: 10 }
+        - { owner_id: 2, owner_name: "Bob", total: 7 }
+
   - name: "PostgreSQL CREATE VIEW stores and expands parser IR"
     sql: |
       CREATE VIEW psql_data_view (view_id, view_name)
@@ -453,5 +489,7 @@ test_cases:
 
 cleanup:
   - sql: "DROP VIEW IF EXISTS psql_data_view"
+  - sql: "DROP TABLE IF EXISTS psql_group_item"
+  - sql: "DROP TABLE IF EXISTS psql_group_owner"
   - sql: "DROP TABLE IF EXISTS psql_decimal_range"
   - sql: "DROP TABLE IF EXISTS psql_data"

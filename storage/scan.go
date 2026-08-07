@@ -250,10 +250,11 @@ func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 
 // scanResult bundles per-shard outputs to minimize allocations and type assertions.
 type scanResult struct {
-	res        scm.Scmer
-	outCount   int64
-	inputCount int64
-	err        scanError // err.r != nil indicates an error
+	res            scm.Scmer
+	outCount       int64
+	inputCount     int64
+	candidateCount int64
+	err            scanError // err.r != nil indicates an error
 }
 
 func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
@@ -369,6 +370,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	execStart := time.Now()
 	var outCount int64
 	var inputCount int64
+	var candidateCount int64
 	values := make(chan scanResult, 4)
 	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
 		defer func() {
@@ -381,8 +383,8 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 		if ss != nil && ss.IsKilled() {
 			panic("query killed")
 		}
-		res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
-		values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
+		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
+		values <- scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount}
 	})
 	if done == nil {
 		close(values)
@@ -409,6 +411,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 				continue
 			}
 			inputCount += msg.inputCount
+			candidateCount += msg.candidateCount
 			outCount += msg.outCount
 			if msg.outCount > 0 {
 				akkumulator = fn(akkumulator, msg.res)
@@ -432,6 +435,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 				continue
 			}
 			inputCount += msg.inputCount
+			candidateCount += msg.candidateCount
 			outCount += msg.outCount
 			if msg.outCount > 0 {
 				akkumulator = fn(akkumulator, msg.res)
@@ -454,6 +458,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 				continue
 			}
 			inputCount += msg.inputCount
+			candidateCount += msg.candidateCount
 			outCount += msg.outCount
 			hadValue = hadValue || msg.outCount > 0
 		}
@@ -467,7 +472,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	}
 	// log statistics (best-effort, async so it doesn't add latency)
 	execNs := time.Since(execStart).Nanoseconds()
-	if Settings.ScanDebugging || inputCount > int64(Settings.AnalyzeMinItems) {
+	if Settings.ScanDebugging || candidateCount > int64(Settings.AnalyzeMinItems) {
 		go func(anNs, exNs int64) {
 			defer func() { _ = recover() }()
 			filterEnc := ""
@@ -481,7 +486,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 				filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 			}
 			indexColsEnc := boundaryIndexCols(boundaries)
-			safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", indexColsEnc, inputCount, outCount, anNs, exNs)
+			safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", indexColsEnc, inputCount, candidateCount, outCount, anNs, exNs)
 		}(analyzeNs, execNs)
 	}
 	return akkumulator
@@ -608,12 +613,13 @@ func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, uppe
 	return found
 }
 
-func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64) {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64, int64) {
 	if stride > 0 {
 		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
 	}
 	akkumulator := neutral
 	var outCount int64
+	var candidateCount int64
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -666,7 +672,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	if recsetFilter != nil {
 		recsetPart = recsetFilter.shardEntry(t)
 		if recsetPart == nil || recsetPart.count == 0 {
-			return neutral, 0
+			return neutral, 0, 0
 		}
 	}
 	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
@@ -734,6 +740,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	hadValue := false
 
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		candidateCount += int64(len(batch))
 		// filter in-place: overwrite batch with passing IDs
 		outN := 0
 		for _, idx := range batch {
@@ -833,7 +840,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			locked = false
 		}
 		mapper.FlushSideEffects()
-		return scm.NewNil(), outCount
+		return scm.NewNil(), outCount, candidateCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
 		// Release exclusive lock before map+reduce phase: mapFn may contain
@@ -867,12 +874,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		writeLocked = false
 	}
 	mapper.FlushSideEffects()
-	return akkumulator, outCount
+	return akkumulator, outCount, candidateCount
 }
 
-func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64) {
+func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64, int64) {
 	akkumulator := neutral
 	var outCount int64
+	var candidateCount int64
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -918,7 +926,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	if recsetFilter != nil {
 		recsetPart = recsetFilter.shardEntry(t)
 		if recsetPart == nil || recsetPart.count == 0 {
-			return neutral, 0
+			return neutral, 0, 0
 		}
 	}
 	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
@@ -999,6 +1007,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		}
 
 		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+			candidateCount += int64(len(batch))
 			if ss != nil && ss.IsKilled() {
 				panic("query killed")
 			}
@@ -1098,7 +1107,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	}
 	if !hadValue {
 		mapper.FlushSideEffects()
-		return scm.NewNil(), outCount
+		return scm.NewNil(), outCount, candidateCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
 		if writeLocked {
@@ -1125,5 +1134,5 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		writeLocked = false
 	}
 	mapper.FlushSideEffects()
-	return akkumulator, outCount
+	return akkumulator, outCount, candidateCount
 }
