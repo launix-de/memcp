@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
 # Coverage tests for range scans, scan statistics logging, EXPLAIN (printer.go),
 # ordered scans with OFFSET/LIMIT, and aggregates with filters.
 # Exercises: storage/scan.go, storage/scan_order.go, storage/scan_helper.go,
@@ -68,6 +70,22 @@ test_cases:
         - inputCount: 200
           candidateCount: 1
           outputCount: 1
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
+  - name: "Unordered range scan distinguishes candidates from output rows"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
+      - sql: "SELECT id FROM rs_data WHERE id BETWEEN 40 AND 49 AND MOD(id, 4) = 0"
+      - scm: '(sleep 0.1)'
+    sql: "SELECT inputCount, candidateCount, outputCount FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data' AND ordered = FALSE ORDER BY timestamp DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - inputCount: 200
+          candidateCount: 200
+          outputCount: 3
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
 

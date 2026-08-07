@@ -84,6 +84,34 @@ test_cases:
           "ok"
           (error "recset scan returned wrong row set")))
 
+  - name: "recset boundary statistics count candidates before residual filtering"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items'"
+      - scm: |
+          (begin
+            (define tbl (table "memcp-tests" "recset_items"))
+            (define rs (scan_recset nil tbl
+              '("tenant")
+              (lambda (tenant) (equal? tenant 1))))
+            (scan nil tbl
+              '("$recset_contains" "active")
+              (lambda (in_recset active) (and (in_recset rs) (equal? active 1)))
+              '("id")
+              (lambda (id) id)
+              (lambda (acc id) (+ acc id))
+              0))
+      - scm: '(sleep 0.1)'
+    sql: "SELECT inputCount, candidateCount, outputCount FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items' AND ordered = FALSE AND outputCount = 2 ORDER BY timestamp DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - inputCount: 5
+          candidateCount: 5
+          outputCount: 2
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
   - name: "$recset_contains probes current table row without exposing recid"
     scm: |
       (begin
@@ -166,6 +194,37 @@ test_cases:
         (if (equal? ordered (list (list 1) (list 5)))
           "ok"
           (error "scan_order $recset_contains returned wrong order")))
+
+  - name: "ordered recset scan statistics use recset cardinality"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items'"
+      - scm: |
+          (begin
+            (define tbl (table "memcp-tests" "recset_items"))
+            (define rs (scan_recset nil tbl
+              '("tenant")
+              (lambda (tenant) (equal? tenant 1))))
+            (scan_order nil rs
+              '("active")
+              (lambda (active) (equal? active 1))
+              '("id") '(<)
+              0 0 10
+              '("id")
+              (lambda (id) (list id))
+              (lambda (acc row) (append acc row))
+              '()
+              false))
+      - scm: '(sleep 0.1)'
+    sql: "SELECT inputCount, candidateCount, outputCount FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items' AND ordered = TRUE ORDER BY timestamp DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - inputCount: 3
+          candidateCount: 3
+          outputCount: 2
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
 
   - name: "scan_order keeps repeated $recset_contains calls exact"
     scm: |

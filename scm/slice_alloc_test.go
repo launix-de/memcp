@@ -116,6 +116,29 @@ func TestOptimizeGeneratedConsChainToList(t *testing.T) {
 	}
 }
 
+func TestOptimizeGeneratedConsChainWithListTail(t *testing.T) {
+	expr := Read("generated cons chain with list tail", `(lambda (a b c) (cons a (cons b (list c 4))))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if strings.Contains(serialized, "cons") {
+		t.Fatalf("generated cons chain with list tail was not flattened: %s", serialized)
+	}
+
+	result := Apply(Eval(optimized, &Globalenv), NewInt(1), NewInt(2), NewInt(3))
+	expected := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)})
+	if !Equal(result, expected) {
+		t.Fatalf("unexpected result: got %s, want %s", String(result), String(expected))
+	}
+}
+
+func TestOptimizePreservesSetInNumberedLambda(t *testing.T) {
+	expr := Read("numbered set", `((lambda (counter) (!begin (set counter (+ counter 1)) counter) 1) 0)`)
+	got := Eval(Optimize(expr, &Globalenv), &Globalenv)
+	if ToInt(got) != 1 {
+		t.Fatalf("optimized numbered lambda returned %s, want 1", got.String())
+	}
+}
+
 func TestOptimizeImproperConsStaysCons(t *testing.T) {
 	expr := Read("improper cons", `(lambda (tail) (cons 1 tail))`)
 	optimized := Optimize(expr, &Globalenv)
