@@ -1483,7 +1483,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(list stage null_stage)
 				(list source null_source))))))
 
-(define make_in_stage_rewrite (lambda (probe inner args)
+(define make_plain_in_stage_rewrite (lambda (probe inner args)
 	(begin
 		(define outer_sources (nth args 0))
 		(define negate (if (>= (count args) 3) (nth args 2) false))
@@ -1604,6 +1604,62 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
 				(list stage null_stage)
 				(list source null_source))))))
+
+(define grouped_membership_inner_supported? (lambda (inner outer_sources)
+	(and (query_block? inner)
+		(and (not (empty_list? (qb_sources inner)))
+			(and (not (empty_list? (qb_group inner)))
+				(and (empty_list? (qb_order inner))
+					(and (nil? (qb_limit inner))
+						(and (nil? (qb_offset inner))
+							(empty_list? (btw2025_query_block_accessing_aliases inner outer_sources))))))))))
+
+(define make_grouped_in_semijoin_rewrite (lambda (probe inner outer_sources)
+	(begin
+		(if (not (grouped_membership_inner_supported? inner outer_sources))
+			(neumann_fail "untangle_query" "grouped IN currently requires an uncorrelated unordered query-block")
+			true)
+		(if (not (equal? (count (qb_fields inner)) 2))
+			(neumann_fail "untangle_query" "IN subquery must expose exactly one column")
+			true)
+		(define stage (make_group_stage_for_query_block inner))
+		(define input_alias (group_stage_input_alias stage))
+		(define keys (gs_keys stage))
+		(define ags (gs_aggregates stage))
+		(define rhs_expr (canonical_column_expr_for_alias input_alias (query_block_first_expr inner)))
+		(define key_idx (group_key_index input_alias keys rhs_expr))
+		(if (nil? key_idx)
+			(neumann_fail "untangle_query" "grouped IN currently requires the selected value to be a GROUP BY key")
+			true)
+		(define stage_alias (exists_stage_alias (gs_id stage)))
+		(define key_names (group_key_cols keys))
+		(define having_expr (replace_group_expr
+			input_alias stage_alias keys key_names ags (coalesceNil (gs_having stage) true)))
+		(define join_condition (combine_where_terms
+			(list
+				(make_exists_stage_join_condition stage_alias (list (nth key_names key_idx)) (list probe))
+				(list (quote not) (list (quote nil?) probe))
+				having_expr)
+			true))
+		(define source (list
+			stage_alias
+			(group_stage_schema stage)
+			(make_stage_output_relation (gs_id stage))
+			false
+			join_condition))
+		(list true (list stage) (list source)))))
+
+(define make_in_stage_rewrite (lambda (probe inner args)
+	(begin
+		(define outer_sources (nth args 0))
+		(define negate (if (>= (count args) 3) (nth args 2) false))
+		(define semijoin_where (and (not negate) (if (>= (count args) 4) (nth args 3) false)))
+		(define membership_inner (normalize_membership_query_block inner))
+		(if (empty_list? (qb_group membership_inner))
+			(make_plain_in_stage_rewrite probe membership_inner args)
+			(if semijoin_where
+				(make_grouped_in_semijoin_rewrite probe membership_inner outer_sources)
+				(neumann_fail "untangle_query" "grouped IN is currently supported only as a positive WHERE predicate"))))))
 
 (define make_scalar_aggregate_stage_rewrite (lambda (inner args)
 	(begin
