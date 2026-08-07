@@ -402,6 +402,97 @@ test_cases:
         - {ID: 2, can_read: true}
         - {ID: 3, can_read: false}
 
+  - name: "Scalar query recipes reuse shared presence carrier preparation"
+    sql: |
+      SELECT c.ID,
+        COALESCE((
+          SELECT (
+            EXISTS (
+              SELECT TRUE FROM exists_orders global_a
+              WHERE global_a.total > 1000
+              LIMIT 1
+            )
+            OR EXISTS (
+              SELECT TRUE FROM exists_orders own_a
+              WHERE own_a.customer_id = parent_a.ID
+              LIMIT 1
+            )
+          )
+          FROM exists_customers parent_a
+          WHERE parent_a.ID = c.ID
+          LIMIT 1
+        ), FALSE) AS allowed_a,
+        COALESCE((
+          SELECT (
+            EXISTS (
+              SELECT TRUE FROM exists_orders global_b
+              WHERE global_b.total > 1000
+              LIMIT 1
+            )
+            OR EXISTS (
+              SELECT TRUE FROM exists_orders own_b
+              WHERE own_b.customer_id = parent_b.ID
+              LIMIT 1
+            )
+          )
+          FROM exists_customers parent_b
+          WHERE parent_b.ID = c.ID
+          LIMIT 1
+        ), FALSE) AS allowed_b
+      FROM exists_customers c
+      ORDER BY c.ID
+    expect:
+      rows: 3
+      data:
+        - {ID: 1, allowed_a: true, allowed_b: true}
+        - {ID: 2, allowed_a: true, allowed_b: true}
+        - {ID: 3, allowed_a: false, allowed_b: false}
+
+  - name: "EXPLAIN prepares shared scalar recipe presence carriers once"
+    sql: |
+      EXPLAIN SELECT c.ID,
+        COALESCE((
+          SELECT (
+            EXISTS (
+              SELECT TRUE FROM exists_orders global_a
+              WHERE global_a.total > 1000
+              LIMIT 1
+            )
+            OR EXISTS (
+              SELECT TRUE FROM exists_orders own_a
+              WHERE own_a.customer_id = parent_a.ID
+              LIMIT 1
+            )
+          )
+          FROM exists_customers parent_a
+          WHERE parent_a.ID = c.ID
+          LIMIT 1
+        ), FALSE) AS allowed_a,
+        COALESCE((
+          SELECT (
+            EXISTS (
+              SELECT TRUE FROM exists_orders global_b
+              WHERE global_b.total > 1000
+              LIMIT 1
+            )
+            OR EXISTS (
+              SELECT TRUE FROM exists_orders own_b
+              WHERE own_b.customer_id = parent_b.ID
+              LIMIT 1
+            )
+          )
+          FROM exists_customers parent_b
+          WHERE parent_b.ID = c.ID
+          LIMIT 1
+        ), FALSE) AS allowed_b
+      FROM exists_customers c
+      ORDER BY c.ID
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "touch_keytable"
+          count: 2
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS exists_doc_shares"
   - sql: "DROP TABLE IF EXISTS exists_docs"
