@@ -121,6 +121,108 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "SELECT literals normalize into runtime bindings"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "SELECT id FROM ps_test WHERE id >= 1 AND name = 'alice' ORDER BY id LIMIT 2 OFFSET 0"
+        true)
+        '(normalized bindings)
+        (if (and
+          (equal? normalized "SELECT id FROM ps_test WHERE id >= ? AND name = ? ORDER BY id LIMIT ? OFFSET ?")
+          (equal? bindings '(1 "alice" 2 0)))
+          "ok"
+          (error (concat "unexpected normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Literal variants share one cached SELECT plan"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (cached_parse cache (lambda (_schema _query _policy) 7)
+          "memcp-tests" "SELECT id FROM ps_test WHERE id = 1 LIMIT 1 OFFSET 0"
+          nil "root" sess true)
+        (cached_parse cache (lambda (_schema _query _policy) 7)
+          "memcp-tests" "SELECT id FROM ps_test WHERE id = 2 LIMIT 2 OFFSET 1"
+          nil "root" sess true)
+        (if (and
+          (equal? (count (cache)) 1)
+          (equal? (sess "v1") 2)
+          (equal? (sess "v2") 2)
+          (equal? (sess "v3") 1))
+          "ok"
+          (error (concat "unexpected cache/bindings: " (count (cache)) " / " (sess "v1") "," (sess "v2") "," (sess "v3")))))
+    expect:
+      data: ["ok"]
+
+  - name: "Literal front cache stores only generalized SELECTs"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (sql_parameterize_select_literals_cached cache
+          "UPDATE ps_test SET score = 5 WHERE id = 1" true)
+        (sql_parameterize_select_literals_cached cache
+          "SELECT COUNT(*) FROM ps_test WHERE id = 1" true)
+        (sql_parameterize_select_literals_cached cache
+          "SELECT id FROM ps_test WHERE id = 1" true)
+        (sql_parameterize_select_literals_cached cache
+          "SELECT id FROM ps_test WHERE id = 1" true)
+        (if (equal? (count (cache)) 1)
+          "ok"
+          (error (concat "unexpected literal front-cache size: " (count (cache))))))
+    expect:
+      data: ["ok"]
+
+  - name: "Literal equality first execution"
+    sql: "SELECT id FROM ps_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {id: 1}
+
+  - name: "Literal equality second execution"
+    sql: "SELECT id FROM ps_test WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - {id: 2}
+
+  - name: "Projection literal keeps result metadata"
+    sql: "SELECT 1, 'fixed' AS label FROM ps_test LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - {"1": 1, label: "fixed"}
+
+  - name: "Literal normalization leaves DML exact"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "UPDATE ps_test SET score = 5 WHERE id = 1"
+        true)
+        '(normalized bindings)
+        (if (and
+          (equal? normalized "UPDATE ps_test SET score = 5 WHERE id = 1")
+          (equal? bindings '()))
+          "ok"
+          (error (concat "unexpected normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Literal LIMIT and OFFSET stay execution-local"
+    sql: "SELECT id FROM ps_test ORDER BY id LIMIT 1 OFFSET 0"
+    expect:
+      rows: 1
+      data:
+        - {id: 1}
+
+  - name: "Literal LIMIT and OFFSET second execution"
+    sql: "SELECT id FROM ps_test ORDER BY id LIMIT 1 OFFSET 1"
+    expect:
+      rows: 1
+      data:
+        - {id: 2}
+
   - name: "? placeholder: no match returns 0 rows"
     sql: "SELECT id FROM ps_test WHERE id = ?"
     params: [99]
