@@ -4415,6 +4415,27 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(ir_context_of ir)
 			(ir_return ir)))))
 
+(define group_stage_carrier_owner_key (lambda (stage)
+	(if (group_stage? stage)
+		(concat (group_stage_carrier_schema stage) "\n" (group_stage_carrier_relation stage))
+		(concat "stage\n" (logical_stage_key stage)))))
+
+(define group_stage_with_initializer_owner (lambda (stage owner)
+	(if (not (group_stage? stage))
+		stage
+		(make_group_stage
+			(gs_id stage)
+			(gs_input stage)
+			(gs_domain stage)
+			(gs_keys stage)
+			(gs_aggregates stage)
+			(gs_having stage)
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			(qassoc_set (gs_facts stage) (quote keytable_initializer_owner) owner)))))
+
 (define node_contains_nested_stage_input? (lambda (node)
 	(if (query_block? node)
 		(reduce (qb_stages node) (lambda (found stage)
@@ -5386,8 +5407,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(merge acc (list ag)))))
 		'())))
 
-(define group_table_name (lambda (schema tbl alias keys condition ags)
-	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v2" schema tbl alias keys condition ags))))))
+(define group_table_name (lambda (schema tbl alias keys condition)
+	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v3" schema tbl alias keys condition))))))
 
 (define canonical_group_stage_alias "__grp")
 
@@ -5442,15 +5463,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define tbl (group_stage_input_name stage))
 		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
-		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(make_group_keytable_carrier schema (group_table_name
 			schema
 			tbl
 			canonical_group_stage_alias
 			(canonicalize_group_stage_local_exprs alias keys)
-			(canonicalize_group_stage_local_expr alias condition)
-			(canonicalize_group_stage_local_exprs alias ags))))))
+			(canonicalize_group_stage_local_expr alias condition))))))
 
 (define group_stage_carrier (lambda (stage)
 	(coalesceNil
@@ -7392,24 +7411,41 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(if (group_stage? stage)
 		(begin
 			(define carrier (group_stage_carrier stage))
-			(list (quote group) (group_carrier_schema carrier) (group_carrier_relation carrier)))
+			(list
+				(quote group)
+				(group_carrier_schema carrier)
+				(group_carrier_relation carrier)
+				(map (gs_aggregates stage) aggregate_col_name)
+				(map (gs_order stage) (lambda (item) (fnv_hash (serialize item))))
+				(if (source_is_base_table? (gs_input stage))
+					nil
+					(list
+						(qassoc_get (gs_facts stage) (quote purpose) nil)
+						(qassoc_get (gs_facts stage) (quote cardinality_mode) nil)))))
 		(logical_stage_key stage))))
 
-(define lower_unique_stage_prepares_acc (lambda (stages seen prepare)
+(define lower_unique_stage_prepares_acc (lambda (stages seen initialized_carriers prepare)
 	(match (coalesceNil stages '())
 		(cons stage rest) (begin
-			/* Lower every logical owner before deduplication so stage-output IDs are
-			still resolved and validated against their original dependency scope. */
-			(define plan (prepare stage))
+			(define shared_carrier (and (group_stage? stage) (source_is_base_table? (gs_input stage))))
+			(define carrier_key (if shared_carrier (group_stage_carrier_owner_key stage) nil))
+			(define initializer_owner (or (not shared_carrier) (not (has_assoc? initialized_carriers carrier_key))))
+			(define prepared_stage (if shared_carrier
+				(group_stage_with_initializer_owner stage initializer_owner)
+				stage))
+			(define plan (prepare prepared_stage))
 			(define identity (stage_prepare_identity stage))
+			(define next_carriers (if (and shared_carrier initializer_owner)
+				(set_assoc initialized_carriers carrier_key true)
+				initialized_carriers))
 			(if (has_assoc? seen identity)
-				(lower_unique_stage_prepares_acc rest seen prepare)
+				(lower_unique_stage_prepares_acc rest seen next_carriers prepare)
 				(cons plan
-					(lower_unique_stage_prepares_acc rest (set_assoc seen identity true) prepare))))
+					(lower_unique_stage_prepares_acc rest (set_assoc seen identity true) next_carriers prepare))))
 		_ '())))
 
 (define lower_unique_stage_prepares (lambda (stages prepare)
-	(lower_unique_stage_prepares_acc stages '() prepare)))
+	(lower_unique_stage_prepares_acc stages '() '() prepare)))
 
 (define lower_unique_stage_prepares_using (lambda (all_stages lookup_stages stages)
 	(lower_unique_stage_prepares stages (lambda (stage)
@@ -7472,6 +7508,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
 		(define key_names (group_key_cols keys))
 		(define grouptbl (group_carrier_relation carrier))
+		(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
 		(define scalar_query_stage (and (query_block? src)
 			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
 				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote single_or_error))
@@ -7525,21 +7562,29 @@ PostgreSQL parsers should both lower to the same combined operators.
 			nil
 			(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
 		(define key_columns (map key_names (lambda (col) (list (quote list) "column" col "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))
-		(define agg_columns (if (or query_input_carrier scalar_order_base_stage)
-			(map ags (lambda (ag) (list (quote list) "column" (aggregate_col_name ag) "any" (quoted_runtime_list '()) (quoted_runtime_list '()))))
-			'()))
 		(define create_cols (cons (quote list)
 			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
-				(merge (list key_columns agg_columns)))))
-		(define keytable_init (list (quote !begin)
-			(list (quote if)
-				(list (quote createtable) schema grouptbl create_cols (quoted_runtime_list '("engine" "sloppy")) true)
-				nil
-				nil)
-			(list (quote touch_keytable) (list (quote table) schema grouptbl))
-			(list (quote or)
-				(list (quote not) (list (quote has?) (list (quote show) schema) grouptbl))
-				(list (quote table_empty?) (list (quote table) schema grouptbl)))))
+				key_columns)))
+		(define ensure_agg_columns (if (or query_input_carrier scalar_order_base_stage)
+			(map ags (lambda (ag)
+				(list (quote createcolumn)
+					(list (quote table) schema grouptbl)
+					(aggregate_col_name ag)
+					"any"
+					(quoted_runtime_list '())
+					(quoted_runtime_list '()))))
+			'()))
+		(define keytable_init (cons (quote !begin)
+			(merge (list
+				(list
+					(list (quote if)
+						(list (quote createtable) schema grouptbl create_cols (quoted_runtime_list '("engine" "sloppy")) true)
+						nil
+						nil)
+					(list (quote touch_keytable) (list (quote table) schema grouptbl)))
+				(list (list (quote or)
+					(list (quote not) (list (quote has?) (list (quote show) schema) grouptbl))
+					(list (quote table_empty?) (list (quote table) schema grouptbl))))))))
 		(define collect_plan (if query_input_carrier
 			(if (union_block? src)
 				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
@@ -7563,39 +7608,46 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(if (direct_group_order_expr? replaced_order_expr) '() (list replaced_order_expr))))))))
 		(define computed_order_plans (map computed_order_exprs (lambda (expr)
 			(build_group_computed_order_column schema grouptbl expr))))
+		(define ensure_agg_expr (if (empty_list? ensure_agg_columns)
+			nil
+			(cons (quote !begin) ensure_agg_columns)))
 		(define aggregate_prepare_expr (cons
 			(quote !begin)
-			(merge (list agg_plans computed_order_plans))))
+			(merge (list ensure_agg_columns agg_plans computed_order_plans))))
 		(if scalar_query_stage
 			(list (quote !begin)
 				nested_prepare_expr
-				keytable_init
+				(if initializer_owner keytable_init nil)
+				ensure_agg_expr
 				(build_scalar_single_query_stage_fill_plan prepared_src grouptbl keys key_names (car lowering_ags) (cadr lowering_ags)))
 			(if query_input_carrier
 				(cons (quote !begin)
 					(merge (list
 						nested_prepare
 						nested_materialize
-						(list keytable_init)
-						(if (empty_list? ags) (list collect_plan) '())
+						(if initializer_owner (list keytable_init) '())
+						ensure_agg_columns
+						(if (and initializer_owner (empty_list? ags)) (list collect_plan) '())
 						agg_plans
 						computed_order_plans)))
 				(if scalar_order_base_stage
 					(list (quote !begin)
 						nested_prepare_expr
-						keytable_init
+						(if initializer_owner keytable_init nil)
 						aggregate_prepare_expr)
 					(list (quote !begin)
 						nested_prepare_expr
-						(if (nil? cleanup_plan)
-							(list (quote !begin)
-								keytable_init
-								collect_plan)
-							(list (quote if) keytable_init
+						(if initializer_owner
+							(if (nil? cleanup_plan)
 								(list (quote !begin)
-									collect_plan
-									cleanup_plan)
-								nil))
+									keytable_init
+									collect_plan)
+								(list (quote if) keytable_init
+									(list (quote !begin)
+										collect_plan
+										cleanup_plan)
+									nil))
+							nil)
 						aggregate_prepare_expr)))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
@@ -8196,15 +8248,40 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define query_block_stages_to_prepare_base (lambda (block)
 	(query_block_stages_to_prepare_base_using (qb_stages block) block)))
 
+(define selected_group_carrier_keys (lambda (stages)
+	(reduce (coalesceNil stages '()) (lambda (keys stage)
+		(if (and (group_stage? stage) (source_is_base_table? (gs_input stage)))
+			(set_assoc keys (group_stage_carrier_owner_key stage) true)
+			keys))
+		'())))
+
+(define include_shared_group_carrier_stages (lambda (block_stages selected)
+	(begin
+		(define selected_carriers (selected_group_carrier_keys selected))
+		(define selected_ids (reduce (coalesceNil selected '()) (lambda (ids stage)
+			(set_assoc ids (gs_id stage) true)) '()))
+		(if (empty_list? selected_carriers)
+			selected
+			(filter (coalesceNil block_stages '()) (lambda (stage)
+				(or
+					(has_assoc? selected_ids (gs_id stage))
+					(and
+						(group_stage? stage)
+						(and
+							(source_is_base_table? (gs_input stage))
+							(has_assoc? selected_carriers (group_stage_carrier_owner_key stage)))))))))))
+
 (define query_block_stages_to_prepare_using (lambda (all_stages block)
 	(begin
 		(define prelimit_stage_ids (if (late_projection_candidate_block? block)
 			(stage_ids_for_sources_with_closure all_stages (query_block_prelimit_sources block))
 			nil))
-		(filter (query_block_stages_to_prepare_base_using all_stages block) (lambda (stage)
-			(or
-				(nil? prelimit_stage_ids)
-				(stage_id_in? stage prelimit_stage_ids)))))))
+		(include_shared_group_carrier_stages
+			(qb_stages block)
+			(filter (query_block_stages_to_prepare_base_using all_stages block) (lambda (stage)
+				(or
+					(nil? prelimit_stage_ids)
+					(stage_id_in? stage prelimit_stage_ids))))))))
 
 (define query_block_stages_to_prepare (lambda (block)
 	(query_block_stages_to_prepare_using (qb_stages block) block)))
