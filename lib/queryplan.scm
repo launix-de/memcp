@@ -2969,6 +2969,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 			'(expr dir) (list (rewrite_derived_ref alias projection expr) dir)
 			_ item)))))
 
+(define rewrite_order_output_alias (lambda (fields expr)
+	(match expr
+		((symbol get_column) nil ignorecase col _json_path)
+		(coalesceNil (field_expr_by_title fields col ignorecase) expr)
+		((quote get_column) nil ignorecase col _json_path)
+		(coalesceNil (field_expr_by_title fields col ignorecase) expr)
+		_ expr)))
+
+(define rewrite_order_output_aliases (lambda (fields order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr dir) (list (rewrite_order_output_alias fields expr) dir)
+			_ item)))))
+
 (define rewrite_source_join_for_derived (lambda (alias projection src)
 	(list
 		(source_alias src)
@@ -3413,8 +3427,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 									true)
 								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
+								(define rewritten_fields (rewrite_derived_fields_chain rewrites (qb_fields block)))
 								(define field_result (untangle_fields_with_stages
-									(qualify_join_expr (rewrite_derived_fields_chain rewrites (qb_fields block)))
+									(qualify_join_expr rewritten_fields)
 									joined_expr_outer_sources joined_expr_ctx))
 								(define having_result (untangle_expr_with_stages
 									(qualify_join_expr (rewrite_derived_ref_chain rewrites (qb_having block)))
@@ -3426,7 +3441,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define order_result (untangle_order_with_stages
-									(qualify_join_expr (rewrite_derived_order_chain rewrites (qb_order block)))
+									(qualify_join_expr (rewrite_order_output_aliases
+										rewritten_fields
+										(rewrite_derived_order_chain rewrites (qb_order block))))
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define hidden_result (untangle_fields_with_stages
