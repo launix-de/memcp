@@ -24,6 +24,13 @@ import (
 	"strings"
 )
 
+func bindMatchVar(en *Env, sym Symbol, value Scmer) {
+	if en.Vars == nil {
+		en.Vars = make(Vars)
+	}
+	en.Vars[sym] = value
+}
+
 func scmerSymbolName(s Scmer) (string, bool) {
 	// Unwrap SourceInfo and direct symbols
 	if name, ok := symbolName(s); ok {
@@ -150,7 +157,7 @@ func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 		case "false":
 			return val.IsBool() && !val.Bool()
 		default:
-			en.Vars[Symbol(pattern.String())] = val
+			bindMatchVar(en, Symbol(pattern.String()), val)
 			return true
 		}
 	case tagNthLocalVar:
@@ -322,7 +329,7 @@ func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 							continue
 						}
 						if sym, ok := symbolName(p[i+2]); ok {
-							en.Vars[Symbol(sym)] = NewString(match[i])
+							bindMatchVar(en, Symbol(sym), NewString(match[i]))
 							continue
 						}
 						panic("regex variable invalid: " + SerializeToString(p[i+2], en))
@@ -361,7 +368,7 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			return true
 		}
 		if name, ok := symbolName(target); ok {
-			en.Vars[Symbol(name)] = NewString(str)
+			bindMatchVar(en, Symbol(name), NewString(str))
 			return true
 		}
 		return false
@@ -388,7 +395,7 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 					return true
 				}
 				if name, ok := symbolName(first); ok {
-					en.Vars[Symbol(name)] = NewString(base)
+					bindMatchVar(en, Symbol(name), NewString(base))
 					return true
 				}
 			}
@@ -412,7 +419,7 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 				}
 				en.VarsNumbered[id] = NewString(prefix)
 			} else if name, ok := symbolName(first); ok {
-				en.Vars[Symbol(name)] = NewString(prefix)
+				bindMatchVar(en, Symbol(name), NewString(prefix))
 			} else {
 				return false
 			}

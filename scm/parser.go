@@ -24,6 +24,8 @@ import (
 	"strings"
 )
 
+var schemeStringUnescaper = strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t", "\\0", "\x00")
+
 type SourceInfo struct {
 	source   string
 	line     int
@@ -154,7 +156,6 @@ func tokenize(source, s string) []Scmer {
 	line := 1
 	col := 0
 
-	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t", "\\0", "\x00")
 	state := 0
 	startToken := 0
 	result := make([]Scmer, 0)
@@ -194,7 +195,7 @@ func tokenize(source, s string) []Scmer {
 			state = 3 // continue with string
 		} else if state == 3 && ch == '"' {
 			// finish string
-			result = append(result, NewString(stringreplacer.Replace(string(s[startToken+1:i]))))
+			result = append(result, NewString(schemeStringUnescaper.Replace(string(s[startToken+1:i]))))
 			state = 0
 		} else {
 			// otherwise: state change!

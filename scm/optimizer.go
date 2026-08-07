@@ -52,6 +52,29 @@ func procBodyUsesNamedParam(body Scmer, named map[Symbol]struct{}) bool {
 	return false
 }
 
+func procCanUseNumberedOnly(params, body Scmer, numVars int) bool {
+	if numVars == 0 {
+		return false
+	}
+	if stripped, ok := scmerStripSourceInfo(params); ok {
+		params = stripped
+	}
+	named := make(map[Symbol]struct{})
+	if params.IsSlice() {
+		for _, param := range params.Slice() {
+			if stripped, ok := scmerStripSourceInfo(param); ok {
+				param = stripped
+			}
+			if param.IsSymbol() && !param.SymbolEquals("_") {
+				named[mustSymbol(param)] = struct{}{}
+			}
+		}
+	} else if params.IsSymbol() && !params.SymbolEquals("_") {
+		named[mustSymbol(params)] = struct{}{}
+	}
+	return !procBodyUsesNamedParam(body, named)
+}
+
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
 func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	/* API contract:
@@ -246,6 +269,8 @@ type optimizerMetainfo struct {
 	loopDepth            int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
 	lambdaDepth          int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
 	beginDepth           int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
+	inlineDepth          int
+	inlineStack          map[Symbol]bool
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -271,6 +296,8 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.loopDepth = ome.loopDepth
 	result.lambdaDepth = ome.lambdaDepth
 	result.beginDepth = ome.beginDepth
+	result.inlineDepth = ome.inlineDepth
+	result.inlineStack = ome.inlineStack
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
 }
@@ -293,7 +320,150 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.loopDepth = ome.loopDepth
 	result.lambdaDepth = ome.lambdaDepth
 	result.beginDepth = ome.beginDepth
+	result.inlineDepth = ome.inlineDepth
+	result.inlineStack = ome.inlineStack
 	return
+}
+
+const maxLeafInlineNodes = 24
+const maxLeafInlineDepth = 8
+
+func analyzeLeafInlineBody(expr Scmer, callee Symbol, paramCount int, refs []int, nodes *int) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	*nodes++
+	if *nodes > maxLeafInlineNodes {
+		return false
+	}
+	if expr.IsNthLocalVar() {
+		idx := int(expr.NthLocalVar())
+		if idx < 0 || idx >= paramCount {
+			return false
+		}
+		refs[idx]++
+		return refs[idx] <= 1
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 {
+		return true
+	}
+	if scmerIsSymbol(items[0], "quote") {
+		return true
+	}
+	if head, ok := scmerSymbol(items[0]); ok {
+		switch head {
+		case callee, "lambda", "define", "set", "setN", "eval", "parser", "outer", "begin", "begin_mut", "!begin", "match", "match_mut":
+			return false
+		}
+	}
+	for _, item := range items {
+		if !analyzeLeafInlineBody(item, callee, paramCount, refs, nodes) {
+			return false
+		}
+	}
+	return true
+}
+
+func substituteLeafInlineParams(expr Scmer, args []Scmer) Scmer {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsNthLocalVar() {
+		return args[int(expr.NthLocalVar())]
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+		return expr
+	}
+	rewritten := make([]Scmer, len(items))
+	for i, item := range items {
+		rewritten[i] = substituteLeafInlineParams(item, args)
+	}
+	return NewSlice(rewritten)
+}
+
+func leafInlineBindingsStable(expr Scmer, source, target *Env) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsNthLocalVar() || !expr.IsSlice() && !expr.IsSymbol() {
+		return true
+	}
+	if expr.IsSymbol() {
+		sym := mustSymbol(expr)
+		sourceOwner := source.FindRead(sym)
+		targetOwner := target.FindRead(sym)
+		if sourceOwner == nil || targetOwner == nil {
+			return false
+		}
+		sourceValue, sourceOK := sourceOwner.Vars[sym]
+		targetValue, targetOK := targetOwner.Vars[sym]
+		return sourceOK && targetOK && sourceValue == targetValue
+	}
+	items := expr.Slice()
+	if len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+		return true
+	}
+	for _, item := range items {
+		if !leafInlineBindingsStable(item, source, target) {
+			return false
+		}
+	}
+	return true
+}
+
+func tryInlineLeafProc(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo, bool) {
+	if len(v) < 1 || ome.inlineDepth >= maxLeafInlineDepth {
+		return NewNil(), tiZero, false
+	}
+	callee, ok := scmerSymbol(v[0])
+	if !ok || (ome.inlineStack != nil && ome.inlineStack[callee]) {
+		return NewNil(), tiZero, false
+	}
+	owner := env.FindRead(callee)
+	if owner == nil {
+		return NewNil(), tiZero, false
+	}
+	value, ok := owner.Vars[callee]
+	if !ok || !value.IsProc() {
+		return NewNil(), tiZero, false
+	}
+	proc := value.Proc()
+	if proc == nil || proc.En == nil {
+		return NewNil(), tiZero, false
+	}
+	params := proc.Params
+	if stripped, ok := scmerStripSourceInfo(params); ok {
+		params = stripped
+	}
+	paramItems, ok := scmerSlice(params)
+	if !ok || len(paramItems) != len(v)-1 || proc.NumVars != len(paramItems) {
+		return NewNil(), tiZero, false
+	}
+	refs := make([]int, len(paramItems))
+	nodes := 0
+	if !analyzeLeafInlineBody(proc.Body, callee, len(paramItems), refs, &nodes) {
+		return NewNil(), tiZero, false
+	}
+	if !leafInlineBindingsStable(proc.Body, proc.En, env) {
+		return NewNil(), tiZero, false
+	}
+	for _, count := range refs {
+		if count != 1 {
+			return NewNil(), tiZero, false
+		}
+	}
+	inlined := substituteLeafInlineParams(proc.Body, v[1:])
+	if ome.inlineStack == nil {
+		ome.inlineStack = make(map[Symbol]bool)
+	}
+	ome.inlineStack[callee] = true
+	ome.inlineDepth++
+	result, ti := OptimizeEx(inlined, env, ome, useResult)
+	ome.inlineDepth--
+	delete(ome.inlineStack, callee)
+	return result, ti, true
 }
 
 func scmerIsSymbol(v Scmer, name string) bool {
@@ -1114,6 +1284,11 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		transferOwnership = ti.Transfer()
 		if i > 0 && !ti.Const() {
 			allConstArgs = false
+		}
+	}
+	if !allConstArgs {
+		if inlined, ti, ok := tryInlineLeafProc(v, env, ome, useResult); ok {
+			return inlined, ti.ToTypeDescriptor()
 		}
 	}
 

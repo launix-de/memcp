@@ -140,6 +140,56 @@ func TestSchemeReturnHintsPreserveNestedMutRewrite(t *testing.T) {
 	}
 }
 
+func TestOptimizeInlinesSingleUseLeafProc(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("leaf inline test", `(define leaf_second (lambda (values) (nth values 1)))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (values) (leaf_second values))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if strings.Contains(serialized, "leaf_second") {
+		t.Fatalf("single-use leaf proc was not inlined: %s", serialized)
+	}
+	got := Apply(Eval(optimized, env), NewSlice([]Scmer{NewInt(4), NewInt(9)}))
+	if ToInt(got) != 9 {
+		t.Fatalf("inlined leaf proc returned %s, want 9", String(got))
+	}
+}
+
+func TestOptimizeKeepsMultiUseLeafProcCall(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("leaf inline test", `(define leaf_twice (lambda (value) (+ value value)))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (value) (leaf_twice value))`)
+	if serialized := serializedTestExpr(t, env, optimized); !strings.Contains(serialized, "leaf_twice") {
+		t.Fatalf("multi-use leaf proc was inlined: %s", serialized)
+	}
+}
+
+func TestOptimizeKeepsRecursiveLeafProcCall(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("leaf inline test", `(define leaf_recurse (lambda (value)
+		(if (equal? value 0) 0 (leaf_recurse (- value 1)))))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (value) (leaf_recurse value))`)
+	if serialized := serializedTestExpr(t, env, optimized); !strings.Contains(serialized, "leaf_recurse") {
+		t.Fatalf("recursive leaf proc was inlined: %s", serialized)
+	}
+}
+
+func TestOptimizeKeepsLeafProcWithDifferentCapturedBinding(t *testing.T) {
+	source := newOptimizerTestEnv()
+	EvalAll("leaf inline test", `(define captured_value 7)`, source)
+	proc := Eval(Optimize(Read("leaf inline test", `(lambda (value) (+ value captured_value))`), source), source)
+
+	target := newOptimizerTestEnv()
+	target.Vars[Symbol("captured_value")] = NewInt(9)
+	target.Vars[Symbol("captured_leaf")] = proc
+	optimized := optimizeTestSource(t, target, `(lambda (value) (captured_leaf value))`)
+	if serialized := serializedTestExpr(t, target, optimized); !strings.Contains(serialized, "captured_leaf") {
+		t.Fatalf("leaf proc with a different captured binding was inlined: %s", serialized)
+	}
+}
+
 func BenchmarkOptimizeSchemeHelperFreshReturn(b *testing.B) {
 	env := newOptimizerTestEnv()
 	EvalAll("optimizer return benchmark", `(define benchmark_fresh_pair (lambda (a b) (list a b)))`, env)

@@ -541,6 +541,26 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 	return result, td
 }
 
+// optimizeFilter fuses a serial map followed by a filter into one physical
+// traversal. The Scheme expression remains declarative; the fused operator is
+// optimizer-only and does not expose a separate surface-language primitive.
+func optimizeFilter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.applyDefaultOptimization(v, useResult, "filter_mut")
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) != 3 || (!scmerIsSymbol(rv[0], "filter") && !scmerIsSymbol(rv[0], "filter_mut")) {
+		return result, td
+	}
+	inner, ok := scmerSlice(rv[1])
+	if !ok || len(inner) != 3 || (!scmerIsSymbol(inner[0], "map") && !scmerIsSymbol(inner[0], "map_mut")) {
+		return result, td
+	}
+	if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
+		return result, td
+	}
+	fused := NewSlice([]Scmer{NewSymbol("filter_map"), inner[1], inner[2], rv[2]})
+	return fused, descriptorWithLength(FreshAlloc, UnknownLength)
+}
+
 // optimizeProduceN rewrites (produceN ...) to (produceN_mut ... nil) when the
 // result is unused, so runtime can avoid result allocation.
 func optimizeProduceN(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
@@ -1026,7 +1046,7 @@ func init_list() {
 			},
 			Return:   FreshAlloc,
 			Const:    true,
-			Optimize: FirstParameterMutable("filter_mut"),
+			Optimize: optimizeFilter,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1872,6 +1892,58 @@ func init_list() {
 		},
 	})
 
+	// Fused physical operators: optimizer-only, forbidden from .scm code.
+	Declare(&Globalenv, &Declaration{
+		Name: "filter_map",
+		Desc: "fused serial map and filter (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "filter_map")
+			mapper := OptimizeProcToSerialFunction(a[1])
+			predicate := OptimizeProcToSerialFunction(a[2])
+			result := make([]Scmer, 0, len(input))
+			for _, item := range input {
+				mapped := mapper(item)
+				if predicate(mapped).Bool() {
+					result = append(result, mapped)
+				}
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", NoEscape: true},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "condition", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "flat_map",
+		Desc: "fused fixed-width serial map and flatten (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "flat_map")
+			mapper := OptimizeProcToSerialFunction(a[1])
+			width := int(ToInt(a[2]))
+			result := make([]Scmer, 0, len(input)*width)
+			for _, item := range input {
+				result = append(result, asSlice(mapper(item), "flat_map result")...)
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", NoEscape: true},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "list"}},
+				{Kind: "int", ParamName: "width"},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+		},
+	})
 	// _mut variants: optimizer-only, forbidden from .scm code
 	// Tier 1: same-length, zero-copy
 
@@ -2365,6 +2437,24 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 		return result, td
 	}
 	if len(rv) == 2 {
+		if producer, ok := scmerSlice(rv[1]); ok && len(producer) == 3 {
+			if exprMayHaveSideEffects(producer[2]) {
+				return result, td
+			}
+			itemLength := exactCallbackListLength(producer[2], oc)
+			if itemLength >= 0 {
+				switch {
+				case scmerIsSymbol(producer[0], "map"), scmerIsSymbol(producer[0], "map_mut"):
+					inputLength := optimizedExactListLength(producer[1], oc)
+					resultLength := UnknownLength
+					if inputLength >= 0 {
+						resultLength = inputLength * itemLength
+					}
+					fused := NewSlice([]Scmer{NewSymbol("flat_map"), producer[1], producer[2], NewInt(int64(itemLength))})
+					return fused, descriptorWithLength(FreshAlloc, resultLength)
+				}
+			}
+		}
 		if outer, ok := scmerSlice(rv[1]); ok && len(outer) > 0 && scmerIsSymbol(outer[0], "list") {
 			merged := make([]Scmer, 0, len(outer)+1)
 			merged = append(merged, NewSymbol("list"))
