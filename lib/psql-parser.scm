@@ -79,7 +79,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ))) (merge sub)))
 
 (define psql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
-(define psql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e-?[0-9]+)?" true)) (simplify x)))
+(define psql_number (parser (define x (regex "-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
+(define psql_interval_unit (parser '((define unit psql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
 (define psql_string (parser (or
 	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
@@ -194,9 +195,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	(define psql_expression3 (parser (or
 		/* date + INTERVAL n UNIT */
-		(parser '((define a psql_expression4) "+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_identifier_unquoted)) '('date_add a n unit))
+		(parser '((define a psql_expression4) "+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_add a n unit))
 		/* date - INTERVAL n UNIT */
-		(parser '((define a psql_expression4) "-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_identifier_unquoted)) '('date_sub a n unit))
+		(parser '((define a psql_expression4) "-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_sub a n unit))
 		(parser '((define a psql_expression4) "+" (define b psql_expression3)) '((quote +) a b))
 		(parser '((define a psql_expression4) "-" (define b psql_expression3)) '((quote -) a b))
 		psql_expression4
