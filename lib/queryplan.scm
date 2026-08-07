@@ -8126,13 +8126,11 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(merge (list
 				(list
 					(list (quote if)
-						(list (quote createtable) schema grouptbl create_cols (quoted_runtime_list '("engine" "sloppy")) true)
+						(list (quote createtable) schema grouptbl create_cols (quoted_runtime_list '("engine" "memory")) true)
 						nil
 						nil)
 					(list (quote touch_keytable) (list (quote table) schema grouptbl)))
-				(list (list (quote or)
-					(list (quote not) (list (quote has?) (list (quote show) schema) grouptbl))
-					(list (quote table_empty?) (list (quote table) schema grouptbl))))))))
+				(list (list (quote table_empty?) (list (quote table) schema grouptbl)))))))
 		(define collect_plan (if query_input_carrier
 			(if (union_block? src)
 				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
@@ -8314,7 +8312,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 				(if (query_block? src) (query_block_stage_catalog src) '())))))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
-			(lower_query_block_core_with_lazy_prepares stage_catalog
+			(lower_query_block_core
 				(group_stage_final_block stage (group_stage_final_extra_sources_using stage_catalog stage)))))))
 
 (define row_number_get_column? (lambda (col expr)

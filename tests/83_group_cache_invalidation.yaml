@@ -79,6 +79,18 @@ test_cases:
         - "createcolumn"
         - ".grp:sc_base:"
 
+  - name: "GROUP BY lowering prepares each canonical carrier once"
+    sql: "EXPLAIN SELECT dept, COUNT(*) AS c, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "touch_keytable"
+          count: 1
+      result_not_contains:
+        - "(show"
+      result_contains:
+        - "memory"
+
   # === INSERT new rows into base table ===
   - name: "Insert new Engineering employee"
     sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (6, 'Engineering', 300, true)"
