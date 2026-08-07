@@ -1011,6 +1011,22 @@ func (c *column) distinctEstimateFor(t *table) uint {
 	return uint(t.CountEstimate())
 }
 
+// truncateStringCharacters applies SQL character limits to UTF-8 characters,
+// not to their encoded byte length.
+func truncateStringCharacters(value string, limit int) string {
+	if utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	characters := 0
+	for byteOffset := range value {
+		if characters == limit {
+			return value[:byteOffset]
+		}
+		characters++
+	}
+	return value
+}
+
 func (c *column) UpdateSanitizer() {
 	typ := strings.ToUpper(c.Typ)
 	allowNull := c.AllowNull
@@ -1098,9 +1114,11 @@ func (c *column) UpdateSanitizer() {
 		if len(dims) >= 1 && dims[0] > 0 {
 			maxLen := dims[0]
 			inner = func(v scm.Scmer) scm.Scmer {
-				s := scm.String(v)
-				if len(s) > maxLen {
-					s = s[:maxLen]
+				s := truncateStringCharacters(scm.String(v), maxLen)
+				if typ == "CHAR" {
+					// Keep CHAR compact while preserving its blank-padded SQL value:
+					// trailing pad spaces are not observable when read back.
+					s = strings.TrimRight(s, " ")
 				}
 				return scm.NewString(s)
 			}
