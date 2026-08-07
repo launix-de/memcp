@@ -277,7 +277,6 @@ setup:
   - sql: "INSERT INTO trace_ref_b SELECT id, id, TRUE FROM trace_asset WHERE id IN (1, 17, 257)"
   - sql: "INSERT INTO trace_ref_c SELECT id, id, FALSE FROM trace_asset WHERE id % 257 = 0"
   - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
-
 test_cases:
   - name: "COUNT lowers a grouped derived stage with an outer presence stage"
     max_plan_size: 20000
@@ -670,6 +669,58 @@ test_cases:
         - id: 1
           archived: false
           can_view: true
+
+  - name: "Repeated correlated access projections compile within one second"
+    max_time: 1.0
+    max_planner_time_ms: 500
+    max_plan_size: 240000
+    sql: |
+      EXPLAIN COMPILE SELECT projected.*
+      FROM (
+        SELECT item.id, item.archived,
+        COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_1 WHERE parent_1.id = item.parent_id LIMIT 1), FALSE) AS access_1,
+        COALESCE((SELECT (parent_2.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_2 WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_2 WHERE parent_2.id = item.parent_id LIMIT 1), FALSE) AS access_2,
+        COALESCE((SELECT (parent_3.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_3 WHERE member_3.team_id = parent_3.team_id AND member_3.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_3 WHERE parent_3.id = item.parent_id LIMIT 1), FALSE) AS access_3,
+        COALESCE((SELECT (parent_4.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_4 WHERE member_4.team_id = parent_4.team_id AND member_4.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_4 WHERE parent_4.id = item.parent_id LIMIT 1), FALSE) AS access_4,
+        COALESCE((SELECT (parent_5.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_5 WHERE member_5.team_id = parent_5.team_id AND member_5.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_5 WHERE parent_5.id = item.parent_id LIMIT 1), FALSE) AS access_5,
+        COALESCE((SELECT (parent_6.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_6 WHERE member_6.team_id = parent_6.team_id AND member_6.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_6 WHERE parent_6.id = item.parent_id LIMIT 1), FALSE) AS access_6,
+        COALESCE((SELECT (parent_7.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_7 WHERE member_7.team_id = parent_7.team_id AND member_7.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_7 WHERE parent_7.id = item.parent_id LIMIT 1), FALSE) AS access_7,
+        COALESCE((SELECT (parent_8.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_8 WHERE member_8.team_id = parent_8.team_id AND member_8.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_8 WHERE parent_8.id = item.parent_id LIMIT 1), FALSE) AS access_8,
+        COALESCE((SELECT (parent_9.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_9 WHERE member_9.team_id = parent_9.team_id AND member_9.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_9 WHERE parent_9.id = item.parent_id LIMIT 1), FALSE) AS access_9,
+        COALESCE((SELECT (parent_10.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_10 WHERE member_10.team_id = parent_10.team_id AND member_10.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_10 WHERE parent_10.id = item.parent_id LIMIT 1), FALSE) AS access_10,
+        COALESCE((SELECT (parent_11.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_11 WHERE member_11.team_id = parent_11.team_id AND member_11.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_11 WHERE parent_11.id = item.parent_id LIMIT 1), FALSE) AS access_11,
+        COALESCE((SELECT (parent_12.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_12 WHERE member_12.team_id = parent_12.team_id AND member_12.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_12 WHERE parent_12.id = item.parent_id LIMIT 1), FALSE) AS access_12,
+        COALESCE((SELECT (parent_13.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_13 WHERE member_13.team_id = parent_13.team_id AND member_13.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_13 WHERE parent_13.id = item.parent_id LIMIT 1), FALSE) AS access_13,
+        COALESCE((SELECT (parent_14.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_14 WHERE member_14.team_id = parent_14.team_id AND member_14.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_14 WHERE parent_14.id = item.parent_id LIMIT 1), FALSE) AS access_14,
+        COALESCE((SELECT (parent_15.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_15 WHERE member_15.team_id = parent_15.team_id AND member_15.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_15 WHERE parent_15.id = item.parent_id LIMIT 1), FALSE) AS access_15,
+        COALESCE((SELECT (parent_16.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_16 WHERE member_16.team_id = parent_16.team_id AND member_16.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_16 WHERE parent_16.id = item.parent_id LIMIT 1), FALSE) AS access_16,
+        COALESCE((SELECT (parent_17.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_17 WHERE member_17.team_id = parent_17.team_id AND member_17.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_17 WHERE parent_17.id = item.parent_id LIMIT 1), FALSE) AS access_17,
+        COALESCE((SELECT (parent_18.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_18 WHERE member_18.team_id = parent_18.team_id AND member_18.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_18 WHERE parent_18.id = item.parent_id LIMIT 1), FALSE) AS access_18,
+        COALESCE((SELECT (parent_19.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_19 WHERE member_19.team_id = parent_19.team_id AND member_19.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_19 WHERE parent_19.id = item.parent_id LIMIT 1), FALSE) AS access_19,
+        COALESCE((SELECT (parent_20.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_20 WHERE member_20.team_id = parent_20.team_id AND member_20.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_20 WHERE parent_20.id = item.parent_id LIMIT 1), FALSE) AS access_20,
+        COALESCE((SELECT (parent_21.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_21 WHERE member_21.team_id = parent_21.team_id AND member_21.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_21 WHERE parent_21.id = item.parent_id LIMIT 1), FALSE) AS access_21,
+        COALESCE((SELECT (parent_22.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_22 WHERE member_22.team_id = parent_22.team_id AND member_22.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_22 WHERE parent_22.id = item.parent_id LIMIT 1), FALSE) AS access_22,
+        COALESCE((SELECT (parent_23.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_23 WHERE member_23.team_id = parent_23.team_id AND member_23.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_23 WHERE parent_23.id = item.parent_id LIMIT 1), FALSE) AS access_23,
+        COALESCE((SELECT (parent_24.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_24 WHERE member_24.team_id = parent_24.team_id AND member_24.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_24 WHERE parent_24.id = item.parent_id LIMIT 1), FALSE) AS access_24,
+        COALESCE((SELECT (parent_25.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_25 WHERE member_25.team_id = parent_25.team_id AND member_25.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_25 WHERE parent_25.id = item.parent_id LIMIT 1), FALSE) AS access_25,
+        COALESCE((SELECT (parent_26.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_26 WHERE member_26.team_id = parent_26.team_id AND member_26.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_26 WHERE parent_26.id = item.parent_id LIMIT 1), FALSE) AS access_26,
+        COALESCE((SELECT (parent_27.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_27 WHERE member_27.team_id = parent_27.team_id AND member_27.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_27 WHERE parent_27.id = item.parent_id LIMIT 1), FALSE) AS access_27,
+        COALESCE((SELECT (parent_28.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_28 WHERE member_28.team_id = parent_28.team_id AND member_28.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_28 WHERE parent_28.id = item.parent_id LIMIT 1), FALSE) AS access_28,
+        COALESCE((SELECT (parent_29.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_29 WHERE member_29.team_id = parent_29.team_id AND member_29.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_29 WHERE parent_29.id = item.parent_id LIMIT 1), FALSE) AS access_29,
+        COALESCE((SELECT (parent_30.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_30 WHERE member_30.team_id = parent_30.team_id AND member_30.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_30 WHERE parent_30.id = item.parent_id LIMIT 1), FALSE) AS access_30,
+        COALESCE((SELECT (parent_31.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_31 WHERE member_31.team_id = parent_31.team_id AND member_31.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_31 WHERE parent_31.id = item.parent_id LIMIT 1), FALSE) AS access_31,
+        COALESCE((SELECT (parent_32.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_32 WHERE member_32.team_id = parent_32.team_id AND member_32.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_32 WHERE parent_32.id = item.parent_id LIMIT 1), FALSE) AS access_32
+        FROM trace_wide_prop item
+      ) projected
+      WHERE projected.id = 1
+        AND (projected.archived IS NULL OR projected.archived = FALSE)
+      LIMIT 72
+    expect:
+      rows: 1
+      contains:
+        - "planner_total_ns"
+        - "logical_nodes"
+        - "group_stages"
 
   - name: "Independent nested scalar aggregates compile within a linear budget"
     max_time: 5.0
