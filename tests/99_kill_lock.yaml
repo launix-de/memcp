@@ -377,12 +377,14 @@ test_cases:
       # kill the running INSERT SELECT
       - session_id: "rb-kill-attacker2"
         sql: "SELECT KILL_QUERY(id) FROM kill_ctrl2 LIMIT 1"
-      # two more sync steps: rollback completes before the background
-      # HTTP response is sent, so by the time we check, state is stable
+      # unrelated requests remain responsive while entered shards drain
       - session_id: "rb-kill-attacker2"
         sql: "SELECT 1"
       - session_id: "rb-kill-attacker2"
         sql: "SELECT 1"
+      # A running shard is atomic: KILL prevents further shard scheduling but
+      # rollback starts only after every already-entered shard has drained.
+      - wait_for_background: true
       # after rollback: target must be empty (all partial inserts undone)
       - session_id: "rb-kill-check"
         sql: "SELECT COUNT(*) AS n FROM kill_dst"

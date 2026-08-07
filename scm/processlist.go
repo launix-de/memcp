@@ -175,6 +175,10 @@ func (s *SessionState) ClearCancel(seq uint64) {
 }
 
 // IsKilled returns true if this session has been killed.
+//
+// Storage execution contract: callers may check cancellation while scheduling
+// shard jobs, but never after entering a shard. Shard execution is atomic and
+// must not contain cancellation checks in index, batch, or row loops.
 func (s *SessionState) IsKilled() bool {
 	return s.IsKilledSeq(CurrentQuerySeq())
 }
@@ -198,6 +202,10 @@ func CurrentQuerySeq() uint64 {
 }
 
 // IsKilledSeq returns true if the given query generation has been killed.
+//
+// Storage execution contract: callers may check cancellation while scheduling
+// shard jobs, but never after entering a shard. Shard execution is atomic and
+// must not contain cancellation checks in index, batch, or row loops.
 func (s *SessionState) IsKilledSeq(seq uint64) bool {
 	if seq == 0 {
 		return false

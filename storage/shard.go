@@ -1301,7 +1301,6 @@ type mapArgGetter func(uint32, uint32) scm.Scmer
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
 	shard           *storageShard
-	sessionState    *scm.SessionState
 	currentTx       *TxContext
 	acidMode        bool
 	mainGetters     []mapArgGetter
@@ -1350,7 +1349,6 @@ type ShardMapReducer struct {
 func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) *ShardMapReducer {
 	mr := &ShardMapReducer{
 		shard:            t,
-		sessionState:     SessionStateFromTx(currentTx),
 		currentTx:        currentTx,
 		acidMode:         currentTx != nil && currentTx.Mode == TxACID,
 		mainGetters:      make([]mapArgGetter, len(cols)),
@@ -1593,12 +1591,6 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 	return mr
 }
 
-func (m *ShardMapReducer) checkKilled() {
-	if m.sessionState != nil && m.sessionState.IsKilled() {
-		panic("query killed")
-	}
-}
-
 func withTxSession(currentTx *TxContext, fn func() scm.Scmer) scm.Scmer {
 	if currentTx == nil || currentTx.Session.IsNil() {
 		return fn()
@@ -1612,7 +1604,6 @@ func withTxSession(currentTx *TxContext, fn func() scm.Scmer) scm.Scmer {
 // partitioned order-preserving into runs of main-storage IDs and delta IDs.
 // batchids is optional and, when present, must align 1:1 with recids.
 func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
-	m.checkKilled()
 	i := 0
 	n := len(recids)
 	for i < n {
@@ -1648,10 +1639,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	// not for the whole batch. This allows nested read scans (e.g. EXISTS
 	// inside UPDATE on the same table) to acquire RLock between rows.
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
-	for rowidx, id := range recids {
-		if rowidx&63 == 0 {
-			m.checkKilled()
-		}
+	for _, id := range recids {
 		func() {
 			effectiveID := id
 			// Acquire write lock per-row for mutation scans
@@ -1692,9 +1680,6 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
 	for rowidx, id := range recids {
-		if rowidx&63 == 0 {
-			m.checkKilled()
-		}
 		func() {
 			effectiveID := id
 			batchid := batchids[rowidx]
@@ -1734,10 +1719,7 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	// Same hoisting as processMainBlock (see comment there).
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
-	for rowidx, id := range recids {
-		if rowidx&63 == 0 {
-			m.checkKilled()
-		}
+	for _, id := range recids {
 		func() {
 			effectiveID := id
 			if needsPerRowLock {
@@ -1775,9 +1757,6 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
 	for rowidx, id := range recids {
-		if rowidx&63 == 0 {
-			m.checkKilled()
-		}
 		func() {
 			effectiveID := id
 			batchid := batchids[rowidx]
