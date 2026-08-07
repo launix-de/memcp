@@ -24,6 +24,51 @@ setup:
 
 test_cases:
 
+  - name: "Set invariant CASE filter to true branch"
+    session_id: "ccn_invariant_filter"
+    sql: "SET @ccn_filter_mode = 1"
+
+  - name: "CASE filter with invariant session condition uses true branch"
+    session_id: "ccn_invariant_filter"
+    sql: |
+      SELECT id FROM ccn_data
+      WHERE CASE WHEN @ccn_filter_mode = 1 THEN amount >= 200 ELSE amount >= 100 AND amount < 200 END
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 6
+
+  - name: "Switch invariant CASE filter to false branch"
+    session_id: "ccn_invariant_filter"
+    sql: "SET @ccn_filter_mode = 0"
+
+  - name: "CASE filter with invariant session condition uses false branch"
+    session_id: "ccn_invariant_filter"
+    sql: |
+      SELECT id FROM ccn_data
+      WHERE CASE WHEN @ccn_filter_mode = 1 THEN amount >= 200 ELSE amount >= 100 AND amount < 200 END
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 7
+
+  - name: "EXPLAIN hoists invariant CASE dispatch outside scan filter"
+    session_id: "ccn_invariant_filter"
+    sql: |
+      EXPLAIN SELECT id FROM ccn_data
+      WHERE CASE WHEN @ccn_filter_mode = 1 THEN amount >= 200 ELSE amount >= 100 AND amount < 200 END
+      ORDER BY id
+    expect:
+      rows: 1
+      result_contains:
+        - '\n\t(if\n'
+      result_not_contains:
+        - '(optimize\n\t\t\t(if'
+
   # === Simple CASE WHEN ===
 
   - name: "CASE with literal comparison"
