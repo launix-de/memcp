@@ -9205,6 +9205,41 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 (define join_filter_cols_for_alias (lambda (all_sources default_alias alias condition)
 	(extract_columns_for_join_alias all_sources default_alias alias condition)))
 
+/* Schedule WHERE conjuncts inside the selected physical scan pipeline. A term
+becomes local as soon as no future source is required. Terms touching an outer
+source remain residual so they observe the null-extended row. */
+(define physical_condition_refs_outer_source? (lambda (default_alias all_sources condition)
+	(reduce (coalesceNil all_sources '()) (lambda (found src)
+		(or found
+			(and (source_outer? src)
+				(expr_refs_alias? default_alias (source_alias src) condition))))
+		false)))
+
+(define physical_condition_ready? (lambda (default_alias all_sources future_sources condition)
+	(and
+		(not (expr_contains_orc_column? condition))
+		(and
+			(not (expr_refs_any_alias? default_alias (source_aliases future_sources) condition))
+			(not (physical_condition_refs_outer_source? default_alias all_sources condition))))))
+
+(define physical_partition_condition_terms (lambda (default_alias all_sources future_sources terms ready pending)
+	(match (coalesceNil terms '())
+		(cons term rest) (if (physical_condition_ready? default_alias all_sources future_sources term)
+			(physical_partition_condition_terms default_alias all_sources future_sources rest (cons term ready) pending)
+			(physical_partition_condition_terms default_alias all_sources future_sources rest ready (cons term pending)))
+		_ (list
+			(combine_where_terms ready true)
+			(combine_where_terms pending true)))))
+
+(define physical_partition_condition (lambda (default_alias all_sources future_sources condition)
+	(physical_partition_condition_terms
+		default_alias
+		all_sources
+		future_sources
+		(split_and_terms (coalesceNil condition true))
+		'()
+		'())))
+
 (define row_number_condition_expr? (lambda (src col expr)
 	(match expr
 		((symbol if) _presence nil_expr inner) (if (nil? nil_expr) (row_number_condition_expr? src col inner) false)
@@ -9459,15 +9494,15 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 	(begin
 		(define src (car sources))
 		(define alias (source_alias src))
-		(define condition (coalesceNil (source_join_expr src) true))
-		(define membership (coalesceNil
-			(driver_membership_for_source src final_condition)
-			(driver_membership_for_source src condition)))
+		(define condition_parts (physical_partition_condition default_alias sources (cdr sources) final_condition))
+		(define local_condition (nth condition_parts 0))
+		(define remaining_condition (nth condition_parts 1))
+		(define condition (combine_where (source_join_expr src) local_condition))
+		(define membership (driver_membership_for_source src condition))
 		(define membership_table_expr (if (nil? membership)
 			nil
 			(recset_project_join_expr_for_membership src membership)))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
-		(define effective_final_condition (strip_driver_membership_for_source src final_condition effective_membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
 		(define membership_var (symbol "__membership_recset"))
 		(define membership_filter_expr (if (nil? membership_table_expr)
@@ -9482,37 +9517,42 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(define table_expr (source_table_expr src))
 		(define offset_expr (coalesceNil offset_value 0))
 		(define limit_expr (coalesceNil limit_value -1))
+		(define single_pass (equal? offset_expr 0))
 		(define has_limit_expr (list (quote not) (list (quote equal?) limit_expr -1)))
 		(define end_expr (list (quote +) offset_expr limit_expr))
 		(define match_needed_exprs (merge (list
-			(list effective_final_condition)
+			(list remaining_condition)
 			(source_join_exprs sources))))
-		(define match_rows_expr (build_join_scan_rows_with_mapper
-			schema
-			sources
-			(cdr sources)
-			default_alias
-			match_needed_exprs
-			effective_final_condition
-			true
-			'()
-			0
-			-1
-			true
-			stages))
+		(define match_rows_expr (if single_pass
+			nil
+			(build_join_scan_rows_with_mapper
+				schema
+				sources
+				(cdr sources)
+				default_alias
+				match_needed_exprs
+				remaining_condition
+				true
+				'()
+				0
+				-1
+				true
+				stages)))
 		(define rest_rows_expr (build_join_scan_rows_with_mapper
 			schema
 			sources
 			(cdr sources)
 			default_alias
 			needed_exprs
-			effective_final_condition
+			remaining_condition
 			(lower_join_result_row_assoc sources default_alias fields order_items)
 			'()
 			0
 			-1
 			true
 			stages))
+		(define joined_source_expr (if single_pass rest_rows_expr match_rows_expr))
+		(define joined_rows_expr (if single_pass (quote joined_matches) rest_rows_expr))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(list (quote optimize) (lower_column_expr_for_join sources default_alias filter_condition))))
@@ -9522,13 +9562,13 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 				(list (quote and) has_limit_expr (list (quote >=) (quote __seen) end_expr))
 				(list (symbol "$break"))
 				(list (quote !begin)
-					(list (quote define) (quote joined_matches) match_rows_expr)
+					(list (quote define) (quote joined_matches) joined_source_expr)
 					(list (quote define) (quote joined_count) (list (quote count) (quote joined_matches)))
 					(list (quote if)
 						(list (quote equal?) (quote joined_count) 0)
 						(list (quote list))
 						(list (quote !begin)
-							(list (quote define) (quote joined_rows) rest_rows_expr)
+							(list (quote define) (quote joined_rows) joined_rows_expr)
 							(list (quote define) (quote start_idx) (list (quote max) 0 (list (quote -) offset_expr (quote __seen))))
 							(list (quote define) (quote stop_idx) (list (quote if)
 								has_limit_expr
@@ -9673,10 +9713,11 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 				(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
 				true)
 			(define alias (source_alias src))
-			(define condition (coalesceNil (source_join_expr src) true))
-			(define final_membership (driver_membership_for_source src final_condition))
-			(define condition_membership (driver_membership_for_source src condition))
-			(define membership (coalesceNil final_membership condition_membership))
+			(define condition_parts (physical_partition_condition default_alias all_sources (cdr sources) final_condition))
+			(define local_condition (nth condition_parts 0))
+			(define remaining_condition (nth condition_parts 1))
+			(define condition (combine_where (source_join_expr src) local_condition))
+			(define membership (driver_membership_for_source src condition))
 			(define delay_limit_after_join (ordered_join_limit_requires_complete_rows? sources default_alias final_condition offset_value limit_value))
 			(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_carrier)))
 				nil
@@ -9684,7 +9725,6 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(define membership_driver (and (not (nil? membership_table_expr)) (empty_list? (cdr sources))))
 			(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
 			(define effective_membership (if (nil? membership_table_expr) nil membership))
-			(define effective_final_condition (strip_driver_membership_for_source src final_condition effective_membership))
 			(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
 			(define membership_var (symbol "__membership_recset"))
 			(define membership_filter_expr (if membership_filter
@@ -9709,7 +9749,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 				(list (quote optimize) lowered_filter_condition)))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_rows_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs effective_final_condition row_expr '() 0 -1 allow_membership_carrier column_recipe stages)))
+				(build_join_scan_rows_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_carrier column_recipe stages)))
 			(define reduce_expr (list (quote lambda) (list (quote acc) (quote subrows))
 				(list (quote if)
 					(list (quote nil?) (quote subrows))
@@ -9717,7 +9757,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 					(list (quote merge) (quote acc) (quote subrows)))))
 			(define scan_expr
 				(if (not (nil? row_number_stage_filter))
-					(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs effective_final_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe)
+					(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe)
 					(if (and (empty_list? order_items) (not (query_limit_active? offset_value limit_value)))
 						(list (quote scan)
 							'(session "__memcp_tx")

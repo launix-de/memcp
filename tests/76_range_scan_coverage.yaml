@@ -17,6 +17,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS rs_right"
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_dim"
+  - sql: "DROP TABLE IF EXISTS pushdown_main"
+  - sql: "DROP TABLE IF EXISTS pushdown_lookup"
 
 test_cases:
 
@@ -366,12 +368,90 @@ test_cases:
       contains:
         - '"stage": "untangle", "kind": "tables", "value": "((\"d\" \"memcp-tests\" \"perf_dim\" false nil) (\"m\" \"memcp-tests\" \"perf_main\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
         - '"stage": "reorder", "kind": "tables", "value": "((\"d\" \"memcp-tests\" \"perf_dim\" false true) (\"m\" \"memcp-tests\" \"perf_main\" false (equal?? (get_column \"m\" false \"category\" false) (get_column \"d\" false \"cat_id\" false))))"'
-  # ========================================================================
-  # 7. Compress and re-test (exercises range scans on compressed storage)
-  # ========================================================================
       not_contains:
         - "inner_select"
         - "dependent-subquery"
+
+  - name: "Create physical pushdown tables"
+    sql: "CREATE TABLE pushdown_main (id INT PRIMARY KEY, lookup_id INT, payload VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Create physical pushdown lookup"
+    sql: "CREATE TABLE pushdown_lookup (id INT PRIMARY KEY, enabled BOOL, label VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert physical pushdown lookup"
+    sql: |
+      INSERT INTO pushdown_lookup VALUES
+        (1, TRUE, 'one'), (2, FALSE, 'two'), (3, FALSE, 'three'),
+        (4, FALSE, 'four'), (5, FALSE, 'five'), (6, FALSE, 'six'),
+        (7, FALSE, 'seven'), (8, FALSE, 'eight'), (9, FALSE, 'nine'),
+        (10, FALSE, 'ten')
+    expect:
+      affected_rows: 10
+
+  - name: "Insert physical pushdown driver rows"
+    scm: |
+      (insert
+        (table "memcp-tests" "pushdown_main")
+        '("id" "lookup_id" "payload")
+        (map (produceN 10000) (lambda (i)
+          (list (+ i 1) (+ 1 (- i (* 2 (floor (/ i 2))))) (concat "row-" i)))))
+    expect:
+      data: [10000]
+
+  - name: "Nested point selection returns one row"
+    setup:
+      - scm: '(settings "ScanDebugging" false)'
+      - sql: |
+          SELECT m.id, d.label
+          FROM pushdown_main m
+          JOIN pushdown_lookup d ON d.id = m.lookup_id
+          WHERE m.id = 9999 AND d.enabled = TRUE
+          LIMIT 1
+      - scm: '(sleep 0.5)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND (`table` = 'pushdown_main' OR `table` = 'pushdown_lookup')"
+      - scm: '(settings "ScanDebugging" true)'
+    sql: |
+      SELECT m.id, d.label
+      FROM pushdown_main m
+      JOIN pushdown_lookup d ON d.id = m.lookup_id
+      WHERE m.id = 9999 AND d.enabled = TRUE
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - id: 9999
+          label: "one"
+
+  - name: "Nested point selection schedules filters before maps"
+    setup:
+      - scm: '(sleep 0.5)'
+    sql: |
+      SELECT `table`, SUM(candidateCount) AS candidates, SUM(outputCount) AS outputs
+      FROM `system_statistic`.`scans`
+      WHERE `schema` = 'memcp-tests'
+        AND (`table` = 'pushdown_main' OR `table` = 'pushdown_lookup')
+      GROUP BY `table`
+      ORDER BY `table`
+    expect:
+      rows: 2
+      data:
+        - table: "pushdown_lookup"
+          candidates: 1
+          outputs: 1
+        - table: "pushdown_main"
+          candidates: 1
+          outputs: 1
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
+  # ========================================================================
+  # 7. Compress and re-test (exercises range scans on compressed storage)
+  # ========================================================================
+
   - name: "SHUTDOWN to compress"
     sql: "SHUTDOWN"
     expect:
@@ -559,3 +639,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS rs_multi"
   - sql: "DROP TABLE IF EXISTS rs_left"
   - sql: "DROP TABLE IF EXISTS rs_right"
+  - sql: "DROP TABLE IF EXISTS pushdown_main"
+  - sql: "DROP TABLE IF EXISTS pushdown_lookup"
