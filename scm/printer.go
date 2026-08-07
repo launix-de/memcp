@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -25,6 +25,8 @@ import (
 	"reflect"
 	"strings"
 )
+
+var schemeStringEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n")
 
 func String(v Scmer) string {
 	switch v.GetTag() {
@@ -141,7 +143,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(v.String())
 	case tagString, tagCString, tagBString:
 		b.WriteByte('"')
-		b.WriteString(strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(v.String()))
+		b.WriteString(schemeStringEscaper.Replace(v.String()))
 		b.WriteByte('"')
 	case tagSymbol:
 		sym := v.String()
@@ -260,7 +262,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 		if s, ok := v.Any().(string); ok {
 			b.WriteByte('"')
-			b.WriteString(strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(s))
+			b.WriteString(schemeStringEscaper.Replace(s))
 			b.WriteByte('"')
 			return
 		}

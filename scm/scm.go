@@ -228,7 +228,7 @@ restart:
 				val := Eval(list[1], en)
 				i := 2
 				mutable := headSym == Symbol("match_mut")
-				en2 := Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
+				en2 := Env{VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
 				for i < len(list)-1 {
 					if match(val, list[i], &en2, mutable) {
 						en = &en2
@@ -282,7 +282,13 @@ restart:
 				if len(list) > 3 {
 					numVars = int(list[3].Int())
 				}
-				return NewProcStruct(Proc{Params: params, Body: list[2], En: en, NumVars: numVars})
+				return NewProcStruct(Proc{
+					Params:       params,
+					Body:         list[2],
+					En:           en,
+					NumVars:      numVars,
+					NumberedOnly: procCanUseNumberedOnly(params, list[2], numVars),
+				})
 			case "begin":
 				en2 := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
 				for _, form := range list[1 : len(list)-1] {
@@ -537,13 +543,28 @@ restart:
 	return
 }
 
+type smallProcCallEnv struct {
+	env      Env
+	numbered [4]Scmer
+}
+
+func newProcCallEnv(proc Proc) *Env {
+	if proc.NumVars <= 4 {
+		frame := &smallProcCallEnv{}
+		frame.env.Outer = proc.En
+		frame.env.VarsNumbered = frame.numbered[:proc.NumVars]
+		return &frame.env
+	}
+	return &Env{VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En}
+}
+
 func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 	if p == nil {
 		panic("apply: nil procedure")
 	}
 	proc := *p
 	var vars Vars
-	env := &Env{Vars: vars, VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
+	env := newProcCallEnv(proc)
 	switch proc.Params.GetTag() {
 	case tagSlice:
 		params := proc.Params.Slice()
@@ -551,16 +572,18 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 			panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
 		}
 		if proc.NumVars > 0 {
-			vars = make(Vars, len(params))
-			env.Vars = vars
+			if !proc.NumberedOnly {
+				vars = make(Vars, len(params))
+				env.Vars = vars
+			}
 			for i := range params {
 				if i < len(operands) && i < proc.NumVars {
 					val := Eval(operands[i], caller)
 					env.VarsNumbered[i] = val
-					if !params[i].SymbolEquals("_") {
+					if !proc.NumberedOnly && !params[i].SymbolEquals("_") {
 						env.Vars[mustSymbol(params[i])] = val
 					}
-				} else if !params[i].SymbolEquals("_") {
+				} else if !proc.NumberedOnly && !params[i].SymbolEquals("_") {
 					env.Vars[mustSymbol(params[i])] = NewNil()
 				}
 			}
@@ -585,9 +608,11 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 		argsList := NewSlice(args)
 		if proc.NumVars > 0 {
 			env.VarsNumbered[0] = argsList
-			vars = make(Vars, 1)
-			env.Vars = vars
-			env.Vars[mustSymbol(proc.Params)] = argsList
+			if !proc.NumberedOnly {
+				vars = make(Vars, 1)
+				env.Vars = vars
+				env.Vars[mustSymbol(proc.Params)] = argsList
+			}
 		} else {
 			vars = make(Vars, 1)
 			env.Vars = vars
@@ -607,20 +632,22 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 	}
 	proc := *p
 	var vars Vars
-	env := &Env{Vars: vars, VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
+	env := newProcCallEnv(proc)
 	switch proc.Params.GetTag() {
 	case tagSlice:
 		params := proc.Params.Slice()
 		if proc.NumVars > 0 {
-			vars = make(Vars, len(params))
-			env.Vars = vars
+			if !proc.NumberedOnly {
+				vars = make(Vars, len(params))
+				env.Vars = vars
+			}
 			for i := range params {
 				if i < len(args) {
 					env.VarsNumbered[i] = args[i]
-					if !params[i].SymbolEquals("_") {
+					if !proc.NumberedOnly && !params[i].SymbolEquals("_") {
 						env.Vars[mustSymbol(params[i])] = args[i]
 					}
-				} else if !params[i].SymbolEquals("_") {
+				} else if !proc.NumberedOnly && !params[i].SymbolEquals("_") {
 					env.Vars[mustSymbol(params[i])] = NewNil()
 				}
 			}
@@ -641,9 +668,11 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 		argsList := NewSlice(args)
 		if proc.NumVars > 0 {
 			env.VarsNumbered[0] = argsList
-			vars = make(Vars, 1)
-			env.Vars = vars
-			env.Vars[mustSymbol(proc.Params)] = argsList
+			if !proc.NumberedOnly {
+				vars = make(Vars, 1)
+				env.Vars = vars
+				env.Vars[mustSymbol(proc.Params)] = argsList
+			}
 		} else {
 			vars = make(Vars, 1)
 			env.Vars = vars
@@ -746,6 +775,7 @@ type Proc struct {
 	Params, Body Scmer
 	En           *Env
 	NumVars      int
+	NumberedOnly bool
 }
 
 // helper pseudo type to optimize parameter reading from indices
