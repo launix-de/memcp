@@ -2031,6 +2031,49 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(map (coalesceNil stages '()) (lambda (stage)
 		(requalify_stage_for_derived old_alias new_alias stage)))))
 
+(define derived_stage_rebind_id_map (lambda (alias stages)
+	(map (coalesceNil stages '()) (lambda (stage)
+		(list (gs_id stage) (concat (gs_id stage) ":derived:" (fnv_hash (string alias))))))))
+
+(define derived_stage_rebind_alias_map (lambda (id_map)
+	(map (coalesceNil id_map '()) (lambda (entry)
+		(list (exists_stage_alias (nth entry 0)) (exists_stage_alias (nth entry 1)))))))
+
+(define derived_stage_rebind_stage (lambda (alias_map id_map stage)
+	(if (not (group_stage? stage))
+		stage
+		(make_group_stage
+			(stage_merge_lookup id_map (gs_id stage) (gs_id stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_input stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_domain stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_keys stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_aggregates stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_having stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_output stage))
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_order stage))
+			(gs_limit stage)
+			(gs_offset stage)
+			(rewrite_stage_output_left_join_expr alias_map id_map (gs_facts stage))))))
+
+/* Independently flattened instances may start with identical generated stage
+IDs. Give each instance its own IDs and source aliases before their plans meet. */
+(define rebind_derived_stages (lambda (alias stages)
+	(begin
+		(define id_map (derived_stage_rebind_id_map alias stages))
+		(define alias_map (derived_stage_rebind_alias_map id_map))
+		(list
+			(map (coalesceNil stages '()) (lambda (stage)
+				(derived_stage_rebind_stage alias_map id_map stage)))
+			alias_map
+			id_map))))
+
+(define rebind_derived_stage_expr (lambda (rebinding expr)
+	(rewrite_stage_output_left_join_expr (nth rebinding 1) (nth rebinding 2) expr)))
+
+(define rebind_derived_stage_sources (lambda (rebinding sources)
+	(map (coalesceNil sources '()) (lambda (src)
+		(rewrite_stage_output_left_join_source (nth rebinding 1) (nth rebinding 2) src)))))
+
 (define make_scalar_single_stage_rewrite (lambda (inner args)
 	(begin
 		(define outer_sources (nth args 0))
@@ -3147,7 +3190,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 										(begin
 											(define only_inner (car inner_sources))
 											(define inner_alias (source_alias only_inner))
-											(define projection (requalify_single_source_fields inner_alias alias (qb_fields inner)))
+											(define requalified_inner_stages (requalify_stages_for_derived inner_alias alias (qb_stages inner)))
+											(define stage_rebinding (rebind_derived_stages alias requalified_inner_stages))
+											(define projection (rebind_derived_stage_expr stage_rebinding
+												(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 											(define effective_projection (if (source_outer? src)
 												(null_extend_projection_fields projection)
 												projection))
@@ -3168,13 +3214,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 													(rewrite_sources_join_for_derived alias effective_projection tail_sources))
 												(cons (list alias effective_projection) tail_rewrites)
 												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))
-												(merge (list (qb_stages inner) tail_stages))))
+												(merge (list (nth stage_rebinding 0) tail_stages))))
 										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
 											(if (scalar_source_shape_supported? inner_sources)
 												(begin
 													(define only_inner (car inner_sources))
 													(define inner_alias (source_alias only_inner))
-													(define projection (requalify_single_source_fields inner_alias alias (qb_fields inner)))
+													(define requalified_inner_stages (requalify_stages_for_derived inner_alias alias (qb_stages inner)))
+													(define stage_rebinding (rebind_derived_stages alias requalified_inner_stages))
+													(define projection (rebind_derived_stage_expr stage_rebinding
+														(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 													(define effective_projection (if (source_outer? src)
 														(null_extend_projection_fields projection)
 														projection))
@@ -3187,7 +3236,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 														(source_relation only_inner)
 														(source_outer? src)
 														joined_condition))
-													(define derived_stage_sources (requalify_source_join_exprs inner_alias alias (cdr inner_sources)))
+													(define derived_stage_sources (rebind_derived_stage_sources stage_rebinding
+														(requalify_source_join_exprs inner_alias alias (cdr inner_sources))))
 													(list
 														(merge (list
 															(list derived_base_source)
@@ -3195,7 +3245,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 															(rewrite_sources_join_for_derived alias effective_projection tail_sources)))
 														(cons (list alias effective_projection) tail_rewrites)
 														tail_wheres
-														(merge (list (qb_stages inner) tail_stages))))
+														(merge (list (nth stage_rebinding 0) tail_stages))))
 												(neumann_fail "untangle_query" "multi-source derived JOIN needs relation-unit lowering"))
 											(list
 												(merge (list inner_sources (rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)))

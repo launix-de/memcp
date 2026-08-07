@@ -29,12 +29,21 @@ setup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
   - sql: "DROP TABLE IF EXISTS dtl_hist"
   - sql: "DROP TABLE IF EXISTS dtl_ref"
+  - sql: "DROP TABLE IF EXISTS dtl_join_main"
+  - sql: "DROP TABLE IF EXISTS dtl_join_ref"
+  - sql: "DROP TABLE IF EXISTS dtl_join_acl"
   - sql: "CREATE TABLE dtl_main (ID INT PRIMARY KEY, name TEXT, category INT)"
   - sql: "CREATE TABLE dtl_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
   - sql: "CREATE TABLE dtl_ref (ID INT PRIMARY KEY, label TEXT)"
   - sql: "INSERT INTO dtl_main VALUES (1, 'Alice', 10), (2, 'Bob', 20)"
   - sql: "INSERT INTO dtl_hist VALUES (1, 1, 100, 1000), (2, 1, 200, 2000), (3, 2, 300, 3000)"
   - sql: "INSERT INTO dtl_ref VALUES (10, 'Cat A'), (20, 'Cat B')"
+  - sql: "CREATE TABLE dtl_join_main (ID INT PRIMARY KEY, first_ref INT, second_ref INT)"
+  - sql: "CREATE TABLE dtl_join_ref (ID INT PRIMARY KEY, label TEXT)"
+  - sql: "CREATE TABLE dtl_join_acl (ID INT PRIMARY KEY, ref_id INT, allowed BOOL)"
+  - sql: "INSERT INTO dtl_join_main VALUES (1, 10, 20), (2, 20, 30), (3, 99, 10)"
+  - sql: "INSERT INTO dtl_join_ref VALUES (10, 'ten'), (20, 'twenty'), (30, 'thirty'), (40, 'forty')"
+  - sql: "INSERT INTO dtl_join_acl VALUES (1, 10, TRUE), (2, 20, FALSE), (3, 40, TRUE)"
 
 test_cases:
 
@@ -189,8 +198,171 @@ test_cases:
         - "dependent-subquery"
         - '__mat:'
 
+  - name: "Flattened LEFT JOIN cascade keeps every ON predicate"
+    sql: |
+      SELECT t.ID, t.first_label, t.second_label
+      FROM (
+        SELECT m.ID, m.first_ref,
+          first_lookup.label AS first_label,
+          second_lookup.label AS second_label
+        FROM dtl_join_main m
+        LEFT JOIN (
+          SELECT ID, label FROM dtl_join_ref
+        ) first_lookup ON first_lookup.ID = m.first_ref
+        LEFT JOIN (
+          SELECT ID, label FROM dtl_join_ref
+        ) second_lookup ON second_lookup.ID = m.second_ref
+      ) t
+      ORDER BY t.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          first_label: "ten"
+          second_label: "twenty"
+        - ID: 2
+          first_label: "twenty"
+          second_label: "thirty"
+        - ID: 3
+          first_label: null
+          second_label: "ten"
+
+  - name: "Outer sorter JOIN keeps its ON predicate after flattened cascade"
+    sql: |
+      SELECT t.ID, t.first_label, sorter.label AS sorted_label
+      FROM (
+        SELECT m.ID, m.first_ref,
+          first_lookup.label AS first_label
+        FROM dtl_join_main m
+        LEFT JOIN (
+          SELECT ID, label FROM dtl_join_ref
+        ) first_lookup ON first_lookup.ID = m.first_ref
+      ) t
+      LEFT JOIN dtl_join_ref sorter ON sorter.ID = t.first_ref
+      ORDER BY sorter.label, t.ID
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 3
+      data:
+        - ID: 3
+          first_label: null
+          sorted_label: null
+        - ID: 1
+          first_label: "ten"
+          sorted_label: "ten"
+        - ID: 2
+          first_label: "twenty"
+          sorted_label: "twenty"
+
+  - name: "LEFT JOIN with correlated EXISTS projection keeps its ON predicate"
+    sql: |
+      SELECT m.ID, lookup_ref.label, lookup_ref.can_view
+      FROM dtl_join_main m
+      LEFT JOIN (
+        SELECT r.ID, r.label,
+          EXISTS (
+            SELECT 1 FROM dtl_join_acl acl
+            WHERE acl.ref_id = r.ID AND acl.allowed = TRUE
+          ) AS can_view
+        FROM dtl_join_ref r
+      ) lookup_ref ON lookup_ref.ID = m.first_ref
+      ORDER BY m.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          label: "ten"
+          can_view: true
+        - ID: 2
+          label: "twenty"
+          can_view: false
+        - ID: 3
+          label: null
+          can_view: null
+
+  - name: "LEFT JOIN with constant and correlated stages keeps its ON predicate"
+    sql: |
+      SELECT m.ID, lookup_ref.label, lookup_ref.can_view
+      FROM dtl_join_main m
+      LEFT JOIN (
+        SELECT r.ID, r.label,
+          (EXISTS (
+            SELECT 1 FROM dtl_join_acl global_acl
+            WHERE global_acl.allowed = TRUE
+          )) AND (CASE WHEN EXISTS (
+            SELECT 1 FROM dtl_join_acl global_acl
+            WHERE global_acl.allowed = FALSE
+          ) THEN TRUE ELSE EXISTS (
+            SELECT 1 FROM dtl_join_acl correlated_acl
+            WHERE correlated_acl.ref_id = r.ID
+              AND correlated_acl.allowed = TRUE
+          ) END) AS can_view
+        FROM dtl_join_ref r
+      ) lookup_ref ON lookup_ref.ID = m.first_ref
+      ORDER BY m.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          label: "ten"
+          can_view: true
+        - ID: 2
+          label: "twenty"
+          can_view: true
+        - ID: 3
+          label: null
+          can_view: null
+
+  - name: "Cascaded stage-producing LEFT JOINs keep every ON predicate"
+    sql: |
+      SELECT m.ID,
+        first_lookup.label AS first_label,
+        first_lookup.can_view AS first_can_view,
+        second_lookup.label AS second_label,
+        second_lookup.can_view AS second_can_view
+      FROM dtl_join_main m
+      LEFT JOIN (
+        SELECT r.ID, r.label,
+          EXISTS (
+            SELECT 1 FROM dtl_join_acl acl
+            WHERE acl.ref_id = r.ID AND acl.allowed = TRUE
+          ) AS can_view
+        FROM dtl_join_ref r
+      ) first_lookup ON first_lookup.ID = m.first_ref
+      LEFT JOIN (
+        SELECT r.ID, r.label,
+          EXISTS (
+            SELECT 1 FROM dtl_join_acl acl
+            WHERE acl.ref_id = r.ID AND acl.allowed = TRUE
+          ) AS can_view
+        FROM dtl_join_ref r
+      ) second_lookup ON second_lookup.ID = m.second_ref
+      ORDER BY m.ID
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          first_label: "ten"
+          first_can_view: true
+          second_label: "twenty"
+          second_can_view: false
+        - ID: 2
+          first_label: "twenty"
+          first_can_view: false
+          second_label: "thirty"
+          second_can_view: false
+        - ID: 3
+          first_label: null
+          first_can_view: null
+          second_label: "ten"
+          second_can_view: true
+
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
   - sql: "DROP TABLE IF EXISTS dtl_hist"
   - sql: "DROP TABLE IF EXISTS dtl_ref"
+  - sql: "DROP TABLE IF EXISTS dtl_join_main"
+  - sql: "DROP TABLE IF EXISTS dtl_join_ref"
+  - sql: "DROP TABLE IF EXISTS dtl_join_acl"
