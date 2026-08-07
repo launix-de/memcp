@@ -186,6 +186,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"c"
 			(list (quote and) "d" (list (quote and) "e" "f")))
 		true)) '("a" "b" "c" "d" "e" "f")) true "combine_where_terms flattens nested AND terms")
+	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
+	(define canonical_group_count (list 1 (quote +) 0))
+	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
+	(define canonical_group_keys (list (list (quote get_column) "g" false "owner_id" false)))
+	(define canonical_group_sum_stage (make_group_stage "group-sum" canonical_group_source '()
+		canonical_group_keys (list canonical_group_sum) nil '() '() nil nil '()))
+	(define canonical_group_count_stage (make_group_stage "group-count" canonical_group_source '()
+		canonical_group_keys (list canonical_group_count) nil '() '() nil nil '()))
+	(assert (equal?
+		(group_stage_carrier_relation canonical_group_sum_stage)
+		(group_stage_carrier_relation canonical_group_count_stage))
+		true "group keytable identity excludes aggregate columns")
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
