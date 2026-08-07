@@ -25,6 +25,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
+(set sql_literal_shape_cache (newcachemap))
+
+/* Keep exact SQL variants out of the parser while sharing their compiled plan.
+Only parameterized results enter the small front cache; exact-only statements
+continue to occupy just their existing query-plan entry. */
+(define sql_parameterize_select_literals_cached (lambda (cache query enabled)
+	(if (not enabled)
+		(list query '())
+		(begin
+			(define cached (cache query))
+			(if cached
+				cached
+				(match (parameterize_sql_select_literals query) '(normalized bindings)
+					(if (equal? bindings '())
+						(list normalized bindings)
+						(cache query (list normalized bindings)))))))))
+
+(define sql_parameterize_select_literals (lambda (query enabled)
+	(sql_parameterize_select_literals_cached sql_literal_shape_cache query enabled)))
 
 /* sql_parameterize_select_like_strings: query-plan-cache helper for ad-hoc
 fulltext-ish SELECTs. It replaces string literals directly following LIKE or
@@ -79,35 +98,35 @@ literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 					(list normalized bindings))))))))
 
 /* cached_parse: wraps a parser with cachemap-based caching.
-cache_key = username:schema:hash(query) — per-user isolation (policy checked at parse time).
-The query is hashed with FNV-1a (fnv_hash) so long SQL strings don't bloat the cache index.
-LIKE/AGAINST strings may be parameterized into session variables, but their
-bindings still participate in the key because the planner may choose different
-physical strategies from their selectivity.
-Session-sensitive plans must not be reused under a binding-blind key because
-their lowered runtime helper names and cache domains may depend on current
-session variables.
-On parse error the result is not cached (e.g. table does not exist yet). */
-(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_like_strings)
+cache_key = username:schema:view-generation:hash(query-shape), retaining policy
+isolation while sharing safe SELECT plans across literal variants. Runtime
+bindings are installed only after a shape miss has compiled in a value-neutral
+session. On parse error the result is not cached. */
+(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals)
 	(begin
-		(match (sql_parameterize_select_like_strings query parameterize_like_strings) '(parse_query bindings) (begin
+		(match (sql_parameterize_select_literals query parameterize_literals) '(parse_query bindings) (begin
+			(define cache_key (concat username ":" schema ":" (sql_view_query_generation parse_query) ":" (fnv_hash parse_query)))
+			(define compile_diagnostic (match (toUpper parse_query)
+				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
+				_ false))
+			(define planning_session (if (equal? bindings '()) session (newsession)))
+			(if (not (equal? bindings '()))
+				(begin
+					(planning_session "username" username)
+					(planning_session "schema" schema)
+					(planning_session "__memcp_tx" (session "__memcp_tx")))
+				nil)
+			/* Compile diagnostics measure true misses and must not turn their own
+			previous result into a cache hit. The inspected query is never run. */
+			(define formula (if compile_diagnostic
+				(optimize (with_session planning_session (lambda () (parse_fn schema parse_query policy))))
+				(queryplan_cache "get_or_compute" cache_key
+					(lambda () (optimize (with_session planning_session (lambda () (parse_fn schema parse_query policy))))))))
 			(if (not (equal? bindings '()))
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
 				nil)
-			(define cache_payload (if (not (equal? bindings '()))
-				(serialize (list parse_query bindings))
-				parse_query))
-			(define cache_key (concat username ":" schema ":" (sql_view_query_generation parse_query) ":" (fnv_hash cache_payload)))
-			(define compile_diagnostic (match (toUpper parse_query)
-				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
-				_ false))
-			/* Compile diagnostics measure true misses and must not turn their own
-			previous result into a cache hit. The inspected query is never run. */
-			(if compile_diagnostic
-				(optimize (with_session session (lambda () (parse_fn schema parse_query policy))))
-				(queryplan_cache "get_or_compute" cache_key
-					(lambda () (optimize (with_session session (lambda () (parse_fn schema parse_query policy))))))))))))
+			formula)))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),

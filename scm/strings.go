@@ -126,6 +126,7 @@ func TransformFromJSON(a_ any) Scmer {
 }
 
 func init_strings() {
+	declareSQLLiteralParameterizer()
 	// string functions
 	DeclareTitle("Strings")
 
