@@ -650,7 +650,7 @@ test_cases:
             - "in_candidate"
             - "candidate"
             - "membership_plan_strategy"
-            - "driver_order_membership_probe"
+            - "candidate_keyset"
             - "membership_selectivity_class"
             - "selective"
             - "membership_driver_rows"
@@ -666,6 +666,7 @@ test_cases:
             - "in_membership"
             - ".grp:"
             - "touch_keytable"
+            - "driver_order_membership_probe"
       - sql: |
           EXPLAIN
           SELECT d.ID

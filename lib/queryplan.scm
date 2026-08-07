@@ -3687,23 +3687,13 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(gs_offset stage)
 		(merge (list (stage_reorder_telemetry stage) (gs_facts stage))))))
 
-(define candidate_reorder_strategy (lambda (stage sources block)
-	(begin
-		(define driver (if (empty_list? sources) nil (car sources)))
-		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 512))
-		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
-		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
-		(define estimate_ratio_broad (and
-			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
-			(>= (* estimate_rows 4) estimate_input)))
-		(define broad (or
-			estimate_ratio_broad
-			(and (nil? candidate_estimate) (candidate_stage_broad? stage))))
-		(if (and (not (nil? driver))
-			(or (source_order_limit_driver? driver (qb_order block) (qb_limit block))
-				(source_row_number_limit_driver? (qb_stages block) driver)))
-			(quote driver_order_membership_probe)
-			(quote candidate_keyset)))))
+(define candidate_reorder_strategy (lambda (telemetry single_source_driver)
+	(if (and
+		(or single_source_driver
+			(equal? (qassoc_get telemetry (quote membership_selectivity_class) nil) (quote broad)))
+		(qassoc_get telemetry (quote membership_order_limit_driver) false))
+		(quote driver_order_membership_probe)
+		(quote candidate_keyset))))
 
 (define query_block_with_reorder_facts (lambda (block facts)
 	(make_query_block
@@ -3769,6 +3759,26 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define driver_order_membership_strategy? (lambda (facts)
 	(equal? (qassoc_get facts (quote membership_plan_strategy) nil) (quote driver_order_membership_probe))))
 
+(define membership_strategy? (lambda (facts)
+	(or (driver_order_membership_strategy? facts)
+		(equal? (qassoc_get facts (quote membership_plan_strategy) nil) (quote candidate_keyset)))))
+
+(define candidate_recset_branch_supported? (lambda (branch)
+	(and (query_block? branch)
+		(and (single_source? (qb_sources branch))
+			(and (source_is_base_table? (car (qb_sources branch)))
+				(and (empty_list? (qb_stages branch))
+					(not (nil? (direct_column_name_for_alias
+						(car (qb_sources branch))
+						(query_block_first_expr branch))))))))))
+
+(define candidate_stage_recset_supported? (lambda (stage)
+	(and (group_stage? stage)
+		(and (union_block? (gs_input stage))
+			(reduce (union_branches (gs_input stage)) (lambda (supported branch)
+				(and supported (candidate_recset_branch_supported? branch)))
+				true)))))
+
 (define broad_driver_order_membership_probe? (lambda (facts)
 	(begin
 		(define estimated_rows (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
@@ -3785,8 +3795,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 					broad_by_count
 					(equal? (qassoc_get facts (quote membership_selectivity_class) nil) (quote broad))))))))
 
-(define stage_consumed_by_driver_order_membership_source? (lambda (stage stages sources facts)
-	(if (not (driver_order_membership_strategy? facts))
+(define stage_consumed_by_membership_source? (lambda (stage stages sources facts)
+	(if (not (membership_strategy? facts))
 		false
 		(begin
 			(define candidate (first_candidate_source stages sources))
@@ -3794,10 +3804,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(not (nil? candidate))
 				(and (stage_output_relation? (source_relation candidate))
 					(and (group_stage? stage)
-						(equal? (stage_output_relation_id (source_relation candidate)) (gs_id stage)))))))))
+						(and (candidate_stage_recset_supported? stage)
+							(equal? (stage_output_relation_id (source_relation candidate)) (gs_id stage))))))))))
 
-(define query_block_with_physical_driver_order_membership_using (lambda (stages block)
-	(if (not (driver_order_membership_strategy? (qb_facts block)))
+(define query_block_with_physical_membership_using (lambda (stages block)
+	(if (not (membership_strategy? (qb_facts block)))
 		block
 		(begin
 			(define sources (qb_sources block))
@@ -3806,20 +3817,23 @@ PostgreSQL parsers should both lower to the same combined operators.
 				block
 				(begin
 					(define stage (stage_by_id stages (stage_output_relation_id (source_relation candidate))))
-					(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-					(make_query_block
-						(qb_schema block)
-						(without_source_alias sources (source_alias candidate))
-						(qb_fields block)
-						(combine_where (qb_where block) (driver_membership_probe_expr stage probe))
-						(qb_group block)
-						(qb_having block)
-						(qb_order block)
-						(qb_limit block)
-						(qb_offset block)
-						(qb_hidden block)
-						(candidate_stage_without_source (qb_stages block) (gs_id stage))
-						(qb_facts block))))))))
+					(if (not (candidate_stage_recset_supported? stage))
+						block
+						(begin
+							(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+							(make_query_block
+								(qb_schema block)
+								(without_source_alias sources (source_alias candidate))
+								(qb_fields block)
+								(combine_where (qb_where block) (driver_membership_probe_expr stage probe))
+								(qb_group block)
+								(qb_having block)
+								(qb_order block)
+								(qb_limit block)
+								(qb_offset block)
+								(qb_hidden block)
+								(candidate_stage_without_source (qb_stages block) (gs_id stage))
+								(qb_facts block))))))))))
 
 (define negated_term? (lambda (term)
 	(match term
@@ -3977,31 +3991,18 @@ PostgreSQL parsers should both lower to the same combined operators.
 										(list (list (quote exists_plan_strategy) (quote recset_project_join)))))))))
 					(begin
 						(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
-						(define strategy (candidate_reorder_strategy stage sources block))
+						(define candidate_telemetry (candidate_reorder_telemetry stage sources block))
+						(define strategy (candidate_reorder_strategy candidate_telemetry
+							(single_source? (without_source_alias sources (source_alias candidate)))))
 						(define facts (merge (list
 							(query_block_reorder_telemetry block)
 							(cons
 								(list (quote membership_plan_strategy) strategy)
-								(candidate_reorder_telemetry stage sources block)))))
-						(match strategy
-							(symbol driver_order_membership_probe) (query_block_with_reorder_facts
-								(make_query_block
-									(qb_schema block)
-									(qb_sources block)
-									(qb_fields block)
-									(qb_where block)
-									(qb_group block)
-									(qb_having block)
-									(qb_order block)
-									(qb_limit block)
-									(qb_offset block)
-									(qb_hidden block)
-									(map (qb_stages block) join_reorder_stage)
-									(qb_facts block))
-								facts)
-							_ (make_query_block
+								candidate_telemetry))))
+						(query_block_with_reorder_facts
+							(make_query_block
 								(qb_schema block)
-								(reorder_candidate_sources (qb_stages block) sources)
+								(qb_sources block)
 								(qb_fields block)
 								(qb_where block)
 								(qb_group block)
@@ -4011,7 +4012,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(qb_offset block)
 								(qb_hidden block)
 								(map (qb_stages block) join_reorder_stage)
-								(merge (list facts (qassoc_set (qb_facts block) (quote default_alias) (source_alias (car sources)))))))))))))))
+								(qb_facts block))
+							facts))))))))
 
 (define join_reorder_node (lambda (node)
 	(if (query_block? node)
@@ -7311,7 +7313,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(unique_stages_by_id (merge (list stages (qb_stages block))))))
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
 		(define scalar_rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
-		(define membership_rewritten (query_block_with_physical_driver_order_membership_using stage_lookup scalar_rewritten))
+		(define membership_rewritten (query_block_with_physical_membership_using stage_lookup scalar_rewritten))
 		(define sources (qb_sources membership_rewritten))
 		(define default_alias (qassoc_get (qb_facts membership_rewritten) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 		(define presence_probe_sources (presence_probe_output_sources stage_lookup sources default_alias))
@@ -8140,7 +8142,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(begin
 		(define sources (qb_sources block))
 		(and (not (single_source? sources))
-			(and (equal? (qassoc_get (qb_facts block) (quote membership_selectivity_class) nil) (quote selective))
+			(and (equal? (qassoc_get (qb_facts block) (quote membership_plan_strategy) nil) (quote candidate_keyset))
 				(and (not (empty_list? (qb_order block)))
 					(and (not (empty_list? sources))
 						(order_items_belong_to_source? (car sources) (coalesceNil (qb_order block) '())))))))))
@@ -8161,7 +8163,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		true
 		(not (or
 			(row_number_stage_consumed_by_join? stage sources)
-			(stage_consumed_by_driver_order_membership_source? stage (qb_stages block) sources (qb_facts block))
+			(stage_consumed_by_membership_source? stage (qb_stages block) sources (qb_facts block))
 			(stage_consumed_by_probe_source? stage (qb_stages block) sources default_alias (qb_limit block)))))))
 
 (define stage_direct_prepare_semantic_candidate? (lambda (consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)
@@ -9204,7 +9206,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 				(define direct_order_safe (and direct_order
 					(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
 				(define membership_candidate_sort_plan
-					(equal? (qassoc_get (qb_facts block) (quote membership_selectivity_class) nil) (quote selective)))
+					(equal? (qassoc_get (qb_facts block) (quote membership_plan_strategy) nil) (quote candidate_keyset)))
 				(define needed_exprs (merge (list
 					(extract_assoc fields (lambda (_title expr) expr))
 					(list final_condition)
