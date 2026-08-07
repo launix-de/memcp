@@ -3345,26 +3345,37 @@ PostgreSQL parsers should both lower to the same combined operators.
 								(define joined_expr_ctx (make_uctx child_ctx (list
 									(list (quote outer-sources) joined_expr_outer_sources)
 									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources))))))
+								(define local_resolution_sources (merge_unique (list untangled_sources source_join_stage_sources)))
+								(define qualify_join_expr (lambda (expr)
+									(if (single_source? local_resolution_sources)
+										expr
+										(qualify_unqualified_column_for_sources local_resolution_sources expr))))
 								(define rewritten_where (qualify_unqualified_column_for_sources
-									(merge_unique (list untangled_sources source_join_stage_sources))
+									local_resolution_sources
 									(combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block)))))
 								(if (expr_contains_window? rewritten_where)
 									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 									true)
 								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
-								(define field_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_fields block)) joined_expr_outer_sources joined_expr_ctx))
-								(define having_result (untangle_expr_with_stages (rewrite_derived_ref_chain rewrites (qb_having block)) joined_expr_outer_sources joined_expr_ctx))
+								(define field_result (untangle_fields_with_stages
+									(qualify_join_expr (rewrite_derived_fields_chain rewrites (qb_fields block)))
+									joined_expr_outer_sources joined_expr_ctx))
+								(define having_result (untangle_expr_with_stages
+									(qualify_join_expr (rewrite_derived_ref_chain rewrites (qb_having block)))
+									joined_expr_outer_sources joined_expr_ctx))
 								(define stage_sources (merge_unique (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
 								(define group_result (untangle_expr_list_with_stages
-									(qualify_unqualified_column_for_sources (merge_unique (list untangled_sources source_join_stage_sources))
+									(qualify_unqualified_column_for_sources local_resolution_sources
 										(map (coalesceNil (qb_group block) '()) (lambda (item) (rewrite_derived_ref_chain rewrites item))))
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define order_result (untangle_order_with_stages
-									(rewrite_derived_order_chain rewrites (qb_order block))
+									(qualify_join_expr (rewrite_derived_order_chain rewrites (qb_order block)))
 									joined_expr_outer_sources
 									joined_expr_ctx))
-								(define hidden_result (untangle_fields_with_stages (rewrite_derived_fields_chain rewrites (qb_hidden block)) joined_expr_outer_sources joined_expr_ctx))
+								(define hidden_result (untangle_fields_with_stages
+									(qualify_join_expr (rewrite_derived_fields_chain rewrites (qb_hidden block)))
+									joined_expr_outer_sources joined_expr_ctx))
 								(define delayed_block (make_query_block
 									(qb_schema block)
 									(merge_unique (list untangled_sources source_join_stage_sources stage_sources (nth group_result 2) (nth order_result 2) (nth hidden_result 2)))
