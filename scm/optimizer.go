@@ -374,10 +374,9 @@ func scmerSlice(v Scmer) ([]Scmer, bool) {
 	return nil, false
 }
 
-// expressionContainsEvalCall conservatively detects runtime eval usage.
-// If a lambda body calls eval, parameter symbol bindings must remain name-based
-// so eval can resolve them from lexical scope.
-func expressionContainsEvalCall(v Scmer) bool {
+// expressionContainsDynamicSyntaxCall detects forms that interpret an AST in
+// their lexical environment. Symbols reachable by these forms must stay named.
+func expressionContainsDynamicSyntaxCall(v Scmer) bool {
 	if stripped, ok := scmerStripSourceInfo(v); ok {
 		v = stripped
 	}
@@ -386,7 +385,7 @@ func expressionContainsEvalCall(v Scmer) bool {
 		return false
 	}
 	if head, ok := scmerSymbol(list[0]); ok {
-		if head == Symbol("eval") {
+		if head == Symbol("eval") || head == Symbol("import") || head == Symbol("parser") {
 			return true
 		}
 		if head == Symbol("quote") {
@@ -394,32 +393,7 @@ func expressionContainsEvalCall(v Scmer) bool {
 		}
 	}
 	for _, item := range list {
-		if expressionContainsEvalCall(item) {
-			return true
-		}
-	}
-	return false
-}
-
-// expressionContainsEvalOrImportCall conservatively detects runtime eval/import usage.
-func expressionContainsEvalOrImportCall(v Scmer) bool {
-	if stripped, ok := scmerStripSourceInfo(v); ok {
-		v = stripped
-	}
-	list, ok := scmerSlice(v)
-	if !ok || len(list) == 0 {
-		return false
-	}
-	if head, ok := scmerSymbol(list[0]); ok {
-		if head == Symbol("eval") || head == Symbol("import") {
-			return true
-		}
-		if head == Symbol("quote") {
-			return false
-		}
-	}
-	for _, item := range list {
-		if expressionContainsEvalOrImportCall(item) {
+		if expressionContainsDynamicSyntaxCall(item) {
 			return true
 		}
 	}
@@ -543,6 +517,13 @@ func canEliminateFromBegin(val Scmer) bool {
 	return true // constant value, safe to eliminate
 }
 
+type localBindingFacts struct {
+	defineIdx int
+	firstUse  int
+	count     int
+	used      bool
+}
+
 func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
 	var transferOwnership, isConstant bool
 	if len(v) == 0 {
@@ -590,9 +571,45 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		usedVariables := make(map[Symbol]int)
 		variableContent := make(map[Symbol]Scmer)
-		// Track top-level define positions and earliest top-level eval/import index
-		defineTopIdx := make(map[Symbol]int)
-		earliestEvalImport := -1
+		bindings := make(map[Symbol]localBindingFacts)
+		bindingOrder := make([]Symbol, 0)
+		earliestDynamicSyntax := -1
+		currentTopIdx := 0
+		for i := bodyStart; i < len(v); i++ {
+			expr := v[i]
+			if stripped, ok := scmerStripSourceInfo(expr); ok {
+				expr = stripped
+			}
+			if sub, ok := scmerSlice(expr); ok && len(sub) > 0 {
+				headExpr := sub[0]
+				if stripped, ok := scmerStripSourceInfo(headExpr); ok {
+					headExpr = stripped
+				}
+				if head, ok := scmerSymbol(headExpr); ok {
+					if (head == Symbol("define") || head == Symbol("set")) && len(sub) >= 3 {
+						if sym, ok := scmerSymbol(sub[1]); ok {
+							facts := bindings[sym]
+							if facts.count == 0 {
+								bindingOrder = append(bindingOrder, sym)
+							}
+							facts.defineIdx = i
+							facts.count++
+							bindings[sym] = facts
+						}
+					}
+					if head == Symbol("eval") || head == Symbol("import") {
+						if earliestDynamicSyntax == -1 || i < earliestDynamicSyntax {
+							earliestDynamicSyntax = i
+						}
+					}
+				}
+				if expressionContainsDynamicSyntaxCall(expr) {
+					if earliestDynamicSyntax == -1 || i < earliestDynamicSyntax {
+						earliestDynamicSyntax = i
+					}
+				}
+			}
+		}
 		var visitNode func(x Scmer, depth int, blacklist []Symbol)
 		visitNode = func(x Scmer, depth int, blacklist []Symbol) {
 			if stripped, ok := scmerStripSourceInfo(x); ok {
@@ -662,6 +679,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					}
 				}
 				if !isBlacklisted {
+					if facts, tracked := bindings[sym]; tracked && !facts.used {
+						facts.firstUse = currentTopIdx
+						facts.used = true
+						bindings[sym] = facts
+					}
 					if depth > 0 {
 						usedVariables[sym] = 100
 					} else {
@@ -671,35 +693,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		for i := bodyStart; i < len(v); i++ {
+			currentTopIdx = i
 			visitNode(v[i], 0, nil)
-			// Scan top-level statement order for define/set and eval/import safeguards
-			expr := v[i]
-			if stripped, ok := scmerStripSourceInfo(expr); ok {
-				expr = stripped
-			}
-			if sub, ok := scmerSlice(expr); ok && len(sub) > 0 {
-				headExpr := sub[0]
-				if stripped, ok := scmerStripSourceInfo(headExpr); ok {
-					headExpr = stripped
-				}
-				if head, ok := scmerSymbol(headExpr); ok {
-					if (head == Symbol("define") || head == Symbol("set")) && len(sub) >= 3 {
-						if sym, ok := scmerSymbol(sub[1]); ok {
-							defineTopIdx[sym] = i
-						}
-					}
-					if head == Symbol("eval") || head == Symbol("import") {
-						if earliestEvalImport == -1 || i < earliestEvalImport {
-							earliestEvalImport = i
-						}
-					}
-				}
-				if expressionContainsEvalOrImportCall(expr) {
-					if earliestEvalImport == -1 || i < earliestEvalImport {
-						earliestEvalImport = i
-					}
-				}
-			}
 		}
 		ome2 := ome.CopySharedScope()
 		ome2.beginDepth++
@@ -734,24 +729,45 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					shouldReplace = false
 				}
 				// Safeguard: if RHS references a symbol that is defined at top-level in this begin, do not inline
-				if _, ok := defineTopIdx[mustSymbol(normalized)]; ok {
+				if _, ok := bindings[mustSymbol(normalized)]; ok {
 					shouldReplace = false
 				}
 			}
-			// Safeguard: if a top-level eval/import appears anywhere in this begin,
+			// Safeguard: if a dynamic syntax form appears anywhere in this begin,
 			// keep all bindings explicit. eval can resolve dynamically-built symbols
 			// against lexical scope, so partial inlining is unsafe.
-			if earliestEvalImport >= 0 {
+			if earliestDynamicSyntax >= 0 {
 				shouldReplace = false
 			}
 			if shouldReplace {
 				delete(variableContent, sym)
 				delete(usedVariables, sym)
+				delete(bindings, sym)
 				ome2.setBlacklist = append(ome2.setBlacklist, sym)
 				ome2.variableReplacement[sym] = content
 			}
 		}
-		if len(usedVariables) == 0 && len(defineTopIdx) == 0 {
+		var numberedLocals map[Symbol]Scmer
+		if earliestDynamicSyntax < 0 && ome2.nextSlot != nil {
+			for _, sym := range bindingOrder {
+				if _, retained := variableContent[sym]; !retained {
+					continue
+				}
+				facts := bindings[sym]
+				if facts.count != 1 || (facts.used && facts.firstUse <= facts.defineIdx) || *ome2.nextSlot >= 256 {
+					continue
+				}
+				if numberedLocals == nil {
+					numberedLocals = make(map[Symbol]Scmer)
+				}
+				slot := NewNthLocalVar(NthLocalVar(*ome2.nextSlot))
+				*ome2.nextSlot++
+				numberedLocals[sym] = slot
+				delete(usedVariables, sym)
+				delete(bindings, sym)
+			}
+		}
+		if len(usedVariables) == 0 && len(bindings) == 0 {
 			v[0] = NewSymbol("!begin")
 			for sym, content := range ome2.variableReplacement {
 				if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
@@ -760,6 +776,17 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		for i := bodyStart; i < len(v); i++ {
+			expr := v[i]
+			if stripped, ok := scmerStripSourceInfo(expr); ok {
+				expr = stripped
+			}
+			if items, ok := scmerSlice(expr); ok && len(items) == 3 && (scmerIsSymbol(items[0], "define") || scmerIsSymbol(items[0], "set")) {
+				if sym, ok := scmerSymbol(items[1]); ok {
+					if slot, numbered := numberedLocals[sym]; numbered {
+						ome2.variableReplacement[sym] = slot
+					}
+				}
+			}
 			var constant bool
 			v[i], transferOwnership, constant = optimizeExCompat(v[i], env, &ome2, i == len(v)-1 && useResult)
 			if constant {
@@ -827,9 +854,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if stripped, ok := scmerStripSourceInfo(params); ok {
 			params = stripped
 		}
-		// Keep lambdas with eval conservative: eval relies on symbol lookup in
-		// current lexical scope and cannot see NthLocalVar-only parameters.
-		if expressionContainsEvalCall(v[2]) {
+		// Dynamic syntax forms rely on symbol lookup in the current lexical scope
+		// and cannot see NthLocalVar-only parameters.
+		if expressionContainsDynamicSyntaxCall(v[2]) {
 			ome2 := ome.Copy()
 			ome2.lambdaDepth++
 			for sym := range assigned {
@@ -859,6 +886,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				delete(ome2.variableReplacement, sym)
 			}
 			numVars := int(ToInt(v[3]))
+			slotIndex := numVars
+			ome2.nextSlot = &slotIndex
 			if list, ok := scmerSlice(params); ok {
 				for i, param := range list {
 					if i >= numVars {
@@ -873,6 +902,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 			var bodyType TypeInfo
 			v[2], bodyType = OptimizeEx(v[2], env, &ome2, true)
+			if slotIndex != numVars {
+				v[3] = NewInt(int64(slotIndex))
+			}
 			return NewSlice(v), bodyType.WithoutConst()
 		}
 		// Auto-number parameters

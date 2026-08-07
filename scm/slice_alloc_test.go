@@ -135,6 +135,199 @@ func TestOptimizePreservesSetAndReadInNestedLambda(t *testing.T) {
 	}
 }
 
+func TestOptimizeNumbersRepeatedLocalBinding(t *testing.T) {
+	expr := Read("numbered local", `(lambda (value)
+		(begin
+			(define doubled (+ value value))
+			(+ doubled doubled)))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if strings.Contains(serialized, "define doubled") {
+		t.Fatalf("repeated local binding stayed symbolic: %s", serialized)
+	}
+	if !strings.Contains(serialized, "setN") {
+		t.Fatalf("repeated local binding did not get a numbered slot: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(3)); ToInt(got) != 12 {
+		t.Fatalf("optimized local binding returned %s, want 12", String(got))
+	}
+}
+
+func TestOptimizeNumbersLocalBindingsDeterministically(t *testing.T) {
+	source := `(lambda (value)
+		(begin
+			(define first (+ value 1))
+			(define second (+ value 2))
+			(+ first first second second)))`
+	want := serializeSliceAllocTestExpr(t, Optimize(Read("numbered local reference", source), &Globalenv))
+	for i := 0; i < 100; i++ {
+		got := serializeSliceAllocTestExpr(t, Optimize(Read("numbered local repeat", source), &Globalenv))
+		if got != want {
+			t.Fatalf("numbered local slots changed between runs:\nwant %s\n got %s", want, got)
+		}
+	}
+}
+
+func TestOptimizeExtendsExplicitNumVarsForLocalBinding(t *testing.T) {
+	expr := Read("numbered local explicit frame", `(lambda (value)
+		(begin
+			(define doubled (+ value value))
+			(+ doubled doubled))
+		1)`)
+	optimized := Optimize(expr, &Globalenv)
+	items := optimized.Slice()
+	if len(items) != 4 || ToInt(items[3]) != 2 {
+		t.Fatalf("explicit frame was not extended for local binding: %s", serializeSliceAllocTestExpr(t, optimized))
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(4)); ToInt(got) != 16 {
+		t.Fatalf("optimized explicit-frame binding returned %s, want 16", String(got))
+	}
+}
+
+func TestOptimizeKeepsEvalVisibleBindingNamed(t *testing.T) {
+	expr := Read("dynamic local", `(lambda (value)
+		(begin
+			(define dynamic_value (+ value value))
+			(+ dynamic_value (eval 'dynamic_value))))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "define dynamic_value") {
+		t.Fatalf("eval-visible local binding was numbered: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(5)); ToInt(got) != 20 {
+		t.Fatalf("optimized eval-visible binding returned %s, want 20", String(got))
+	}
+}
+
+func TestOptimizeKeepsParserVisibleBindingNamed(t *testing.T) {
+	expr := Read("dynamic parser local", `(lambda ()
+		(begin
+			(define parser_rule (parser (atom "FOO" true) "inner"))
+			(define parser_value (parser parser_rule "ok"))
+			(list parser_rule parser_value)))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "define parser_rule") {
+		t.Fatalf("parser-visible local binding was numbered: %s", serialized)
+	}
+	result := Apply(Eval(optimized, &Globalenv))
+	if len(result.Slice()) != 2 || !result.Slice()[1].IsParser() {
+		t.Fatalf("optimized parser-visible binding returned %s", String(result))
+	}
+}
+
+func TestOptimizeKeepsForwardReferencedBindingNamed(t *testing.T) {
+	expr := Read("forward local", `(lambda (value)
+		(begin
+			(define read_later (lambda () later))
+			(define later (+ value value))
+			(+ (read_later) later)))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "define later") {
+		t.Fatalf("forward-referenced local binding was numbered: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(6)); ToInt(got) != 24 {
+		t.Fatalf("optimized forward binding returned %s, want 24", String(got))
+	}
+}
+
+func TestOptimizeKeepsInitializerReferenceNamed(t *testing.T) {
+	expr := Read("initializer local", `(lambda (value)
+		(begin
+			(define current (+ current value))
+			current))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "define current") {
+		t.Fatalf("initializer-referenced local binding was numbered: %s", serialized)
+	}
+}
+
+func TestOptimizeKeepsMultiplyDefinedBindingNamed(t *testing.T) {
+	expr := Read("redefined local", `(lambda (value)
+		(begin
+			(define current (+ value 1))
+			(define before current)
+			(set current (+ value 2))
+			(+ before current)))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "define current") || !strings.Contains(serialized, "set current") {
+		t.Fatalf("multiply defined local binding was numbered: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(3)); ToInt(got) != 9 {
+		t.Fatalf("optimized redefined binding returned %s, want 9", String(got))
+	}
+}
+
+func TestOptimizeNumberedLocalSurvivesClosureCapture(t *testing.T) {
+	expr := Read("captured numbered local", `(lambda (value)
+		(begin
+			(define doubled (+ value value))
+			(define read_doubled (lambda () doubled))
+			(+ doubled (read_doubled))))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "setN") || !strings.Contains(serialized, "outer") {
+		t.Fatalf("captured local did not use a numbered outer slot: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(7)); ToInt(got) != 28 {
+		t.Fatalf("optimized captured binding returned %s, want 28", String(got))
+	}
+}
+
+func TestOptimizeNumbersLocalInsideBeginMutReserve(t *testing.T) {
+	expr := Read("begin mut local", `(lambda (value)
+		(begin_mut 1
+			(define doubled (+ value value))
+			(+ doubled doubled)))`)
+	optimized := Optimize(expr, &Globalenv)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "setN") {
+		t.Fatalf("begin_mut local binding was not numbered: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(8)); ToInt(got) != 32 {
+		t.Fatalf("optimized begin_mut binding returned %s, want 32", String(got))
+	}
+}
+
+func benchmarkRepeatedLocalBindings(b *testing.B, serial bool) {
+	expr := Read("numbered local benchmark", `(lambda (value)
+		(begin
+			(define v0 (+ value 1))
+			(define v1 (+ value 2))
+			(define v2 (+ value 3))
+			(define v3 (+ value 4))
+			(define v4 (+ value 5))
+			(define v5 (+ value 6))
+			(define v6 (+ value 7))
+			(define v7 (+ value 8))
+			(+ v0 v0 v1 v1 v2 v2 v3 v3 v4 v4 v5 v5 v6 v6 v7 v7)))`)
+	proc := Eval(Optimize(expr, &Globalenv), &Globalenv)
+	value := NewInt(3)
+	b.ReportAllocs()
+	b.ResetTimer()
+	if serial {
+		fn := OptimizeProcToSerialFunction(proc)
+		for i := 0; i < b.N; i++ {
+			fn(value)
+		}
+		return
+	}
+	for i := 0; i < b.N; i++ {
+		Apply(proc, value)
+	}
+}
+
+func BenchmarkRepeatedLocalBindingsApply(b *testing.B) {
+	benchmarkRepeatedLocalBindings(b, false)
+}
+
+func BenchmarkRepeatedLocalBindingsSerial(b *testing.B) {
+	benchmarkRepeatedLocalBindings(b, true)
+}
+
 func benchmarkGeneratedConsChain(b *testing.B, width int) {
 	b.ReportAllocs()
 	b.ResetTimer()
