@@ -1,0 +1,99 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Scalar probe compile-time scaling"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS scale_host"
+  - sql: "DROP TABLE IF EXISTS scale_box"
+  - sql: |
+      CREATE TABLE scale_host (
+        id INT PRIMARY KEY,
+        kind INT
+      )
+  - sql: |
+      CREATE TABLE scale_box (
+        id INT PRIMARY KEY,
+        host_id INT
+      )
+  - sql: "INSERT INTO scale_host (id, kind) VALUES (1, 1)"
+  - sql: "INSERT INTO scale_box (id, host_id) VALUES (1, 1)"
+
+test_cases:
+  - name: "Distinct scalar probe stages compile within a linear budget"
+    max_time: 1.0
+    max_compile_phase_ms:
+      recipe_emit_ns: 700
+    sql: |
+      SELECT
+        (SELECT probe_1.kind FROM scale_host probe_1 WHERE probe_1.id = outer_row.host_id AND probe_1.kind = 1 LIMIT 1) AS value_1,
+        (SELECT probe_2.kind FROM scale_host probe_2 WHERE probe_2.id = outer_row.host_id AND probe_2.kind = 2 LIMIT 1) AS value_2,
+        (SELECT probe_3.kind FROM scale_host probe_3 WHERE probe_3.id = outer_row.host_id AND probe_3.kind = 3 LIMIT 1) AS value_3,
+        (SELECT probe_4.kind FROM scale_host probe_4 WHERE probe_4.id = outer_row.host_id AND probe_4.kind = 4 LIMIT 1) AS value_4,
+        (SELECT probe_5.kind FROM scale_host probe_5 WHERE probe_5.id = outer_row.host_id AND probe_5.kind = 5 LIMIT 1) AS value_5,
+        (SELECT probe_6.kind FROM scale_host probe_6 WHERE probe_6.id = outer_row.host_id AND probe_6.kind = 6 LIMIT 1) AS value_6,
+        (SELECT probe_7.kind FROM scale_host probe_7 WHERE probe_7.id = outer_row.host_id AND probe_7.kind = 7 LIMIT 1) AS value_7,
+        (SELECT probe_8.kind FROM scale_host probe_8 WHERE probe_8.id = outer_row.host_id AND probe_8.kind = 8 LIMIT 1) AS value_8,
+        (SELECT probe_9.kind FROM scale_host probe_9 WHERE probe_9.id = outer_row.host_id AND probe_9.kind = 9 LIMIT 1) AS value_9,
+        (SELECT probe_10.kind FROM scale_host probe_10 WHERE probe_10.id = outer_row.host_id AND probe_10.kind = 10 LIMIT 1) AS value_10,
+        (SELECT probe_11.kind FROM scale_host probe_11 WHERE probe_11.id = outer_row.host_id AND probe_11.kind = 11 LIMIT 1) AS value_11,
+        (SELECT probe_12.kind FROM scale_host probe_12 WHERE probe_12.id = outer_row.host_id AND probe_12.kind = 12 LIMIT 1) AS value_12,
+        (SELECT probe_13.kind FROM scale_host probe_13 WHERE probe_13.id = outer_row.host_id AND probe_13.kind = 13 LIMIT 1) AS value_13,
+        (SELECT probe_14.kind FROM scale_host probe_14 WHERE probe_14.id = outer_row.host_id AND probe_14.kind = 14 LIMIT 1) AS value_14,
+        (SELECT probe_15.kind FROM scale_host probe_15 WHERE probe_15.id = outer_row.host_id AND probe_15.kind = 15 LIMIT 1) AS value_15,
+        (SELECT probe_16.kind FROM scale_host probe_16 WHERE probe_16.id = outer_row.host_id AND probe_16.kind = 16 LIMIT 1) AS value_16,
+        (SELECT probe_17.kind FROM scale_host probe_17 WHERE probe_17.id = outer_row.host_id AND probe_17.kind = 17 LIMIT 1) AS value_17,
+        (SELECT probe_18.kind FROM scale_host probe_18 WHERE probe_18.id = outer_row.host_id AND probe_18.kind = 18 LIMIT 1) AS value_18,
+        (SELECT probe_19.kind FROM scale_host probe_19 WHERE probe_19.id = outer_row.host_id AND probe_19.kind = 19 LIMIT 1) AS value_19,
+        (SELECT probe_20.kind FROM scale_host probe_20 WHERE probe_20.id = outer_row.host_id AND probe_20.kind = 20 LIMIT 1) AS value_20,
+        (SELECT probe_21.kind FROM scale_host probe_21 WHERE probe_21.id = outer_row.host_id AND probe_21.kind = 21 LIMIT 1) AS value_21,
+        (SELECT probe_22.kind FROM scale_host probe_22 WHERE probe_22.id = outer_row.host_id AND probe_22.kind = 22 LIMIT 1) AS value_22,
+        (SELECT probe_23.kind FROM scale_host probe_23 WHERE probe_23.id = outer_row.host_id AND probe_23.kind = 23 LIMIT 1) AS value_23,
+        (SELECT probe_24.kind FROM scale_host probe_24 WHERE probe_24.id = outer_row.host_id AND probe_24.kind = 24 LIMIT 1) AS value_24,
+        (SELECT probe_25.kind FROM scale_host probe_25 WHERE probe_25.id = outer_row.host_id AND probe_25.kind = 25 LIMIT 1) AS value_25,
+        (SELECT probe_26.kind FROM scale_host probe_26 WHERE probe_26.id = outer_row.host_id AND probe_26.kind = 26 LIMIT 1) AS value_26,
+        (SELECT probe_27.kind FROM scale_host probe_27 WHERE probe_27.id = outer_row.host_id AND probe_27.kind = 27 LIMIT 1) AS value_27,
+        (SELECT probe_28.kind FROM scale_host probe_28 WHERE probe_28.id = outer_row.host_id AND probe_28.kind = 28 LIMIT 1) AS value_28,
+        (SELECT probe_29.kind FROM scale_host probe_29 WHERE probe_29.id = outer_row.host_id AND probe_29.kind = 29 LIMIT 1) AS value_29,
+        (SELECT probe_30.kind FROM scale_host probe_30 WHERE probe_30.id = outer_row.host_id AND probe_30.kind = 30 LIMIT 1) AS value_30,
+        (SELECT probe_31.kind FROM scale_host probe_31 WHERE probe_31.id = outer_row.host_id AND probe_31.kind = 31 LIMIT 1) AS value_31,
+        (SELECT probe_32.kind FROM scale_host probe_32 WHERE probe_32.id = outer_row.host_id AND probe_32.kind = 32 LIMIT 1) AS value_32,
+        (SELECT probe_33.kind FROM scale_host probe_33 WHERE probe_33.id = outer_row.host_id AND probe_33.kind = 33 LIMIT 1) AS value_33,
+        (SELECT probe_34.kind FROM scale_host probe_34 WHERE probe_34.id = outer_row.host_id AND probe_34.kind = 34 LIMIT 1) AS value_34,
+        (SELECT probe_35.kind FROM scale_host probe_35 WHERE probe_35.id = outer_row.host_id AND probe_35.kind = 35 LIMIT 1) AS value_35,
+        (SELECT probe_36.kind FROM scale_host probe_36 WHERE probe_36.id = outer_row.host_id AND probe_36.kind = 36 LIMIT 1) AS value_36,
+        (SELECT probe_37.kind FROM scale_host probe_37 WHERE probe_37.id = outer_row.host_id AND probe_37.kind = 37 LIMIT 1) AS value_37,
+        (SELECT probe_38.kind FROM scale_host probe_38 WHERE probe_38.id = outer_row.host_id AND probe_38.kind = 38 LIMIT 1) AS value_38,
+        (SELECT probe_39.kind FROM scale_host probe_39 WHERE probe_39.id = outer_row.host_id AND probe_39.kind = 39 LIMIT 1) AS value_39,
+        (SELECT probe_40.kind FROM scale_host probe_40 WHERE probe_40.id = outer_row.host_id AND probe_40.kind = 40 LIMIT 1) AS value_40,
+        (SELECT probe_41.kind FROM scale_host probe_41 WHERE probe_41.id = outer_row.host_id AND probe_41.kind = 41 LIMIT 1) AS value_41,
+        (SELECT probe_42.kind FROM scale_host probe_42 WHERE probe_42.id = outer_row.host_id AND probe_42.kind = 42 LIMIT 1) AS value_42,
+        (SELECT probe_43.kind FROM scale_host probe_43 WHERE probe_43.id = outer_row.host_id AND probe_43.kind = 43 LIMIT 1) AS value_43,
+        (SELECT probe_44.kind FROM scale_host probe_44 WHERE probe_44.id = outer_row.host_id AND probe_44.kind = 44 LIMIT 1) AS value_44,
+        (SELECT probe_45.kind FROM scale_host probe_45 WHERE probe_45.id = outer_row.host_id AND probe_45.kind = 45 LIMIT 1) AS value_45,
+        (SELECT probe_46.kind FROM scale_host probe_46 WHERE probe_46.id = outer_row.host_id AND probe_46.kind = 46 LIMIT 1) AS value_46,
+        (SELECT probe_47.kind FROM scale_host probe_47 WHERE probe_47.id = outer_row.host_id AND probe_47.kind = 47 LIMIT 1) AS value_47,
+        (SELECT probe_48.kind FROM scale_host probe_48 WHERE probe_48.id = outer_row.host_id AND probe_48.kind = 48 LIMIT 1) AS value_48
+      FROM scale_box outer_row
+      LIMIT 1
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS scale_box"
+  - sql: "DROP TABLE IF EXISTS scale_host"
+

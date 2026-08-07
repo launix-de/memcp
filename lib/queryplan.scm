@@ -4968,7 +4968,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(and (expr_refs_stage_output_alias? (list (quote get_column) tblvar false col false)) true)
 		_ false)))
 
-(define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys)
+(define lower_scalar_first_query_probe_expr (lambda (all_stages dependency_graph stage value_expr keys lookup_keys)
 	(begin
 		(define input (gs_input stage))
 		(define direct_nested_stages (merge_unique (list
@@ -4977,7 +4977,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(define nested_stages (merge_unique (list
 			direct_nested_stages
 			(merge (map direct_nested_stages (lambda (nested_stage)
-				(consumed_stage_closure all_stages nested_stage)))))))
+				(stage_dependency_closure_using_graph dependency_graph nested_stage)))))))
 		(define keyed_terms (map (produceN (count keys)) (lambda (i)
 			(list (query_key_term_alias (qb_sources input) (nth keys i))
 				(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
@@ -5118,7 +5118,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(qb_stages block)
 			(qb_facts block)))))
 
-(define scalar_query_probe_recipe_binding (lambda (all_stages entry)
+(define scalar_query_probe_recipe_binding (lambda (all_stages dependency_graph entry)
 	(match entry
 		'(stage requested_col) (begin
 			(define raw_keys (gs_keys stage))
@@ -5138,12 +5138,14 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 				(quote define)
 				(symbol (scalar_query_probe_recipe_key stage requested_col))
 				(list (quote lambda) params
-					(lower_scalar_first_query_probe_expr all_stages stage value_expr keys params))))
+					(lower_scalar_first_query_probe_expr all_stages dependency_graph stage value_expr keys params))))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe entry"))))
 
 (define scalar_query_probe_recipe_bindings (lambda (all_stages entries)
-	(map (coalesceNil entries '()) (lambda (entry)
-		(scalar_query_probe_recipe_binding all_stages entry)))))
+	(begin
+		(define dependency_graph (stage_dependency_graph all_stages))
+		(map (coalesceNil entries '()) (lambda (entry)
+			(scalar_query_probe_recipe_binding all_stages dependency_graph entry))))))
 
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages)
 	(begin
@@ -5169,6 +5171,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(if (query_block? src)
 			(lower_scalar_first_query_probe_expr
 				all_stages
+				(stage_dependency_graph all_stages)
 				stage
 				value_expr
 				keys
@@ -7023,7 +7026,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(physicalize_stage_output_source stages src)))))
 
 (define stage_outputs_from_sources_using (lambda (stages sources)
-	(merge_unique (list (filter (map (coalesceNil sources '()) (lambda (src)
+	(unique_stages_by_id (filter (map (coalesceNil sources '()) (lambda (src)
 		(match src
 			'(_alias _schema relation _outer _join_expr)
 			(if (not (stage_output_relation? relation))
@@ -7035,7 +7038,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 						(neumann_fail "build_queryplan" (concat "dependency stage-output source references unknown stage " id))
 						stage)))
 			_ nil)))
-		(lambda (stage) (not (nil? stage))))))))
+		(lambda (stage) (not (nil? stage)))))))
 
 (define available_stage_outputs_from_sources_using (lambda (stages sources)
 	(filter (map (coalesceNil sources '()) (lambda (src)
@@ -7087,26 +7090,6 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(scalar_first_stage_output_source? stages src)
 		(presence_stage_output_source? stages src))))
 
-(define probeable_stage_for_alias (lambda (stages sources default_alias tblvar tbl_ignorecase)
-	(reduce (coalesceNil sources '()) (lambda (found src)
-		(if (not (nil? found))
-			found
-			(if (and (probeable_stage_output_source? stages src)
-				(source_alias_matches? src default_alias tblvar tbl_ignorecase))
-				(stage_by_id stages (stage_output_relation_id (source_relation src)))
-				nil)))
-		nil)))
-
-(define scalar_aggregate_probe_stage_for_alias (lambda (stages sources default_alias tblvar tbl_ignorecase)
-	(reduce (coalesceNil sources '()) (lambda (found src)
-		(if (not (nil? found))
-			found
-			(if (and (scalar_aggregate_probe_stage_output_source? stages src)
-				(source_alias_matches? src default_alias tblvar tbl_ignorecase))
-				(stage_by_id stages (stage_output_relation_id (source_relation src)))
-				nil)))
-		nil)))
-
 (define list_index_of_from (lambda (items value offset)
 	(begin
 		(define rest (coalesceNil items '()))
@@ -7128,24 +7111,69 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(nth lookup_keys idx)
 			nil))))
 
-(define rewrite_scalar_first_probe_expr (lambda (stages sources default_alias expr)
+(define probe_stage_alias_key (lambda (alias insensitive)
+	(list
+		(if insensitive (quote insensitive) (quote exact))
+		(if (and insensitive (string? alias)) (toLower alias) alias))))
+
+(define probe_stage_alias_index (lambda (stages sources)
+	(begin
+		(define probe_stages (unique_stages_by_id (filter
+			(map (coalesceNil sources '()) (lambda (src)
+				(source_stage_output_stage stages src)))
+			(lambda (stage) (or (scalar_or_presence_probe_stage? stage)
+				(scalar_aggregate_probe_stage? stage))))))
+		(define closures (stage_dependency_closure_index_using_graph
+			(stage_dependency_graph stages) probe_stages))
+		(reduce (coalesceNil sources '()) (lambda (index src)
+			(begin
+				(define stage (source_stage_output_stage stages src))
+				(if (or (scalar_or_presence_probe_stage? stage)
+					(scalar_aggregate_probe_stage? stage))
+					(begin
+						(define entry (list stage (get_assoc closures (logical_stage_key stage))))
+						(define exact_key (probe_stage_alias_key (source_alias src) false))
+						(define insensitive_key (probe_stage_alias_key (source_alias src) true))
+						(define with_exact (if (has_assoc? index exact_key)
+							index
+							(set_assoc index exact_key entry)))
+						(if (has_assoc? with_exact insensitive_key)
+							with_exact
+							(set_assoc with_exact insensitive_key entry)))
+					index))) '()))))
+
+(define probe_stage_entry_for_alias_using_index (lambda (index default_alias tblvar tbl_ignorecase)
+	(get_assoc index
+		(probe_stage_alias_key (resolve_column_alias tblvar default_alias) tbl_ignorecase))))
+
+(define rewrite_scalar_first_probe_expr_using_index (lambda (stages index default_alias expr)
 	(match expr
-		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
-			(define stage (probeable_stage_for_alias stages sources default_alias tblvar tbl_ignorecase))
-			(if (nil? stage)
+		((symbol get_column) tblvar tbl_ignorecase col _col_ignorecase) (begin
+			(define entry (probe_stage_entry_for_alias_using_index index default_alias tblvar tbl_ignorecase))
+			(if (nil? entry)
+				expr
 				(begin
-					(define aggregate_stage (scalar_aggregate_probe_stage_for_alias stages sources default_alias tblvar tbl_ignorecase))
-					(if (nil? aggregate_stage)
-						expr
-						(scalar_aggregate_probe_expr aggregate_stage col)))
-				(coalesceNil
-					(scalar_first_stage_key_lookup_expr stage col)
-					(scalar_first_probe_expr stage col (lowering_catalog_stages stages)))))
+					(define stage (nth entry 0))
+					(define dependencies (nth entry 1))
+					(if (scalar_aggregate_probe_stage? stage)
+						(scalar_aggregate_probe_expr stage col)
+						(coalesceNil
+							(scalar_first_stage_key_lookup_expr stage col)
+							(scalar_first_probe_expr stage col dependencies))))))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
-		(rewrite_scalar_first_probe_expr stages sources default_alias (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(rewrite_scalar_first_probe_expr_using_index stages index default_alias
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
 		(cons head tail) (cons head (map tail (lambda (item)
-			(rewrite_scalar_first_probe_expr stages sources default_alias item))))
+			(rewrite_scalar_first_probe_expr_using_index stages index default_alias item))))
 		_ expr)))
+
+(define rewrite_scalar_first_probe_expr (lambda (stages sources default_alias expr)
+	(rewrite_scalar_first_probe_expr_using_index stages
+		(probe_stage_alias_index stages sources) default_alias expr)))
+
+(define rewrite_scalar_first_probe_fields_using_index (lambda (stages index default_alias fields)
+	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
+		(rewrite_scalar_first_probe_expr_using_index stages index default_alias expr)))))
 
 (define rewrite_scalar_first_probe_fields (lambda (stages sources default_alias fields)
 	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
@@ -7155,6 +7183,12 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 	(map (coalesceNil order_items '()) (lambda (item)
 		(match item
 			'(expr dir) (list (rewrite_scalar_first_probe_expr stages sources default_alias expr) dir)
+			_ item)))))
+
+(define rewrite_scalar_first_probe_order_using_index (lambda (stages index default_alias order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr dir) (list (rewrite_scalar_first_probe_expr_using_index stages index default_alias expr) dir)
 			_ item)))))
 
 (define rewrite_scalar_first_probe_aggregate (lambda (stages sources default_alias ag)
@@ -7212,6 +7246,15 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(source_relation src)
 			(source_outer? src)
 			(rewrite_scalar_first_probe_expr stages rewrite_sources default_alias (source_join_expr src)))))))
+
+(define rewrite_scalar_first_probe_sources_using_index (lambda (stages sources index default_alias)
+	(map (coalesceNil sources '()) (lambda (src)
+		(list
+			(source_alias src)
+			(source_schema src)
+			(source_relation src)
+			(source_outer? src)
+			(rewrite_scalar_first_probe_expr_using_index stages index default_alias (source_join_expr src)))))))
 
 (define sources_without_scalar_first_outputs (lambda (stages sources)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -7320,10 +7363,11 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src))))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
-	(filter (coalesceNil sources '()) (lambda (src)
-		(not (reduce probe_sources (lambda (found probe_src)
-			(or found (equal? (source_alias src) (source_alias probe_src))))
-			false))))))
+	(begin
+		(define probe_aliases (reduce (coalesceNil probe_sources '()) (lambda (aliases src)
+			(set_assoc aliases (source_alias src) true)) '()))
+		(filter (coalesceNil sources '()) (lambda (src)
+			(not (has_assoc? probe_aliases (source_alias src))))))))
 
 (define presence_probe_output_sources (lambda (stages sources default_alias)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -7449,32 +7493,47 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 					(group_stage_direct_dependencies_using_indexes id_index carrier_index stage)
 					'()))) '()))))
 
-(define stage_dependency_closure_visit (lambda (graph stage states)
+(define stage_dependency_closure_index_visit (lambda (graph stage states closures)
 	(begin
 		(define key (logical_stage_key stage))
 		(define state (if (has_assoc? states key) (states key) nil))
 		(if (equal? state (quote visiting))
 			(neumann_fail "build_queryplan" (concat "cyclic physical stage dependency " key))
 			true)
-		(if (equal? state (quote done))
-			(list '() states)
+		(if (has_assoc? closures key)
+			(list (closures key) states closures)
 			(begin
-				(define visiting (set_assoc states key (quote visiting)))
-				(define direct (if (has_assoc? graph key) (graph key) '()))
-				(define nested (reduce direct (lambda (acc dependency)
+				(define nested (reduce (if (has_assoc? graph key) (graph key) '()) (lambda (acc dependency)
 					(begin
-						(define result (stage_dependency_closure_visit graph dependency (nth acc 1)))
-						(list (merge (list (nth acc 0) (nth result 0))) (nth result 1))))
-					(list '() visiting)))
+						(define result (stage_dependency_closure_index_visit
+							graph dependency (nth acc 1) (nth acc 2)))
+						(list
+							(merge (list (nth acc 0) (nth result 0)))
+							(nth result 1)
+							(nth result 2))))
+					(list '() (set_assoc states key (quote visiting)) closures)))
+				(define closure (unique_stages_by_id (cons stage (nth nested 0))))
 				(list
-					(cons stage (nth nested 0))
-					(set_assoc (nth nested 1) key (quote done))))))))
+					closure
+					(set_assoc (nth nested 1) key (quote done))
+					(set_assoc (nth nested 2) key closure)))))))
+
+(define stage_dependency_closure_index_using_graph (lambda (graph stages)
+	(nth (reduce (coalesceNil stages '()) (lambda (acc stage)
+		(begin
+			(define result (stage_dependency_closure_index_visit graph stage (nth acc 0) (nth acc 1)))
+			(list (nth result 1) (nth result 2))))
+		(list '() '())) 1)))
 
 (define stage_dependency_closure_using_graph (lambda (graph stage)
-	(nth (stage_dependency_closure_visit graph stage '()) 0)))
+	(nth (stage_dependency_closure_index_visit graph stage '() '()) 0)))
 
-(define consumed_stage_closure (lambda (stages stage)
-	(stage_dependency_closure_using_graph (stage_dependency_graph stages) stage)))
+(define stage_dependency_closure_many_using_graph (lambda (graph stages)
+	(begin
+		(define roots (coalesceNil stages '()))
+		(define closures (stage_dependency_closure_index_using_graph graph roots))
+		(unique_stages_by_id (merge (map roots (lambda (stage)
+			(get_assoc closures (logical_stage_key stage)))))))))
 
 (define expr_probe_stages (lambda (expr)
 	(match expr
@@ -7597,33 +7656,32 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 	(filter (coalesceNil stages '()) (lambda (stage)
 		(not (contains? ids (gs_id stage)))))))
 
-(define scalar_first_probe_consumed_stages (lambda (stages stage)
-	(if (not (scalar_or_presence_probe_stage? stage))
-		'()
-		(consumed_stage_closure stages stage))))
+(define scalar_probe_consumed_stages_many_using_graph (lambda (graph stages)
+	(unique_stages_by_id (merge (list
+		(filter (coalesceNil stages '()) scalar_aggregate_probe_stage?)
+		(stage_dependency_closure_many_using_graph graph
+			(filter (coalesceNil stages '()) scalar_or_presence_probe_stage?)))))))
 
-(define scalar_probe_consumed_stages (lambda (stages stage)
-	(if (scalar_aggregate_probe_stage? stage)
-		(list stage)
-		(scalar_first_probe_consumed_stages stages stage))))
+(define stage_id_set (lambda (stages)
+	(reduce (coalesceNil stages '()) (lambda (ids stage)
+		(set_assoc ids (gs_id stage) true)) '())))
+
+(define stages_without_consumed_probes_using_graph (lambda (graph stages probe_stages)
+	(begin
+		(define consumed_ids (stage_id_set
+			(scalar_probe_consumed_stages_many_using_graph graph probe_stages)))
+		(filter (coalesceNil stages '()) (lambda (stage)
+			(not (has_assoc? consumed_ids (gs_id stage))))))))
 
 (define stages_without_scalar_first_probes (lambda (stages)
-	(begin
-		(define consumed_ids (map
-			(merge_unique (map (coalesceNil stages '()) (lambda (stage)
-				(scalar_probe_consumed_stages stages stage))))
-			gs_id))
-		(filter (coalesceNil stages '()) (lambda (stage)
-			(not (contains? consumed_ids (gs_id stage))))))))
+	(stages_without_consumed_probes_using_graph
+		(stage_dependency_graph stages) stages stages)))
 
 (define stages_without_probe_sources (lambda (stages probe_sources)
 	(begin
-		(define consumed_ids (map
-			(merge_unique (map (stage_outputs_from_sources_using stages probe_sources) (lambda (stage)
-				(scalar_probe_consumed_stages stages stage))))
-			gs_id))
-		(filter (coalesceNil stages '()) (lambda (stage)
-			(not (contains? consumed_ids (gs_id stage))))))))
+		(define graph (stage_dependency_graph stages))
+		(stages_without_consumed_probes_using_graph graph stages
+			(stage_outputs_from_sources_using stages probe_sources)))))
 
 (define query_block_with_scalar_first_probes_using (lambda (stages block)
 	(begin
@@ -7631,18 +7689,19 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 		(define probe_sources (probe_output_sources_for_block stages sources default_alias (qb_limit block)))
-		(define rewritten_sources (rewrite_scalar_first_probe_sources_using stages sources probe_sources default_alias))
+		(define probe_index (probe_stage_alias_index stages probe_sources))
+		(define rewritten_sources (rewrite_scalar_first_probe_sources_using_index stages sources probe_index default_alias))
 		(make_query_block
 			(qb_schema block)
 			(sources_without_probe_outputs rewritten_sources probe_sources)
-			(rewrite_scalar_first_probe_fields stages probe_sources default_alias (qb_fields block))
-			(rewrite_scalar_first_probe_expr stages probe_sources default_alias (qb_where block))
+			(rewrite_scalar_first_probe_fields_using_index stages probe_index default_alias (qb_fields block))
+			(rewrite_scalar_first_probe_expr_using_index stages probe_index default_alias (qb_where block))
 			(qb_group block)
-			(rewrite_scalar_first_probe_expr stages probe_sources default_alias (qb_having block))
-			(rewrite_scalar_first_probe_order stages probe_sources default_alias (qb_order block))
+			(rewrite_scalar_first_probe_expr_using_index stages probe_index default_alias (qb_having block))
+			(rewrite_scalar_first_probe_order_using_index stages probe_index default_alias (qb_order block))
 			(qb_limit block)
 			(qb_offset block)
-			(rewrite_scalar_first_probe_fields stages probe_sources default_alias (qb_hidden block))
+			(rewrite_scalar_first_probe_fields_using_index stages probe_index default_alias (qb_hidden block))
 			(stages_without_probe_sources (qb_stages block) probe_sources)
 			(query_block_facts_with_stage_catalog block stage_list)))))
 
