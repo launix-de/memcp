@@ -1257,6 +1257,57 @@ test_cases:
       data:
         - ID: 2
 
+  - name: "IN subquery consumes grouped keys after HAVING"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID IN (
+        SELECT grp FROM in_nullable_rhs
+        GROUP BY grp
+        HAVING SUM(ID) > 2
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+        - ID: 2
+
+  - name: "Grouped outer query consumes grouped IN keys"
+    sql: |
+      SELECT f.ID, COUNT(*) AS job_count
+      FROM in_fop_files f
+      JOIN in_renderjob j ON j.result = f.ID
+      WHERE f.ID IN (
+        SELECT grp FROM in_nullable_rhs
+        GROUP BY grp
+        HAVING SUM(ID) > 2
+      )
+      GROUP BY f.ID
+      ORDER BY f.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          job_count: 1
+
+  - name: "Grouped IN lowers to group stages without a subquery marker"
+    sql: |
+      EXPLAIN IR
+      SELECT ID FROM in_fop_files
+      WHERE ID IN (
+        SELECT grp FROM in_nullable_rhs
+        GROUP BY grp
+        HAVING SUM(ID) > 2
+      )
+    expect:
+      contains:
+        - "group-stage"
+        - "stage-output"
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
+        - ".grp:"
+
   - name: "NOT IN subquery with RHS NULL projects UNKNOWN"
     sql: |
       SELECT ID, ID NOT IN (SELECT result FROM in_nullable_rhs) AS ok
