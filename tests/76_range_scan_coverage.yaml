@@ -233,6 +233,10 @@ test_cases:
     sql: "EXPLAIN SELECT category, COUNT(*) FROM rs_data GROUP BY category"
     expect:
       rows: 1
+      result_contains:
+        - "resultrow '("
+      result_not_contains:
+        - "resultrow (cons"
 
   - name: "EXPLAIN JOIN"
     sql: "EXPLAIN SELECT a.id, b.id FROM rs_data a JOIN rs_data b ON a.val = b.val WHERE a.id < 5"
