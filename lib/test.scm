@@ -198,6 +198,42 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(group_stage_carrier_relation canonical_group_sum_stage)
 		(group_stage_carrier_relation canonical_group_count_stage))
 		true "group keytable identity excludes aggregate columns")
+	(define rebind_child_ag (list 1 (quote +) 0))
+	(define rebind_child_stage (make_group_stage
+		"rebind-child"
+		(list "child" "memcp-tests" "child_source" false nil)
+		'() '(1) (list rebind_child_ag) nil '() '() nil nil '()))
+	(define rebind_parent_ag (list
+		(list (quote scalar_first_probe)
+			rebind_child_stage
+			(aggregate_col_name rebind_child_ag)
+			(list rebind_child_stage))
+		(quote +)
+		0))
+	(define rebind_parent_stage (make_group_stage
+		"rebind-parent"
+		(list "parent" "memcp-tests" (make_stage_output_relation "rebind-child") false nil)
+		'() '(1) (list rebind_parent_ag) nil '() '() nil nil '()))
+	(define rebind_fixture (rebind_derived_stages
+		"lookup"
+		(list rebind_child_stage rebind_parent_stage)))
+	(define rebound_parent_stage (stage_by_id
+		(nth rebind_fixture 0)
+		(stage_merge_lookup (nth rebind_fixture 2) "rebind-parent" nil)))
+	(define rebound_parent_ref (rebind_derived_stage_expr rebind_fixture
+		(list (quote get_column)
+			(exists_stage_alias "rebind-parent")
+			false
+			(aggregate_col_name rebind_parent_ag)
+			false)))
+	(assert (not (equal?
+		(aggregate_col_name rebind_parent_ag)
+		(aggregate_col_name (car (gs_aggregates rebound_parent_stage)))))
+		true "derived stage rebinding changes dependent aggregate column hashes")
+	(assert (equal?
+		(nth rebound_parent_ref 3)
+		(aggregate_col_name (car (gs_aggregates rebound_parent_stage))))
+		true "derived stage rebinding updates aggregate column handles")
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
