@@ -1,5 +1,5 @@
 # Decimal Storage, Sanitizer & Type Constraints
-# Tests for DECIMAL column handling, type sanitizers (INT, FLOAT, DECIMAL, BOOLEAN, VARCHAR),
+# Tests for DECIMAL column handling, type sanitizers (INT, FLOAT, DECIMAL, BOOLEAN, VARCHAR, CHAR),
 # NOT NULL enforcement, mixed-type columns, and rounding behavior.
 
 metadata:
@@ -14,6 +14,7 @@ setup:
   - sql: "CREATE TABLE float_strict (id INT, f FLOAT)"
   - sql: "CREATE TABLE bool_strict (id INT, b BOOLEAN)"
   - sql: "CREATE TABLE vc_strict (id INT, s VARCHAR(5))"
+  - sql: "CREATE TABLE char_strict (id INT, s CHAR(5) UNIQUE)"
   - sql: "CREATE TABLE mixed_col (id INT, x any)"
   - sql: "CREATE TABLE dec_scale0 (id INT, val DECIMAL(10,0))"
 
@@ -297,6 +298,85 @@ test_cases:
       data:
         - { s: "abcde" }
 
+  - name: "VARCHAR length counts Unicode characters"
+    sql: "INSERT INTO vc_strict (id, s) VALUES (4, 'äöüßxy')"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback Unicode VARCHAR without splitting UTF-8"
+    sql: "SELECT s FROM vc_strict WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - { s: "äöüßx" }
+
+  - name: "VARCHAR preserves trailing spaces"
+    sql: "INSERT INTO vc_strict (id, s) VALUES (5, 'ab  ')"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback VARCHAR trailing spaces"
+    sql: "SELECT s FROM vc_strict WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - { s: "ab  " }
+
+  # === CHAR sanitizer: character length and trailing pad spaces ===
+
+  - name: "CHAR strips trailing pad spaces on readback"
+    sql: "INSERT INTO char_strict (id, s) VALUES (1, 'abc  ')"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback CHAR without trailing pad spaces"
+    sql: "SELECT s FROM char_strict WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - { s: "abc" }
+
+  - name: "CHAR length counts Unicode characters"
+    sql: "INSERT INTO char_strict (id, s) VALUES (2, 'äöüßxy')"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback Unicode CHAR without splitting UTF-8"
+    sql: "SELECT s FROM char_strict WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - { s: "äöüßx" }
+
+  - name: "CHAR preserves NULL"
+    sql: "INSERT INTO char_strict (id, s) VALUES (3, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback NULL CHAR"
+    sql: "SELECT s FROM char_strict WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - { s: null }
+
+  - name: "CHAR unique values ignore trailing pad spaces"
+    sql: "INSERT INTO char_strict (id, s) VALUES (4, 'abc')"
+    expect:
+      error: true
+
+  - name: "UPDATE applies CHAR trailing-space normalization"
+    sql: "UPDATE char_strict SET s = 'xy   ' WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback normalized CHAR update"
+    sql: "SELECT s FROM char_strict WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - { s: "xy" }
+
   # === DECIMAL string rejection ===
 
   - name: "Insert string into DECIMAL column must fail"
@@ -432,6 +512,15 @@ test_cases:
         - { id: 14, price: 0.00, qty: 14 }
         - { id: 15, price: -100.50, qty: 15 }
 
+  - name: "After rebuild: CHAR normalization remains stable"
+    sql: "SELECT id, s FROM char_strict ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, s: "abc" }
+        - { id: 2, s: "xy" }
+        - { id: 3, s: null }
+
   - name: "After rebuild: verify SUM is correct"
     sql: "SELECT SUM(price) AS total FROM dec_rebuild"
     expect:
@@ -511,6 +600,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS float_strict"
   - sql: "DROP TABLE IF EXISTS bool_strict"
   - sql: "DROP TABLE IF EXISTS vc_strict"
+  - sql: "DROP TABLE IF EXISTS char_strict"
   - sql: "DROP TABLE IF EXISTS mixed_col"
   - sql: "DROP TABLE IF EXISTS dec_scale0"
   - sql: "DROP TABLE IF EXISTS dec_rebuild"
