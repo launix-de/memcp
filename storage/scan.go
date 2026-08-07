@@ -69,6 +69,9 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	if rewritten := tryScanInvariantFilterRewrite(v); !rewritten.IsNil() {
+		return oc.OptimizeSub(rewritten, useResult)
+	}
 	if rewritten := tryScanExistsRewrite(v); !rewritten.IsNil() {
 		return oc.OptimizeSub(rewritten, useResult)
 	}
@@ -76,6 +79,104 @@ func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.
 		return oc.OptimizeSub(rewritten, useResult)
 	}
 	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
+}
+
+// tryScanInvariantFilterRewrite selects a row-independent IF branch once per
+// scan invocation instead of evaluating it for every candidate row.
+func tryScanInvariantFilterRewrite(v []scm.Scmer) scm.Scmer {
+	// scan and scan_order share tx/table/filtercols/filterfn at indices 1..4.
+	if len(v) < 5 {
+		return scm.NewNil()
+	}
+	lambda, ok := scmerSlice(v[4])
+	if !ok || len(lambda) < 3 || !scanSymbolIs(lambda[0], "lambda") {
+		return scm.NewNil()
+	}
+	_, body, ok := scanLambdaParts(v[4])
+	if !ok {
+		return scm.NewNil()
+	}
+
+	wrappedOptimize := false
+	if bodyItems, bodyOK := scmerSlice(body); bodyOK && len(bodyItems) == 2 && scanSymbolIs(bodyItems[0], "optimize") {
+		wrappedOptimize = true
+		body = bodyItems[1]
+	}
+	conditional, ok := scmerSlice(body)
+	if !ok || len(conditional) != 4 || !scanSymbolIs(conditional[0], "if") {
+		return scm.NewNil()
+	}
+	condition := conditional[1]
+	if !scanExprSafeToHoist(condition, false) {
+		return scm.NewNil()
+	}
+
+	makeBranch := func(branch scm.Scmer) scm.Scmer {
+		if wrappedOptimize {
+			branch = scm.NewSlice([]scm.Scmer{scm.NewSymbol("optimize"), branch})
+		}
+		branchLambda := append([]scm.Scmer(nil), lambda...)
+		branchLambda[2] = branch
+		return scm.NewSlice(branchLambda)
+	}
+
+	rewritten := append([]scm.Scmer(nil), v...)
+	rewritten[4] = scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("if"),
+		scanLiftOutOfLambda(condition),
+		makeBranch(conditional[2]),
+		makeBranch(conditional[3]),
+	})
+	return scm.NewSlice(rewritten)
+}
+
+func scanExprSafeToHoist(expr scm.Scmer, belowOuter bool) bool {
+	if expr.IsNthLocalVar() {
+		return belowOuter
+	}
+	if _, ok := scanSymbolName(expr); ok {
+		return false
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 {
+		return true
+	}
+	if scanSymbolIs(items[0], "quote") {
+		return true
+	}
+	if scanSymbolIs(items[0], "outer") {
+		return len(items) == 2 && scanExprSafeToHoist(items[1], true)
+	}
+	name, named := scanSymbolName(items[0])
+	if !named {
+		return false
+	}
+	switch name {
+	case "session", "equal?", "equal??", "nil?", "not", "and", "or", "coalesceNil", "bool?", "int?", "float?", "string?", "<", "<=", ">", ">=":
+	default:
+		return false
+	}
+	for _, item := range items[1:] {
+		if !scanExprSafeToHoist(item, belowOuter) {
+			return false
+		}
+	}
+	return true
+}
+
+func scanLiftOutOfLambda(expr scm.Scmer) scm.Scmer {
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 || scanSymbolIs(items[0], "quote") {
+		return expr
+	}
+	if scanSymbolIs(items[0], "outer") && len(items) == 2 {
+		return items[1]
+	}
+	lifted := make([]scm.Scmer, len(items))
+	for i, item := range items {
+		lifted[i] = scanLiftOutOfLambda(item)
+	}
+	return scm.NewSlice(lifted)
 }
 
 func tryScanExistsRewrite(v []scm.Scmer) scm.Scmer {
@@ -245,6 +346,9 @@ func scanExprMayHaveSideEffects(v scm.Scmer) bool {
 }
 
 func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	if rewritten := tryScanInvariantFilterRewrite(v); !rewritten.IsNil() {
+		return oc.OptimizeSub(rewritten, useResult)
+	}
 	return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
 }
 
