@@ -91,7 +91,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 )))
 
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
-(define sql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e-?[0-9]+)?" true)) (simplify x)))
+(define sql_number (parser (define x (regex "-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
+(define sql_interval_unit (parser '((define unit sql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
 (define sql_string (parser (or
 	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
@@ -639,9 +640,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 	(define sql_expression3 (parser (or
 		/* date + INTERVAL n UNIT */
-		(parser '((define a sql_expression4) "+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_identifier_unquoted)) '('date_add a n unit))
+		(parser '((define a sql_expression4) "+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_add a n unit))
 		/* date - INTERVAL n UNIT */
-		(parser '((define a sql_expression4) "-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_identifier_unquoted)) '('date_sub a n unit))
+		(parser '((define a sql_expression4) "-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_sub a n unit))
 		(parser '((define a sql_expression4) "+" (define b sql_expression3)) '((quote +) a b))
 		(parser '((define a sql_expression4) "-" (define b sql_expression3)) '((quote -) a b))
 		sql_expression4

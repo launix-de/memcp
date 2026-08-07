@@ -264,6 +264,25 @@ test_cases:
       data:
         - tiny_number: 0.000001
 
+  - name: "Leading-dot decimal literal"
+    sql: "SELECT .06 AS leading_dot"
+    expect:
+      rows: 1
+      data:
+        - leading_dot: 0.06
+
+  - name: "Negative leading-dot decimal literal"
+    sql: "SELECT -.25 AS leading_dot"
+    expect:
+      rows: 1
+      data:
+        - leading_dot: -0.25
+
+  - name: "Leading dot without fractional digits must fail"
+    sql: "SELECT . AS invalid_decimal"
+    expect:
+      error: true
+
   - name: "Negative zero"
     sql: "SELECT -0 AS negative_zero"
     expect:
