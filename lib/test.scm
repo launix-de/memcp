@@ -263,6 +263,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define prepared_lowering_catalog (make_lowering_catalog indexed_catalog_stages))
 	(assert (lowering_catalog? prepared_lowering_catalog) true
 		"physical preparation indexes stage catalogs above the measured crossover")
+	(assert (lowering_catalog? (make_lowering_catalog (cdr indexed_catalog_stages))) false
+		"physical preparation keeps exactly 24 stages on the list path")
 	(assert (equal? (gs_id (stage_for_output_relation prepared_lowering_catalog
 		(make_stage_output_relation "nested-catalog-stage"))) "nested-catalog-stage")
 		true "indexed physical catalog resolves stage-output relations")
@@ -287,8 +289,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"child lowering catalog resolves local stages")
 	(assert (equal? (gs_id (stage_by_id child_lowering_catalog "nested-catalog-stage")) "nested-catalog-stage") true
 		"child lowering catalog inherits root stage lookup")
+	(assert (equal? (gs_id (stage_for_carrier_source child_lowering_catalog outer_catalog_carrier_source))
+		"outer-catalog-stage") true
+		"child lowering catalog inherits root carrier lookup")
 	(assert (count (lowering_catalog_stages child_lowering_catalog)) (+ (count indexed_catalog_stages) 1)
 		"child lowering catalog exposes local and inherited stages without changing the root")
+	(define extended_list_catalog
+		(lowering_catalog_with_local_stages prepared_stage_lookup (list local_catalog_stage)))
+	(assert (lowering_catalog? extended_list_catalog) false
+		"local physical stages keep a small lowering catalog on the list path")
+	(assert (equal? (gs_id (stage_by_id extended_list_catalog "local-catalog-stage")) "local-catalog-stage") true
+		"extended list catalog resolves its local stage")
 	(assert (equal?
 		(stage_dependency_graph indexed_catalog_stages)
 		(stage_dependency_graph prepared_lowering_catalog))

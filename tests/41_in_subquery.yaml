@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
 # IN with subquery tests
 
 metadata:
@@ -1307,6 +1309,57 @@ test_cases:
         - "inner_select"
         - "dependent-subquery"
         - ".grp:"
+
+  - name: "Grouped IN rejects an aggregate membership value"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID IN (
+        SELECT SUM(ID) FROM in_nullable_rhs
+        GROUP BY grp
+      )
+    expect:
+      error: true
+
+  - name: "Grouped IN rejects a correlated RHS"
+    sql: |
+      SELECT ID FROM in_fop_files f
+      WHERE ID IN (
+        SELECT grp FROM in_nullable_rhs r
+        WHERE r.ID >= f.ID
+        GROUP BY grp
+      )
+    expect:
+      error: true
+
+  - name: "Grouped IN rejects ordered limited membership"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID IN (
+        SELECT grp FROM in_nullable_rhs
+        GROUP BY grp
+        ORDER BY grp
+        LIMIT 1
+      )
+    expect:
+      error: true
+
+  - name: "Grouped NOT IN remains explicitly unsupported"
+    sql: |
+      SELECT ID FROM in_fop_files
+      WHERE ID NOT IN (
+        SELECT grp FROM in_nullable_rhs
+        GROUP BY grp
+      )
+    expect:
+      error: true
+
+  - name: "Projected grouped IN remains explicitly unsupported"
+    sql: |
+      SELECT ID,
+        ID IN (SELECT grp FROM in_nullable_rhs GROUP BY grp) AS grouped_match
+      FROM in_fop_files
+    expect:
+      error: true
 
   - name: "NOT IN subquery with RHS NULL projects UNKNOWN"
     sql: |
