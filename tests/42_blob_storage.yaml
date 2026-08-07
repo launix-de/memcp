@@ -304,6 +304,22 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: "Shared blob: rebuild both tables concurrently"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Shared blob: both tables survive concurrent rebuild"
+    sql: |
+      SELECT
+        (SELECT payload = REPEAT('S', 1000) FROM blob_shared1 WHERE id = 1) AS first_ok,
+        (SELECT payload = REPEAT('S', 1000) FROM blob_shared2 WHERE id = 1) AS second_ok
+    expect:
+      rows: 1
+      data:
+        - first_ok: 1
+          second_ok: 1
+
   - name: "Shared blob: drop first table"
     sql: "DROP TABLE blob_shared1"
     expect:

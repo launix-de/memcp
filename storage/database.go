@@ -42,18 +42,41 @@ type database struct {
 	//     instead of forcing N full schema.json rewrites in sequence
 	//   - durable=true (Safe engine metadata) upgrades the coalesced write to
 	//     a fully synced commit; non-durable callers may piggyback on it
-	saveMu          sync.Mutex `json:"-"`
-	saveCondOnce    sync.Once  `json:"-"`
-	saveCond        *sync.Cond `json:"-"`
-	saveRequested   uint64     `json:"-"`
-	saveCompleted   uint64     `json:"-"`
-	saveInFlight    bool       `json:"-"`
-	savePending     []byte     `json:"-"`
-	savePendingSync bool       `json:"-"`
-	savePanic       any        `json:"-"`
+	saveMu          sync.Mutex    `json:"-"`
+	saveCondOnce    sync.Once     `json:"-"`
+	saveCond        *sync.Cond    `json:"-"`
+	saveRequested   uint64        `json:"-"`
+	saveCompleted   uint64        `json:"-"`
+	saveInFlight    bool          `json:"-"`
+	savePending     []byte        `json:"-"`
+	savePendingSync bool          `json:"-"`
+	savePanic       any           `json:"-"`
+	blobRefs        *blobRefState `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
+}
+
+// blobRefLock occupies one cache line so unrelated hash stripes do not
+// invalidate each other's lock state under parallel blob rebuilds.
+type blobRefLock struct {
+	mu sync.Mutex
+	_  [56]byte
+}
+
+type blobRefState struct {
+	tableMu sync.Mutex
+	rows    sync.RWMutex
+	locks   [64]blobRefLock
+	table   atomic.Pointer[table]
+}
+
+func (db *database) blobRefState() *blobRefState {
+	return db.blobRefs
+}
+
+func newDatabase() *database {
+	return &database{blobRefs: new(blobRefState)}
 }
 
 type rebuildDatabaseResult struct {
@@ -207,7 +230,7 @@ func LoadDatabases() {
 	entries, _ := os.ReadDir(Basepath)
 	for _, entry := range entries {
 		if entry.IsDir() {
-			db := new(database)
+			db := newDatabase()
 			db.Name = entry.Name()
 			db.persistence = &FileStorage{path: Basepath + "/" + entry.Name() + "/"}
 			db.srState = COLD
@@ -227,7 +250,7 @@ func LoadDatabases() {
 				continue
 			}
 			fmt.Println("loading database", dbName, "from backend config", configPath)
-			db := new(database)
+			db := newDatabase()
 			db.Name = dbName
 			db.persistence = persistence
 			db.srState = COLD
@@ -360,6 +383,9 @@ func (db *database) ensureLoaded() {
 	// restore back-references; do not touch on-disk columns yet
 	for _, t := range db.tables.GetAll() {
 		t.schema = db
+		if t.Name == ".blobs" {
+			db.blobRefState().table.Store(t)
+		}
 		for _, col := range t.Columns {
 			col.UpdateSanitizer()
 		}
@@ -486,6 +512,9 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 		// do nothing for cold databases; avoid loading during rebuild
 		return rebuildDatabaseResult{}
 	}
+	// Blob-producing table rebuilds run in parallel. Publish their shared
+	// refcount table before workers start so no worker mutates the catalog.
+	db.ensureBlobTable()
 	var done sync.WaitGroup
 	// Collect pre-rebuild shards that were superseded. Their cleanup
 	// (RemoveFromDisk → ReleaseBlobs → DecrBlobRefcount) must run after
@@ -496,9 +525,31 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 	var errMu sync.Mutex
 	var rebuildErrors []string
 	dbs := db.tables.GetAll()
+	if !includeEphemeral {
+		onlineTables := make([]*table, 0, len(dbs))
+		for _, t := range dbs {
+			if t.Name != ".blobs" {
+				onlineTables = append(onlineTables, t)
+			}
+		}
+		dbs = onlineTables
+	}
+	var blobWriters sync.WaitGroup
+	for _, t := range dbs {
+		if t.Name != ".blobs" {
+			blobWriters.Add(1)
+		}
+	}
 	done.Add(len(dbs))
 	for _, t := range dbs {
 		go func(t *table) {
+			if t.Name == ".blobs" {
+				// Rebuilding other tables may update blob refcounts. Rebuild the
+				// shared catalog only after those writes have completed.
+				blobWriters.Wait()
+			} else {
+				defer blobWriters.Done()
+			}
 			tableLocked := false
 			rebuildClaimed := false
 			t.ddlMu.RLock()
@@ -770,7 +821,7 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 		panic("Database " + schema + " already exists")
 	}
 
-	db = new(database)
+	db = newDatabase()
 	db.Name = schema
 	persistence := FileFactory{Basepath} // TODO: remove this, use parameter instead
 	db.persistence = persistence.CreateDatabase(schema)
@@ -847,7 +898,7 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 		panic("failed to create persistence engine for backend: " + backend)
 	}
 
-	db = new(database)
+	db = newDatabase()
 	db.Name = schema
 	db.persistence = persistence
 	db.tables = NonLockingReadMap.New[table, string]()
@@ -905,7 +956,7 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 		panic("failed to create persistence engine from source config")
 	}
 
-	db = new(database)
+	db = newDatabase()
 	db.Name = schema
 	db.persistence = persistence
 	db.tables = NonLockingReadMap.New[table, string]()
@@ -993,7 +1044,17 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 		}
 		panic("Table " + name + " already exists")
 	}
-	t = new(table)
+	t = db.newTable(name, pm)
+	if existing := db.tables.Set(t); existing != nil {
+		panic("Table " + name + " already exists")
+	}
+	return t, true
+}
+
+// newTable builds a complete table object without publishing it in db.tables.
+// Callers may add internal columns before publication while holding schemalock.
+func (db *database) newTable(name string, pm PersistencyMode) *table {
+	t := new(table)
 	t.schema = db
 	t.Name = name
 	t.PersistencyMode = pm
@@ -1003,10 +1064,7 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 	t.Shards[0] = NewShard(t)
 	t.Auto_increment = 1
 	t.publishShowColumnsSnapshot()
-	if existing := db.tables.Set(t); existing != nil {
-		panic("Table " + name + " already exists")
-	}
-	return t, true
+	return t
 }
 
 func registerCreatedTable(t *table) {
@@ -1039,6 +1097,9 @@ func DropTable(schema, name string, ifexists bool) {
 		panic("Table " + schema + "." + name + " does not exist")
 	}
 	db.tables.Remove(name)
+	if name == ".blobs" {
+		db.blobRefState().table.Store(nil)
+	}
 	db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
 	// fire AfterDropTable triggers after releasing schemalock (avoids deadlock on cascading drops)
 	t.ExecuteTableLifecycleTriggers(AfterDropTable)

@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
@@ -430,6 +431,53 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 		t.Fatalf("after dropping both tables: expected 0 blob files, got %d", n)
 	}
 	fmt.Println("TestBlobSharedAcrossTables passed")
+}
+
+func TestConcurrentBlobRefcountUpdates(t *testing.T) {
+	dir := t.TempDir()
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tdb_concurrent")
+	oldAnalyzeMinItems := Settings.AnalyzeMinItems
+	Settings.AnalyzeMinItems = 1 << 30
+	defer func() { Settings.AnalyzeMinItems = oldAnalyzeMinItems }()
+
+	CreateDatabase("tdb_concurrent", false)
+	db := GetDatabase("tdb_concurrent")
+	hash := strings.Repeat("ab", 32)
+
+	const refs = 64
+	var wg sync.WaitGroup
+	wg.Add(refs)
+	for range refs {
+		go func() {
+			defer wg.Done()
+			db.IncrBlobRefcount(hash)
+		}()
+	}
+	wg.Wait()
+
+	values := queryBlobsTable(t, db)
+	if len(values) != 1 || values[hash] != refs {
+		t.Fatalf("concurrent increments: got %v, want one row with refcount %d", values, refs)
+	}
+
+	wg.Add(refs - 1)
+	for range refs - 1 {
+		go func() {
+			defer wg.Done()
+			db.DecrBlobRefcount(hash)
+		}()
+	}
+	wg.Wait()
+
+	values = queryBlobsTable(t, db)
+	if len(values) != 1 || values[hash] != 1 {
+		t.Fatalf("concurrent decrements: got %v, want one row with refcount 1", values)
+	}
 }
 
 // TestDoubleRebuildPreservesShardFiles is a regression test for a data-loss

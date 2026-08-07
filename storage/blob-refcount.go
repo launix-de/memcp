@@ -19,19 +19,78 @@ package storage
 import "fmt"
 import "github.com/launix-de/memcp/scm"
 
+func blobRefStripe(hash string) int {
+	value := byte(0)
+	for i := 0; i < len(hash) && i < 2; i++ {
+		value <<= 4
+		switch c := hash[i]; {
+		case c >= '0' && c <= '9':
+			value |= c - '0'
+		case c >= 'a' && c <= 'f':
+			value |= c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			value |= c - 'A' + 10
+		default:
+			value ^= c
+		}
+	}
+	return int(value) & 63
+}
+
+func (db *database) lockBlobRef(hash string) func() {
+	lock := &db.blobRefState().locks[blobRefStripe(hash)].mu
+	lock.Lock()
+	return lock.Unlock
+}
+
+func blobTableHasColumns(t *table) bool {
+	hash, refcount := false, false
+	for _, col := range t.Columns {
+		hash = hash || col.Name == "hash"
+		refcount = refcount || col.Name == "refcount"
+	}
+	return hash && refcount
+}
+
 // ensureBlobTable lazily creates the `.blobs` table inside this database.
 func (db *database) ensureBlobTable() *table {
-	t := db.GetTable(".blobs")
-	if t != nil {
+	state := db.blobRefState()
+	t := state.table.Load()
+	if t != nil && blobTableHasColumns(t) {
 		return t
 	}
-	fmt.Println("creating table", db.Name+".\".blobs\"")
-	t, _ = CreateTable(db.Name, ".blobs", Safe, true)
-	if t != nil {
+
+	state.tableMu.Lock()
+	defer state.tableMu.Unlock()
+	if t = state.table.Load(); t != nil && blobTableHasColumns(t) {
+		return t
+	}
+	db.ensureLoaded()
+	if t = db.tables.Get(".blobs"); t != nil {
+		// Repair schemas created by older versions that published the table
+		// before both columns had been added.
 		t.CreateColumn("hash", "TEXT", nil, nil)
 		t.CreateColumn("refcount", "INT", nil, nil)
-		db.save()
+		state.table.Store(t)
+		return t
 	}
+
+	fmt.Println("creating table", db.Name+".\".blobs\"")
+	db.schemalock.Lock()
+	if t = db.tables.Get(".blobs"); t != nil {
+		db.schemalock.Unlock()
+		t.CreateColumn("hash", "TEXT", nil, nil)
+		t.CreateColumn("refcount", "INT", nil, nil)
+		state.table.Store(t)
+		return t
+	}
+	t = db.newTable(".blobs", Safe)
+	t.createColumnLocked("hash", "TEXT", nil, nil)
+	t.createColumnLocked("refcount", "INT", nil, nil)
+	db.tables.Set(t)
+	db.saveLockedWithDurabilityAndUnlock(true)
+	state.table.Store(t)
+	registerCreatedTable(t)
 	return t
 }
 
@@ -58,12 +117,11 @@ func sumProc() scm.Scmer {
 
 // IncrBlobRefcount increments the reference count for a blob hash in db.`.blobs`.
 // If no row exists yet, it inserts one with refcount=1.
-// IncrBlobRefcount increments the reference count for a blob hash in db.`.blobs`.
-// If no row exists yet, it inserts one with refcount=1.
-// No global lock: the .blobs table's own shard-level locking via scan+$update
-// provides atomicity per hash.  Callers must call IncrBlobRefcount BEFORE
-// WriteBlob so that cleanBlobs never sees an orphaned file on disk.
+// Same-hash operations are serialized across the scan and insert/update;
+// independent hashes retain the concurrency of separate lock stripes.
 func (db *database) IncrBlobRefcount(hash string) {
+	defer db.lockBlobRef(hash)()
+	state := db.blobRefState()
 	t := db.ensureBlobTable()
 	if t == nil {
 		return
@@ -90,25 +148,41 @@ func (db *database) IncrBlobRefcount(hash string) {
 	})
 
 	aggr := sumProc()
-	result := t.scan(
-		CurrentTx(),
-		[]string{"hash"}, blobCondition(hashVal),
-		[]string{"refcount", "$update"}, callback,
-		aggr, scm.NewInt(0), aggr, false,
-	)
-
-	if scm.ToInt(result) == 0 {
-		t.Insert(
-			[]string{"hash", "refcount"},
-			[][]scm.Scmer{{hashVal, scm.NewInt(1)}},
-			nil, scm.NewNil(), false, nil,
+	incrementExisting := func() bool {
+		result := t.scan(
+			CurrentTx(),
+			[]string{"hash"}, blobCondition(hashVal),
+			[]string{"refcount", "$update"}, callback,
+			aggr, scm.NewInt(0), aggr, false,
 		)
+		return scm.ToInt(result) > 0
 	}
+	state.rows.RLock()
+	found := incrementExisting()
+	state.rows.RUnlock()
+	if found {
+		return
+	}
+
+	state.rows.Lock()
+	defer state.rows.Unlock()
+	if incrementExisting() {
+		return
+	}
+	t.Insert(
+		[]string{"hash", "refcount"},
+		[][]scm.Scmer{{hashVal, scm.NewInt(1)}},
+		nil, scm.NewNil(), false, nil,
+	)
 }
 
 // DecrBlobRefcount decrements the reference count for a blob hash in db.`.blobs`.
 // If the count reaches 0, the row is deleted and the blob file is removed.
 func (db *database) DecrBlobRefcount(hash string) {
+	defer db.lockBlobRef(hash)()
+	state := db.blobRefState()
+	state.rows.Lock()
+	defer state.rows.Unlock()
 	t := db.ensureBlobTable()
 	if t == nil {
 		return

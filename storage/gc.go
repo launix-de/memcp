@@ -33,9 +33,8 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
 }
 
 // cleanBlobs deletes blob files that are not referenced in the .blobs table.
-// No global lock needed: IncrBlobRefcount is always called BEFORE WriteBlob,
-// so any file on disk has (or will have) a refcount entry.  Only truly
-// orphaned files (from incomplete writes) are deleted.
+// IncrBlobRefcount is always called BEFORE WriteBlob, and the per-hash lock
+// prevents cleanup from racing a missing-row insert or final decrement.
 // Queries the .blobs table per blob file instead of building an in-memory map.
 func cleanBlobs(db *database) int {
 	bt := db.GetTable(".blobs")
@@ -47,6 +46,10 @@ func cleanBlobs(db *database) int {
 	// Walk disk blobs one by one; check refcount via scan on .blobs table.
 	deleted := 0
 	db.persistence.WalkBlobs(func(hash string) error {
+		defer db.lockBlobRef(hash)()
+		state := db.blobRefState()
+		state.rows.RLock()
+		defer state.rows.RUnlock()
 		hashVal := scm.NewString(hash)
 		// scan .blobs WHERE hash = <hash>, sum refcount
 		rc := bt.scan(
