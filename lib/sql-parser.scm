@@ -204,7 +204,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 						(list (symbol "lambda") (list (symbol "row"))
 							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
 					(list (symbol "set") (symbol "resultrow") _rrsym)
-					(build_queryplan_term transformed_subquery)
+					(build_queryplan_term (sql_expand_views transformed_subquery policy))
 					(list _psym "value")))
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
@@ -336,7 +336,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 															(list (symbol "list"))
 															(if ignore (list (symbol "lambda") '() 0) nil)
 															false nil)))
-												(build_queryplan_term inner_t)))))
+												(build_queryplan_term (sql_expand_views inner_t policy))))))
 									(if (equal? tag '!update)
 										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin
@@ -956,7 +956,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
 				'('lambda '('id) '('session "last_insert_id" 'id)))))
-			(build_queryplan_term inner)
+			(build_queryplan_term (sql_expand_views inner policy))
 		)
 	)))
 	(define sql_select_core (parser '(
@@ -1320,6 +1320,26 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (atom "SET NULL" true) "set null")
 	)))
 
+	(define sql_create_view (parser '(
+		(atom "CREATE" true)
+		(define replace (? (atom "OR" true) (atom "REPLACE" true)))
+		(atom "VIEW" true)
+		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
+		(define target (or
+			(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
+			(parser (define id sql_identifier) '(nil id))))
+		(define aliases (? (parser '("(" (define columns (+ sql_identifier ",")) ")") columns)))
+		(atom "AS" true)
+		(define captured (capture sql_select))
+	) (match target '(schema2 id) (begin
+			(define view_schema (coalesce schema2 schema))
+			(if policy (policy view_schema id true) true)
+			(define query (sql_apply_view_column_aliases (nth captured 1) aliases))
+			(list (quote create_sql_view)
+				(list (quote session) "__memcp_tx")
+				view_schema id "sql" (nth captured 0) (list (quote quote) query)
+				(if replace "replace" (if ifnotexists "ignore" "error")))))))
+
 	(define sql_create_table (parser '(
 		(atom "CREATE" true)
 		(atom "TABLE" true)
@@ -1441,15 +1461,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-		(parser (define query sql_select) (build_queryplan_term query))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir query))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder query))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile query parse_started_ns (strlen s)))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		(parser (define query sql_select) (build_queryplan_term (sql_expand_views query policy)))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy)))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s)))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term (sql_expand_views query policy)) (settings "ExplainWidth")))))
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
 		sql_insert_select
+		sql_create_view
 		sql_create_table
 		sql_alter_table
 		sql_update
@@ -1657,6 +1678,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
+		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
+			(define target (or
+				(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
+				(parser (define id sql_identifier) '(nil id)))))
+			(match target '(schema2 id) (begin
+				(define view_schema (coalesce schema2 schema))
+				(if policy (policy view_schema id true) true)
+				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
 

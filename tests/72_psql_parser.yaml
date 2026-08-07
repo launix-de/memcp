@@ -13,6 +13,7 @@ metadata:
   syntax: postgresql
 
 setup:
+  - sql: "DROP VIEW IF EXISTS psql_data_view"
   - sql: "DROP TABLE IF EXISTS psql_data"
   - sql: "DROP TABLE IF EXISTS psql_decimal_range"
   - sql: |
@@ -430,6 +431,27 @@ test_cases:
         - id: 2
           name: "Bob"
 
+  - name: "PostgreSQL CREATE VIEW stores and expands parser IR"
+    sql: |
+      CREATE VIEW psql_data_view (view_id, view_name)
+      AS SELECT id, name FROM psql_data WHERE val >= 30
+    expect:
+      affected_rows: 1
+
+  - name: "PostgreSQL SELECT reads a logical view"
+    sql: "SELECT view_id, view_name FROM psql_data_view ORDER BY view_id"
+    expect:
+      rows: 2
+      data:
+        - { view_id: 2, view_name: "Bob" }
+        - { view_id: 3, view_name: "Charlie" }
+
+  - name: "PostgreSQL DROP VIEW removes the definition"
+    sql: "DROP VIEW psql_data_view"
+    expect:
+      affected_rows: 1
+
 cleanup:
+  - sql: "DROP VIEW IF EXISTS psql_data_view"
   - sql: "DROP TABLE IF EXISTS psql_decimal_range"
   - sql: "DROP TABLE IF EXISTS psql_data"

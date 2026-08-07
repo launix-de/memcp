@@ -10,6 +10,8 @@ metadata:
   isolated: true
 
 cleanup:
+  - action: "Drop persisted view"
+    sql: "DROP VIEW IF EXISTS tp_order_totals"
   - action: "Drop test tables"
     sql: "DROP TABLE IF EXISTS tp_orders"
   - action: "Drop test tables"
@@ -90,6 +92,21 @@ test_cases:
       # Only the user-visible tp_add100 trigger should appear; hidden prejoin triggers must not
       rows: 1
 
+  - name: "Create logical view before restart"
+    sql: "CREATE VIEW tp_order_totals AS SELECT customer_id, SUM(amount) AS total FROM tp_orders GROUP BY customer_id"
+    expect:
+      affected_rows: 1
+
+  - name: "Logical view works before restart"
+    sql: "SELECT customer_id, total FROM tp_order_totals ORDER BY customer_id"
+    expect:
+      rows: 2
+      data:
+        - customer_id: 1
+          total: 300
+        - customer_id: 2
+          total: 150
+
   # ----------------------------------------------------------------
   # SHUTDOWN — server will restart; subsequent tests run against fresh instance
   # ----------------------------------------------------------------
@@ -113,6 +130,16 @@ test_cases:
     expect:
       data:
         - val: 107
+
+  - name: "After restart: serialized logical view IR is restored"
+    sql: "SELECT customer_id, total FROM tp_order_totals ORDER BY customer_id"
+    expect:
+      rows: 2
+      data:
+        - customer_id: 1
+          total: 300
+        - customer_id: 2
+          total: 150
 
   # ----------------------------------------------------------------
   # After restart: internal prejoin trigger must still fire
@@ -152,6 +179,9 @@ test_cases:
   # ----------------------------------------------------------------
   # Cleanup
   # ----------------------------------------------------------------
+
+  - name: "Cleanup tp_order_totals"
+    sql: "DROP VIEW tp_order_totals"
 
   - name: "Cleanup tp_orders"
     sql: "DROP TABLE tp_orders"

@@ -9,6 +9,18 @@ setup:
   # Ensure user rows don't pre-exist from earlier runs
   - sql: "DELETE FROM system.user WHERE username = 'testuser'"
   - sql: "DELETE FROM system.user WHERE username = 'testuser2'"
+  - sql: "DROP VIEW IF EXISTS ddl_view_nested"
+  - sql: "DROP VIEW IF EXISTS ddl_view_totals"
+  - sql: "DROP VIEW IF EXISTS ddl_view_base"
+  - sql: "DROP VIEW IF EXISTS ddl_view_cycle_a"
+  - sql: "DROP VIEW IF EXISTS ddl_view_cycle_b"
+  - sql: "DROP VIEW IF EXISTS ddl_view_shadow"
+  - sql: "DROP TABLE IF EXISTS ddl_view_shadow"
+  - sql: "DROP TABLE IF EXISTS ddl_view_copy"
+  - sql: "DROP TABLE IF EXISTS ddl_view_source"
+  - sql: "CREATE TABLE ddl_view_source (id INT, category VARCHAR(20), amount INT)"
+  - sql: "CREATE TABLE ddl_view_copy (id INT, amount INT)"
+  - sql: "INSERT INTO ddl_view_source (id, category, amount) VALUES (1, 'a', 10), (2, 'a', 20), (3, 'b', 30)"
 
 test_cases:
 
@@ -223,6 +235,152 @@ test_cases:
     expect:
       affected_rows: 1
 
+  # === LOGICAL VIEW OPERATIONS ===
+  - name: "CREATE VIEW stores and expands a logical SELECT"
+    sql: |
+      CREATE VIEW ddl_view_base (key_id, category, doubled)
+      AS SELECT id, category, amount * 2
+      FROM ddl_view_source
+      WHERE amount >= 20
+    expect:
+      affected_rows: 1
+
+  - name: "SELECT reads an expanded view without materialization"
+    sql: "SELECT key_id, category, doubled FROM ddl_view_base ORDER BY key_id"
+    expect:
+      rows: 2
+      data:
+        - { key_id: 2, category: "a", doubled: 40 }
+        - { key_id: 3, category: "b", doubled: 60 }
+
+  - name: "system.views keeps raw SQL and parsed IR"
+    sql: |
+      SELECT dialect, sql LIKE 'SELECT%' AS has_sql, ir IS NOT NULL AS has_ir
+      FROM system.views
+      WHERE database = 'memcp-tests' AND name = 'ddl_view_base'
+    expect:
+      rows: 1
+      data:
+        - { dialect: "sql", has_sql: true, has_ir: true }
+
+  - name: "Nested views are recursively expanded"
+    sql: "CREATE VIEW ddl_view_nested AS SELECT key_id, doubled + 1 AS result FROM ddl_view_base"
+    expect:
+      affected_rows: 1
+
+  - name: "Nested view query sees the complete logical query"
+    sql: "SELECT key_id, result FROM ddl_view_nested ORDER BY key_id"
+    expect:
+      rows: 2
+      data:
+        - { key_id: 2, result: 41 }
+        - { key_id: 3, result: 61 }
+
+  - name: "Duplicate CREATE VIEW fails"
+    sql: "CREATE VIEW ddl_view_base AS SELECT id FROM ddl_view_source"
+    expect:
+      error: true
+
+  - name: "CREATE VIEW IF NOT EXISTS preserves the definition"
+    sql: "CREATE VIEW IF NOT EXISTS ddl_view_base AS SELECT id FROM ddl_view_source"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE OR REPLACE VIEW invalidates cached plans"
+    sql: |
+      CREATE OR REPLACE VIEW ddl_view_base (key_id, category, doubled)
+      AS SELECT id, category, amount * 3 FROM ddl_view_source
+    expect:
+      affected_rows: 1
+
+  - name: "Repeated SELECT uses the replaced view definition"
+    sql: "SELECT key_id, category, doubled FROM ddl_view_base ORDER BY key_id"
+    expect:
+      rows: 3
+      data:
+        - { key_id: 1, category: "a", doubled: 30 }
+        - { key_id: 2, category: "a", doubled: 60 }
+        - { key_id: 3, category: "b", doubled: 90 }
+
+  - name: "Aggregate view supports the TPC-H Q15 query shape"
+    sql: |
+      CREATE VIEW ddl_view_totals (supplier_no, total_revenue)
+      AS SELECT id, SUM(amount)
+      FROM ddl_view_source
+      GROUP BY id
+    expect:
+      affected_rows: 1
+
+  - name: "Aggregate view can be referenced by an aggregate subquery"
+    sql: |
+      SELECT supplier_no, total_revenue
+      FROM ddl_view_totals
+      WHERE total_revenue = (SELECT MAX(total_revenue) FROM ddl_view_totals)
+    expect:
+      rows: 1
+      data:
+        - { supplier_no: 3, total_revenue: 30 }
+
+  - name: "INSERT SELECT compiles views as logical sources"
+    sql: "INSERT INTO ddl_view_copy (id, amount) SELECT key_id, doubled FROM ddl_view_base"
+    expect:
+      affected_rows: 3
+
+  - name: "INSERT SELECT copied the expanded view rows"
+    sql: "SELECT id, amount FROM ddl_view_copy ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, amount: 30 }
+        - { id: 2, amount: 60 }
+        - { id: 3, amount: 90 }
+
+  - name: "View output alias count must match"
+    sql: "CREATE VIEW ddl_bad_view (only_one) AS SELECT id, amount FROM ddl_view_source"
+    expect:
+      error: true
+
+  - name: "Circular view definitions can be recorded"
+    sql: "CREATE VIEW ddl_view_cycle_a AS SELECT * FROM ddl_view_cycle_b"
+    expect:
+      affected_rows: 1
+
+  - name: "Second half of circular view can be recorded"
+    sql: "CREATE VIEW ddl_view_cycle_b AS SELECT * FROM ddl_view_cycle_a"
+    expect:
+      affected_rows: 1
+
+  - name: "Circular view expansion fails explicitly"
+    sql: "SELECT * FROM ddl_view_cycle_a"
+    expect:
+      error: true
+
+  - name: "Physical table shadows a view with the same name"
+    setup:
+      - sql: "CREATE VIEW ddl_view_shadow AS SELECT amount FROM ddl_view_source WHERE id = 1"
+      - sql: "CREATE TABLE ddl_view_shadow (amount INT)"
+      - sql: "INSERT INTO ddl_view_shadow (amount) VALUES (99)"
+    sql: "SELECT amount FROM ddl_view_shadow"
+    expect:
+      rows: 1
+      data:
+        - { amount: 99 }
+
+  - name: "DROP VIEW removes the catalog entry"
+    sql: "DROP VIEW ddl_view_nested"
+    expect:
+      affected_rows: 1
+
+  - name: "DROP missing VIEW fails"
+    sql: "DROP VIEW ddl_view_nested"
+    expect:
+      error: true
+
+  - name: "DROP VIEW IF EXISTS accepts a missing view"
+    sql: "DROP VIEW IF EXISTS ddl_view_nested"
+    expect:
+      affected_rows: 0
+
   # TODO: ALTER USER operations
   # - name: "ALTER USER password"
   #   sql: "ALTER USER testuser IDENTIFIED BY 'newpassword'"
@@ -233,3 +391,11 @@ cleanup:
   # Clean up created users to keep suite idempotent
   - sql: "DELETE FROM system.user WHERE username = 'testuser'"
   - sql: "DELETE FROM system.user WHERE username = 'testuser2'"
+  - sql: "DROP TABLE IF EXISTS ddl_view_shadow"
+  - sql: "DROP VIEW IF EXISTS ddl_view_shadow"
+  - sql: "DROP VIEW IF EXISTS ddl_view_cycle_b"
+  - sql: "DROP VIEW IF EXISTS ddl_view_cycle_a"
+  - sql: "DROP VIEW IF EXISTS ddl_view_totals"
+  - sql: "DROP VIEW IF EXISTS ddl_view_base"
+  - sql: "DROP TABLE IF EXISTS ddl_view_copy"
+  - sql: "DROP TABLE IF EXISTS ddl_view_source"

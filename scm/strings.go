@@ -756,6 +756,23 @@ func init_strings() {
 			Const:  true,
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		Name: "json_decode_scmer",
+		Desc: "parses JSON produced by json_encode and preserves Scheme symbols and lists",
+		Fn: func(a ...Scmer) Scmer {
+			var result Scmer
+			err := json.Unmarshal([]byte(String(a[0])), &result)
+			if err != nil {
+				panic(err)
+			}
+			return result
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "Scmer JSON to decode"}},
+			Return: &TypeDescriptor{Kind: "any"},
+			Const:  true,
+		},
+	})
 
 	Declare(&Globalenv, &Declaration{
 		Name: "base64_encode",
