@@ -87,6 +87,15 @@ test_cases:
       data:
         - cnt: 10
 
+  - repeat: 20
+    tests:
+      - name: "Selective COUNT keeps nonempty shard result"
+        sql: "SELECT COUNT(*) AS cnt FROM ms_data WHERE val BETWEEN 30000 AND 30009"
+        expect:
+          rows: 1
+          data:
+            - cnt: 10
+
   - name: "MIN/MAX across shards"
     sql: "SELECT MIN(val) AS lo, MAX(val) AS hi FROM ms_data"
     expect:

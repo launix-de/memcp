@@ -215,6 +215,7 @@ func ensureSystemStatistic() {
 		{"order", "TEXT"},
 		{"index_cols", "TEXT"},
 		{"inputCount", "INT"},
+		{"candidateCount", "INT"},
 		{"outputCount", "INT"},
 		// TODO: measurements are temporary; remove later (store in nanoseconds)
 		{"analyze_ns", "INT"},
@@ -237,7 +238,7 @@ func ensureSystemStatistic() {
 
 // safeLogScan writes a single row into system_statistic.scans. Failures are ignored.
 // TODO: measurements are temporary; remove later (nanoseconds)
-func safeLogScan(schema, table string, ordered bool, filter, order, indexCols string, inputCount, outputCount, analyzeNs, execNs int64) {
+func safeLogScan(schema, table string, ordered bool, filter, order, indexCols string, inputCount, candidateCount, outputCount, analyzeNs, execNs int64) {
 	defer func() { _ = recover() }()
 	db := GetDatabase("system_statistic")
 	if db == nil {
@@ -248,7 +249,7 @@ func safeLogScan(schema, table string, ordered bool, filter, order, indexCols st
 		return
 	}
 
-	cols := []string{"schema", "table", "ordered", "filter", "order", "index_cols", "inputCount", "outputCount", "analyze_ns", "exec_ns", "timestamp"}
+	cols := []string{"schema", "table", "ordered", "filter", "order", "index_cols", "inputCount", "candidateCount", "outputCount", "analyze_ns", "exec_ns", "timestamp"}
 	row := []scm.Scmer{
 		scm.NewString(schema),
 		scm.NewString(table),
@@ -257,6 +258,7 @@ func safeLogScan(schema, table string, ordered bool, filter, order, indexCols st
 		scm.NewString(order),
 		scm.NewString(indexCols),
 		scm.NewInt(inputCount),
+		scm.NewInt(candidateCount),
 		scm.NewInt(outputCount),
 		scm.NewInt(analyzeNs),
 		scm.NewInt(execNs),
