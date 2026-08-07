@@ -4968,16 +4968,22 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(and (expr_refs_stage_output_alias? (list (quote get_column) tblvar false col false)) true)
 		_ false)))
 
-(define lower_scalar_first_query_probe_expr (lambda (all_stages dependency_graph stage value_expr keys lookup_keys)
+(define scalar_first_query_probe_direct_nested_stages (lambda (all_stages stage)
 	(begin
 		(define input (gs_input stage))
-		(define direct_nested_stages (merge_unique (list
+		(unique_stages_by_id (merge (list
 			(qb_stages input)
-			(stage_outputs_from_sources_using all_stages (qb_sources input)))))
-		(define nested_stages (merge_unique (list
-			direct_nested_stages
-			(merge (map direct_nested_stages (lambda (nested_stage)
-				(stage_dependency_closure_using_graph dependency_graph nested_stage)))))))
+			(stage_outputs_from_sources_using all_stages (qb_sources input))))))))
+
+(define scalar_first_query_probe_nested_stages_using_index (lambda (direct_stages closure_index)
+	(unique_stages_by_id (merge (list
+		direct_stages
+		(merge (map direct_stages (lambda (nested_stage)
+			(get_assoc closure_index (logical_stage_key nested_stage))))))))))
+
+(define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages)
+	(begin
+		(define input (gs_input stage))
 		(define keyed_terms (map (produceN (count keys)) (lambda (i)
 			(list (query_key_term_alias (qb_sources input) (nth keys i))
 				(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
@@ -4997,11 +5003,12 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(qb_hidden input)
 			(qb_stages input)
 			(qb_facts input)))
-		(define prepared_input (query_block_without_stages_after_eager_prepare_using nested_stages keyed_input))
+		(define raw_prepared_input
+			(query_block_without_stages_after_eager_prepare_using nested_stages keyed_input))
+		(define prepared_input (if (empty_list? prepare_stages)
+			(query_block_with_stage_catalog raw_prepared_input '())
+			raw_prepared_input))
 		(define rows_plan (lower_query_block_as_dataset_rows prepared_input (list "__value" value_expr)))
-		(define prepare_exprs (merge (list
-			(lower_unique_stage_prepares_using nested_stages nested_stages nested_stages)
-			(lower_stage_materialize_all nested_stages))))
 		(define probe_expr (list (quote scan)
 			'(session "__memcp_tx")
 			rows_plan
@@ -5017,14 +5024,32 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(or (not (nil? (qb_limit input))) (not (nil? (qb_offset input)))))
 			(neumann_fail "build_queryplan" "scalar-first query probe cannot preserve nested ORDER/LIMIT yet")
 			(begin
-				(define raw_probe (cons (quote !begin)
-					(merge (list
-						(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
-						prepare_exprs
-						(list probe_expr)))))
+				(define raw_probe (if (not (empty_list? prepare_stages))
+					(cons (quote !begin)
+						(merge (list
+							(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
+							(lower_unique_stage_prepares_using nested_stages nested_stages nested_stages)
+							(lower_stage_materialize_all nested_stages)
+							(list probe_expr))))
+					probe_expr))
 				(if (presence_bool_stage_output_expr? value_expr)
 					(list (quote coalesceNil) raw_probe false)
 					raw_probe))))))
+
+(define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys)
+	(begin
+		(define direct_stages (scalar_first_query_probe_direct_nested_stages all_stages stage))
+		(define dependency_graph (stage_dependency_graph all_stages))
+		(define closure_index (stage_dependency_closure_index_using_graph dependency_graph direct_stages))
+		(define nested_stages
+			(scalar_first_query_probe_nested_stages_using_index direct_stages closure_index))
+		(lower_scalar_first_query_probe_expr_using
+			stage
+			value_expr
+			keys
+			lookup_keys
+			nested_stages
+			nested_stages))))
 
 /* Query-input scalar probes can occur in many projected fields after their
 logical stages have merged. Emit the physical probe recipe once per block and
@@ -5118,9 +5143,54 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(qb_stages block)
 			(qb_facts block)))))
 
-(define scalar_query_probe_recipe_binding (lambda (all_stages dependency_graph entry)
+(define scalar_query_probe_recipe_seed (lambda (all_stages entry)
 	(match entry
-		'(stage requested_col) (begin
+		'(stage requested_col) (list
+			stage
+			requested_col
+			(scalar_first_query_probe_direct_nested_stages all_stages stage))
+		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe entry"))))
+
+(define scalar_query_probe_recipe_plan_using_index (lambda (closure_index seed)
+	(match seed
+		'(stage requested_col direct_stages) (begin
+			(define nested_stages
+				(scalar_first_query_probe_nested_stages_using_index direct_stages closure_index))
+			(define hoisted_stages (filter nested_stages (lambda (nested_stage)
+				(and (group_stage? nested_stage)
+					(equal? (qassoc_get (gs_facts nested_stage) (quote purpose) nil) (quote exists))
+					(equal? (qassoc_get (gs_facts nested_stage) (quote presence_only) false) true)
+					(source_is_base_table? (gs_input nested_stage))
+					(not (stage_has_residual_outer_refs? nested_stage))))))
+			(define hoisted_ids (stage_id_set hoisted_stages))
+			(define prepare_stages (filter nested_stages (lambda (nested_stage)
+				(not (has_assoc? hoisted_ids (gs_id nested_stage))))))
+			(list
+				stage
+				requested_col
+				nested_stages
+				hoisted_stages
+				prepare_stages))
+		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe seed"))))
+
+(define scalar_query_probe_recipe_plans_using_graph (lambda (all_stages dependency_graph entries)
+	(begin
+		(define seeds (map (coalesceNil entries '()) (lambda (entry)
+			(scalar_query_probe_recipe_seed all_stages entry))))
+		(define direct_stages (unique_stages_by_id (merge (map seeds (lambda (seed) (nth seed 2))))))
+		(define closure_index (stage_dependency_closure_index_using_graph dependency_graph direct_stages))
+		(map seeds (lambda (seed)
+			(scalar_query_probe_recipe_plan_using_index closure_index seed))))))
+
+(define scalar_query_probe_recipe_plans (lambda (all_stages entries)
+	(scalar_query_probe_recipe_plans_using_graph
+		all_stages
+		(stage_dependency_graph all_stages)
+		entries)))
+
+(define scalar_query_probe_recipe_binding (lambda (plan)
+	(match plan
+		'(stage requested_col nested_stages _hoisted_stages prepare_stages) (begin
 			(define raw_keys (gs_keys stage))
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
 			(define keys (if (empty_list? lookup_keys) '() raw_keys))
@@ -5138,14 +5208,24 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 				(quote define)
 				(symbol (scalar_query_probe_recipe_key stage requested_col))
 				(list (quote lambda) params
-					(lower_scalar_first_query_probe_expr all_stages dependency_graph stage value_expr keys params))))
-		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe entry"))))
+					(lower_scalar_first_query_probe_expr_using stage value_expr keys params nested_stages prepare_stages))))
+		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
-(define scalar_query_probe_recipe_bindings (lambda (all_stages entries)
+(define scalar_query_probe_recipe_bindings (lambda (plans)
+	(map (coalesceNil plans '()) scalar_query_probe_recipe_binding)))
+
+(define scalar_query_probe_recipe_hoisted_stages (lambda (plans)
+	(unique_stages_by_id (merge (map (coalesceNil plans '()) (lambda (plan)
+		(match plan
+			'(_stage _requested_col _nested_stages hoisted_stages _prepare_stages) hoisted_stages
+			_ '())))))))
+
+(define scalar_query_probe_recipe_prepare_exprs (lambda (plans)
 	(begin
-		(define dependency_graph (stage_dependency_graph all_stages))
-		(map (coalesceNil entries '()) (lambda (entry)
-			(scalar_query_probe_recipe_binding all_stages dependency_graph entry))))))
+		(define stages (scalar_query_probe_recipe_hoisted_stages plans))
+		(merge (list
+			(lower_unique_stage_prepares_using stages stages stages)
+			(lower_stage_materialize_all stages))))))
 
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages)
 	(begin
@@ -5171,7 +5251,6 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(if (query_block? src)
 			(lower_scalar_first_query_probe_expr
 				all_stages
-				(stage_dependency_graph all_stages)
 				stage
 				value_expr
 				keys
@@ -8761,12 +8840,17 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(if (empty_list? (qb_stages block))
 			(begin
 				(define probe_recipe_entries (query_block_scalar_query_probe_recipe_entries block))
+				(define probe_recipe_plans
+					(scalar_query_probe_recipe_plans stage_lookup probe_recipe_entries))
 				(define recipe_block (query_block_with_scalar_query_probe_recipes block probe_recipe_entries))
 				(define probe_recipe_bindings
-					(scalar_query_probe_recipe_bindings stage_lookup probe_recipe_entries))
+					(scalar_query_probe_recipe_bindings probe_recipe_plans))
+				(define probe_recipe_prepares
+					(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
 				(if (empty_list? probe_recipe_bindings)
 					(lower_query_block_core recipe_block)
 					(cons (quote !begin) (merge (list
+						probe_recipe_prepares
 						probe_recipe_bindings
 						(list (lower_query_block_core recipe_block)))))))
 			(begin
@@ -8785,15 +8869,21 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 									(query_block_with_prepared_sources_using stage_lookup block)))
 								(define probe_recipe_entries
 									(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
+								(define probe_recipe_plans
+									(scalar_query_probe_recipe_plans_using_graph
+										stage_lookup dependency_graph probe_recipe_entries))
 								(define prepared_block
 									(query_block_with_scalar_query_probe_recipes raw_prepared_block probe_recipe_entries))
 								(define probe_recipe_bindings
-									(scalar_query_probe_recipe_bindings stage_lookup probe_recipe_entries))
+									(scalar_query_probe_recipe_bindings probe_recipe_plans))
+								(define probe_recipe_prepares
+									(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
 								(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
 								(define core_block (query_block_with_stage_catalog prepared_block lazy_catalog))
 								(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
 								(cons (quote !begin)
 									(merge (list
+										probe_recipe_prepares
 										probe_recipe_bindings
 										(lazy_stage_prepare_bindings stage_catalog lazy_stages)
 										(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup eager_stages)
