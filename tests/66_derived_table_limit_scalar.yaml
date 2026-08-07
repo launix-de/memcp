@@ -96,6 +96,61 @@ test_cases:
           latest_val: 300
           latest_ts: 3000
 
+  - name: "outer ORDER BY lowers correlated scalar probe"
+    sql: |
+      SELECT t.ID
+      FROM (
+        SELECT m.ID AS ID, m.category AS category
+        FROM dtl_main m
+      ) t
+      ORDER BY (
+        SELECT r.ID FROM dtl_ref r
+        WHERE r.ID = t.category LIMIT 1
+      ) DESC, t.ID ASC
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+        - ID: 1
+
+  - name: "cached outer ORDER BY keeps scalar probe lowered"
+    sql: |
+      SELECT t.ID
+      FROM (
+        SELECT m.ID AS ID, m.category AS category
+        FROM dtl_main m
+      ) t
+      ORDER BY (
+        SELECT r.ID FROM dtl_ref r
+        WHERE r.ID = t.category LIMIT 1
+      ) DESC, t.ID ASC
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+        - ID: 1
+
+  - name: "physical outer ORDER BY contains no scalar probe IR"
+    sql: |
+      EXPLAIN
+      SELECT t.ID
+      FROM (
+        SELECT m.ID AS ID, m.category AS category
+        FROM dtl_main m
+      ) t
+      ORDER BY (
+        SELECT r.ID FROM dtl_ref r
+        WHERE r.ID = t.category LIMIT 1
+      ) DESC, t.ID ASC
+      LIMIT 72 OFFSET 0
+    expect:
+      contains:
+        - "scan_order"
+      not_contains:
+        - "scalar_first_probe"
+
   - name: "COUNT over derived table with scalar subselects"
     sql: |
       SELECT COUNT(*) AS cnt, SUM(t.latest_val) AS total FROM (

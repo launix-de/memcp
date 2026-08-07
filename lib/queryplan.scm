@@ -5438,15 +5438,31 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			'(expr _dir) (order_column_for_alias src expr)
 			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
 
-(define lower_scan_order_sort_expr_for_alias (lambda (src expr)
+(define scan_order_sort_callback_symbols (lambda (driver_cols bound_symbols expr)
 	(match expr
-		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
-			(symbol (resolve_physical_column_name src col col_ignorecase))
-			(neumann_fail "build_queryplan" "ORDER BY references a different source"))
-		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
-		(lower_scan_order_sort_expr_for_alias src (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
-		(cons head tail) (cons head (map tail (lambda (item) (lower_scan_order_sort_expr_for_alias src item))))
-		_ expr)))
+		((symbol quote) _value) expr
+		((symbol lambda) params body) (list (quote lambda) params
+			(scan_order_sort_callback_symbols driver_cols (merge_unique (list bound_symbols params)) body))
+		((symbol lambda) params body numvars) (list (quote lambda) params
+			(scan_order_sort_callback_symbols driver_cols (merge_unique (list bound_symbols params)) body)
+			numvars)
+		(cons head tail) (cons
+			(scan_order_sort_callback_symbols driver_cols bound_symbols head)
+			(map tail (lambda (item) (scan_order_sort_callback_symbols driver_cols bound_symbols item))))
+		_ (if (or (string? expr) (contains? bound_symbols expr))
+			expr
+			(begin
+				(define text (string expr))
+				(define col (find driver_cols (lambda (candidate)
+					(begin
+						(define suffix (concat "." candidate))
+						(and (> (strlen text) (strlen suffix))
+							(equal? (substr text (- (strlen text) (strlen suffix)) (strlen suffix)) suffix)))) nil))
+				(if (nil? col) expr (symbol col)))))))
+
+(define lower_scan_order_sort_expr_for_alias (lambda (src driver_cols expr)
+	(scan_order_sort_callback_symbols driver_cols '()
+		(lower_column_expr_for_alias src expr))))
 
 (define scan_order_sort_column_for_alias (lambda (src expr)
 	(match expr
@@ -5459,7 +5475,7 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(define cols (extract_columns_for_alias src expr))
 			(list (quote lambda)
 				(map cols (lambda (col) (symbol col)))
-				(lower_scan_order_sort_expr_for_alias src expr))))))
+				(lower_scan_order_sort_expr_for_alias src cols expr))))))
 
 (define scan_order_sort_columns_for_alias (lambda (src order_items)
 	(map (coalesceNil order_items '()) (lambda (item)
