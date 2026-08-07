@@ -363,9 +363,7 @@ type scanResult struct {
 
 func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
 	ss := SessionStateFromTx(currentTx)
-	if ss != nil && ss.IsKilled() {
-		panic("query killed")
-	}
+	querySeq := scm.CurrentQuerySeq()
 	touchTempColumns(t, conditionCols, nil)
 	boundaries := extractBoundaries(conditionCols, condition)
 	boundaries, recsetFilter := splitRecSetBoundary(boundaries, t)
@@ -387,6 +385,11 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
+		// Cancellation contract: check only at the scheduling boundary, before entering
+		// the shard. Once entered, a shard runs atomically without cancellation checks.
+		if ss != nil && ss.IsKilledSeq(querySeq) {
+			panic("query killed")
+		}
 		if s.scanExists(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, &found, recsetFilter) {
 			found.Store(true)
 			values <- scanResult{outCount: 1}
@@ -428,9 +431,7 @@ func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm
 
 func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
-	if ss != nil && ss.IsKilled() {
-		panic("query killed")
-	}
+	querySeq := scm.CurrentQuerySeq()
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -482,9 +483,9 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
-		// This keeps the worker pool draining quickly on tables with many shards.
-		if ss != nil && ss.IsKilled() {
+		// Cancellation contract: check only at the scheduling boundary, before entering
+		// the shard. Once entered, a shard runs atomically without cancellation checks.
+		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
 		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
@@ -665,9 +666,6 @@ func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, uppe
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
-		}
-		if ss != nil && ss.IsKilled() {
-			panic("query killed")
 		}
 		for _, idx := range batch {
 			if recsetPart != nil && !recsetPart.contains(idx) {
@@ -1099,9 +1097,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	batchBoundaries := hasBatchBoundaries(boundaries)
 
 	for batchid := 0; batchid < batchCount; batchid++ {
-		if ss != nil && ss.IsKilled() {
-			panic("query killed")
-		}
 		activeBoundaries := boundaries
 		activeLower := lower
 		activeUpperLast := upperLast
@@ -1112,9 +1107,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 
 		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
-			if ss != nil && ss.IsKilled() {
-				panic("query killed")
-			}
 			outN := 0
 			for _, idx := range batch {
 				effectiveIdx := idx

@@ -466,9 +466,6 @@ func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 	execStart := time.Now()
 	ss := SessionStateFromTx(currentTx)
-	if ss != nil && ss.IsKilled() {
-		panic("query killed")
-	}
 
 	total_limit := -1
 	if limitPartitionCols == 0 && limit >= 0 {
@@ -553,6 +550,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 							if part.count == 0 {
 								continue
 							}
+							// Cancellation contract: check only at the scheduling boundary, before entering
+							// the shard. Once entered, a shard runs atomically without cancellation checks.
 							if ss != nil && ss.IsKilledSeq(querySeq) {
 								panic("query killed")
 							}
@@ -562,7 +561,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 										q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 									}
 								}()
-								res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, querySeq)
+								res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 								res.callbackCols = callbackCols
 								res.callback = callback
 								res.tableIdx = tableIdx
@@ -582,15 +581,17 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 					go func(part recSetShard) {
 						withTxSession(currentTx, func() scm.Scmer {
 							defer wg.Done()
-							if ss != nil && ss.IsKilledSeq(querySeq) {
-								panic("query killed")
-							}
 							defer func() {
 								if r := recover(); r != nil {
 									q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 								}
 							}()
-							res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, querySeq)
+							// Cancellation contract: check only at the scheduling boundary, before entering
+							// the shard. Once entered, a shard runs atomically without cancellation checks.
+							if ss != nil && ss.IsKilledSeq(querySeq) {
+								panic("query killed")
+							}
+							res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 							res.callbackCols = callbackCols
 							res.callback = callback
 							res.tableIdx = tableIdx
@@ -602,14 +603,16 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			}
 		} else {
 			done := t.iterateShardsParallel(tableBounds, func(s *storageShard, solo bool) {
-				if ss != nil && ss.IsKilled() {
-					panic("query killed")
-				}
 				defer func() {
 					if r := recover(); r != nil {
 						q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 					}
 				}()
+				// Cancellation contract: check only at the scheduling boundary, before entering
+				// the shard. Once entered, a shard runs atomically without cancellation checks.
+				if ss != nil && ss.IsKilledSeq(querySeq) {
+					panic("query killed")
+				}
 				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, orderedEarlyLimit, recsetFilter)
 				res.callbackCols = callbackCols
 				res.callback = callback
