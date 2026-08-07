@@ -5009,6 +5009,125 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 					(list (quote coalesceNil) raw_probe false)
 					raw_probe))))))
 
+/* Query-input scalar probes can occur in many projected fields after their
+logical stages have merged. Emit the physical probe recipe once per block and
+pass correlation keys to it instead of copying the complete recipe per field. */
+(define scalar_query_probe_recipe_key (lambda (stage requested_col)
+	(concat "__scalar_query_probe_" (fnv_hash (concat (gs_id stage) "\n" requested_col)))))
+
+(define scalar_query_probe_recipe_entry_add (lambda (state stage requested_col)
+	(if (not (query_block? (gs_input stage)))
+		state
+		(begin
+			(define key (scalar_query_probe_recipe_key stage requested_col))
+			(if (has_assoc? (nth state 1) key)
+				state
+				(list
+					(cons (list stage requested_col) (nth state 0))
+					(set_assoc (nth state 1) key true)))))))
+
+(define collect_scalar_query_probe_recipe_entries_acc (lambda (expr state)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col)
+		(scalar_query_probe_recipe_entry_add state stage requested_col)
+		((quote scalar_first_probe) stage requested_col)
+		(scalar_query_probe_recipe_entry_add state stage requested_col)
+		((symbol scalar_first_probe) stage requested_col _stages)
+		(scalar_query_probe_recipe_entry_add state stage requested_col)
+		((quote scalar_first_probe) stage requested_col _stages)
+		(scalar_query_probe_recipe_entry_add state stage requested_col)
+		(cons _head tail) (reduce tail (lambda (acc item)
+			(collect_scalar_query_probe_recipe_entries_acc item acc)) state)
+		_ state)))
+
+(define query_block_scalar_query_probe_recipe_entries (lambda (block)
+	(nth (collect_scalar_query_probe_recipe_entries_acc
+		(list
+			(qb_sources block)
+			(qb_fields block)
+			(qb_where block)
+			(qb_group block)
+			(qb_having block)
+			(qb_order block)
+			(qb_hidden block))
+		(list '() '())) 0)))
+
+(define scalar_query_probe_recipe_keys (lambda (entries)
+	(reduce entries (lambda (keys entry)
+		(match entry
+			'(stage requested_col) (set_assoc keys
+				(scalar_query_probe_recipe_key stage requested_col) true)
+			_ keys)) '())))
+
+(define rewrite_scalar_query_probe_recipe_expr (lambda (expr recipe_keys)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col)
+		(if (has_assoc? recipe_keys (scalar_query_probe_recipe_key stage requested_col))
+			(cons (symbol (scalar_query_probe_recipe_key stage requested_col))
+				(qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			expr)
+		((quote scalar_first_probe) stage requested_col)
+		(rewrite_scalar_query_probe_recipe_expr
+			(list (symbol "scalar_first_probe") stage requested_col) recipe_keys)
+		((symbol scalar_first_probe) stage requested_col _stages)
+		(rewrite_scalar_query_probe_recipe_expr
+			(list (symbol "scalar_first_probe") stage requested_col) recipe_keys)
+		((quote scalar_first_probe) stage requested_col _stages)
+		(rewrite_scalar_query_probe_recipe_expr
+			(list (symbol "scalar_first_probe") stage requested_col) recipe_keys)
+		(cons head tail) (cons head (map tail (lambda (item)
+			(rewrite_scalar_query_probe_recipe_expr item recipe_keys))))
+		_ expr)))
+
+(define rewrite_scalar_query_probe_recipe_source (lambda (src recipe_keys)
+	(source_with_join_expr src
+		(rewrite_scalar_query_probe_recipe_expr (source_join_expr src) recipe_keys))))
+
+(define query_block_with_scalar_query_probe_recipes (lambda (block entries)
+	(begin
+		(define recipe_keys (scalar_query_probe_recipe_keys entries))
+		(make_query_block
+			(qb_schema block)
+			(map (qb_sources block) (lambda (src)
+				(rewrite_scalar_query_probe_recipe_source src recipe_keys)))
+			(rewrite_scalar_query_probe_recipe_expr (qb_fields block) recipe_keys)
+			(rewrite_scalar_query_probe_recipe_expr (qb_where block) recipe_keys)
+			(rewrite_scalar_query_probe_recipe_expr (qb_group block) recipe_keys)
+			(rewrite_scalar_query_probe_recipe_expr (qb_having block) recipe_keys)
+			(rewrite_scalar_query_probe_recipe_expr (qb_order block) recipe_keys)
+			(qb_limit block)
+			(qb_offset block)
+			(rewrite_scalar_query_probe_recipe_expr (qb_hidden block) recipe_keys)
+			(qb_stages block)
+			(qb_facts block)))))
+
+(define scalar_query_probe_recipe_binding (lambda (all_stages entry)
+	(match entry
+		'(stage requested_col) (begin
+			(define raw_keys (gs_keys stage))
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define keys (if (empty_list? lookup_keys) '() raw_keys))
+			(if (not (equal? (count keys) (count lookup_keys)))
+				(neumann_fail "build_queryplan" "scalar query probe recipe key/domain mismatch")
+				true)
+			(define ag (scalar_first_probe_aggregate stage requested_col))
+			(if (nil? ag)
+				(neumann_fail "build_queryplan" "scalar query probe recipe references unknown aggregate column")
+				true)
+			(define value_expr (nth (scalar_first_probe_parts ag) 0))
+			(define params (map (produceN (count keys)) (lambda (i)
+				(symbol (concat "__probe_key_" i)))))
+			(list
+				(quote define)
+				(symbol (scalar_query_probe_recipe_key stage requested_col))
+				(list (quote lambda) params
+					(lower_scalar_first_query_probe_expr all_stages stage value_expr keys params))))
+		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe entry"))))
+
+(define scalar_query_probe_recipe_bindings (lambda (all_stages entries)
+	(map (coalesceNil entries '()) (lambda (entry)
+		(scalar_query_probe_recipe_binding all_stages entry)))))
+
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages)
 	(begin
 		(if (not (scalar_or_presence_probe_stage? stage))
@@ -8561,31 +8680,48 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 	(query_block_stages_to_prepare_using (qb_stages block) block)))
 
 (define lower_query_block_with_cataloged_stages (lambda (block)
-	(if (empty_list? (qb_stages block))
-		(lower_query_block_core block)
-		(begin
-			(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-				(lower_grouped_query_block_with_stages block)
-				(begin
-					(define fused_row_number (lower_fused_row_number_block block))
-					(if (not (nil? fused_row_number))
-						fused_row_number
-						(begin
-							(define stage_catalog (query_block_stage_catalog block))
-							(define stage_lookup (query_block_stage_lookup block))
-							(define eager_stages (query_block_stages_to_prepare_using stage_lookup block))
-							(define dependency_graph (stage_dependency_graph stage_lookup))
-							(define prepared_block (if (single_source? (qb_sources block))
-								(query_block_without_stages_after_prepare_using stage_lookup block)
-								(query_block_with_prepared_sources_using stage_lookup block)))
-							(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
-							(define core_block (query_block_with_stage_catalog prepared_block lazy_catalog))
-							(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
-							(cons (quote !begin)
-								(merge (list
-									(lazy_stage_prepare_bindings stage_catalog lazy_stages)
-									(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup eager_stages)
-									(list (lower_query_block_core core_block))))))))))))))
+	(begin
+		(define stage_lookup (query_block_stage_lookup block))
+		(if (empty_list? (qb_stages block))
+			(begin
+				(define probe_recipe_entries (query_block_scalar_query_probe_recipe_entries block))
+				(define recipe_block (query_block_with_scalar_query_probe_recipes block probe_recipe_entries))
+				(define probe_recipe_bindings
+					(scalar_query_probe_recipe_bindings stage_lookup probe_recipe_entries))
+				(if (empty_list? probe_recipe_bindings)
+					(lower_query_block_core recipe_block)
+					(cons (quote !begin) (merge (list
+						probe_recipe_bindings
+						(list (lower_query_block_core recipe_block)))))))
+			(begin
+				(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
+					(lower_grouped_query_block_with_stages block)
+					(begin
+						(define fused_row_number (lower_fused_row_number_block block))
+						(if (not (nil? fused_row_number))
+							fused_row_number
+							(begin
+								(define stage_catalog (query_block_stage_catalog block))
+								(define eager_stages (query_block_stages_to_prepare_using stage_lookup block))
+								(define dependency_graph (stage_dependency_graph stage_lookup))
+								(define raw_prepared_block (if (single_source? (qb_sources block))
+									(query_block_without_stages_after_prepare_using stage_lookup block)
+									(query_block_with_prepared_sources_using stage_lookup block)))
+								(define probe_recipe_entries
+									(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
+								(define prepared_block
+									(query_block_with_scalar_query_probe_recipes raw_prepared_block probe_recipe_entries))
+								(define probe_recipe_bindings
+									(scalar_query_probe_recipe_bindings stage_lookup probe_recipe_entries))
+								(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
+								(define core_block (query_block_with_stage_catalog prepared_block lazy_catalog))
+								(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
+								(cons (quote !begin)
+									(merge (list
+										probe_recipe_bindings
+										(lazy_stage_prepare_bindings stage_catalog lazy_stages)
+										(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup eager_stages)
+										(list (lower_query_block_core core_block)))))))))))))))
 
 (define lower_query_block_with_stages (lambda (block)
 	(lower_query_block_with_cataloged_stages (query_block_with_full_stage_catalog block))))
