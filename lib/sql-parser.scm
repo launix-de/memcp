@@ -813,6 +813,28 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		sql_column
 	)))
 
+	/* SQL-standard derived-table column alias lists rename visible output
+	columns from left to right. Keep this transform at the parser boundary so
+	the planner receives the same neutral query shape for every frontend. */
+	(define sql_rename_derived_fields (lambda (fields aliases) (match aliases
+		(cons alias remaining_aliases) (match fields
+			(cons _title (cons expr remaining_fields))
+			(cons alias (cons expr (sql_rename_derived_fields remaining_fields remaining_aliases)))
+			_ (error "derived table has more column aliases than columns"))
+		_ fields
+	)))
+	(define sql_apply_derived_column_aliases (lambda (query aliases) (match query
+		((symbol query-block) schema2 tables fields condition group having order limit offset hidden stages facts)
+		(list (quote query-block) schema2 tables
+			(sql_rename_derived_fields fields aliases)
+			condition group having order limit offset hidden stages facts)
+		((symbol union-block) mode branches order limit offset facts)
+		(list (quote union-block) mode
+			(map branches (lambda (branch) (sql_apply_derived_column_aliases branch aliases)))
+			order limit offset facts)
+		_ (error "derived table column aliases require a SELECT query")
+	)))
+
 	(define tabledefs (parser (or
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
 		(parser '((define l tabledefs) (define x (or
@@ -829,6 +851,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (define t tabledef) '(t))
 	)))
 	(define tabledef (parser (or
+		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")
+			(list id schema (sql_apply_derived_column_aliases query aliases) false nil)) /* inner select with relation and column aliases */
+		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")
+			(list id schema (sql_apply_derived_column_aliases query aliases) false nil)) /* AS is optional */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		/* TODO: case insensititive table search */

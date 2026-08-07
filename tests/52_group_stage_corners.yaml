@@ -10,6 +10,9 @@ test_cases:
   - name: "Create items table"
     sql: "CREATE TABLE gs_items (id INT PRIMARY KEY, order_id INT, product VARCHAR(50), qty INT)"
 
+  - name: "Create customers table"
+    sql: "CREATE TABLE gs_customers (id INT PRIMARY KEY, name VARCHAR(50))"
+
   - name: "Insert orders"
     sql: |
       INSERT INTO gs_orders (id, customer, amount, priority) VALUES
@@ -32,6 +35,14 @@ test_cases:
         (7, 5, 'Gadget', 2),
         (8, 6, 'Doohickey', 4),
         (9, 6, 'Widget', 1)
+
+  - name: "Insert customers"
+    sql: |
+      INSERT INTO gs_customers (id, name) VALUES
+        (1, 'Alice'),
+        (2, 'Bob'),
+        (3, 'Charlie'),
+        (4, 'Dana')
 
   # =================================================================
   # 1. GROUP BY inside FROM subquery (derived table with aggregation)
@@ -112,6 +123,36 @@ test_cases:
           cnt: 3
         - customer: "Bob"
           cnt: 2
+
+  - name: "Outer GROUP BY on aggregate alias from left-joined derived table"
+    sql: |
+      SELECT order_count, COUNT(*) AS customer_count
+      FROM (
+        SELECT c.id, COUNT(o.id) AS order_count
+        FROM gs_customers c
+        LEFT OUTER JOIN gs_orders o
+          ON o.customer = c.name
+         AND o.customer NOT LIKE '%Nobody%'
+        GROUP BY c.id
+      ) customer_orders (customer_id, order_count)
+      GROUP BY order_count
+      ORDER BY customer_count DESC, order_count DESC
+    expect:
+      rows: 4
+      data:
+        - order_count: 3
+          customer_count: 1
+        - order_count: 2
+          customer_count: 1
+        - order_count: 1
+          customer_count: 1
+        - order_count: 0
+          customer_count: 1
+
+  - name: "Derived table rejects more column aliases than outputs"
+    sql: "SELECT renamed FROM (SELECT id FROM gs_customers) customer_ids (renamed, extra)"
+    expect:
+      error: true
 
   # =================================================================
   # 5. COUNT(DISTINCT) with JOIN
@@ -305,5 +346,6 @@ test_cases:
           total_qty: 5
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS gs_customers"
   - sql: "DROP TABLE IF EXISTS gs_items"
   - sql: "DROP TABLE IF EXISTS gs_orders"
