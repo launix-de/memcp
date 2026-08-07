@@ -658,6 +658,10 @@ class SQLTestRunner:
         if not isinstance(compile_phase_limits_ms, dict):
             return self._record_fail(name, "max_compile_phase_ms must be a mapping",
                                      query, None, None, is_noncritical)
+        compile_metric_limits = test_case.get("max_compile_metrics", {})
+        if not isinstance(compile_metric_limits, dict):
+            return self._record_fail(name, "max_compile_metrics must be a mapping",
+                                     query, None, None, is_noncritical)
         perf_rows = PERF_DEFAULT_ROWS  # default row count
         if is_perf_test:
             # Get baseline data if available
@@ -933,7 +937,7 @@ class SQLTestRunner:
 
             # Explicit cold planner budget. Unlike max_time, this reads the
             # compile-only phase metric before EXPLAIN warms the plan cache.
-            if ((planner_time_limit_ms > 0 or compile_phase_limits_ms)
+            if ((planner_time_limit_ms > 0 or compile_phase_limits_ms or compile_metric_limits)
                     and not is_perf_test and not is_sparql
                     and not test_case.get("expect", {}).get("error")):
                 qhead = query.lstrip().upper()
@@ -973,6 +977,23 @@ class SQLTestRunner:
                                 f"{phase_time_ms:.1f}ms > {limit_ms:.0f}ms",
                                 query, compile_resp, test_case.get("expect"), is_noncritical,
                                 phase_time_ms, limit_ms, diag,
+                            )
+                    for metric, limit_value in compile_metric_limits.items():
+                        if metric not in metrics:
+                            return self._record_fail(
+                                name, f"EXPLAIN COMPILE did not report metric {metric}",
+                                query, compile_resp, test_case.get("expect"), is_noncritical,
+                            )
+                        metric_value = float(metrics[metric])
+                        metric_limit = float(limit_value)
+                        if metric_value > metric_limit:
+                            diag = self._run_on_fail(test_case, database)
+                            return self._record_fail(
+                                name,
+                                f"Compile metric {metric} too large: "
+                                f"{metric_value:g} > {metric_limit:g}",
+                                query, compile_resp, test_case.get("expect"), is_noncritical,
+                                metric_value, metric_limit, diag,
                             )
 
             # Hard plan-size limit — the hardware-independent compile-time-blowup

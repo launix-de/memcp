@@ -670,12 +670,18 @@ test_cases:
           archived: false
           can_view: true
 
-  - name: "Repeated correlated access projections compile within one second"
+  - name: "Repeated correlated access projections share physical recipes"
     max_time: 1.0
-    max_planner_time_ms: 500
-    max_plan_size: 240000
+    max_planner_time_ms: 800
+    max_compile_phase_ms:
+      recipe_emit_ns: 160
+    max_compile_metrics:
+      plan_nodes: 6000
+      scans: 64
+      group_carriers: 8
+    max_plan_size: 100000
     sql: |
-      EXPLAIN COMPILE SELECT projected.*
+      SELECT projected.*
       FROM (
         SELECT item.id, item.archived,
         COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_1 WHERE parent_1.id = item.parent_id LIMIT 1), FALSE) AS access_1,
@@ -717,10 +723,59 @@ test_cases:
       LIMIT 72
     expect:
       rows: 1
-      contains:
-        - "planner_total_ns"
-        - "logical_nodes"
-        - "group_stages"
+      data:
+        - id: 1
+          archived: false
+          access_1: true
+          access_2: true
+          access_3: true
+          access_4: true
+          access_5: true
+          access_6: true
+          access_7: true
+          access_8: true
+          access_9: true
+          access_10: true
+          access_11: true
+          access_12: true
+          access_13: true
+          access_14: true
+          access_15: true
+          access_16: true
+          access_17: true
+          access_18: true
+          access_19: true
+          access_20: true
+          access_21: true
+          access_22: true
+          access_23: true
+          access_24: true
+          access_25: true
+          access_26: true
+          access_27: true
+          access_28: true
+          access_29: true
+          access_30: true
+          access_31: true
+          access_32: true
+
+  - name: "Shared scalar probe recipes preserve correlation keys"
+    sql: |
+      SELECT item.id,
+        COALESCE((SELECT (parent_a.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_a WHERE member_a.team_id = parent_a.team_id AND member_a.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_a WHERE parent_a.id = item.parent_id LIMIT 1), FALSE) AS access_a,
+        COALESCE((SELECT (parent_b.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_b WHERE member_b.team_id = parent_b.team_id AND member_b.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_b WHERE parent_b.id = item.parent_id LIMIT 1), FALSE) AS access_b
+      FROM trace_wide_prop item
+      WHERE item.id IN (1, 2)
+      ORDER BY item.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          access_a: true
+          access_b: true
+        - id: 2
+          access_a: false
+          access_b: false
 
   - name: "Independent nested scalar aggregates compile within a linear budget"
     max_time: 5.0
