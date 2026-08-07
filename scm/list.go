@@ -2448,11 +2448,84 @@ func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer
 	return NewSlice(rv), td
 }
 
+func flattenConsList(v []Scmer) ([]Scmer, bool) {
+	if len(v) != 3 {
+		return nil, false
+	}
+	tail := v[2]
+	if tail.GetTag() != tagSlice && !tail.IsSourceInfo() {
+		return nil, false
+	}
+	if stripped, ok := scmerStripSourceInfo(tail); ok {
+		tail = stripped
+	}
+	tailExpr, ok := scmerSlice(tail)
+	if !ok || len(tailExpr) != 3 || !scmerIsSymbol(tailExpr[0], "cons") {
+		return nil, false
+	}
+
+	headCount := 0
+	tailCount := 0
+	current := v
+	for len(current) == 3 && scmerIsSymbol(current[0], "cons") {
+		headCount++
+		tail := current[2]
+		if stripped, ok := scmerStripSourceInfo(tail); ok {
+			tail = stripped
+		}
+		tailExpr, ok := scmerSlice(tail)
+		if !ok || len(tailExpr) == 0 {
+			return nil, false
+		}
+		if scmerIsSymbol(tailExpr[0], "cons") {
+			current = tailExpr
+			continue
+		}
+		if scmerIsSymbol(tailExpr[0], "list") {
+			tailCount = len(tailExpr) - 1
+			break
+		}
+		if len(tailExpr) == 2 && scmerIsSymbol(tailExpr[0], "quote") {
+			if quoted, ok := scmerSlice(tailExpr[1]); ok && len(quoted) == 0 {
+				break
+			}
+		}
+		return nil, false
+	}
+	if headCount == 0 {
+		return nil, false
+	}
+
+	items := make([]Scmer, 1, 1+headCount+tailCount)
+	items[0] = NewSymbol("list")
+	current = v
+	for len(current) == 3 && scmerIsSymbol(current[0], "cons") {
+		items = append(items, current[1])
+		tail := current[2]
+		if stripped, ok := scmerStripSourceInfo(tail); ok {
+			tail = stripped
+		}
+		tailExpr, _ := scmerSlice(tail)
+		if scmerIsSymbol(tailExpr[0], "cons") {
+			current = tailExpr
+			continue
+		}
+		if scmerIsSymbol(tailExpr[0], "list") {
+			items = append(items, tailExpr[1:]...)
+		}
+		return items, true
+	}
+	return nil, false
+}
+
 // optimizeCons rewrites cons when the tail is a freshly allocated list:
 //
 //	(cons head (map list fn)) → (cons head (map_mut list fn))  — already handled by _mut
 //	(cons head (list a b c))  → (list head a b c)              — avoid double allocation
 func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if flattened, ok := flattenConsList(v); ok {
+		return oc.ApplyDefaultOptimization(flattened, useResult)
+	}
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
 	if rSlice, ok := scmerSlice(result); ok && len(rSlice) == 3 {
 		tail := rSlice[2]

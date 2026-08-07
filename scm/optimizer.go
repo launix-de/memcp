@@ -310,6 +310,38 @@ func scmerSymbol(v Scmer) (Symbol, bool) {
 	return "", false
 }
 
+func assignedSymbolsInLambda(body Scmer) map[Symbol]bool {
+	var assigned map[Symbol]bool
+	var visit func(Scmer)
+	visit = func(expr Scmer) {
+		if stripped, ok := scmerStripSourceInfo(expr); ok {
+			expr = stripped
+		}
+		items, ok := scmerSlice(expr)
+		if !ok || len(items) == 0 {
+			return
+		}
+		if scmerIsSymbol(items[0], "quote") || scmerIsSymbol(items[0], "lambda") {
+			return
+		}
+		if scmerIsSymbol(items[0], "set") && len(items) == 3 {
+			if sym, ok := scmerSymbol(items[1]); ok {
+				if assigned == nil {
+					assigned = make(map[Symbol]bool)
+				}
+				assigned[sym] = true
+			}
+			visit(items[2])
+			return
+		}
+		for _, item := range items {
+			visit(item)
+		}
+	}
+	visit(body)
+	return assigned
+}
+
 func scmerStripSourceInfo(v Scmer) (Scmer, bool) {
 	if v.IsSourceInfo() {
 		si := v.SourceInfo()
@@ -791,6 +823,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 
 	if headOk && headSym == Symbol("lambda") {
 		params := v[1]
+		assigned := assignedSymbolsInLambda(v[2])
 		if stripped, ok := scmerStripSourceInfo(params); ok {
 			params = stripped
 		}
@@ -799,6 +832,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if expressionContainsEvalCall(v[2]) {
 			ome2 := ome.Copy()
 			ome2.lambdaDepth++
+			for sym := range assigned {
+				delete(ome2.variableReplacement, sym)
+			}
 			if list, ok := scmerSlice(params); ok {
 				for _, param := range list {
 					if sym, ok := scmerSymbol(param); ok {
@@ -819,17 +855,20 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if len(v) > 3 {
 			ome2 := ome.Copy()
 			ome2.lambdaDepth++
+			for sym := range assigned {
+				delete(ome2.variableReplacement, sym)
+			}
 			numVars := int(ToInt(v[3]))
 			if list, ok := scmerSlice(params); ok {
 				for i, param := range list {
 					if i >= numVars {
 						break
 					}
-					if sym, ok := scmerSymbol(param); ok && sym != Symbol("_") {
+					if sym, ok := scmerSymbol(param); ok && sym != Symbol("_") && !assigned[sym] {
 						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(i))
 					}
 				}
-			} else if sym, ok := scmerSymbol(params); ok {
+			} else if sym, ok := scmerSymbol(params); ok && !assigned[sym] {
 				ome2.variableReplacement[sym] = NewNthLocalVar(0)
 			}
 			var bodyType TypeInfo
@@ -839,18 +878,23 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		// Auto-number parameters
 		ome2 := ome.Copy()
 		ome2.lambdaDepth++
+		for sym := range assigned {
+			delete(ome2.variableReplacement, sym)
+		}
 		slotIndex := 0
 		if list, ok := scmerSlice(params); ok {
 			for _, param := range list {
 				if sym, ok := scmerSymbol(param); ok {
-					if sym != Symbol("_") {
+					if sym != Symbol("_") && !assigned[sym] {
 						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
 					}
 				}
 				slotIndex++
 			}
 		} else if sym, ok := scmerSymbol(params); ok {
-			ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+			if !assigned[sym] {
+				ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+			}
 			slotIndex++
 		}
 		ome2.nextSlot = &slotIndex // allow !list/!!list to allocate extra slots
