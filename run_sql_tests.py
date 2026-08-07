@@ -819,6 +819,19 @@ class SQLTestRunner:
                 step_sid = step.get("session_id")
                 step_timeout = int(step.get("timeout", 30))
                 step_expect = step.get("expect", {})
+                if step.get("wait_for_background"):
+                    for thread in bg_threads:
+                        thread.join(timeout=step_timeout)
+                    if any(thread.is_alive() for thread in bg_threads):
+                        return self._record_fail(
+                            name,
+                            "Background step did not finish before synchronization timeout",
+                            "wait_for_background",
+                            None,
+                            None,
+                            is_noncritical,
+                        )
+                    continue
                 if step.get("background"):
                     t = threading.Thread(target=run_bg_step, args=(step, bg_results), daemon=True)
                     t.start()

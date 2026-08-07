@@ -103,7 +103,7 @@ test_cases:
         sql: "SELECT 1"
       - session_id: "lock-conc-writer"
         sql: "UNLOCK TABLES"
-      # background thread joins here: SELECT must have completed with correct data
+      - wait_for_background: true
 
   # ── concurrent: WRITE lock blocks INSERT from another session ─────────────
 
@@ -123,7 +123,7 @@ test_cases:
         sql: "SELECT 1"
       - session_id: "lock-conc-w2"
         sql: "UNLOCK TABLES"
-      # after join: verify the INSERT committed
+      - wait_for_background: true
       - session_id: "lock-conc-w2"
         sql: "SELECT val FROM lock_test WHERE id = 50"
         expect:
@@ -147,7 +147,7 @@ test_cases:
         sql: "SELECT 1"
       - session_id: "lock-conc-r2"
         sql: "UNLOCK TABLES"
-      # after join: verify the INSERT committed
+      - wait_for_background: true
       - session_id: "lock-conc-r2"
         sql: "SELECT val FROM lock_test WHERE id = 51"
         expect:
@@ -264,6 +264,7 @@ test_cases:
         sql: "SELECT 1"
       - session_id: "lock-upd-writer"
         sql: "UNLOCK TABLES"
+      - wait_for_background: true
       - session_id: "lock-upd-writer"
         sql: "SELECT val FROM lock_test WHERE id = 88"
         expect:
