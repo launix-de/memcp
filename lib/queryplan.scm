@@ -5852,6 +5852,84 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(cons head tail) (merge_unique (map tail extract_aggregates))
 		_ '())))
 
+/* DECIMAL is currently represented as float64 at runtime. Keep calculations
+unmodified, but normalize visible aggregate results to the declared scale of
+their DECIMAL inputs so binary floating-point residue does not leak through the
+SQL output boundary. This annotation is attached while base-column provenance
+is still available and remains an ordinary scalar expression through untangle. */
+(define decimal_column_scale (lambda (src col)
+	(if (or (not (string? (source_schema src))) (not (string? (source_relation src))))
+		nil
+		(begin
+			(define info (find (get_schema (source_schema src) (source_relation src))
+				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
+			(define dimensions (if (nil? info) '() (coalesceNil (info "Dimensions") '())))
+			(if (and (not (nil? info))
+				(equal? (toLower (coalesceNil (info "RawType") "")) "decimal")
+				(> (count dimensions) 1))
+				(nth dimensions 1)
+				nil)))))
+
+(define decimal_column_scale_for_sources (lambda (sources tblvar col)
+	(reduce (coalesceNil sources '()) (lambda (best src)
+		(if (and (or (nil? tblvar) (equal?? tblvar (source_alias src)))
+			(not (stage_output_relation? (source_relation src))))
+			(begin
+				(define scale (decimal_column_scale src col))
+				(if (nil? scale) best (if (nil? best) scale (max best scale))))
+			best)) nil)))
+
+(define decimal_expr_scale (lambda (sources expr)
+	(match expr
+		((symbol get_column) tblvar _ignorecase col _col_ignorecase)
+		(decimal_column_scale_for_sources sources tblvar col)
+		((quote get_column) tblvar _ignorecase col _col_ignorecase)
+		(decimal_column_scale_for_sources sources tblvar col)
+		(cons _head tail) (reduce tail (lambda (best item)
+			(begin
+				(define scale (decimal_expr_scale sources item))
+				(if (nil? scale) best (if (nil? best) scale (max best scale))))) nil)
+		_ nil)))
+
+(define decimal_aggregate_output_scale (lambda (sources expr)
+	(reduce (extract_aggregates expr) (lambda (best aggregate_descriptor)
+		(begin
+			(define scale (decimal_expr_scale sources (nth aggregate_descriptor 0)))
+			(if (nil? scale) best (if (nil? best) scale (max best scale))))) nil)))
+
+(define sanitize_decimal_aggregate_fields (lambda (sources fields)
+	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
+		(begin
+			(define scale (decimal_aggregate_output_scale sources expr))
+			(if (nil? scale) expr (list (quote sql_decimal_output) expr scale)))))))
+
+(define sanitize_decimal_aggregate_outputs (lambda (query)
+	(begin
+		(define normalized (normalize_query_ast query))
+		(if (query_block? normalized)
+			(make_query_block
+				(qb_schema normalized)
+				(qb_sources normalized)
+				(sanitize_decimal_aggregate_fields (qb_sources normalized) (qb_fields normalized))
+				(qb_where normalized)
+				(qb_group normalized)
+				(qb_having normalized)
+				(qb_order normalized)
+				(qb_limit normalized)
+				(qb_offset normalized)
+				(qb_hidden normalized)
+				(qb_stages normalized)
+				(qb_facts normalized))
+			(if (union_block? normalized)
+				(make_union_block
+					(union_mode normalized)
+					(map (union_branches normalized) sanitize_decimal_aggregate_outputs)
+					(union_order normalized)
+					(union_limit normalized)
+					(union_offset normalized)
+					(union_facts normalized))
+				normalized)))))
+
 (define stage_aggregates_for_fields (lambda (fields)
 	(merge_unique (extract_assoc fields (lambda (_title expr) (extract_aggregates expr))))))
 
@@ -10490,7 +10568,7 @@ build_queryplan contract. */
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan
 		(join_reorder
-			(untangle_query_term ast nil)))))
+			(untangle_query_term (sanitize_decimal_aggregate_outputs ast) nil)))))
 
 (define neumann_compile_ir_pipeline (lambda (ir)
 	(build_queryplan

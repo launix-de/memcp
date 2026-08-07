@@ -10,6 +10,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS fdc_float"
   - sql: "DROP TABLE IF EXISTS fdc_decimal"
+  - sql: "DROP TABLE IF EXISTS fdc_decimal_expr"
   - sql: "DROP TABLE IF EXISTS fdc_mixed"
   - sql: "DROP TABLE IF EXISTS fdc_allnull"
   - sql: "DROP TABLE IF EXISTS fdc_empty"
@@ -127,6 +128,39 @@ test_cases:
     sql: "SELECT AVG(price) AS a FROM fdc_decimal"
     expect:
       rows: 1
+
+  - name: "Create decimal expression table"
+    sql: "CREATE TABLE fdc_decimal_expr (price DECIMAL(10,2), discount DECIMAL(5,2), tax DECIMAL(5,2), sample DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Insert decimal expression data"
+    sql: "INSERT INTO fdc_decimal_expr VALUES (100.00, 0.07, 0.19, 1.2345), (12.34, 0.03, 0.07, 2.3456)"
+    expect:
+      affected_rows: 2
+
+  - name: "Decimal: aggregate expression is normalized to source scale"
+    sql: "SELECT SUM(price * (1 - discount) * (1 + tax)) AS total FROM fdc_decimal_expr"
+    expect:
+      rows: 1
+      result_contains: '"total": 123.48'
+      data:
+        - total: 123.48
+
+  - name: "Decimal: AVG is normalized to source scale"
+    sql: "SELECT AVG(price) AS average_price FROM fdc_decimal_expr"
+    expect:
+      rows: 1
+      data:
+        - average_price: 56.17
+
+  - name: "Float: aggregate output keeps its full precision"
+    sql: "SELECT SUM(sample) AS total FROM fdc_decimal_expr"
+    expect:
+      rows: 1
+      result_contains: '"total": 3.5801'
+      data:
+        - total: 3.5801
 
   - name: "Decimal: MIN"
     sql: "SELECT MIN(price) AS m FROM fdc_decimal"
@@ -349,6 +383,7 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS fdc_float"
   - sql: "DROP TABLE IF EXISTS fdc_decimal"
+  - sql: "DROP TABLE IF EXISTS fdc_decimal_expr"
   - sql: "DROP TABLE IF EXISTS fdc_mixed"
   - sql: "DROP TABLE IF EXISTS fdc_allnull"
   - sql: "DROP TABLE IF EXISTS fdc_empty"

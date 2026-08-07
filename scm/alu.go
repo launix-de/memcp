@@ -47,7 +47,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 			JITEmit: func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc {
 				d0 := descs[0]
 				r0 := ctx.AllocReg()
@@ -72,7 +72,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -109,8 +109,8 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", ParamName: "value...", ParamDesc: "values to add", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Return:   &TypeDescriptor{Kind: "number"},
+			Const:    true,
 			Optimize: optimizeAssociative,
 		},
 	})
@@ -153,7 +153,7 @@ func init_alu() {
 				{Kind: "number", ParamName: "value...", ParamDesc: "values", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -198,8 +198,8 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", ParamName: "value...", ParamDesc: "values", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Return:   &TypeDescriptor{Kind: "number"},
+			Const:    true,
 			Optimize: optimizeAssociative,
 		},
 	})
@@ -224,7 +224,7 @@ func init_alu() {
 				{Kind: "number", ParamName: "value...", ParamDesc: "values", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -253,7 +253,7 @@ func init_alu() {
 				{Kind: "number", ParamName: "b", ParamDesc: "divisor"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -268,7 +268,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -283,7 +283,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -298,7 +298,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -313,7 +313,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -328,7 +328,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -343,7 +343,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -373,7 +373,7 @@ func init_alu() {
 				{Kind: "string", ParamName: "collation", ParamDesc: "collation name"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -393,7 +393,7 @@ func init_alu() {
 				{Kind: "string", ParamName: "collation", ParamDesc: "collation name"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -407,7 +407,7 @@ func init_alu() {
 				{Kind: "bool", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -421,7 +421,7 @@ func init_alu() {
 				{Kind: "bool", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -435,7 +435,7 @@ func init_alu() {
 				{Kind: "any", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -457,7 +457,7 @@ func init_alu() {
 				{Kind: "number|string", ParamName: "value...", ParamDesc: "value", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number|string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -479,7 +479,7 @@ func init_alu() {
 				{Kind: "number|string", ParamName: "value...", ParamDesc: "value", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number|string"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -493,7 +493,7 @@ func init_alu() {
 				{Kind: "number", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -507,7 +507,7 @@ func init_alu() {
 				{Kind: "number", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -521,7 +521,34 @@ func init_alu() {
 				{Kind: "number", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sql_decimal_output",
+		Desc: "normalizes a DECIMAL-derived result to its declared output scale",
+		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			scale := ToInt(a[1])
+			if scale < 0 || scale > 15 {
+				return a[0]
+			}
+			factor := math.Pow10(int(scale))
+			value := a[0].Float()
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return a[0]
+			}
+			return NewFloat(math.Round(value*factor) / factor)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "number|nil", ParamName: "value", ParamDesc: "DECIMAL-derived value"},
+				{Kind: "int", ParamName: "scale", ParamDesc: "declared decimal scale"},
+			},
+			Return: &TypeDescriptor{Kind: "number|nil"},
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -546,7 +573,7 @@ func init_alu() {
 				{Kind: "number", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -567,7 +594,7 @@ func init_alu() {
 				{Kind: "number", ParamName: "value", ParamDesc: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -584,7 +611,7 @@ func init_alu() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 }
