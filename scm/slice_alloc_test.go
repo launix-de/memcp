@@ -124,6 +124,17 @@ func TestOptimizeImproperConsStaysCons(t *testing.T) {
 	}
 }
 
+func TestOptimizePreservesSetAndReadInNestedLambda(t *testing.T) {
+	expr := Read("nested set", `((lambda (counter)
+		((lambda () (!begin
+			(set counter (+ counter 1))
+			counter)))) 0)`)
+	got := Eval(Optimize(expr, &Globalenv), &Globalenv)
+	if ToInt(got) != 1 {
+		t.Fatalf("optimized nested set returned %s, want 1", got.String())
+	}
+}
+
 func benchmarkGeneratedConsChain(b *testing.B, width int) {
 	b.ReportAllocs()
 	b.ResetTimer()
