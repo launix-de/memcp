@@ -504,6 +504,30 @@ test_cases:
           "ok"
           (error "derived aggregate rebinding kept a stale column handle")))
 
+  - name: "stage graph rewrite separates root identity from internal references"
+    scm: |
+      (begin
+        (define y66_graph_stage (make_group_stage
+          "root-old"
+          (list "probe" "memcp-tests" (make_stage_output_relation "dep-old") false nil)
+          '() '(1) '() nil '() '() nil nil '()))
+        (define y66_graph_id_map (list
+          (list "root-old" "root-new")
+          (list "dep-old" "dep-new")))
+        (define y66_graph_preserved
+          (rewrite_stage_graph_stage '() y66_graph_id_map false y66_graph_stage))
+        (define y66_graph_rebound
+          (rewrite_stage_graph_stage '() y66_graph_id_map true y66_graph_stage))
+        (if (and
+          (equal? (gs_id y66_graph_preserved) "root-old")
+          (equal? (stage_output_relation_id
+            (source_relation (gs_input y66_graph_preserved))) "dep-new")
+          (equal? (gs_id y66_graph_rebound) "root-new")
+          (equal? (stage_output_relation_id
+            (source_relation (gs_input y66_graph_rebound))) "dep-new"))
+          "ok"
+          (error "stage graph rewrite mixed root identity with reference rebinding")))
+
   - name: "Repeated global EXISTS in derived wrapper stays scalar"
     sql: |
       SELECT t.* FROM (
