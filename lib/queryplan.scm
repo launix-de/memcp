@@ -4355,11 +4355,11 @@ created. Canonicalize that unambiguous interface before physical lowering. */
 		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
 		(canonicalize_stage_output_interfaces
 			(merge_compatible_stage_output_left_joins_ir (make_ir
-			(ir_kind ir)
-			(nth root_result 0)
-			(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
-			(ir_context_of ir)
-			(ir_return ir)))))))
+				(ir_kind ir)
+				(nth root_result 0)
+				(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
+				(ir_context_of ir)
+				(ir_return ir)))))))
 
 /* Scalar stages are merged after decorrelation. Build their signatures bottom-up
 so generated aliases and dependency IDs do not hide equivalent stage graphs. */
@@ -7397,20 +7397,25 @@ is still available and remains an ordinary scalar expression through untangle. *
 		nil
 		(stage_for_output_relation stages (source_relation src)))))
 
-(define constant_scalar_stage_output_source? (lambda (stages src)
+(define constant_scalar_or_presence_stage_output_source? (lambda (stages src)
 	(begin
-		(define stage (source_stage_output_stage stages src))
+		(define stage (if (stage_output_relation? (source_relation src))
+			(source_stage_output_stage stages src)
+			(stage_for_carrier_source stages src)))
+		(define purpose (if (group_stage? stage)
+			(qassoc_get (gs_facts stage) (quote purpose) nil)
+			nil))
 		(and (group_stage? stage)
-			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
+			(and (or (equal? purpose (quote scalar_single)) (equal? purpose (quote exists)))
 				(and (empty_list? (gs_domain stage))
 					(not (stage_has_residual_outer_refs? stage))))))))
 
 (define constant_scalar_stage_outputs_first (lambda (stages sources)
 	(merge (list
 		(filter (coalesceNil sources '()) (lambda (src)
-			(constant_scalar_stage_output_source? stages src)))
+			(constant_scalar_or_presence_stage_output_source? stages src)))
 		(filter (coalesceNil sources '()) (lambda (src)
-			(not (constant_scalar_stage_output_source? stages src))))))))
+			(not (constant_scalar_or_presence_stage_output_source? stages src))))))))
 
 (define scalar_first_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
@@ -8033,7 +8038,26 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define stage_list (lowering_catalog_stages stages))
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(define probe_sources (probe_output_sources_for_block stages sources default_alias (qb_limit block)))
+		(define prelimit_sources (prelimit_sources_for sources default_alias
+			(coalesceNil (qb_where block) true) (coalesceNil (qb_order block) '())))
+		(define prelimit_aliases (map prelimit_sources source_alias))
+		(define unbounded_probe_candidates (probe_output_sources_for_block stages sources default_alias nil))
+		(define unbounded_probe_aliases (map unbounded_probe_candidates source_alias))
+		(define probe_candidates (filter
+			(probe_output_sources_for_block stages sources default_alias (qb_limit block))
+			(lambda (src)
+				(or (not (contains? prelimit_aliases (source_alias src)))
+					(contains? unbounded_probe_aliases (source_alias src))))))
+		(define order_lookup (if (late_projection_candidate_block? block)
+			(scalar_order_lookup_source stages sources default_alias (coalesceNil (qb_order block) '()))
+			nil))
+		(define retained_order_alias (if (or (nil? order_lookup) (nil? (nth order_lookup 0)))
+			nil
+			(source_alias (nth order_lookup 0))))
+		(define probe_sources (if (nil? retained_order_alias)
+			probe_candidates
+			(filter probe_candidates (lambda (src)
+				(not (equal? retained_order_alias (source_alias src)))))))
 		(define probe_index (probe_stage_alias_index stages probe_sources))
 		(define rewritten_sources (rewrite_scalar_first_probe_sources_using_index stages sources probe_index default_alias))
 		(make_query_block
@@ -8084,7 +8108,10 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
 		(make_query_block
 			(qb_schema rewritten)
-			(physicalize_stage_output_sources stage_lookup (qb_sources rewritten))
+			(physicalize_stage_output_sources stage_lookup
+				(if (late_projection_candidate_block? block)
+					(constant_scalar_stage_outputs_first stage_lookup (qb_sources rewritten))
+					(qb_sources rewritten)))
 			(qb_fields rewritten)
 			(qb_where rewritten)
 			(qb_group rewritten)
@@ -8153,7 +8180,10 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define rewritten (query_block_with_presence_probes_using stage_lookup membership_rewritten))
 		(make_query_block
 			(qb_schema rewritten)
-			(physicalize_stage_output_sources stage_lookup (qb_sources rewritten))
+			(physicalize_stage_output_sources stage_lookup
+				(if (late_projection_candidate_block? block)
+					(constant_scalar_stage_outputs_first stage_lookup (qb_sources rewritten))
+					(qb_sources rewritten)))
 			(qb_fields rewritten)
 			(qb_where rewritten)
 			(qb_group rewritten)
@@ -8338,7 +8368,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 						stage_lookup
 						(unique_stages_by_id (merge (list stage_lookup (qb_stages rewritten_src))))))
 					(if (not (empty_list? (filter (qb_sources rewritten_src) (lambda (src)
-						(constant_scalar_stage_output_source? constant_reorder_stages src)))))
+						(constant_scalar_or_presence_stage_output_source? constant_reorder_stages src)))))
 						(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages rewritten_src)
 						(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src)))
 				(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src))
@@ -9002,25 +9032,42 @@ is still available and remains an ordinary scalar expression through untangle. *
 (define stage_ids_for_sources_with_closure_using_graph (lambda (dependency_graph stages sources)
 	(map (stages_consumed_by_sources_with_closure_using_graph dependency_graph stages sources) gs_id)))
 
-(define late_projection_candidate_block? (lambda (block)
+(define prelimit_sources_for (lambda (sources default_alias where_expr order_items)
 	(begin
-		(define sources (qb_sources block))
-		(and (not (single_source? sources))
-			(and (equal? (qassoc_get (qb_facts block) (quote membership_plan_strategy) nil) (quote candidate_keyset))
-				(and (not (empty_list? (qb_order block)))
-					(and (not (empty_list? sources))
-						(order_items_belong_to_source? (car sources) (coalesceNil (qb_order block) '())))))))))
+		(define required_columns (join_column_recipe sources default_alias
+			(merge (list (list where_expr) (order_exprs order_items)))))
+		(if (empty_list? sources)
+			'()
+			(cons (car sources)
+				(filter (cdr sources) (lambda (src)
+					(not (empty_list? (qassoc_get required_columns (source_alias src) '()))))))))))
 
 (define query_block_prelimit_sources (lambda (block)
 	(begin
 		(define sources (qb_sources block))
 		(define first_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 		(define where_expr (coalesceNil (qb_where block) true))
-		(if (empty_list? sources)
-			'()
-			(cons (car sources)
-				(filter (cdr sources) (lambda (src)
-					(expr_refs_alias? first_alias (source_alias src) where_expr))))))))
+		(prelimit_sources_for sources first_alias where_expr (coalesceNil (qb_order block) '())))))
+
+(define late_projection_candidate_block? (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define prelimit_sources (query_block_prelimit_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+			(if (empty_list? sources) nil (source_alias (car sources)))))
+		(define order_items (coalesceNil (qb_order block) '()))
+		(define membership_candidate (and
+			(equal? (qassoc_get (qb_facts block) (quote membership_plan_strategy) nil) (quote candidate_keyset))
+			(and (not (empty_list? sources))
+				(order_items_belong_to_source? (car sources) order_items))))
+		(define scalar_lookup_candidate (and
+			(query_limit_active? (qb_offset block) (qb_limit block))
+			(not (nil? (scalar_order_lookup_source
+				(query_block_stage_lookup block) sources default_alias order_items)))))
+		(and (not (single_source? sources))
+			(and (not (empty_list? order_items))
+				(and (or membership_candidate scalar_lookup_candidate)
+					(late_projection_sources_preserve_rows? sources prelimit_sources)))))))
 
 (define stage_direct_prepare_source_visible? (lambda (block sources default_alias stage)
 	(if (single_source? sources)
@@ -9716,12 +9763,12 @@ source remain residual so they observe the null-extended row. */
 											(list (quote map)
 												(quote limited_rows)
 												(list (quote lambda) (list (quote __driver_row))
-													project_rows_expr)))))))
-						(list (quote slice) (quote sorted) offset_expr end_expr)))
-				(list (quote sort) (quote rows)
-					(list (quote lambda) (list (quote a) (quote b))
-						(join_order_compare_expr order_items 0)))))
-		rows_plan))))
+													project_rows_expr))))))
+							(list (quote slice) (quote sorted) offset_expr end_expr)))
+					(list (quote sort) (quote rows)
+						(list (quote lambda) (list (quote a) (quote b))
+							(join_order_compare_expr order_items 0)))))
+			rows_plan)))))
 
 (define emit_join_ordered_rows_expr (lambda (fields)
 	(list (quote map) (quote emit_rows)
@@ -10138,6 +10185,137 @@ source remain residual so they observe the null-extended row. */
 				(qb_offset block)
 				(qb_limit block))))))
 
+(define scalar_order_lookup_input_keys (lambda (stage)
+	(begin
+		(define repr (qassoc_get (gs_facts stage) (quote btw2025_repr) '()))
+		(if (equal? (count repr) (count (gs_keys stage)))
+			(map repr (lambda (pair)
+				(match pair
+					'(_outer local) local
+					_ nil)))
+			'()))))
+
+(define scalar_order_lookup_key_expr (lambda (key_exprs)
+	(if (equal? (count key_exprs) 1)
+		(car key_exprs)
+		(cons (quote list) key_exprs))))
+
+(define scalar_order_lookup_stage? (lambda (stage requested_col)
+	(if (or (nil? requested_col)
+		(or (not (group_stage? stage))
+			(not (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single)))))
+		false
+		(begin
+			(define ag (scalar_first_probe_aggregate stage requested_col))
+			(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
+			(define input_rows (planner_stage_input_rows (gs_input stage)))
+			(define local_keys (scalar_order_lookup_input_keys stage))
+			(define input_keys (if (not (source_is_base_table? (gs_input stage)))
+				false
+				(reduce local_keys (lambda (local key)
+					(and local (equal? (expr_source_alias key) (source_alias (gs_input stage))))) true)))
+			(and (not (nil? input_rows))
+				(and (>= input_rows 1000)
+					(and (source_is_base_table? (gs_input stage))
+						(and input_keys
+							(and (equal? (count local_keys) 1)
+								(and (not (nil? parts))
+									(and (empty_list? (nth parts 1)) (equal? (nth parts 3) 0))))))))))))
+
+(define scalar_order_lookup_marker (lambda (expr found)
+	(if (not (nil? found))
+		found
+		(match expr
+			((symbol scalar_first_probe) stage requested_col)
+			(if (scalar_order_lookup_stage? stage requested_col) (list nil stage requested_col) nil)
+			((quote scalar_first_probe) stage requested_col)
+			(if (scalar_order_lookup_stage? stage requested_col) (list nil stage requested_col) nil)
+			((symbol scalar_first_probe) stage requested_col _stages)
+			(if (scalar_order_lookup_stage? stage requested_col) (list nil stage requested_col) nil)
+			((quote scalar_first_probe) stage requested_col _stages)
+			(if (scalar_order_lookup_stage? stage requested_col) (list nil stage requested_col) nil)
+			(cons _head tail) (reduce tail (lambda (nested item)
+				(scalar_order_lookup_marker item nested)) nil)
+			_ nil))))
+
+(define scalar_order_lookup_source (lambda (stages sources default_alias order_items)
+	(begin
+		(define order_columns (join_column_recipe sources default_alias (order_exprs order_items)))
+		(define source_lookup (reduce sources (lambda (found src)
+			(if (not (nil? found))
+				found
+				(begin
+					(define stage (if (stage_output_relation? (source_relation src))
+						(stage_for_output_relation stages (source_relation src))
+						(stage_for_carrier_source stages src)))
+					(define requested_cols (qassoc_get order_columns (source_alias src) '()))
+					(define requested_col (if (empty_list? requested_cols) nil (car requested_cols)))
+					(if (and (scalar_order_lookup_stage? stage requested_col)
+						(stage_lookup_keys_resolve_in_sources? stage sources default_alias))
+						(list src stage requested_col)
+						nil))))
+			nil))
+		(if (not (nil? source_lookup))
+			source_lookup
+			(scalar_order_lookup_marker (order_exprs order_items) nil)))))
+
+(define rewrite_scalar_order_lookup_expr (lambda (sources default_alias lookup_alias lookup_expr requested_col expr)
+	(match expr
+		((symbol scalar_first_probe) _stage col)
+		(if (equal?? col requested_col) lookup_expr expr)
+		((quote scalar_first_probe) _stage col)
+		(if (equal?? col requested_col) lookup_expr expr)
+		((symbol scalar_first_probe) _stage col _stages)
+		(if (equal?? col requested_col) lookup_expr expr)
+		((quote scalar_first_probe) _stage col _stages)
+		(if (equal?? col requested_col) lookup_expr expr)
+		((symbol get_column) tblvar tbl_ignorecase col _col_ignorecase)
+		(if (and (equal?? (resolve_column_alias tblvar default_alias) lookup_alias)
+			(equal?? col requested_col))
+			lookup_expr
+			expr)
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(rewrite_scalar_order_lookup_expr sources default_alias lookup_alias lookup_expr requested_col
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(rewrite_scalar_order_lookup_expr sources default_alias lookup_alias lookup_expr requested_col item))))
+		_ expr)))
+
+(define scalar_order_lookup_plan (lambda (stage requested_col)
+	(begin
+		(define input_src (gs_input stage))
+		(define keys (scalar_order_lookup_input_keys stage))
+		(define ag (scalar_first_probe_aggregate stage requested_col))
+		(define value_expr (nth (scalar_first_probe_parts ag) 0))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define keycols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias input_src expr)))))
+		(define valuecols (extract_columns_for_alias input_src value_expr))
+		(define filtercols (merge_unique (list keycols (extract_columns_for_alias input_src condition))))
+		(define mapcols (merge_unique (list keycols valuecols)))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(source_table_expr input_src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
+				(list (quote optimize) (lower_column_expr_for_alias input_src condition)))
+			(cons (quote list) mapcols)
+			(list (quote lambda)
+				(map mapcols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
+				(list (quote list)
+					(scalar_order_lookup_key_expr
+						(map keys (lambda (expr) (lower_column_expr_for_alias input_src expr))))
+					(lower_column_expr_for_alias input_src value_expr)))
+			(list (quote lambda) (list (quote acc) (quote rowvals))
+				(list (quote set_assoc)
+					(quote acc)
+					(list (quote car) (quote rowvals))
+					(list (quote cadr) (quote rowvals))))
+			(quoted_runtime_list '())
+			(list (quote lambda) (list (quote acc) (quote grouped))
+				(list (quote merge_assoc_mut) (quote acc) (quote grouped)))
+			false))))
+
 (define lower_multi_source_query_block (lambda (block)
 	(begin
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
@@ -10152,12 +10330,43 @@ source remain residual so they observe the null-extended row. */
 					(and (not (equal? where_expr true))
 						(and (not (expr_contains_orc_column? where_expr))
 							(empty_list? (external_column_refs_for_alias first_alias where_expr))))))
-				(define scan_sources (if push_first_where
+				(define raw_scan_sources (if push_first_where
 					(cons (source_with_join_expr (car sources) (combine_where (source_join_expr (car sources)) where_expr)) (cdr sources))
 					sources))
 				(define final_condition (if push_first_where true where_expr))
-				(define order_items (coalesceNil (qb_order block) '()))
 				(define stage_catalog (query_block_stage_catalog block))
+				(define stage_lookup (query_block_stage_lookup block))
+				(define raw_order_items (coalesceNil (qb_order block) '()))
+				(define order_lookup (scalar_order_lookup_source stage_lookup raw_scan_sources first_alias raw_order_items))
+				(define order_lookup_src (if (nil? order_lookup) nil (nth order_lookup 0)))
+				(define order_lookup_stage (if (nil? order_lookup) nil (nth order_lookup 1)))
+				(define order_lookup_col (if (nil? order_lookup) nil (nth order_lookup 2)))
+				(define order_lookup_var (symbol "__scalar_order_lookup"))
+				(define order_lookup_key_exprs (if (nil? order_lookup)
+					'()
+					(qassoc_get (gs_facts order_lookup_stage) (quote lookup-keys) '())))
+				(define order_lookup_key (if (nil? order_lookup)
+					nil
+					(scalar_order_lookup_key_expr (map
+						order_lookup_key_exprs
+						(lambda (key) (lower_column_expr_for_join raw_scan_sources first_alias key))))))
+				(define order_lookup_expr (if (nil? order_lookup)
+					nil
+					(list (quote get_assoc) order_lookup_var order_lookup_key)))
+				(define scan_sources (if (or (nil? order_lookup) (nil? order_lookup_src))
+					raw_scan_sources
+					(filter raw_scan_sources (lambda (src)
+						(not (equal? (source_alias src) (source_alias order_lookup_src)))))))
+				(define order_items (if (nil? order_lookup)
+					raw_order_items
+					(map raw_order_items (lambda (item)
+						(match item
+							'(expr dir) (list
+								(rewrite_scalar_order_lookup_expr raw_scan_sources first_alias
+									(if (nil? order_lookup_src) nil (source_alias order_lookup_src))
+									order_lookup_expr order_lookup_col expr)
+								dir)
+							_ item)))))
 				(define direct_order (and (equal? first_alias (source_alias (car scan_sources)))
 					(order_items_belong_to_source? (car scan_sources) order_items)))
 				(define direct_order_safe (and direct_order
@@ -10168,75 +10377,80 @@ source remain residual so they observe the null-extended row. */
 					(extract_assoc fields (lambda (_title expr) expr))
 					(list final_condition)
 					(order_exprs order_items)
+					order_lookup_key_exprs
 					(source_join_exprs scan_sources))))
-				(define prelimit_sources (if (empty_list? scan_sources)
-					'()
-					(cons (car scan_sources)
-						(filter (cdr scan_sources) (lambda (src)
-							(expr_refs_alias? first_alias (source_alias src) final_condition))))))
+				(define prelimit_sources
+					(prelimit_sources_for scan_sources first_alias final_condition order_items))
 				(define late_projection_safe (late_projection_sources_preserve_rows? scan_sources prelimit_sources))
-				(if direct_order_safe
-					(build_join_scan_rows (qb_schema block) scan_sources first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
-					(if direct_order
-						(if (and membership_candidate_sort_plan late_projection_safe)
-							(begin
-								(define project_needed_exprs (merge (list
-									(extract_assoc fields (lambda (_title expr) expr))
-									(order_exprs order_items)
-									(source_join_exprs scan_sources))))
-								(define driver_needed_exprs (merge (list
-									(list final_condition)
-									(order_exprs order_items)
-									(map project_needed_exprs (lambda (expr)
-										(extract_columns_for_join_alias scan_sources first_alias first_alias expr))))))
-								(define project_column_recipe (join_column_recipe scan_sources first_alias project_needed_exprs))
-								(define driver_cols (qassoc_get project_column_recipe first_alias '()))
-								(define project_dependency_graph (stage_dependency_graph stage_catalog))
-								(define prelimit_stage_ids
-									(stage_ids_for_sources_with_closure_using_graph project_dependency_graph stage_catalog prelimit_sources))
-								(define project_stages (filter (query_block_stages_to_prepare_base_using stage_catalog block) (lambda (stage)
-									(not (stage_id_in? stage prelimit_stage_ids)))))
-								(define project_prepare_expr (cons (quote !begin)
-									(lower_unique_stage_prepares_with_graph project_dependency_graph stage_catalog project_stages)))
-								(define project_row_expr
-									(lower_join_result_row_assoc scan_sources first_alias fields order_items))
-								(define project_rows_expr (replace_lowered_driver_symbols_with_row first_alias driver_cols
-									(build_join_scan_rows_with_mapper_using_recipe
-										(qb_schema block)
-										scan_sources
-										(cdr scan_sources)
-										first_alias
-										project_needed_exprs
-										true
-										project_row_expr
-										'()
-										0
-										-1
-										true
-										project_column_recipe
-										stage_catalog)))
-								(define driver_rows_expr
-									(build_join_scan_rows_with_mapper
-										(qb_schema block)
-										scan_sources
-										prelimit_sources
-										first_alias
-										driver_needed_exprs
-										final_condition
-										(lower_join_driver_sort_row_assoc scan_sources first_alias (car scan_sources) driver_cols order_items)
-										'()
-										0
-										-1
-										true
-										stage_catalog))
-								(join_sorted_rows_late_projection_plan
-									driver_rows_expr
-									project_prepare_expr
-									project_rows_expr
-									fields
-									order_items
-									(qb_offset block)
-									(qb_limit block)))
+				(define late_projection_sort_plan (and
+					(late_projection_candidate_block? block)
+					(and (not (empty_list? order_items))
+						(and late_projection_safe
+							(< (count prelimit_sources) (count scan_sources))))))
+				(define lowered_plan (if late_projection_sort_plan
+					(begin
+						(define project_needed_exprs (merge (list
+							(extract_assoc fields (lambda (_title expr) expr))
+							(order_exprs order_items)
+							order_lookup_key_exprs
+							(source_join_exprs scan_sources))))
+						(define project_column_recipe (join_column_recipe scan_sources first_alias project_needed_exprs))
+						(define driver_cols (qassoc_get project_column_recipe first_alias '()))
+						(define driver_needed_exprs (merge (list
+							(list final_condition)
+							(order_exprs order_items)
+							order_lookup_key_exprs
+							(map driver_cols (lambda (col)
+								(list (quote get_column) first_alias false col false))))))
+						(define project_dependency_graph (stage_dependency_graph stage_catalog))
+						(define prelimit_stage_ids
+							(stage_ids_for_sources_with_closure_using_graph project_dependency_graph stage_catalog prelimit_sources))
+						(define project_stages (filter (query_block_stages_to_prepare_base_using stage_catalog block) (lambda (stage)
+							(not (stage_id_in? stage prelimit_stage_ids)))))
+						(define project_prepare_expr (cons (quote !begin)
+							(lower_unique_stage_prepares_with_graph project_dependency_graph stage_catalog project_stages)))
+						(define project_row_expr
+							(lower_join_result_row_assoc scan_sources first_alias fields order_items))
+						(define project_rows_expr (replace_lowered_driver_symbols_with_row first_alias driver_cols
+							(build_join_scan_rows_with_mapper_using_recipe
+								(qb_schema block)
+								scan_sources
+								(cdr scan_sources)
+								first_alias
+								project_needed_exprs
+								true
+								project_row_expr
+								'()
+								0
+								-1
+								true
+								project_column_recipe
+								stage_catalog)))
+						(define driver_rows_expr
+							(build_join_scan_rows_with_mapper
+								(qb_schema block)
+								scan_sources
+								prelimit_sources
+								first_alias
+								driver_needed_exprs
+								final_condition
+								(lower_join_driver_sort_row_assoc scan_sources first_alias (car scan_sources) driver_cols order_items)
+								'()
+								0
+								-1
+								true
+								stage_catalog))
+						(join_sorted_rows_late_projection_plan
+							driver_rows_expr
+							project_prepare_expr
+							project_rows_expr
+							fields
+							order_items
+							(qb_offset block)
+							(qb_limit block)))
+					(if direct_order_safe
+						(build_join_scan_rows (qb_schema block) scan_sources first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
+						(if direct_order
 							(join_ordered_filtered_stream_plan
 								(qb_schema block)
 								scan_sources
@@ -10247,26 +10461,31 @@ source remain residual so they observe the null-extended row. */
 								order_items
 								(qb_offset block)
 								(qb_limit block)
-								stage_catalog))
-						(join_sorted_rows_plan
-							(build_join_scan_rows_with_mapper
-								(qb_schema block)
-								scan_sources
-								scan_sources
-								first_alias
-								needed_exprs
-								final_condition
-								(lower_join_result_row_assoc sources first_alias fields order_items)
-								'()
-								0
-								-1
-								(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))
 								stage_catalog)
-							fields
-							order_items
-							(qb_offset block)
-							(qb_limit block))))))
-)))
+							(join_sorted_rows_plan
+								(build_join_scan_rows_with_mapper
+									(qb_schema block)
+									scan_sources
+									scan_sources
+									first_alias
+									needed_exprs
+									final_condition
+									(lower_join_result_row_assoc sources first_alias fields order_items)
+									'()
+									0
+									-1
+									(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))
+									stage_catalog)
+								fields
+								order_items
+								(qb_offset block)
+								(qb_limit block))))))
+				(if (nil? order_lookup)
+					lowered_plan
+					(list
+						(list (quote lambda) (list order_lookup_var) lowered_plan)
+						(scalar_order_lookup_plan order_lookup_stage order_lookup_col)))
+)))))
 
 (define lower_zero_source_query_block (lambda (block)
 	(if (equal? (coalesceNil (qb_where block) true) true)
