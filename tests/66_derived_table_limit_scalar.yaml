@@ -601,6 +601,94 @@ test_cases:
         - ID: 1
         - ID: 2
 
+  - name: "Selective driver predicate stays ahead of nested scalar permission probe"
+    sql: |
+      SELECT t.* FROM (
+        SELECT m.ID, m.first_ref, m.second_ref, ref.label
+        FROM dtl_join_main m
+        LEFT JOIN (
+          SELECT r.ID AS ref_id, r.label
+          FROM dtl_join_ref r
+        ) ref ON ref.ref_id = m.first_ref
+        WHERE m.second_ref = 20
+          AND EXISTS (
+            SELECT TRUE FROM dtl_global_access global_access
+            WHERE global_access.account_id = 11
+              AND global_access.tenant_id IS NULL
+            LIMIT 1
+          )
+          AND COALESCE((
+            SELECT CASE WHEN EXISTS (
+              SELECT TRUE FROM dtl_global_access global_access
+              WHERE global_access.account_id = 11
+                AND global_access.tenant_id IS NULL
+              LIMIT 1
+            ) THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM dtl_join_acl row_access
+              WHERE row_access.ref_id = probe.ID
+                AND row_access.allowed = TRUE
+              LIMIT 1
+            ) END
+            FROM dtl_join_ref probe
+            WHERE probe.ID = m.first_ref
+            LIMIT 1
+          ), FALSE)
+      ) t
+      LEFT JOIN dtl_join_ref sorter ON sorter.ID = t.first_ref
+      ORDER BY t.second_ref DESC, t.ID
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          first_ref: 10
+          second_ref: 20
+          label: "ten"
+
+  - name: "Physical driver filter precedes nested scalar permission recipe"
+    fail_comment: "physical predicate partitioning must not reverse a cheap local filter behind a scalar probe"
+    sql: |
+      EXPLAIN SELECT t.* FROM (
+        SELECT m.ID, m.first_ref, m.second_ref, ref.label
+        FROM dtl_join_main m
+        LEFT JOIN (
+          SELECT r.ID AS ref_id, r.label
+          FROM dtl_join_ref r
+        ) ref ON ref.ref_id = m.first_ref
+        WHERE m.second_ref = 20
+          AND EXISTS (
+            SELECT TRUE FROM dtl_global_access global_access
+            WHERE global_access.account_id = 11
+              AND global_access.tenant_id IS NULL
+            LIMIT 1
+          )
+          AND COALESCE((
+            SELECT CASE WHEN EXISTS (
+              SELECT TRUE FROM dtl_global_access global_access
+              WHERE global_access.account_id = 11
+                AND global_access.tenant_id IS NULL
+              LIMIT 1
+            ) THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM dtl_join_acl row_access
+              WHERE row_access.ref_id = probe.ID
+                AND row_access.allowed = TRUE
+              LIMIT 1
+            ) END
+            FROM dtl_join_ref probe
+            WHERE probe.ID = m.first_ref
+            LIMIT 1
+          ), FALSE)
+      ) t
+      LEFT JOIN dtl_join_ref sorter ON sorter.ID = t.first_ref
+      ORDER BY t.second_ref DESC, t.ID
+      LIMIT 72
+    expect:
+      result_contains:
+        - "__scalar_query_probe_"
+        - "(and (equal??"
+      result_not_contains:
+        - "(and (coalesceNil (__scalar_query_probe_"
+
   - name: "Remove stale physical carrier fixture"
     scm: '(droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)'
 

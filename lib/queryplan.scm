@@ -9438,8 +9438,8 @@ source remain residual so they observe the null-extended row. */
 			(physical_partition_condition_terms default_alias all_sources future_sources rest (cons term ready) pending)
 			(physical_partition_condition_terms default_alias all_sources future_sources rest ready (cons term pending)))
 		_ (list
-			(combine_where_terms ready true)
-			(combine_where_terms pending true)))))
+			(combine_where_terms (reverse ready) true)
+			(combine_where_terms (reverse pending) true)))))
 
 (define physical_partition_condition (lambda (default_alias all_sources future_sources condition)
 	(physical_partition_condition_terms
