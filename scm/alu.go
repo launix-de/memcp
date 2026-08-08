@@ -115,6 +115,30 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "sql_sum_reduce",
+		Desc: "adds two SQL SUM values while treating NULL as the empty aggregate identity",
+		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return a[1]
+			}
+			if a[1].IsNil() {
+				return a[0]
+			}
+			if a[0].IsInt() && a[1].IsInt() {
+				return NewInt(a[0].Int() + a[1].Int())
+			}
+			return NewFloat(a[0].Float() + a[1].Float())
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "number|nil", ParamName: "left", ParamDesc: "partial sum"},
+				{Kind: "number|nil", ParamName: "right", ParamDesc: "next value"},
+			},
+			Return: &TypeDescriptor{Kind: "number|nil"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "-",
 		Desc: "subtracts two or more numbers from the first one",
 		Fn: func(a ...Scmer) Scmer {

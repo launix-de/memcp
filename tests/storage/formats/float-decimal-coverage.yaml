@@ -265,12 +265,12 @@ test_cases:
       data:
         - c: 0
 
-  - name: "Empty: SUM returns zero"
+  - name: "Empty: SUM returns NULL"
     sql: "SELECT SUM(val) AS s FROM fdc_empty"
     expect:
       rows: 1
       data:
-        - s: 0
+        - s: null
 
   - name: "Empty: single-row with NULL"
     sql: "INSERT INTO fdc_empty VALUES (1, NULL)"

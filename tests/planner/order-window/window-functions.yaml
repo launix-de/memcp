@@ -19,6 +19,15 @@ test_cases:
       (4, 200, 15, 200),
       (5, 200, 25, 400)
 
+  - name: "Create nullable window aggregate data"
+    sql: "CREATE TABLE win_nullable (id INT PRIMARY KEY, grp INT, value INT)"
+
+  - name: "Insert nullable window aggregate data"
+    sql: |
+      INSERT INTO win_nullable VALUES
+      (1, 1, NULL), (2, 1, NULL),
+      (3, 2, NULL), (4, 2, 5), (5, 2, 7)
+
   # ==========================================================================
   # Case 1: OVER (ORDER BY) + LAG/LEAD — no partition, no outer sort
   # ==========================================================================
@@ -114,6 +123,22 @@ test_cases:
         - {id: 3, parent: 100, amount: 700, mx: 700}
         - {id: 4, parent: 200, amount: 200, mx: 400}
         - {id: 5, parent: 200, amount: 400, mx: 400}
+
+  - name: "Case 2: Window aggregates preserve nullable SQL identities"
+    sql: |
+      SELECT id, COUNT(value) OVER (PARTITION BY grp) AS row_count,
+        SUM(value) OVER (PARTITION BY grp) AS total,
+        AVG(value) OVER (PARTITION BY grp) AS average
+      FROM win_nullable
+      ORDER BY id
+    expect:
+      rows: 5
+      data:
+        - {id: 1, row_count: 0, total: null, average: null}
+        - {id: 2, row_count: 0, total: null, average: null}
+        - {id: 3, row_count: 2, total: 12, average: 6}
+        - {id: 4, row_count: 2, total: 12, average: 6}
+        - {id: 5, row_count: 2, total: 12, average: 6}
 
   # ==========================================================================
   # Case 3: OVER ORDER BY + outer ORDER BY → ORC materialized window value
@@ -446,3 +471,4 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS win_emp"
+  - sql: "DROP TABLE IF EXISTS win_nullable"

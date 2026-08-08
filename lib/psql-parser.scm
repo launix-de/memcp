@@ -234,8 +234,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e psql_expression) ")") '('count_distinct e))
 		/* COUNT(expr): count non-NULL values -> map to (if (nil? expr) 0 1), reduce +, neutral 0 */
 		(parser '((atom "COUNT" true) "(" (define e psql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
-		(parser '((atom "SUM" true) "(" (define s psql_expression) ")") '('aggregate s (quote +) 0))
-		(parser '((atom "AVG" true) "(" (define s psql_expression) ")") '((quote /) '('aggregate s (quote +) 0) '('aggregate 1 (quote +) 0)))
+		(parser '((atom "SUM" true) "(" (define s psql_expression) ")")
+			(begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
+		(parser '((atom "AVG" true) "(" (define s psql_expression) ")")
+			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
 		(parser '((atom "MIN" true) "(" (define s psql_expression) ")") '('aggregate s 'min nil))
 		(parser '((atom "MAX" true) "(" (define s psql_expression) ")") '('aggregate s 'max nil))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s psql_expression) (atom "SEPARATOR" true) (define sep psql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil))
