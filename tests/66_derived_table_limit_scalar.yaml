@@ -463,6 +463,47 @@ test_cases:
       not_contains:
         - "scalar_first_probe"
 
+  - name: "derived stage rebinding updates dependent aggregate handles"
+    scm: |
+      (begin
+        (define y66_child_ag (list 1 (quote +) 0))
+        (define y66_child_stage (make_group_stage
+          "y66-child"
+          (list "child" "memcp-tests" "child_source" false nil)
+          '() '(1) (list y66_child_ag) nil '() '() nil nil '()))
+        (define y66_parent_ag (list
+          (list (quote scalar_first_probe)
+            y66_child_stage
+            (aggregate_col_name y66_child_ag)
+            (list y66_child_stage))
+          (quote +)
+          0))
+        (define y66_parent_stage (make_group_stage
+          "y66-parent"
+          (list "parent" "memcp-tests" (make_stage_output_relation "y66-child") false nil)
+          '() '(1) (list y66_parent_ag) nil '() '() nil nil '()))
+        (define y66_fixture (rebind_derived_stages
+          "lookup"
+          (list y66_child_stage y66_parent_stage)))
+        (define y66_rebound_parent (stage_by_id
+          (nth y66_fixture 0)
+          (stage_merge_lookup (nth y66_fixture 2) "y66-parent" nil)))
+        (define y66_rebound_col
+          (aggregate_col_name (car (gs_aggregates y66_rebound_parent))))
+        (define y66_rebound_ref (rebind_derived_stage_expr y66_fixture
+          (list (quote get_column)
+            (exists_stage_alias "y66-parent")
+            false
+            (aggregate_col_name y66_parent_ag)
+            false)))
+        (if (and
+          (not (equal?
+            (aggregate_col_name y66_parent_ag)
+            y66_rebound_col))
+          (equal? (nth y66_rebound_ref 3) y66_rebound_col))
+          "ok"
+          (error "derived aggregate rebinding kept a stale column handle")))
+
   - name: "Repeated global EXISTS in derived wrapper stays scalar"
     sql: |
       SELECT t.* FROM (
