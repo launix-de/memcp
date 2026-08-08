@@ -560,6 +560,42 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(merge_unique (map (coalesceNil terms '()) (lambda (term)
 		(btw2025_expr_accessing_aliases term outer_aliases))))))
 
+/* Session reads affect a dependent helper like outer-column reads do. Keep
+their expressions in Domain D so reusable carriers are keyed by the binding
+instead of capturing whichever session populated the carrier first. */
+(define query_expr_session_reads (lambda (expr)
+	(match expr
+		((symbol session) "__memcp_tx") '()
+		((quote session) "__memcp_tx") '()
+		((symbol session) key) (list (list (quote session) key))
+		((quote session) key) (list (list (quote session) key))
+		(cons head tail) (merge_unique (cons
+			(query_expr_session_reads head)
+			(map tail query_expr_session_reads)))
+		_ '())))
+
+(define query_session_read? (lambda (expr)
+	(match expr
+		((symbol session) "__memcp_tx") false
+		((quote session) "__memcp_tx") false
+		((symbol session) _key) true
+		((quote session) _key) true
+		_ false)))
+
+(define session_domain_pairs (lambda (node)
+	(map (query_expr_session_reads node) (lambda (expr) (list expr expr)))))
+
+(define presence_session_domain_pairs (lambda (block)
+	(session_domain_pairs (list
+		(qb_sources block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_stages block)))))
+
 (define btw2025_query_block_accessing_aliases (lambda (block outer_sources)
 	(if (not (query_block? block))
 		'()
@@ -1226,13 +1262,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define visible_ags (stage_aggregates_for_fields (qb_fields inner)))
 		(define order_ags (merge_unique (map (order_item_exprs (qb_order inner)) extract_aggregates)))
 		(define ags (dedupe_aggregates_by_col (merge_unique (list visible_ags order_ags (list aggregate_count_descriptor)))))
-		(define keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
+		(define session_keys (query_expr_session_reads inner))
+		(define explicit_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
+		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
+			(not (contains? explicit_keys expr)))))))
 		(define stage_id (concat "scalar-group-top:" (fnv_hash (serialize (list subquery keys ags (qb_order inner))))))
 		(define stage (make_group_stage
 			stage_id
 			inner_src
-			'()
+			session_keys
 			keys
 			ags
 			nil
@@ -1243,8 +1282,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list
 				(list (quote condition) (coalesceNil (qb_where inner) true))
 				(list (quote purpose) (quote scalar_aggregate))
-				(list (quote domain) '())
-				(list (quote lookup-keys) '())
+				(list (quote domain) session_keys)
+				(list (quote lookup-keys) session_keys)
 				(list (quote preserve_empty_domain) false)
 				(list (quote null_semantics) (quote scalar))
 				(list (quote cardinality_mode) (quote first)))))
@@ -1269,7 +1308,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
+		(define lookup_pairs (domain_correlation_pairs (merge (list
+			corr_pairs source_corr_pairs (presence_session_domain_pairs inner)))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define keys (if (empty_list? lookup_pairs)
@@ -1347,7 +1387,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
+		(define lookup_pairs (domain_correlation_pairs (merge (list
+			corr_pairs source_corr_pairs (presence_session_domain_pairs inner)))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define explicit_keys (map (qb_group inner) (lambda (expr)
@@ -1601,7 +1642,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define corr_pairs (filter (map terms (lambda (term)
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
-		(define lookup_pairs (unique_correlation_pairs corr_pairs))
+		(define lookup_pairs (domain_correlation_pairs (merge (list
+			corr_pairs (session_domain_pairs membership_inner)))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define rhs_expr (canonical_column_expr_for_alias inner_default (query_block_first_expr membership_inner)))
@@ -1788,7 +1830,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(define local_having_terms (filter having_terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define all_corr_pairs (domain_correlation_pairs (merge (list corr_pairs having_corr_pairs source_corr_pairs))))
+		(define all_corr_pairs (domain_correlation_pairs (merge (list
+			corr_pairs having_corr_pairs source_corr_pairs (session_domain_pairs inner)))))
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys))
@@ -1867,7 +1910,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
+		(define lookup_pairs (domain_correlation_pairs (merge (list
+			corr_pairs source_corr_pairs (session_domain_pairs inner)))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define keys (if (empty_list? lookup_pairs)
@@ -2206,7 +2250,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
+		(define lookup_pairs (domain_correlation_pairs (merge (list
+			corr_pairs source_corr_pairs (session_domain_pairs inner)))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
 		(define keys (if (empty_list? lookup_pairs)
@@ -5864,13 +5909,17 @@ dependency preparation does not emit free outer-row symbols. */
 		(define value_expr (replace_group_expr alias grouptbl keys key_names ags (first_projection_expr (gs_output stage))))
 		(define replaced_order (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr dir) (list (replace_group_order_expr alias grouptbl keys key_names ags expr) dir)))))
+		(define session_filter (group_stage_session_filter_expr stage grouptbl keys key_names))
+		(define filtercols (extract_columns_for_alias group_src session_filter))
 		(define ordercols (order_cols_for_alias group_src replaced_order))
 		(define valuecols (extract_columns_for_alias group_src value_expr))
 		(list (quote scan_order)
 			'(session "__memcp_tx")
 			(list (quote table) schema grouptbl)
-			(quoted_runtime_list '())
-			(list (quote lambda) '() true)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat grouptbl "." col))))
+				(list (quote optimize) (lower_column_expr_for_alias group_src session_filter)))
 			(cons (quote list) ordercols)
 			(cons (quote list) (order_dirs replaced_order))
 			0
@@ -6406,6 +6455,67 @@ is still available and remains an ordinary scalar expression through untangle. *
 (define group_key_cols (lambda (keys)
 	(map (produceN (count keys)) group_key_col_name)))
 
+(define group_stage_session_domain_keys (lambda (stage)
+	(query_expr_session_reads (gs_domain stage))))
+
+(define group_key_expr_index (lambda (keys expr)
+	(reduce (produceN (count keys)) (lambda (found i)
+		(if (not (nil? found)) found (if (equal? (nth keys i) expr) i nil)))
+		nil)))
+
+(define group_stage_session_key_pairs (lambda (stage keys key_names)
+	(map (group_stage_session_domain_keys stage) (lambda (expr)
+		(begin
+			(define idx (group_key_expr_index keys expr))
+			(if (nil? idx)
+				(neumann_fail "build_queryplan" (concat "session domain expression is not a group key: "
+					(serialize expr) " in " (serialize keys)))
+				(list expr (nth key_names idx))))))))
+
+(define replace_group_session_expr (lambda (stage keys key_names expr)
+	(begin
+		(define pair (reduce (group_stage_session_key_pairs stage keys key_names)
+			(lambda (found candidate)
+				(if (not (nil? found)) found (if (equal? expr (nth candidate 0)) candidate nil)))
+			nil))
+		(if (not (nil? pair))
+			(list (quote outer) (symbol (nth pair 1)))
+			(match expr
+				(cons head tail) (cons head (map tail (lambda (item)
+					(replace_group_session_expr stage keys key_names item))))
+				_ expr)))))
+
+(define group_stage_session_filter_expr (lambda (stage grouptbl keys key_names)
+	(begin
+		(define pairs (group_stage_session_key_pairs stage keys key_names))
+		(if (empty_list? pairs)
+			true
+			(combine_where_terms (map pairs (lambda (pair)
+				(list (quote equal??)
+					(list (quote get_column) grouptbl false (nth pair 1) false)
+					(nth pair 0))))
+				true)))))
+
+(define group_stage_session_binding_missing_expr (lambda (stage schema grouptbl keys key_names)
+	(begin
+		(define pairs (group_stage_session_key_pairs stage keys key_names))
+		(if (empty_list? pairs)
+			(list (quote table_empty?) (list (quote table) schema grouptbl))
+			(begin
+				(define cols (map pairs (lambda (pair) (nth pair 1))))
+				(define params (map cols (lambda (col) (symbol (concat grouptbl "." col)))))
+				(list (quote not)
+					(list (quote scan_exists)
+						'(session "__memcp_tx")
+						(list (quote table) schema grouptbl)
+						(cons (quote list) cols)
+						(list (quote lambda)
+							params
+							(list (quote optimize)
+								(combine_where_terms (map (produceN (count pairs)) (lambda (i)
+									(list (quote equal??) (nth params i) (nth (nth pairs i) 0))))
+									true))))))))))
+
 (define assoc_keys_as_dataset_rows (lambda (dict width)
 	(map (extract_assoc dict (lambda (k v) k))
 		(lambda (k)
@@ -6439,11 +6549,16 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(merge_unique (list visible_ags having_ags))
 			(merge_unique (list visible_ags having_ags (list aggregate_count_descriptor))))))
 		(define alias (source_alias src))
+		(define session_keys (query_expr_session_reads block))
+		(define explicit_keys (map (coalesceNil (qb_group block) '()) (lambda (expr)
+			(canonical_column_expr_for_alias alias expr))))
+		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
+			(not (contains? explicit_keys expr)))))))
 		(make_group_stage
-			(concat "group:" (source_relation src) ":" (fnv_hash (string (list (qb_group block) ags))))
+			(concat "group:" (source_relation src) ":" (fnv_hash (string (list keys ags))))
 			src
-			'()
-			(map (coalesceNil (qb_group block) '()) (lambda (expr) (canonical_column_expr_for_alias alias expr)))
+			session_keys
+			keys
 			ags
 			(qb_having block)
 			(qb_fields block)
@@ -6451,7 +6566,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(qb_limit block)
 			(qb_offset block)
 			(list
-				(list (quote condition) (coalesceNil (qb_where block) true)))))))
+				(list (quote condition) (coalesceNil (qb_where block) true))
+				(list (quote domain) session_keys)
+				(list (quote lookup-keys) session_keys))))))
 
 (define make_group_stage_for_query_block (lambda (block)
 	(begin
@@ -6464,6 +6581,8 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define group_keys (map (coalesceNil (qb_group block) '()) (lambda (expr) (canonical_column_expr_for_alias alias expr))))
 		(define field_passthrough_keys (field_passthrough_keys_for_alias alias (qb_fields block)))
 		(define passthrough_keys (external_column_refs_for_alias alias (coalesceNil (qb_having block) true)))
+		(define session_keys (query_expr_session_reads block))
+		(define keys (merge_unique (list group_keys field_passthrough_keys passthrough_keys session_keys)))
 		(define input (make_query_block
 			(qb_schema block)
 			(qb_sources block)
@@ -6474,10 +6593,11 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(qb_stages block)
 			(qb_facts block)))
 		(make_group_stage
-			(concat "group:query:" (fnv_hash (serialize (list (qb_sources block) (qb_where block) (qb_group block) ags))))
+			(concat "group:query:" (fnv_hash (serialize (list
+				(qb_sources block) (qb_where block) keys ags))))
 			input
-			'()
-			(merge_unique (list group_keys field_passthrough_keys passthrough_keys))
+			session_keys
+			keys
 			ags
 			(qb_having block)
 			(qb_fields block)
@@ -6486,6 +6606,8 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(qb_offset block)
 			(list
 				(list (quote condition) true)
+				(list (quote domain) session_keys)
+				(list (quote lookup-keys) session_keys)
 				(list (quote stage_catalog) (query_block_stage_catalog block)))))))
 
 (define group_key_index (lambda (alias keys expr)
@@ -6681,9 +6803,11 @@ is still available and remains an ordinary scalar expression through untangle. *
 	(begin
 		(define src (list alias nil nil false nil))
 		(map (produceN (count keys)) (lambda (i)
-			(list (quote equal?)
-				(lower_column_expr_for_alias src (nth keys i))
-				(list (quote outer) (symbol (nth key_names i)))))))))
+			(if (query_session_read? (nth keys i))
+				true
+				(list (quote equal?)
+					(lower_column_expr_for_alias src (nth keys i))
+					(list (quote outer) (symbol (nth key_names i))))))))))
 
 (define build_group_collect_plan (lambda (schema tbl alias grouptbl keys key_names condition)
 	(if (equal? keys '(1))
@@ -8380,11 +8504,13 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define count_col_name (aggregate_col_name aggregate_count_descriptor))
 		(define count_check (list (quote >) (list (quote get_column) grouptbl false count_col_name false) 0))
 		(define needs_count_filter (and (not (equal? keys '(1))) (not (equal? condition true))))
-		(define having_expr (if (not needs_count_filter)
+		(define aggregate_having_expr (if (not needs_count_filter)
 			replaced_having
 			(if (or (nil? replaced_having) (equal? replaced_having true))
 				count_check
 				(list (quote and) replaced_having count_check))))
+		(define session_filter (group_stage_session_filter_expr stage grouptbl keys key_names))
+		(define having_expr (combine_where_terms (list aggregate_having_expr session_filter) true))
 		(make_query_block
 			schema
 			(cons
@@ -8516,6 +8642,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
 		(define key_names (group_key_cols keys))
+		(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
 		(define grouptbl (group_carrier_relation carrier))
 		(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
 		(define scalar_query_stage (and (query_block? src)
@@ -8591,7 +8718,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 						nil
 						nil)
 					(list (quote touch_keytable) (list (quote table) schema grouptbl)))
-				(list (list (quote table_empty?) (list (quote table) schema grouptbl)))))))
+				(list (group_stage_session_binding_missing_expr stage schema grouptbl keys key_names))))))
 		(define collect_plan (if query_input_carrier
 			(if (union_block? src)
 				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
@@ -8607,8 +8734,8 @@ is still available and remains an ordinary scalar expression through untangle. *
 					(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags)
 					(build_query_group_aggregates_insert_plan_using prepared_src grouptbl keys key_names lowering_ags ags))))
 			(if scalar_order_base_stage
-				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
-				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names condition ag))))))
+				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names aggregate_condition ags))
+				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
 		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr _dir) (begin
 				(define replaced_order_expr (replace_group_order_expr alias grouptbl keys key_names ags expr))

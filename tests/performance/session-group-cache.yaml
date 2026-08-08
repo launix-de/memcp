@@ -43,7 +43,7 @@ cleanup:
 test_cases:
   - name: "set session user"
     session_id: "sgc_sess"
-    sql: "SET @fop_user = 1"
+    sql: "SET @app_user = 1"
     expect:
       rows_affected: 0
 
@@ -54,7 +54,7 @@ test_cases:
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @fop_user
+        WHERE sgc_acl.usr = @app_user
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -76,7 +76,7 @@ test_cases:
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @fop_user
+        WHERE sgc_acl.usr = @app_user
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -98,7 +98,7 @@ test_cases:
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @fop_user
+        WHERE sgc_acl.usr = @app_user
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -108,20 +108,18 @@ test_cases:
 
   - name: "set session user 2"
     session_id: "sgc_sess2"
-    sql: "SET @fop_user = 2"
+    sql: "SET @app_user = 2"
     expect:
       rows_affected: 0
 
   - name: "different session sees different groups"
-    noncritical: true
-    fail_comment: "the reusable group carrier currently retains results from the previous session binding"
     session_id: "sgc_sess2"
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @fop_user
+        WHERE sgc_acl.usr = @app_user
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -134,11 +132,205 @@ test_cases:
         - category: 4
           cnt: 4
 
+  - name: "first session reuses its own cached groups"
+    session_id: "sgc_sess"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @app_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 4
+        - category: 2
+          cnt: 4
+        - category: 3
+          cnt: 4
+
+  - name: "write from an unrelated session updates every populated domain"
+    session_id: "sgc_writer"
+    sql: "INSERT INTO sgc_data (category, owner, val) VALUES (4, 9, 200)"
+    expect:
+      affected_rows: 1
+
+  - name: "second session sees incremental changes for its cached domain"
+    session_id: "sgc_sess2"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @app_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 2
+      data:
+        - category: 1
+          cnt: 4
+        - category: 4
+          cnt: 5
+
+  - name: "first session stays isolated after an unrelated write"
+    session_id: "sgc_sess"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @app_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 4
+        - category: 2
+          cnt: 4
+        - category: 3
+          cnt: 4
+
+  - name: "logical plan exposes the session binding as a domain key"
+    session_id: "sgc_sess"
+    sql: |
+      EXPLAIN IR SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @app_user
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+    expect:
+      contains:
+        - '(domain ((get_column "sgc_data" true "category" true) (session "app_user")))'
+        - '(lookup-keys ((get_column "sgc_data" true "category" true) (session "app_user")))'
+
   - name: "simple COUNT with session WHERE (warm, must be fast)"
     session_id: "sgc_sess"
     sql: |
       SELECT COUNT(*) AS cnt
       FROM sgc_data
-      WHERE owner = @fop_user
+      WHERE owner = @app_user
     expect:
       rows: 1
+
+  - name: "set first aggregate factor"
+    session_id: "sgc_factor_a"
+    sql: "SET @factor = 2"
+    expect:
+      rows_affected: 0
+
+  - name: "session value in aggregate expression uses first domain"
+    session_id: "sgc_factor_a"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 700
+        - category: 2
+          total: 476
+        - category: 3
+          total: 532
+        - category: 4
+          total: 988
+        - category: 5
+          total: 644
+
+  - name: "set second aggregate factor"
+    session_id: "sgc_factor_b"
+    sql: "SET @factor = 3"
+    expect:
+      rows_affected: 0
+
+  - name: "session value in aggregate expression uses second domain"
+    session_id: "sgc_factor_b"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 1050
+        - category: 2
+          total: 714
+        - category: 3
+          total: 798
+        - category: 4
+          total: 1482
+        - category: 5
+          total: 966
+
+  - name: "set unrelated aggregate session"
+    session_id: "sgc_factor_writer"
+    sql: "SET @factor = 9"
+    expect:
+      rows_affected: 0
+
+  - name: "write under unrelated aggregate session"
+    session_id: "sgc_factor_writer"
+    sql: "INSERT INTO sgc_data (category, owner, val) VALUES (1, 9, 5)"
+    expect:
+      affected_rows: 1
+
+  - name: "first aggregate domain remains correct after write"
+    session_id: "sgc_factor_a"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 710
+        - category: 2
+          total: 476
+        - category: 3
+          total: 532
+        - category: 4
+          total: 988
+        - category: 5
+          total: 644
+
+  - name: "second aggregate domain remains correct after write"
+    session_id: "sgc_factor_b"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 1065
+        - category: 2
+          total: 714
+        - category: 3
+          total: 798
+        - category: 4
+          total: 1482
+        - category: 5
+          total: 966

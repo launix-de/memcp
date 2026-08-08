@@ -66,7 +66,6 @@ test_cases:
 
   - name: "Reminder badge query with grouped inner aggregate for user 1"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT 1 AS ok,
         (SELECT SUM(cnt)
@@ -129,7 +128,6 @@ test_cases:
 
   - name: "Materialized grouped reminder source for user 1"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT *
       FROM (
@@ -179,7 +177,6 @@ test_cases:
           cnt: 1
   - name: "Reminder badge query reflects changed equality session key"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT 1 AS ok,
         (SELECT SUM(cnt)
@@ -274,7 +271,6 @@ test_cases:
           cnt: 2
   - name: "Reminder badge query reflects changed range session key"
     session_id: "sgr-reminder-session"
-    noncritical: true
     sql: |
       SELECT 1 AS ok,
         (SELECT SUM(cnt)
@@ -311,5 +307,5 @@ test_cases:
       rows: 1
       data:
         - ok: 1
-          grouped_due: 1
+          grouped_due: 2
           reminder_tickets: 1
