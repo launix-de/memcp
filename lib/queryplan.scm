@@ -941,6 +941,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define scalar_aggregate_probe_expr (lambda (stage col)
 	(list (quote scalar_aggregate_probe) stage col)))
 
+(define scalar_aggregate_probe_outer_exprs (lambda (stage)
+	(merge (list
+		(qassoc_get (gs_facts stage) (quote lookup-keys) '())
+		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))))
+
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
 		(make_exists_stage_join_condition stage_alias key_names outer_domain)
@@ -1157,9 +1162,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate))
 			(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote many))
 				(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-					(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
-						(and (equal? (coalesceNil (gs_having stage) true) true)
-							(source_is_base_table? (gs_input stage))))))))))
+					(and (equal? (coalesceNil (gs_having stage) true) true)
+						(source_is_base_table? (gs_input stage)))))))))
 
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
@@ -2172,11 +2176,22 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 
 (define window_aggregate_descriptor (lambda (fn args)
 	(match fn
-		"COUNT" (list aggregate_count_descriptor)
+		"COUNT" (if (empty_list? args)
+			(list aggregate_count_descriptor)
+			(list (list (sql_nonnull_count_expr (car args)) (quote +) 0)))
 		"SUM" (match (car args)
-			((symbol aggregate) agg_expr (symbol +) 0) (list (list agg_expr (quote +) 0))
-			((quote aggregate) agg_expr (quote +) 0) (list (list agg_expr (quote +) 0))
-			_ (list (list (car args) (quote +) 0)))
+			((symbol aggregate) agg_expr agg_reduce agg_neutral)
+			(list (list agg_expr agg_reduce agg_neutral))
+			((quote aggregate) agg_expr agg_reduce agg_neutral)
+			(list (list agg_expr agg_reduce agg_neutral))
+			_ (begin
+				(define descriptor (sql_aggregates "SUM"))
+				(list (list (car args) (car descriptor) (cadr descriptor)))))
+		"AVG" (begin
+			(define sum_descriptor (sql_aggregates "SUM"))
+			(list
+				(list (car args) (car sum_descriptor) (cadr sum_descriptor))
+				(list (sql_nonnull_count_expr (car args)) (quote +) 0)))
 		"MAX" (list (list (car args) (quote max) nil))
 		"MIN" (list (list (car args) (quote min) nil))
 		"GROUP_CONCAT" (list (list
@@ -2190,8 +2205,11 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 
 (define window_aggregate_value_expr (lambda (fn args ags stage_alias)
 	(match fn
-		"COUNT" (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false)
+		"COUNT" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
 		"SUM" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+		"AVG" (list (quote sql_avg_divide)
+			(list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+			(list (quote get_column) stage_alias false (aggregate_col_name (cadr ags)) false))
 		"MAX" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
 		"MIN" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
 		"GROUP_CONCAT" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
@@ -5047,8 +5065,8 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		((quote scalar_first_probe) stage requested_col _stages)
 		(extract_columns_for_alias src (list (quote scalar_first_probe) stage requested_col))
 		((symbol scalar_aggregate_probe) stage _requested_col)
-		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
-			(extract_columns_for_alias src key))))
+		(merge_unique (map (scalar_aggregate_probe_outer_exprs stage) (lambda (expr)
+			(extract_columns_for_alias src expr))))
 		((quote scalar_aggregate_probe) stage requested_col)
 		(extract_columns_for_alias src (list (quote scalar_aggregate_probe) stage requested_col))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
@@ -5381,6 +5399,29 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(stage_dependency_graph all_stages)
 		entries)))
 
+(define scalar_query_probe_param_index (lambda (lookup_keys params)
+	(reduce (produceN (count lookup_keys)) (lambda (index i)
+		(match (nth lookup_keys i)
+			((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+			(set_assoc index (nth lookup_keys i) (nth params i))
+			((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+			(set_assoc index (nth lookup_keys i) (nth params i))
+			_ index)) '())))
+
+/* A query-probe lambda evaluates its outer lookup keys before entering nested
+stages. Replace inherited direct column references with those parameters so
+dependency preparation does not emit free outer-row symbols. */
+(define rewrite_scalar_query_probe_params (lambda (index expr)
+	(match expr
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(coalesceNil (get_assoc index expr) expr)
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(rewrite_scalar_query_probe_params index
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons (rewrite_scalar_query_probe_params index head) (map tail (lambda (item)
+			(rewrite_scalar_query_probe_params index item))))
+		_ expr)))
+
 (define scalar_query_probe_recipe_binding (lambda (plan)
 	(match plan
 		'(stage requested_col nested_stages _hoisted_stages prepare_stages) (begin
@@ -5397,12 +5438,19 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(define value_expr (nth (scalar_first_probe_parts ag) 0))
 			(define params (map (produceN (count keys)) (lambda (i)
 				(symbol (concat "__probe_key_" i)))))
+			(define param_index (scalar_query_probe_param_index lookup_keys params))
+			(define bound_stage (rewrite_scalar_query_probe_params param_index stage))
+			(define bound_value_expr (rewrite_scalar_query_probe_params param_index value_expr))
+			(define bound_nested_stages (map nested_stages (lambda (nested_stage)
+				(rewrite_scalar_query_probe_params param_index nested_stage))))
+			(define bound_prepare_stages (map prepare_stages (lambda (prepare_stage)
+				(rewrite_scalar_query_probe_params param_index prepare_stage))))
 			(list
 				(quote define)
 				(symbol (scalar_query_probe_recipe_key stage requested_col))
 				(list (quote memoize)
 					(list (quote lambda) params
-						(lower_scalar_first_query_probe_expr_using stage value_expr keys params nested_stages prepare_stages)))))
+						(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr keys params bound_nested_stages bound_prepare_stages)))))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
 (define scalar_query_probe_recipe_bindings (lambda (plans)
@@ -5545,8 +5593,8 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		((quote scalar_first_probe) stage requested_col _stages)
 		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_first_probe) stage requested_col) columns_by_alias)
 		((symbol scalar_aggregate_probe) stage _requested_col)
-		(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (acc key)
-			(collect_join_columns_acc sources default_alias target_alias key acc)) columns_by_alias)
+		(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
 		((quote scalar_aggregate_probe) stage requested_col)
 		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_aggregate_probe) stage requested_col) columns_by_alias)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
@@ -7724,8 +7772,10 @@ is still available and remains an ordinary scalar expression through untangle. *
 				(scalar_aggregate_probe_stage_safe? stage)
 				(and
 					(or
-						(probe_limit_small_enough? limit_value)
-						(probe_context_small_enough? probe_sources))
+						(stage_has_residual_outer_refs? stage)
+						(or
+							(probe_limit_small_enough? limit_value)
+							(probe_context_small_enough? probe_sources)))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
 
 (define probe_output_sources_for_block (lambda (stages sources default_alias limit_value)

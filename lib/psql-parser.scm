@@ -90,6 +90,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define psql_mod_expr (lambda (a b) '('mod a b))
 ))
 
+/* SQL numeric literals are exact decimals. Fold literal addition and
+subtraction before the AST loses that distinction to binary float runtime
+arithmetic; leave expressions containing columns or functions untouched. */
+(define psql_add_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_add_numeric_literals a b)
+	'((quote +) a b))))
+(define psql_sub_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_sub_numeric_literals a b)
+	'((quote -) a b))))
+
 (define psql_type (parser (or
 	(parser '((atom "character" true) (atom "varying" true)) "varying")
 	(parser '((atom "double" true) (atom "precision" true)) "double")
@@ -198,8 +208,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a psql_expression4) "+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_add a n unit))
 		/* date - INTERVAL n UNIT */
 		(parser '((define a psql_expression4) "-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a psql_expression4) "+" (define b psql_expression3)) '((quote +) a b))
-		(parser '((define a psql_expression4) "-" (define b psql_expression3)) '((quote -) a b))
+		(parser '((define a psql_expression4) "+" (define b psql_expression3)) (psql_add_expr a b))
+		(parser '((define a psql_expression4) "-" (define b psql_expression3)) (psql_sub_expr a b))
 		psql_expression4
 	)))
 
@@ -234,8 +244,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e psql_expression) ")") '('count_distinct e))
 		/* COUNT(expr): count non-NULL values -> map to (if (nil? expr) 0 1), reduce +, neutral 0 */
 		(parser '((atom "COUNT" true) "(" (define e psql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
-		(parser '((atom "SUM" true) "(" (define s psql_expression) ")") '('aggregate s (quote +) 0))
-		(parser '((atom "AVG" true) "(" (define s psql_expression) ")") '((quote /) '('aggregate s (quote +) 0) '('aggregate 1 (quote +) 0)))
+		(parser '((atom "SUM" true) "(" (define s psql_expression) ")")
+			(begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
+		(parser '((atom "AVG" true) "(" (define s psql_expression) ")")
+			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
 		(parser '((atom "MIN" true) "(" (define s psql_expression) ")") '('aggregate s 'min nil))
 		(parser '((atom "MAX" true) "(" (define s psql_expression) ")") '('aggregate s 'max nil))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s psql_expression) (atom "SEPARATOR" true) (define sep psql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil))

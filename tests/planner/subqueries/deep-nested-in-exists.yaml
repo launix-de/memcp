@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Deep nested IN / EXISTS / NOT IN at arbitrary depths
 # Reuses the dn_* chain tables from 104 plus adds a tags table for set membership.
 # Tests that IN/EXISTS/NOT IN rewrite candidates (→ COUNT-based Neumann unnesting)
@@ -200,8 +215,6 @@ test_cases:
         - "touch_keytable"
 
   - name: "Depth 3: EXISTS references outermost table (skip 2 levels)"
-    noncritical: true
-    fail_comment: "skip-level EXISTS loses its outermost domain key"
     sql: |
       SELECT a.id,
         (SELECT
@@ -424,8 +437,6 @@ test_cases:
           matched_d: 30
 
   - name: "Mixed depth 3: IN at level 2, scalar at level 3"
-    noncritical: true
-    fail_comment: "mixed IN and scalar stages currently produce an invalid physical value tag"
     sql: |
       SELECT a.id,
         (SELECT
@@ -470,8 +481,6 @@ test_cases:
           non_gamma_label: null
 
   - name: "Mixed depth 4: NOT IN skipping 2 levels to outermost"
-    noncritical: true
-    fail_comment: "skip-level NOT IN currently produces an invalid physical value tag"
     sql: |
       SELECT a.id,
         (SELECT
@@ -537,8 +546,6 @@ test_cases:
         - "exists_probe"
 
   - name: "Depth 3: EXISTS result propagated through 2 scalar levels"
-    noncritical: true
-    fail_comment: "projected EXISTS currently fails across two scalar stage boundaries"
     sql: |
       SELECT a.id,
         (SELECT
@@ -558,8 +565,6 @@ test_cases:
           is_urgent: false
 
   - name: "Depth 4: projected EXISTS propagates false through 3 scalar levels"
-    noncritical: true
-    fail_comment: "projected EXISTS currently fails across three scalar stage boundaries"
     sql: |
       SELECT a.id,
         (SELECT

@@ -29,8 +29,28 @@ import (
 	crand "crypto/rand"
 	"encoding/binary"
 	"math"
+	"math/big"
+	"strconv"
 	"strings"
 )
+
+func sqlLiteralArithmetic(a, b Scmer, subtract bool) Scmer {
+	left, leftOK := new(big.Rat).SetString(strconv.FormatFloat(a.Float(), 'g', -1, 64))
+	right, rightOK := new(big.Rat).SetString(strconv.FormatFloat(b.Float(), 'g', -1, 64))
+	if !leftOK || !rightOK {
+		if subtract {
+			return NewFloat(a.Float() - b.Float())
+		}
+		return NewFloat(a.Float() + b.Float())
+	}
+	if subtract {
+		left.Sub(left, right)
+	} else {
+		left.Add(left, right)
+	}
+	result, _ := left.Float64()
+	return NewFloat(result)
+}
 
 func init_alu() {
 	// string functions
@@ -115,6 +135,30 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "sql_sum_reduce",
+		Desc: "adds two SQL SUM values while treating NULL as the empty aggregate identity",
+		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return a[1]
+			}
+			if a[1].IsNil() {
+				return a[0]
+			}
+			if a[0].IsInt() && a[1].IsInt() {
+				return NewInt(a[0].Int() + a[1].Int())
+			}
+			return NewFloat(a[0].Float() + a[1].Float())
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "number|nil", ParamName: "left", ParamDesc: "partial sum"},
+				{Kind: "number|nil", ParamName: "right", ParamDesc: "next value"},
+			},
+			Return: &TypeDescriptor{Kind: "number|nil"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "-",
 		Desc: "subtracts two or more numbers from the first one",
 		Fn: func(a ...Scmer) Scmer {
@@ -151,6 +195,36 @@ func init_alu() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "number", ParamName: "value...", ParamDesc: "values", Variadic: true},
+			},
+			Return: &TypeDescriptor{Kind: "number"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sql_add_numeric_literals",
+		Desc: "adds two SQL numeric literals using their exact decimal spellings",
+		Fn: func(a ...Scmer) Scmer {
+			return sqlLiteralArithmetic(a[0], a[1], false)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "number", ParamName: "a", ParamDesc: "left literal"},
+				{Kind: "number", ParamName: "b", ParamDesc: "right literal"},
+			},
+			Return: &TypeDescriptor{Kind: "number"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sql_sub_numeric_literals",
+		Desc: "subtracts two SQL numeric literals using their exact decimal spellings",
+		Fn: func(a ...Scmer) Scmer {
+			return sqlLiteralArithmetic(a[0], a[1], true)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "number", ParamName: "a", ParamDesc: "left literal"},
+				{Kind: "number", ParamName: "b", ParamDesc: "right literal"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,

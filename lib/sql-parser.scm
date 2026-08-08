@@ -22,7 +22,18 @@ ordered=false: ORDER BY in OVER() can be ignored (result independent of row orde
 ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
 Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
 (define sql_aggregates (coalesce sql_aggregates (newsession)))
-(sql_aggregates "SUM" '(+ 0 false))
+(define sql_avg_divide (lambda (sum count)
+	(if (or (nil? sum) (equal? count 0)) nil (/ sum count))))
+(define sql_nonnull_count_expr (lambda (expr)
+	(list (quote if) (list (quote nil?) expr) 0 1)))
+(define sql_avg_expr (lambda (expr sum_descriptor count_descriptor)
+	(list (quote sql_avg_divide)
+		(list (quote aggregate) expr (car sum_descriptor) (cadr sum_descriptor))
+		(list (quote aggregate)
+			(sql_nonnull_count_expr expr)
+			(car count_descriptor)
+			(cadr count_descriptor)))))
+(sql_aggregates "SUM" (list (quote sql_sum_reduce) nil false))
 (sql_aggregates "MIN" '(min nil false))
 (sql_aggregates "MAX" '(max nil false))
 /* COUNT is special: compiler replaces arg with 1 (TODO: COUNT(DISTINCT col)) */
@@ -107,6 +118,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		'((quote -) a '((quote *) b '((quote if) '((quote <) '((quote /) a b) 0) '((quote ceil) '((quote /) a b)) '((quote floor) '((quote /) a b)))))
 	)
 ))
+
+/* SQL numeric literals are exact decimals. Fold literal addition and
+subtraction before the AST loses that distinction to binary float runtime
+arithmetic; leave expressions containing columns or functions untouched. */
+(define sql_add_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_add_numeric_literals a b)
+	'((quote +) a b))))
+(define sql_sub_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_sub_numeric_literals a b)
+	'((quote -) a b))))
 
 /* lightweight literal parser for top-level contexts (before sql_expression is defined) */
 (define sql_literal (parser (or
@@ -643,8 +664,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((define a sql_expression4) "+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_add a n unit))
 		/* date - INTERVAL n UNIT */
 		(parser '((define a sql_expression4) "-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a sql_expression4) "+" (define b sql_expression3)) '((quote +) a b))
-		(parser '((define a sql_expression4) "-" (define b sql_expression3)) '((quote -) a b))
+		(parser '((define a sql_expression4) "+" (define b sql_expression3)) (sql_add_expr a b))
+		(parser '((define a sql_expression4) "-" (define b sql_expression3)) (sql_sub_expr a b))
 		sql_expression4
 	)))
 
@@ -704,7 +725,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
 		(parser '((atom "COUNT" true) "(" (define e sql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
 		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
-		(parser '((atom "AVG" true) "(" (define s sql_expression) ")") (begin (define ds (sql_aggregates "SUM")) (define dc (sql_aggregates "COUNT")) '((quote /) '('aggregate s (car ds) (cadr ds)) '('aggregate 1 (car dc) (cadr dc)))))
+		(parser '((atom "AVG" true) "(" (define s sql_expression) ")")
+			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
 		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "MIN")) '('aggregate s (car d) (cadr d))))
 		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "MAX")) '('aggregate s (car d) (cadr d))))
 		/* GROUP_CONCAT with OVER: window function (must precede plain rules) */

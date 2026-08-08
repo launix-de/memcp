@@ -278,6 +278,15 @@ test_cases:
       data:
         - leading_dot: -0.25
 
+  - name: "Decimal literal addition and subtraction are exact"
+    sql: "SELECT .06 + 0.01 AS upper_bound, .06 - 0.01 AS lower_bound, (.06 + 0.01) = 0.07 AS upper_matches"
+    expect:
+      rows: 1
+      data:
+        - upper_bound: 0.07
+          lower_bound: 0.05
+          upper_matches: true
+
   - name: "Leading dot without fractional digits must fail"
     sql: "SELECT . AS invalid_decimal"
     expect:

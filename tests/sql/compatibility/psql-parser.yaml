@@ -46,6 +46,15 @@ setup:
         5000)
 
 test_cases:
+  - name: "Empty SUM and AVG use NULL rather than the COUNT identity"
+    sql: "SELECT COUNT(val) AS row_count, SUM(val) AS total, AVG(val) AS average FROM psql_data WHERE id < 0"
+    expect:
+      rows: 1
+      data:
+        - row_count: 0
+          total: null
+          average: null
+
   - name: "EXPLAIN COMPILE exposes PostgreSQL planner metrics"
     sql: "EXPLAIN COMPILE SELECT id FROM psql_data WHERE val BETWEEN 20 AND 40 ORDER BY id"
     expect:
@@ -215,6 +224,20 @@ test_cases:
       rows: 1
       data:
         - { matching_rows: 3000 }
+
+  - name: "TPC-H Q6 computed decimal bounds include both endpoints"
+    sql: |
+      SELECT discount, COUNT(*) AS rows_per_discount
+      FROM psql_decimal_range
+      WHERE discount BETWEEN .06 - 0.01 AND .06 + 0.01
+      GROUP BY discount
+      ORDER BY discount
+    expect:
+      rows: 3
+      data:
+        - { discount: 0.05, rows_per_discount: 1000 }
+        - { discount: 0.06, rows_per_discount: 1000 }
+        - { discount: 0.07, rows_per_discount: 1000 }
 
   - name: "TPC-H Q6 combined predicates retain every matching row"
     sql: |
