@@ -312,7 +312,7 @@ cd memcp
 go build -o memcp
 
 # 4. Run the test suite (starts its own server automatically)
-python3 run_sql_tests.py tests/01_basic_sql.yaml
+python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml
 
 # 5. Make your changes and add tests
 # 6. Submit a pull request!
@@ -337,12 +337,12 @@ make test
 cp git-pre-commit .git/hooks/pre-commit
 
 # Run specific test suites (starts its own server automatically)
-python3 run_sql_tests.py tests/01_basic_sql.yaml      # Basic operations
-python3 run_sql_tests.py tests/02_functions.yaml      # SQL functions
-python3 run_sql_tests.py tests/07_error_cases.yaml    # Error handling
+python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml   # Basic operations
+python3 run_sql_tests.py tests/sql/expressions/functions.yaml   # SQL functions
+python3 run_sql_tests.py tests/sql/expressions/error-cases.yaml # Error handling
 
 # Connect to an already-running instance (skip startup)
-python3 run_sql_tests.py tests/01_basic_sql.yaml 4321 --connect-only
+python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml 4321 --connect-only
 ```
 
 ## Performance Testing 📊

@@ -1,0 +1,543 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Synthetic relational shapes corresponding to TPC-H operator combinations"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: |
+      CREATE TABLE cq_parent (
+        id INT PRIMARY KEY,
+        owner_id INT,
+        tenant_id INT,
+        ref_id INT
+      )
+  - sql: |
+      CREATE TABLE cq_item (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        ref_id INT,
+        score INT,
+        state INT
+      )
+  - sql: |
+      CREATE TABLE cq_ref (
+        id INT PRIMARY KEY,
+        group_id INT,
+        label VARCHAR(32)
+      )
+  - sql: |
+      CREATE TABLE cq_assignment (
+        id INT PRIMARY KEY,
+        actor_id INT,
+        tenant_id INT,
+        ref_id INT,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE cq_event (
+        id INT PRIMARY KEY,
+        item_id INT,
+        status VARCHAR(16),
+        sequence_no INT
+      )
+  - sql: |
+      INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
+        (1, 10, 100, 1000),
+        (2, 20, 200, 2000),
+        (3, 30, NULL, 3000),
+        (4, 40, 100, NULL),
+        (5, 50, 300, 5000)
+  - sql: |
+      INSERT INTO cq_item (id, parent_id, ref_id, score, state) VALUES
+        (11, 1, 1000, 5, 1),
+        (12, 1, 1001, 9, NULL),
+        (21, 2, 2000, 7, 1),
+        (31, 3, 3000, 3, 0),
+        (41, 4, NULL, 8, 1)
+  - sql: |
+      INSERT INTO cq_ref (id, group_id, label) VALUES
+        (1000, 1, 'alpha'),
+        (1001, 1, 'beta'),
+        (2000, 2, 'gamma'),
+        (3000, NULL, 'delta')
+  - sql: |
+      INSERT INTO cq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
+        (1, 7, 100, 1000, TRUE),
+        (2, 7, 100, 1001, FALSE),
+        (3, 8, 200, 2000, TRUE),
+        (4, 7, NULL, NULL, TRUE),
+        (5, 9, 300, NULL, NULL)
+  - sql: |
+      INSERT INTO cq_event (id, item_id, status, sequence_no) VALUES
+        (1, 11, 'open', 1),
+        (2, 11, 'closed', 2),
+        (3, 12, 'open', 1),
+        (4, 21, 'closed', 1),
+        (5, 31, 'open', 1)
+
+test_cases:
+
+  - name: "TPC-H Q1 shape: grouped multi-aggregate projection"
+    sql: |
+      SELECT COALESCE(state, -1) AS state_key,
+        COUNT(*) AS row_count,
+        SUM(score) AS total_score,
+        MIN(score) AS min_score,
+        MAX(score) AS max_score,
+        AVG(score) > 6 AS average_above_six
+      FROM cq_item
+      GROUP BY COALESCE(state, -1)
+      ORDER BY state_key
+    expect:
+      rows: 3
+      data:
+        - state_key: -1
+          row_count: 1
+          total_score: 9
+          min_score: 9
+          max_score: 9
+          average_above_six: true
+        - state_key: 0
+          row_count: 1
+          total_score: 3
+          min_score: 3
+          max_score: 3
+          average_above_six: false
+        - state_key: 1
+          row_count: 3
+          total_score: 20
+          min_score: 5
+          max_score: 8
+          average_above_six: true
+
+  - name: "TPC-H Q2 shape: correlated minimum across a joined domain"
+    sql: |
+      SELECT i.id, r.label
+      FROM cq_item i
+      JOIN cq_ref r ON r.id = i.ref_id
+      WHERE i.score = (
+        SELECT MIN(i2.score)
+        FROM cq_item i2
+        JOIN cq_ref r2 ON r2.id = i2.ref_id
+        WHERE r2.group_id = r.group_id
+      )
+      ORDER BY r.label DESC, i.id
+      LIMIT 3
+    expect:
+      rows: 2
+      data:
+        - id: 21
+          label: "gamma"
+        - id: 11
+          label: "alpha"
+
+  - name: "TPC-H Q3 shape: joined revenue groups with top-k ordering"
+    sql: |
+      SELECT p.id, SUM(i.score) AS revenue
+      FROM cq_parent p
+      JOIN cq_item i ON i.parent_id = p.id
+      WHERE p.tenant_id IS NOT NULL
+      GROUP BY p.id
+      ORDER BY revenue DESC, p.id
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          revenue: 14
+        - id: 4
+          revenue: 8
+
+  - name: "TPC-H Q4 shape: correlated EXISTS followed by grouping"
+    sql: |
+      SELECT p.tenant_id, COUNT(*) AS parent_count
+      FROM cq_parent p
+      WHERE p.tenant_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM cq_item i
+          JOIN cq_event e ON e.item_id = i.id
+          WHERE i.parent_id = p.id
+        )
+      GROUP BY p.tenant_id
+      ORDER BY p.tenant_id
+    expect:
+      rows: 2
+      data:
+        - tenant_id: 100
+          parent_count: 1
+        - tenant_id: 200
+          parent_count: 1
+
+  - name: "TPC-H Q5 shape: wide join grouped by a dimension"
+    sql: |
+      SELECT r.group_id, SUM(i.score) AS total_score
+      FROM cq_parent p
+      JOIN cq_item i ON i.parent_id = p.id
+      JOIN cq_ref r ON r.id = i.ref_id
+      JOIN cq_assignment a
+        ON a.tenant_id = p.tenant_id AND a.allowed = TRUE
+      GROUP BY r.group_id
+      ORDER BY r.group_id
+    expect:
+      rows: 2
+      data:
+        - group_id: 1
+          total_score: 14
+        - group_id: 2
+          total_score: 7
+
+  - name: "TPC-H Q6 shape: filtered scalar aggregate"
+    sql: |
+      SELECT SUM(score * 2) AS weighted_score
+      FROM cq_item
+      WHERE score BETWEEN 5 AND 7
+        AND state = 1
+    expect:
+      rows: 1
+      data:
+        - weighted_score: 24
+
+  - name: "TPC-H Q7 shape: bidirectional OR join alternatives"
+    noncritical: true
+    fail_comment: "join lowering retains the first bidirectional OR arm but drops the second matching arm"
+    sql: |
+      SELECT p.owner_id, a.actor_id, COUNT(*) AS pair_count
+      FROM cq_parent p
+      JOIN cq_assignment a
+        ON a.tenant_id = p.tenant_id
+       AND ((p.owner_id = 10 AND a.actor_id = 7)
+         OR (p.owner_id = 20 AND a.actor_id = 8))
+      GROUP BY p.owner_id, a.actor_id
+      ORDER BY p.owner_id
+    expect:
+      rows: 2
+      data:
+        - owner_id: 10
+          actor_id: 7
+          pair_count: 2
+        - owner_id: 20
+          actor_id: 8
+          pair_count: 1
+
+  - name: "TPC-H Q8 shape: conditional aggregate share inputs"
+    sql: |
+      SELECT r.group_id,
+        SUM(CASE WHEN i.state = 1 THEN i.score ELSE 0 END) AS selected_score,
+        SUM(i.score) AS total_score
+      FROM cq_item i
+      JOIN cq_ref r ON r.id = i.ref_id
+      WHERE r.group_id IS NOT NULL
+      GROUP BY r.group_id
+      ORDER BY r.group_id
+    expect:
+      rows: 2
+      data:
+        - group_id: 1
+          selected_score: 5
+          total_score: 14
+        - group_id: 2
+          selected_score: 7
+          total_score: 7
+
+  - name: "TPC-H Q9 shape: multi-join profit grouped by two keys"
+    sql: |
+      SELECT r.label, e.sequence_no,
+        SUM(i.score - e.sequence_no) AS profit
+      FROM cq_item i
+      JOIN cq_ref r ON r.id = i.ref_id
+      JOIN cq_event e ON e.item_id = i.id
+      GROUP BY r.label, e.sequence_no
+      ORDER BY r.label, e.sequence_no DESC
+    expect:
+      rows: 5
+      data:
+        - label: "alpha"
+          sequence_no: 2
+          profit: 3
+        - label: "alpha"
+          sequence_no: 1
+          profit: 4
+        - label: "beta"
+          sequence_no: 1
+          profit: 8
+        - label: "delta"
+          sequence_no: 1
+          profit: 2
+        - label: "gamma"
+          sequence_no: 1
+          profit: 6
+
+  - name: "TPC-H Q10 shape: joined detail grouped and ranked by aggregate"
+    sql: |
+      SELECT p.id, p.owner_id, SUM(i.score) AS open_score
+      FROM cq_parent p
+      JOIN cq_item i ON i.parent_id = p.id
+      JOIN cq_event e ON e.item_id = i.id
+      WHERE e.status = 'open'
+      GROUP BY p.id, p.owner_id
+      ORDER BY open_score DESC, p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          owner_id: 10
+          open_score: 14
+        - id: 3
+          owner_id: 30
+          open_score: 3
+
+  - name: "TPC-H Q11 shape: scalar aggregate threshold in HAVING"
+    sql: |
+      SELECT a.tenant_id,
+        SUM(CASE WHEN a.allowed = TRUE THEN 1 ELSE 0 END) AS allowed_count
+      FROM cq_assignment a
+      WHERE a.tenant_id IS NOT NULL
+      GROUP BY a.tenant_id
+      HAVING SUM(CASE WHEN a.allowed = TRUE THEN 1 ELSE 0 END) > (
+        SELECT MIN(i.state)
+        FROM cq_item i
+        WHERE i.state IS NOT NULL
+      )
+      ORDER BY a.tenant_id
+    expect:
+      rows: 2
+      data:
+        - tenant_id: 100
+          allowed_count: 1
+        - tenant_id: 200
+          allowed_count: 1
+
+  - name: "TPC-H Q12 shape: multiple conditional counts in one group"
+    sql: |
+      SELECT i.parent_id,
+        SUM(CASE WHEN e.status = 'open' THEN 1 ELSE 0 END) AS open_count,
+        SUM(CASE WHEN e.status = 'closed' THEN 1 ELSE 0 END) AS closed_count
+      FROM cq_item i
+      JOIN cq_event e ON e.item_id = i.id
+      GROUP BY i.parent_id
+      ORDER BY i.parent_id
+    expect:
+      rows: 3
+      data:
+        - parent_id: 1
+          open_count: 2
+          closed_count: 1
+        - parent_id: 2
+          open_count: 0
+          closed_count: 1
+        - parent_id: 3
+          open_count: 1
+          closed_count: 0
+
+  - name: "TPC-H Q13 shape: distribution over a LEFT JOIN aggregate"
+    sql: |
+      SELECT grouped.child_count, COUNT(*) AS parent_count
+      FROM (
+        SELECT p.id, COUNT(i.id) AS child_count
+        FROM cq_parent p
+        LEFT JOIN cq_item i ON i.parent_id = p.id
+        GROUP BY p.id
+      ) grouped
+      GROUP BY grouped.child_count
+      ORDER BY grouped.child_count
+    expect:
+      rows: 3
+      data:
+        - child_count: 0
+          parent_count: 1
+        - child_count: 1
+          parent_count: 3
+        - child_count: 2
+          parent_count: 1
+
+  - name: "TPC-H Q14 shape: conditional and total aggregates share a scan"
+    sql: |
+      SELECT
+        SUM(CASE WHEN r.label LIKE 'a%' THEN i.score ELSE 0 END) AS selected_score,
+        SUM(i.score) AS total_score
+      FROM cq_item i
+      JOIN cq_ref r ON r.id = i.ref_id
+    expect:
+      rows: 1
+      data:
+        - selected_score: 5
+          total_score: 24
+
+  - name: "TPC-H Q15 shape: maximum over a derived grouped aggregate"
+    sql: |
+      SELECT totals.parent_id, totals.total_score
+      FROM (
+        SELECT i.parent_id, SUM(i.score) AS total_score
+        FROM cq_item i
+        GROUP BY i.parent_id
+      ) totals
+      WHERE totals.total_score = (
+        SELECT MAX(other.total_score)
+        FROM (
+          SELECT i2.parent_id, SUM(i2.score) AS total_score
+          FROM cq_item i2
+          GROUP BY i2.parent_id
+        ) other
+      )
+      ORDER BY totals.parent_id
+    expect:
+      rows: 1
+      data:
+        - parent_id: 1
+          total_score: 14
+
+  - name: "TPC-H Q16 shape: anti-membership with COUNT DISTINCT"
+    sql: |
+      SELECT i.state, COUNT(DISTINCT i.ref_id) AS distinct_refs
+      FROM cq_item i
+      WHERE i.ref_id IS NOT NULL
+        AND i.ref_id NOT IN (
+          SELECT a.ref_id
+          FROM cq_assignment a
+          WHERE a.allowed = FALSE
+        )
+      GROUP BY i.state
+      ORDER BY i.state
+    expect:
+      rows: 2
+      data:
+        - state: 0
+          distinct_refs: 1
+        - state: 1
+          distinct_refs: 2
+
+  - name: "TPC-H Q17 shape: correlated AVG filters an outer aggregate"
+    sql: |
+      SELECT SUM(i.score) AS below_average_score
+      FROM cq_item i
+      WHERE i.score < (
+        SELECT AVG(i2.score)
+        FROM cq_item i2
+        WHERE i2.parent_id = i.parent_id
+      )
+    expect:
+      rows: 1
+      data:
+        - below_average_score: 5
+
+  - name: "TPC-H Q18 shape: grouped IN subquery feeds an outer group"
+    sql: |
+      SELECT p.id, SUM(i.score) AS total_score
+      FROM cq_parent p
+      JOIN cq_item i ON i.parent_id = p.id
+      WHERE p.id IN (
+        SELECT i2.parent_id
+        FROM cq_item i2
+        GROUP BY i2.parent_id
+        HAVING SUM(i2.score) > 10
+      )
+      GROUP BY p.id
+      ORDER BY p.id
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          total_score: 14
+
+  - name: "TPC-H Q19 shape: disjoint OR branches contribute once"
+    sql: |
+      SELECT SUM(score) AS selected_score
+      FROM cq_item
+      WHERE (state = 1 AND score BETWEEN 5 AND 6)
+         OR (state = 0 AND score BETWEEN 3 AND 4)
+         OR (state IS NULL AND score BETWEEN 9 AND 10)
+    expect:
+      rows: 1
+      data:
+        - selected_score: 17
+
+  - name: "TPC-H Q20 shape: grouped IN candidates plus correlated EXISTS"
+    sql: |
+      SELECT r.id, r.label
+      FROM cq_ref r
+      WHERE r.id IN (
+        SELECT i.ref_id
+        FROM cq_item i
+        WHERE i.ref_id IS NOT NULL
+        GROUP BY i.ref_id
+        HAVING SUM(i.score) >= 7
+      )
+        AND EXISTS (
+          SELECT 1
+          FROM cq_assignment a
+          WHERE a.ref_id = r.id
+        )
+      ORDER BY r.id
+    expect:
+      rows: 2
+      data:
+        - id: 1001
+          label: "beta"
+        - id: 2000
+          label: "gamma"
+
+  - name: "TPC-H Q21 shape: EXISTS and NOT EXISTS share a child domain"
+    sql: |
+      SELECT i.id
+      FROM cq_item i
+      WHERE EXISTS (
+        SELECT 1 FROM cq_event e
+        WHERE e.item_id = i.id AND e.status = 'closed'
+      )
+        AND NOT EXISTS (
+          SELECT 1 FROM cq_event e
+          WHERE e.item_id = i.id AND e.status = 'open'
+        )
+      ORDER BY i.id
+    expect:
+      rows: 1
+      data:
+        - id: 21
+
+  - name: "TPC-H Q22 shape: string prefix group with scalar AVG and anti-join"
+    sql: |
+      SELECT SUBSTRING(r.label, 1, 1) AS label_prefix,
+        COUNT(*) AS ref_count
+      FROM cq_ref r
+      WHERE LENGTH(r.label) > (
+        SELECT AVG(LENGTH(r2.label)) FROM cq_ref r2
+      )
+        AND NOT EXISTS (
+          SELECT 1 FROM cq_assignment a WHERE a.ref_id = r.id
+        )
+      GROUP BY SUBSTRING(r.label, 1, 1)
+      ORDER BY label_prefix
+    expect:
+      rows: 1
+      data:
+        - label_prefix: "d"
+          ref_count: 1
+
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"

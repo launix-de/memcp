@@ -1,0 +1,412 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Trace-derived late projection and composed read-model contracts"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trace_config"
+  - sql: "DROP TABLE IF EXISTS trace_doc"
+  - sql: "DROP TABLE IF EXISTS trace_revision"
+  - sql: "DROP TABLE IF EXISTS trace_file"
+  - sql: "DROP TABLE IF EXISTS trace_profile"
+  - sql: "DROP TABLE IF EXISTS trace_metric"
+  - sql: "DROP TABLE IF EXISTS trace_wide_prop"
+  - sql: "DROP TABLE IF EXISTS trace_wide_parent"
+  - sql: "DROP TABLE IF EXISTS trace_wide_assignment"
+  - sql: |
+      CREATE TABLE trace_profile (
+        id INT PRIMARY KEY
+      )
+  - sql: |
+      CREATE TABLE trace_metric (
+        id INT PRIMARY KEY,
+        profile_id INT,
+        valid_from INT,
+        value_a INT,
+        value_b INT,
+        value_c INT,
+        value_d INT,
+        value_e INT,
+        value_f INT,
+        value_g INT,
+        value_h INT
+      )
+  - sql: |
+      CREATE TABLE trace_wide_parent (
+        id INT PRIMARY KEY,
+        owner_id INT,
+        is_public BOOL,
+        team_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_wide_assignment (
+        id INT PRIMARY KEY,
+        team_id INT,
+        member_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_wide_prop (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        archived BOOL
+      )
+  - sql: "INSERT INTO trace_profile (id) VALUES (1)"
+  - sql: "INSERT INTO trace_metric (id, profile_id, valid_from, value_a, value_b, value_c, value_d, value_e, value_f, value_g, value_h) VALUES (1, 1, 1, 10, 20, 30, 40, 50, 60, 70, 80)"
+  - sql: "INSERT INTO trace_metric SELECT id + 1, profile_id, valid_from + 1, value_a + 1, value_b + 1, value_c + 1, value_d + 1, value_e + 1, value_f + 1, value_g + 1, value_h + 1 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 2, profile_id, valid_from + 2, value_a + 2, value_b + 2, value_c + 2, value_d + 2, value_e + 2, value_f + 2, value_g + 2, value_h + 2 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 4, profile_id, valid_from + 4, value_a + 4, value_b + 4, value_c + 4, value_d + 4, value_e + 4, value_f + 4, value_g + 4, value_h + 4 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 8, profile_id, valid_from + 8, value_a + 8, value_b + 8, value_c + 8, value_d + 8, value_e + 8, value_f + 8, value_g + 8, value_h + 8 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 16, profile_id, valid_from + 16, value_a + 16, value_b + 16, value_c + 16, value_d + 16, value_e + 16, value_f + 16, value_g + 16, value_h + 16 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 32, profile_id, valid_from + 32, value_a + 32, value_b + 32, value_c + 32, value_d + 32, value_e + 32, value_f + 32, value_g + 32, value_h + 32 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 64, profile_id, valid_from + 64, value_a + 64, value_b + 64, value_c + 64, value_d + 64, value_e + 64, value_f + 64, value_g + 64, value_h + 64 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 128, profile_id, valid_from + 128, value_a + 128, value_b + 128, value_c + 128, value_d + 128, value_e + 128, value_f + 128, value_g + 128, value_h + 128 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 256, profile_id, valid_from + 256, value_a + 256, value_b + 256, value_c + 256, value_d + 256, value_e + 256, value_f + 256, value_g + 256, value_h + 256 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 512, profile_id, valid_from + 512, value_a + 512, value_b + 512, value_c + 512, value_d + 512, value_e + 512, value_f + 512, value_g + 512, value_h + 512 FROM trace_metric"
+  - sql: "INSERT INTO trace_metric SELECT id + 1024, profile_id, valid_from + 1024, value_a + 1024, value_b + 1024, value_c + 1024, value_d + 1024, value_e + 1024, value_f + 1024, value_g + 1024, value_h + 1024 FROM trace_metric"
+  - sql: "INSERT INTO trace_wide_parent (id, owner_id, is_public, team_id) VALUES (1, 7, FALSE, 10), (2, 8, TRUE, 20)"
+  - sql: "INSERT INTO trace_wide_assignment (id, team_id, member_id) VALUES (1, 10, 7), (2, 20, 9)"
+  - sql: "INSERT INTO trace_wide_prop (id, parent_id, archived) VALUES (1, 1, FALSE)"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 1, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 2, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 4, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 8, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 16, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 32, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 64, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 128, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 256, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: "INSERT INTO trace_wide_prop SELECT id + 512, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM trace_wide_prop"
+  - sql: |
+      CREATE TABLE trace_config (
+        id INT PRIMARY KEY,
+        default_type INT
+      )
+  - sql: |
+      CREATE TABLE trace_doc (
+        id INT PRIMARY KEY,
+        type INT,
+        archived BOOL,
+        parent INT
+      )
+  - sql: |
+      CREATE TABLE trace_revision (
+        id INT PRIMARY KEY,
+        doc_id INT,
+        file_id INT,
+        created INT
+      )
+  - sql: |
+      CREATE TABLE trace_file (
+        id INT PRIMARY KEY,
+        filename VARCHAR(64),
+        mime VARCHAR(64)
+      )
+  - sql: "INSERT INTO trace_config (id, default_type) VALUES (1, 10)"
+  - sql: "INSERT INTO trace_file (id, filename, mime) VALUES (1, 'one.txt', 'text/plain'), (2, 'two.pdf', 'application/pdf')"
+  - sql: "INSERT INTO trace_doc (id, type, archived, parent) VALUES (1, 10, FALSE, NULL)"
+  - sql: "INSERT INTO trace_doc SELECT id + 1, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 2, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 4, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 8, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 16, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 32, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 64, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 128, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 256, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_doc SELECT id + 512, CASE WHEN id % 2 = 0 THEN 10 ELSE 20 END, FALSE, 1 FROM trace_doc"
+  - sql: "INSERT INTO trace_revision SELECT id, id, CASE WHEN id % 2 = 0 THEN 2 ELSE 1 END, id FROM trace_doc"
+
+test_cases:
+  - name: "Derived doc list applies outer ID filter before expensive projection"
+    max_time: 2.2
+    max_plan_size: 60000
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT
+          CASE
+            WHEN (
+              (((SELECT default_type FROM trace_config WHERE id = 1 LIMIT 1) IS NULL) AND d.type IS NULL)
+              OR d.type = (SELECT default_type FROM trace_config WHERE id = 1 LIMIT 1)
+            )
+            THEN '#hit'
+            ELSE NULL
+          END AS color,
+          d.id AS id,
+          d.archived AS archived,
+          (SELECT r.file_id FROM trace_revision r WHERE r.doc_id = d.id ORDER BY r.created DESC, r.id DESC LIMIT 1) AS file_id,
+          (SELECT f.filename FROM trace_file f WHERE f.id = (
+            SELECT r.file_id FROM trace_revision r WHERE r.doc_id = d.id ORDER BY r.created DESC, r.id DESC LIMIT 1
+          ) LIMIT 1) AS filename,
+          (SELECT MIN(r.created) FROM trace_revision r WHERE r.doc_id = d.id LIMIT 1) AS first_seen,
+          (SELECT MAX(r.created) FROM trace_revision r WHERE r.doc_id = d.id LIMIT 1) AS last_seen,
+          EXISTS (
+            SELECT TRUE
+            FROM trace_revision r
+            WHERE r.doc_id = d.id
+              AND (SELECT f.mime FROM trace_file f WHERE f.id = r.file_id LIMIT 1) = 'application/pdf'
+            LIMIT 1
+          ) AS has_pdf
+        FROM trace_doc d
+      ) t
+      WHERE t.id IN (1)
+        AND (t.archived IS NULL OR t.archived IN (FALSE))
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - color: "#hit"
+          id: 1
+          archived: false
+          file_id: 1
+          filename: "one.txt"
+          first_seen: 1
+          last_seen: 1
+          has_pdf: false
+  - name: "Late projection recipe preserves columns from every join source"
+    max_time: 2.0
+    max_plan_size: 30000
+    sql: |
+      SELECT q.*
+      FROM (
+        SELECT d.id, d.type, r.created, f.filename
+        FROM trace_doc d
+        LEFT JOIN trace_revision r ON r.doc_id = d.id
+        LEFT JOIN trace_file f ON f.id = r.file_id
+      ) q
+      WHERE q.id IN (
+        SELECT id FROM trace_doc WHERE id = 1
+        UNION
+        SELECT doc_id FROM trace_revision WHERE file_id = 999
+      )
+      ORDER BY q.id
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          type: 10
+          created: 1
+          filename: "one.txt"
+  - name: "EXPLAIN uses one ordered scan for repeated scalar latest projections"
+    sql: |
+      EXPLAIN
+      SELECT
+        p.id,
+        COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+        COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+        COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c,
+        COALESCE((SELECT m.value_d FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_d,
+        COALESCE((SELECT m.value_e FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_e,
+        COALESCE((SELECT m.value_f FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_f,
+        COALESCE((SELECT m.value_g FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_g,
+        COALESCE((SELECT m.value_h FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_h
+      FROM trace_profile p
+      WHERE p.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "value_h"
+        - "scan_order"
+      result_occurrences:
+        - text: "scan_order"
+          count: 1
+      result_not_contains:
+        - "scalar-once:b1ecb2795b4bbb34"
+        - "__exists_2ff8679a7aafb8ea"
+  - name: "Repeated scalar latest projections reuse one key carrier"
+    sql: |
+      SELECT
+        p.id,
+        COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+        COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+        COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c,
+        COALESCE((SELECT m.value_d FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_d,
+        COALESCE((SELECT m.value_e FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_e,
+        COALESCE((SELECT m.value_f FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_f,
+        COALESCE((SELECT m.value_g FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_g,
+        COALESCE((SELECT m.value_h FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= 4096 ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_h
+      FROM trace_profile p
+      WHERE p.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          value_a: 2057
+          value_b: 2067
+          value_c: 2077
+          value_d: 2087
+          value_e: 2097
+          value_f: 2107
+          value_g: 2117
+          value_h: 2127
+  - name: "Wide bounded scalar projection probes nested presence stage on cold cache"
+    max_time: 1.0
+    max_plan_size: 30000
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT
+          p.id,
+          p.archived,
+          COALESCE((
+            SELECT CASE
+              WHEN par.owner_id = 7 THEN TRUE
+              ELSE NOT (
+                (NOT par.is_public)
+                AND COALESCE(par.owner_id <> 7, TRUE)
+                AND NOT EXISTS (
+                  SELECT TRUE
+                  FROM trace_wide_assignment a
+                  WHERE a.team_id = par.team_id
+                    AND a.member_id = 7
+                  LIMIT 1
+                )
+              )
+            END
+            FROM trace_wide_parent par
+            WHERE par.id = p.parent_id
+            LIMIT 1
+          ), TRUE) AS can_view
+        FROM trace_wide_prop p
+      ) t
+      WHERE t.id IN (1)
+        AND (t.archived IS NULL OR t.archived IN (FALSE))
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          archived: false
+          can_view: true
+  - name: "Repeated correlated access projections share physical recipes"
+    max_time: 1.0
+    max_planner_time_ms: 800
+    max_compile_phase_ms:
+      recipe_emit_ns: 160
+    max_compile_metrics:
+      plan_nodes: 6000
+      scans: 64
+      group_carriers: 8
+    max_plan_size: 100000
+    sql: |
+      SELECT projected.*
+      FROM (
+        SELECT item.id, item.archived,
+        COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_1 WHERE parent_1.id = item.parent_id LIMIT 1), FALSE) AS access_1,
+        COALESCE((SELECT (parent_2.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_2 WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_2 WHERE parent_2.id = item.parent_id LIMIT 1), FALSE) AS access_2,
+        COALESCE((SELECT (parent_3.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_3 WHERE member_3.team_id = parent_3.team_id AND member_3.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_3 WHERE parent_3.id = item.parent_id LIMIT 1), FALSE) AS access_3,
+        COALESCE((SELECT (parent_4.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_4 WHERE member_4.team_id = parent_4.team_id AND member_4.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_4 WHERE parent_4.id = item.parent_id LIMIT 1), FALSE) AS access_4,
+        COALESCE((SELECT (parent_5.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_5 WHERE member_5.team_id = parent_5.team_id AND member_5.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_5 WHERE parent_5.id = item.parent_id LIMIT 1), FALSE) AS access_5,
+        COALESCE((SELECT (parent_6.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_6 WHERE member_6.team_id = parent_6.team_id AND member_6.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_6 WHERE parent_6.id = item.parent_id LIMIT 1), FALSE) AS access_6,
+        COALESCE((SELECT (parent_7.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_7 WHERE member_7.team_id = parent_7.team_id AND member_7.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_7 WHERE parent_7.id = item.parent_id LIMIT 1), FALSE) AS access_7,
+        COALESCE((SELECT (parent_8.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_8 WHERE member_8.team_id = parent_8.team_id AND member_8.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_8 WHERE parent_8.id = item.parent_id LIMIT 1), FALSE) AS access_8,
+        COALESCE((SELECT (parent_9.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_9 WHERE member_9.team_id = parent_9.team_id AND member_9.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_9 WHERE parent_9.id = item.parent_id LIMIT 1), FALSE) AS access_9,
+        COALESCE((SELECT (parent_10.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_10 WHERE member_10.team_id = parent_10.team_id AND member_10.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_10 WHERE parent_10.id = item.parent_id LIMIT 1), FALSE) AS access_10,
+        COALESCE((SELECT (parent_11.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_11 WHERE member_11.team_id = parent_11.team_id AND member_11.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_11 WHERE parent_11.id = item.parent_id LIMIT 1), FALSE) AS access_11,
+        COALESCE((SELECT (parent_12.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_12 WHERE member_12.team_id = parent_12.team_id AND member_12.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_12 WHERE parent_12.id = item.parent_id LIMIT 1), FALSE) AS access_12,
+        COALESCE((SELECT (parent_13.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_13 WHERE member_13.team_id = parent_13.team_id AND member_13.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_13 WHERE parent_13.id = item.parent_id LIMIT 1), FALSE) AS access_13,
+        COALESCE((SELECT (parent_14.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_14 WHERE member_14.team_id = parent_14.team_id AND member_14.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_14 WHERE parent_14.id = item.parent_id LIMIT 1), FALSE) AS access_14,
+        COALESCE((SELECT (parent_15.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_15 WHERE member_15.team_id = parent_15.team_id AND member_15.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_15 WHERE parent_15.id = item.parent_id LIMIT 1), FALSE) AS access_15,
+        COALESCE((SELECT (parent_16.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_16 WHERE member_16.team_id = parent_16.team_id AND member_16.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_16 WHERE parent_16.id = item.parent_id LIMIT 1), FALSE) AS access_16,
+        COALESCE((SELECT (parent_17.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_17 WHERE member_17.team_id = parent_17.team_id AND member_17.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_17 WHERE parent_17.id = item.parent_id LIMIT 1), FALSE) AS access_17,
+        COALESCE((SELECT (parent_18.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_18 WHERE member_18.team_id = parent_18.team_id AND member_18.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_18 WHERE parent_18.id = item.parent_id LIMIT 1), FALSE) AS access_18,
+        COALESCE((SELECT (parent_19.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_19 WHERE member_19.team_id = parent_19.team_id AND member_19.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_19 WHERE parent_19.id = item.parent_id LIMIT 1), FALSE) AS access_19,
+        COALESCE((SELECT (parent_20.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_20 WHERE member_20.team_id = parent_20.team_id AND member_20.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_20 WHERE parent_20.id = item.parent_id LIMIT 1), FALSE) AS access_20,
+        COALESCE((SELECT (parent_21.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_21 WHERE member_21.team_id = parent_21.team_id AND member_21.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_21 WHERE parent_21.id = item.parent_id LIMIT 1), FALSE) AS access_21,
+        COALESCE((SELECT (parent_22.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_22 WHERE member_22.team_id = parent_22.team_id AND member_22.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_22 WHERE parent_22.id = item.parent_id LIMIT 1), FALSE) AS access_22,
+        COALESCE((SELECT (parent_23.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_23 WHERE member_23.team_id = parent_23.team_id AND member_23.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_23 WHERE parent_23.id = item.parent_id LIMIT 1), FALSE) AS access_23,
+        COALESCE((SELECT (parent_24.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_24 WHERE member_24.team_id = parent_24.team_id AND member_24.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_24 WHERE parent_24.id = item.parent_id LIMIT 1), FALSE) AS access_24,
+        COALESCE((SELECT (parent_25.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_25 WHERE member_25.team_id = parent_25.team_id AND member_25.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_25 WHERE parent_25.id = item.parent_id LIMIT 1), FALSE) AS access_25,
+        COALESCE((SELECT (parent_26.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_26 WHERE member_26.team_id = parent_26.team_id AND member_26.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_26 WHERE parent_26.id = item.parent_id LIMIT 1), FALSE) AS access_26,
+        COALESCE((SELECT (parent_27.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_27 WHERE member_27.team_id = parent_27.team_id AND member_27.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_27 WHERE parent_27.id = item.parent_id LIMIT 1), FALSE) AS access_27,
+        COALESCE((SELECT (parent_28.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_28 WHERE member_28.team_id = parent_28.team_id AND member_28.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_28 WHERE parent_28.id = item.parent_id LIMIT 1), FALSE) AS access_28,
+        COALESCE((SELECT (parent_29.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_29 WHERE member_29.team_id = parent_29.team_id AND member_29.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_29 WHERE parent_29.id = item.parent_id LIMIT 1), FALSE) AS access_29,
+        COALESCE((SELECT (parent_30.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_30 WHERE member_30.team_id = parent_30.team_id AND member_30.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_30 WHERE parent_30.id = item.parent_id LIMIT 1), FALSE) AS access_30,
+        COALESCE((SELECT (parent_31.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_31 WHERE member_31.team_id = parent_31.team_id AND member_31.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_31 WHERE parent_31.id = item.parent_id LIMIT 1), FALSE) AS access_31,
+        COALESCE((SELECT (parent_32.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_32 WHERE member_32.team_id = parent_32.team_id AND member_32.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_32 WHERE parent_32.id = item.parent_id LIMIT 1), FALSE) AS access_32
+        FROM trace_wide_prop item
+      ) projected
+      WHERE projected.id = 1
+        AND (projected.archived IS NULL OR projected.archived = FALSE)
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          archived: false
+          access_1: true
+          access_2: true
+          access_3: true
+          access_4: true
+          access_5: true
+          access_6: true
+          access_7: true
+          access_8: true
+          access_9: true
+          access_10: true
+          access_11: true
+          access_12: true
+          access_13: true
+          access_14: true
+          access_15: true
+          access_16: true
+          access_17: true
+          access_18: true
+          access_19: true
+          access_20: true
+          access_21: true
+          access_22: true
+          access_23: true
+          access_24: true
+          access_25: true
+          access_26: true
+          access_27: true
+          access_28: true
+          access_29: true
+          access_30: true
+          access_31: true
+          access_32: true
+  - name: "Shared scalar probe recipes preserve correlation keys"
+    sql: |
+      SELECT item.id,
+        COALESCE((SELECT (parent_a.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_a WHERE member_a.team_id = parent_a.team_id AND member_a.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_a WHERE parent_a.id = item.parent_id LIMIT 1), FALSE) AS access_a,
+        COALESCE((SELECT (parent_b.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_b WHERE member_b.team_id = parent_b.team_id AND member_b.member_id = 7 LIMIT 1)) FROM trace_wide_parent parent_b WHERE parent_b.id = item.parent_id LIMIT 1), FALSE) AS access_b
+      FROM trace_wide_prop item
+      WHERE item.id IN (1, 2)
+      ORDER BY item.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          access_a: true
+          access_b: true
+        - id: 2
+          access_a: false
+          access_b: false
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_config"
+  - sql: "DROP TABLE IF EXISTS trace_doc"
+  - sql: "DROP TABLE IF EXISTS trace_revision"
+  - sql: "DROP TABLE IF EXISTS trace_file"
+  - sql: "DROP TABLE IF EXISTS trace_profile"
+  - sql: "DROP TABLE IF EXISTS trace_metric"
+  - sql: "DROP TABLE IF EXISTS trace_wide_prop"
+  - sql: "DROP TABLE IF EXISTS trace_wide_parent"
+  - sql: "DROP TABLE IF EXISTS trace_wide_assignment"

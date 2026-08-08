@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Large lookup GROUP BY performance"
+  isolated: true
   max_time: 5
 
 setup:

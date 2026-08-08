@@ -66,7 +66,7 @@ def check_runner() -> None:
 
 def check_yaml_overrides() -> None:
     pattern = re.compile(r"^\s*max_time\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$")
-    for path in sorted(TESTS.glob("*.yaml")):
+    for path in sorted(TESTS.rglob("*.yaml")):
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             match = pattern.match(line)
             if match and float(match.group(1)) > EXPECTED_DEFAULT_MAX_TIME_SEC:

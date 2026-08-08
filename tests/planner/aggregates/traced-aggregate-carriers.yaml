@@ -1,0 +1,100 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Trace-derived grouped aggregate carrier contracts"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trace_count_access"
+  - sql: "DROP TABLE IF EXISTS trace_count_reference"
+  - sql: "DROP TABLE IF EXISTS trace_count_parent"
+  - sql: |
+      CREATE TABLE trace_count_parent (
+        id INT PRIMARY KEY,
+        reference_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_count_reference (
+        id INT PRIMARY KEY,
+        label VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE trace_count_access (
+        id INT PRIMARY KEY,
+        reference_id INT,
+        actor_id INT
+      )
+  - sql: "INSERT INTO trace_count_parent (id, reference_id) VALUES (1, 10), (2, 20), (3, 30)"
+  - sql: "INSERT INTO trace_count_reference (id, label) VALUES (10, 'north'), (20, 'south'), (30, 'west')"
+  - sql: "INSERT INTO trace_count_access (id, reference_id, actor_id) VALUES (1, 10, 7), (2, 30, 8)"
+
+test_cases:
+  - name: "COUNT lowers a grouped derived stage with an outer presence stage"
+    max_plan_size: 20000
+    sql: |
+      SELECT COUNT(*) AS total, SUM(candidate.member_count) AS memberships
+      FROM (
+        SELECT reference.id, COUNT(access_row.id) AS member_count
+        FROM trace_count_reference reference
+        LEFT JOIN trace_count_access access_row
+          ON access_row.reference_id = reference.id
+        GROUP BY reference.id
+      ) candidate
+      WHERE EXISTS (
+        SELECT TRUE
+        FROM trace_count_parent parent
+        WHERE parent.reference_id = candidate.id
+        LIMIT 1
+      )
+    expect:
+      rows: 1
+      data:
+        - total: 3
+          memberships: 2
+  - name: "Grouped derived COUNT keeps carriers out of logical IR"
+    max_plan_size: 20000
+    sql: |
+      EXPLAIN IR
+      SELECT COUNT(*) AS total, SUM(candidate.member_count) AS memberships
+      FROM (
+        SELECT reference.id, COUNT(access_row.id) AS member_count
+        FROM trace_count_reference reference
+        LEFT JOIN trace_count_access access_row
+          ON access_row.reference_id = reference.id
+        GROUP BY reference.id
+      ) candidate
+      WHERE EXISTS (
+        SELECT TRUE
+        FROM trace_count_parent parent
+        WHERE parent.reference_id = candidate.id
+        LIMIT 1
+      )
+    expect:
+      contains:
+        - "group-stage"
+        - "stage-output"
+      not_contains:
+        - "legacy_materialized"
+        - "inner_select"
+        - "dependent-subquery"
+        - ".grp:"
+        - "(scan"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_count_access"
+  - sql: "DROP TABLE IF EXISTS trace_count_reference"
+  - sql: "DROP TABLE IF EXISTS trace_count_parent"

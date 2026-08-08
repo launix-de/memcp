@@ -16,6 +16,7 @@
 metadata:
   version: "1.0"
   description: "Scalar probe compile-time scaling"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS scale_host"

@@ -1,0 +1,50 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Trace-derived random ordering with membership filtering"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trace_item"
+  - sql: "DROP TABLE IF EXISTS trace_group"
+  - sql: |
+      CREATE TABLE trace_group (
+        id INT PRIMARY KEY
+      )
+  - sql: |
+      CREATE TABLE trace_item (
+        id INT PRIMARY KEY,
+        group_id INT,
+        state INT
+      )
+  - sql: "INSERT INTO trace_group (id) VALUES (10), (20)"
+  - sql: "INSERT INTO trace_item (id, group_id, state) VALUES (1, 10, 1), (2, 20, NULL), (3, 30, 0)"
+
+test_cases:
+  - name: "ORDER BY RAND supports filtered table scan with IN subquery"
+    sql: |
+      SELECT id
+      FROM trace_item
+      WHERE (state = 1 OR state = 0 OR state IS NULL)
+        AND group_id IN (SELECT id FROM trace_group)
+      ORDER BY RAND()
+    expect:
+      rows: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_item"
+  - sql: "DROP TABLE IF EXISTS trace_group"

@@ -1,0 +1,426 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Deep correlation, EXISTS, IN, NOT IN, UNION, and NULL semantics"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: |
+      CREATE TABLE cq_parent (
+        id INT PRIMARY KEY,
+        owner_id INT,
+        tenant_id INT,
+        ref_id INT
+      )
+  - sql: |
+      CREATE TABLE cq_item (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        ref_id INT,
+        score INT,
+        state INT
+      )
+  - sql: |
+      CREATE TABLE cq_ref (
+        id INT PRIMARY KEY,
+        group_id INT,
+        label VARCHAR(32)
+      )
+  - sql: |
+      CREATE TABLE cq_assignment (
+        id INT PRIMARY KEY,
+        actor_id INT,
+        tenant_id INT,
+        ref_id INT,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE cq_event (
+        id INT PRIMARY KEY,
+        item_id INT,
+        status VARCHAR(16),
+        sequence_no INT
+      )
+  - sql: |
+      INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
+        (1, 10, 100, 1000),
+        (2, 20, 200, 2000),
+        (3, 30, NULL, 3000),
+        (4, 40, 100, NULL),
+        (5, 50, 300, 5000)
+  - sql: |
+      INSERT INTO cq_item (id, parent_id, ref_id, score, state) VALUES
+        (11, 1, 1000, 5, 1),
+        (12, 1, 1001, 9, NULL),
+        (21, 2, 2000, 7, 1),
+        (31, 3, 3000, 3, 0),
+        (41, 4, NULL, 8, 1)
+  - sql: |
+      INSERT INTO cq_ref (id, group_id, label) VALUES
+        (1000, 1, 'alpha'),
+        (1001, 1, 'beta'),
+        (2000, 2, 'gamma'),
+        (3000, NULL, 'delta')
+  - sql: |
+      INSERT INTO cq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
+        (1, 7, 100, 1000, TRUE),
+        (2, 7, 100, 1001, FALSE),
+        (3, 8, 200, 2000, TRUE),
+        (4, 7, NULL, NULL, TRUE),
+        (5, 9, 300, NULL, NULL)
+  - sql: |
+      INSERT INTO cq_event (id, item_id, status, sequence_no) VALUES
+        (1, 11, 'open', 1),
+        (2, 11, 'closed', 2),
+        (3, 12, 'open', 1),
+        (4, 21, 'closed', 1),
+        (5, 31, 'open', 1)
+
+test_cases:
+
+  - name: "Correlated ACL alternatives combine owner and assignment EXISTS"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE p.owner_id = 10
+         OR EXISTS (
+           SELECT 1 FROM cq_assignment a
+           WHERE a.actor_id = 7
+             AND a.tenant_id = p.tenant_id
+             AND a.allowed = TRUE
+         )
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 4
+
+  - name: "Repeated correlated EXISTS agrees in WHERE and projection"
+    noncritical: true
+    fail_comment: "the projected use is rebound to a false/stale stage output although the identical WHERE use matched"
+    sql: |
+      SELECT p.id,
+        EXISTS (
+          SELECT 1 FROM cq_assignment a
+          WHERE a.actor_id = 7
+            AND a.tenant_id = p.tenant_id
+            AND a.allowed = TRUE
+        ) AS visible
+      FROM cq_parent p
+      WHERE EXISTS (
+        SELECT 1 FROM cq_assignment a
+        WHERE a.actor_id = 7
+          AND a.tenant_id = p.tenant_id
+          AND a.allowed = TRUE
+      )
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          visible: true
+        - id: 4
+          visible: true
+
+  - name: "Global EXISTS is combined with correlated EXISTS"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE EXISTS (
+        SELECT 1 FROM cq_assignment a
+        WHERE a.actor_id = 7 AND a.tenant_id IS NULL
+      )
+        AND EXISTS (
+          SELECT 1 FROM cq_item i
+          WHERE i.parent_id = p.id AND i.score >= 8
+        )
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 4
+
+  - name: "Depth three scalar EXISTS references outermost scope"
+    noncritical: true
+    fail_comment: "skip-level correlation loses the outer domain while lowering nested scalar stages"
+    sql: |
+      SELECT p.id,
+        (SELECT
+          (SELECT EXISTS (
+             SELECT 1 FROM cq_assignment a
+             WHERE a.actor_id = 7
+               AND a.tenant_id = p.tenant_id
+               AND a.ref_id = i.ref_id
+               AND a.allowed = TRUE
+           )
+           FROM cq_ref r
+           WHERE r.id = i.ref_id
+           LIMIT 1)
+         FROM cq_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.score DESC
+         LIMIT 1) AS permitted
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          permitted: false
+        - id: 2
+          permitted: false
+        - id: 3
+          permitted: false
+        - id: 4
+          permitted: null
+        - id: 5
+          permitted: null
+
+  - name: "Depth four nested EXISTS filters a scalar chain"
+    sql: |
+      SELECT p.id,
+        (SELECT
+          (SELECT
+            (SELECT r.label
+             FROM cq_ref r
+             WHERE r.id = i.ref_id
+               AND EXISTS (
+                 SELECT 1 FROM cq_assignment a
+                 WHERE a.actor_id = 7
+                   AND a.ref_id = r.id
+                   AND a.allowed = TRUE
+               )
+             LIMIT 1)
+           FROM cq_event e
+           WHERE e.item_id = i.id
+           LIMIT 1)
+         FROM cq_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.id
+         LIMIT 1) AS permitted_label
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          permitted_label: "alpha"
+        - id: 2
+          permitted_label: null
+        - id: 3
+          permitted_label: null
+        - id: 4
+          permitted_label: null
+        - id: 5
+          permitted_label: null
+
+  - name: "Projected EXISTS returns false for an empty correlated domain"
+    sql: |
+      SELECT p.id,
+        EXISTS (
+          SELECT 1 FROM cq_item i
+          WHERE i.parent_id = p.id AND i.score > 100
+        ) AS has_large_item
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          has_large_item: false
+        - id: 2
+          has_large_item: false
+        - id: 3
+          has_large_item: false
+        - id: 4
+          has_large_item: false
+        - id: 5
+          has_large_item: false
+
+  - name: "Projected EXISTS keeps false through two scalar levels"
+    noncritical: true
+    fail_comment: "the presence result is lost while it crosses two scalar stage boundaries"
+    sql: |
+      SELECT p.id,
+        (SELECT
+          (SELECT EXISTS (
+             SELECT 1 FROM cq_event e
+             WHERE e.item_id = i.id AND e.status = 'missing'
+           )
+           FROM cq_ref r
+           WHERE r.id = i.ref_id
+           LIMIT 1)
+         FROM cq_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.id
+         LIMIT 1) AS has_missing_event
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          has_missing_event: false
+        - id: 2
+          has_missing_event: false
+        - id: 3
+          has_missing_event: false
+        - id: 4
+          has_missing_event: null
+        - id: 5
+          has_missing_event: null
+
+  - name: "Nested NOT EXISTS keeps outer correlation"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE EXISTS (
+        SELECT 1 FROM cq_item i
+        WHERE i.parent_id = p.id
+          AND NOT EXISTS (
+            SELECT 1 FROM cq_event e
+            WHERE e.item_id = i.id AND e.status = 'open'
+          )
+      )
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 4
+
+  - name: "IN over UNION combines two candidate branches"
+    noncritical: true
+    fail_comment: "membership lowering rejects a UNION branch that already contains a decorrelated EXISTS stage"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE p.id IN (
+        SELECT i.parent_id FROM cq_item i WHERE i.score >= 8
+        UNION
+        SELECT i.parent_id FROM cq_item i
+        WHERE EXISTS (
+          SELECT 1 FROM cq_event e
+          WHERE e.item_id = i.id AND e.status = 'closed'
+        )
+      )
+      ORDER BY p.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 4
+
+  - name: "Correlated IN over UNION references the outer row in both branches"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE p.ref_id IN (
+        SELECT i.ref_id FROM cq_item i
+        WHERE i.parent_id = p.id AND i.state = 1
+        UNION
+        SELECT a.ref_id FROM cq_assignment a
+        WHERE a.tenant_id = p.tenant_id AND a.allowed = TRUE
+      )
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
+
+  - name: "NOT IN with an empty correlated input is true"
+    noncritical: true
+    fail_comment: "a NULL probe against an empty subquery is TRUE, but the outer row is currently discarded"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE p.ref_id NOT IN (
+        SELECT i.ref_id FROM cq_item i
+        WHERE i.parent_id = p.id AND i.score > 100
+      )
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+
+  - name: "NOT IN with a NULL candidate remains unknown"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE p.ref_id NOT IN (
+        SELECT i.ref_id FROM cq_item i
+        WHERE i.parent_id = 4
+      )
+      ORDER BY p.id
+    expect:
+      rows: 0
+
+  - name: "Deep NOT IN skips scopes and preserves NULL semantics"
+    noncritical: true
+    fail_comment: "deep anti-membership loses its outer correlation and returns NULL for every scalar domain"
+    sql: |
+      SELECT p.id,
+        (SELECT
+          (SELECT r.label
+           FROM cq_ref r
+           WHERE r.id = i.ref_id
+             AND r.id NOT IN (
+               SELECT a.ref_id FROM cq_assignment a
+               WHERE a.actor_id = p.owner_id
+             )
+           LIMIT 1)
+         FROM cq_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.id
+         LIMIT 1) AS unassigned_label
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          unassigned_label: "alpha"
+        - id: 2
+          unassigned_label: "gamma"
+        - id: 3
+          unassigned_label: "delta"
+        - id: 4
+          unassigned_label: null
+        - id: 5
+          unassigned_label: null
+
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"

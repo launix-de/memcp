@@ -1,0 +1,453 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Composed scalar, aggregate, derived-table, and outer-join semantics"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: |
+      CREATE TABLE cq_parent (
+        id INT PRIMARY KEY,
+        owner_id INT,
+        tenant_id INT,
+        ref_id INT
+      )
+  - sql: |
+      CREATE TABLE cq_item (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        ref_id INT,
+        score INT,
+        state INT
+      )
+  - sql: |
+      CREATE TABLE cq_ref (
+        id INT PRIMARY KEY,
+        group_id INT,
+        label VARCHAR(32)
+      )
+  - sql: |
+      CREATE TABLE cq_assignment (
+        id INT PRIMARY KEY,
+        actor_id INT,
+        tenant_id INT,
+        ref_id INT,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE cq_event (
+        id INT PRIMARY KEY,
+        item_id INT,
+        status VARCHAR(16),
+        sequence_no INT
+      )
+  - sql: |
+      INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
+        (1, 10, 100, 1000),
+        (2, 20, 200, 2000),
+        (3, 30, NULL, 3000),
+        (4, 40, 100, NULL),
+        (5, 50, 300, 5000)
+  - sql: |
+      INSERT INTO cq_item (id, parent_id, ref_id, score, state) VALUES
+        (11, 1, 1000, 5, 1),
+        (12, 1, 1001, 9, NULL),
+        (21, 2, 2000, 7, 1),
+        (31, 3, 3000, 3, 0),
+        (41, 4, NULL, 8, 1)
+  - sql: |
+      INSERT INTO cq_ref (id, group_id, label) VALUES
+        (1000, 1, 'alpha'),
+        (1001, 1, 'beta'),
+        (2000, 2, 'gamma'),
+        (3000, NULL, 'delta')
+  - sql: |
+      INSERT INTO cq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
+        (1, 7, 100, 1000, TRUE),
+        (2, 7, 100, 1001, FALSE),
+        (3, 8, 200, 2000, TRUE),
+        (4, 7, NULL, NULL, TRUE),
+        (5, 9, 300, NULL, NULL)
+  - sql: |
+      INSERT INTO cq_event (id, item_id, status, sequence_no) VALUES
+        (1, 11, 'open', 1),
+        (2, 11, 'closed', 2),
+        (3, 12, 'open', 1),
+        (4, 21, 'closed', 1),
+        (5, 31, 'open', 1)
+
+test_cases:
+
+  - name: "Correlated scalar ORDER BY LIMIT chooses the top item"
+    sql: |
+      SELECT p.id,
+        (SELECT i.id
+         FROM cq_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.score DESC, i.id ASC
+         LIMIT 1) AS top_item
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          top_item: 12
+        - id: 2
+          top_item: 21
+        - id: 3
+          top_item: 31
+        - id: 4
+          top_item: 41
+        - id: 5
+          top_item: null
+
+  - name: "Correlated scalar OFFSET chooses the second item"
+    sql: |
+      SELECT p.id,
+        (SELECT i.id
+         FROM cq_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.score DESC, i.id ASC
+         LIMIT 1 OFFSET 1) AS second_item
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          second_item: 11
+        - id: 2
+          second_item: null
+        - id: 3
+          second_item: null
+        - id: 4
+          second_item: null
+        - id: 5
+          second_item: null
+
+  - name: "Correlated COUNT returns zero for a missing domain"
+    sql: |
+      SELECT p.id,
+        (SELECT COUNT(*) FROM cq_item i WHERE i.parent_id = p.id) AS item_count
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          item_count: 2
+        - id: 2
+          item_count: 1
+        - id: 3
+          item_count: 1
+        - id: 4
+          item_count: 1
+        - id: 5
+          item_count: 0
+
+  - name: "Correlated SUM returns NULL for a missing domain"
+    sql: |
+      SELECT p.id,
+        (SELECT SUM(i.score) FROM cq_item i WHERE i.parent_id = p.id) AS total_score
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          total_score: 14
+        - id: 2
+          total_score: 7
+        - id: 3
+          total_score: 3
+        - id: 4
+          total_score: 8
+        - id: 5
+          total_score: null
+
+  - name: "Equivalent correlated aggregates remain distinct projections"
+    sql: |
+      SELECT p.id,
+        (SELECT COUNT(*) FROM cq_item i WHERE i.parent_id = p.id) AS all_items,
+        (SELECT COUNT(*) FROM cq_item i WHERE i.parent_id = p.id AND i.state = 1) AS active_items,
+        (SELECT MAX(i.score) FROM cq_item i WHERE i.parent_id = p.id) AS max_score
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          all_items: 2
+          active_items: 1
+          max_score: 9
+        - id: 2
+          all_items: 1
+          active_items: 1
+          max_score: 7
+        - id: 3
+          all_items: 1
+          active_items: 0
+          max_score: 3
+        - id: 4
+          all_items: 1
+          active_items: 1
+          max_score: 8
+        - id: 5
+          all_items: 0
+          active_items: 0
+          max_score: null
+
+  - name: "Derived wrapper preserves scalar projections and LEFT JOIN misses"
+    sql: |
+      SELECT d.id, d.ref_label, d.open_events
+      FROM (
+        SELECT p.id,
+          r.label AS ref_label,
+          (SELECT COUNT(*)
+           FROM cq_event e
+           WHERE e.item_id IN (
+             SELECT i.id FROM cq_item i WHERE i.parent_id = p.id
+           ) AND e.status = 'open') AS open_events
+        FROM cq_parent p
+        LEFT JOIN cq_ref r ON r.id = p.ref_id
+      ) d
+      WHERE d.open_events > 0 OR d.ref_label IS NULL
+      ORDER BY d.id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          ref_label: "alpha"
+          open_events: 2
+        - id: 3
+          ref_label: "delta"
+          open_events: 1
+        - id: 4
+          ref_label: null
+          open_events: 0
+        - id: 5
+          ref_label: null
+          open_events: 0
+
+  - name: "Correlated aggregate HAVING is used as an EXISTS input"
+    noncritical: true
+    fail_comment: "EXISTS decorrelation rejects grouped inner query blocks instead of preserving their HAVING stage"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE EXISTS (
+        SELECT i.parent_id
+        FROM cq_item i
+        WHERE i.parent_id = p.id
+        GROUP BY i.parent_id
+        HAVING COUNT(*) >= 2
+      )
+      ORDER BY p.id
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  - name: "LEFT JOIN ON with correlated EXISTS preserves unmatched rows"
+    sql: |
+      SELECT p.id, r.label
+      FROM cq_parent p
+      LEFT JOIN cq_ref r
+        ON r.id = p.ref_id
+       AND EXISTS (
+         SELECT 1 FROM cq_item i
+         WHERE i.parent_id = p.id AND i.ref_id = r.id
+       )
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          label: "alpha"
+        - id: 2
+          label: "gamma"
+        - id: 3
+          label: "delta"
+        - id: 4
+          label: null
+        - id: 5
+          label: null
+
+  - name: "Nested derived aggregate retains outer correlation"
+    sql: |
+      SELECT p.id,
+        (SELECT MAX(x.score)
+         FROM (
+           SELECT i.score, i.parent_id
+           FROM cq_item i
+           WHERE EXISTS (
+             SELECT 1 FROM cq_event e
+             WHERE e.item_id = i.id
+           )
+         ) x
+         WHERE x.parent_id = p.id) AS event_score
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          event_score: 9
+        - id: 2
+          event_score: 7
+        - id: 3
+          event_score: 3
+        - id: 4
+          event_score: null
+        - id: 5
+          event_score: null
+
+  - name: "CASE selects between global and correlated EXISTS"
+    sql: |
+      SELECT p.id,
+        CASE
+          WHEN p.tenant_id IS NULL THEN EXISTS (
+            SELECT 1 FROM cq_assignment a WHERE a.tenant_id IS NULL
+          )
+          ELSE EXISTS (
+            SELECT 1 FROM cq_assignment a
+            WHERE a.tenant_id = p.tenant_id AND a.allowed = TRUE
+          )
+        END AS permitted
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          permitted: true
+        - id: 2
+          permitted: true
+        - id: 3
+          permitted: true
+        - id: 4
+          permitted: true
+        - id: 5
+          permitted: false
+
+  - name: "COALESCE wraps nested scalar aggregate without losing zero"
+    sql: |
+      SELECT p.id,
+        COALESCE((
+          SELECT SUM((
+            SELECT COUNT(*) FROM cq_event e
+            WHERE e.item_id = i.id AND e.status = 'open'
+          ))
+          FROM cq_item i
+          WHERE i.parent_id = p.id
+        ), 0) AS open_count
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          open_count: 2
+        - id: 2
+          open_count: 0
+        - id: 3
+          open_count: 1
+        - id: 4
+          open_count: 0
+        - id: 5
+          open_count: 0
+
+  - name: "Two-column correlation keeps duplicate domains separate"
+    noncritical: true
+    fail_comment: "the aggregate carrier loses nonconstant two-column domain keys"
+    sql: |
+      SELECT p.id,
+        (SELECT COUNT(*)
+         FROM cq_assignment a
+         WHERE a.tenant_id = p.tenant_id
+           AND (a.ref_id = p.ref_id OR a.ref_id IS NULL)) AS grants
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          grants: 1
+        - id: 2
+          grants: 1
+        - id: 3
+          grants: 0
+        - id: 4
+          grants: 0
+        - id: 5
+          grants: 1
+
+  - name: "Outer NULL key does not equal an inner NULL key"
+    sql: |
+      SELECT p.id,
+        EXISTS (
+          SELECT 1 FROM cq_item i WHERE i.ref_id = p.ref_id
+        ) AS has_equal_ref
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          has_equal_ref: true
+        - id: 2
+          has_equal_ref: true
+        - id: 3
+          has_equal_ref: true
+        - id: 4
+          has_equal_ref: false
+        - id: 5
+          has_equal_ref: false
+
+  - name: "Nested OR keeps NOT EXISTS and nullable scalar predicates"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE (
+        NOT EXISTS (
+          SELECT 1 FROM cq_item i WHERE i.parent_id = p.id
+        )
+        OR COALESCE((
+          SELECT MAX(i.state) FROM cq_item i WHERE i.parent_id = p.id
+        ), 0) = 0
+      )
+        AND NOT (p.owner_id = 40)
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 3
+        - id: 5
+
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"
