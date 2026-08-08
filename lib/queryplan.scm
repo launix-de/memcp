@@ -975,6 +975,14 @@ PostgreSQL parsers should both lower to the same combined operators.
 						(and (or (nil? (qb_limit inner)) (equal? (qb_limit inner) 1))
 							(nil? (qb_offset inner))))))))))
 
+(define grouped_exists_inner_supported? (lambda (inner)
+	(and (query_block? inner)
+		(and (not (empty_list? (qb_sources inner)))
+			(and (not (empty_list? (qb_group inner)))
+				(and (empty_list? (qb_order inner))
+					(and (nil? (qb_limit inner))
+						(nil? (qb_offset inner)))))))))
+
 (define normalize_membership_query_block (lambda (inner)
 	(if (and (query_block? inner)
 		(and (not (empty_list? (qb_order inner)))
@@ -1169,7 +1177,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(and (group_stage? stage)
 		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
 			(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-				(equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true))))))
+				(and (equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
+					(equal? (coalesceNil (gs_having stage) true) true)))))))
 
 (define stage_has_residual_outer_refs? (lambda (stage)
 	(not (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '())))))
@@ -1244,7 +1253,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(list stage)
 			'()))))
 
-(define make_exists_stage_rewrite (lambda (inner args)
+(define make_plain_exists_stage_rewrite (lambda (inner args)
 	(begin
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
@@ -1321,6 +1330,91 @@ PostgreSQL parsers should both lower to the same combined operators.
 				0)
 			(list stage)
 			(list source)))))
+
+(define make_grouped_exists_stage_rewrite (lambda (inner args)
+	(begin
+		(define outer_sources (nth args 0))
+		(define subquery (nth args 1))
+		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
+		(if (not (grouped_exists_inner_supported? inner))
+			(neumann_fail "untangle_query" "grouped EXISTS requires an unordered, unlimited query-block")
+			true)
+		(define inner_src (car (qb_sources inner)))
+		(define inner_sources (qb_sources inner))
+		(define inner_default (source_alias inner_src))
+		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
+		(define corr_pairs (filter (map terms (lambda (term)
+			(exists_correlation_pair inner_default inner_sources outer_sources term)))
+			(lambda (pair) (not (nil? pair)))))
+		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
+		(define lookup_pairs (domain_correlation_pairs (merge (list corr_pairs source_corr_pairs))))
+		(define local_terms (filter terms (lambda (term)
+			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
+		(define explicit_keys (map (qb_group inner) (lambda (expr)
+			(canonical_column_expr_for_alias inner_default expr))))
+		(define keys (group_keys_for_correlations inner_default lookup_pairs explicit_keys))
+		(define outer_domain (correlation_domain lookup_pairs))
+		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+		(define condition (combine_where_terms local_terms true))
+		(define ags (dedupe_aggregates_by_col (merge_unique
+			(list (extract_aggregates (coalesceNil (qb_having inner) true))
+				(list aggregate_count_descriptor)))))
+		(define stage_input (make_query_block
+			(qb_schema inner)
+			(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
+			'()
+			condition
+			'() nil '() nil nil
+			'()
+			(qb_stages inner)
+			(qb_facts inner)))
+		(define stage_id (concat "exists-group:" (fnv_hash
+			(string (list subquery keys outer_domain condition (qb_having inner))))))
+		(define stage (make_group_stage
+			stage_id
+			stage_input
+			outer_domain
+			keys
+			ags
+			(qb_having inner)
+			'()
+			'()
+			nil nil
+			(merge (list
+				(list
+					(list (quote condition) true)
+					(list (quote purpose) (quote exists))
+					(list (quote presence_only) true)
+					(list (quote domain) outer_domain)
+					(list (quote lookup-keys) lookup_keys)
+					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
+					(list (quote null_semantics) (quote exists))
+					(list (quote cardinality_mode) (quote many)))
+				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
+		(define stage_alias (exists_stage_alias stage_id))
+		(define key_names (group_key_cols keys))
+		(define having_expr (replace_group_expr
+			inner_default stage_alias keys key_names ags (coalesceNil (qb_having inner) true)))
+		(define source (list
+			stage_alias
+			(group_stage_schema stage)
+			(make_stage_output_relation stage_id)
+			(stage_source_outer? outer_sources)
+			(make_stage_lookup_condition stage_alias key_names lookup_keys having_expr)))
+		(define count_col (aggregate_col_name aggregate_count_descriptor))
+		(list
+			(list (quote >)
+				(list (quote coalesceNil)
+					(list (quote get_column) stage_alias false count_col false)
+					0)
+				0)
+			(list stage)
+			(list source)))))
+
+(define make_exists_stage_rewrite (lambda (inner args)
+	(if (empty_list? (qb_group inner))
+		(make_plain_exists_stage_rewrite inner args)
+		(make_grouped_exists_stage_rewrite inner args))))
 
 (define combine_exists_union_results (lambda (results)
 	(match (coalesceNil results '())
