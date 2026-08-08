@@ -5400,8 +5400,9 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(list
 				(quote define)
 				(symbol (scalar_query_probe_recipe_key stage requested_col))
-				(list (quote lambda) params
-					(lower_scalar_first_query_probe_expr_using stage value_expr keys params nested_stages prepare_stages))))
+				(list (quote memoize)
+					(list (quote lambda) params
+						(lower_scalar_first_query_probe_expr_using stage value_expr keys params nested_stages prepare_stages)))))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
 (define scalar_query_probe_recipe_bindings (lambda (plans)

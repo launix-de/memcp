@@ -1201,6 +1201,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (once_fn 2) 3) true "once first call computes")
 	(assert (equal? (once_fn 99) 3) true "once second call returns cached")
 	(assert (equal? (once_calls "n") 1) true "once executes only once")
+	/* memoize */
+	(define memo_calls (newsession))
+	(memo_calls "n" 0)
+	(define memo_fn (memoize (lambda (x y) (begin
+		(memo_calls "n" (+ (memo_calls "n") 1))
+		(if (equal? x 0) nil (+ x y))))))
+	(assert (equal? (memo_fn 2 3) 5) true "memoize first key computes")
+	(assert (equal? (memo_fn 2 3) 5) true "memoize repeated key reuses value")
+	(assert (nil? (memo_fn 0 9)) true "memoize caches nil values")
+	(assert (nil? (memo_fn 0 9)) true "memoize reuses cached nil values")
+	(assert (equal? (memo_fn 3 3) 6) true "memoize distinguishes arguments")
+	(assert (equal? (memo_calls "n") 3) true "memoize computes once per argument tuple")
+	(define memo_recursive (memoize (lambda (x)
+		(if (equal? x 0) 0 (+ 1 (memo_recursive (- x 1)))))))
+	(assert (equal? (memo_recursive 4) 4) true "memoize permits recursive calls")
+	(assert (equal? (memo_recursive 4) 4) true "memoize reuses recursive results")
 	/* mutex */
 	(define mtx (mutex))
 	(assert (equal? (mtx (lambda () 42)) 42) true "mutex executes inner function")

@@ -198,6 +198,60 @@ type session struct {
 	Map map[string]Scmer
 }
 
+type memoizedFunction struct {
+	mu      sync.Mutex
+	entries []Scmer
+	dict    *FastDict
+}
+
+func (memo *memoizedFunction) find(args []Scmer) (Scmer, bool) {
+	key := NewSlice(args)
+	if memo.dict != nil {
+		return memo.dict.Get(key)
+	}
+	for i := 0; i < len(memo.entries); i += 2 {
+		if Equal(memo.entries[i], key) {
+			return memo.entries[i+1], true
+		}
+	}
+	return NewNil(), false
+}
+
+func (memo *memoizedFunction) store(args []Scmer, value Scmer) {
+	key := NewSlice(append([]Scmer(nil), args...))
+	if memo.dict != nil {
+		memo.dict.Set(key, value, nil)
+		return
+	}
+	memo.entries = append(memo.entries, key, value)
+	if len(memo.entries) >= 10 {
+		memo.dict = NewFastDictValue(len(memo.entries)/2 + 4)
+		for i := 0; i < len(memo.entries); i += 2 {
+			memo.dict.Set(memo.entries[i], memo.entries[i+1], nil)
+		}
+		memo.entries = nil
+	}
+}
+
+func (memo *memoizedFunction) apply(fn Scmer, args []Scmer) (result Scmer) {
+	memo.mu.Lock()
+	if cached, ok := memo.find(args); ok {
+		memo.mu.Unlock()
+		return cached
+	}
+	memo.mu.Unlock()
+
+	result = Apply(fn, args...)
+	memo.mu.Lock()
+	if cached, ok := memo.find(args); ok {
+		memo.mu.Unlock()
+		return cached
+	}
+	memo.store(args, result)
+	memo.mu.Unlock()
+	return result
+}
+
 // build this function into your SCM environment to offer http server capabilities
 func NewSession(a ...Scmer) Scmer {
 	sess := new(session)
@@ -363,7 +417,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "newpromise",
 		Desc: "Creates a single-value promise cell (thread-safe via CAS spin-lock). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
-		Fn: NewPromise,
+		Fn:   NewPromise,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "list", ParamDesc: "optional: ≥2-element slice to use as backing", Optional: true},
@@ -381,7 +435,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "newsession",
 		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
-		Fn: NewSession,
+		Fn:   NewSession,
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
 				Params: []*TypeDescriptor{
@@ -409,7 +463,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "context",
 		Desc: "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
-		Fn: Context,
+		Fn:   Context,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "args...", ParamDesc: "depends on the usage", Variadic: true},
@@ -462,6 +516,27 @@ func init_sync() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "memoize",
+		Desc: "Creates a query-local function wrapper that caches completed results by structurally equal argument tuple. Small caches stay linear and promote to a FastDict at the standard assoc-array threshold. Misses compute without holding the cache lock so recursive calls cannot deadlock.",
+		Fn: func(a ...Scmer) Scmer {
+			memo := &memoizedFunction{}
+			return NewFunc(func(args ...Scmer) Scmer {
+				return memo.apply(a[0], args)
+			})
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "func", ParamName: "f", ParamDesc: "pure function whose results are cached by argument tuple"},
+			},
+			Return: &TypeDescriptor{Kind: "func",
+				Params: []*TypeDescriptor{
+					{Kind: "any", ParamName: "args", ParamDesc: "arguments forwarded to the wrapped function", Variadic: true},
+				},
+				Return: &TypeDescriptor{Kind: "any"},
+			},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "mutex",
 		Desc: "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
 		Fn: func(a ...Scmer) Scmer {
@@ -499,7 +574,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -517,7 +592,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "dict"},
-			Const: true,
+			Const:  true,
 		},
 	})
 }
