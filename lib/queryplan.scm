@@ -4012,12 +4012,23 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(equal? tblvar alias)
 		_ false)))
 
+(define condition_requires_exists_recset_probe? (lambda (alias condition)
+	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
+		(or found (exists_recset_probe_term? alias term))) false)))
+
 (define condition_has_exists_recset_probe? (lambda (alias condition)
 	(match condition
 		(cons head tail) (or
 			(exists_recset_probe_term? alias condition)
 			(reduce tail (lambda (found item) (or found (condition_has_exists_recset_probe? alias item))) false))
 		_ false)))
+
+(define rewrite_required_exists_recset_probe_refs (lambda (alias expr)
+	(if (exists_recset_probe_term? alias expr)
+		true
+		(match expr
+			(cons head tail) (cons head (map tail (lambda (item) (rewrite_required_exists_recset_probe_refs alias item))))
+			_ expr))))
 
 (define rewrite_exists_recset_probe_refs (lambda (alias stage probe expr)
 	(if (exists_recset_probe_term? alias expr)
@@ -4118,6 +4129,16 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 								(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation exists_src))))
 								(define stage_id (gs_id stage))
 								(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+								(define probe_sources (list exists_src))
+								(define probe_required (condition_requires_exists_recset_probe?
+									(source_alias exists_src) (qb_where block)))
+								(define rewritten_sources (rewrite_scalar_first_probe_sources_using
+									(qb_stages block) sources probe_sources default_alias))
+								(define rewrite_consumer (lambda (expr)
+									(if probe_required
+										(rewrite_required_exists_recset_probe_refs (source_alias exists_src) expr)
+										(rewrite_scalar_first_probe_expr
+											(qb_stages block) probe_sources default_alias expr))))
 								(define base_where (rewrite_exists_recset_probe_refs
 									(source_alias exists_src)
 									stage
@@ -4126,15 +4147,15 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 								(query_block_with_reorder_facts
 									(make_query_block
 										(qb_schema block)
-										(without_source_alias sources (source_alias exists_src))
-										(qb_fields block)
+										(without_source_alias rewritten_sources (source_alias exists_src))
+										(rewrite_consumer (qb_fields block))
 										base_where
-										(qb_group block)
-										(qb_having block)
-										(qb_order block)
+										(rewrite_consumer (qb_group block))
+										(rewrite_consumer (qb_having block))
+										(rewrite_consumer (qb_order block))
 										(qb_limit block)
 										(qb_offset block)
-										(qb_hidden block)
+										(rewrite_consumer (qb_hidden block))
 										(map (candidate_stage_without_source (qb_stages block) stage_id) join_reorder_stage)
 										(qb_facts block))
 									(merge (list
