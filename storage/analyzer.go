@@ -340,6 +340,20 @@ func widenBounds(a, b boundaries) boundaries {
 			} else if boundaryValueEqual(a[i].upper, cb.upper) {
 				a[i].upperInclusive = a[i].upperInclusive || cb.upperInclusive
 			}
+			// The union of distinct equality points is a range. Keeping the
+			// EqualMatcher here would let adaptive index ordering place this
+			// widened column before real equality columns and make the B-tree
+			// scan treat only the lower point as an exact prefix.
+			if matcherKindEqual(a[i].matcher, EqualMatcher) {
+				samePoint := a[i].lowerBatch && a[i].upperBatch &&
+					a[i].lowerBatchSubidx == a[i].upperBatchSubidx
+				if !a[i].lowerBatch && !a[i].upperBatch {
+					samePoint = boundaryValueEqual(a[i].lower, a[i].upper)
+				}
+				if !samePoint {
+					a[i].matcher = RangeMatcher
+				}
+			}
 			break
 		}
 		if found {

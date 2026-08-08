@@ -75,6 +75,30 @@ func TestBoundaryRange(t *testing.T) {
 	}
 }
 
+func TestWidenDistinctEqualityPointsProducesRange(t *testing.T) {
+	left := boundaries{{
+		col: "actor_id", matcher: EqualMatcher,
+		lower: scm.NewInt(7), lowerInclusive: true,
+		upper: scm.NewInt(7), upperInclusive: true,
+	}}
+	right := boundaries{{
+		col: "actor_id", matcher: EqualMatcher,
+		lower: scm.NewInt(8), lowerInclusive: true,
+		upper: scm.NewInt(8), upperInclusive: true,
+	}}
+
+	got := widenBounds(left, right)
+	if len(got) != 1 {
+		t.Fatalf("expected one widened boundary, got %d", len(got))
+	}
+	if got[0].matcher.Kind() != "range" {
+		t.Fatalf("widened matcher = %q, want range", got[0].matcher.Kind())
+	}
+	if got[0].lower.String() != "7" || got[0].upper.String() != "8" {
+		t.Fatalf("widened bounds = [%v..%v], want [7..8]", got[0].lower, got[0].upper)
+	}
+}
+
 func TestEffectiveBoundaryInclusivenessUsesIndexedRange(t *testing.T) {
 	bounds := boundaries{
 		{col: "discount", matcher: RangeMatcher, lowerInclusive: true, upperInclusive: true},
