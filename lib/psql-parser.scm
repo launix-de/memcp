@@ -90,6 +90,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define psql_mod_expr (lambda (a b) '('mod a b))
 ))
 
+/* SQL numeric literals are exact decimals. Fold literal addition and
+subtraction before the AST loses that distinction to binary float runtime
+arithmetic; leave expressions containing columns or functions untouched. */
+(define psql_add_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_add_numeric_literals a b)
+	'((quote +) a b))))
+(define psql_sub_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_sub_numeric_literals a b)
+	'((quote -) a b))))
+
 (define psql_type (parser (or
 	(parser '((atom "character" true) (atom "varying" true)) "varying")
 	(parser '((atom "double" true) (atom "precision" true)) "double")
@@ -198,8 +208,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a psql_expression4) "+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_add a n unit))
 		/* date - INTERVAL n UNIT */
 		(parser '((define a psql_expression4) "-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a psql_expression4) "+" (define b psql_expression3)) '((quote +) a b))
-		(parser '((define a psql_expression4) "-" (define b psql_expression3)) '((quote -) a b))
+		(parser '((define a psql_expression4) "+" (define b psql_expression3)) (psql_add_expr a b))
+		(parser '((define a psql_expression4) "-" (define b psql_expression3)) (psql_sub_expr a b))
 		psql_expression4
 	)))
 

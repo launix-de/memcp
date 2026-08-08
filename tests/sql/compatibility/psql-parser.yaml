@@ -225,6 +225,20 @@ test_cases:
       data:
         - { matching_rows: 3000 }
 
+  - name: "TPC-H Q6 computed decimal bounds include both endpoints"
+    sql: |
+      SELECT discount, COUNT(*) AS rows_per_discount
+      FROM psql_decimal_range
+      WHERE discount BETWEEN .06 - 0.01 AND .06 + 0.01
+      GROUP BY discount
+      ORDER BY discount
+    expect:
+      rows: 3
+      data:
+        - { discount: 0.05, rows_per_discount: 1000 }
+        - { discount: 0.06, rows_per_discount: 1000 }
+        - { discount: 0.07, rows_per_discount: 1000 }
+
   - name: "TPC-H Q6 combined predicates retain every matching row"
     sql: |
       SELECT COUNT(*) AS matching_rows
