@@ -149,6 +149,35 @@ Session reads used inside dependent helpers are treated like outer dependencies
 when they affect semantics. Pull their values into the helper domain/key
 context and join back with null-safe equality when needed.
 
+The internal transaction session `__memcp_tx` identifies execution state, not
+SQL input, and must not become a semantic domain key. All other session reads
+that can change a helper result are external dependencies, including values
+used below grouped or derived query blocks.
+
+## Predicate and Rewrite Closure
+
+Planner rewrites must preserve the complete predicate. A rule may split a
+top-level AND into independently placeable terms, but selecting one useful term
+does not permit the remaining terms to be dropped. Terms that cannot move must
+remain as residual predicates at a semantically valid level.
+
+When a rewrite removes or replaces a stage-output source, it must rewrite every
+consumer of that source consistently: source joins, WHERE, projections, GROUP
+BY, HAVING, ORDER BY, and hidden fields. Driver/domain keys must be selected
+from the rewritten source set, after inherited scalar probes and correlation
+bindings have been resolved. Choosing a key from the pre-rewrite source set can
+leave free aliases in the physical plan.
+
+Carrier projection is valid only when all semantic inputs are represented:
+
+- every key has a matching projected driver column or an explicit external
+  binding
+- the full local filter remains attached to the carrier build or as a residual
+  predicate
+- session-dependent carriers are query-local and cannot be reused across
+  different session bindings
+- NULL and empty-domain behavior remains that of the logical stage
+
 ## Scalar Cardinality
 
 Scalar cardinality is semantic, not a physical operator.
@@ -323,3 +352,16 @@ It must also preserve architecture and performance:
 Do not weaken tests, mark critical tests noncritical, or replace performance
 guards with shape-only assertions unless the lost protection is restored
 elsewhere.
+
+## Planner Source Layout
+
+Source files should follow the planner phases rather than feature history. A
+future split of `lib/queryplan.scm` should keep one-way dependencies in pipeline
+order: shared logical IR, decorrelation and logical rewrites, reorder/cost facts,
+physical lowering, then parser-facing adapters. Logical modules must not import
+or call physical lowering modules.
+
+Do not combine a large mechanical file move with a semantic planner fix. Move
+stable phase ranges in a dedicated refactoring PR so review can distinguish
+behavior changes from relocation and A/B compile-time measurements remain
+meaningful.
