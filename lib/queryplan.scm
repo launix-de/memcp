@@ -6105,7 +6105,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 		'())))
 
 (define group_table_name (lambda (schema tbl alias keys condition)
-	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v3" schema tbl alias keys condition))))))
+	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v4" schema tbl alias keys condition))))))
 
 (define canonical_group_stage_alias "__grp")
 
