@@ -8754,9 +8754,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 						nested_materialize
 						(if initializer_owner (list keytable_init) '())
 						ensure_agg_columns
+						computed_order_plans
 						(if (and initializer_owner (empty_list? ags)) (list collect_plan) '())
-						agg_plans
-						computed_order_plans)))
+						agg_plans)))
 				(if scalar_order_base_stage
 					(list (quote !begin)
 						nested_prepare_expr
