@@ -2047,24 +2047,30 @@ PostgreSQL parsers should both lower to the same combined operators.
 						old_alias
 						(aggregate_col_name ag)
 						(aggregate_col_name
-							(rewrite_stage_output_left_join_expr base_alias_map id_map ag))))))))))
+							(rewrite_stage_graph_expr base_alias_map id_map ag))))))))))
 		(merge (list base_alias_map aggregate_col_map)))))
 
-(define derived_stage_rebind_stage (lambda (alias_map id_map stage)
+/* Derived clones rebind their root ID. Stage merges keep the surviving root ID,
+while both modes rebind every reference and nested stage descriptor below it. */
+(define rewrite_stage_graph_stage (lambda (alias_map id_map rebind_id stage)
 	(if (not (group_stage? stage))
 		stage
 		(make_group_stage
-			(stage_merge_lookup id_map (gs_id stage) (gs_id stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_input stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_domain stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_keys stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_aggregates stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_having stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_output stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_order stage))
+			(if rebind_id (stage_merge_lookup id_map (gs_id stage) (gs_id stage)) (gs_id stage))
+			(rewrite_stage_graph_expr alias_map id_map (gs_input stage))
+			(rewrite_stage_graph_expr alias_map id_map (gs_domain stage))
+			(rewrite_stage_graph_expr alias_map id_map (gs_keys stage))
+			(rewrite_stage_graph_expr alias_map id_map (gs_aggregates stage))
+			(rewrite_stage_graph_expr alias_map id_map (gs_having stage))
+			(rewrite_stage_graph_expr alias_map id_map (gs_output stage))
+			(rewrite_stage_graph_expr alias_map id_map (gs_order stage))
 			(gs_limit stage)
 			(gs_offset stage)
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_facts stage))))))
+			(rewrite_stage_graph_expr alias_map id_map (gs_facts stage))))))
+
+(define rewrite_stage_graph_stages (lambda (alias_map id_map stages)
+	(map (coalesceNil stages '()) (lambda (stage)
+		(rewrite_stage_graph_stage alias_map id_map true stage)))))
 
 /* Independently flattened instances may start with identical generated stage
 IDs. Give each instance its own IDs and source aliases before their plans meet. */
@@ -2074,16 +2080,16 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define alias_map (derived_stage_rebind_alias_map id_map stages))
 		(list
 			(map (coalesceNil stages '()) (lambda (stage)
-				(derived_stage_rebind_stage alias_map id_map stage)))
+				(rewrite_stage_graph_stage alias_map id_map true stage)))
 			alias_map
 			id_map))))
 
 (define rebind_derived_stage_expr (lambda (rebinding expr)
-	(rewrite_stage_output_left_join_expr (nth rebinding 1) (nth rebinding 2) expr)))
+	(rewrite_stage_graph_expr (nth rebinding 1) (nth rebinding 2) expr)))
 
 (define rebind_derived_stage_sources (lambda (rebinding sources)
 	(map (coalesceNil sources '()) (lambda (src)
-		(rewrite_stage_output_left_join_source (nth rebinding 1) (nth rebinding 2) src)))))
+		(rewrite_stage_graph_source (nth rebinding 1) (nth rebinding 2) src)))))
 
 (define make_scalar_single_stage_rewrite (lambda (inner args)
 	(begin
@@ -4500,7 +4506,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(list
 				(stage_output_relation_id (source_relation (nth source_sources i)))
 				(stage_output_relation_id (source_relation (nth target_sources i)))))))
-		(rewrite_stage_output_left_join_expr alias_map id_map (gs_aggregates stage)))))
+		(rewrite_stage_graph_expr alias_map id_map (gs_aggregates stage)))))
 
 (define stage_output_left_join_entry_add_source (lambda (entry src stage)
 	(list
@@ -4658,49 +4664,42 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				nil)
 			default))))
 
-(define rewrite_stage_output_probe_column (lambda (alias_map id_map stage requested_col)
+(define rewrite_stage_graph_probe_column (lambda (alias_map id_map stage requested_col)
 	(begin
 		(define ag (scalar_first_probe_aggregate stage requested_col))
 		(if (nil? ag)
 			requested_col
 			(aggregate_col_name
-				(rewrite_stage_output_left_join_expr alias_map id_map ag))))))
+				(rewrite_stage_graph_expr alias_map id_map ag))))))
 
-(define rewrite_stage_output_probe_stage (lambda (alias_map id_map stage)
-	(derived_stage_rebind_stage alias_map id_map stage)))
-
-(define rewrite_stage_output_probe_stages (lambda (alias_map id_map stages)
-	(map (coalesceNil stages '()) (lambda (stage)
-		(rewrite_stage_output_probe_stage alias_map id_map stage)))))
-
-(define rewrite_stage_output_left_join_expr (lambda (alias_map id_map expr)
+(define rewrite_stage_graph_expr (lambda (alias_map id_map expr)
 	(match expr
 		((symbol scalar_first_probe) stage requested_col stages)
 		(list (quote scalar_first_probe)
-			(rewrite_stage_output_probe_stage alias_map id_map stage)
-			(rewrite_stage_output_probe_column alias_map id_map stage requested_col)
-			(rewrite_stage_output_probe_stages alias_map id_map stages))
+			(rewrite_stage_graph_stage alias_map id_map true stage)
+			(rewrite_stage_graph_probe_column alias_map id_map stage requested_col)
+			(rewrite_stage_graph_stages alias_map id_map stages))
 		((quote scalar_first_probe) stage requested_col stages)
 		(list (quote scalar_first_probe)
-			(rewrite_stage_output_probe_stage alias_map id_map stage)
-			(rewrite_stage_output_probe_column alias_map id_map stage requested_col)
-			(rewrite_stage_output_probe_stages alias_map id_map stages))
+			(rewrite_stage_graph_stage alias_map id_map true stage)
+			(rewrite_stage_graph_probe_column alias_map id_map stage requested_col)
+			(rewrite_stage_graph_stages alias_map id_map stages))
 		((symbol scalar_first_probe) stage requested_col)
 		(list (quote scalar_first_probe)
-			(rewrite_stage_output_probe_stage alias_map id_map stage)
-			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
+			(rewrite_stage_graph_stage alias_map id_map true stage)
+			(rewrite_stage_graph_probe_column alias_map id_map stage requested_col))
 		((quote scalar_first_probe) stage requested_col)
 		(list (quote scalar_first_probe)
-			(rewrite_stage_output_probe_stage alias_map id_map stage)
-			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
+			(rewrite_stage_graph_stage alias_map id_map true stage)
+			(rewrite_stage_graph_probe_column alias_map id_map stage requested_col))
 		((symbol scalar_aggregate_probe) stage requested_col)
 		(list (quote scalar_aggregate_probe)
-			(rewrite_stage_output_probe_stage alias_map id_map stage)
-			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
+			(rewrite_stage_graph_stage alias_map id_map true stage)
+			(rewrite_stage_graph_probe_column alias_map id_map stage requested_col))
 		((quote scalar_aggregate_probe) stage requested_col)
 		(list (quote scalar_aggregate_probe)
-			(rewrite_stage_output_probe_stage alias_map id_map stage)
-			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
+			(rewrite_stage_graph_stage alias_map id_map true stage)
+			(rewrite_stage_graph_probe_column alias_map id_map stage requested_col))
 		((symbol get_column) tblvar ignorecase col col_ignorecase)
 		(list (quote get_column)
 			(stage_merge_lookup alias_map tblvar tblvar)
@@ -4717,36 +4716,20 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(list (quote stage-output) (stage_merge_lookup id_map stage_id stage_id))
 		((quote stage-output) stage_id)
 		(list (quote stage-output) (stage_merge_lookup id_map stage_id stage_id))
-		(cons head tail) (cons (rewrite_stage_output_left_join_expr alias_map id_map head)
-			(map tail (lambda (item) (rewrite_stage_output_left_join_expr alias_map id_map item))))
+		(cons head tail) (cons (rewrite_stage_graph_expr alias_map id_map head)
+			(map tail (lambda (item) (rewrite_stage_graph_expr alias_map id_map item))))
 		_ expr)))
 
-(define rewrite_stage_output_left_join_source (lambda (alias_map id_map src)
+(define rewrite_stage_graph_source (lambda (alias_map id_map src)
 	(match src
 		'(alias schema relation outer join)
 		(list
 			(stage_merge_lookup alias_map alias alias)
 			schema
-			(rewrite_stage_output_left_join_expr alias_map id_map relation)
+			(rewrite_stage_graph_expr alias_map id_map relation)
 			outer
-			(rewrite_stage_output_left_join_expr alias_map id_map join))
+			(rewrite_stage_graph_expr alias_map id_map join))
 		_ src)))
-
-(define rewrite_stage_output_left_join_stage (lambda (alias_map id_map stage)
-	(if (not (group_stage? stage))
-		stage
-		(make_group_stage
-			(gs_id stage)
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_input stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_domain stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_keys stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_aggregates stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_having stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_output stage))
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_order stage))
-			(gs_limit stage)
-			(gs_offset stage)
-			(rewrite_stage_output_left_join_expr alias_map id_map (gs_facts stage))))))
 
 (define stage_id_in_list? (lambda (ids stage_id)
 	(reduce (coalesceNil ids '()) (lambda (found id)
@@ -4779,27 +4762,27 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 					(define untouched_stages (filter (qb_stages block) (lambda (stage)
 						(stage_not_in_id_list? candidate_ids stage))))
 					(define merged_stages (map entries (lambda (entry)
-						(rewrite_stage_output_left_join_stage alias_map id_map
+						(rewrite_stage_graph_stage alias_map id_map false
 							(stage_output_left_join_stage_with_aggregates
 								(stage_output_left_join_entry_stage entry)
 								(stage_output_left_join_entry_ags entry))))))
 					(make_query_block
 						(qb_schema block)
 						(merge_unique (list (map (qb_sources block) (lambda (src)
-							(rewrite_stage_output_left_join_source alias_map id_map
+							(rewrite_stage_graph_source alias_map id_map
 								(rewrite_stage_output_left_join_source_columns column_maps src))))))
-						(rewrite_stage_output_left_join_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_fields block)))
-						(rewrite_stage_output_left_join_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_where block)))
-						(rewrite_stage_output_left_join_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_group block)))
-						(rewrite_stage_output_left_join_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_having block)))
-						(rewrite_stage_output_left_join_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_order block)))
+						(rewrite_stage_graph_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_fields block)))
+						(rewrite_stage_graph_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_where block)))
+						(rewrite_stage_graph_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_group block)))
+						(rewrite_stage_graph_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_having block)))
+						(rewrite_stage_graph_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_order block)))
 						(qb_limit block)
 						(qb_offset block)
-						(rewrite_stage_output_left_join_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_hidden block)))
+						(rewrite_stage_graph_expr alias_map id_map (rewrite_stage_output_left_join_columns column_maps (qb_hidden block)))
 						(merge_unique (list
-							(map untouched_stages (lambda (stage) (rewrite_stage_output_left_join_stage '() id_map stage)))
+							(map untouched_stages (lambda (stage) (rewrite_stage_graph_stage '() id_map false stage)))
 							merged_stages))
-						(rewrite_stage_output_left_join_expr alias_map id_map (qb_facts block)))))))))
+						(rewrite_stage_graph_expr alias_map id_map (qb_facts block)))))))))
 
 (define merge_compatible_stage_output_left_joins_node (lambda (node)
 	(if (query_block? node)
