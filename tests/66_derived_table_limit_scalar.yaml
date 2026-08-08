@@ -24,6 +24,7 @@
 metadata:
   version: "1.0"
   description: "Derived table with ORDER BY LIMIT scalar subselects"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
@@ -32,6 +33,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS dtl_join_main"
   - sql: "DROP TABLE IF EXISTS dtl_join_ref"
   - sql: "DROP TABLE IF EXISTS dtl_join_acl"
+  - sql: "DROP TABLE IF EXISTS dtl_access_link"
+  - sql: "DROP TABLE IF EXISTS dtl_access_tenant"
+  - sql: "DROP TABLE IF EXISTS dtl_access_location"
+  - sql: "DROP TABLE IF EXISTS dtl_global_access"
   - sql: "CREATE TABLE dtl_main (ID INT PRIMARY KEY, name TEXT, category INT)"
   - sql: "CREATE TABLE dtl_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
   - sql: "CREATE TABLE dtl_ref (ID INT PRIMARY KEY, label TEXT)"
@@ -44,6 +49,37 @@ setup:
   - sql: "INSERT INTO dtl_join_main VALUES (1, 10, 20), (2, 20, 30), (3, 99, 10)"
   - sql: "INSERT INTO dtl_join_ref VALUES (10, 'ten'), (20, 'twenty'), (30, 'thirty'), (40, 'forty')"
   - sql: "INSERT INTO dtl_join_acl VALUES (1, 10, TRUE), (2, 20, FALSE), (3, 40, TRUE)"
+  - sql: "CREATE TABLE dtl_access_link (ID INT PRIMARY KEY, account_id INT, tenant_id INT, location_id INT)"
+  - sql: "CREATE TABLE dtl_access_tenant (ID INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE dtl_access_location (ID INT PRIMARY KEY, name TEXT, tenant_id INT)"
+  - sql: "INSERT INTO dtl_access_tenant VALUES (100, 'tenant-a'), (200, 'tenant-b')"
+  - sql: "INSERT INTO dtl_access_location VALUES (1000, 'location-a', 100), (2000, 'location-b', 200)"
+  - sql: "INSERT INTO dtl_access_link VALUES (1, 11, 100, 1000), (2, 11, 200, 2000), (3, 12, 100, 1000), (4, 11, NULL, NULL)"
+  - sql: "CREATE TABLE dtl_global_access (ID INT PRIMARY KEY, account_id INT, tenant_id INT)"
+  - sql: "INSERT INTO dtl_global_access VALUES (1, 11, NULL), (2, 11, NULL), (3, 11, NULL), (4, 11, NULL), (5, 12, NULL)"
+  # Simulate a v3 carrier retained across a planner upgrade. Its stale computed
+  # presence column makes all four carrier keys look like successful probes.
+  - scm: |
+      (begin
+        (droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)
+        (createtable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc"
+          (list
+            (list "unique" "group" (list "k0"))
+            (list "column" "k0" "any" (list) (list)))
+          (list "engine" "memory")
+          true)
+        (insert
+          (table "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc")
+          (list "k0")
+          (list (list 1) (list 2) (list 3) (list 4)))
+        (createcolumn
+          (table "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc")
+          "agg_f0d39398d80eb9d2"
+          "any"
+          (list)
+          (list "temp" true)
+          (list "k0")
+          (lambda (k0) 1)))
 
 test_cases:
 
@@ -358,6 +394,175 @@ test_cases:
           second_label: "ten"
           second_can_view: true
 
+  - name: "Derived access lookup retains nested scalar probe aggregates"
+    sql: |
+      EXPLAIN SELECT access_link.ID, location_lookup.description AS location_description,
+        location_lookup.can_view AS location_can_view
+      FROM dtl_access_link access_link
+        JOIN (
+          SELECT location.ID, location.name AS description,
+            ((EXISTS (
+              SELECT TRUE FROM dtl_access_link global_access
+              WHERE global_access.account_id = 11
+                AND global_access.tenant_id IS NULL
+              LIMIT 1
+            )) OR (NOT EXISTS (
+              SELECT TRUE FROM dtl_access_link denied_access
+              WHERE denied_access.account_id = 999
+                AND denied_access.tenant_id IS NULL
+              LIMIT 1
+            ))) AND (CASE WHEN EXISTS (
+              SELECT TRUE FROM dtl_access_link global_access
+              WHERE global_access.account_id = 11
+                AND global_access.tenant_id IS NULL
+              LIMIT 1
+            ) THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM dtl_access_link location_access
+              WHERE COALESCE(location_access.location_id, location.ID) = location.ID
+                AND location_access.account_id = 11
+              LIMIT 1
+            ) END) AND COALESCE((
+              SELECT ((EXISTS (
+                SELECT TRUE FROM dtl_access_link nested_global_access
+                WHERE nested_global_access.account_id = 11
+                  AND nested_global_access.tenant_id IS NULL
+                LIMIT 1
+              )) OR (NOT EXISTS (
+                SELECT TRUE FROM dtl_access_link nested_denied_access
+                WHERE nested_denied_access.account_id = 999
+                  AND nested_denied_access.tenant_id IS NULL
+                LIMIT 1
+              ))) AND (CASE WHEN EXISTS (
+                SELECT TRUE FROM dtl_access_link nested_global_access
+                WHERE nested_global_access.account_id = 11
+                  AND nested_global_access.tenant_id IS NULL
+                LIMIT 1
+              ) THEN TRUE ELSE EXISTS (
+                SELECT TRUE FROM dtl_access_link nested_tenant_access
+                WHERE nested_tenant_access.tenant_id = parent_tenant.ID
+                  AND nested_tenant_access.account_id = 11
+                LIMIT 1
+              ) END)
+              FROM dtl_access_tenant parent_tenant
+              WHERE parent_tenant.ID = location.tenant_id
+              LIMIT 1
+            ), FALSE) AS can_view
+          FROM dtl_access_location location
+        ) location_lookup ON location_lookup.ID = access_link.location_id
+      WHERE EXISTS (
+        SELECT TRUE FROM dtl_access_link global_filter
+        WHERE global_filter.account_id = 11
+          AND global_filter.tenant_id IS NULL
+        LIMIT 1
+      )
+      ORDER BY access_link.ID
+      LIMIT 72 OFFSET 0
+    expect:
+      contains:
+        - "scan"
+      not_contains:
+        - "scalar_first_probe"
+
+  - name: "Repeated global EXISTS in derived wrapper stays scalar"
+    sql: |
+      SELECT t.* FROM (
+        SELECT r.ID, r.label,
+          EXISTS (
+            SELECT TRUE FROM dtl_global_access global_access
+            WHERE global_access.account_id = 11
+              AND global_access.tenant_id IS NULL
+            LIMIT 1
+          ) AS can_delete,
+          (EXISTS (
+            SELECT TRUE FROM dtl_global_access global_access
+            WHERE global_access.account_id = 11
+              AND global_access.tenant_id IS NULL
+            LIMIT 1
+          )) AND (CASE WHEN EXISTS (
+            SELECT TRUE FROM dtl_global_access global_access
+            WHERE global_access.account_id = 11
+              AND global_access.tenant_id IS NULL
+            LIMIT 1
+          ) THEN TRUE ELSE r.ID = 10 END) AS can_edit
+        FROM dtl_join_ref r
+        WHERE EXISTS (
+          SELECT TRUE FROM dtl_global_access global_access
+          WHERE global_access.account_id = 11
+            AND global_access.tenant_id IS NULL
+          LIMIT 1
+        )
+      ) t
+      WHERE TRUE
+      ORDER BY t.ID
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 4
+      data:
+        - ID: 10
+          label: "ten"
+          can_delete: true
+          can_edit: true
+        - ID: 20
+          label: "twenty"
+          can_delete: true
+          can_edit: true
+        - ID: 30
+          label: "thirty"
+          can_delete: true
+          can_edit: true
+        - ID: 40
+          label: "forty"
+          can_delete: true
+          can_edit: true
+
+  - name: "Derived comma JOIN keeps equality predicate from WHERE"
+    sql: |
+      SELECT t.* FROM (
+        SELECT m.ID, r.label
+        FROM dtl_join_main m, dtl_join_ref r
+        WHERE r.ID = m.first_ref
+          AND EXISTS (
+            SELECT TRUE FROM dtl_global_access global_access
+            WHERE global_access.account_id = 11
+              AND global_access.tenant_id IS NULL
+            LIMIT 1
+          )
+      ) t
+      ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          label: "ten"
+        - ID: 2
+          label: "twenty"
+
+  - name: "Derived correlated EXISTS keeps JOIN predicate from inner WHERE"
+    sql: |
+      SELECT t.* FROM (
+        SELECT m.ID
+        FROM dtl_join_main m
+        WHERE EXISTS (
+          SELECT TRUE FROM dtl_join_ref r
+          WHERE r.ID = m.first_ref
+          LIMIT 1
+        ) AND EXISTS (
+          SELECT TRUE FROM dtl_global_access global_access
+          WHERE global_access.account_id = 11
+            AND global_access.tenant_id IS NULL
+          LIMIT 1
+        )
+      ) t
+      ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+        - ID: 2
+
+  - name: "Remove stale physical carrier fixture"
+    scm: '(droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)'
+
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
@@ -366,3 +571,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS dtl_join_main"
   - sql: "DROP TABLE IF EXISTS dtl_join_ref"
   - sql: "DROP TABLE IF EXISTS dtl_join_acl"
+  - sql: "DROP TABLE IF EXISTS dtl_access_link"
+  - sql: "DROP TABLE IF EXISTS dtl_access_tenant"
+  - sql: "DROP TABLE IF EXISTS dtl_access_location"
+  - sql: "DROP TABLE IF EXISTS dtl_global_access"

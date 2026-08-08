@@ -2035,9 +2035,20 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(map (coalesceNil stages '()) (lambda (stage)
 		(list (gs_id stage) (concat (gs_id stage) ":derived:" (fnv_hash (string alias))))))))
 
-(define derived_stage_rebind_alias_map (lambda (id_map)
-	(map (coalesceNil id_map '()) (lambda (entry)
-		(list (exists_stage_alias (nth entry 0)) (exists_stage_alias (nth entry 1)))))))
+(define derived_stage_rebind_alias_map (lambda (id_map stages)
+	(begin
+		(define base_alias_map (map (coalesceNil id_map '()) (lambda (entry)
+			(list (exists_stage_alias (nth entry 0)) (exists_stage_alias (nth entry 1))))))
+		(define aggregate_col_map (merge (map (coalesceNil stages '()) (lambda (stage)
+			(begin
+				(define old_alias (exists_stage_alias (gs_id stage)))
+				(map (gs_aggregates stage) (lambda (ag)
+					(list
+						old_alias
+						(aggregate_col_name ag)
+						(aggregate_col_name
+							(rewrite_stage_output_left_join_expr base_alias_map id_map ag))))))))))
+		(merge (list base_alias_map aggregate_col_map)))))
 
 (define derived_stage_rebind_stage (lambda (alias_map id_map stage)
 	(if (not (group_stage? stage))
@@ -2060,7 +2071,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 (define rebind_derived_stages (lambda (alias stages)
 	(begin
 		(define id_map (derived_stage_rebind_id_map alias stages))
-		(define alias_map (derived_stage_rebind_alias_map id_map))
+		(define alias_map (derived_stage_rebind_alias_map id_map stages))
 		(list
 			(map (coalesceNil stages '()) (lambda (stage)
 				(derived_stage_rebind_stage alias_map id_map stage)))
@@ -4631,19 +4642,69 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				nil)
 			default))))
 
+(define stage_column_merge_lookup (lambda (mapping alias col default)
+	(if (empty_list? mapping)
+		default
+		(coalesceNil
+			(reduce mapping (lambda (found entry)
+				(if (not (nil? found))
+					found
+					(match entry
+						'(entry_alias entry_col replacement)
+						(if (and (equal? entry_alias alias) (equal? entry_col col))
+							replacement
+							nil)
+						_ nil)))
+				nil)
+			default))))
+
+(define rewrite_stage_output_probe_column (lambda (alias_map id_map stage requested_col)
+	(begin
+		(define ag (scalar_first_probe_aggregate stage requested_col))
+		(if (nil? ag)
+			requested_col
+			(aggregate_col_name
+				(rewrite_stage_output_left_join_expr alias_map id_map ag))))))
+
 (define rewrite_stage_output_left_join_expr (lambda (alias_map id_map expr)
 	(match expr
+		((symbol scalar_first_probe) stage requested_col stages)
+		(list (quote scalar_first_probe)
+			(rewrite_stage_output_left_join_expr alias_map id_map stage)
+			(rewrite_stage_output_probe_column alias_map id_map stage requested_col)
+			(rewrite_stage_output_left_join_expr alias_map id_map stages))
+		((quote scalar_first_probe) stage requested_col stages)
+		(list (quote scalar_first_probe)
+			(rewrite_stage_output_left_join_expr alias_map id_map stage)
+			(rewrite_stage_output_probe_column alias_map id_map stage requested_col)
+			(rewrite_stage_output_left_join_expr alias_map id_map stages))
+		((symbol scalar_first_probe) stage requested_col)
+		(list (quote scalar_first_probe)
+			(rewrite_stage_output_left_join_expr alias_map id_map stage)
+			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
+		((quote scalar_first_probe) stage requested_col)
+		(list (quote scalar_first_probe)
+			(rewrite_stage_output_left_join_expr alias_map id_map stage)
+			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
+		((symbol scalar_aggregate_probe) stage requested_col)
+		(list (quote scalar_aggregate_probe)
+			(rewrite_stage_output_left_join_expr alias_map id_map stage)
+			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
+		((quote scalar_aggregate_probe) stage requested_col)
+		(list (quote scalar_aggregate_probe)
+			(rewrite_stage_output_left_join_expr alias_map id_map stage)
+			(rewrite_stage_output_probe_column alias_map id_map stage requested_col))
 		((symbol get_column) tblvar ignorecase col col_ignorecase)
 		(list (quote get_column)
 			(stage_merge_lookup alias_map tblvar tblvar)
 			ignorecase
-			col
+			(stage_column_merge_lookup alias_map tblvar col col)
 			col_ignorecase)
 		((quote get_column) tblvar ignorecase col col_ignorecase)
 		(list (quote get_column)
 			(stage_merge_lookup alias_map tblvar tblvar)
 			ignorecase
-			col
+			(stage_column_merge_lookup alias_map tblvar col col)
 			col_ignorecase)
 		((symbol stage-output) stage_id)
 		(list (quote stage-output) (stage_merge_lookup id_map stage_id stage_id))
@@ -6044,7 +6105,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 		'())))
 
 (define group_table_name (lambda (schema tbl alias keys condition)
-	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v3" schema tbl alias keys condition))))))
+	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v4" schema tbl alias keys condition))))))
 
 (define canonical_group_stage_alias "__grp")
 
