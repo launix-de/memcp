@@ -528,6 +528,64 @@ test_cases:
           "ok"
           (error "stage graph rewrite mixed root identity with reference rebinding")))
 
+  - name: "Single aggregate stage output uses its canonical column"
+    scm: |
+      (begin
+        (define y66_interface_ag (list true (quote max) false))
+        (define y66_interface_target (make_group_stage
+          "interface-target"
+          (list "target-row" "memcp-tests" "dtl_join_ref" false nil)
+          '() '(1) (list y66_interface_ag) nil '() '() nil nil '()))
+        (define y66_interface_consumer_ag (list
+          (list (quote get_column) "target-output" false "agg_stale" false)
+          (quote max)
+          false))
+        (define y66_interface_consumer (make_group_stage
+          "interface-consumer"
+          (make_query_block
+            "memcp-tests"
+            (list (list "target-output" "memcp-tests"
+              (make_stage_output_relation "interface-target") true true))
+            '() true nil nil nil nil nil '() '() '())
+          '() '(1) (list y66_interface_consumer_ag) nil '() '() nil nil '()))
+        (define y66_interface_stages (canonicalize_stage_output_stages
+          (list y66_interface_target y66_interface_consumer)))
+        (define y66_interface_ref (car (car (gs_aggregates
+          (stage_by_id y66_interface_stages "interface-consumer")))))
+        (if (equal? (nth y66_interface_ref 3)
+          (aggregate_col_name y66_interface_ag))
+          "ok"
+          (error "single aggregate stage output kept a stale column")))
+
+  - name: "Multi aggregate stage output is not guessed"
+    scm: |
+      (begin
+        (define y66_ambiguous_first (list true (quote max) false))
+        (define y66_ambiguous_second (list false (quote min) true))
+        (define y66_ambiguous_target (make_group_stage
+          "ambiguous-target"
+          (list "target-row" "memcp-tests" "dtl_join_ref" false nil)
+          '() '(1) (list y66_ambiguous_first y66_ambiguous_second)
+          nil '() '() nil nil '()))
+        (define y66_ambiguous_consumer (make_group_stage
+          "ambiguous-consumer"
+          (make_query_block
+            "memcp-tests"
+            (list (list "target-output" "memcp-tests"
+              (make_stage_output_relation "ambiguous-target") true true))
+            '() true nil nil nil nil nil '() '() '())
+          '() '(1) (list (list
+            (list (quote get_column) "target-output" false "agg_unknown" false)
+            (quote max)
+            false)) nil '() '() nil nil '()))
+        (define y66_ambiguous_stages (canonicalize_stage_output_stages
+          (list y66_ambiguous_target y66_ambiguous_consumer)))
+        (define y66_ambiguous_ref (car (car (gs_aggregates
+          (stage_by_id y66_ambiguous_stages "ambiguous-consumer")))))
+        (if (equal? (nth y66_ambiguous_ref 3) "agg_unknown")
+          "ok"
+          (error "multi aggregate stage output guessed a column")))
+
   - name: "Repeated global EXISTS in derived wrapper stays scalar"
     sql: |
       SELECT t.* FROM (
