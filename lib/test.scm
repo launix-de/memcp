@@ -1086,6 +1086,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			'('lambda '('acc 'x) '('match 'acc '('cons 'h 't) '(+ 'h 'x) 'x))
 			'(list))))))
 	(assert (match opt_reduce_ser (regex "match_mut" _) true false) true "optimizer: match on owned reduce accumulator becomes match_mut")
+	/* cdr is a borrowed slice view; mutating its result must not corrupt the source list. */
+	(define filter_cdr_without_aliasing (eval (optimize '('lambda '('xs)
+		'('list 'xs '('filter '('cdr 'xs) '('lambda '('x) '(> 'x 2))))))))
+	(assert
+		(filter_cdr_without_aliasing (list 1 2 3 4))
+		(list (list 1 2 3 4) (list 3 4))
+		"optimizer: filter after cdr preserves the source list")
 
 	/* REGEXP_REPLACE precompilation: constant pattern gets precompiled */
 	(assert ((eval (optimize '('lambda '('s) '(regexp_replace 's "[^0-9]" "")))) "abc123def") "123" "regexp_replace precompilation works")

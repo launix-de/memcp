@@ -880,7 +880,8 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "list", ParamDesc: "list", NoEscape: true},
 			},
-			Return:   FreshAlloc,
+			// cdr shares the input slice's backing array; its result is borrowed.
+			Return:   &TypeDescriptor{Kind: "list"},
 			Const:    true,
 			Optimize: optimizeCdr,
 		},

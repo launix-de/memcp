@@ -1756,6 +1756,86 @@ test_cases:
       not_contains:
         - "unknown stage"
 
+  - name: "Derived LEFT JOIN keeps projected values beside nested permission probes"
+    fail_comment: "compiled plans must execute derived LEFT JOIN matches, not only resolve their stages"
+    setup:
+      - sql: "DROP TABLE IF EXISTS derived_label_acl"
+      - sql: "DROP TABLE IF EXISTS derived_label_item"
+      - sql: "DROP TABLE IF EXISTS derived_label_tenant"
+      - sql: "CREATE TABLE derived_label_acl (ID INT PRIMARY KEY, actor INT, derived_label_tenant INT)"
+      - sql: "CREATE TABLE derived_label_item (ID INT PRIMARY KEY, derived_label_tenant INT, title VARCHAR(64))"
+      - sql: "CREATE TABLE derived_label_tenant (ID INT PRIMARY KEY, name VARCHAR(64))"
+      - sql: "INSERT INTO derived_label_tenant (ID, name) VALUES (7, 'Tenant Seven'), (8, 'Tenant Eight')"
+      - sql: "INSERT INTO derived_label_item (ID, derived_label_tenant, title) VALUES (101, 7, 'matched'), (102, 8, 'matched too'), (103, 99, 'missing')"
+      - sql: "INSERT INTO derived_label_acl (ID, actor, derived_label_tenant) VALUES (1, 42, NULL), (2, 42, 7)"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT derived_label_item.ID,
+          derived_label_item.derived_label_tenant,
+          `ref:tenant`.`tenant:description` AS `tenant:description`,
+          `ref:tenant`.`tenant:canView` AS `tenant:canView`
+        FROM derived_label_item derived_label_item
+        LEFT JOIN (
+          SELECT derived_label_tenant.ID AS `tenant:ID`,
+            derived_label_tenant.name AS `tenant:description`,
+            ((FALSE OR EXISTS (
+              SELECT TRUE FROM derived_label_acl global_allow
+              WHERE global_allow.actor = 42 AND global_allow.derived_label_tenant IS NULL
+              LIMIT 1
+            )) OR (NOT EXISTS (
+              SELECT TRUE FROM derived_label_acl global_deny
+              WHERE global_deny.actor = 42 AND global_deny.derived_label_tenant IS NULL
+              LIMIT 1
+            ))) AND CASE WHEN EXISTS (
+              SELECT TRUE FROM derived_label_acl global_check
+              WHERE global_check.actor = 42 AND global_check.derived_label_tenant IS NULL
+              LIMIT 1
+            ) THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM derived_label_acl tenant_acl
+              WHERE tenant_acl.derived_label_tenant = derived_label_tenant.ID
+                AND tenant_acl.actor = 42
+              LIMIT 1
+            ) END AS `tenant:canView`
+          FROM derived_label_tenant
+        ) `ref:tenant`
+          ON `ref:tenant`.`tenant:ID` = derived_label_tenant
+        WHERE EXISTS (
+          SELECT TRUE FROM derived_label_acl global_allow
+          WHERE global_allow.actor = 42 AND global_allow.derived_label_tenant IS NULL
+          LIMIT 1
+        ) AND COALESCE((
+          SELECT CASE WHEN EXISTS (
+            SELECT TRUE FROM derived_label_acl global_allow
+            WHERE global_allow.actor = 42 AND global_allow.derived_label_tenant IS NULL
+            LIMIT 1
+          ) THEN TRUE ELSE EXISTS (
+            SELECT TRUE FROM derived_label_acl row_filter
+            WHERE row_filter.derived_label_tenant = tenant_probe.ID
+              AND row_filter.actor = 42
+            LIMIT 1
+          ) END
+          FROM derived_label_tenant tenant_probe
+          WHERE tenant_probe.ID = derived_label_item.derived_label_tenant
+          LIMIT 1
+        ), FALSE)
+      ) t
+      LEFT JOIN derived_label_tenant sorter_tenant
+        ON t.derived_label_tenant = sorter_tenant.ID
+      ORDER BY t.ID
+      LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - ID: 101
+          derived_label_tenant: 7
+          "tenant:description": "Tenant Seven"
+          "tenant:canView": true
+        - ID: 102
+          derived_label_tenant: 8
+          "tenant:description": "Tenant Eight"
+          "tenant:canView": true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS assignment_x"
   - sql: "DROP TABLE IF EXISTS item_x"
@@ -1777,3 +1857,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS in_nullable_rhs"
   - sql: "DROP TABLE IF EXISTS in_renderjob"
   - sql: "DROP TABLE IF EXISTS in_fop_files"
+  - sql: "DROP TABLE IF EXISTS derived_label_acl"
+  - sql: "DROP TABLE IF EXISTS derived_label_item"
+  - sql: "DROP TABLE IF EXISTS derived_label_tenant"
