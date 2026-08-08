@@ -261,7 +261,7 @@ func Optimize(val Scmer, env *Env) Scmer {
 }
 
 type optimizerMetainfo struct {
-	variableReplacement  map[Symbol]Scmer
+	variableReplacement  *replacementScope
 	setBlacklist         []Symbol
 	nextSlot             *int            // pointer to lambda's slot counter; nil outside lambda
 	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
@@ -273,8 +273,115 @@ type optimizerMetainfo struct {
 	inlineStack          map[Symbol]bool
 }
 
+type replacementScope struct {
+	parent      *replacementScope
+	values      map[Symbol]Scmer
+	deleted     map[Symbol]struct{}
+	boundary    bool // crossing this scope emits one outer wrapper
+	preserveNth bool // shared scopes keep raw numbered locals in the same frame
+	frozen      bool // children have observed this node; mutations need an overlay
+}
+
+func newReplacementScope() *replacementScope {
+	return &replacementScope{values: make(map[Symbol]Scmer)}
+}
+
+func (ome *optimizerMetainfo) forkReplacements(preserveNth bool) *replacementScope {
+	ome.variableReplacement.frozen = true
+	return &replacementScope{
+		parent:      ome.variableReplacement,
+		boundary:    true,
+		preserveNth: preserveNth,
+	}
+}
+
+func (ome *optimizerMetainfo) mutableReplacements() *replacementScope {
+	if !ome.variableReplacement.frozen {
+		return ome.variableReplacement
+	}
+	ome.variableReplacement = &replacementScope{parent: ome.variableReplacement}
+	return ome.variableReplacement
+}
+
+func (ome *optimizerMetainfo) setReplacement(sym Symbol, value Scmer) {
+	scope := ome.mutableReplacements()
+	if scope.values == nil {
+		scope.values = make(map[Symbol]Scmer)
+	}
+	scope.values[sym] = value
+	delete(scope.deleted, sym)
+}
+
+func (ome *optimizerMetainfo) deleteReplacement(sym Symbol) {
+	scope := ome.mutableReplacements()
+	delete(scope.values, sym)
+	if scope.parent != nil {
+		if scope.deleted == nil {
+			scope.deleted = make(map[Symbol]struct{})
+		}
+		scope.deleted[sym] = struct{}{}
+	}
+}
+
+func wrapOuter(value Scmer, count int) Scmer {
+	for i := 0; i < count; i++ {
+		value = NewSlice([]Scmer{NewSymbol("outer"), value})
+	}
+	return value
+}
+
+func (ome *optimizerMetainfo) replacement(sym Symbol) (Scmer, bool) {
+	boundaries := 0
+	nthBoundaries := 0
+	for scope := ome.variableReplacement; scope != nil; scope = scope.parent {
+		if _, deleted := scope.deleted[sym]; deleted {
+			return NewNil(), false
+		}
+		if value, ok := scope.values[sym]; ok {
+			if value.IsNthLocalVar() {
+				return wrapOuter(value, nthBoundaries), true
+			}
+			return wrapOuter(value, boundaries), true
+		}
+		if scope.boundary {
+			boundaries++
+			if !scope.preserveNth {
+				nthBoundaries = boundaries
+			}
+		}
+	}
+	return NewNil(), false
+}
+
+func (ome *optimizerMetainfo) forEachReplacement(fn func(Symbol, Scmer)) {
+	seen := make(map[Symbol]struct{})
+	for scope := ome.variableReplacement; scope != nil; scope = scope.parent {
+		for sym := range scope.deleted {
+			seen[sym] = struct{}{}
+		}
+		for sym := range scope.values {
+			if _, done := seen[sym]; done {
+				continue
+			}
+			seen[sym] = struct{}{}
+			if value, ok := ome.replacement(sym); ok {
+				fn(sym, value)
+			}
+		}
+	}
+}
+
+func (ome *optimizerMetainfo) outerReplacementScope() *replacementScope {
+	for scope := ome.variableReplacement; scope != nil; scope = scope.parent {
+		if scope.boundary {
+			return scope.parent
+		}
+	}
+	return newReplacementScope()
+}
+
 func newOptimizerMetainfo() (result optimizerMetainfo) {
-	result.variableReplacement = make(map[Symbol]Scmer)
+	result.variableReplacement = newReplacementScope()
 	return
 }
 
@@ -288,10 +395,7 @@ func (ome *optimizerMetainfo) DecrLoopDepth() { ome.loopDepth-- }
 // LoopDepth returns the current loop nesting depth.
 func (ome *optimizerMetainfo) LoopDepth() int { return ome.loopDepth }
 func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
-	result.variableReplacement = make(map[Symbol]Scmer)
-	for k, v := range ome.variableReplacement {
-		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
-	}
+	result.variableReplacement = ome.forkReplacements(false)
 	result.setBlacklist = ome.setBlacklist
 	result.loopDepth = ome.loopDepth
 	result.lambdaDepth = ome.lambdaDepth
@@ -306,14 +410,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 // their parent (begin, match). NthLocalVar entries are kept as-is instead of
 // being wrapped in (outer ...) since they access the same VarsNumbered array.
 func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
-	result.variableReplacement = make(map[Symbol]Scmer)
-	for k, v := range ome.variableReplacement {
-		if v.IsNthLocalVar() {
-			result.variableReplacement[k] = v
-		} else {
-			result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
-		}
-	}
+	result.variableReplacement = ome.forkReplacements(true)
 	result.setBlacklist = ome.setBlacklist
 	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
 	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
@@ -588,7 +685,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		return val, TypeInfo{kind: KindString, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagSymbol:
 		sym := mustSymbol(val)
-		if replacement, ok := ome.variableReplacement[sym]; ok {
+		if replacement, ok := ome.replacement(sym); ok {
 			if replacement.IsSymbol() && mustSymbol(replacement) == sym {
 				return val, tiTransfer
 			}
@@ -708,15 +805,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		// already represents one scope transition. We need to "unwrap" one (outer ...)
 		// level from the variable replacements to avoid double-wrapping.
 		outerOme := optimizerMetainfo{
-			variableReplacement: make(map[Symbol]Scmer),
+			variableReplacement: ome.outerReplacementScope(),
 			setBlacklist:        ome.setBlacklist,
-		}
-		for k, repl := range ome.variableReplacement {
-			if slice, ok := scmerSlice(repl); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
-				outerOme.variableReplacement[k] = slice[1]
-			}
-			// Local NthLocalVar replacements (current lambda params) are NOT
-			// accessible in the outer scope, so we intentionally exclude them.
 		}
 		inner, transferOwnership, isConstant := optimizeExCompat(v[1], env, &outerOme, useResult)
 		if isConstant {
@@ -780,8 +870,22 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
-		var visitNode func(x Scmer, depth int, blacklist []Symbol)
-		visitNode = func(x Scmer, depth int, blacklist []Symbol) {
+		var shadowed map[Symbol]uint32
+		pushShadow := func(sym Symbol) {
+			if shadowed == nil {
+				shadowed = make(map[Symbol]uint32)
+			}
+			shadowed[sym]++
+		}
+		popShadow := func(sym Symbol) {
+			if shadowed[sym] == 1 {
+				delete(shadowed, sym)
+			} else {
+				shadowed[sym]--
+			}
+		}
+		var visitNode func(x Scmer, depth int)
+		visitNode = func(x Scmer, depth int) {
 			if stripped, ok := scmerStripSourceInfo(x); ok {
 				x = stripped
 			}
@@ -792,7 +896,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 				subHead, subHeadOk := scmerSymbol(subHeadExpr)
 				if subHeadOk && (subHead == Symbol("define") || subHead == Symbol("set")) {
-					visitNode(sub[2], depth, blacklist)
+					visitNode(sub[2], depth)
 					if depth == 0 {
 						if sym, ok := scmerSymbol(sub[1]); ok {
 							variableContent[sym] = sub[2]
@@ -804,15 +908,21 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						params = stripped
 					}
 					if sym, ok := scmerSymbol(params); ok {
-						visitNode(sub[2], depth+1, append(append([]Symbol{}, blacklist...), sym))
+						pushShadow(sym)
+						visitNode(sub[2], depth+1)
+						popShadow(sym)
 					} else if list, ok := scmerSlice(params); ok {
-						blacklist2 := append([]Symbol{}, blacklist...)
 						for _, entry := range list {
 							if s, ok := scmerSymbol(entry); ok {
-								blacklist2 = append(blacklist2, s)
+								pushShadow(s)
 							}
 						}
-						visitNode(sub[2], depth+1, blacklist2)
+						visitNode(sub[2], depth+1)
+						for _, entry := range list {
+							if s, ok := scmerSymbol(entry); ok {
+								popShadow(s)
+							}
+						}
 					}
 				} else if subHeadOk && (subHead == Symbol("begin") || subHead == Symbol("begin_mut")) {
 					start := 1
@@ -820,35 +930,28 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						start = 2
 					}
 					for i := start; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, blacklist)
+						visitNode(sub[i], depth+1)
 					}
 				} else if subHeadOk && subHead == Symbol("!begin") {
 					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth, blacklist)
+						visitNode(sub[i], depth)
 					}
 				} else if subHeadOk && subHead == Symbol("eval") {
 					usedVariables[Symbol("eval")] = 1
 					for i := 2; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, blacklist)
+						visitNode(sub[i], depth+1)
 					}
 				} else {
 					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
-					visitNode(sub[0], depth+1, blacklist)
+					visitNode(sub[0], depth+1)
 					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, blacklist)
+						visitNode(sub[i], depth+1)
 					}
 				}
 				return
 			}
 			if sym, ok := scmerSymbol(x); ok {
-				isBlacklisted := false
-				for _, b := range blacklist {
-					if b == sym {
-						isBlacklisted = true
-						break
-					}
-				}
-				if !isBlacklisted {
+				if shadowed[sym] == 0 {
 					if facts, tracked := bindings[sym]; tracked && !facts.used {
 						facts.firstUse = currentTopIdx
 						facts.used = true
@@ -864,7 +967,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		for i := bodyStart; i < len(v); i++ {
 			currentTopIdx = i
-			visitNode(v[i], 0, nil)
+			visitNode(v[i], 0)
 		}
 		ome2 := ome.CopySharedScope()
 		ome2.beginDepth++
@@ -914,7 +1017,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				delete(usedVariables, sym)
 				delete(bindings, sym)
 				ome2.setBlacklist = append(ome2.setBlacklist, sym)
-				ome2.variableReplacement[sym] = content
+				ome2.setReplacement(sym, content)
 			}
 		}
 		var numberedLocals map[Symbol]Scmer
@@ -939,11 +1042,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		if len(usedVariables) == 0 && len(bindings) == 0 {
 			v[0] = NewSymbol("!begin")
-			for sym, content := range ome2.variableReplacement {
+			ome2.forEachReplacement(func(sym Symbol, content Scmer) {
 				if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
-					ome2.variableReplacement[sym] = slice[1]
+					ome2.setReplacement(sym, slice[1])
 				}
-			}
+			})
 		}
 		for i := bodyStart; i < len(v); i++ {
 			expr := v[i]
@@ -953,7 +1056,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if items, ok := scmerSlice(expr); ok && len(items) == 3 && (scmerIsSymbol(items[0], "define") || scmerIsSymbol(items[0], "set")) {
 				if sym, ok := scmerSymbol(items[1]); ok {
 					if slot, numbered := numberedLocals[sym]; numbered {
-						ome2.variableReplacement[sym] = slot
+						ome2.setReplacement(sym, slot)
 					}
 				}
 			}
@@ -1030,16 +1133,16 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			ome2 := ome.Copy()
 			ome2.lambdaDepth++
 			for sym := range assigned {
-				delete(ome2.variableReplacement, sym)
+				ome2.deleteReplacement(sym)
 			}
 			if list, ok := scmerSlice(params); ok {
 				for _, param := range list {
 					if sym, ok := scmerSymbol(param); ok {
-						delete(ome2.variableReplacement, sym)
+						ome2.deleteReplacement(sym)
 					}
 				}
 			} else if sym, ok := scmerSymbol(params); ok {
-				delete(ome2.variableReplacement, sym)
+				ome2.deleteReplacement(sym)
 			}
 			v[2], _, _ = optimizeExCompat(v[2], env, &ome2, true)
 			return NewSlice(v), tiZero
@@ -1053,7 +1156,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			ome2 := ome.Copy()
 			ome2.lambdaDepth++
 			for sym := range assigned {
-				delete(ome2.variableReplacement, sym)
+				ome2.deleteReplacement(sym)
 			}
 			numVars := int(ToInt(v[3]))
 			slotIndex := numVars
@@ -1064,11 +1167,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						break
 					}
 					if sym, ok := scmerSymbol(param); ok && sym != Symbol("_") && !assigned[sym] {
-						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(i))
+						ome2.setReplacement(sym, NewNthLocalVar(NthLocalVar(i)))
 					}
 				}
 			} else if sym, ok := scmerSymbol(params); ok && !assigned[sym] {
-				ome2.variableReplacement[sym] = NewNthLocalVar(0)
+				ome2.setReplacement(sym, NewNthLocalVar(0))
 			}
 			var bodyType TypeInfo
 			v[2], bodyType = OptimizeEx(v[2], env, &ome2, true)
@@ -1081,21 +1184,21 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		ome2 := ome.Copy()
 		ome2.lambdaDepth++
 		for sym := range assigned {
-			delete(ome2.variableReplacement, sym)
+			ome2.deleteReplacement(sym)
 		}
 		slotIndex := 0
 		if list, ok := scmerSlice(params); ok {
 			for _, param := range list {
 				if sym, ok := scmerSymbol(param); ok {
 					if sym != Symbol("_") && !assigned[sym] {
-						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+						ome2.setReplacement(sym, NewNthLocalVar(NthLocalVar(slotIndex)))
 					}
 				}
 				slotIndex++
 			}
 		} else if sym, ok := scmerSymbol(params); ok {
 			if !assigned[sym] {
-				ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+				ome2.setReplacement(sym, NewNthLocalVar(NthLocalVar(slotIndex)))
 			}
 			slotIndex++
 		}
@@ -1134,12 +1237,14 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			for _, black := range ome.setBlacklist {
 				if black == sym {
 					if useResult {
-						return ome.variableReplacement[sym], tiZero
+						if replacement, ok := ome.replacement(sym); ok {
+							return replacement, tiZero
+						}
 					}
 					return NewNil(), tiConstTransfer
 				}
 			}
-			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
+			if repl, ok := ome.replacement(sym); ok && repl.IsNthLocalVar() {
 				v[1] = repl
 			}
 			if ome.lambdaDepth == 0 && ome.beginDepth == 0 {
@@ -1169,7 +1274,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if !valueTransfer && value.IsNthLocalVar() && ome.ownedVars != nil {
 			for sym, owned := range ome.ownedVars {
 				if owned {
-					if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == value.NthLocalVar() {
+					if repl, ok := ome.replacement(sym); ok && repl.IsNthLocalVar() && repl.NthLocalVar() == value.NthLocalVar() {
 						valueTransfer = true
 						transferOwnership = true
 						break
@@ -1312,7 +1417,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 				} else if arg1.IsNthLocalVar() {
 					for sym, owned := range ome.ownedVars {
 						if owned {
-							if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == arg1.NthLocalVar() {
+							if repl, ok := ome.replacement(sym); ok && repl.IsNthLocalVar() && repl.NthLocalVar() == arg1.NthLocalVar() {
 								firstArgFresh = true
 								break
 							}
@@ -1612,7 +1717,7 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 	}
 
 	if sym, ok := scmerSymbol(pattern); ok {
-		delete(ome2.variableReplacement, sym)
+		ome2.deleteReplacement(sym)
 		return pattern
 	}
 
@@ -1687,8 +1792,8 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 	} else if headOk && headSym == Symbol("define") {
 		slice[2] = OptimizeParser(slice[2], env, ome, false)
 		if sym, ok := scmerSymbol(slice[1]); ok {
-			if _, present := ome.variableReplacement[sym]; present {
-				delete(ome.variableReplacement, sym)
+			if _, present := ome.replacement(sym); present {
+				ome.deleteReplacement(sym)
 			}
 		}
 		val = NewSlice(slice)
