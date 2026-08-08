@@ -4284,15 +4284,82 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(union_facts block))
 			(merge_unique (map branch_results (lambda (item) (nth item 1))))))))
 
+/* Aggregate column names are derived from their expressions. A decorrelation
+rewrite may therefore rename a single-column stage output after a consumer was
+created. Canonicalize that unambiguous interface before physical lowering. */
+(define stage_output_stage_index (lambda (stages)
+	(reduce (coalesceNil stages '()) (lambda (index stage)
+		(if (group_stage? stage) (set_assoc index (gs_id stage) stage) index)) '())))
+
+(define stage_output_single_aggregate_columns (lambda (stage_index sources)
+	(filter (map (coalesceNil sources '()) (lambda (src)
+		(begin
+			(define relation (source_relation src))
+			(define stage (if (stage_output_relation? relation)
+				(get_assoc stage_index (stage_output_relation_id relation))
+				nil))
+			(if (and (group_stage? stage) (equal? (count (gs_aggregates stage)) 1))
+				(list (source_alias src) (quote aggregate-column)
+					(aggregate_col_name (car (gs_aggregates stage))))
+				nil))))
+		(lambda (entry) (not (nil? entry))))))
+
+(define aggregate_column_name? (lambda (col)
+	(and (string? col) (and (>= (strlen col) 4) (equal? (substr col 0 4) "agg_")))))
+
+(define canonicalize_stage_output_stage (lambda (stage_index stage)
+	(if (not (group_stage? stage))
+		stage
+		(begin
+			(define input (gs_input stage))
+			(define sources (if (query_block? input) (qb_sources input) (list input)))
+			(rewrite_stage_graph_stage
+				(stage_output_single_aggregate_columns stage_index sources)
+				'() false stage)))))
+
+(define canonicalize_stage_output_stages_acc (lambda (remaining rewritten stage_index)
+	(match (coalesceNil remaining '())
+		(cons stage rest) (begin
+			(define canonical (canonicalize_stage_output_stage stage_index stage))
+			(canonicalize_stage_output_stages_acc rest
+				(merge rewritten (list canonical))
+				(if (group_stage? canonical)
+					(set_assoc stage_index (gs_id canonical) canonical)
+					stage_index)))
+		_ (list rewritten stage_index))))
+
+(define canonicalize_stage_output_stages (lambda (stages)
+	(nth (canonicalize_stage_output_stages_acc
+		stages '() (stage_output_stage_index stages)) 0)))
+
+(define canonicalize_stage_output_interfaces (lambda (ir)
+	(begin
+		(define root (ir_root ir))
+		(if (not (query_block? root))
+			ir
+			(begin
+				(define canonical (canonicalize_stage_output_stages_acc
+					(qb_stages root) '() (stage_output_stage_index (qb_stages root))))
+				(define stages (nth canonical 0))
+				(define block_with_stages (make_query_block
+					(qb_schema root) (qb_sources root) (qb_fields root) (qb_where root)
+					(qb_group root) (qb_having root) (qb_order root) (qb_limit root)
+					(qb_offset root) (qb_hidden root) stages (qb_facts root)))
+				(define block (rewrite_stage_graph_expr
+					(stage_output_single_aggregate_columns (nth canonical 1) (qb_sources root))
+					'() block_with_stages))
+				(make_ir (ir_kind ir) block stages (ir_context_of ir) (ir_return ir)))))))
+
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
 		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
-		(merge_compatible_stage_output_left_joins_ir (make_ir
+		(canonicalize_stage_output_interfaces
+			(merge_compatible_stage_output_left_joins_ir (make_ir
 			(ir_kind ir)
 			(nth root_result 0)
 			(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
 			(ir_context_of ir)
-			(ir_return ir))))))
+			(ir_return ir)))))))
 
 /* Scalar stages are merged after decorrelation. Build their signatures bottom-up
 so generated aliases and dependency IDs do not hide equivalent stage graphs. */
@@ -4656,6 +4723,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				(if (not (nil? found))
 					found
 					(match entry
+						'(entry_alias (symbol aggregate-column) replacement)
+						(if (and (equal? entry_alias alias) (aggregate_column_name? col))
+							replacement
+							nil)
 						'(entry_alias entry_col replacement)
 						(if (and (equal? entry_alias alias) (equal? entry_col col))
 							replacement
