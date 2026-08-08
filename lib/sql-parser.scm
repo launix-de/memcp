@@ -108,6 +108,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	)
 ))
 
+/* SQL numeric literals are exact decimals. Fold literal addition and
+subtraction before the AST loses that distinction to binary float runtime
+arithmetic; leave expressions containing columns or functions untouched. */
+(define sql_add_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_add_numeric_literals a b)
+	'((quote +) a b))))
+(define sql_sub_expr (lambda (a b) (if (and (number? a) (number? b))
+	(sql_sub_numeric_literals a b)
+	'((quote -) a b))))
+
 /* lightweight literal parser for top-level contexts (before sql_expression is defined) */
 (define sql_literal (parser (or
 	(parser (atom "NULL" true) (sql_null_literal))
@@ -643,8 +653,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((define a sql_expression4) "+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_add a n unit))
 		/* date - INTERVAL n UNIT */
 		(parser '((define a sql_expression4) "-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a sql_expression4) "+" (define b sql_expression3)) '((quote +) a b))
-		(parser '((define a sql_expression4) "-" (define b sql_expression3)) '((quote -) a b))
+		(parser '((define a sql_expression4) "+" (define b sql_expression3)) (sql_add_expr a b))
+		(parser '((define a sql_expression4) "-" (define b sql_expression3)) (sql_sub_expr a b))
 		sql_expression4
 	)))
 
