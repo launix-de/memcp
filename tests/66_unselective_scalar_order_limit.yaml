@@ -23,18 +23,29 @@ setup:
   - sql: "DROP TABLE IF EXISTS usol_file"
   - sql: "DROP TABLE IF EXISTS usol_parent"
   - sql: "DROP TABLE IF EXISTS usol_assignment"
+  - sql: "DROP TABLE IF EXISTS usol_item_multi"
+  - sql: "DROP TABLE IF EXISTS usol_file_multi"
   - sql: "CREATE TABLE usol_item (id INT PRIMARY KEY, parent_id INT, file_id INT)"
   - sql: "CREATE TABLE usol_file (id INT, uploaded_at INT)"
   - sql: "CREATE TABLE usol_parent (id INT PRIMARY KEY, owner_id INT, team_id INT)"
   - sql: "CREATE TABLE usol_assignment (id INT PRIMARY KEY, team_id INT, member_id INT)"
+  - sql: "CREATE TABLE usol_item_multi (id INT PRIMARY KEY, bucket INT, file_id INT)"
+  - sql: "CREATE TABLE usol_file_multi (bucket INT, id INT, uploaded_at INT)"
   - sql: "INSERT INTO usol_parent VALUES (1, 7, 10), (2, 8, 20)"
   - sql: "INSERT INTO usol_assignment VALUES (1, 10, 7), (2, 20, 8)"
+  - sql: "INSERT INTO usol_item_multi VALUES (1, 1, 1), (2, 2, 1), (3, 1, 2), (4, 2, 2)"
   - scm: |
       (begin
         (insert (table "memcp-tests" "usol_item") '("id" "parent_id" "file_id")
           (map (produceN 20000) (lambda (i) (list (+ i 1) (+ (- i (* 2 (floor (/ i 2)))) 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_file") '("id" "uploaded_at")
           (map (produceN 20000) (lambda (i) (list (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "usol_file_multi") '("bucket" "id" "uploaded_at")
+          (map (produceN 2000) (lambda (i)
+            (begin
+              (define bucket (+ (- i (* 2 (floor (/ i 2)))) 1))
+              (define id (+ (floor (/ i 2)) 1))
+              (list bucket id (+ (* id 10) (if (equal? bucket 2) 5 0)))))))
         (rebuild)
         20000)
 
@@ -110,8 +121,30 @@ test_cases:
           access_3: true
           access_4: true
 
+  - name: "Composite scalar ORDER lookup preserves every key component"
+    max_time: 1.5
+    sql: |
+      SELECT projected.id
+      FROM (
+        SELECT item.id, item.bucket, item.file_id
+        FROM usol_item_multi item
+      ) projected
+      ORDER BY (
+        SELECT file.uploaded_at FROM usol_file_multi file
+        WHERE file.bucket = projected.bucket AND file.id = projected.file_id
+        LIMIT 1
+      ) DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 4
+        - id: 3
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS usol_item"
   - sql: "DROP TABLE IF EXISTS usol_file"
   - sql: "DROP TABLE IF EXISTS usol_parent"
   - sql: "DROP TABLE IF EXISTS usol_assignment"
+  - sql: "DROP TABLE IF EXISTS usol_item_multi"
+  - sql: "DROP TABLE IF EXISTS usol_file_multi"

@@ -10195,6 +10195,11 @@ source remain residual so they observe the null-extended row. */
 					_ nil)))
 			'()))))
 
+(define scalar_order_lookup_key_expr (lambda (key_exprs)
+	(if (equal? (count key_exprs) 1)
+		(car key_exprs)
+		(cons (quote list) key_exprs))))
+
 (define scalar_order_lookup_stage? (lambda (stage requested_col)
 	(if (or (nil? requested_col)
 		(or (not (group_stage? stage))
@@ -10204,16 +10209,18 @@ source remain residual so they observe the null-extended row. */
 			(define ag (scalar_first_probe_aggregate stage requested_col))
 			(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
 			(define input_rows (planner_stage_input_rows (gs_input stage)))
+			(define local_keys (scalar_order_lookup_input_keys stage))
 			(define input_keys (if (not (source_is_base_table? (gs_input stage)))
 				false
-				(reduce (scalar_order_lookup_input_keys stage) (lambda (local key)
+				(reduce local_keys (lambda (local key)
 					(and local (equal? (expr_source_alias key) (source_alias (gs_input stage))))) true)))
 			(and (not (nil? input_rows))
 				(and (>= input_rows 1000)
 					(and (source_is_base_table? (gs_input stage))
 						(and input_keys
-							(and (not (nil? parts))
-								(and (empty_list? (nth parts 1)) (equal? (nth parts 3) 0)))))))))))
+							(and (equal? (count local_keys) 1)
+								(and (not (nil? parts))
+									(and (empty_list? (nth parts 1)) (equal? (nth parts 3) 0))))))))))))
 
 (define scalar_order_lookup_marker (lambda (expr found)
 	(if (not (nil? found))
@@ -10296,7 +10303,8 @@ source remain residual so they observe the null-extended row. */
 			(list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
 				(list (quote list)
-					(runtime_cons_list_expr (map keys (lambda (expr) (lower_column_expr_for_alias input_src expr))))
+					(scalar_order_lookup_key_expr
+						(map keys (lambda (expr) (lower_column_expr_for_alias input_src expr))))
 					(lower_column_expr_for_alias input_src value_expr)))
 			(list (quote lambda) (list (quote acc) (quote rowvals))
 				(list (quote set_assoc)
@@ -10339,7 +10347,7 @@ source remain residual so they observe the null-extended row. */
 					(qassoc_get (gs_facts order_lookup_stage) (quote lookup-keys) '())))
 				(define order_lookup_key (if (nil? order_lookup)
 					nil
-					(runtime_cons_list_expr (map
+					(scalar_order_lookup_key_expr (map
 						order_lookup_key_exprs
 						(lambda (key) (lower_column_expr_for_join raw_scan_sources first_alias key))))))
 				(define order_lookup_expr (if (nil? order_lookup)
