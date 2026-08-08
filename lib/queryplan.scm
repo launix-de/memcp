@@ -2176,11 +2176,22 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 
 (define window_aggregate_descriptor (lambda (fn args)
 	(match fn
-		"COUNT" (list aggregate_count_descriptor)
+		"COUNT" (if (empty_list? args)
+			(list aggregate_count_descriptor)
+			(list (list (sql_nonnull_count_expr (car args)) (quote +) 0)))
 		"SUM" (match (car args)
-			((symbol aggregate) agg_expr (symbol +) 0) (list (list agg_expr (quote +) 0))
-			((quote aggregate) agg_expr (quote +) 0) (list (list agg_expr (quote +) 0))
-			_ (list (list (car args) (quote +) 0)))
+			((symbol aggregate) agg_expr agg_reduce agg_neutral)
+			(list (list agg_expr agg_reduce agg_neutral))
+			((quote aggregate) agg_expr agg_reduce agg_neutral)
+			(list (list agg_expr agg_reduce agg_neutral))
+			_ (begin
+				(define descriptor (sql_aggregates "SUM"))
+				(list (list (car args) (car descriptor) (cadr descriptor)))))
+		"AVG" (begin
+			(define sum_descriptor (sql_aggregates "SUM"))
+			(list
+				(list (car args) (car sum_descriptor) (cadr sum_descriptor))
+				(list (sql_nonnull_count_expr (car args)) (quote +) 0)))
 		"MAX" (list (list (car args) (quote max) nil))
 		"MIN" (list (list (car args) (quote min) nil))
 		"GROUP_CONCAT" (list (list
@@ -2194,8 +2205,11 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 
 (define window_aggregate_value_expr (lambda (fn args ags stage_alias)
 	(match fn
-		"COUNT" (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false)
+		"COUNT" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
 		"SUM" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+		"AVG" (list (quote sql_avg_divide)
+			(list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+			(list (quote get_column) stage_alias false (aggregate_col_name (cadr ags)) false))
 		"MAX" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
 		"MIN" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
 		"GROUP_CONCAT" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)

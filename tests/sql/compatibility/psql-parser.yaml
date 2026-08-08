@@ -46,6 +46,15 @@ setup:
         5000)
 
 test_cases:
+  - name: "Empty SUM and AVG use NULL rather than the COUNT identity"
+    sql: "SELECT COUNT(val) AS row_count, SUM(val) AS total, AVG(val) AS average FROM psql_data WHERE id < 0"
+    expect:
+      rows: 1
+      data:
+        - row_count: 0
+          total: null
+          average: null
+
   - name: "EXPLAIN COMPILE exposes PostgreSQL planner metrics"
     sql: "EXPLAIN COMPILE SELECT id FROM psql_data WHERE val BETWEEN 20 AND 40 ORDER BY id"
     expect:

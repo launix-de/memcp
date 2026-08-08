@@ -250,8 +250,6 @@ test_cases:
           visible_events: 3
 
   - name: "Badge count and sum keep distinct empty-domain identities"
-    noncritical: true
-    fail_comment: "the empty SUM carrier currently uses the COUNT identity 0 instead of SQL NULL"
     sql: |
       SELECT
         (SELECT COUNT(1)

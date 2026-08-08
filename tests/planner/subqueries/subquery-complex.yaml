@@ -22,6 +22,8 @@ metadata:
   description: "Subqueries: scalar, IN, EXISTS, correlated, in HAVING and WHERE"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS sq_large_dept"
+  - sql: "DROP TABLE IF EXISTS sq_large_emp"
   - sql: "DROP TABLE IF EXISTS sq_dept"
   - sql: "DROP TABLE IF EXISTS sq_emp"
   - sql: |
@@ -41,6 +43,11 @@ setup:
         (6, 'Frank', 1, 95000),
         (7, 'Grace', 3, 65000),
         (8, 'Henry', NULL, 50000)
+  - sql: "CREATE TABLE sq_large_dept (did INT)"
+  - sql: "CREATE TABLE sq_large_emp (did INT, salary INT)"
+  - scm: |
+      (insert (table "memcp-tests" "sq_large_dept") '("did")
+        (map (produceN 1001) (lambda (i) (list i))))
 
 test_cases:
 
@@ -354,7 +361,7 @@ test_cases:
         - did: 4
           metric: 0
 
-  - name: "Nested aggregate scopes share one keytable initializer"
+  - name: "Small nested aggregate scopes avoid keytable preparation"
     sql: |
       EXPLAIN SELECT candidate.did, candidate.total_salary
       FROM (
@@ -363,6 +370,21 @@ test_cases:
         FROM sq_dept d
       ) candidate
       WHERE (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = candidate.did) > 0
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "touch_keytable"
+          count: 0
+
+  - name: "Broad nested aggregate scopes share one keytable initializer"
+    sql: |
+      EXPLAIN SELECT candidate.did, candidate.total_salary
+      FROM (
+        SELECT d.did,
+          (SELECT SUM(e.salary) FROM sq_large_emp e WHERE e.did = d.did) AS total_salary
+        FROM sq_large_dept d
+      ) candidate
+      WHERE (SELECT MAX(e.salary) FROM sq_large_emp e WHERE e.did = candidate.did) > 0
     expect:
       rows: 1
       result_occurrences:
@@ -553,5 +575,7 @@ test_cases:
         - dname: "Empty"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS sq_large_emp"
+  - sql: "DROP TABLE IF EXISTS sq_large_dept"
   - sql: "DROP TABLE IF EXISTS sq_emp"
   - sql: "DROP TABLE IF EXISTS sq_dept"

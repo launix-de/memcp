@@ -6,10 +6,16 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS tbl"
+  - sql: "DROP TABLE IF EXISTS aggregate_identity"
   - sql: "CREATE TABLE tbl (a INT, b INT)"
+  - sql: "CREATE TABLE aggregate_identity (id INT, grp INT, value INT)"
   - sql: |
       INSERT INTO tbl (a, b) VALUES
       (1, 10), (1, 20), (2, 5), (3, 7)
+  - sql: |
+      INSERT INTO aggregate_identity (id, grp, value) VALUES
+      (1, 1, NULL), (2, 1, NULL),
+      (3, 2, NULL), (4, 2, 5), (5, 2, 7)
 
 test_cases:
   - name: "Group sum by a (exact query)"
@@ -56,6 +62,37 @@ test_cases:
           c: 4
           s: 160
 
+  - name: "Empty aggregate input keeps COUNT and SUM identities distinct"
+    sql: |
+      SELECT COUNT(value) AS row_count, SUM(value) AS total, AVG(value) AS average
+      FROM aggregate_identity
+      WHERE id < 0
+    expect:
+      rows: 1
+      data:
+        - row_count: 0
+          total: null
+          average: null
+
+  - name: "SUM ignores NULL values and remains NULL for an all-NULL group"
+    sql: |
+      SELECT grp, COUNT(value) AS row_count, SUM(value) AS total, AVG(value) AS average
+      FROM aggregate_identity
+      GROUP BY grp
+      ORDER BY grp
+    expect:
+      rows: 2
+      data:
+        - grp: 1
+          row_count: 0
+          total: null
+          average: null
+        - grp: 2
+          row_count: 2
+          total: 12
+          average: 6
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS tbl"
   - sql: "DROP TABLE IF EXISTS tbl_mix"
+  - sql: "DROP TABLE IF EXISTS aggregate_identity"
