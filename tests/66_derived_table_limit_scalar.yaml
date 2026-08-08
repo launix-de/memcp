@@ -24,6 +24,7 @@
 metadata:
   version: "1.0"
   description: "Derived table with ORDER BY LIMIT scalar subselects"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
@@ -56,6 +57,29 @@ setup:
   - sql: "INSERT INTO dtl_access_link VALUES (1, 11, 100, 1000), (2, 11, 200, 2000), (3, 12, 100, 1000), (4, 11, NULL, NULL)"
   - sql: "CREATE TABLE dtl_global_access (ID INT PRIMARY KEY, account_id INT, tenant_id INT)"
   - sql: "INSERT INTO dtl_global_access VALUES (1, 11, NULL), (2, 11, NULL), (3, 11, NULL), (4, 11, NULL), (5, 12, NULL)"
+  # Simulate a v3 carrier retained across a planner upgrade. Its stale computed
+  # presence column makes all four carrier keys look like successful probes.
+  - scm: |
+      (begin
+        (droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)
+        (createtable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc"
+          (list
+            (list "unique" "group" (list "k0"))
+            (list "column" "k0" "any" (list) (list)))
+          (list "engine" "memory")
+          true)
+        (insert
+          (table "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc")
+          (list "k0")
+          (list (list 1) (list 2) (list 3) (list 4)))
+        (createcolumn
+          (table "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc")
+          "agg_f0d39398d80eb9d2"
+          "any"
+          (list)
+          (list "temp" true)
+          (list "k0")
+          (lambda (k0) 1)))
 
 test_cases:
 
@@ -535,6 +559,9 @@ test_cases:
       data:
         - ID: 1
         - ID: 2
+
+  - name: "Remove stale physical carrier fixture"
+    scm: '(droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)'
 
 
 cleanup:
