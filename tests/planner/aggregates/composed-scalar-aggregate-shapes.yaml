@@ -250,8 +250,6 @@ test_cases:
           open_events: 0
 
   - name: "Correlated aggregate HAVING is used as an EXISTS input"
-    noncritical: true
-    fail_comment: "EXISTS decorrelation rejects grouped inner query blocks instead of preserving their HAVING stage"
     sql: |
       SELECT p.id
       FROM cq_parent p
@@ -267,6 +265,72 @@ test_cases:
       rows: 1
       data:
         - id: 1
+
+  - name: "Correlated aggregate HAVING preserves NOT EXISTS misses"
+    sql: |
+      SELECT p.id
+      FROM cq_parent p
+      WHERE NOT EXISTS (
+        SELECT i.parent_id
+        FROM cq_item i
+        WHERE i.parent_id = p.id
+        GROUP BY i.parent_id
+        HAVING COUNT(*) >= 2
+      )
+      ORDER BY p.id
+    expect:
+      rows: 4
+      data:
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+
+  - name: "Correlated aggregate HAVING projects a boolean per outer domain"
+    sql: |
+      SELECT p.id,
+        EXISTS (
+          SELECT i.parent_id
+          FROM cq_item i
+          WHERE i.parent_id = p.id
+          GROUP BY i.parent_id
+          HAVING COUNT(*) >= 2
+        ) AS has_many
+      FROM cq_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          has_many: true
+        - id: 2
+          has_many: false
+        - id: 3
+          has_many: false
+        - id: 4
+          has_many: false
+        - id: 5
+          has_many: false
+
+  - name: "EXPLAIN IR keeps grouped EXISTS logical and decorrelated"
+    sql: |
+      EXPLAIN IR SELECT p.id
+      FROM cq_parent p
+      WHERE EXISTS (
+        SELECT i.parent_id
+        FROM cq_item i
+        WHERE i.parent_id = p.id
+        GROUP BY i.parent_id
+        HAVING COUNT(*) >= 2
+      )
+    expect:
+      contains:
+        - "group-stage"
+        - "(purpose exists)"
+        - "(aggregate 1 + 0)"
+      not_contains:
+        - "inner_select"
+        - "dependent-subquery"
 
   - name: "LEFT JOIN ON with correlated EXISTS preserves unmatched rows"
     sql: |
