@@ -941,6 +941,11 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define scalar_aggregate_probe_expr (lambda (stage col)
 	(list (quote scalar_aggregate_probe) stage col)))
 
+(define scalar_aggregate_probe_outer_exprs (lambda (stage)
+	(merge (list
+		(qassoc_get (gs_facts stage) (quote lookup-keys) '())
+		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))))
+
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
 		(make_exists_stage_join_condition stage_alias key_names outer_domain)
@@ -1157,9 +1162,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate))
 			(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote many))
 				(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-					(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
-						(and (equal? (coalesceNil (gs_having stage) true) true)
-							(source_is_base_table? (gs_input stage))))))))))
+					(and (equal? (coalesceNil (gs_having stage) true) true)
+						(source_is_base_table? (gs_input stage)))))))))
 
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
@@ -5026,8 +5030,8 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		((quote scalar_first_probe) stage requested_col _stages)
 		(extract_columns_for_alias src (list (quote scalar_first_probe) stage requested_col))
 		((symbol scalar_aggregate_probe) stage _requested_col)
-		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
-			(extract_columns_for_alias src key))))
+		(merge_unique (map (scalar_aggregate_probe_outer_exprs stage) (lambda (expr)
+			(extract_columns_for_alias src expr))))
 		((quote scalar_aggregate_probe) stage requested_col)
 		(extract_columns_for_alias src (list (quote scalar_aggregate_probe) stage requested_col))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
@@ -5523,8 +5527,8 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		((quote scalar_first_probe) stage requested_col _stages)
 		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_first_probe) stage requested_col) columns_by_alias)
 		((symbol scalar_aggregate_probe) stage _requested_col)
-		(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (acc key)
-			(collect_join_columns_acc sources default_alias target_alias key acc)) columns_by_alias)
+		(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
 		((quote scalar_aggregate_probe) stage requested_col)
 		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_aggregate_probe) stage requested_col) columns_by_alias)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
@@ -7702,8 +7706,10 @@ is still available and remains an ordinary scalar expression through untangle. *
 				(scalar_aggregate_probe_stage_safe? stage)
 				(and
 					(or
-						(probe_limit_small_enough? limit_value)
-						(probe_context_small_enough? probe_sources))
+						(stage_has_residual_outer_refs? stage)
+						(or
+							(probe_limit_small_enough? limit_value)
+							(probe_context_small_enough? probe_sources)))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
 
 (define probe_output_sources_for_block (lambda (stages sources default_alias limit_value)

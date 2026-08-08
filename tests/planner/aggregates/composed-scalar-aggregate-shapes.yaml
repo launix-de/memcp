@@ -19,6 +19,8 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS cq_large_parent"
+  - sql: "DROP TABLE IF EXISTS cq_digit"
   - sql: "DROP TABLE IF EXISTS cq_event"
   - sql: "DROP TABLE IF EXISTS cq_assignment"
   - sql: "DROP TABLE IF EXISTS cq_item"
@@ -60,6 +62,13 @@ setup:
         status VARCHAR(16),
         sequence_no INT
       )
+  - sql: "CREATE TABLE cq_digit (n INT PRIMARY KEY)"
+  - sql: |
+      CREATE TABLE cq_large_parent (
+        id INT PRIMARY KEY,
+        tenant_id INT,
+        ref_id INT
+      )
   - sql: |
       INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
         (1, 10, 100, 1000),
@@ -94,6 +103,13 @@ setup:
         (3, 12, 'open', 1),
         (4, 21, 'closed', 1),
         (5, 31, 'open', 1)
+  - sql: "INSERT INTO cq_digit (n) VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+  - sql: |
+      INSERT INTO cq_large_parent (id, tenant_id, ref_id)
+      SELECT d1.n * 100 + d2.n * 10 + d3.n,
+        100,
+        IF((d1.n * 100 + d2.n * 10 + d3.n) % 2 = 0, 1000, 1001)
+      FROM cq_digit d1, cq_digit d2, cq_digit d3
 
 test_cases:
 
@@ -378,8 +394,6 @@ test_cases:
           open_count: 0
 
   - name: "Two-column correlation keeps duplicate domains separate"
-    noncritical: true
-    fail_comment: "the aggregate carrier loses nonconstant two-column domain keys"
     sql: |
       SELECT p.id,
         (SELECT COUNT(*)
@@ -401,6 +415,36 @@ test_cases:
           grants: 0
         - id: 5
           grants: 1
+
+  - name: "Residual aggregate correlation remains correct above the probe cost threshold"
+    sql: |
+      SELECT SUM(
+        (SELECT COUNT(*)
+         FROM cq_assignment a
+         WHERE a.tenant_id = p.tenant_id
+           AND (a.ref_id = p.ref_id OR a.ref_id IS NULL))
+      ) AS grants
+      FROM cq_large_parent p
+    expect:
+      rows: 1
+      data:
+        - grants: 1000
+
+  - name: "EXPLAIN keeps residual aggregate correlation inside the outer scan"
+    sql: |
+      EXPLAIN SELECT p.id,
+        (SELECT COUNT(*)
+         FROM cq_assignment a
+         WHERE a.tenant_id = p.tenant_id
+           AND (a.ref_id = p.ref_id OR a.ref_id IS NULL)) AS grants
+      FROM cq_large_parent p
+    expect:
+      contains:
+        - '"cq_assignment"'
+        - "p.ref_id"
+      not_contains:
+        - "touch_keytable"
+        - ".grp:cq_assignment"
 
   - name: "Outer NULL key does not equal an inner NULL key"
     sql: |
@@ -446,6 +490,8 @@ test_cases:
 
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS cq_large_parent"
+  - sql: "DROP TABLE IF EXISTS cq_digit"
   - sql: "DROP TABLE IF EXISTS cq_event"
   - sql: "DROP TABLE IF EXISTS cq_assignment"
   - sql: "DROP TABLE IF EXISTS cq_item"
