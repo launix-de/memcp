@@ -1,0 +1,117 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Unselective scalar ORDER LIMIT late projection"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS usol_item"
+  - sql: "DROP TABLE IF EXISTS usol_file"
+  - sql: "DROP TABLE IF EXISTS usol_parent"
+  - sql: "DROP TABLE IF EXISTS usol_assignment"
+  - sql: "CREATE TABLE usol_item (id INT PRIMARY KEY, parent_id INT, file_id INT)"
+  - sql: "CREATE TABLE usol_file (id INT, uploaded_at INT)"
+  - sql: "CREATE TABLE usol_parent (id INT PRIMARY KEY, owner_id INT, team_id INT)"
+  - sql: "CREATE TABLE usol_assignment (id INT PRIMARY KEY, team_id INT, member_id INT)"
+  - sql: "INSERT INTO usol_parent VALUES (1, 7, 10), (2, 8, 20)"
+  - sql: "INSERT INTO usol_assignment VALUES (1, 10, 7), (2, 20, 8)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "usol_item") '("id" "parent_id" "file_id")
+          (map (produceN 20000) (lambda (i) (list (+ i 1) (+ (- i (* 2 (floor (/ i 2)))) 1) (+ i 1)))))
+        (insert (table "memcp-tests" "usol_file") '("id" "uploaded_at")
+          (map (produceN 20000) (lambda (i) (list (+ i 1) (+ i 1)))))
+        (rebuild)
+        20000)
+
+test_cases:
+  - name: "Unselective scalar ORDER LIMIT defers nested access projections"
+    max_time: 1.5
+    max_plan_size: 100000
+    sql: |
+      SELECT projected.id, projected.access_1, projected.access_2,
+        projected.access_3, projected.access_4
+      FROM (
+        SELECT item.id, item.file_id,
+          COALESCE((
+            SELECT (parent_1.owner_id = 7 OR EXISTS (
+              SELECT TRUE FROM usol_assignment member_1
+              WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1
+            ))
+            FROM usol_parent parent_1 WHERE parent_1.id = item.parent_id LIMIT 1
+          ), FALSE) AS access_1,
+          COALESCE((
+            SELECT (parent_2.owner_id = 7 OR EXISTS (
+              SELECT TRUE FROM usol_assignment member_2
+              WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 7 LIMIT 1
+            ))
+            FROM usol_parent parent_2 WHERE parent_2.id = item.parent_id LIMIT 1
+          ), FALSE) AS access_2,
+          COALESCE((
+            SELECT (parent_3.owner_id = 7 OR EXISTS (
+              SELECT TRUE FROM usol_assignment member_3
+              WHERE member_3.team_id = parent_3.team_id AND member_3.member_id = 7 LIMIT 1
+            ))
+            FROM usol_parent parent_3 WHERE parent_3.id = item.parent_id LIMIT 1
+          ), FALSE) AS access_3,
+          COALESCE((
+            SELECT (parent_4.owner_id = 7 OR EXISTS (
+              SELECT TRUE FROM usol_assignment member_4
+              WHERE member_4.team_id = parent_4.team_id AND member_4.member_id = 7 LIMIT 1
+            ))
+            FROM usol_parent parent_4 WHERE parent_4.id = item.parent_id LIMIT 1
+          ), FALSE) AS access_4
+        FROM usol_item item
+        WHERE COALESCE((
+          SELECT (filter_parent.owner_id = 7 OR EXISTS (
+            SELECT TRUE FROM usol_assignment filter_member
+            WHERE filter_member.team_id = filter_parent.team_id
+              AND filter_member.member_id = 7 LIMIT 1
+          ))
+          FROM usol_parent filter_parent
+          WHERE filter_parent.id = item.parent_id LIMIT 1
+        ), FALSE)
+      ) projected
+      ORDER BY (
+        SELECT file.uploaded_at FROM usol_file file
+        WHERE file.id = projected.file_id LIMIT 1
+      ) DESC, projected.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 19999
+          access_1: true
+          access_2: true
+          access_3: true
+          access_4: true
+        - id: 19997
+          access_1: true
+          access_2: true
+          access_3: true
+          access_4: true
+        - id: 19995
+          access_1: true
+          access_2: true
+          access_3: true
+          access_4: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS usol_item"
+  - sql: "DROP TABLE IF EXISTS usol_file"
+  - sql: "DROP TABLE IF EXISTS usol_parent"
+  - sql: "DROP TABLE IF EXISTS usol_assignment"
