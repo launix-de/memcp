@@ -1063,8 +1063,6 @@ test_cases:
         - weighted_score: 24
 
   - name: "TPC-H Q7 shape: bidirectional OR join alternatives"
-    noncritical: true
-    fail_comment: "join lowering retains the first bidirectional OR arm but drops the second matching arm"
     sql: |
       SELECT p.owner_id, a.actor_id, COUNT(*) AS pair_count
       FROM cq_parent p
@@ -1074,6 +1072,17 @@ test_cases:
          OR (p.owner_id = 20 AND a.actor_id = 8))
       GROUP BY p.owner_id, a.actor_id
       ORDER BY p.owner_id
+    on_fail:
+      sql: |
+        EXPLAIN IR
+        SELECT p.owner_id, a.actor_id, COUNT(*) AS pair_count
+        FROM cq_parent p
+        JOIN cq_assignment a
+          ON a.tenant_id = p.tenant_id
+         AND ((p.owner_id = 10 AND a.actor_id = 7)
+           OR (p.owner_id = 20 AND a.actor_id = 8))
+        GROUP BY p.owner_id, a.actor_id
+        ORDER BY p.owner_id
     expect:
       rows: 2
       data:
