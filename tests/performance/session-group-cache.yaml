@@ -11,6 +11,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS sgc_data"
   - sql: "DROP TABLE IF EXISTS sgc_acl"
+  - sql: "DROP TABLE IF EXISTS sgc_range_data"
   - sql: |
       CREATE TABLE sgc_data (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -24,6 +25,7 @@ setup:
         usr INT,
         category INT
       )
+  - sql: "CREATE TABLE sgc_range_data (id INT PRIMARY KEY, category INT, val INT)"
   - sql: |
       INSERT INTO sgc_data (category, owner, val) VALUES
         (2, 2, 7), (3, 3, 14), (4, 1, 21), (5, 2, 28), (1, 3, 35),
@@ -35,15 +37,17 @@ setup:
         (1, 1), (1, 2), (1, 3),
         (2, 1), (2, 4),
         (3, 2), (3, 5)
+  - sql: "INSERT INTO sgc_range_data VALUES (1, 1, 60), (2, 1, 90)"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS sgc_data"
   - sql: "DROP TABLE IF EXISTS sgc_acl"
+  - sql: "DROP TABLE IF EXISTS sgc_range_data"
 
 test_cases:
   - name: "set session user"
     session_id: "sgc_sess"
-    sql: "SET @app_user = 1"
+    sql: "SET @actor_id = 1"
     expect:
       rows_affected: 0
 
@@ -54,7 +58,7 @@ test_cases:
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
+        WHERE sgc_acl.usr = @actor_id
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -68,6 +72,24 @@ test_cases:
           cnt: 4
         - category: 3
           cnt: 4
+
+  - name: "session equality is a logical domain key"
+    session_id: "sgc_sess"
+    sql: |
+      EXPLAIN IR SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @actor_id
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      result_contains:
+        - "btw2025_domain"
+        - "btw2025_lookup_keys"
+        - "(condition true) (purpose exists)"
 
   - name: "session-filtered COUNT GROUP BY (warm, must be fast)"
     session_id: "sgc_sess"
@@ -76,7 +98,7 @@ test_cases:
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
+        WHERE sgc_acl.usr = @actor_id
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -91,6 +113,26 @@ test_cases:
         - category: 3
           cnt: 4
 
+  - name: "session-dependent grouping projects one membership recset"
+    session_id: "sgc_sess"
+    sql: |
+      EXPLAIN SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @actor_id
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      result_contains:
+        - "scan_recset"
+        - "recset_project_join"
+      result_not_contains:
+        - ".grp:"
+        - "scan_exists"
+
   - name: "session-filtered SUM GROUP BY (warm)"
     session_id: "sgc_sess"
     sql: |
@@ -98,7 +140,7 @@ test_cases:
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
+        WHERE sgc_acl.usr = @actor_id
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -108,7 +150,7 @@ test_cases:
 
   - name: "set session user 2"
     session_id: "sgc_sess2"
-    sql: "SET @app_user = 2"
+    sql: "SET @actor_id = 2"
     expect:
       rows_affected: 0
 
@@ -119,7 +161,7 @@ test_cases:
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
+        WHERE sgc_acl.usr = @actor_id
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -132,62 +174,67 @@ test_cases:
         - category: 4
           cnt: 4
 
-  - name: "first session reuses its own cached groups"
+  - name: "change the original session binding"
+    session_id: "sgc_sess"
+    sql: "SET @actor_id = 2"
+    expect:
+      rows_affected: 0
+
+  - name: "changed session binding uses its own domain key"
     session_id: "sgc_sess"
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
+        WHERE @actor_id = sgc_acl.usr
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
       ORDER BY category
     expect:
-      rows: 3
+      rows: 2
       data:
         - category: 1
           cnt: 4
-        - category: 2
-          cnt: 4
-        - category: 3
+        - category: 4
           cnt: 4
 
-  - name: "write from an unrelated session updates every populated domain"
-    session_id: "sgc_writer"
-    sql: "INSERT INTO sgc_data (category, owner, val) VALUES (4, 9, 200)"
+  - name: "restore the original session binding"
+    session_id: "sgc_sess"
+    sql: "SET @actor_id = 1"
     expect:
-      affected_rows: 1
+      rows_affected: 0
 
-  - name: "second session sees incremental changes for its cached domain"
+  - name: "null session binding"
+    session_id: "sgc_sess2"
+    sql: "SET @actor_id = NULL"
+    expect:
+      rows_affected: 0
+
+  - name: "null session binding has no memberships"
     session_id: "sgc_sess2"
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
+        WHERE sgc_acl.usr = @actor_id
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
       ORDER BY category
     expect:
-      rows: 2
-      data:
-        - category: 1
-          cnt: 4
-        - category: 4
-          cnt: 5
+      rows: 0
 
-  - name: "first session stays isolated after an unrelated write"
+  - name: "restored session binding reuses the correct carrier slice"
     session_id: "sgc_sess"
     sql: |
       SELECT category, COUNT(*) AS cnt
       FROM sgc_data
       WHERE EXISTS (
         SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
+        WHERE sgc_acl.usr = @actor_id
           AND sgc_acl.category = sgc_data.category
       )
       GROUP BY category
@@ -202,30 +249,44 @@ test_cases:
         - category: 3
           cnt: 4
 
-  - name: "logical plan exposes the session binding as a domain key"
-    session_id: "sgc_sess"
-    sql: |
-      EXPLAIN IR SELECT category, COUNT(*) AS cnt
-      FROM sgc_data
-      WHERE EXISTS (
-        SELECT 1 FROM sgc_acl
-        WHERE sgc_acl.usr = @app_user
-          AND sgc_acl.category = sgc_data.category
-      )
-      GROUP BY category
-    expect:
-      contains:
-        - '(domain ((get_column "sgc_data" true "category" true) (session "app_user")))'
-        - '(lookup-keys ((get_column "sgc_data" true "category" true) (session "app_user")))'
-
   - name: "simple COUNT with session WHERE (warm, must be fast)"
     session_id: "sgc_sess"
     sql: |
       SELECT COUNT(*) AS cnt
       FROM sgc_data
-      WHERE owner = @app_user
+      WHERE owner = @actor_id
     expect:
       rows: 1
+
+  - name: "set initial range binding"
+    session_id: "sgc_range"
+    sql: "SET @cutoff = 100"
+    expect:
+      rows_affected: 0
+
+  - name: "nested grouped aggregate uses initial range binding"
+    session_id: "sgc_range"
+    sql: >-
+      SELECT (SELECT SUM(cnt) FROM (SELECT category, SUM(1) AS cnt FROM sgc_range_data WHERE val < @cutoff GROUP BY category) grouped_rows LIMIT 1) AS total
+    expect:
+      rows: 1
+      data:
+        - total: 2
+
+  - name: "tighten range binding"
+    session_id: "sgc_range"
+    sql: "SET @cutoff = 85"
+    expect:
+      rows_affected: 0
+
+  - name: "nested grouped aggregate uses changed range binding"
+    session_id: "sgc_range"
+    sql: >-
+      SELECT (SELECT SUM(cnt) FROM (SELECT category, SUM(1) AS cnt FROM sgc_range_data WHERE val < @cutoff GROUP BY category) grouped_rows LIMIT 1) AS total
+    expect:
+      rows: 1
+      data:
+        - total: 1
 
   - name: "set first aggregate factor"
     session_id: "sgc_factor_a"
@@ -250,7 +311,7 @@ test_cases:
         - category: 3
           total: 532
         - category: 4
-          total: 988
+          total: 588
         - category: 5
           total: 644
 
@@ -277,7 +338,7 @@ test_cases:
         - category: 3
           total: 798
         - category: 4
-          total: 1482
+          total: 882
         - category: 5
           total: 966
 
@@ -310,7 +371,7 @@ test_cases:
         - category: 3
           total: 532
         - category: 4
-          total: 988
+          total: 588
         - category: 5
           total: 644
 
@@ -331,6 +392,60 @@ test_cases:
         - category: 3
           total: 798
         - category: 4
-          total: 1482
+          total: 882
         - category: 5
           total: 966
+
+  - name: "restore second membership domain"
+    session_id: "sgc_sess2"
+    sql: "SET @actor_id = 2"
+    expect:
+      rows_affected: 0
+
+  - name: "write from an unrelated session updates populated membership domains"
+    session_id: "sgc_writer"
+    sql: "INSERT INTO sgc_data (category, owner, val) VALUES (4, 9, 200)"
+    expect:
+      affected_rows: 1
+
+  - name: "second membership domain sees incremental changes"
+    session_id: "sgc_sess2"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @actor_id
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 2
+      data:
+        - category: 1
+          cnt: 5
+        - category: 4
+          cnt: 5
+
+  - name: "first membership domain remains isolated after write"
+    session_id: "sgc_sess"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @actor_id
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 5
+        - category: 2
+          cnt: 4
+        - category: 3
+          cnt: 4
