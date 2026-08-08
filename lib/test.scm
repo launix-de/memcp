@@ -186,6 +186,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"c"
 			(list (quote and) "d" (list (quote and) "e" "f")))
 		true)) '("a" "b" "c" "d" "e" "f")) true "combine_where_terms flattens nested AND terms")
+	(define probe_outer_column (list (quote get_column) "outer_row" true "id" true))
+	(define probe_param (symbol "__probe_key_0"))
+	(define probe_param_index (scalar_query_probe_param_index (list probe_outer_column) (list probe_param)))
+	(assert (equal?
+		(rewrite_scalar_query_probe_params probe_param_index probe_outer_column)
+		probe_param) true "scalar query probe binds a direct inherited column")
+	(assert (equal?
+		(rewrite_scalar_query_probe_params probe_param_index (list (quote stage-fixture) (list probe_outer_column)))
+		(list (quote stage-fixture) (list probe_param))) true "scalar query probe binds inherited columns throughout stage data")
 	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
 	(define canonical_group_count (list 1 (quote +) 0))
 	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
