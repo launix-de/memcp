@@ -116,8 +116,6 @@ test_cases:
         - id: 4
 
   - name: "Repeated correlated EXISTS agrees in WHERE and projection"
-    noncritical: true
-    fail_comment: "the projected use is rebound to a false/stale stage output although the identical WHERE use matched"
     sql: |
       SELECT p.id,
         EXISTS (
@@ -141,6 +139,60 @@ test_cases:
           visible: true
         - id: 4
           visible: true
+
+  - name: "Projected EXISTS remains false when another OR branch admits the row"
+    sql: |
+      SELECT p.id,
+        EXISTS (
+          SELECT 1 FROM cq_assignment a
+          WHERE a.actor_id = 7
+            AND a.tenant_id = p.tenant_id
+            AND a.allowed = TRUE
+        ) AS visible
+      FROM cq_parent p
+      WHERE p.owner_id = 20
+         OR EXISTS (
+           SELECT 1 FROM cq_assignment a
+           WHERE a.actor_id = 7
+             AND a.tenant_id = p.tenant_id
+             AND a.allowed = TRUE
+         )
+      ORDER BY p.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          visible: true
+        - id: 2
+          visible: false
+        - id: 4
+          visible: true
+
+  - name: "Required projected EXISTS reuses its RecSet without a scalar rescan"
+    sql: |
+      EXPLAIN SELECT p.id,
+        EXISTS (
+          SELECT 1 FROM cq_assignment a
+          WHERE a.actor_id = 7
+            AND a.tenant_id = p.tenant_id
+            AND a.allowed = TRUE
+        ) AS visible
+      FROM cq_parent p
+      WHERE EXISTS (
+        SELECT 1 FROM cq_assignment a
+        WHERE a.actor_id = 7
+          AND a.tenant_id = p.tenant_id
+          AND a.allowed = TRUE
+      )
+    expect:
+      contains:
+        - "recset_project_join"
+        - "scan_recset"
+        - "visible"
+      not_contains:
+        - "scan_order"
+        - "scan_exists"
+        - "driver_membership_probe"
 
   - name: "Global EXISTS is combined with correlated EXISTS"
     sql: |
