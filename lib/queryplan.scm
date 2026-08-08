@@ -5381,6 +5381,29 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		(stage_dependency_graph all_stages)
 		entries)))
 
+(define scalar_query_probe_param_index (lambda (lookup_keys params)
+	(reduce (produceN (count lookup_keys)) (lambda (index i)
+		(match (nth lookup_keys i)
+			((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+			(set_assoc index (nth lookup_keys i) (nth params i))
+			((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+			(set_assoc index (nth lookup_keys i) (nth params i))
+			_ index)) '())))
+
+/* A query-probe lambda evaluates its outer lookup keys before entering nested
+stages. Replace inherited direct column references with those parameters so
+dependency preparation does not emit free outer-row symbols. */
+(define rewrite_scalar_query_probe_params (lambda (index expr)
+	(match expr
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(coalesceNil (get_assoc index expr) expr)
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(rewrite_scalar_query_probe_params index
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons (rewrite_scalar_query_probe_params index head) (map tail (lambda (item)
+			(rewrite_scalar_query_probe_params index item))))
+		_ expr)))
+
 (define scalar_query_probe_recipe_binding (lambda (plan)
 	(match plan
 		'(stage requested_col nested_stages _hoisted_stages prepare_stages) (begin
@@ -5397,11 +5420,18 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(define value_expr (nth (scalar_first_probe_parts ag) 0))
 			(define params (map (produceN (count keys)) (lambda (i)
 				(symbol (concat "__probe_key_" i)))))
+			(define param_index (scalar_query_probe_param_index lookup_keys params))
+			(define bound_stage (rewrite_scalar_query_probe_params param_index stage))
+			(define bound_value_expr (rewrite_scalar_query_probe_params param_index value_expr))
+			(define bound_nested_stages (map nested_stages (lambda (nested_stage)
+				(rewrite_scalar_query_probe_params param_index nested_stage))))
+			(define bound_prepare_stages (map prepare_stages (lambda (prepare_stage)
+				(rewrite_scalar_query_probe_params param_index prepare_stage))))
 			(list
 				(quote define)
 				(symbol (scalar_query_probe_recipe_key stage requested_col))
 				(list (quote lambda) params
-					(lower_scalar_first_query_probe_expr_using stage value_expr keys params nested_stages prepare_stages))))
+					(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr keys params bound_nested_stages bound_prepare_stages))))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
 (define scalar_query_probe_recipe_bindings (lambda (plans)
