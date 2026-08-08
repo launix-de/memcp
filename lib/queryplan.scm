@@ -657,13 +657,34 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(qualify_unqualified_column_for_sources sources item))))
 		_ expr)))
 
+(define session_dependency_expr? (lambda (expr)
+	(match expr
+		((symbol session) key) (not (equal? key "__memcp_tx"))
+		((quote session) key) (not (equal? key "__memcp_tx"))
+		_ false)))
+
+(define expr_contains_session_dependency? (lambda (expr)
+	(if (session_dependency_expr? expr)
+		true
+		(match expr
+			(cons head tail) (or
+				(expr_contains_session_dependency? head)
+				(reduce tail (lambda (found item)
+					(or found (expr_contains_session_dependency? item)))
+					false))
+			_ false))))
+
 (define exists_correlation_pair (lambda (inner_default inner_sources outer_sources term)
 	(match term
 		((symbol equal??) a b) (begin
 			(define a_inner (expr_refs_sources? inner_default inner_sources a))
 			(define b_inner (expr_refs_sources? inner_default inner_sources b))
-			(define a_outer (and (not a_inner) (expr_refs_sources? nil outer_sources a)))
-			(define b_outer (and (not b_inner) (expr_refs_sources? nil outer_sources b)))
+			(define a_outer (and (not a_inner) (or
+				(expr_refs_sources? nil outer_sources a)
+				(session_dependency_expr? a))))
+			(define b_outer (and (not b_inner) (or
+				(expr_refs_sources? nil outer_sources b)
+				(session_dependency_expr? b))))
 			(if (and a_inner b_outer)
 				(list a (qualify_unqualified_column_for_sources outer_sources b))
 				(if (and b_inner a_outer)
@@ -3887,12 +3908,16 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_candidate)))))))
 
 (define exists_recset_stage? (lambda (stage)
-	(and (group_stage? stage)
-		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
-			(and (equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
-				(and (single_source? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-					(and (single_source? (gs_keys stage))
-						(source_is_base_table? (gs_input stage)))))))))
+	(if (not (group_stage? stage))
+		false
+		(begin
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(and
+				(equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
+				(equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
+				(not (empty_list? lookup_keys))
+				(equal? (count lookup_keys) (count (gs_keys stage)))
+				(source_is_base_table? (gs_input stage)))))))
 
 (define exists_recset_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
@@ -4026,12 +4051,26 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(cons head tail) (cons head (map tail (lambda (item) (rewrite_exists_recset_probe_refs alias stage probe item))))
 			_ expr))))
 
+(define first_driver_lookup_key (lambda (stage sources)
+	(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (found key)
+		(if (not (nil? found))
+			found
+			(reduce (coalesceNil sources '()) (lambda (resolved src)
+				(if (or (not (nil? resolved)) (nil? (direct_column_name_for_alias src key)))
+					resolved
+					key))
+				nil)))
+		nil)))
+
 (define first_exists_recset_source (lambda (stages sources default_alias condition)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(if (not (nil? found))
 			found
 			(if (and (exists_recset_stage_output_source? stages src)
-				(condition_has_exists_recset_probe? (source_alias src) condition))
+				(and (not (nil? (first_driver_lookup_key
+					(stage_by_id stages (stage_output_relation_id (source_relation src)))
+					(without_source_alias sources (source_alias src)))))
+					(condition_has_exists_recset_probe? (source_alias src) condition)))
 				src
 				nil)))
 		nil)))
@@ -4117,7 +4156,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(begin
 								(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation exists_src))))
 								(define stage_id (gs_id stage))
-								(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+								(define driver_sources (without_source_alias sources (source_alias exists_src)))
+								(define probe (first_driver_lookup_key stage driver_sources))
 								(define base_where (rewrite_exists_recset_probe_refs
 									(source_alias exists_src)
 									stage
@@ -4126,7 +4166,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 								(query_block_with_reorder_facts
 									(make_query_block
 										(qb_schema block)
-										(without_source_alias sources (source_alias exists_src))
+										driver_sources
 										(qb_fields block)
 										base_where
 										(qb_group block)
@@ -5922,6 +5962,65 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			(source_table_expr target_src)
 			(quoted_runtime_list (list target_col))))))
 
+(define exists_recset_projection_parts_acc (lambda (input_src target_src keys lookup_keys source_cols target_cols constant_terms)
+	(match keys
+		(cons inner_expr inner_rest) (match lookup_keys
+			(cons lookup_expr lookup_rest) (begin
+				(define source_col (direct_column_name_for_alias input_src inner_expr))
+				(define target_col (direct_column_name_for_alias target_src lookup_expr))
+				(if (nil? source_col)
+					nil
+					(if (not (nil? target_col))
+						(exists_recset_projection_parts_acc input_src target_src inner_rest lookup_rest
+							(merge source_cols (list source_col))
+							(merge target_cols (list target_col))
+							constant_terms)
+						(if (expr_refs_sources? nil (list target_src) lookup_expr)
+							nil
+							(exists_recset_projection_parts_acc input_src target_src inner_rest lookup_rest
+								source_cols target_cols
+								(merge constant_terms (list
+									(list (quote equal??) inner_expr lookup_expr))))))))
+			_ nil)
+		_ (if (empty_list? lookup_keys)
+			(list source_cols target_cols constant_terms)
+			nil))))
+
+(define exists_recset_projection_parts (lambda (stage target_src)
+	(exists_recset_projection_parts_acc
+		(gs_input stage)
+		target_src
+		(gs_keys stage)
+		(qassoc_get (gs_facts stage) (quote lookup-keys) '())
+		'() '() '())))
+
+(define exists_recset_project_join_expr (lambda (target_src stage)
+	(begin
+		(define input_src (gs_input stage))
+		(define parts (exists_recset_projection_parts stage target_src))
+		(if (or (nil? parts) (empty_list? (nth parts 0)))
+			nil
+			(begin
+				(define alias (source_alias input_src))
+				(define condition (combine_where_terms
+					(cons
+						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+						(nth parts 2))
+					true))
+				(define filtercols (extract_columns_for_alias input_src condition))
+				(list (quote recset_project_join)
+					'(session "__memcp_tx")
+					(list (quote scan_recset)
+						'(session "__memcp_tx")
+						(source_table_expr input_src)
+						(cons (quote list) filtercols)
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat alias "." col))))
+							(list (quote optimize) (lower_column_expr_for_alias input_src condition))))
+					(quoted_runtime_list (nth parts 0))
+					(source_table_expr target_src)
+					(quoted_runtime_list (nth parts 1))))))))
+
 (define recset_project_join_expr_for_membership (lambda (src membership)
 	(begin
 		(define stage (nth membership 0))
@@ -5935,26 +6034,28 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 					(car projected)
 					(list (quote recset_union) (cons (quote list) projected))))
 			(if (exists_recset_stage? stage)
-				(begin
-					(define source_col (direct_column_name_for_alias input (car (gs_keys stage))))
-					(if (nil? source_col)
-						nil
-						(begin
-							(define alias (source_alias input))
-							(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-							(define filtercols (extract_columns_for_alias input condition))
-							(list (quote recset_project_join)
-								'(session "__memcp_tx")
-								(list (quote scan_recset)
+				(if (> (count (gs_keys stage)) 1)
+					(exists_recset_project_join_expr src stage)
+					(begin
+						(define source_col (direct_column_name_for_alias input (car (gs_keys stage))))
+						(if (nil? source_col)
+							nil
+							(begin
+								(define alias (source_alias input))
+								(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+								(define filtercols (extract_columns_for_alias input condition))
+								(list (quote recset_project_join)
 									'(session "__memcp_tx")
-									(source_table_expr input)
-									(cons (quote list) filtercols)
-									(list (quote lambda)
-										(map filtercols (lambda (col) (symbol (concat alias "." col))))
-										(list (quote optimize) (lower_column_expr_for_alias input condition))))
-								(quoted_runtime_list (list source_col))
-								(source_table_expr src)
-								(quoted_runtime_list (list target_col))))))
+									(list (quote scan_recset)
+										'(session "__memcp_tx")
+										(source_table_expr input)
+										(cons (quote list) filtercols)
+										(list (quote lambda)
+											(map filtercols (lambda (col) (symbol (concat alias "." col))))
+											(list (quote optimize) (lower_column_expr_for_alias input condition))))
+									(quoted_runtime_list (list source_col))
+									(source_table_expr src)
+									(quoted_runtime_list (list target_col)))))))
 				nil)))))
 
 (define lower_scalar_marker_expr (lambda (expr)
@@ -6897,7 +6998,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 			_ false)))
 		true)))
 
-(define build_base_group_scan_assoc_plan (lambda (schema tbl alias keys condition ags)
+(define build_base_group_scan_assoc_plan (lambda (schema tbl alias table_expr keys condition ags)
 	(begin
 		(define src (list alias schema tbl false nil))
 		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
@@ -6925,7 +7026,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(list (quote merge_assoc_mut) (quote acc) (quote grouped) merge_payload)))
 		(list (quote scan)
 			'(session "__memcp_tx")
-			(list (quote table) schema tbl)
+			table_expr
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -6970,6 +7071,25 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define limit_expr (coalesceNil limit_value -1))
 		(define normalized_order (coalesceNil order_items '()))
 		(define raw_rows_expr (list (quote assoc_keys_values_as_dataset_rows) (quote grouped) (count key_names)))
+		(define candidate_membership (driver_membership_for_source src condition))
+		(define membership_stage (if (nil? candidate_membership) nil (nth candidate_membership 0)))
+		(define membership (if (and (list? membership_stage)
+			(and (group_stage? membership_stage) (reduce
+				(qassoc_get (gs_facts membership_stage) (quote lookup-keys) '())
+				(lambda (found key) (or found (expr_contains_session_dependency? key)))
+				false)))
+			candidate_membership
+			nil))
+		(define membership_table_expr (if (nil? membership)
+			nil
+			(recset_project_join_expr_for_membership src membership)))
+		(define effective_membership (if (nil? membership_table_expr) nil membership))
+		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define membership_var (symbol "__membership_recset"))
+		(define table_expr (if (nil? membership_table_expr)
+			(source_table_expr src)
+			membership_var))
+		(define grouped_scan (build_base_group_scan_assoc_plan schema tbl alias table_expr keys effective_condition ags))
 		(list
 			(list (quote lambda) (list (quote grouped))
 				(if (empty_list? normalized_order)
@@ -7014,7 +7134,11 @@ is still available and remains an ordinary scalar expression through untangle. *
 						nil
 						nil
 						false)))
-			(build_base_group_scan_assoc_plan schema tbl alias keys condition ags)))))
+			(if (nil? membership_table_expr)
+				grouped_scan
+				(list
+					(list (quote lambda) (list membership_var) grouped_scan)
+					membership_table_expr))))))
 
 (define aggregate_payload_merge_expr (lambda (ags idx)
 	(if (>= idx (count ags))
@@ -8920,7 +9044,10 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(begin
 				(define stage_lookup (query_block_stage_lookup block))
 				(define rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
-				(define sources (qb_sources rewritten))
+				(define probe_rewritten (if (expr_contains_session_dependency? (qb_where rewritten))
+					(query_block_with_prepared_sources_using stage_lookup rewritten)
+					rewritten))
+				(define sources (qb_sources probe_rewritten))
 				(define stage_catalog (query_block_stage_catalog rewritten))
 				(define dependency_graph (stage_dependency_graph stage_lookup))
 				(define physical_sources (physicalize_stage_output_sources stage_lookup sources))
@@ -8929,30 +9056,37 @@ is still available and remains an ordinary scalar expression through untangle. *
 					(neumann_fail "build_queryplan" "group-stage source did not lower to a physical driver")
 					true)
 				(define stage_sources (cdr physical_sources))
+				(define direct_probe_group (and
+					(empty_list? stage_sources)
+					(empty_list? (qb_stages probe_rewritten))
+					(source_is_base_table? driver_src)
+					(expr_contains_driver_membership? (qb_where probe_rewritten))))
 				(define final_stage_sources (physicalize_stage_output_sources stage_lookup
 					(filter (cdr sources) (lambda (src)
-						(source_needed_after_group? (source_alias driver_src) rewritten src)))))
+						(source_needed_after_group? (source_alias driver_src) probe_rewritten src)))))
 				(define grouped_input_block (make_query_block
-					(qb_schema rewritten)
+					(qb_schema probe_rewritten)
 					(cons driver_src stage_sources)
-					(qb_fields rewritten)
-					(qb_where rewritten)
-					(qb_group rewritten)
-					(qb_having rewritten)
-					(qb_order rewritten)
-					(qb_limit rewritten)
-					(qb_offset rewritten)
-					(qb_hidden rewritten)
+					(qb_fields probe_rewritten)
+					(qb_where probe_rewritten)
+					(qb_group probe_rewritten)
+					(qb_having probe_rewritten)
+					(qb_order probe_rewritten)
+					(qb_limit probe_rewritten)
+					(qb_offset probe_rewritten)
+					(qb_hidden probe_rewritten)
 					'()
-					(qb_facts rewritten)))
+					(qb_facts probe_rewritten)))
 				(define main_stage (make_group_stage_for_query_block grouped_input_block))
 				(define main_stage_lookup (lowering_catalog_with_local_stages stage_lookup (list main_stage)))
-				(cons (quote !begin)
-					(merge (list
-						(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages rewritten))
-						(lower_stage_materialize_all (qb_stages rewritten))
-						(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage))
-						(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources)))))))))))
+				(if direct_probe_group
+					(lower_query_block_core grouped_input_block)
+					(cons (quote !begin)
+						(merge (list
+							(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages rewritten))
+							(lower_stage_materialize_all (qb_stages rewritten))
+							(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage))
+							(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources))))))))))))
 
 (define query_block_without_stages (lambda (block)
 	(make_query_block
@@ -9275,10 +9409,13 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define key_names (group_key_cols keys))
 		(define ags (gs_aggregates stage))
 		(define order_items (coalesceNil (qb_order block) '()))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(and (not (empty_list? (qb_group block)))
 			(and (nil? (qb_having block))
 				(and (or (empty_list? order_items)
-					(and (query_limit_active? (qb_offset block) (qb_limit block))
+					(and (or
+						(query_limit_active? (qb_offset block) (qb_limit block))
+						(expr_contains_session_dependency? condition))
 						(direct_group_order_supported? alias keys key_names ags order_items)))
 					(and (query_block_has_aggregates? block)
 						(not (reduce ags
