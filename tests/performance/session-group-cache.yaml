@@ -133,6 +133,30 @@ test_cases:
         - ".grp:"
         - "scan_exists"
 
+  - name: "projected session presence maps lookup domain to inner group key"
+    session_id: "sgc_sess"
+    sql: |
+      SELECT wrapped.id, wrapped.has_global_access
+      FROM (
+        SELECT id,
+          EXISTS (
+            SELECT TRUE
+            FROM sgc_acl access_rows
+            WHERE access_rows.usr = @actor_id
+              AND access_rows.category IS NULL
+            GROUP BY access_rows.usr
+            HAVING COUNT(*) > 0
+          ) AS has_global_access
+        FROM sgc_data
+      ) wrapped
+      ORDER BY wrapped.id
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          has_global_access: false
+
   - name: "session-filtered SUM GROUP BY (warm)"
     session_id: "sgc_sess"
     sql: |

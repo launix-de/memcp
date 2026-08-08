@@ -6580,11 +6580,18 @@ is still available and remains an ordinary scalar expression through untangle. *
 (define group_stage_session_key_pairs (lambda (stage keys key_names)
 	(map (group_stage_session_domain_keys stage) (lambda (expr)
 		(begin
-			(define idx (group_key_expr_index keys expr))
+			(define direct_idx (group_key_expr_index keys expr))
+			(define lookup_idx (group_key_expr_index
+				(coalesceNil (qassoc_get (gs_facts stage) (quote lookup-keys) '()) '())
+				expr))
+			(define idx (if (not (nil? direct_idx)) direct_idx lookup_idx))
 			(if (nil? idx)
 				(neumann_fail "build_queryplan" (concat "session domain expression is not a group key: "
 					(serialize expr) " in " (serialize keys)))
-				(list expr (nth key_names idx))))))))
+				(if (>= idx (count key_names))
+					(neumann_fail "build_queryplan" (concat "session lookup key has no matching group key: "
+						(serialize expr) " in " (serialize keys)))
+					(list expr (nth key_names idx)))))))))
 
 (define replace_group_session_expr (lambda (stage keys key_names expr)
 	(begin
