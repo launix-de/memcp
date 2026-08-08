@@ -75,6 +75,32 @@ func TestBoundaryRange(t *testing.T) {
 	}
 }
 
+func TestScanBufferSizeUsesSmallBufferOnlyForBoundUniqueKey(t *testing.T) {
+	tbl := &table{Unique: []uniqueKey{{Id: "PRIMARY", Cols: []string{"tenant_id", "id"}}}}
+	point := func(col string, value scm.Scmer) columnboundaries {
+		return columnboundaries{
+			col: col, matcher: EqualMatcher,
+			lower: value, lowerInclusive: true,
+			upper: value, upperInclusive: true,
+		}
+	}
+
+	if got := tbl.scanBufferSize(boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewInt(42))}); got != uniquePointScanBufferSize {
+		t.Fatalf("fully bound unique key buffer = %d, want %d", got, uniquePointScanBufferSize)
+	}
+	if got := tbl.scanBufferSize(boundaries{point("id", scm.NewInt(42))}); got != defaultScanBufferSize {
+		t.Fatalf("partially bound unique key buffer = %d, want %d", got, defaultScanBufferSize)
+	}
+	if got := tbl.scanBufferSize(boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewNil())}); got != defaultScanBufferSize {
+		t.Fatalf("NULL unique key buffer = %d, want %d", got, defaultScanBufferSize)
+	}
+	rangeBoundary := point("id", scm.NewInt(42))
+	rangeBoundary.matcher = RangeMatcher
+	if got := tbl.scanBufferSize(boundaries{point("tenant_id", scm.NewInt(9)), rangeBoundary}); got != defaultScanBufferSize {
+		t.Fatalf("range-bound unique key buffer = %d, want %d", got, defaultScanBufferSize)
+	}
+}
+
 func TestWidenDistinctEqualityPointsProducesRange(t *testing.T) {
 	left := boundaries{{
 		col: "actor_id", matcher: EqualMatcher,

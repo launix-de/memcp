@@ -1355,17 +1355,6 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		deltaGetters:     make([]mapArgGetter, len(cols)),
 		mainCols:         make([]ColumnStorage, len(cols)),
 		colNames:         cols,
-		isUpdate:         make([]bool, len(cols)),
-		isInvalidate:     make([]bool, len(cols)),
-		invalidateProxy:  make([]*StorageComputeProxy, len(cols)),
-		isIncrement:      make([]bool, len(cols)),
-		incrementProxy:   make([]*StorageComputeProxy, len(cols)),
-		isSet:            make([]bool, len(cols)),
-		setProxy:         make([]*StorageComputeProxy, len(cols)),
-		isBreak:          make([]bool, len(cols)),
-		setClosureFn:     make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
-		incrClosureFn:    make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
-		invClosureFn:     make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
 		args:             make([]scm.Scmer, len(cols)),
 		mapFn:            scm.OptimizeProcToSerialFunction(mapFn),
 		reduceFn:         scm.OptimizeProcToSerialFunction(reduceFn),
@@ -1373,6 +1362,29 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		reduceScmer:      reduceFn,
 		mainCount:        t.main_count,
 		shardWriteLocked: alreadyLocked,
+	}
+	needsMutationMetadata := false
+	for _, col := range cols {
+		if col == "$update" || col == "$break" || len(col) >= 4 && col[:4] == "NEW." ||
+			len(col) > 12 && col[:12] == "$invalidate:" ||
+			len(col) > 11 && col[:11] == "$increment:" ||
+			len(col) > 5 && col[:5] == "$set:" {
+			needsMutationMetadata = true
+			break
+		}
+	}
+	if needsMutationMetadata {
+		mr.isUpdate = make([]bool, len(cols))
+		mr.isInvalidate = make([]bool, len(cols))
+		mr.invalidateProxy = make([]*StorageComputeProxy, len(cols))
+		mr.isIncrement = make([]bool, len(cols))
+		mr.incrementProxy = make([]*StorageComputeProxy, len(cols))
+		mr.isSet = make([]bool, len(cols))
+		mr.setProxy = make([]*StorageComputeProxy, len(cols))
+		mr.isBreak = make([]bool, len(cols))
+		mr.setClosureFn = make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols))
+		mr.incrClosureFn = make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols))
+		mr.invClosureFn = make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols))
 	}
 	hasDeleteTriggers := false
 	for _, tr := range t.t.Triggers {
@@ -1442,12 +1454,14 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 	// Pre-allocate tagClosure fn ptrs (hoisted, one per pseudo-col type per column).
 	// These are allocated once here so processMainBlock/processDeltaBlock can use
 	// NewClosure(ptr, effectiveID) per row without any heap allocation.
-	noopFn := func(id uint32, args ...scm.Scmer) scm.Scmer { return scm.NewBool(true) }
-	mr.noopClosureFn = &noopFn
-	breakFn := func(id uint32, args ...scm.Scmer) scm.Scmer { panic(breakSentinel{}) }
-	mr.breakClosureFn = &breakFn
+	if needsMutationMetadata {
+		noopFn := func(id uint32, args ...scm.Scmer) scm.Scmer { return scm.NewBool(true) }
+		mr.noopClosureFn = &noopFn
+		breakFn := func(id uint32, args ...scm.Scmer) scm.Scmer { panic(breakSentinel{}) }
+		mr.breakClosureFn = &breakFn
+	}
 	for i := range cols {
-		if mr.isSet[i] {
+		if needsMutationMetadata && mr.isSet[i] {
 			if proxy := mr.setProxy[i]; proxy != nil {
 				fn := func(id uint32, args ...scm.Scmer) scm.Scmer {
 					if len(args) > 0 {
@@ -1458,7 +1472,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 				mr.setClosureFn[i] = &fn
 			}
 		}
-		if mr.isIncrement[i] {
+		if needsMutationMetadata && mr.isIncrement[i] {
 			if proxy := mr.incrementProxy[i]; proxy != nil {
 				// Batch increments: aggregate per (proxy, recid) and flush after scan
 				if mr.incrementBatch == nil {
@@ -1488,7 +1502,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 				mr.incrClosureFn[i] = &fn
 			}
 		}
-		if mr.isInvalidate[i] {
+		if needsMutationMetadata && mr.isInvalidate[i] {
 			if proxy := mr.invalidateProxy[i]; proxy != nil {
 				// Batch invalidations: mark proxy for InvalidateAll after scan
 				if mr.invalidateBatch == nil {
@@ -1504,7 +1518,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		if mr.mainGetters[i] != nil {
 			continue
 		}
-		if mr.isInvalidate[i] {
+		if needsMutationMetadata && mr.isInvalidate[i] {
 			if fnptr := mr.invClosureFn[i]; fnptr != nil {
 				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
 					return scm.NewClosure(fnptr, id)
@@ -1519,7 +1533,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			}
 			continue
 		}
-		if mr.isIncrement[i] {
+		if needsMutationMetadata && mr.isIncrement[i] {
 			if fnptr := mr.incrClosureFn[i]; fnptr != nil {
 				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
 					return scm.NewClosure(fnptr, id)
@@ -1534,7 +1548,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			}
 			continue
 		}
-		if mr.isSet[i] {
+		if needsMutationMetadata && mr.isSet[i] {
 			if fnptr := mr.setClosureFn[i]; fnptr != nil {
 				getter := func(id uint32, batchid uint32) scm.Scmer {
 					return scm.NewClosure(fnptr, id)
@@ -1550,7 +1564,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			}
 			continue
 		}
-		if mr.isBreak[i] {
+		if needsMutationMetadata && mr.isBreak[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				return scm.NewClosure(mr.breakClosureFn, id)
 			}
@@ -1558,7 +1572,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.deltaGetters[i] = getter
 			continue
 		}
-		if mr.isUpdate[i] {
+		if needsMutationMetadata && mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch, mr.currentTx))
 			}
