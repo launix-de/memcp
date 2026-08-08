@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 metadata:
   version: "1.0"
   description: "Group stage corner cases: limits in subqueries, DISTINCT+joins, nested staging"
@@ -43,6 +58,28 @@ test_cases:
         (2, 'Bob'),
         (3, 'Charlie'),
         (4, 'Dana')
+
+  - name: "Create unordered group lookup tables"
+    sql: "CREATE TABLE gs_parts (id INT, category VARCHAR(20))"
+
+  - name: "Create unordered group bridge"
+    sql: "CREATE TABLE gs_sources (part_id INT, source_id INT)"
+
+  - name: "Create unordered anti-membership table"
+    sql: "CREATE TABLE gs_blocked_sources (source_id INT, blocked BOOLEAN)"
+
+  - name: "Insert unordered group lookup rows"
+    sql: "INSERT INTO gs_parts VALUES (1, 'A'), (2, 'A'), (3, 'B')"
+
+  - name: "Insert unordered group bridge rows"
+    sql: |
+      INSERT INTO gs_sources VALUES
+        (1, 10), (1, 11), (1, 12),
+        (2, 11), (2, 13),
+        (3, 20), (3, 21)
+
+  - name: "Insert unordered anti-membership rows"
+    sql: "INSERT INTO gs_blocked_sources VALUES (20, TRUE), (21, FALSE)"
 
   # =================================================================
   # 1. GROUP BY inside FROM subquery (derived table with aggregation)
@@ -173,6 +210,26 @@ test_cases:
           products: 2
         - customer: "Charlie"
           products: 1
+
+  - name: "COUNT DISTINCT ordered by aggregate after anti-membership join"
+    sql: |
+      SELECT p.category, COUNT(DISTINCT s.source_id) AS source_count
+      FROM gs_sources s, gs_parts p
+      WHERE p.id = s.part_id
+        AND s.source_id NOT IN (
+          SELECT blocked.source_id
+          FROM gs_blocked_sources blocked
+          WHERE blocked.blocked = TRUE
+      )
+      GROUP BY p.category
+      ORDER BY source_count DESC, p.category
+    expect:
+      rows: 2
+      data:
+        - category: "A"
+          source_count: 4
+        - category: "B"
+          source_count: 1
 
   # =================================================================
   # 6. COUNT(DISTINCT) with WHERE + JOIN
@@ -346,6 +403,9 @@ test_cases:
           total_qty: 5
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS gs_blocked_sources"
+  - sql: "DROP TABLE IF EXISTS gs_sources"
+  - sql: "DROP TABLE IF EXISTS gs_parts"
   - sql: "DROP TABLE IF EXISTS gs_customers"
   - sql: "DROP TABLE IF EXISTS gs_items"
   - sql: "DROP TABLE IF EXISTS gs_orders"
