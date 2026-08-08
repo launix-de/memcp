@@ -82,13 +82,66 @@ $resolved"
   printf "%s\n" "$selected" | sed '/^$/d' | sort -u
 }
 
-# Find all numbered test files (01_*.yaml, 02_*.yaml, etc.) or use the selected subset.
+# Discover every CI suite recursively. Directory taxonomy and metadata replace
+# the old numeric filename convention; metadata.ci=false is the only opt-out.
 if [ "$#" -gt 0 ]; then
     if ! test_files="$(resolve_test_selection "$@")"; then
         exit 1
     fi
 else
-    test_files=$(find tests/ -name "[0-9][0-9]_*.yaml" | sort)
+    if ! test_files=$(python3 - <<'PY'
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+root = Path("tests")
+taxonomy = {
+    "execution": {"concurrency", "operators"},
+    "integration": {"import", "query-shapes", "regressions"},
+    "performance": {None},
+    "planner": {"aggregates", "core", "joins", "order-window", "set-operations", "subqueries"},
+    "rdf": {None},
+    "sql": {"compatibility", "ddl", "dml", "expressions", "security", "triggers"},
+    "storage": {"formats", "indexes", "persistence"},
+}
+name_pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$")
+errors = []
+selected = []
+
+for path in sorted(root.rglob("*.yaml")):
+    relative = path.relative_to(root)
+    parts = relative.parts
+    area = parts[0] if len(parts) > 1 else None
+    section = parts[1] if len(parts) > 2 else None
+    if area not in taxonomy or section not in taxonomy.get(area, set()):
+        errors.append(f"{path}: path is outside the documented test taxonomy")
+        continue
+    if not name_pattern.fullmatch(path.name):
+        errors.append(f"{path}: suite filename must be lower kebab-case without a numeric prefix")
+        continue
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            spec = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        errors.append(f"{path}: cannot parse YAML: {exc}")
+        continue
+    metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
+    if not isinstance(metadata, dict) or not metadata.get("description"):
+        errors.append(f"{path}: metadata.description is required")
+        continue
+    if metadata.get("ci", True) is not False:
+        selected.append(str(path))
+
+if errors:
+    print("\n".join(f"ERROR: {error}" for error in errors), file=sys.stderr)
+    raise SystemExit(1)
+print("\n".join(selected))
+PY
+    ); then
+        exit 1
+    fi
 fi
 mapfile -t test_files_arr <<< "$test_files"
 

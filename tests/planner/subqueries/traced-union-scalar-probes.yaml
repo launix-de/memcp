@@ -1,0 +1,208 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Trace-derived UNION and scalar presence probe contracts"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trace_asset"
+  - sql: "DROP TABLE IF EXISTS trace_ref_a"
+  - sql: "DROP TABLE IF EXISTS trace_ref_b"
+  - sql: "DROP TABLE IF EXISTS trace_ref_c"
+  - sql: "DROP TABLE IF EXISTS trace_ref_d"
+  - sql: "DROP TABLE IF EXISTS trace_box"
+  - sql: "DROP TABLE IF EXISTS trace_host"
+  - sql: "DROP TABLE IF EXISTS trace_folder"
+  - sql: "DROP TABLE IF EXISTS trace_message"
+  - sql: "DROP TABLE IF EXISTS trace_share"
+  - sql: |
+      CREATE TABLE trace_host (
+        id INT PRIMARY KEY,
+        kind INT
+      )
+  - sql: |
+      CREATE TABLE trace_box (
+        id INT PRIMARY KEY,
+        host_id INT,
+        owner_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_folder (
+        id INT PRIMARY KEY,
+        box_id INT,
+        name VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE trace_message (
+        id INT PRIMARY KEY,
+        box_id INT,
+        folder_id INT,
+        seen BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_share (
+        id INT PRIMARY KEY,
+        box_id INT,
+        owner_id INT
+      )
+  - sql: "INSERT INTO trace_host (id, kind) VALUES (1, 1), (2, 2)"
+  - sql: "INSERT INTO trace_box (id, host_id, owner_id) VALUES (100, 1, 7), (200, 2, 9)"
+  - sql: "INSERT INTO trace_folder (id, box_id, name) VALUES (1001, 100, 'inbox'), (1002, 100, 'archive'), (2001, 200, 'other')"
+  - sql: "INSERT INTO trace_message (id, box_id, folder_id, seen) VALUES (1, 100, 1001, FALSE), (2, 100, 1002, TRUE), (3, 200, 2001, FALSE)"
+  - sql: "INSERT INTO trace_share (id, box_id, owner_id) VALUES (1, 100, 7)"
+  - sql: |
+      CREATE TABLE trace_asset (
+        id INT PRIMARY KEY,
+        filename VARCHAR(64),
+        kind INT,
+        payload VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE trace_ref_a (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_ref_b (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_ref_c (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_ref_d (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
+  - sql: "INSERT INTO trace_asset (id, filename, kind, payload) VALUES (1, 'asset-1.dat', 1, 'p1')"
+  - sql: "INSERT INTO trace_asset SELECT id + 1, CONCAT('asset-', CAST(id + 1 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 1 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 2, CONCAT('asset-', CAST(id + 2 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 2 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 4, CONCAT('asset-', CAST(id + 4 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 4 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 8, CONCAT('asset-', CAST(id + 8 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 8 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 16, CONCAT('asset-', CAST(id + 16 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 16 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 32, CONCAT('asset-', CAST(id + 32 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 32 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 64, CONCAT('asset-', CAST(id + 64 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 64 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 128, CONCAT('asset-', CAST(id + 128 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 128 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 256, CONCAT('asset-', CAST(id + 256 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 256 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 512, CONCAT('asset-', CAST(id + 512 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 512 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_asset SELECT id + 1024, CONCAT('asset-', CAST(id + 1024 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 1024 AS VARCHAR)) FROM trace_asset"
+  - sql: "INSERT INTO trace_ref_a SELECT id, id, TRUE FROM trace_asset WHERE id % 997 = 0"
+  - sql: "INSERT INTO trace_ref_b SELECT id, id, TRUE FROM trace_asset WHERE id IN (1, 17, 257)"
+  - sql: "INSERT INTO trace_ref_c SELECT id, id, FALSE FROM trace_asset WHERE id % 257 = 0"
+  - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
+
+test_cases:
+  - name: "UNION ALL wrapper decorrelates scalar subqueries in branches"
+    fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
+    sql: |
+      SELECT *
+      FROM (
+        SELECT
+          b.id AS box_id,
+          0 AS indent,
+          CAST(b.owner_id AS VARCHAR) AS label,
+          'box' AS kind,
+          (SELECT f.id FROM trace_folder f WHERE f.box_id = b.id LIMIT 1) AS item_id,
+          (SELECT COUNT(*) FROM trace_message m WHERE NOT m.seen AND m.box_id = b.id) AS unseen
+        FROM trace_box b
+        WHERE (SELECT h.kind FROM trace_host h WHERE h.id = b.host_id) = 1
+          AND (CASE WHEN FALSE THEN TRUE ELSE NOT ((b.owner_id <> 7) AND NOT EXISTS (SELECT TRUE FROM trace_share s WHERE s.box_id = b.id AND s.owner_id = 7 LIMIT 1)) END)
+        UNION ALL
+        SELECT
+          f.box_id AS box_id,
+          1 AS indent,
+          f.name AS label,
+          'folder' AS kind,
+          f.id AS item_id,
+          (SELECT COUNT(*) FROM trace_message m WHERE m.folder_id = f.id AND NOT m.seen AND m.box_id = f.box_id) AS unseen
+        FROM trace_folder f
+        WHERE COALESCE((
+          SELECT (CASE WHEN FALSE THEN TRUE ELSE NOT ((b.owner_id <> 7) AND NOT EXISTS (SELECT TRUE FROM trace_share s WHERE s.box_id = b.id AND s.owner_id = 7 LIMIT 1)) END)
+          FROM trace_box b
+          WHERE b.id = f.box_id
+          LIMIT 1
+        ), FALSE)
+      ) t
+      ORDER BY box_id ASC, indent ASC, label ASC
+    expect:
+      rows: 3
+      data:
+        - box_id: 100
+          indent: 0
+          label: "7"
+          kind: "box"
+          item_id: 1001
+          unseen: 1
+        - box_id: 100
+          indent: 1
+          label: "archive"
+          kind: "folder"
+          item_id: 1002
+          unseen: 0
+        - box_id: 100
+          indent: 1
+          label: "inbox"
+          kind: "folder"
+          item_id: 1001
+          unseen: 1
+  - name: "UNION EXISTS projection probes only selected outer rows"
+    max_time: 0.4
+    max_plan_size: 60000
+    sql: |
+      SELECT
+        a.id,
+        a.filename,
+        EXISTS (
+          SELECT r.id FROM trace_ref_a r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_b r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_c r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_d r WHERE r.enabled AND r.asset_id = a.id
+        ) AS referenced
+      FROM trace_asset a
+      WHERE a.id IN (1, 2)
+      ORDER BY a.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          filename: "asset-1.dat"
+          referenced: true
+        - id: 2
+          filename: "asset-2.dat"
+          referenced: false
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_asset"
+  - sql: "DROP TABLE IF EXISTS trace_ref_a"
+  - sql: "DROP TABLE IF EXISTS trace_ref_b"
+  - sql: "DROP TABLE IF EXISTS trace_ref_c"
+  - sql: "DROP TABLE IF EXISTS trace_ref_d"
+  - sql: "DROP TABLE IF EXISTS trace_box"
+  - sql: "DROP TABLE IF EXISTS trace_host"
+  - sql: "DROP TABLE IF EXISTS trace_folder"
+  - sql: "DROP TABLE IF EXISTS trace_message"
+  - sql: "DROP TABLE IF EXISTS trace_share"

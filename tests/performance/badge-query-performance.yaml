@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Badge count queries with session-filtered correlated subselects"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS bp_doc"

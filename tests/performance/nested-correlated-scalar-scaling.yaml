@@ -10,6 +10,7 @@
 metadata:
   version: "1.0"
   description: "Nested correlated scalar-in-aggregate-in-scalar must stay fast"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS ncs_acc"

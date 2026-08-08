@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Haensch
 # Stress test: concurrent writes, reads, and REBUILD must not lose data.
 # This exercises the non-repartition rebuild path under parallel readers and
-# writers, complementing 71_repartition_concurrent.yaml which covers the
+# writers, complementing repartition-concurrent.yaml which covers the
 # partitioned dual-write path.
 
 metadata:

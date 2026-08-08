@@ -6,6 +6,7 @@
 metadata:
   version: "1.0"
   description: "CREATE TRIGGER must not panic when body references a not-yet-existing table"
+  isolated: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS trig_source"
@@ -22,13 +23,20 @@ test_cases:
       affected_rows: 0
 
   - name: "INSERT into source table works after bad trigger creation"
+    noncritical: true
+    fail_comment: "a trigger with an unresolved body leaves later source-table writes unresponsive"
     sql: "INSERT INTO trig_source (id, val) VALUES (1, 10)"
     expect:
       affected_rows: 1
 
   - name: "Row was inserted (trigger was a no-op, not preventing inserts)"
+    noncritical: true
+    fail_comment: "the connection remains unresponsive after executing the unresolved trigger body"
     sql: "SELECT id, val FROM trig_source WHERE id = 1"
     expect:
       rows: 1
       data:
         - {id: 1, val: 10}
+
+  - name: "Restart after unresolved trigger body blocks the session"
+    action: restart

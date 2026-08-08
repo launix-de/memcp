@@ -5,7 +5,7 @@
 - `scm/`: Scheme runtime (REPL, HTTP/MySQL servers, builtins).
 - `storage/`: core storage engine (tables, shards, indexes, persistence).
 - `lib/`: Scheme modules; SQL parsers and planner live here (`lib/sql-parser.scm`, `lib/psql-parser.scm`, `lib/queryplan.scm`); `lib/main.scm` bootstraps the API.
-- `tests/`: YAML suites named `NN_description.yaml` (e.g., `01_basic_sql.yaml`).
+- `tests/`: SQL YAML suites organized by the taxonomy in `tests/README.md`.
 - `run_sql_tests.py`: test runner (HTTP-based); starts `memcp` when needed.
 - `docs/`: generated API/reference docs.
 - if you work on files, update/add the copyright notice's current year
@@ -39,9 +39,9 @@ Every change — bugfix, feature, refactor — must go through a **branch + PR**
 - Build: `go build -o memcp` or `make` (default builds).
 - Run: `./memcp --api-port=4321 lib/main.scm` (MySQL off by default in tests).
 - Background run: always use `--no-repl` when running memcp in the background, otherwise closing stdin causes the REPL to exit: `./memcp --no-repl --api-port=4321 lib/main.scm &`
-- Quick test (single file): `python3 run_sql_tests.py tests/01_basic_sql.yaml`.
-- Connect-only (reuse a running instance): `python3 run_sql_tests.py tests/02_functions.yaml 4321 --connect-only`.
-- Pre-commit: `git commit` runs all `tests/[0-9][0-9]_*.yaml` via a single `memcp` instance (port 4400). Bypassing with `--no-verify` is permitted for intermediate commits on non-`master` branches, after a successful `make test` run, or for documentation-only changes (README/docs/manuals) without code/test modifications; still run the full suite before pushing whenever code/test changes are part of the branch.
+- Quick test (single file): `python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml`.
+- Connect-only (reuse a running instance): `python3 run_sql_tests.py tests/sql/expressions/functions.yaml 4321 --connect-only`.
+- Pre-commit: `git commit` recursively runs every `tests/**/*.yaml` suite except files with `metadata.ci: false`, using a single MemCP instance. Bypassing with `--no-verify` is permitted for intermediate commits on non-`master` branches, after a successful `make test` run, or for documentation-only changes (README/docs/manuals) without code/test modifications; still run the full suite before pushing whenever code/test changes are part of the branch.
 
 ### Exact Server Invocation (used by test runner)
 The test runner (`run_sql_tests.py`) starts the server exactly like this:
@@ -82,7 +82,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - In this scheme dialect (set var value) does not change any value of the outer scope - it rather works exactly like (define )
 - Use a functional programming style. Use set/define only for function declaration or single state assignments, prefer the match coding patterns over iterative approaches.
 - lambdas in scheme have only two parameters: (paramlist) and body: `(lambda (a b) (+ a b))`. if you want to compute multiple statements inside the body, you must open a (begin) block
-- Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
+- Tests: YAML keys use lower_snake_case. Suite filenames use descriptive lower kebab-case without numeric prefixes and live in a documented taxonomy directory.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.
 
 ### API Stability
@@ -141,10 +141,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - The `make test` / `git-pre-commit` script supports `MEMCP_COVERAGE=1 MEMCP_COVERDIR=/tmp/memcp-coverage` environment variables to automatically build with coverage, collect profiles, and report.
 - Generate report: `go tool covdata textfmt -i=/tmp/memcp-coverage -o=/tmp/memcp-coverage/coverage.out && go tool cover -func=/tmp/memcp-coverage/coverage.out`
 - HTML report: `go tool cover -html=/tmp/memcp-coverage/coverage.out`
-- Current coverage: **69.7%** (594 Scheme unit tests in `lib/test.scm`, 72 storage type tests + ~2470 SQL tests in `tests/*.yaml`)
+- Current coverage: **69.7%** (594 Scheme unit tests in `lib/test.scm`, 72 storage type tests + ~4800 SQL cases in `tests/**/*.yaml`)
 - Two test layers:
   - `lib/test.scm`: Scheme-level unit tests for the runtime (match, compare, date, strings, lists, scheduler, sync, optimizer, JIT). These run at startup before the SQL frontend.
-  - `tests/*.yaml`: SQL integration tests via HTTP API. Cover SQL parsing, query planning, storage compression, triggers, persistence, DML/DDL.
+- `tests/**/*.yaml`: SQL integration tests via HTTP API. Cover SQL parsing, query planning, storage compression, triggers, persistence, DML/DDL.
 - To bypass static type validation in Scheme tests (e.g., passing an int to a function declared as accepting string), wrap with an identity function: `(define _i (lambda (x) x))` then `(parse_date (_i 1718451045))`.
 
 ## Debugging Strategy

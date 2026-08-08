@@ -1,0 +1,123 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Trace-derived INSERT SELECT ordering and pagination contracts"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trace_limit_output"
+  - sql: "DROP TABLE IF EXISTS trace_limit_parent"
+  - sql: "DROP TABLE IF EXISTS trace_limit_label"
+  - sql: |
+      CREATE TABLE trace_limit_parent (
+        id INT PRIMARY KEY,
+        label_id INT
+      )
+  - sql: |
+      CREATE TABLE trace_limit_label (
+        id INT PRIMARY KEY,
+        label VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE trace_limit_output (
+        id INT PRIMARY KEY,
+        label VARCHAR(64)
+      )
+  - sql: "INSERT INTO trace_limit_parent (id, label_id) VALUES (1, 10), (2, 20)"
+  - sql: "INSERT INTO trace_limit_label (id, label) VALUES (10, 'zeta'), (20, 'alpha')"
+
+test_cases:
+  - name: "INSERT SELECT preserves a multi-source derived ORDER LIMIT relation"
+    max_time: 1.0
+    max_plan_size: 20000
+    sql: |
+      INSERT INTO trace_limit_output (id, label)
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY label.label DESC
+        LIMIT 1
+      ) candidate
+      WHERE NOT EXISTS (
+        SELECT TRUE
+        FROM trace_limit_output present
+        WHERE present.id = candidate.id
+      )
+    expect:
+      affected_rows: 1
+  - name: "INSERT SELECT derived ORDER LIMIT stores the selected joined row"
+    sql: "SELECT id, label FROM trace_limit_output"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          label: "zeta"
+  - name: "Multi-source derived ORDER LIMIT preserves OFFSET"
+    sql: |
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY label.label ASC
+        LIMIT 1 OFFSET 1
+      ) candidate
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          label: "zeta"
+  - name: "Empty multi-source derived LIMIT returns no row"
+    sql: |
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        WHERE parent.id > 100
+        ORDER BY label.label DESC
+        LIMIT 1
+      ) candidate
+    expect:
+      rows: 0
+  - name: "Multi-source derived LIMIT stays a logical one-row carrier"
+    sql: |
+      EXPLAIN IR
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY label.label DESC
+        LIMIT 1
+      ) candidate
+    expect:
+      contains:
+        - "group-stage"
+        - "cardinality_mode first"
+        - "physical_max_rows 1"
+      not_contains:
+        - "legacy_materialized"
+        - "inner_select"
+        - "__mat:"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_limit_output"
+  - sql: "DROP TABLE IF EXISTS trace_limit_parent"
+  - sql: "DROP TABLE IF EXISTS trace_limit_label"

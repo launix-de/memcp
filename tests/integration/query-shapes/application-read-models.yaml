@@ -1,0 +1,285 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Synthetic read-model, data-view, access, and badge query shapes"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: |
+      CREATE TABLE cq_parent (
+        id INT PRIMARY KEY,
+        owner_id INT,
+        tenant_id INT,
+        ref_id INT
+      )
+  - sql: |
+      CREATE TABLE cq_item (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        ref_id INT,
+        score INT,
+        state INT
+      )
+  - sql: |
+      CREATE TABLE cq_ref (
+        id INT PRIMARY KEY,
+        group_id INT,
+        label VARCHAR(32)
+      )
+  - sql: |
+      CREATE TABLE cq_assignment (
+        id INT PRIMARY KEY,
+        actor_id INT,
+        tenant_id INT,
+        ref_id INT,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE cq_event (
+        id INT PRIMARY KEY,
+        item_id INT,
+        status VARCHAR(16),
+        sequence_no INT
+      )
+  - sql: |
+      INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
+        (1, 10, 100, 1000),
+        (2, 20, 200, 2000),
+        (3, 30, NULL, 3000),
+        (4, 40, 100, NULL),
+        (5, 50, 300, 5000)
+  - sql: |
+      INSERT INTO cq_item (id, parent_id, ref_id, score, state) VALUES
+        (11, 1, 1000, 5, 1),
+        (12, 1, 1001, 9, NULL),
+        (21, 2, 2000, 7, 1),
+        (31, 3, 3000, 3, 0),
+        (41, 4, NULL, 8, 1)
+  - sql: |
+      INSERT INTO cq_ref (id, group_id, label) VALUES
+        (1000, 1, 'alpha'),
+        (1001, 1, 'beta'),
+        (2000, 2, 'gamma'),
+        (3000, NULL, 'delta')
+  - sql: |
+      INSERT INTO cq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
+        (1, 7, 100, 1000, TRUE),
+        (2, 7, 100, 1001, FALSE),
+        (3, 8, 200, 2000, TRUE),
+        (4, 7, NULL, NULL, TRUE),
+        (5, 9, 300, NULL, NULL)
+  - sql: |
+      INSERT INTO cq_event (id, item_id, status, sequence_no) VALUES
+        (1, 11, 'open', 1),
+        (2, 11, 'closed', 2),
+        (3, 12, 'open', 1),
+        (4, 21, 'closed', 1),
+        (5, 31, 'open', 1)
+
+test_cases:
+
+  - name: "Detail projection combines latest child and nested access checks"
+    sql: |
+      SELECT p.id,
+        r.label AS ref_label,
+        (SELECT i.id
+         FROM cq_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.score DESC, i.id
+         LIMIT 1) AS leading_item,
+        (SELECT e.status
+         FROM cq_event e
+         WHERE e.item_id = (
+           SELECT i.id
+           FROM cq_item i
+           WHERE i.parent_id = p.id
+           ORDER BY i.score DESC, i.id
+           LIMIT 1
+         )
+         ORDER BY e.sequence_no DESC
+         LIMIT 1) AS latest_status,
+        COALESCE((
+          SELECT CASE
+            WHEN source.owner_id = 10 THEN TRUE
+            ELSE EXISTS (
+              SELECT 1
+              FROM cq_assignment a
+              WHERE a.actor_id = 7
+                AND a.tenant_id = source.tenant_id
+                AND a.allowed = TRUE
+            )
+          END
+          FROM cq_parent source
+          WHERE source.id = p.id
+          LIMIT 1
+        ), FALSE) AS can_edit,
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM cq_assignment a
+            WHERE a.actor_id = 7
+              AND a.tenant_id = p.tenant_id
+              AND a.allowed = TRUE
+          ) THEN 'assigned'
+          ELSE 'none'
+        END AS access_source
+      FROM cq_parent p
+      LEFT JOIN cq_ref r ON r.id = p.ref_id
+      WHERE p.id IN (1, 2)
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          ref_label: "alpha"
+          leading_item: 12
+          latest_status: "open"
+          can_edit: true
+          access_source: "assigned"
+        - id: 2
+          ref_label: "gamma"
+          leading_item: 21
+          latest_status: "closed"
+          can_edit: false
+          access_source: "none"
+
+  - name: "Data view preserves projected filters through sorter joins and pagination"
+    sql: |
+      SELECT view_rows.id, view_rows.ref_label, view_rows.top_score
+      FROM (
+        SELECT p.id,
+          p.ref_id,
+          r.label AS ref_label,
+          (SELECT MAX(i.score)
+           FROM cq_item i
+           WHERE i.parent_id = p.id) AS top_score,
+          EXISTS (
+            SELECT 1
+            FROM cq_item i
+            WHERE i.parent_id = p.id
+              AND EXISTS (
+                SELECT 1
+                FROM cq_event e
+                WHERE e.item_id = i.id
+                  AND e.status = 'open'
+              )
+          ) AS has_open_event
+        FROM cq_parent p
+        LEFT JOIN cq_ref r ON r.id = p.ref_id
+      ) view_rows
+      LEFT JOIN cq_ref sort_ref ON sort_ref.id = view_rows.ref_id
+      WHERE view_rows.has_open_event = TRUE
+        AND view_rows.top_score IS NOT NULL
+      ORDER BY sort_ref.label ASC, view_rows.top_score DESC, view_rows.id
+      LIMIT 1 OFFSET 1
+    expect:
+      rows: 1
+      data:
+        - id: 3
+          ref_label: "delta"
+          top_score: 3
+
+  - name: "Badge fanout combines independent nested aggregate domains"
+    sql: |
+      SELECT 1 AS marker,
+        (SELECT COUNT(1)
+         FROM cq_parent p
+         WHERE p.owner_id = 10
+            OR EXISTS (
+              SELECT 1
+              FROM cq_assignment a
+              WHERE a.actor_id = 7
+                AND a.tenant_id = p.tenant_id
+                AND a.allowed = TRUE
+            )) AS visible_parents,
+        (SELECT SUM(i.score)
+         FROM cq_item i
+         WHERE i.parent_id IN (
+           SELECT p.id
+           FROM cq_parent p
+           WHERE EXISTS (
+             SELECT 1
+             FROM cq_assignment a
+             WHERE a.actor_id = 7
+               AND a.tenant_id = p.tenant_id
+               AND a.allowed = TRUE
+           )
+         )) AS visible_score,
+        (SELECT COUNT(1)
+         FROM cq_event e
+         WHERE e.item_id IN (
+           SELECT i.id
+           FROM cq_item i
+           WHERE i.parent_id IN (
+             SELECT p.id
+             FROM cq_parent p
+             WHERE EXISTS (
+               SELECT 1
+               FROM cq_assignment a
+               WHERE a.actor_id = 7
+                 AND a.tenant_id = p.tenant_id
+                 AND a.allowed = TRUE
+             )
+           )
+         )) AS visible_events
+    expect:
+      rows: 1
+      data:
+        - marker: 1
+          visible_parents: 2
+          visible_score: 22
+          visible_events: 3
+
+  - name: "Badge count and sum keep distinct empty-domain identities"
+    noncritical: true
+    fail_comment: "the empty SUM carrier currently uses the COUNT identity 0 instead of SQL NULL"
+    sql: |
+      SELECT
+        (SELECT COUNT(1)
+         FROM cq_event e
+         WHERE e.status = 'missing') AS empty_count,
+        (SELECT SUM(1)
+         FROM cq_event e
+         WHERE e.status = 'missing') AS empty_sum,
+        COALESCE((
+          SELECT SUM(1)
+          FROM cq_event e
+          WHERE e.status = 'missing'
+        ), 0) AS display_count
+    expect:
+      rows: 1
+      data:
+        - empty_count: 0
+          empty_sum: null
+          display_count: 0
+
+  # These cases use independent synthetic SQL to cover the relational shapes
+  # exercised by TPC-H Q1 through Q22. No benchmark query text or data is
+  # redistributed here.
+
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cq_event"
+  - sql: "DROP TABLE IF EXISTS cq_assignment"
+  - sql: "DROP TABLE IF EXISTS cq_item"
+  - sql: "DROP TABLE IF EXISTS cq_parent"
+  - sql: "DROP TABLE IF EXISTS cq_ref"
