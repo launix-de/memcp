@@ -224,7 +224,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		) (match operand
 				'("interval" value unit) (list (concat "date_" op) value unit)
 				'("value" value) (list op value)
-		))))
+		)) empty true))
 	) (reduce terms psql_fold_additive_term a)))
 
 	(define psql_expression4 (parser (or
