@@ -107,6 +107,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		'("date_add" value unit) '('date_add acc value unit)
 		'("date_sub" value unit) '('date_sub acc value unit))))
 
+(define psql_comparison_expr (lambda (op a b)
+	(match op
+		"eq" '((quote equal??) a b)
+		"ne" '((quote not) '((quote equal?) a b))
+		"le" '((quote <=) a b)
+		"ge" '((quote >=) a b)
+		"lt" '((quote <) a b)
+		"gt" '((quote >) a b))))
+
 (define psql_type (parser (or
 	(parser '((atom "character" true) (atom "varying" true)) "varying")
 	(parser '((atom "double" true) (atom "precision" true)) "double")
@@ -181,14 +190,16 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") '('inner_select_in a sub))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
-		(parser '((define a psql_expression3) "==" (define b psql_expression2)) '((quote equal??) a b))
-		(parser '((define a psql_expression3) "=" (define b psql_expression2)) '((quote equal??) a b))
-		(parser '((define a psql_expression3) "<>" (define b psql_expression2)) '((quote not) '((quote equal?) a b)))
-		(parser '((define a psql_expression3) "!=" (define b psql_expression2)) '((quote not) '((quote equal?) a b)))
-		(parser '((define a psql_expression3) "<=" (define b psql_expression2)) '((quote <=) a b))
-		(parser '((define a psql_expression3) ">=" (define b psql_expression2)) '((quote >=) a b))
-		(parser '((define a psql_expression3) "<" (define b psql_expression2)) '((quote <) a b))
-		(parser '((define a psql_expression3) ">" (define b psql_expression2)) '((quote >) a b))
+		(parser '((define a psql_expression3) (define op (or
+			(parser "==" "eq")
+			(parser "=" "eq")
+			(parser "<>" "ne")
+			(parser "!=" "ne")
+			(parser "<=" "le")
+			(parser ">=" "ge")
+			(parser "<" "lt")
+			(parser ">" "gt")
+		)) (define b psql_expression2)) (psql_comparison_expr op a b))
 		/* ILIKE is Postgres case-insensitive LIKE. */
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "ILIKE" true) (define b psql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
 		(parser '((define a psql_expression3) (atom "ILIKE" true) (define b psql_expression2)) '('strlike a b "utf8mb4_general_ci"))

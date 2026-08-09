@@ -136,6 +136,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		'("date_add" value unit) '('date_add acc value unit)
 		'("date_sub" value unit) '('date_sub acc value unit))))
 
+(define sql_comparison_expr (lambda (op a b)
+	(match op
+		"eq" '((quote equal??) a b)
+		"ne" '((quote not) '((quote equal??) a b))
+		"le" '((quote <=) a b)
+		"ge" '((quote >=) a b)
+		"lt" '((quote <) a b)
+		"gt" '((quote >) a b))))
+
 /* lightweight literal parser for top-level contexts (before sql_expression is defined) */
 (define sql_literal (parser (or
 	(parser (atom "NULL" true) (sql_null_literal))
@@ -641,14 +650,16 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "==" (define b sql_expression2)) '('equal_collate a b collation))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "<>" (define b sql_expression2)) '('notequal_collate a b collation))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "!=" (define b sql_expression2)) '('notequal_collate a b collation))
-		(parser '((define a sql_expression3) "==" (define b sql_expression2)) '((quote equal??) a b))
-		(parser '((define a sql_expression3) "=" (define b sql_expression2)) '((quote equal??) a b))
-		(parser '((define a sql_expression3) "<>" (define b sql_expression2)) '((quote not) '((quote equal??) a b)))
-		(parser '((define a sql_expression3) "!=" (define b sql_expression2)) '((quote not) '((quote equal??) a b)))
-		(parser '((define a sql_expression3) "<=" (define b sql_expression2)) '((quote <=) a b))
-		(parser '((define a sql_expression3) ">=" (define b sql_expression2)) '((quote >=) a b))
-		(parser '((define a sql_expression3) "<" (define b sql_expression2)) '((quote <) a b))
-		(parser '((define a sql_expression3) ">" (define b sql_expression2)) '((quote >) a b))
+		(parser '((define a sql_expression3) (define op (or
+			(parser "==" "eq")
+			(parser "=" "eq")
+			(parser "<>" "ne")
+			(parser "!=" "ne")
+			(parser "<=" "le")
+			(parser ">=" "ge")
+			(parser "<" "lt")
+			(parser ">" "gt")
+		)) (define b sql_expression2)) (sql_comparison_expr op a b))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
