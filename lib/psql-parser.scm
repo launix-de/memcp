@@ -212,12 +212,19 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 	(define psql_expression3 (parser '(
 		(define a psql_expression4)
-		(define terms (* (or
-			(parser '("+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '("date_add" n unit))
-			(parser '("-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '("date_sub" n unit))
-			(parser '("+" (define b psql_expression4)) '("add" b))
-			(parser '("-" (define b psql_expression4)) '("sub" b))
-		)))
+		(define terms (* (parser '(
+			(define op (or
+				(parser "+" "add")
+				(parser "-" "sub")
+			))
+			(define operand (or
+				(parser '((atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '("interval" n unit))
+				(parser (define value psql_expression4) '("value" value))
+			))
+		) (match operand
+				'("interval" value unit) (list (concat "date_" op) value unit)
+				'("value" value) (list op value)
+		))))
 	) (reduce terms psql_fold_additive_term a)))
 
 	(define psql_expression4 (parser (or

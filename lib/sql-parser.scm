@@ -668,12 +668,19 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 	(define sql_expression3 (parser '(
 		(define a sql_expression4)
-		(define terms (* (or
-			(parser '("+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '("date_add" n unit))
-			(parser '("-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '("date_sub" n unit))
-			(parser '("+" (define b sql_expression4)) '("add" b))
-			(parser '("-" (define b sql_expression4)) '("sub" b))
-		)))
+		(define terms (* (parser '(
+			(define op (or
+				(parser "+" "add")
+				(parser "-" "sub")
+			))
+			(define operand (or
+				(parser '((atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '("interval" n unit))
+				(parser (define value sql_expression4) '("value" value))
+			))
+		) (match operand
+				'("interval" value unit) (list (concat "date_" op) value unit)
+				'("value" value) (list op value)
+		))))
 	) (reduce terms sql_fold_additive_term a)))
 
 	(define sql_expression4 (parser (or
