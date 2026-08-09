@@ -21,6 +21,11 @@
 
 echo "🔍 Running MemCP pre-commit tests..."
 
+if ! python3 tools/test_sql_runner_contract.py; then
+  echo "❌ SQL runner contract tests failed, commit aborted"
+  exit 1
+fi
+
 if ! python3 tools/check_test_table_names.py; then
   echo "❌ Test fixture table names collide across CI suites"
   exit 1
