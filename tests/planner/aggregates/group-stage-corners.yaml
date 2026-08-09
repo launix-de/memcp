@@ -402,6 +402,31 @@ test_cases:
           amount: 250
           total_qty: 5
 
+  # =================================================================
+  # 15. Ungrouped aggregates over an empty join still return one row
+  # =================================================================
+  - name: "SUM over empty join returns NULL"
+    sql: |
+      SELECT SUM(i.qty) AS total
+      FROM gs_orders o
+      JOIN gs_items i ON i.order_id = o.id
+      WHERE o.id < 0
+    expect:
+      rows: 1
+      data:
+        - total: null
+
+  - name: "COUNT over empty join returns zero"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM gs_orders o
+      JOIN gs_items i ON i.order_id = o.id
+      WHERE o.id < 0
+    expect:
+      rows: 1
+      data:
+        - total: 0
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS gs_blocked_sources"
   - sql: "DROP TABLE IF EXISTS gs_sources"
