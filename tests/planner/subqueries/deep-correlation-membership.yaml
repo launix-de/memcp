@@ -363,7 +363,7 @@ test_cases:
         - id: 4
 
   - name: "IN over UNION combines two candidate branches"
-    max_time: 1000
+    max_time: 1
     max_plan_size: 30000
     sql: |
       SELECT p.id
