@@ -6930,15 +6930,18 @@ is still available and remains an ordinary scalar expression through untangle. *
 					(lower_column_expr_for_alias src (nth keys i))
 					(list (quote outer) (symbol (nth key_names i))))))))))
 
+(define build_group_constant_key_insert_plan (lambda (schema grouptbl)
+	(list (quote insert)
+		(list (quote table) schema grouptbl)
+		(quoted_runtime_list (list "k0"))
+		(list (quote list) (list (quote list) 1))
+		(quoted_runtime_list '())
+		(list (quote lambda) '() true)
+		true)))
+
 (define build_group_collect_plan (lambda (schema tbl alias grouptbl keys key_names condition)
 	(if (equal? keys '(1))
-		(list (quote insert)
-			(list (quote table) schema grouptbl)
-			(quoted_runtime_list (list "k0"))
-			(list (quote list) (list (quote list) 1))
-			(quoted_runtime_list '())
-			(list (quote lambda) '() true)
-			true)
+		(build_group_constant_key_insert_plan schema grouptbl)
 		(begin
 			(define src (list alias schema tbl false nil))
 			(define keycols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
@@ -8790,8 +8793,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
 		(define grouptbl (group_carrier_relation carrier))
 		(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
+		(define scalar_single_stage (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single)))
 		(define scalar_query_stage (and (query_block? src)
-			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
+			(and scalar_single_stage
 				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote single_or_error))
 					(and (equal? (count ags) 2)
 						(equal? (cadr ags) aggregate_count_descriptor))))))
@@ -8881,6 +8885,12 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(if scalar_order_base_stage
 				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
 				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
+		(define empty_aggregate_seed_plans (if (and query_input_carrier
+			(and initializer_owner
+				(and (not scalar_single_stage)
+					(and (not (empty_list? ags)) (equal? keys '(1))))))
+			(list (build_group_constant_key_insert_plan schema grouptbl))
+			'()))
 		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr _dir) (begin
 				(define replaced_order_expr (replace_group_order_expr alias grouptbl keys key_names ags expr))
@@ -8908,7 +8918,8 @@ is still available and remains an ordinary scalar expression through untangle. *
 						ensure_agg_columns
 						computed_order_plans
 						(if (and initializer_owner (empty_list? ags)) (list collect_plan) '())
-						agg_plans)))
+						agg_plans
+						empty_aggregate_seed_plans)))
 				(if scalar_order_base_stage
 					(list (quote !begin)
 						nested_prepare_expr
