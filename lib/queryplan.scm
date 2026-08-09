@@ -7056,8 +7056,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define mapcols (merge_unique (list group_key_cols_for_scan valuecols)))
 		(define key_expr (runtime_cons_list_expr (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
 		(define payload_expr (runtime_cons_list_expr (map value_exprs (lambda (expr) (lower_column_expr_for_alias src expr)))))
-		(define key_sortcols (map keys (lambda (expr) (order_column_for_alias src expr))))
-		(define key_dirs (map keys (lambda (_key) (quote <))))
+		(define physical_order_keys (filter keys (lambda (expr) (not (query_session_read? expr)))))
+		(define key_sortcols (map physical_order_keys (lambda (expr) (order_column_for_alias src expr))))
+		(define key_dirs (map physical_order_keys (lambda (_key) (quote <))))
 		(define keep_first (list (quote lambda) (list (quote old) (quote new)) (quote old)))
 		(list
 			(list (quote lambda) (list (quote grouped))
@@ -8878,7 +8879,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 					(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags)
 					(build_query_group_aggregates_insert_plan_using prepared_src grouptbl keys key_names lowering_ags ags))))
 			(if scalar_order_base_stage
-				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names aggregate_condition ags))
+				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
 				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
 		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr _dir) (begin

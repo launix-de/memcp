@@ -255,6 +255,69 @@ test_cases:
           value_f: 2107
           value_g: 2117
           value_h: 2127
+  - name: "Set session cutoff for repeated scalar latest projections"
+    session_id: "trace_scalar_cutoff"
+    sql: "SET @cutoff = 100"
+    expect:
+      rows_affected: 0
+  - name: "Repeated scalar latest projections share a session cutoff"
+    session_id: "trace_scalar_cutoff"
+    sql: |
+      SELECT
+        p.id,
+        COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+        COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+        COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c
+      FROM trace_profile p
+      WHERE p.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          value_a: 109
+          value_b: 119
+          value_c: 129
+    on_fail:
+      - sql: |
+          EXPLAIN IR
+          SELECT
+            p.id,
+            COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+            COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+            COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c
+          FROM trace_profile p
+          WHERE p.id = 1
+      - sql: |
+          EXPLAIN REORDER
+          SELECT
+            p.id,
+            COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+            COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+            COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c
+          FROM trace_profile p
+          WHERE p.id = 1
+  - name: "Change session cutoff for repeated scalar latest projections"
+    session_id: "trace_scalar_cutoff"
+    sql: "SET @cutoff = 10"
+    expect:
+      rows_affected: 0
+  - name: "Repeated scalar latest projections use the changed session cutoff"
+    session_id: "trace_scalar_cutoff"
+    sql: |
+      SELECT
+        p.id,
+        COALESCE((SELECT m.value_a FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_a,
+        COALESCE((SELECT m.value_b FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_b,
+        COALESCE((SELECT m.value_c FROM trace_metric m WHERE m.profile_id = p.id AND m.valid_from <= @cutoff ORDER BY m.valid_from DESC LIMIT 1), 0) AS value_c
+      FROM trace_profile p
+      WHERE p.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          value_a: 19
+          value_b: 29
+          value_c: 39
   - name: "Wide bounded scalar projection probes nested presence stage on cold cache"
     max_time: 1.0
     max_plan_size: 30000
