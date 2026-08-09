@@ -123,6 +123,132 @@ type shardqueue struct {
 	callbackCols   []string  // per-table map columns (for multi-table merge)
 	callback       scm.Scmer // per-table map function (for multi-table merge)
 	tableIdx       int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
+	releases       []func()
+}
+
+type preparedPointValueReader struct {
+	shard       *storageShard
+	keyCols     []string
+	keyStorages []ColumnStorage
+	valueCol    string
+	valueReader ColumnReader
+	currentTx   *TxContext
+}
+
+func (t *table) preparePointValueReader(keyCols []string, valueCol string, currentTx *TxContext) (*preparedPointValueReader, func(), bool) {
+	t.shardModeMu.RLock()
+	if t.ShardMode != ShardModeFree {
+		t.shardModeMu.RUnlock()
+		return nil, nil, false
+	}
+	var shard *storageShard
+	for _, candidate := range t.Shards {
+		if candidate == nil {
+			continue
+		}
+		if shard != nil {
+			t.shardModeMu.RUnlock()
+			return nil, nil, false
+		}
+		shard = candidate
+	}
+	if shard == nil {
+		t.shardModeMu.RUnlock()
+		return nil, nil, false
+	}
+	shard.activeScanners.Add(1)
+	t.shardModeMu.RUnlock()
+	releaseRead := shard.GetRead()
+	release := func() {
+		releaseRead()
+		shard.activeScanners.Add(-1)
+	}
+	prepared := false
+	defer func() {
+		if !prepared {
+			release()
+		}
+	}()
+
+	shard.ensureMainCount(false)
+	keyStorages := make([]ColumnStorage, len(keyCols))
+	for i, col := range keyCols {
+		keyStorages[i] = shard.getColumnStorageOrPanic(col)
+	}
+	valueStorage := shard.getColumnStorageOrPanic(valueCol)
+	reader := &preparedPointValueReader{
+		shard:       shard,
+		keyCols:     keyCols,
+		keyStorages: keyStorages,
+		valueCol:    valueCol,
+		valueReader: newCachedColumnReaderTx(valueStorage, currentTx),
+		currentTx:   currentTx,
+	}
+	prepared = true
+	return reader, release, true
+}
+
+func (r *preparedPointValueReader) Lookup(values []scm.Scmer) scm.Scmer {
+	if len(values) != len(r.keyCols) {
+		return scm.NewNil()
+	}
+	bounds := make(boundaries, len(r.keyCols))
+	for i, col := range r.keyCols {
+		bounds[i] = columnboundaries{col: col, matcher: EqualMatcher, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
+	}
+	lower, upperLast := indexFromBoundaries(bounds)
+
+	r.shard.mu.RLock()
+	defer r.shard.mu.RUnlock()
+	mainCount := r.shard.main_count
+	maxInsertIndex := len(r.shard.inserts)
+	visibleUpper := mainCount + uint32(maxInsertIndex)
+	acidMode := r.currentTx != nil && r.currentTx.Mode == TxACID
+	var result scm.Scmer
+	found := false
+	var buf [8]uint32
+	r.shard.iterateIndex(r.currentTx, bounds, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		for _, recid := range batch {
+			if recid >= visibleUpper {
+				continue
+			}
+			if acidMode {
+				if !r.currentTx.IsVisible(r.shard, recid) {
+					continue
+				}
+			} else if r.shard.deletions.Get(uint(recid)) {
+				continue
+			}
+			matched := true
+			for i, expected := range values {
+				var actual scm.Scmer
+				if recid < mainCount {
+					actual = r.keyStorages[i].GetValue(recid)
+				} else {
+					actual = r.shard.getDelta(int(recid-mainCount), r.keyCols[i])
+				}
+				if !scm.Equal(actual, expected) {
+					matched = false
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			if recid < mainCount {
+				result = r.valueReader.GetValue(recid)
+			} else {
+				result = r.shard.getDelta(int(recid-mainCount), r.valueCol)
+			}
+			found = true
+			return false
+		}
+		return true
+	})
+	if !found {
+		return scm.NewNil()
+	}
+	return result
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
@@ -638,6 +764,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 	// Collect shard results into globalqueue
 	var scanErr scanError
+	var scanQueues []*shardqueue
 	for msg := range q_ {
 		if msg.err.r != nil {
 			if scanErr.r == nil {
@@ -648,8 +775,11 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		if scanErr.r != nil {
 			continue
 		}
-		if msg.res != nil && len(msg.res.items) > 0 {
-			heap.Push(&q, msg.res)
+		if msg.res != nil {
+			scanQueues = append(scanQueues, msg.res)
+			if len(msg.res.items) > 0 {
+				heap.Push(&q, msg.res)
+			}
 		}
 		if msg.res != nil && msg.res.tableIdx >= 0 && msg.res.tableIdx < len(stats) {
 			tableStats := &stats[msg.res.tableIdx]
@@ -658,6 +788,13 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			tableStats.outputCount += msg.outputCount
 		}
 	}
+	defer func() {
+		for _, queue := range scanQueues {
+			for _, release := range queue.releases {
+				release()
+			}
+		}
+	}()
 	if scanErr.r != nil {
 		panic(scanErr)
 	}
@@ -852,6 +989,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 // scan_order delegates to scanOrderMulti with a single-element table spec.
 func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	if len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !aggregate.IsNil() && !isOuter {
+		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral)
+	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		table:          t,
 		conditionCols:  conditionCols,
@@ -862,6 +1002,109 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 		perTableOffset: -1,
 		perTableLimit:  -1,
 	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter)
+}
+
+// scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
+// preserves the scan operator contract while avoiding the queues, channels,
+// and global merge needed by the general ordered multi-shard implementation.
+func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+	ss := SessionStateFromTx(currentTx)
+	querySeq := scm.CurrentQuerySeq()
+	bounds := extractBoundaries(conditionCols, condition)
+	bounds, recsetFilter := splitRecSetBoundary(bounds, t)
+	reorderByFrequency(bounds, t)
+	lower, upperLast := indexFromBoundaries(bounds)
+
+	var mu sync.Mutex
+	var foundShard *storageShard
+	var foundID uint32
+	var firstErr scanError
+	done := t.iterateShardsParallel(bounds, func(shard *storageShard, _ bool) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				mu.Lock()
+				if firstErr.r == nil {
+					firstErr = scanError{recovered, string(debug.Stack())}
+				}
+				mu.Unlock()
+			}
+		}()
+		mu.Lock()
+		finished := foundShard != nil || firstErr.r != nil
+		mu.Unlock()
+		if finished {
+			return
+		}
+		if ss != nil && ss.IsKilledSeq(querySeq) {
+			panic("query killed")
+		}
+		recid, present := shard.scanFirstRecord(bounds, lower, upperLast, conditionCols, condition, currentTx, ss, nil, recsetFilter)
+		if !present {
+			return
+		}
+		mu.Lock()
+		if foundShard == nil {
+			foundShard = shard
+			foundID = recid
+		}
+		mu.Unlock()
+	})
+	if done != nil {
+		<-done
+	}
+	if firstErr.r != nil {
+		panic(firstErr)
+	}
+	if foundShard == nil {
+		return neutral
+	}
+	mapper := foundShard.OpenMapReducer(callbackCols, callback, aggregate, false, 0, nil, currentTx)
+	result := mapper.Stream(neutral, []uint32{foundID}, nil)
+	mapper.FlushSideEffects()
+	return result
+}
+
+func (t *table) scanOrderPointValue(currentTx *TxContext, keyCols []string, keyValues []scm.Scmer, valueCol string) scm.Scmer {
+	if len(keyCols) == 0 || len(keyCols) != len(keyValues) {
+		return scm.NewNil()
+	}
+	bounds := make(boundaries, len(keyCols))
+	for i, col := range keyCols {
+		bounds[i] = columnboundaries{col: col, matcher: EqualMatcher, lower: keyValues[i], lowerInclusive: true, upper: keyValues[i], upperInclusive: true}
+	}
+
+	var mu sync.Mutex
+	var value scm.Scmer
+	found := false
+	done := t.iterateShardsParallel(bounds, func(shard *storageShard, _ bool) {
+		mu.Lock()
+		finished := found
+		mu.Unlock()
+		if finished {
+			return
+		}
+		recid, present := shard.GetRecordidForUnique(keyCols, keyValues, currentTx)
+		if !present {
+			return
+		}
+		reader := shard.ColumnReaderTx(currentTx, valueCol)
+		shard.mu.RLock()
+		candidate := reader(recid)
+		shard.mu.RUnlock()
+		mu.Lock()
+		if !found {
+			value = candidate
+			found = true
+		}
+		mu.Unlock()
+	})
+	if done != nil {
+		<-done
+	}
+	if !found {
+		return scm.NewNil()
+	}
+	return value
 }
 
 func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
@@ -901,6 +1144,14 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState, orderedEarlyLimit bool, recsetFilter *recSet) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
+	defer func() {
+		if r := recover(); r != nil {
+			for _, release := range result.releases {
+				release()
+			}
+			panic(r)
+		}
+	}()
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -931,6 +1182,31 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// prepare sort criteria so they can be queried easily
 	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
 	for i, scol := range sortcols {
+		if descriptor, ok := scmerSlice(scol); ok && len(descriptor) == 5 && scanSymbolIs(descriptor[0], "scan_order_point") {
+			innerTable := TableFromScmer(descriptor[1])
+			keyCols := scmerSliceToStrings(mustScmerSlice(descriptor[2], "scan_order_point key columns"))
+			outerCols := scmerSliceToStrings(mustScmerSlice(descriptor[3], "scan_order_point outer columns"))
+			valueCol := scm.String(descriptor[4])
+			outerReaders := make([]func(uint32) scm.Scmer, len(outerCols))
+			for j, col := range outerCols {
+				outerReaders[j] = t.ColumnReaderTx(currentTx, col)
+			}
+			pointReader, release, prepared := innerTable.preparePointValueReader(keyCols, valueCol, currentTx)
+			if prepared {
+				result.releases = append(result.releases, release)
+			}
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				values := make([]scm.Scmer, len(outerReaders))
+				for j, reader := range outerReaders {
+					values[j] = reader(idx)
+				}
+				if prepared {
+					return pointReader.Lookup(values)
+				}
+				return innerTable.scanOrderPointValue(currentTx, keyCols, values, valueCol)
+			}
+			continue
+		}
 		if scol.IsString() {
 			colname := scol.String()
 			result.scols[i] = t.ColumnReaderTx(currentTx, colname)
@@ -1175,6 +1451,21 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	itemPos := make(map[uint32]int, len(result.items))
 	for i, idx := range result.items {
 		itemPos[idx] = i
+	}
+	// Computed sort callbacks may contain nested point scans. Evaluate each key
+	// once per candidate instead of repeating the callback for every comparison.
+	// The cache is local to this physical scan and is released with its queue.
+	for c, sortcol := range sortcols {
+		if sortcol.IsString() {
+			continue
+		}
+		values := make([]scm.Scmer, len(result.items))
+		for i, idx := range result.items {
+			values[i] = result.scols[c](idx)
+		}
+		result.scols[c] = func(idx uint32) scm.Scmer {
+			return values[itemPos[idx]]
+		}
 	}
 	lessByID := func(a, b uint32) bool {
 		cmpCount := len(result.scols)

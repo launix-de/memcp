@@ -634,6 +634,11 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 }
 
 func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool, recsetFilter *recSet) bool {
+	_, found := t.scanFirstRecord(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, stop, recsetFilter)
+	return found
+}
+
+func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool, recsetFilter *recSet) (uint32, bool) {
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -646,7 +651,7 @@ func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, uppe
 	if recsetFilter != nil {
 		recsetPart = recsetFilter.shardEntry(t)
 		if recsetPart == nil || recsetPart.count == 0 {
-			return false
+			return 0, false
 		}
 	}
 	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
@@ -697,6 +702,7 @@ func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, uppe
 	maxInsertIndex := len(t.inserts)
 	visibleUpper := mainCount + uint32(maxInsertIndex)
 	found := false
+	var foundID uint32
 
 	var buf [8]uint32
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
@@ -742,13 +748,14 @@ func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, uppe
 			}
 			if scm.ToBool(conditionFn(cdataset...)) {
 				found = true
+				foundID = idx
 				return false
 			}
 		}
 		return true
 	})
 
-	return found
+	return foundID, found
 }
 
 func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64, int64) {
