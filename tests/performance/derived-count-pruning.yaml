@@ -25,15 +25,15 @@ metadata:
 test_cases:
   - name: "Perf: derived COUNT prunes correlated subselect payload"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `dcp_main`"
       - sql: "DROP TABLE IF EXISTS `perf_detail`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, payload INT)"
+      - sql: "CREATE TABLE `dcp_main` (id INT PRIMARY KEY, payload INT)"
       - sql: "CREATE TABLE `perf_detail` (id INT PRIMARY KEY, parent INT, val INT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 3)))))
-            (insert (table "{database}" "perf_main") '("id" "payload") rows)
+            (insert (table "{database}" "dcp_main") '("id" "payload") rows)
             (set detail_n (* {rows} 2))
             (set details (map (produceN detail_n) (lambda (i)
               (list
@@ -48,7 +48,7 @@ test_cases:
         SELECT m.id,
           COALESCE((SELECT SUM(d.val) FROM perf_detail d WHERE d.parent = m.id), 0) AS total_val,
           EXISTS (SELECT 1 FROM perf_detail d2 WHERE d2.parent = m.id AND d2.val > 0) AS has_detail
-        FROM perf_main m
+        FROM dcp_main m
       ) t
     threshold_ms: 30000
     on_fail:
@@ -57,11 +57,11 @@ test_cases:
             SELECT m.id,
               COALESCE((SELECT SUM(d.val) FROM perf_detail d WHERE d.parent = m.id), 0) AS total_val,
               EXISTS (SELECT 1 FROM perf_detail d2 WHERE d2.parent = m.id AND d2.val > 0) AS has_detail
-            FROM perf_main m
+            FROM dcp_main m
           ) t
     expect:
       rows: 1
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS perf_main"
+  - sql: "DROP TABLE IF EXISTS dcp_main"
   - sql: "DROP TABLE IF EXISTS perf_detail"

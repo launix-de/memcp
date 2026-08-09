@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # Deep nested correlated scalar subselects (no GROUP BY)
 # Tests nesting depths 3, 4, and 5 using a chain of lookup tables.
 # Each level resolves a foreign key via a correlated scalar subselect.
@@ -9,26 +10,26 @@ metadata:
   isolated: true
 
 setup:
-  - sql: "DROP TABLE IF EXISTS dn_a"
-  - sql: "DROP TABLE IF EXISTS dn_b"
-  - sql: "DROP TABLE IF EXISTS dn_c"
-  - sql: "DROP TABLE IF EXISTS dn_d"
-  - sql: "DROP TABLE IF EXISTS dn_e"
+  - sql: "DROP TABLE IF EXISTS dns_a"
+  - sql: "DROP TABLE IF EXISTS dns_b"
+  - sql: "DROP TABLE IF EXISTS dns_c"
+  - sql: "DROP TABLE IF EXISTS dns_d"
+  - sql: "DROP TABLE IF EXISTS dns_e"
   - sql: |
-      CREATE TABLE dn_e (id INT PRIMARY KEY, val VARCHAR(20))
+      CREATE TABLE dns_e (id INT PRIMARY KEY, val VARCHAR(20))
   - sql: |
-      CREATE TABLE dn_d (id INT PRIMARY KEY, ref_e INT, label VARCHAR(20))
+      CREATE TABLE dns_d (id INT PRIMARY KEY, ref_e INT, label VARCHAR(20))
   - sql: |
-      CREATE TABLE dn_c (id INT PRIMARY KEY, ref_d INT)
+      CREATE TABLE dns_c (id INT PRIMARY KEY, ref_d INT)
   - sql: |
-      CREATE TABLE dn_b (id INT PRIMARY KEY, ref_c INT)
+      CREATE TABLE dns_b (id INT PRIMARY KEY, ref_c INT)
   - sql: |
-      CREATE TABLE dn_a (id INT PRIMARY KEY, ref_b INT)
-  - sql: "INSERT INTO dn_e (id, val) VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')"
-  - sql: "INSERT INTO dn_d (id, ref_e, label) VALUES (10, 1, 'D10'), (20, 2, 'D20'), (30, 3, 'D30')"
-  - sql: "INSERT INTO dn_c (id, ref_d) VALUES (100, 10), (200, 20), (300, 30)"
-  - sql: "INSERT INTO dn_b (id, ref_c) VALUES (1000, 100), (2000, 200), (3000, 300)"
-  - sql: "INSERT INTO dn_a (id, ref_b) VALUES (1, 1000), (2, 2000), (3, 3000)"
+      CREATE TABLE dns_a (id INT PRIMARY KEY, ref_b INT)
+  - sql: "INSERT INTO dns_e (id, val) VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')"
+  - sql: "INSERT INTO dns_d (id, ref_e, label) VALUES (10, 1, 'D10'), (20, 2, 'D20'), (30, 3, 'D30')"
+  - sql: "INSERT INTO dns_c (id, ref_d) VALUES (100, 10), (200, 20), (300, 30)"
+  - sql: "INSERT INTO dns_b (id, ref_c) VALUES (1000, 100), (2000, 200), (3000, 300)"
+  - sql: "INSERT INTO dns_a (id, ref_b) VALUES (1, 1000), (2, 2000), (3, 3000)"
 
 test_cases:
 
@@ -38,9 +39,9 @@ test_cases:
     sql: |
       SELECT a.id,
         (SELECT
-          (SELECT c.ref_d FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS resolved_d
-      FROM dn_a a
+          (SELECT c.ref_d FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS resolved_d
+      FROM dns_a a
       ORDER BY a.id
     expect:
       rows: 3
@@ -56,9 +57,9 @@ test_cases:
     sql: |
       SELECT a.id,
         (SELECT
-          (SELECT c.id FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS c_id
-      FROM dn_a a
+          (SELECT c.id FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS c_id
+      FROM dns_a a
       WHERE a.id <= 2
       ORDER BY a.id
     expect:
@@ -73,9 +74,9 @@ test_cases:
     sql: |
       SELECT a.id,
         (SELECT
-          (SELECT c.ref_d FROM dn_c c WHERE c.id = b.ref_c AND c.ref_d = a.id * 10 LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS matched_d
-      FROM dn_a a
+          (SELECT c.ref_d FROM dns_c c WHERE c.id = b.ref_c AND c.ref_d = a.id * 10 LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS matched_d
+      FROM dns_a a
       ORDER BY a.id
     expect:
       rows: 3
@@ -94,10 +95,10 @@ test_cases:
       SELECT a.id,
         (SELECT
           (SELECT
-            (SELECT d.label FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS d_label
-      FROM dn_a a
+            (SELECT d.label FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS d_label
+      FROM dns_a a
       ORDER BY a.id
     expect:
       rows: 3
@@ -114,10 +115,10 @@ test_cases:
       SELECT a.id,
         (SELECT
           (SELECT
-            (SELECT d.label FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b AND b.id = 9999 LIMIT 1) AS d_label
-      FROM dn_a a
+            (SELECT d.label FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b AND b.id = 9999 LIMIT 1) AS d_label
+      FROM dns_a a
       WHERE a.id = 1
     expect:
       rows: 1
@@ -130,10 +131,10 @@ test_cases:
       SELECT a.id,
         (SELECT
           (SELECT
-            (SELECT d.label FROM dn_d d WHERE d.id = c.ref_d AND d.id = a.id * 10 LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS d_label
-      FROM dn_a a
+            (SELECT d.label FROM dns_d d WHERE d.id = c.ref_d AND d.id = a.id * 10 LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS d_label
+      FROM dns_a a
       ORDER BY a.id
     expect:
       rows: 3
@@ -153,11 +154,11 @@ test_cases:
         (SELECT
           (SELECT
             (SELECT
-              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
-             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
-      FROM dn_a a
+              (SELECT e.val FROM dns_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
+      FROM dns_a a
       ORDER BY a.id
     expect:
       rows: 3
@@ -175,11 +176,11 @@ test_cases:
         (SELECT
           (SELECT
             (SELECT
-              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e AND e.id = a.id LIMIT 1)
-             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
-      FROM dn_a a
+              (SELECT e.val FROM dns_e e WHERE e.id = d.ref_e AND e.id = a.id LIMIT 1)
+             FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
+      FROM dns_a a
       ORDER BY a.id
     expect:
       rows: 3
@@ -197,11 +198,11 @@ test_cases:
         (SELECT
           (SELECT
             (SELECT
-              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
-             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c AND c.id = 999 LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
-      FROM dn_a a
+              (SELECT e.val FROM dns_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c AND c.id = 999 LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val
+      FROM dns_a a
       WHERE a.id = 1
     expect:
       rows: 1
@@ -217,18 +218,18 @@ test_cases:
         (SELECT
           (SELECT
             (SELECT
-              (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
-             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val,
+              (SELECT e.val FROM dns_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS e_val,
         (SELECT
           (SELECT
             (SELECT
-              (SELECT e.id FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
-             FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-           FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-         FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) AS e_id
-      FROM dn_a a
+              (SELECT e.id FROM dns_e e WHERE e.id = d.ref_e LIMIT 1)
+             FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+           FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+         FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) AS e_id
+      FROM dns_a a
       ORDER BY a.id
     expect:
       rows: 3
@@ -247,22 +248,22 @@ test_cases:
 
   - name: "Depth 5 in WHERE: chain resolves to filter value"
     sql: |
-      SELECT a.id FROM dn_a a
+      SELECT a.id FROM dns_a a
       WHERE (SELECT
               (SELECT
                 (SELECT
-                  (SELECT e.val FROM dn_e e WHERE e.id = d.ref_e LIMIT 1)
-                 FROM dn_d d WHERE d.id = c.ref_d LIMIT 1)
-               FROM dn_c c WHERE c.id = b.ref_c LIMIT 1)
-             FROM dn_b b WHERE b.id = a.ref_b LIMIT 1) = 'beta'
+                  (SELECT e.val FROM dns_e e WHERE e.id = d.ref_e LIMIT 1)
+                 FROM dns_d d WHERE d.id = c.ref_d LIMIT 1)
+               FROM dns_c c WHERE c.id = b.ref_c LIMIT 1)
+             FROM dns_b b WHERE b.id = a.ref_b LIMIT 1) = 'beta'
     expect:
       rows: 1
       data:
         - id: 2
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS dn_a"
-  - sql: "DROP TABLE IF EXISTS dn_b"
-  - sql: "DROP TABLE IF EXISTS dn_c"
-  - sql: "DROP TABLE IF EXISTS dn_d"
-  - sql: "DROP TABLE IF EXISTS dn_e"
+  - sql: "DROP TABLE IF EXISTS dns_a"
+  - sql: "DROP TABLE IF EXISTS dns_b"
+  - sql: "DROP TABLE IF EXISTS dns_c"
+  - sql: "DROP TABLE IF EXISTS dns_d"
+  - sql: "DROP TABLE IF EXISTS dns_e"

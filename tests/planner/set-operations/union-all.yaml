@@ -23,9 +23,9 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS renderjob"
-  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: "DROP TABLE IF EXISTS ua_fop_files"
   - sql: |
-      CREATE TABLE fop_files (
+      CREATE TABLE ua_fop_files (
         ID INT PRIMARY KEY,
         name VARCHAR(64)
       )
@@ -35,7 +35,7 @@ setup:
         result INT
       )
   - sql: |
-      INSERT INTO fop_files (ID, name) VALUES
+      INSERT INTO ua_fop_files (ID, name) VALUES
       (1, 'image1.png'), (2, 'image2.png'), (3, 'image3.png'),
       (4, 'image4.png'), (5, 'image5.png')
   - sql: |
@@ -48,7 +48,7 @@ test_cases:
 
   - name: "UNION ALL two tables"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID <= 2
+      SELECT ID, name FROM ua_fop_files WHERE ID <= 2
       UNION ALL
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob WHERE ID <= 102
     expect:
@@ -56,9 +56,9 @@ test_cases:
 
   - name: "UNION ALL preserves duplicates"
     sql: |
-      SELECT name FROM fop_files WHERE ID = 1
+      SELECT name FROM ua_fop_files WHERE ID = 1
       UNION ALL
-      SELECT name FROM fop_files WHERE ID = 1
+      SELECT name FROM ua_fop_files WHERE ID = 1
     expect:
       rows: 2
       data:
@@ -67,11 +67,11 @@ test_cases:
 
   - name: "UNION ALL three queries"
     sql: |
-      SELECT name FROM fop_files WHERE ID = 1
+      SELECT name FROM ua_fop_files WHERE ID = 1
       UNION ALL
-      SELECT name FROM fop_files WHERE ID = 2
+      SELECT name FROM ua_fop_files WHERE ID = 2
       UNION ALL
-      SELECT name FROM fop_files WHERE ID = 3
+      SELECT name FROM ua_fop_files WHERE ID = 3
     expect:
       rows: 3
       data:
@@ -81,9 +81,9 @@ test_cases:
 
   - name: "UNION ALL with WHERE filters"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID <= 2
+      SELECT ID, name FROM ua_fop_files WHERE ID <= 2
       UNION ALL
-      SELECT ID, name FROM fop_files WHERE ID >= 4
+      SELECT ID, name FROM ua_fop_files WHERE ID >= 4
     expect:
       rows: 4
 
@@ -92,9 +92,9 @@ test_cases:
 
   - name: "UNION ALL with ORDER BY"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID <= 2
+      SELECT ID, name FROM ua_fop_files WHERE ID <= 2
       UNION ALL
-      SELECT ID, name FROM fop_files WHERE ID >= 4
+      SELECT ID, name FROM ua_fop_files WHERE ID >= 4
       ORDER BY ID
     expect:
       rows: 4
@@ -110,7 +110,7 @@ test_cases:
 
   - name: "UNION ALL with LIMIT"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM ua_fop_files
       UNION ALL
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
       LIMIT 3
@@ -119,7 +119,7 @@ test_cases:
 
   - name: "UNION ALL with ORDER BY and LIMIT"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM ua_fop_files
       UNION ALL
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
       ORDER BY ID LIMIT 4
@@ -137,7 +137,7 @@ test_cases:
 
   - name: "UNION ALL with ORDER BY DESC and LIMIT"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM ua_fop_files
       UNION ALL
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
       ORDER BY ID DESC LIMIT 3
@@ -153,9 +153,9 @@ test_cases:
 
   - name: "UNION ALL with ORDER BY and OFFSET"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID <= 3
+      SELECT ID, name FROM ua_fop_files WHERE ID <= 3
       UNION ALL
-      SELECT ID, name FROM fop_files WHERE ID >= 4
+      SELECT ID, name FROM ua_fop_files WHERE ID >= 4
       ORDER BY ID LIMIT 2 OFFSET 1
     expect:
       rows: 2
@@ -169,7 +169,7 @@ test_cases:
 
   - name: "UNION ALL ORDER BY across different tables"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID <= 2
+      SELECT ID, name FROM ua_fop_files WHERE ID <= 2
       UNION ALL
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob WHERE ID <= 102
       ORDER BY ID
@@ -187,11 +187,11 @@ test_cases:
 
   - name: "UNION ALL ORDER BY three branches"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID = 3
+      SELECT ID, name FROM ua_fop_files WHERE ID = 3
       UNION ALL
-      SELECT ID, name FROM fop_files WHERE ID = 1
+      SELECT ID, name FROM ua_fop_files WHERE ID = 1
       UNION ALL
-      SELECT ID, name FROM fop_files WHERE ID = 5
+      SELECT ID, name FROM ua_fop_files WHERE ID = 5
       ORDER BY ID
     expect:
       rows: 3
@@ -205,7 +205,7 @@ test_cases:
 
   - name: "UNION ALL ORDER BY with WHERE on both branches"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID BETWEEN 2 AND 4
+      SELECT ID, name FROM ua_fop_files WHERE ID BETWEEN 2 AND 4
       UNION ALL
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob WHERE result = 3
       ORDER BY ID
@@ -225,9 +225,9 @@ test_cases:
 
   - name: "UNION ALL ORDER BY second column"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID <= 3
+      SELECT ID, name FROM ua_fop_files WHERE ID <= 3
       UNION ALL
-      SELECT ID, name FROM fop_files WHERE ID >= 4
+      SELECT ID, name FROM ua_fop_files WHERE ID >= 4
       ORDER BY name
     expect:
       rows: 5
@@ -240,9 +240,9 @@ test_cases:
 
   - name: "EXPLAIN UNION ALL ORDER BY uses scan_order_multi"
     sql: |
-      EXPLAIN SELECT ID, name FROM fop_files WHERE ID <= 2
+      EXPLAIN SELECT ID, name FROM ua_fop_files WHERE ID <= 2
       UNION ALL
-      SELECT ID, name FROM fop_files WHERE ID >= 4
+      SELECT ID, name FROM ua_fop_files WHERE ID >= 4
       ORDER BY ID
     expect:
       rows: 1
@@ -254,7 +254,7 @@ test_cases:
   - name: "UNION ALL as derived table"
     sql: |
       SELECT COUNT(*) AS c FROM (
-        SELECT ID FROM fop_files
+        SELECT ID FROM ua_fop_files
         UNION ALL
         SELECT ID FROM renderjob
       ) AS combined
@@ -268,9 +268,9 @@ test_cases:
     sql: |
       EXPLAIN IR
       SELECT t.ID FROM (
-        SELECT ID FROM fop_files WHERE ID = 1
+        SELECT ID FROM ua_fop_files WHERE ID = 1
         UNION ALL
-        SELECT ID FROM fop_files WHERE ID = 2
+        SELECT ID FROM ua_fop_files WHERE ID = 2
       ) AS t
       WHERE t.ID >= 1
     expect:
@@ -285,9 +285,9 @@ test_cases:
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: |
       EXPLAIN IR
-      SELECT ID FROM fop_files WHERE ID <= 2
+      SELECT ID FROM ua_fop_files WHERE ID <= 2
       UNION ALL
-      SELECT ID FROM fop_files WHERE ID >= 4
+      SELECT ID FROM ua_fop_files WHERE ID >= 4
       ORDER BY ID
       LIMIT 2
       OFFSET 1
@@ -303,10 +303,10 @@ test_cases:
         - "dependent-subquery"
   - name: "UNION ALL with simple derived branch"
     sql: |
-      SELECT ID FROM fop_files WHERE ID = 1
+      SELECT ID FROM ua_fop_files WHERE ID = 1
       UNION ALL
       SELECT ID FROM (
-        SELECT ID FROM fop_files WHERE ID = 2
+        SELECT ID FROM ua_fop_files WHERE ID = 2
       ) AS picked
     expect:
       rows: 2
@@ -316,7 +316,7 @@ test_cases:
 
   - name: "EXISTS with UNION ALL subselect"
     sql: |
-      SELECT ID, name FROM fop_files f
+      SELECT ID, name FROM ua_fop_files f
       WHERE EXISTS (
         SELECT 1 FROM renderjob WHERE result = f.ID
       )
@@ -333,7 +333,7 @@ test_cases:
 
   - name: "UNION ALL keeps output aliases from first branch"
     sql: |
-      SELECT ID AS file_id, name AS label FROM fop_files WHERE ID = 1
+      SELECT ID AS file_id, name AS label FROM ua_fop_files WHERE ID = 1
       UNION ALL
       SELECT result AS ignored_id, CAST(result AS VARCHAR) AS ignored_label FROM renderjob WHERE ID = 102
       ORDER BY file_id
@@ -348,7 +348,7 @@ test_cases:
   - name: "UNION ALL with inner ORDER BY/LIMIT per branch"
     sql: |
       SELECT ID FROM (
-        SELECT ID FROM fop_files ORDER BY ID DESC LIMIT 2
+        SELECT ID FROM ua_fop_files ORDER BY ID DESC LIMIT 2
       ) AS branch_a
       UNION ALL
       SELECT ID FROM (
@@ -364,7 +364,7 @@ test_cases:
 
   - name: "UNION ALL with grouped branch"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID <= 2
+      SELECT ID, name FROM ua_fop_files WHERE ID <= 2
       UNION ALL
       SELECT result AS ID, CONCAT('r', CAST(COUNT(*) AS VARCHAR)) AS name
       FROM renderjob
@@ -383,7 +383,7 @@ test_cases:
 
   - name: "EXPLAIN UNION ALL with grouped branch streams stage output"
     sql: |
-      EXPLAIN SELECT ID, name FROM fop_files WHERE ID <= 2
+      EXPLAIN SELECT ID, name FROM ua_fop_files WHERE ID <= 2
       UNION ALL
       SELECT result AS ID, CONCAT('r', CAST(COUNT(*) AS VARCHAR)) AS name
       FROM renderjob
@@ -399,10 +399,10 @@ test_cases:
 
   - name: "UNION ALL with derived branch filtering"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID = 5
+      SELECT ID, name FROM ua_fop_files WHERE ID = 5
       UNION ALL
       SELECT ID, name FROM (
-        SELECT ID, name FROM fop_files WHERE ID <= 2 ORDER BY ID DESC LIMIT 1
+        SELECT ID, name FROM ua_fop_files WHERE ID <= 2 ORDER BY ID DESC LIMIT 1
       ) AS picked
       ORDER BY ID
     expect:
@@ -415,7 +415,7 @@ test_cases:
 
   - name: "UNION ALL with NULL payload in one branch"
     sql: |
-      SELECT ID, name FROM fop_files WHERE ID = 1
+      SELECT ID, name FROM ua_fop_files WHERE ID = 1
       UNION ALL
       SELECT result AS ID, NULL AS name FROM renderjob WHERE ID = 102
       ORDER BY ID
@@ -431,17 +431,17 @@ test_cases:
 
   - name: "UNION ALL column count mismatch"
     sql: |
-      SELECT ID FROM fop_files
+      SELECT ID FROM ua_fop_files
       UNION ALL
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM ua_fop_files
     expect:
       error: true
 
   - name: "UNION without ALL compatibility"
     sql: |
-      SELECT ID FROM fop_files WHERE ID <= 2
+      SELECT ID FROM ua_fop_files WHERE ID <= 2
       UNION
-      SELECT ID FROM fop_files WHERE ID >= 4
+      SELECT ID FROM ua_fop_files WHERE ID >= 4
     expect:
       rows: 4
       data:
@@ -509,7 +509,7 @@ test_cases:
 
   - name: "UNION without ALL keeps first-branch aliases"
     sql: |
-      SELECT ID AS file_id FROM fop_files WHERE ID = 1
+      SELECT ID AS file_id FROM ua_fop_files WHERE ID = 1
       UNION
       SELECT result AS ignored_alias FROM renderjob WHERE ID = 101
     expect:
@@ -531,12 +531,12 @@ test_cases:
 
   - name: "UNION without ALL column count mismatch"
     sql: |
-      SELECT ID FROM fop_files
+      SELECT ID FROM ua_fop_files
       UNION
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM ua_fop_files
     expect:
       error: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS renderjob"
-  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: "DROP TABLE IF EXISTS ua_fop_files"

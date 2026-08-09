@@ -19,20 +19,20 @@ metadata:
   isolated: true
 
 setup:
-  - sql: "DROP TABLE IF EXISTS cq_event"
-  - sql: "DROP TABLE IF EXISTS cq_assignment"
-  - sql: "DROP TABLE IF EXISTS cq_item"
-  - sql: "DROP TABLE IF EXISTS cq_parent"
-  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: "DROP TABLE IF EXISTS dcm_event"
+  - sql: "DROP TABLE IF EXISTS dcm_assignment"
+  - sql: "DROP TABLE IF EXISTS dcm_item"
+  - sql: "DROP TABLE IF EXISTS dcm_parent"
+  - sql: "DROP TABLE IF EXISTS dcm_ref"
   - sql: |
-      CREATE TABLE cq_parent (
+      CREATE TABLE dcm_parent (
         id INT PRIMARY KEY,
         owner_id INT,
         tenant_id INT,
         ref_id INT
       )
   - sql: |
-      CREATE TABLE cq_item (
+      CREATE TABLE dcm_item (
         id INT PRIMARY KEY,
         parent_id INT,
         ref_id INT,
@@ -40,13 +40,13 @@ setup:
         state INT
       )
   - sql: |
-      CREATE TABLE cq_ref (
+      CREATE TABLE dcm_ref (
         id INT PRIMARY KEY,
         group_id INT,
         label VARCHAR(32)
       )
   - sql: |
-      CREATE TABLE cq_assignment (
+      CREATE TABLE dcm_assignment (
         id INT PRIMARY KEY,
         actor_id INT,
         tenant_id INT,
@@ -54,41 +54,41 @@ setup:
         allowed BOOL
       )
   - sql: |
-      CREATE TABLE cq_event (
+      CREATE TABLE dcm_event (
         id INT PRIMARY KEY,
         item_id INT,
         status VARCHAR(16),
         sequence_no INT
       )
   - sql: |
-      INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
+      INSERT INTO dcm_parent (id, owner_id, tenant_id, ref_id) VALUES
         (1, 10, 100, 1000),
         (2, 20, 200, 2000),
         (3, 30, NULL, 3000),
         (4, 40, 100, NULL),
         (5, 50, 300, 5000)
   - sql: |
-      INSERT INTO cq_item (id, parent_id, ref_id, score, state) VALUES
+      INSERT INTO dcm_item (id, parent_id, ref_id, score, state) VALUES
         (11, 1, 1000, 5, 1),
         (12, 1, 1001, 9, NULL),
         (21, 2, 2000, 7, 1),
         (31, 3, 3000, 3, 0),
         (41, 4, NULL, 8, 1)
   - sql: |
-      INSERT INTO cq_ref (id, group_id, label) VALUES
+      INSERT INTO dcm_ref (id, group_id, label) VALUES
         (1000, 1, 'alpha'),
         (1001, 1, 'beta'),
         (2000, 2, 'gamma'),
         (3000, NULL, 'delta')
   - sql: |
-      INSERT INTO cq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
+      INSERT INTO dcm_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
         (1, 7, 100, 1000, TRUE),
         (2, 7, 100, 1001, FALSE),
         (3, 8, 200, 2000, TRUE),
         (4, 7, NULL, NULL, TRUE),
         (5, 9, 300, NULL, NULL)
   - sql: |
-      INSERT INTO cq_event (id, item_id, status, sequence_no) VALUES
+      INSERT INTO dcm_event (id, item_id, status, sequence_no) VALUES
         (1, 11, 'open', 1),
         (2, 11, 'closed', 2),
         (3, 12, 'open', 1),
@@ -100,10 +100,10 @@ test_cases:
   - name: "Correlated ACL alternatives combine owner and assignment EXISTS"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE p.owner_id = 10
          OR EXISTS (
-           SELECT 1 FROM cq_assignment a
+           SELECT 1 FROM dcm_assignment a
            WHERE a.actor_id = 7
              AND a.tenant_id = p.tenant_id
              AND a.allowed = TRUE
@@ -119,14 +119,14 @@ test_cases:
     sql: |
       SELECT p.id,
         EXISTS (
-          SELECT 1 FROM cq_assignment a
+          SELECT 1 FROM dcm_assignment a
           WHERE a.actor_id = 7
             AND a.tenant_id = p.tenant_id
             AND a.allowed = TRUE
         ) AS visible
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE EXISTS (
-        SELECT 1 FROM cq_assignment a
+        SELECT 1 FROM dcm_assignment a
         WHERE a.actor_id = 7
           AND a.tenant_id = p.tenant_id
           AND a.allowed = TRUE
@@ -144,15 +144,15 @@ test_cases:
     sql: |
       SELECT p.id,
         EXISTS (
-          SELECT 1 FROM cq_assignment a
+          SELECT 1 FROM dcm_assignment a
           WHERE a.actor_id = 7
             AND a.tenant_id = p.tenant_id
             AND a.allowed = TRUE
         ) AS visible
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE p.owner_id = 20
          OR EXISTS (
-           SELECT 1 FROM cq_assignment a
+           SELECT 1 FROM dcm_assignment a
            WHERE a.actor_id = 7
              AND a.tenant_id = p.tenant_id
              AND a.allowed = TRUE
@@ -172,14 +172,14 @@ test_cases:
     sql: |
       EXPLAIN SELECT p.id,
         EXISTS (
-          SELECT 1 FROM cq_assignment a
+          SELECT 1 FROM dcm_assignment a
           WHERE a.actor_id = 7
             AND a.tenant_id = p.tenant_id
             AND a.allowed = TRUE
         ) AS visible
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE EXISTS (
-        SELECT 1 FROM cq_assignment a
+        SELECT 1 FROM dcm_assignment a
         WHERE a.actor_id = 7
           AND a.tenant_id = p.tenant_id
           AND a.allowed = TRUE
@@ -197,13 +197,13 @@ test_cases:
   - name: "Global EXISTS is combined with correlated EXISTS"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE EXISTS (
-        SELECT 1 FROM cq_assignment a
+        SELECT 1 FROM dcm_assignment a
         WHERE a.actor_id = 7 AND a.tenant_id IS NULL
       )
         AND EXISTS (
-          SELECT 1 FROM cq_item i
+          SELECT 1 FROM dcm_item i
           WHERE i.parent_id = p.id AND i.score >= 8
         )
       ORDER BY p.id
@@ -220,20 +220,20 @@ test_cases:
       SELECT p.id,
         (SELECT
           (SELECT EXISTS (
-             SELECT 1 FROM cq_assignment a
+             SELECT 1 FROM dcm_assignment a
              WHERE a.actor_id = 7
                AND a.tenant_id = p.tenant_id
                AND a.ref_id = i.ref_id
                AND a.allowed = TRUE
            )
-           FROM cq_ref r
+           FROM dcm_ref r
            WHERE r.id = i.ref_id
            LIMIT 1)
-         FROM cq_item i
+         FROM dcm_item i
          WHERE i.parent_id = p.id
          ORDER BY i.score DESC
          LIMIT 1) AS permitted
-      FROM cq_parent p
+      FROM dcm_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -255,23 +255,23 @@ test_cases:
         (SELECT
           (SELECT
             (SELECT r.label
-             FROM cq_ref r
+             FROM dcm_ref r
              WHERE r.id = i.ref_id
                AND EXISTS (
-                 SELECT 1 FROM cq_assignment a
+                 SELECT 1 FROM dcm_assignment a
                  WHERE a.actor_id = 7
                    AND a.ref_id = r.id
                    AND a.allowed = TRUE
                )
              LIMIT 1)
-           FROM cq_event e
+           FROM dcm_event e
            WHERE e.item_id = i.id
            LIMIT 1)
-         FROM cq_item i
+         FROM dcm_item i
          WHERE i.parent_id = p.id
          ORDER BY i.id
          LIMIT 1) AS permitted_label
-      FROM cq_parent p
+      FROM dcm_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -291,10 +291,10 @@ test_cases:
     sql: |
       SELECT p.id,
         EXISTS (
-          SELECT 1 FROM cq_item i
+          SELECT 1 FROM dcm_item i
           WHERE i.parent_id = p.id AND i.score > 100
         ) AS has_large_item
-      FROM cq_parent p
+      FROM dcm_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -317,17 +317,17 @@ test_cases:
       SELECT p.id,
         (SELECT
           (SELECT EXISTS (
-             SELECT 1 FROM cq_event e
+             SELECT 1 FROM dcm_event e
              WHERE e.item_id = i.id AND e.status = 'missing'
            )
-           FROM cq_ref r
+           FROM dcm_ref r
            WHERE r.id = i.ref_id
            LIMIT 1)
-         FROM cq_item i
+         FROM dcm_item i
          WHERE i.parent_id = p.id
          ORDER BY i.id
          LIMIT 1) AS has_missing_event
-      FROM cq_parent p
+      FROM dcm_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -346,12 +346,12 @@ test_cases:
   - name: "Nested NOT EXISTS keeps outer correlation"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE EXISTS (
-        SELECT 1 FROM cq_item i
+        SELECT 1 FROM dcm_item i
         WHERE i.parent_id = p.id
           AND NOT EXISTS (
-            SELECT 1 FROM cq_event e
+            SELECT 1 FROM dcm_event e
             WHERE e.item_id = i.id AND e.status = 'open'
           )
       )
@@ -367,13 +367,13 @@ test_cases:
     fail_comment: "membership lowering rejects a UNION branch that already contains a decorrelated EXISTS stage"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE p.id IN (
-        SELECT i.parent_id FROM cq_item i WHERE i.score >= 8
+        SELECT i.parent_id FROM dcm_item i WHERE i.score >= 8
         UNION
-        SELECT i.parent_id FROM cq_item i
+        SELECT i.parent_id FROM dcm_item i
         WHERE EXISTS (
-          SELECT 1 FROM cq_event e
+          SELECT 1 FROM dcm_event e
           WHERE e.item_id = i.id AND e.status = 'closed'
         )
       )
@@ -388,12 +388,12 @@ test_cases:
   - name: "Correlated IN over UNION references the outer row in both branches"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE p.ref_id IN (
-        SELECT i.ref_id FROM cq_item i
+        SELECT i.ref_id FROM dcm_item i
         WHERE i.parent_id = p.id AND i.state = 1
         UNION
-        SELECT a.ref_id FROM cq_assignment a
+        SELECT a.ref_id FROM dcm_assignment a
         WHERE a.tenant_id = p.tenant_id AND a.allowed = TRUE
       )
       ORDER BY p.id
@@ -408,9 +408,9 @@ test_cases:
     fail_comment: "a NULL probe against an empty subquery is TRUE, but the outer row is currently discarded"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE p.ref_id NOT IN (
-        SELECT i.ref_id FROM cq_item i
+        SELECT i.ref_id FROM dcm_item i
         WHERE i.parent_id = p.id AND i.score > 100
       )
       ORDER BY p.id
@@ -426,9 +426,9 @@ test_cases:
   - name: "NOT IN with a NULL candidate remains unknown"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM dcm_parent p
       WHERE p.ref_id NOT IN (
-        SELECT i.ref_id FROM cq_item i
+        SELECT i.ref_id FROM dcm_item i
         WHERE i.parent_id = 4
       )
       ORDER BY p.id
@@ -442,18 +442,18 @@ test_cases:
       SELECT p.id,
         (SELECT
           (SELECT r.label
-           FROM cq_ref r
+           FROM dcm_ref r
            WHERE r.id = i.ref_id
              AND r.id NOT IN (
-               SELECT a.ref_id FROM cq_assignment a
+               SELECT a.ref_id FROM dcm_assignment a
                WHERE a.actor_id = p.owner_id
              )
            LIMIT 1)
-         FROM cq_item i
+         FROM dcm_item i
          WHERE i.parent_id = p.id
          ORDER BY i.id
          LIMIT 1) AS unassigned_label
-      FROM cq_parent p
+      FROM dcm_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -471,8 +471,8 @@ test_cases:
 
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS cq_event"
-  - sql: "DROP TABLE IF EXISTS cq_assignment"
-  - sql: "DROP TABLE IF EXISTS cq_item"
-  - sql: "DROP TABLE IF EXISTS cq_parent"
-  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: "DROP TABLE IF EXISTS dcm_event"
+  - sql: "DROP TABLE IF EXISTS dcm_assignment"
+  - sql: "DROP TABLE IF EXISTS dcm_item"
+  - sql: "DROP TABLE IF EXISTS dcm_parent"
+  - sql: "DROP TABLE IF EXISTS dcm_ref"

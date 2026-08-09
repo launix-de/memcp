@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # Edge cases found during ERPL build-manual testing.
 # Each test reproduces a specific SQL compatibility issue.
 
@@ -6,24 +7,24 @@ metadata:
   description: "ERPL edge cases: correlated subquery alias scope, UPDATE with missing columns"
 
 setup:
-  - sql: "DROP TABLE IF EXISTS eec_state"
-  - sql: "DROP TABLE IF EXISTS eec_record"
-  - sql: "DROP TABLE IF EXISTS eec_tax"
-  - sql: "DROP TABLE IF EXISTS eec_journal"
+  - sql: "DROP TABLE IF EXISTS uoc_state"
+  - sql: "DROP TABLE IF EXISTS uoc_record"
+  - sql: "DROP TABLE IF EXISTS uoc_tax"
+  - sql: "DROP TABLE IF EXISTS uoc_journal"
   - sql: |
-      CREATE TABLE eec_state (
+      CREATE TABLE uoc_state (
         ID INT PRIMARY KEY,
         name TEXT,
         aftercontact INT
       )
   - sql: |
-      CREATE TABLE eec_record (
+      CREATE TABLE uoc_record (
         ID INT PRIMARY KEY,
         state INT,
         title TEXT
       )
   - sql: |
-      CREATE TABLE eec_tax (
+      CREATE TABLE uoc_tax (
         ID INT PRIMARY KEY,
         rate FLOAT,
         intl INT,
@@ -31,26 +32,26 @@ setup:
         allnet INT
       )
   - sql: |
-      CREATE TABLE eec_journal (
+      CREATE TABLE uoc_journal (
         ID INT PRIMARY KEY,
         ref1 INT,
         ref2 INT,
         parent INT
       )
-  - sql: "INSERT INTO eec_state VALUES (1, 'New', NULL), (2, 'Called', 1), (3, 'Done', NULL)"
-  - sql: "INSERT INTO eec_record VALUES (1, 1, 'Alpha'), (2, 2, 'Beta')"
-  - sql: "INSERT INTO eec_tax VALUES (1, 19.0, 0, 0, 0), (2, 7.0, 1, 0, 0)"
-  - sql: "INSERT INTO eec_journal VALUES (1, 10, NULL, NULL), (2, NULL, 20, NULL)"
+  - sql: "INSERT INTO uoc_state VALUES (1, 'New', NULL), (2, 'Called', 1), (3, 'Done', NULL)"
+  - sql: "INSERT INTO uoc_record VALUES (1, 1, 'Alpha'), (2, 2, 'Beta')"
+  - sql: "INSERT INTO uoc_tax VALUES (1, 19.0, 0, 0, 0), (2, 7.0, 1, 0, 0)"
+  - sql: "INSERT INTO uoc_journal VALUES (1, 10, NULL, NULL), (2, NULL, 20, NULL)"
 
 test_cases:
 
   - name: "UPDATE SET with OR expression combining columns"
     sql: |
-      UPDATE eec_tax SET allnet = intl OR svc
+      UPDATE uoc_tax SET allnet = intl OR svc
     # MySQL: allnet = (intl OR svc) → boolean 0/1
 
   - name: "verify UPDATE SET OR"
-    sql: "SELECT ID, allnet FROM eec_tax ORDER BY ID"
+    sql: "SELECT ID, allnet FROM uoc_tax ORDER BY ID"
     expect:
       rows: 2
       data:
@@ -61,10 +62,10 @@ test_cases:
 
   - name: "UPDATE SET with COALESCE over multiple nullable columns"
     sql: |
-      UPDATE eec_journal SET parent = COALESCE(parent, ref1, ref2)
+      UPDATE uoc_journal SET parent = COALESCE(parent, ref1, ref2)
 
   - name: "verify COALESCE UPDATE"
-    sql: "SELECT ID, parent FROM eec_journal ORDER BY ID"
+    sql: "SELECT ID, parent FROM uoc_journal ORDER BY ID"
     expect:
       rows: 2
       data:
@@ -74,18 +75,18 @@ test_cases:
           parent: 20
 
   - name: "DROP COLUMN IF EXISTS on missing column (no error)"
-    sql: "ALTER TABLE eec_state DROP COLUMN IF EXISTS aftercontact"
+    sql: "ALTER TABLE uoc_state DROP COLUMN IF EXISTS aftercontact"
 
   - name: "DROP COLUMN IF EXISTS on already-dropped column (no error)"
-    sql: "ALTER TABLE eec_state DROP COLUMN IF EXISTS aftercontact"
+    sql: "ALTER TABLE uoc_state DROP COLUMN IF EXISTS aftercontact"
 
   - name: "SELECT after DROP COLUMN IF EXISTS"
-    sql: "SELECT ID, name FROM eec_state ORDER BY ID"
+    sql: "SELECT ID, name FROM uoc_state ORDER BY ID"
     expect:
       rows: 3
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS eec_state"
-  - sql: "DROP TABLE IF EXISTS eec_record"
-  - sql: "DROP TABLE IF EXISTS eec_tax"
-  - sql: "DROP TABLE IF EXISTS eec_journal"
+  - sql: "DROP TABLE IF EXISTS uoc_state"
+  - sql: "DROP TABLE IF EXISTS uoc_record"
+  - sql: "DROP TABLE IF EXISTS uoc_tax"
+  - sql: "DROP TABLE IF EXISTS uoc_journal"
