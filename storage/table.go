@@ -41,6 +41,9 @@ func NewTableScmer(t *table) scm.Scmer {
 
 // TableFromScmer extracts a *table from a TagTable Scmer.
 func TableFromScmer(s scm.Scmer) *table {
+	if s.IsNil() {
+		panic("table does not exist")
+	}
 	return (*table)(s.Custom(TagTable))
 }
 

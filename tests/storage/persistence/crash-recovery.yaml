@@ -82,7 +82,7 @@ test_cases:
   - name: "Hard crash with delta rows pending"
     scm: "(crash)"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after delta crash"
     action: restart
@@ -150,7 +150,7 @@ test_cases:
     parallel: crash_insert
     scm: "(begin (sleep 0.05) (crash))"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after large insert crash"
     action: restart
@@ -192,7 +192,7 @@ test_cases:
     parallel: crash_update
     scm: "(begin (sleep 0.05) (crash))"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after update crash"
     action: restart
@@ -235,7 +235,7 @@ test_cases:
             (list (concat "cat" (mod (+ i 30) 3)) (* (+ i 30) 10)))))
         (crash))
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after count crash"
     action: restart
@@ -291,7 +291,7 @@ test_cases:
             (list (concat "item" (+ i 40))))))
         (crash))
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after clean crash"
     action: restart
@@ -369,7 +369,7 @@ test_cases:
   - name: "Crash after GROUP BY INSERT"
     scm: "(crash)"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after GROUP BY crash"
     action: restart
@@ -475,7 +475,7 @@ test_cases:
   - name: "Crash after post-rebuild INSERT"
     scm: "(crash)"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after post-rebuild crash"
     action: restart
@@ -558,7 +558,7 @@ test_cases:
   - name: "Crash after chain INSERT"
     scm: "(crash)"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after chain crash"
     action: restart
@@ -642,7 +642,7 @@ test_cases:
   - name: "Crash after prejoin INSERT"
     scm: "(crash)"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after prejoin crash"
     action: restart
@@ -712,7 +712,7 @@ test_cases:
     parallel: crash_rebuild
     scm: "(begin (sleep 0.05) (crash))"
     expect:
-      error: true
+      interrupted_ok: true
 
   - name: "Restart after rebuild crash"
     action: restart

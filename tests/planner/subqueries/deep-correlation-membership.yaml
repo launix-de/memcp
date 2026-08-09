@@ -363,8 +363,8 @@ test_cases:
         - id: 4
 
   - name: "IN over UNION combines two candidate branches"
-    noncritical: true
-    fail_comment: "membership lowering rejects a UNION branch that already contains a decorrelated EXISTS stage"
+    max_time: 1
+    max_plan_size: 30000
     sql: |
       SELECT p.id
       FROM dcm_parent p
@@ -404,8 +404,6 @@ test_cases:
         - id: 2
 
   - name: "NOT IN with an empty correlated input is true"
-    noncritical: true
-    fail_comment: "a NULL probe against an empty subquery is TRUE, but the outer row is currently discarded"
     sql: |
       SELECT p.id
       FROM dcm_parent p
@@ -422,6 +420,65 @@ test_cases:
         - id: 3
         - id: 4
         - id: 5
+
+  - name: "NULL IN an empty correlated input is false"
+    sql: |
+      SELECT p.ref_id IN (
+        SELECT i.ref_id FROM dcm_item i
+        WHERE i.parent_id = p.id AND i.score > 100
+      ) AS matched
+      FROM dcm_parent p
+      WHERE p.id = 4
+    expect:
+      rows: 1
+      data:
+        - matched: false
+
+  - name: "NULL IN a nonempty correlated input is unknown"
+    sql: |
+      SELECT p.ref_id IN (
+        SELECT i.ref_id FROM dcm_item i
+        WHERE i.parent_id = 1
+      ) AS matched
+      FROM dcm_parent p
+      WHERE p.id = 4
+    expect:
+      rows: 1
+      data:
+        - matched: null
+
+  - name: "NULL IN an empty uncorrelated input is false"
+    sql: |
+      SELECT NULL IN (
+        SELECT i.ref_id FROM dcm_item i WHERE i.score > 100
+      ) AS matched
+    expect:
+      rows: 1
+      data:
+        - matched: false
+
+  - name: "NULL NOT IN an empty uncorrelated input is true"
+    sql: |
+      SELECT NULL NOT IN (
+        SELECT i.ref_id FROM dcm_item i WHERE i.score > 100
+      ) AS unmatched
+    expect:
+      rows: 1
+      data:
+        - unmatched: true
+
+  - name: "NULL NOT IN a nonempty correlated input is unknown"
+    sql: |
+      SELECT p.ref_id NOT IN (
+        SELECT i.ref_id FROM dcm_item i
+        WHERE i.parent_id = 1
+      ) AS unmatched
+      FROM dcm_parent p
+      WHERE p.id = 4
+    expect:
+      rows: 1
+      data:
+        - unmatched: null
 
   - name: "NOT IN with a NULL candidate remains unknown"
     sql: |

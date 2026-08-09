@@ -219,8 +219,6 @@ test_cases:
         - weighted_score: 24
 
   - name: "TPC-H Q7 shape: bidirectional OR join alternatives"
-    noncritical: true
-    fail_comment: "join lowering retains the first bidirectional OR arm but drops the second matching arm"
     sql: |
       SELECT p.owner_id, a.actor_id, COUNT(*) AS pair_count
       FROM rbq_parent p

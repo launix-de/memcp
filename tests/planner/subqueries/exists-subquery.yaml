@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # EXISTS subquery tests
 
 metadata:
@@ -6,6 +21,7 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS exists_shipments"
   - sql: "DROP TABLE IF EXISTS exists_doc_shares"
   - sql: "DROP TABLE IF EXISTS exists_docs"
   - sql: "DROP TABLE IF EXISTS exists_orders"
@@ -45,6 +61,20 @@ setup:
   - sql: |
       INSERT INTO exists_doc_shares (ID, doc_id, user_id) VALUES
       (10, 2, 1)
+  - sql: |
+      CREATE TABLE exists_shipments (
+        ID INT PRIMARY KEY,
+        order_id INT,
+        supplier_id INT,
+        late BOOLEAN
+      )
+  - sql: |
+      INSERT INTO exists_shipments (ID, order_id, supplier_id, late) VALUES
+      (1, 1, 1, TRUE),
+      (2, 1, 2, FALSE),
+      (3, 2, 1, TRUE),
+      (4, 2, 2, TRUE),
+      (5, 3, 1, TRUE)
 
 test_cases:
   - name: "EXISTS with correlated subquery - customers with orders"
@@ -188,6 +218,67 @@ test_cases:
       data:
         - ID: 3
           name: "Charlie"
+
+  - name: "Residual outer column is part of EXISTS domain"
+    sql: |
+      SELECT l1.ID
+      FROM exists_shipments l1
+      WHERE l1.late = TRUE
+        AND EXISTS (
+          SELECT 1
+          FROM exists_shipments l2
+          WHERE l2.order_id = l1.order_id
+            AND l2.supplier_id <> l1.supplier_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM exists_shipments l3
+          WHERE l3.order_id = l1.order_id
+            AND l3.supplier_id <> l1.supplier_id
+            AND l3.late = TRUE
+        )
+      ORDER BY l1.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+
+  - name: "Residual JOIN ON outer column is part of EXISTS domain"
+    sql: |
+      SELECT l1.ID
+      FROM exists_shipments l1
+      WHERE EXISTS (
+        SELECT 1
+        FROM exists_shipments l2
+        JOIN exists_shipments l3
+          ON l3.order_id = l2.order_id
+         AND l3.supplier_id <> l1.supplier_id
+         AND l3.late = FALSE
+        WHERE l2.order_id = l1.order_id
+      )
+      ORDER BY l1.ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+
+  - name: "Unqualified inner column does not enter EXISTS domain"
+    steps:
+      - sql: |
+          EXPLAIN IR SELECT l1.ID
+          FROM exists_shipments l1
+          WHERE EXISTS (
+            SELECT 1
+            FROM exists_shipments l2
+            WHERE l2.order_id = l1.order_id
+              AND supplier_id > 0
+          )
+        expect:
+          contains:
+            - "group-stage"
+            - "domain"
+          not_contains:
+            - '(get_column "l1" false "supplier_id"'
 
   - name: "EXISTS with uncorrelated subquery - true case"
     sql: |
@@ -494,6 +585,7 @@ test_cases:
           count: 2
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS exists_shipments"
   - sql: "DROP TABLE IF EXISTS exists_doc_shares"
   - sql: "DROP TABLE IF EXISTS exists_docs"
   - sql: "DROP TABLE IF EXISTS exists_orders"

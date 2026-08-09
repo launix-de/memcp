@@ -14,4 +14,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Refuse disabled SQL hard time limit
-        run: python3 tools/check_sql_time_limit.py
+        run: |
+          python3 tools/check_sql_time_limit.py
+          python3 tools/test_sql_runner_contract.py

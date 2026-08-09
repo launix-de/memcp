@@ -1,5 +1,6 @@
 # Trigger body references non-existent table at CREATE TRIGGER time
-# Expected: CREATE TRIGGER succeeds (with a warning), trigger acts as no-op
+# Expected: CREATE TRIGGER succeeds; firing it reports the unresolved table
+# promptly and rolls back the source write.
 # Regression: without the try wrapper, compile_trigger_body panics with
 # "table does not exist" when the body references a table not yet created.
 
@@ -22,21 +23,44 @@ test_cases:
     expect:
       affected_rows: 0
 
-  - name: "INSERT into source table works after bad trigger creation"
-    noncritical: true
-    fail_comment: "a trigger with an unresolved body leaves later source-table writes unresponsive"
+  - name: "Unresolved trigger body fails the source INSERT promptly"
+    timeout: 2
+    max_time: 1
     sql: "INSERT INTO trig_source (id, val) VALUES (1, 10)"
     expect:
-      affected_rows: 1
+      error: true
+      contains: "does not exist"
 
-  - name: "Row was inserted (trigger was a no-op, not preventing inserts)"
-    noncritical: true
-    fail_comment: "the connection remains unresponsive after executing the unresolved trigger body"
-    sql: "SELECT id, val FROM trig_source WHERE id = 1"
+  - name: "Failed trigger rolls back the source row and leaves the session usable"
+    max_time: 1
+    sql: "SELECT COUNT(*) AS cnt FROM trig_source"
     expect:
       rows: 1
       data:
-        - {id: 1, val: 10}
+        - {cnt: 0}
 
-  - name: "Restart after unresolved trigger body blocks the session"
+  - name: "Create the trigger target after the initial failure"
+    sql: "CREATE TABLE trig_missing_ref (id INT)"
+    expect:
+      affected_rows: 0
+
+  - name: "Seed a row selected by the deferred trigger body"
+    sql: "INSERT INTO trig_missing_ref (id) VALUES (2)"
+    expect:
+      affected_rows: 1
+
+  - name: "Deferred trigger compiles once its target exists"
+    max_time: 1
+    sql: "INSERT INTO trig_source (id, val) VALUES (2, 20)"
+    expect:
+      affected_rows: 1
+
+  - name: "Deferred trigger executes after successful compilation"
+    sql: "SELECT COUNT(*) AS cnt FROM trig_missing_ref WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 2}
+
+  - name: "Restart after unresolved trigger error"
     action: restart
