@@ -100,6 +100,22 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(sql_sub_numeric_literals a b)
 	'((quote -) a b))))
 
+(define psql_fold_additive_term (lambda (acc term)
+	(match term
+		'("add" value) (psql_add_expr acc value)
+		'("sub" value) (psql_sub_expr acc value)
+		'("date_add" value unit) '('date_add acc value unit)
+		'("date_sub" value unit) '('date_sub acc value unit))))
+
+(define psql_comparison_expr (lambda (op a b)
+	(match op
+		"eq" '((quote equal??) a b)
+		"ne" '((quote not) '((quote equal?) a b))
+		"le" '((quote <=) a b)
+		"ge" '((quote >=) a b)
+		"lt" '((quote <) a b)
+		"gt" '((quote >) a b))))
+
 (define psql_type (parser (or
 	(parser '((atom "character" true) (atom "varying" true)) "varying")
 	(parser '((atom "double" true) (atom "precision" true)) "double")
@@ -174,14 +190,16 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") '('inner_select_in a sub))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
-		(parser '((define a psql_expression3) "==" (define b psql_expression2)) '((quote equal??) a b))
-		(parser '((define a psql_expression3) "=" (define b psql_expression2)) '((quote equal??) a b))
-		(parser '((define a psql_expression3) "<>" (define b psql_expression2)) '((quote not) '((quote equal?) a b)))
-		(parser '((define a psql_expression3) "!=" (define b psql_expression2)) '((quote not) '((quote equal?) a b)))
-		(parser '((define a psql_expression3) "<=" (define b psql_expression2)) '((quote <=) a b))
-		(parser '((define a psql_expression3) ">=" (define b psql_expression2)) '((quote >=) a b))
-		(parser '((define a psql_expression3) "<" (define b psql_expression2)) '((quote <) a b))
-		(parser '((define a psql_expression3) ">" (define b psql_expression2)) '((quote >) a b))
+		(parser '((define a psql_expression3) (define op (or
+			(parser "==" "eq")
+			(parser "=" "eq")
+			(parser "<>" "ne")
+			(parser "!=" "ne")
+			(parser "<=" "le")
+			(parser ">=" "ge")
+			(parser "<" "lt")
+			(parser ">" "gt")
+		)) (define b psql_expression2)) (psql_comparison_expr op a b))
 		/* ILIKE is Postgres case-insensitive LIKE. */
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "ILIKE" true) (define b psql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
 		(parser '((define a psql_expression3) (atom "ILIKE" true) (define b psql_expression2)) '('strlike a b "utf8mb4_general_ci"))
@@ -203,15 +221,22 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		psql_expression3
 	)))
 
-	(define psql_expression3 (parser (or
-		/* date + INTERVAL n UNIT */
-		(parser '((define a psql_expression4) "+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_add a n unit))
-		/* date - INTERVAL n UNIT */
-		(parser '((define a psql_expression4) "-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a psql_expression4) "+" (define b psql_expression3)) (psql_add_expr a b))
-		(parser '((define a psql_expression4) "-" (define b psql_expression3)) (psql_sub_expr a b))
-		psql_expression4
-	)))
+	(define psql_expression3 (parser '(
+		(define a psql_expression4)
+		(define terms (* (parser '(
+			(define op (or
+				(parser "+" "add")
+				(parser "-" "sub")
+			))
+			(define operand (or
+				(parser '((atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '("interval" n unit))
+				(parser (define value psql_expression4) '("value" value))
+			))
+		) (match operand
+				'("interval" value unit) (list (concat "date_" op) value unit)
+				'("value" value) (list op value)
+		)) empty true))
+	) (reduce terms psql_fold_additive_term a)))
 
 	(define psql_expression4 (parser (or
 		(parser '((define a psql_expression5) "*" (define b psql_expression4)) '((quote *) a b))

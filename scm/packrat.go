@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023-2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -324,7 +324,11 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 				} else {
 					sep = packrat.NewEmptyParser(&parserResult{value: NewNil(), env: nil})
 				}
-				return packrat.NewKleeneParser(merger, sub, sep)
+				result := packrat.NewKleeneParser(merger, sub, sep)
+				if len(list) > 3 {
+					result.NoMemo = list[3].Bool()
+				}
+				return result
 			case "+":
 				sub := parseSyntax(list[1], en, ome, ignoreResult)
 				if sub == nil {
@@ -421,7 +425,7 @@ func init_parser() {
 	(regex "asdf" caseinsensitive skipws) RegexParser
 	'(a b c) AndParser
 	(or a b c) OrParser
-	(* sub separator) KleeneParser
+	(* sub separator noMemo) KleeneParser
 	(+ sub separator) ManyParser
 	(? xyz) MaybeParser (if >1 AndParser)
 	(not mainparser parser1 parser2 parser3 ...) a parser that matches mainparser but not parser1...

@@ -129,6 +129,22 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(sql_sub_numeric_literals a b)
 	'((quote -) a b))))
 
+(define sql_fold_additive_term (lambda (acc term)
+	(match term
+		'("add" value) (sql_add_expr acc value)
+		'("sub" value) (sql_sub_expr acc value)
+		'("date_add" value unit) '('date_add acc value unit)
+		'("date_sub" value unit) '('date_sub acc value unit))))
+
+(define sql_comparison_expr (lambda (op a b)
+	(match op
+		"eq" '((quote equal??) a b)
+		"ne" '((quote not) '((quote equal??) a b))
+		"le" '((quote <=) a b)
+		"ge" '((quote >=) a b)
+		"lt" '((quote <) a b)
+		"gt" '((quote >) a b))))
+
 /* lightweight literal parser for top-level contexts (before sql_expression is defined) */
 (define sql_literal (parser (or
 	(parser (atom "NULL" true) (sql_null_literal))
@@ -634,14 +650,16 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "==" (define b sql_expression2)) '('equal_collate a b collation))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "<>" (define b sql_expression2)) '('notequal_collate a b collation))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "!=" (define b sql_expression2)) '('notequal_collate a b collation))
-		(parser '((define a sql_expression3) "==" (define b sql_expression2)) '((quote equal??) a b))
-		(parser '((define a sql_expression3) "=" (define b sql_expression2)) '((quote equal??) a b))
-		(parser '((define a sql_expression3) "<>" (define b sql_expression2)) '((quote not) '((quote equal??) a b)))
-		(parser '((define a sql_expression3) "!=" (define b sql_expression2)) '((quote not) '((quote equal??) a b)))
-		(parser '((define a sql_expression3) "<=" (define b sql_expression2)) '((quote <=) a b))
-		(parser '((define a sql_expression3) ">=" (define b sql_expression2)) '((quote >=) a b))
-		(parser '((define a sql_expression3) "<" (define b sql_expression2)) '((quote <) a b))
-		(parser '((define a sql_expression3) ">" (define b sql_expression2)) '((quote >) a b))
+		(parser '((define a sql_expression3) (define op (or
+			(parser "==" "eq")
+			(parser "=" "eq")
+			(parser "<>" "ne")
+			(parser "!=" "ne")
+			(parser "<=" "le")
+			(parser ">=" "ge")
+			(parser "<" "lt")
+			(parser ">" "gt")
+		)) (define b sql_expression2)) (sql_comparison_expr op a b))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
@@ -659,15 +677,22 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		sql_expression3
 	)))
 
-	(define sql_expression3 (parser (or
-		/* date + INTERVAL n UNIT */
-		(parser '((define a sql_expression4) "+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_add a n unit))
-		/* date - INTERVAL n UNIT */
-		(parser '((define a sql_expression4) "-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a sql_expression4) "+" (define b sql_expression3)) (sql_add_expr a b))
-		(parser '((define a sql_expression4) "-" (define b sql_expression3)) (sql_sub_expr a b))
-		sql_expression4
-	)))
+	(define sql_expression3 (parser '(
+		(define a sql_expression4)
+		(define terms (* (parser '(
+			(define op (or
+				(parser "+" "add")
+				(parser "-" "sub")
+			))
+			(define operand (or
+				(parser '((atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '("interval" n unit))
+				(parser (define value sql_expression4) '("value" value))
+			))
+		) (match operand
+				'("interval" value unit) (list (concat "date_" op) value unit)
+				'("value" value) (list op value)
+		)) empty true))
+	) (reduce terms sql_fold_additive_term a)))
 
 	(define sql_expression4 (parser (or
 		(parser '((define a sql_expression5) "*" (define b sql_expression4)) '((quote *) a b))

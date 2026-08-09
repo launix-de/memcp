@@ -24,6 +24,14 @@ test_cases:
       data:
         - result: 6
 
+  - name: "Equal-precedence arithmetic is left associative"
+    sql: "SELECT 20 - 7 - 3 AS subtract_result, 20 - 7 + 3 AS mixed_result"
+    expect:
+      rows: 1
+      data:
+        - subtract_result: 10
+          mixed_result: 16
+
   - name: "Basic multiplication"
     sql: "SELECT 6 * 7 AS result"
     expect:
