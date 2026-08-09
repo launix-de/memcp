@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # Performance tests for basic operations
 # Run with: PERF_TEST=1 make test
 # Calibrate with: PERF_TEST=1 PERF_CALIBRATE=1 make test (run ~10 times)
@@ -15,17 +16,17 @@ test_cases:
   # COUNT aggregation with data generation
   - name: "Perf: COUNT"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
-    sql: "SELECT COUNT(*) AS cnt FROM perf_main"
+    sql: "SELECT COUNT(*) AS cnt FROM pb_main"
     threshold_ms: 30000
     expect:
       rows: 1
@@ -33,17 +34,17 @@ test_cases:
   # SUM aggregation
   - name: "Perf: SUM"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
-    sql: "SELECT SUM(value) AS total FROM perf_main"
+    sql: "SELECT SUM(value) AS total FROM pb_main"
     threshold_ms: 30000
     expect:
       rows: 1
@@ -51,17 +52,17 @@ test_cases:
   # ORDER BY with LIMIT
   - name: "Perf: ORDER+LIMIT"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
-    sql: "SELECT id, value FROM perf_main ORDER BY value DESC LIMIT 100"
+    sql: "SELECT id, value FROM pb_main ORDER BY value DESC LIMIT 100"
     threshold_ms: 30000
     expect:
       rows: 100
@@ -69,17 +70,17 @@ test_cases:
   # Full table scan with filter
   - name: "Perf: SCAN+FILTER"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
-    sql: "SELECT COUNT(*) AS cnt FROM perf_main WHERE value > 500000"
+    sql: "SELECT COUNT(*) AS cnt FROM pb_main WHERE value > 500000"
     threshold_ms: 30000
     expect:
       rows: 1
@@ -87,17 +88,17 @@ test_cases:
   # GROUP BY aggregation
   - name: "Perf: GROUP BY"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
-            (set cnt (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows))
+            (set cnt (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows))
             (rebuild)
             (set mem (memstats))
             (list cnt (mem "heap_alloc")))
-    sql: "SELECT category % 100 AS cat, COUNT(*) AS cnt, SUM(value) AS total FROM perf_main GROUP BY category % 100"
+    sql: "SELECT category % 100 AS cat, COUNT(*) AS cnt, SUM(value) AS total FROM pb_main GROUP BY category % 100"
     threshold_ms: 30000
     expect:
       rows: 50
@@ -106,40 +107,40 @@ test_cases:
   # 100 dimension rows x {rows}/100 matches each = {rows} total joined rows
   - name: "Perf: EQUI JOIN"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
-      - sql: "DROP TABLE IF EXISTS `perf_dim`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_dim`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
-      - sql: "CREATE TABLE `perf_dim` (cat_id INT PRIMARY KEY, label TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_dim` (cat_id INT PRIMARY KEY, label TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
-            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows)
+            (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows)
             (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
-            (insert (table "{database}" "perf_dim") '("cat_id" "label") dims)
+            (insert (table "{database}" "pb_dim") '("cat_id" "label") dims)
             (rebuild)
             "ok")
-    sql: "SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id"
+    sql: "SELECT d.label, m.id FROM pb_dim d JOIN pb_main m ON m.category = d.cat_id"
     threshold_ms: 30000
 
   # Range join: dimension table drives scan with range boundaries on index
   # 20 range buckets covering all values = {rows} total joined rows
   - name: "Perf: RANGE JOIN"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
       - sql: "DROP TABLE IF EXISTS `perf_ranges`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
       - sql: "CREATE TABLE `perf_ranges` (range_id INT PRIMARY KEY, low_val INT, high_val INT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
-            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows)
+            (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows)
             (set ranges (map (produceN 20) (lambda (i) (list i (* i (/ (* {rows} 71) 20)) (* (+ i 1) (/ (* {rows} 71) 20))))))
             (insert (table "{database}" "perf_ranges") '("range_id" "low_val" "high_val") ranges)
             (rebuild)
             "ok")
-    sql: "SELECT r.range_id, m.id FROM perf_ranges r JOIN perf_main m ON m.value >= r.low_val AND m.value < r.high_val"
+    sql: "SELECT r.range_id, m.id FROM perf_ranges r JOIN pb_main m ON m.value >= r.low_val AND m.value < r.high_val"
     threshold_ms: 30000
 
   # Matrix multiplication: C = A*B via equi join
@@ -170,28 +171,28 @@ test_cases:
   # Dimension table drives equi-join; inner side uses index with streaming merge
   - name: "Perf: DELTA JOIN"
     setup:
-      - sql: "DROP TABLE IF EXISTS `perf_main`"
-      - sql: "DROP TABLE IF EXISTS `perf_dim`"
+      - sql: "DROP TABLE IF EXISTS `pb_main`"
+      - sql: "DROP TABLE IF EXISTS `pb_dim`"
       - scm: "(rebuild)"
-      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
-      - sql: "CREATE TABLE `perf_dim` (cat_id INT PRIMARY KEY, label TEXT)"
+      - sql: "CREATE TABLE `pb_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `pb_dim` (cat_id INT PRIMARY KEY, label TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
-            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") rows)
+            (insert (table "{database}" "pb_main") '("id" "category" "value" "name") rows)
             (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
-            (insert (table "{database}" "perf_dim") '("cat_id" "label") dims)
+            (insert (table "{database}" "pb_dim") '("cat_id" "label") dims)
             (rebuild)
             (set delta_n (floor (/ {rows} 10)))
             (set delta (map (produceN delta_n) (lambda (i) (list (+ i {rows}) (- i (* 100 (floor (/ i 100)))) (* (+ i {rows}) 71) (concat "delta_" i)))))
-            (insert (table "{database}" "perf_main") '("id" "category" "value" "name") delta)
+            (insert (table "{database}" "pb_main") '("id" "category" "value" "name") delta)
             "ok")
-    sql: "SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id"
+    sql: "SELECT d.label, m.id FROM pb_dim d JOIN pb_main m ON m.category = d.cat_id"
     threshold_ms: 30000
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS perf_main"
-  - sql: "DROP TABLE IF EXISTS perf_dim"
+  - sql: "DROP TABLE IF EXISTS pb_main"
+  - sql: "DROP TABLE IF EXISTS pb_dim"
   - sql: "DROP TABLE IF EXISTS perf_ranges"
   - sql: "DROP TABLE IF EXISTS perf_mat_a"
   - sql: "DROP TABLE IF EXISTS perf_mat_b"
