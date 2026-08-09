@@ -139,6 +139,12 @@ RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
 FAILURE_MAP_KEY = "failures"
 
+
+def is_error_response(response: Optional[requests.Response]) -> bool:
+    """Return whether the server returned an explicit SQL/SCM error."""
+    return response is not None and (response.status_code != 200 or "Error" in response.text)
+
+
 def _load_runner_config() -> Dict[str, Any]:
     try:
         with open(PERF_BASELINE_FILE, 'r', encoding='utf-8') as f:
@@ -756,15 +762,9 @@ class SQLTestRunner:
                 if self._expect_interrupted_ok(expect):
                     self._record_success(name, is_noncritical)
                     return True
-                if expect_error:
-                    self._record_success(name, is_noncritical)
-                    return True
                 return self._record_fail(name, f"SCM exception: {e}", scm_code, None, None, is_noncritical)
             if resp is None:
                 if self._expect_interrupted_ok(expect):
-                    self._record_success(name, is_noncritical)
-                    return True
-                if expect_error:
                     self._record_success(name, is_noncritical)
                     return True
                 return self._record_fail(name, "No response from /scm", scm_code, None, None, is_noncritical)
@@ -842,7 +842,7 @@ class SQLTestRunner:
                         if self._expect_interrupted_ok(step_expect):
                             continue
                         if step_expect.get("error"):
-                            if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
+                            if not is_error_response(resp):
                                 return self._record_fail(name, f"Step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
                         else:
                             if resp is None or resp.status_code != 200 or "Error" in resp.text:
@@ -870,14 +870,12 @@ class SQLTestRunner:
                 if isinstance(resp, Exception):
                     if self._expect_interrupted_ok(step_expect):
                         continue
-                    if step_expect.get("error"):
-                        continue
                     return self._record_fail(name, f"Background step '{step_sql[:60]}' raised: {resp}", step_sql, None, step_expect, is_noncritical)
                 if step_expect:
                     if self._expect_interrupted_ok(step_expect):
                         continue
                     if step_expect.get("error"):
-                        if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
+                        if not is_error_response(resp):
                             return self._record_fail(name, f"Background step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
                     else:
                         if resp is None or resp.status_code != 200 or "Error" in resp.text:
@@ -1073,9 +1071,6 @@ class SQLTestRunner:
             if self._expect_interrupted_ok(expect):
                 self._record_success(name, is_noncritical)
                 return True
-            if expect.get("error"):
-                self._record_success(name, is_noncritical)
-                return True
             return self._record_fail(name, "No response", query, None, None, is_noncritical)
 
         results = self.parse_jsonl_response(response)
@@ -1117,8 +1112,7 @@ class SQLTestRunner:
             return True
 
         if expect.get("error"):
-            has_error = response.status_code != 200 or "Error" in response.text
-            if not has_error:
+            if not is_error_response(response):
                 return False
             if "contains" in expect:
                 needles = expect["contains"] if isinstance(expect["contains"], list) else [expect["contains"]]
