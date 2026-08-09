@@ -1866,6 +1866,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		}
 		if !alreadyLocked {
 			t.mu.Lock()
+			defer t.mu.Unlock()
 		}
 		firstNewRecid := uint32(0)
 		firstInsertId := onFirstInsertId
@@ -1878,9 +1879,6 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 				firstInsertId = nil
 			}
 		}
-		if !alreadyLocked {
-			t.mu.Unlock()
-		}
 		return firstNewRecid
 	}
 
@@ -1892,11 +1890,9 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 
 	if !alreadyLocked {
 		t.mu.Lock()
+		defer t.mu.Unlock()
 	}
 	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, currentTx)
-	if !alreadyLocked {
-		t.mu.Unlock()
-	}
 	return firstNewRecid
 }
 
