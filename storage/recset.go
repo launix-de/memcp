@@ -1025,6 +1025,14 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 
 func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) *shardqueue {
 	result := &shardqueue{shard: t}
+	defer func() {
+		if r := recover(); r != nil {
+			for _, release := range result.releases {
+				release()
+			}
+			panic(r)
+		}
+	}()
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -1038,6 +1046,31 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 
 	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
 	for i, scol := range sortcols {
+		if descriptor, ok := scmerSlice(scol); ok && len(descriptor) == 5 && scanSymbolIs(descriptor[0], "scan_order_point") {
+			innerTable := TableFromScmer(descriptor[1])
+			keyCols := scmerSliceToStrings(mustScmerSlice(descriptor[2], "scan_order_point key columns"))
+			outerCols := scmerSliceToStrings(mustScmerSlice(descriptor[3], "scan_order_point outer columns"))
+			valueCol := scm.String(descriptor[4])
+			outerReaders := make([]func(uint32) scm.Scmer, len(outerCols))
+			for j, col := range outerCols {
+				outerReaders[j] = t.ColumnReaderTx(currentTx, col)
+			}
+			pointReader, release, prepared := innerTable.preparePointValueReader(keyCols, valueCol, currentTx)
+			if prepared {
+				result.releases = append(result.releases, release)
+			}
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				values := make([]scm.Scmer, len(outerReaders))
+				for j, reader := range outerReaders {
+					values[j] = reader(idx)
+				}
+				if prepared {
+					return pointReader.Lookup(values)
+				}
+				return innerTable.scanOrderPointValue(currentTx, keyCols, values, valueCol)
+			}
+			continue
+		}
 		if scol.IsString() {
 			result.scols[i] = t.ColumnReaderTx(currentTx, scol.String())
 			continue

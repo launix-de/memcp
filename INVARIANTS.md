@@ -93,6 +93,19 @@ reordering. The same logical helper may lower to a group cache, direct scan,
 `scan_exists`, RecSet, ORC, `scan_order_multi`, or temp table depending on
 costs and semantics.
 
+## LIMIT Is A Scan Boundary
+
+Every physical operator that owns a SQL `LIMIT` must lower to `scan_order` or
+`scan_order_multi` with that limit. This also applies without an explicit
+`ORDER BY`, using an empty sort specification. A limited relational result must
+never be copied into a Scheme list or association structure for a later
+`sort`/`slice` step.
+
+Decorrelated helpers remain nested scans or independently prepared relational
+carriers. They must not replace the limited root scan with a complete lookup
+table. Projection-only helpers belong in the limited scan's map callback so
+rows rejected by filtering, ordering, offset, or limit never invoke them.
+
 ## No Subquery Fallback
 
 Every supported correlated subquery shape must be lowered through relational

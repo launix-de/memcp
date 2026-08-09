@@ -853,6 +853,27 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_order_point",
+		Desc: "specialized scan_order LIMIT 1 equality probe returning one column",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			t := TableFromScmer(a[1])
+			keyCols := scmerSliceToStrings(mustScmerSlice(a[2], "keyColumns"))
+			keyValues := mustScmerSlice(a[3], "keyValues")
+			return t.scanOrderPointValue(currentTx, keyCols, keyValues, scm.String(a[4]))
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx"},
+				{Kind: "table", ParamName: "table"},
+				{Kind: "list", ParamName: "keyColumns"},
+				{Kind: "list", ParamName: "keyValues"},
+				{Kind: "string", ParamName: "valueColumn"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order",
 		Desc: "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
