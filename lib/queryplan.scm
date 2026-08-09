@@ -560,6 +560,42 @@ PostgreSQL parsers should both lower to the same combined operators.
 	(merge_unique (map (coalesceNil terms '()) (lambda (term)
 		(btw2025_expr_accessing_aliases term outer_aliases))))))
 
+(define btw2025_expr_outer_column_refs (lambda (expr inner_sources outer_sources)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (if (nil? tblvar)
+				(if (nil? (source_for_unqualified_column inner_sources nil col col_ignorecase))
+					(source_for_unqualified_column outer_sources nil col col_ignorecase)
+					nil)
+				(source_for_alias outer_sources nil tblvar tbl_ignorecase)))
+			(if (nil? src)
+				'()
+				(list (list
+					(quote get_column)
+					(if (nil? tblvar) (source_alias src) tblvar)
+					(if (nil? tblvar) false tbl_ignorecase)
+					col
+					col_ignorecase))))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(btw2025_expr_outer_column_refs
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+			inner_sources
+			outer_sources)
+		(cons _head tail) (merge_unique (map tail (lambda (item)
+			(btw2025_expr_outer_column_refs item inner_sources outer_sources))))
+		_ '())))
+
+(define btw2025_terms_outer_column_refs (lambda (terms inner_sources outer_sources)
+	(merge_unique (map (coalesceNil terms '()) (lambda (term)
+		(btw2025_expr_outer_column_refs term inner_sources outer_sources))))))
+
+(define btw2025_sources_outer_column_refs (lambda (sources inner_sources outer_sources)
+	(merge_unique (map (coalesceNil sources '()) (lambda (src)
+		(btw2025_expr_outer_column_refs
+			(coalesceNil (source_join_expr src) true)
+			inner_sources
+			outer_sources))))))
+
 /* Session reads affect a dependent helper like outer-column reads do. Keep
 their expressions in Domain D so reusable carriers are keyed by the binding
 instead of capturing whichever session populated the carrier first. */
@@ -918,13 +954,15 @@ instead of capturing whichever session populated the carrier first. */
 				(btw2025_expr_accessing_aliases (coalesceNil (qb_having block) true) outer_aliases)
 				(btw2025_order_accessing_aliases (qb_order block) outer_aliases)))))))
 
-(define btw2025_stage_facts (lambda (block outer_sources lookup_pairs pending_info)
+(define btw2025_stage_facts (lambda (block outer_sources lookup_pairs residual_outer_refs pending_info)
 	(begin
 		(define inner_default (if (or (not (query_block? block)) (empty_list? (qb_sources block))) nil (source_alias (car (qb_sources block)))))
 		(define outer_aliases (source_aliases outer_sources))
 		(define accessing (btw2025_query_block_accessing_aliases block outer_sources))
 		(define accessing_after_simple (btw2025_accessing_after_simple block outer_sources))
-		(define domain (correlation_domain lookup_pairs))
+		(define domain (merge_unique (list
+			(correlation_domain lookup_pairs)
+			residual_outer_refs)))
 		(define key_accessing_after_simple (merge_unique (map (correlation_inner_keys inner_default lookup_pairs) (lambda (key)
 			(btw2025_expr_accessing_aliases key outer_aliases)))))
 		(define residual_accessing_after_simple (merge_unique (list accessing_after_simple key_accessing_after_simple)))
@@ -945,7 +983,9 @@ instead of capturing whichever session populated the carrier first. */
 			(list (quote btw2025_parent) parent)
 			(list (quote btw2025_ancestors) ancestors)
 			(list (quote btw2025_info) info)
-			(list (quote btw2025_lookup_keys) (correlation_lookup_keys lookup_pairs))))))
+			(list (quote btw2025_lookup_keys) (merge_unique (list
+				(correlation_lookup_keys lookup_pairs)
+				residual_outer_refs)))))))
 
 (define exists_stage_alias (lambda (stage_id)
 	(concat "__exists_" (fnv_hash stage_id))))
@@ -1347,17 +1387,28 @@ instead of capturing whichever session populated the carrier first. */
 			corr_pairs source_corr_pairs (presence_session_domain_pairs inner)))))
 		(define local_terms (filter terms (lambda (term)
 			(nil? (presence_correlation_pair inner_default inner_sources outer_sources term)))))
-		(define keys (if (empty_list? lookup_pairs)
+		(define local_sources
+			(sources_without_outer_join_terms inner_default inner_sources outer_sources inner_sources))
+		(define residual_outer_refs (merge_unique (list
+			(btw2025_terms_outer_column_refs local_terms inner_sources outer_sources)
+			(btw2025_sources_outer_column_refs local_sources inner_sources outer_sources))))
+		(define keys (if (and (empty_list? lookup_pairs) (empty_list? residual_outer_refs))
 			'(1)
-			(correlation_inner_keys inner_default lookup_pairs)))
-		(define outer_domain (correlation_domain lookup_pairs))
-		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+			(merge_unique (list
+				(correlation_inner_keys inner_default lookup_pairs)
+				residual_outer_refs))))
+		(define outer_domain (merge_unique (list
+			(correlation_domain lookup_pairs)
+			residual_outer_refs)))
+		(define lookup_keys (merge_unique (list
+			(correlation_lookup_keys lookup_pairs)
+			residual_outer_refs)))
 		(define condition (combine_where_terms local_terms true))
 		(define stage_input (if (and (single_source? (qb_sources inner)) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
+				local_sources
 				'()
 				condition
 				'() nil '() nil nil
@@ -1387,7 +1438,7 @@ instead of capturing whichever session populated the carrier first. */
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
 					(list (quote null_semantics) (quote exists))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs residual_outer_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -1466,7 +1517,7 @@ instead of capturing whichever session populated the carrier first. */
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
 					(list (quote null_semantics) (quote exists))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define having_expr (replace_group_expr
@@ -1731,7 +1782,7 @@ instead of capturing whichever session populated the carrier first. */
 					(list (quote preserve_empty_domain) false)
 					(list (quote null_semantics) (quote in))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts membership_inner outer_sources lookup_pairs pending_info)))))
+				(btw2025_stage_facts membership_inner outer_sources lookup_pairs '() pending_info)))))
 		(define null_stage (make_group_stage
 			null_stage_id
 			stage_input
@@ -1751,7 +1802,7 @@ instead of capturing whichever session populated the carrier first. */
 					(list (quote preserve_empty_domain) false)
 					(list (quote null_semantics) (quote in))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts membership_inner outer_sources lookup_pairs pending_info)))))
+				(btw2025_stage_facts membership_inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define null_stage_alias (exists_stage_alias null_stage_id))
 		(define key_names (group_key_cols keys))
@@ -1906,7 +1957,7 @@ instead of capturing whichever session populated the carrier first. */
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote aggregate))
 					(list (quote cardinality_mode) (quote many)))
-				(btw2025_stage_facts inner outer_sources all_corr_pairs pending_info)))))
+				(btw2025_stage_facts inner outer_sources all_corr_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define post_condition (replace_group_expr inner_default stage_alias keys key_names ags local_having))
@@ -1995,7 +2046,7 @@ instead of capturing whichever session populated the carrier first. */
 					(list (quote partition_by) outer_domain)
 					(list (quote physical_max_rows) 1)
 					(list (quote on_overflow) (quote ignore)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -2334,7 +2385,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 					(list (quote partition_by) outer_domain)
 					(list (quote physical_max_rows) 2)
 					(list (quote on_overflow) (quote error)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -5633,6 +5684,7 @@ dependency preparation does not emit free outer-row symbols. */
 				(symbol (concat "__probe_key_" i)))))
 			(define param_index (scalar_query_probe_param_index lookup_keys params))
 			(define bound_stage (rewrite_scalar_query_probe_params param_index stage))
+			(define bound_keys (gs_keys bound_stage))
 			(define bound_value_expr (rewrite_scalar_query_probe_params param_index value_expr))
 			(define bound_nested_stages (map nested_stages (lambda (nested_stage)
 				(rewrite_scalar_query_probe_params param_index nested_stage))))
@@ -5642,7 +5694,7 @@ dependency preparation does not emit free outer-row symbols. */
 				(quote define)
 				(symbol (scalar_query_probe_recipe_key stage requested_col))
 				(list (quote lambda) params
-					(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr keys params bound_nested_stages bound_prepare_stages))))
+					(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr bound_keys params bound_nested_stages bound_prepare_stages))))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
 (define scalar_query_probe_recipe_bindings (lambda (plans)
