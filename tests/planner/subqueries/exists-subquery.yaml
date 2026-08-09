@@ -262,6 +262,54 @@ test_cases:
       data:
         - ID: 1
 
+  - name: "Derived list keeps residual EXISTS rows through scalar ordering"
+    sql: |
+      SELECT wrapped.*
+      FROM (
+        SELECT
+          l1.ID,
+          l1.order_id,
+          l1.supplier_id,
+          EXISTS (
+            SELECT 1
+            FROM exists_shipments peer
+            WHERE peer.order_id = l1.order_id
+              AND peer.supplier_id <> l1.supplier_id
+          ) AS peer_exists
+        FROM exists_shipments l1
+        WHERE l1.late = TRUE
+          AND EXISTS (
+            SELECT 1
+            FROM exists_shipments l2
+            WHERE l2.order_id = l1.order_id
+              AND l2.supplier_id <> l1.supplier_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM exists_shipments l3
+            WHERE l3.order_id = l1.order_id
+              AND l3.supplier_id <> l1.supplier_id
+              AND l3.late = TRUE
+          )
+      ) wrapped
+      LEFT JOIN exists_shipments sorter
+        ON sorter.ID = wrapped.order_id
+      WHERE TRUE
+      ORDER BY (
+        SELECT ordered.ID
+        FROM exists_shipments ordered
+        WHERE ordered.order_id = wrapped.order_id
+        LIMIT 1
+      ) DESC, wrapped.ID ASC
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          order_id: 1
+          supplier_id: 1
+          peer_exists: true
+
   - name: "Unqualified inner column does not enter EXISTS domain"
     steps:
       - sql: |
