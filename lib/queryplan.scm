@@ -971,41 +971,42 @@ instead of capturing whichever session populated the carrier first. */
 			(list (quote >) (membership_count_expr stage_alias match_ag) 0))
 		true)))
 
-(define in_null_count_descriptor (lambda (rhs_expr)
-	(list (list (quote if) (list (quote nil?) rhs_expr) 1 0) (quote +) 0)))
+/* One aggregate encodes empty=0, nonempty=1, and contains-NULL=2. */
+(define in_rhs_state_descriptor (lambda (rhs_expr)
+	(list (list (quote if) (list (quote nil?) rhs_expr) 2 1) (quote max) 0)))
 
 (define membership_count_expr (lambda (stage_alias ag)
 	(list (quote coalesceNil)
 		(list (quote get_column) stage_alias false (aggregate_col_name ag) false)
 		0)))
 
-(define in_membership_expr (lambda (probe match_alias match_ag null_alias null_ag)
+(define in_membership_expr (lambda (probe match_alias match_ag null_alias rhs_state_ag)
 	(begin
 		(define match_count (membership_count_expr match_alias match_ag))
-		(define null_count (membership_count_expr null_alias null_ag))
+		(define rhs_state (membership_count_expr null_alias rhs_state_ag))
 		(list (quote if)
 			(list (quote nil?) probe)
-			nil
+			(list (quote if) (list (quote >) rhs_state 0) nil false)
 			(list (quote if)
 				(list (quote >) match_count 0)
 				true
 				(list (quote if)
-					(list (quote >) null_count 0)
+					(list (quote equal??) rhs_state 2)
 					nil
 					false))))))
 
-(define not_in_membership_expr (lambda (probe match_alias match_ag null_alias null_ag)
+(define not_in_membership_expr (lambda (probe match_alias match_ag null_alias rhs_state_ag)
 	(begin
 		(define match_count (membership_count_expr match_alias match_ag))
-		(define null_count (membership_count_expr null_alias null_ag))
+		(define rhs_state (membership_count_expr null_alias rhs_state_ag))
 		(list (quote if)
 			(list (quote nil?) probe)
-			nil
+			(list (quote if) (list (quote >) rhs_state 0) nil true)
 			(list (quote if)
 				(list (quote >) match_count 0)
 				false
 				(list (quote if)
-					(list (quote >) null_count 0)
+					(list (quote equal??) rhs_state 2)
 					nil
 					true))))))
 
@@ -1594,7 +1595,7 @@ instead of capturing whichever session populated the carrier first. */
 		(define keys (list candidate_key))
 		(define stage_id (concat "in-candidate:" (fnv_hash (string (list probe inner)))))
 		(define null_stage_id (concat "in-candidate-null:" (fnv_hash (string inner))))
-		(define null_ag (in_null_count_descriptor candidate_key))
+		(define null_ag (in_rhs_state_descriptor candidate_key))
 		(define stage (make_group_stage
 			stage_id
 			union_input
@@ -1640,7 +1641,7 @@ instead of capturing whichever session populated the carrier first. */
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
-			false
+			(not semijoin_where)
 			(if semijoin_where
 				(make_positive_in_join_condition stage_alias key_names (list probe) probe aggregate_count_descriptor)
 				(make_exists_stage_join_condition stage_alias key_names (list probe)))))
@@ -1648,7 +1649,7 @@ instead of capturing whichever session populated the carrier first. */
 			null_stage_alias
 			(group_stage_schema null_stage)
 			(make_stage_output_relation null_stage_id)
-			false
+			true
 			true))
 		(if semijoin_where
 			(list true (list stage) (list source))
@@ -1710,7 +1711,7 @@ instead of capturing whichever session populated the carrier first. */
 				(qb_facts membership_inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
 		(define stage_id (concat "in:" (fnv_hash (string (list probe keys lookup_keys condition)))))
-		(define null_ag (in_null_count_descriptor rhs_expr))
+		(define null_ag (in_rhs_state_descriptor rhs_expr))
 		(define null_stage_id (concat "in-null:" (fnv_hash (string (list outer_domain condition rhs_expr)))))
 		(define stage (make_group_stage
 			stage_id
@@ -1760,7 +1761,7 @@ instead of capturing whichever session populated the carrier first. */
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
-			(if semijoin_where false (stage_source_outer? outer_sources))
+			(not semijoin_where)
 			(if semijoin_where
 				(make_positive_in_join_condition stage_alias key_names lookup_keys probe aggregate_count_descriptor)
 				(make_exists_stage_join_condition stage_alias key_names lookup_keys))))
@@ -1768,7 +1769,7 @@ instead of capturing whichever session populated the carrier first. */
 			null_stage_alias
 			(group_stage_schema null_stage)
 			(make_stage_output_relation null_stage_id)
-			(stage_source_outer? outer_sources)
+			true
 			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys)))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(if semijoin_where
