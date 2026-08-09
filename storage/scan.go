@@ -361,6 +361,42 @@ type scanResult struct {
 	err            scanError // err.r != nil indicates an error
 }
 
+const (
+	defaultScanBufferSize     = 1024
+	uniquePointScanBufferSize = 8
+)
+
+// scanBufferSize keeps full scans batched while avoiding a 4 KiB allocation
+// for the common join case where an exact unique key can yield at most one
+// currently visible row. A few slots remain for stale index entries left by
+// updates; iterateIndex still visits further batches when necessary.
+func (t *table) scanBufferSize(boundaries boundaries) int {
+	for _, unique := range t.Unique {
+		covered := true
+		for _, col := range unique.Cols {
+			matched := false
+			for _, boundary := range boundaries {
+				if boundary.col != col || !matcherKindEqual(boundary.matcher, EqualMatcher) ||
+					boundary.lowerBatch || boundary.upperBatch || boundary.lower.IsNil() || boundary.upper.IsNil() ||
+					!boundary.lowerInclusive || !boundary.upperInclusive ||
+					!boundaryValueEqual(boundary.lower, boundary.upper) {
+					continue
+				}
+				matched = true
+				break
+			}
+			if !matched {
+				covered = false
+				break
+			}
+		}
+		if covered && len(unique.Cols) > 0 {
+			return uniquePointScanBufferSize
+		}
+	}
+	return defaultScanBufferSize
+}
+
 func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
@@ -837,11 +873,11 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		mutationSeen = make(map[uint32]struct{}, 128)
 	}
 
-	// filter phase: iterateIndex fills stack buffer, callback filters in-place and flushes to MapReducer
-	var buf [1024]uint32
+	// filter phase: iterateIndex fills the reusable buffer, callback filters in-place and flushes to MapReducer
+	buf := make([]uint32, t.t.scanBufferSize(boundaries))
 	hadValue := false
 
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, true, func(batch []uint32) bool {
 		candidateCount += int64(len(batch))
 		// filter in-place: overwrite batch with passing IDs
 		outN := 0

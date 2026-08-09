@@ -144,6 +144,62 @@ func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 	}
 }
 
+func benchmarkUniquePointScan(b *testing.B, name string) {
+	dbName := "bench_scan_point_" + name
+	databases.Remove(dbName)
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+
+	condition := scanCondition("id", scm.NewInt(511))
+	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
+	nilFn := scm.NewNil()
+	// Warm the lazily built index before measuring regular probe overhead.
+	tbl.scan(nil, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tbl.scan(nil, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
+	}
+}
+
+// BenchmarkScanUniquePoint measures the repeated dimension-table lookup used
+// by nested joins after logical decorrelation and join reordering.
+func BenchmarkScanUniquePoint(b *testing.B) {
+	benchmarkUniquePointScan(b, "read")
+}
+
+func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {
+	const dbName = "test_scan_mapper_metadata"
+	databases.Remove(dbName)
+	t.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	shard := tbl.Shards[0]
+	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewNil() })
+
+	readMapper := shard.OpenMapReducer([]string{"id"}, mapFn, scm.NewNil(), false, 0, nil, nil)
+	defer readMapper.Close()
+	if readMapper.isUpdate != nil || readMapper.isIncrement != nil || readMapper.setClosureFn != nil {
+		t.Fatal("read mapper allocated mutation-only metadata")
+	}
+
+	mutationMapper := shard.OpenMapReducer([]string{"$update"}, mapFn, scm.NewNil(), false, 0, nil, nil)
+	defer mutationMapper.Close()
+	if len(mutationMapper.isUpdate) != 1 || !mutationMapper.isUpdate[0] || len(mutationMapper.setClosureFn) != 1 {
+		t.Fatal("mutation mapper did not initialize mutation metadata")
+	}
+}
+
 // BenchmarkGLSGetValue measures raw cost of a single GLS GetValue call.
 // Establishes per-call overhead for CurrentTx() GLS lookups inside shard goroutines.
 func BenchmarkGLSGetValue(b *testing.B) {
