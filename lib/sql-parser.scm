@@ -129,6 +129,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(sql_sub_numeric_literals a b)
 	'((quote -) a b))))
 
+(define sql_fold_additive_term (lambda (acc term)
+	(match term
+		'("add" value) (sql_add_expr acc value)
+		'("sub" value) (sql_sub_expr acc value)
+		'("date_add" value unit) '('date_add acc value unit)
+		'("date_sub" value unit) '('date_sub acc value unit))))
+
 /* lightweight literal parser for top-level contexts (before sql_expression is defined) */
 (define sql_literal (parser (or
 	(parser (atom "NULL" true) (sql_null_literal))
@@ -659,15 +666,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		sql_expression3
 	)))
 
-	(define sql_expression3 (parser (or
-		/* date + INTERVAL n UNIT */
-		(parser '((define a sql_expression4) "+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_add a n unit))
-		/* date - INTERVAL n UNIT */
-		(parser '((define a sql_expression4) "-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a sql_expression4) "+" (define b sql_expression3)) (sql_add_expr a b))
-		(parser '((define a sql_expression4) "-" (define b sql_expression3)) (sql_sub_expr a b))
-		sql_expression4
-	)))
+	(define sql_expression3 (parser '(
+		(define a sql_expression4)
+		(define terms (* (or
+			(parser '("+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '("date_add" n unit))
+			(parser '("-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_interval_unit)) '("date_sub" n unit))
+			(parser '("+" (define b sql_expression4)) '("add" b))
+			(parser '("-" (define b sql_expression4)) '("sub" b))
+		)))
+	) (reduce terms sql_fold_additive_term a)))
 
 	(define sql_expression4 (parser (or
 		(parser '((define a sql_expression5) "*" (define b sql_expression4)) '((quote *) a b))

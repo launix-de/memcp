@@ -26,6 +26,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS csa_item"
   - sql: "DROP TABLE IF EXISTS csa_parent"
   - sql: "DROP TABLE IF EXISTS csa_ref"
+  - sql: "DROP TABLE IF EXISTS csa_interval"
+  - sql: "DROP TABLE IF EXISTS csa_break"
+  - sql: "DROP TABLE IF EXISTS csa_balance"
   - sql: |
       CREATE TABLE csa_parent (
         id INT PRIMARY KEY,
@@ -62,6 +65,9 @@ setup:
         status VARCHAR(16),
         sequence_no INT
       )
+  - sql: "CREATE TABLE csa_interval (id INT PRIMARY KEY, owner_id INT, started_at INT, ended_at INT)"
+  - sql: "CREATE TABLE csa_break (id INT PRIMARY KEY, interval_id INT, started_at INT, ended_at INT)"
+  - sql: "CREATE TABLE csa_balance (id INT PRIMARY KEY, owner_id INT, target_value INT, actual_value INT, valid_at INT)"
   - sql: "CREATE TABLE cq_digit (n INT PRIMARY KEY)"
   - sql: |
       CREATE TABLE cq_large_parent (
@@ -103,6 +109,9 @@ setup:
         (3, 12, 'open', 1),
         (4, 21, 'closed', 1),
         (5, 31, 'open', 1)
+  - sql: "INSERT INTO csa_interval VALUES (1, 1, 2, 10), (2, 1, 12, NULL)"
+  - sql: "INSERT INTO csa_break VALUES (1, 1, 4, 6), (2, 2, 14, 15)"
+  - sql: "INSERT INTO csa_balance VALUES (1, 1, 5, 2, 10), (2, 1, 4, 1, 25)"
   - sql: "INSERT INTO cq_digit (n) VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
   - sql: |
       INSERT INTO cq_large_parent (id, tenant_id, ref_id)
@@ -457,6 +466,84 @@ test_cases:
         - id: 5
           open_count: 0
 
+  - name: "Set nested aggregate cutoff"
+    session_id: "csa_nested_aggregate"
+    sql: "SET @csa_cutoff = 20"
+    expect:
+      rows_affected: 0
+
+  - name: "Nested scalar aggregate participates in parent aggregate expression"
+    session_id: "csa_nested_aggregate"
+    max_time: 1.0
+    sql: |
+      SELECT COALESCE(
+        (SELECT COALESCE(SUM(
+          LEAST(COALESCE(i.ended_at, @csa_cutoff), @csa_cutoff)
+          - i.started_at
+          - COALESCE((
+            SELECT SUM(
+              LEAST(COALESCE(b.ended_at, @csa_cutoff), @csa_cutoff)
+              - b.started_at
+            )
+            FROM csa_break b
+            WHERE b.interval_id = i.id
+              AND b.started_at <= @csa_cutoff
+          ), 0)
+        ), 0)
+        FROM csa_interval i
+        WHERE i.owner_id = 1
+          AND i.started_at <= @csa_cutoff)
+        -
+        (SELECT COALESCE(SUM(a.target_value - a.actual_value), 0)
+         FROM csa_balance a
+         WHERE a.owner_id = 1
+           AND a.valid_at <= @csa_cutoff),
+        0
+      ) AS remaining
+    expect:
+      rows: 1
+      data:
+        - remaining: 10
+
+  - name: "Change nested aggregate cutoff"
+    session_id: "csa_nested_aggregate"
+    sql: "SET @csa_cutoff = 14"
+    expect:
+      rows_affected: 0
+
+  - name: "Nested aggregate expression uses changed session cutoff"
+    session_id: "csa_nested_aggregate"
+    max_time: 1.0
+    sql: |
+      SELECT COALESCE(
+        (SELECT COALESCE(SUM(
+          LEAST(COALESCE(i.ended_at, @csa_cutoff), @csa_cutoff)
+          - i.started_at
+          - COALESCE((
+            SELECT SUM(
+              LEAST(COALESCE(b.ended_at, @csa_cutoff), @csa_cutoff)
+              - b.started_at
+            )
+            FROM csa_break b
+            WHERE b.interval_id = i.id
+              AND b.started_at <= @csa_cutoff
+          ), 0)
+        ), 0)
+        FROM csa_interval i
+        WHERE i.owner_id = 1
+          AND i.started_at <= @csa_cutoff)
+        -
+        (SELECT COALESCE(SUM(a.target_value - a.actual_value), 0)
+         FROM csa_balance a
+         WHERE a.owner_id = 1
+           AND a.valid_at <= @csa_cutoff),
+        0
+      ) AS remaining
+    expect:
+      rows: 1
+      data:
+        - remaining: 5
+
   - name: "Two-column correlation keeps duplicate domains separate"
     sql: |
       SELECT p.id,
@@ -561,3 +648,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS csa_item"
   - sql: "DROP TABLE IF EXISTS csa_parent"
   - sql: "DROP TABLE IF EXISTS csa_ref"
+  - sql: "DROP TABLE IF EXISTS csa_interval"
+  - sql: "DROP TABLE IF EXISTS csa_break"
+  - sql: "DROP TABLE IF EXISTS csa_balance"

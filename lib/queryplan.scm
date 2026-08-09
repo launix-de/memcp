@@ -9648,7 +9648,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 								(define probe_recipe_prepares
 									(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
 								(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
-								(define core_block (query_block_with_stage_catalog prepared_block lazy_catalog))
+								(define core_block (query_block_with_stage_catalog
+									(query_block_without_stages prepared_block)
+									lazy_catalog))
 								(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
 								(cons (quote !begin)
 									(merge (list

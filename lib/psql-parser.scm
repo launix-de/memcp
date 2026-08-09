@@ -100,6 +100,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(sql_sub_numeric_literals a b)
 	'((quote -) a b))))
 
+(define psql_fold_additive_term (lambda (acc term)
+	(match term
+		'("add" value) (psql_add_expr acc value)
+		'("sub" value) (psql_sub_expr acc value)
+		'("date_add" value unit) '('date_add acc value unit)
+		'("date_sub" value unit) '('date_sub acc value unit))))
+
 (define psql_type (parser (or
 	(parser '((atom "character" true) (atom "varying" true)) "varying")
 	(parser '((atom "double" true) (atom "precision" true)) "double")
@@ -203,15 +210,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		psql_expression3
 	)))
 
-	(define psql_expression3 (parser (or
-		/* date + INTERVAL n UNIT */
-		(parser '((define a psql_expression4) "+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_add a n unit))
-		/* date - INTERVAL n UNIT */
-		(parser '((define a psql_expression4) "-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '('date_sub a n unit))
-		(parser '((define a psql_expression4) "+" (define b psql_expression3)) (psql_add_expr a b))
-		(parser '((define a psql_expression4) "-" (define b psql_expression3)) (psql_sub_expr a b))
-		psql_expression4
-	)))
+	(define psql_expression3 (parser '(
+		(define a psql_expression4)
+		(define terms (* (or
+			(parser '("+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '("date_add" n unit))
+			(parser '("-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_interval_unit)) '("date_sub" n unit))
+			(parser '("+" (define b psql_expression4)) '("add" b))
+			(parser '("-" (define b psql_expression4)) '("sub" b))
+		)))
+	) (reduce terms psql_fold_additive_term a)))
 
 	(define psql_expression4 (parser (or
 		(parser '((define a psql_expression5) "*" (define b psql_expression4)) '((quote *) a b))
