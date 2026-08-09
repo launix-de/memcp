@@ -363,8 +363,8 @@ test_cases:
         - id: 4
 
   - name: "IN over UNION combines two candidate branches"
-    noncritical: true
-    fail_comment: "membership lowering rejects a UNION branch that already contains a decorrelated EXISTS stage"
+    max_time: 1000
+    max_plan_size: 30000
     sql: |
       SELECT p.id
       FROM cq_parent p
