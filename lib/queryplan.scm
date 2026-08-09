@@ -1237,12 +1237,20 @@ instead of capturing whichever session populated the carrier first. */
 										(not (scalar_once_ordered_payload? (car (gs_aggregates stage)))))))))))))))
 
 (define scalar_aggregate_probe_stage? (lambda (stage)
-	(and (group_stage? stage)
-		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate))
-			(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote many))
-				(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-					(and (equal? (coalesceNil (gs_having stage) true) true)
-						(source_is_base_table? (gs_input stage)))))))))
+	(if (not (group_stage? stage))
+		false
+		(begin
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define keys (if (empty_list? lookup_keys) '() (gs_keys stage)))
+			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate))
+				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote many))
+					(and (equal? (count keys) (count lookup_keys))
+						(and (or
+							(not (empty_list? lookup_keys))
+							(and (empty_list? (gs_domain stage))
+								(not (stage_has_residual_outer_refs? stage))))
+							(and (equal? (coalesceNil (gs_having stage) true) true)
+								(source_is_base_table? (gs_input stage)))))))))))
 
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
@@ -5728,8 +5736,8 @@ dependency preparation does not emit free outer-row symbols. */
 			(neumann_fail "build_queryplan" "scalar aggregate probe requires scalar_aggregate base stage")
 			true)
 		(define src (gs_input stage))
-		(define keys (gs_keys stage))
 		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(define keys (if (empty_list? lookup_keys) '() (gs_keys stage)))
 		(if (not (equal? (count keys) (count lookup_keys)))
 			(neumann_fail "build_queryplan" "scalar aggregate probe key/domain mismatch")
 			true)
@@ -6287,6 +6295,10 @@ dependency preparation does not emit free outer-row symbols. */
 	(match expr
 		((symbol grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
 		((quote grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
+		((symbol scalar_aggregate_probe) stage requested_col)
+		(lower_scalar_aggregate_probe_expr '() nil stage requested_col)
+		((quote scalar_aggregate_probe) stage requested_col)
+		(lower_scalar_aggregate_probe_expr '() nil stage requested_col)
 		((symbol union_count) block) (lower_union_count_expr block)
 		((quote union_count) block) (lower_union_count_expr block)
 		(cons head tail) (cons head (map tail lower_scalar_marker_expr))
@@ -6935,6 +6947,15 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(list (quote table) schema grouptbl)
 		(quoted_runtime_list (list "k0"))
 		(list (quote list) (list (quote list) 1))
+		(quoted_runtime_list '())
+		(list (quote lambda) '() true)
+		true)))
+
+(define build_group_session_key_insert_plan (lambda (schema grouptbl key_names keys)
+	(list (quote insert)
+		(list (quote table) schema grouptbl)
+		(cons (quote list) key_names)
+		(list (quote list) (cons (quote list) keys))
 		(quoted_runtime_list '())
 		(list (quote lambda) '() true)
 		true)))
@@ -8082,9 +8103,24 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(nil? (nth ag 2)))))
 
 (define scalar_aggregate_probe_stage_safe? (lambda (stage)
-	(reduce (gs_aggregates stage) (lambda (ok ag)
-		(and ok (scalar_aggregate_probe_aggregate_safe? ag)))
-		true)))
+	(and (empty_list? (expr_probe_stages (list
+		(qassoc_get (gs_facts stage) (quote condition) true)
+		(gs_aggregates stage))))
+		(reduce (gs_aggregates stage) (lambda (ok ag)
+			(and ok (scalar_aggregate_probe_aggregate_safe? ag)))
+			true))))
+
+(define constant_scalar_aggregate_probe_sources? (lambda (stages sources)
+	(and (not (empty_list? sources))
+		(reduce sources (lambda (constant_only src)
+			(if (not constant_only)
+				false
+				(begin
+					(define stage (source_stage_output_stage stages src))
+					(and (scalar_aggregate_probe_stage? stage)
+						(and (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+							(scalar_aggregate_probe_stage_safe? stage))))))
+			true))))
 
 (define stage_input_small_enough? (lambda (stage)
 	(begin
@@ -8136,11 +8172,13 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(and
 				(scalar_aggregate_probe_stage_safe? stage)
 				(and
-					(or
-						(stage_has_residual_outer_refs? stage)
+					(if (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+						(constant_scalar_aggregate_probe_sources? stages sources)
 						(or
-							(probe_limit_small_enough? limit_value)
-							(probe_context_small_enough? probe_sources)))
+							(stage_has_residual_outer_refs? stage)
+							(or
+								(probe_limit_small_enough? limit_value)
+								(probe_context_small_enough? probe_sources))))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
 
 (define probe_output_sources_for_block (lambda (stages sources default_alias limit_value)
@@ -8888,8 +8926,13 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define empty_aggregate_seed_plans (if (and query_input_carrier
 			(and initializer_owner
 				(and (not scalar_single_stage)
-					(and (not (empty_list? ags)) (equal? keys '(1))))))
-			(list (build_group_constant_key_insert_plan schema grouptbl))
+					(not (empty_list? ags)))))
+			(if (equal? keys '(1))
+				(list (build_group_constant_key_insert_plan schema grouptbl))
+				(if (reduce keys (lambda (session_only key)
+						(and session_only (query_session_read? key))) true)
+					(list (build_group_session_key_insert_plan schema grouptbl key_names keys))
+					'()))
 			'()))
 		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
 			(match item '(expr _dir) (begin

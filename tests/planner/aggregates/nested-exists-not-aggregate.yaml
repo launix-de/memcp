@@ -89,6 +89,17 @@ test_cases:
     expect:
       rows_affected: 0
 
+  - name: "Empty scalar aggregates preserve the outer row"
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM nea_email e WHERE FALSE) AS empty_sum,
+        (SELECT COUNT(1) FROM nea_email e WHERE FALSE) AS empty_count
+    expect:
+      rows: 1
+      data:
+        - empty_sum: null
+          empty_count: 0
+
   - name: "SELECT 1 with scalar SUM subquery and correlated session owner check"
     session_id: "nea_sess"
     sql: |
@@ -132,8 +143,6 @@ test_cases:
           unseen: 2
 
   - name: "SUM with session var and nested CASE in correlated scalar subquery"
-    noncritical: true
-    fail_comment: "nested CASE correlation currently drops the scalar result row"
     session_id: "nea_sess"
     sql: |
       SELECT
@@ -160,11 +169,9 @@ test_cases:
     expect:
       rows: 1
       data:
-        - unseen: 1
+        - unseen: null
 
   - name: "SUM with session var, nested CASE, and nested EXISTS"
-    noncritical: true
-    fail_comment: "nested CASE plus EXISTS correlation currently drops the scalar result row"
     session_id: "nea_sess"
     sql: |
       SELECT
@@ -200,7 +207,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - unseen: 1
+        - unseen: null
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS nea_share"
