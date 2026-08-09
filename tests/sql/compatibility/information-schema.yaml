@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # INFORMATION_SCHEMA virtual table coverage
 # Covers: SCHEMATA, TABLES, COLUMNS queries used by ORMs, migration tools, and dbcheck
 
@@ -7,7 +8,7 @@ metadata:
   isolated: true
 
 setup:
-  - sql: "CREATE TABLE IF NOT EXISTS is_test_tbl (id INT, name VARCHAR(50), score DOUBLE)"
+  - sql: "CREATE TABLE IF NOT EXISTS isc_test_tbl (id INT, name VARCHAR(50), score DOUBLE)"
   - scm: '(createtable "memcp-tests" ".is_hidden_meta" (list (list "column" "id" "int" (list) (list))) (list "engine" "sloppy") true)'
 
 test_cases:
@@ -32,16 +33,16 @@ test_cases:
       rows: 1
 
   - name: "TABLES: table existence check"
-    sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'isc_test_tbl' LIMIT 1"
     expect:
       rows: 1
 
   - name: "TABLES: select table_name with filter"
-    sql: "SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    sql: "SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'isc_test_tbl' LIMIT 1"
     expect:
       rows: 1
       data:
-        - table_name: "is_test_tbl"
+        - table_name: "isc_test_tbl"
 
   - name: "TABLES: non-existent table returns empty"
     sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'nonexistent_xyz_99' LIMIT 1"
@@ -54,50 +55,50 @@ test_cases:
       rows: 0
 
   - name: "TABLES: filter by schema and table"
-    sql: "SELECT table_name, table_type FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'memcp-tests' AND TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    sql: "SELECT table_name, table_type FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'memcp-tests' AND TABLE_NAME = 'isc_test_tbl' LIMIT 1"
     expect:
       rows: 1
 
   - name: "TABLES: select star"
-    sql: "SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'isc_test_tbl' LIMIT 1"
     expect:
       rows: 1
 
   # --- COLUMNS ---
 
   - name: "COLUMNS: list columns of a table"
-    sql: "SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'is_test_tbl' ORDER BY column_name"
+    sql: "SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'isc_test_tbl' ORDER BY column_name"
     expect:
       min_rows: 3
 
   - name: "COLUMNS: check data_type of a column"
-    sql: "SELECT data_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'is_test_tbl' AND COLUMN_NAME = 'name' LIMIT 1"
+    sql: "SELECT data_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'isc_test_tbl' AND COLUMN_NAME = 'name' LIMIT 1"
     expect:
       rows: 1
 
   - name: "COLUMNS: column_type query (used by dbcheck migrations)"
-    sql: "SELECT column_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'is_test_tbl' AND COLUMN_NAME = 'id' LIMIT 1"
+    sql: "SELECT column_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'isc_test_tbl' AND COLUMN_NAME = 'id' LIMIT 1"
     expect:
       rows: 1
 
   # --- STATISTICS ---
 
   - name: "STATISTICS: query returns without error"
-    sql: "SELECT * FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_NAME = 'is_test_tbl' LIMIT 5"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_NAME = 'isc_test_tbl' LIMIT 5"
     expect:
       min_rows: 0
 
   # --- KEY_COLUMN_USAGE ---
 
   - name: "KEY_COLUMN_USAGE: query returns without error"
-    sql: "SELECT * FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_NAME = 'is_test_tbl' LIMIT 5"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_NAME = 'isc_test_tbl' LIMIT 5"
     expect:
       min_rows: 0
 
   # --- REFERENTIAL_CONSTRAINTS ---
 
   - name: "REFERENTIAL_CONSTRAINTS: query returns without error"
-    sql: "SELECT * FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'is_test_tbl' LIMIT 5"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'isc_test_tbl' LIMIT 5"
     expect:
       min_rows: 0
 
@@ -138,7 +139,7 @@ test_cases:
       FROM INFORMATION_SCHEMA.TABLES t
       JOIN INFORMATION_SCHEMA.COLUMNS c
         ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-      WHERE t.table_name = 'is_test_tbl'
+      WHERE t.table_name = 'isc_test_tbl'
       ORDER BY c.column_name
     expect:
       min_rows: 3
@@ -161,5 +162,5 @@ test_cases:
       error: true
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS is_test_tbl"
+  - sql: "DROP TABLE IF EXISTS isc_test_tbl"
   - sql: "DROP TABLE IF EXISTS `.is_hidden_meta`"

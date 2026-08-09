@@ -7059,9 +7059,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define mapcols (merge_unique (list group_key_cols_for_scan valuecols)))
 		(define key_expr (runtime_cons_list_expr (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
 		(define payload_expr (runtime_cons_list_expr (map value_exprs (lambda (expr) (lower_column_expr_for_alias src expr)))))
-		(define physical_order_keys (filter keys (lambda (expr) (not (query_session_read? expr)))))
-		(define key_sortcols (map physical_order_keys (lambda (expr) (order_column_for_alias src expr))))
-		(define key_dirs (map physical_order_keys (lambda (_key) (quote <))))
+		(define physical_keys (filter keys (lambda (expr) (not (query_session_read? expr)))))
+		(define key_sortcols (map physical_keys (lambda (expr) (order_column_for_alias src expr))))
+		(define key_dirs (map physical_keys (lambda (_key) (quote <))))
 		(define keep_first (list (quote lambda) (list (quote old) (quote new)) (quote old)))
 		(list
 			(list (quote lambda) (list (quote grouped))

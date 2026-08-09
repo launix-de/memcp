@@ -21,6 +21,11 @@
 
 echo "🔍 Running MemCP pre-commit tests..."
 
+if ! python3 tools/check_test_table_names.py; then
+  echo "❌ Test fixture table names collide across CI suites"
+  exit 1
+fi
+
 fail_fast_mode="${MEMCP_FAIL_FAST:-1}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
