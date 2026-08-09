@@ -9,9 +9,9 @@ metadata:
   isolated: true
 
 setup:
-  - sql: "DROP TABLE IF EXISTS `rc_data`"
+  - sql: "DROP TABLE IF EXISTS `rpc_data`"
   - sql: |
-      CREATE TABLE `rc_data` (
+      CREATE TABLE `rpc_data` (
         id INT PRIMARY KEY,
         val INT,
         tag TEXT
@@ -23,11 +23,11 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-        (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
+        (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
         61000)
 
   - name: "RC: verify initial count"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data"
     expect:
       rows: 1
       data:
@@ -43,24 +43,24 @@ test_cases:
     scm: |
       (begin
         (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
-        (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
+        (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
         200)
 
   - name: "RC: concurrent DELETE 50 rows"
     parallel: repart
-    sql: "DELETE FROM rc_data WHERE id >= 60950 AND id < 61000"
+    sql: "DELETE FROM rpc_data WHERE id >= 60950 AND id < 61000"
     expect:
       affected_rows: 50
 
   - name: "RC: concurrent UPDATE 50 rows"
     parallel: repart
-    sql: "UPDATE rc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
+    sql: "UPDATE rpc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
     expect:
       affected_rows: 50
 
   - name: "RC: concurrent stable COUNT on unaffected prefix"
     parallel: repart
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 0 AND id < 100"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE id >= 0 AND id < 100"
     expect:
       rows: 1
       data:
@@ -68,7 +68,7 @@ test_cases:
 
   - name: "RC: concurrent stable point lookup"
     parallel: repart
-    sql: "SELECT id, val, tag FROM rc_data WHERE id = 42"
+    sql: "SELECT id, val, tag FROM rpc_data WHERE id = 42"
     expect:
       rows: 1
       data:
@@ -78,7 +78,7 @@ test_cases:
 
   - name: "RC: concurrent stable SUM on unaffected prefix"
     parallel: repart
-    sql: "SELECT SUM(val) AS s FROM rc_data WHERE id >= 100 AND id < 110"
+    sql: "SELECT SUM(val) AS s FROM rpc_data WHERE id >= 100 AND id < 110"
     expect:
       rows: 1
       data:
@@ -86,7 +86,7 @@ test_cases:
 
   # ---- Post-parallel verification ----
   - name: "RC: count after concurrent ops"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data"
     expect:
       rows: 1
       data:
@@ -94,28 +94,28 @@ test_cases:
         - cnt: 61150
 
   - name: "RC: verify inserted rows exist"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 100000"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE id >= 100000"
     expect:
       rows: 1
       data:
         - cnt: 200
 
   - name: "RC: verify deleted rows gone"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE id >= 60950 AND id < 61000"
     expect:
       rows: 1
       data:
         - cnt: 0
 
   - name: "RC: verify updated rows"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE val = -999 AND tag = 'updated'"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE val = -999 AND tag = 'updated'"
     expect:
       rows: 1
       data:
         - cnt: 50
 
   - name: "RC: verify first inserted row"
-    sql: "SELECT id, val, tag FROM rc_data WHERE id = 100000"
+    sql: "SELECT id, val, tag FROM rpc_data WHERE id = 100000"
     expect:
       rows: 1
       data:
@@ -124,7 +124,7 @@ test_cases:
           tag: "new0"
 
   - name: "RC: verify last inserted row"
-    sql: "SELECT id, val, tag FROM rc_data WHERE id = 100199"
+    sql: "SELECT id, val, tag FROM rpc_data WHERE id = 100199"
     expect:
       rows: 1
       data:
@@ -137,14 +137,14 @@ test_cases:
     scm: "(rebuild)"
 
   - name: "RC: count after second rebuild"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data"
     expect:
       rows: 1
       data:
         - cnt: 61150
 
   - name: "RC: verify data integrity after second rebuild"
-    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 100000"
+    sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE id >= 100000"
     expect:
       rows: 1
       data:
@@ -155,10 +155,10 @@ test_cases:
     delay_ms: 20
     tests:
       - name: "RC-del: reset"
-        sql: "DROP TABLE IF EXISTS `rc_data`"
+        sql: "DROP TABLE IF EXISTS `rpc_data`"
       - name: "RC-del: create"
         sql: |
-          CREATE TABLE `rc_data` (
+          CREATE TABLE `rpc_data` (
             id INT PRIMARY KEY,
             val INT,
             tag TEXT
@@ -167,24 +167,24 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-            (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
             61000)
       - name: "RC-del: rebuild"
         parallel: repart_del
         scm: "(rebuild)"
       - name: "RC-del: concurrent DELETE 50"
         parallel: repart_del
-        sql: "DELETE FROM rc_data WHERE id >= 60950 AND id < 61000"
+        sql: "DELETE FROM rpc_data WHERE id >= 60950 AND id < 61000"
         expect:
           affected_rows: 50
       - name: "RC-del: count after ops"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+        sql: "SELECT COUNT(*) AS cnt FROM rpc_data"
         expect:
           rows: 1
           data:
             - cnt: 60950
       - name: "RC-del: deleted rows gone"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+        sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE id >= 60950 AND id < 61000"
         expect:
           rows: 1
           data:
@@ -197,10 +197,10 @@ test_cases:
     delay_ms: 50
     tests:
       - name: "RC-repeat: reset table"
-        sql: "DROP TABLE IF EXISTS `rc_data`"
+        sql: "DROP TABLE IF EXISTS `rpc_data`"
       - name: "RC-repeat: create table"
         sql: |
-          CREATE TABLE `rc_data` (
+          CREATE TABLE `rpc_data` (
             id INT PRIMARY KEY,
             val INT,
             tag TEXT
@@ -209,19 +209,19 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
-            (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
             61000)
       - name: "RC-repeat: rebuild"
         parallel: repart_repeat
         scm: "(rebuild)"
       - name: "RC-repeat: concurrent UPDATE 50"
         parallel: repart_repeat
-        sql: "UPDATE rc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
+        sql: "UPDATE rpc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
         expect:
           affected_rows: 50
       - name: "RC-repeat: concurrent DELETE 50"
         parallel: repart_repeat
-        sql: "DELETE FROM rc_data WHERE id >= 60950 AND id < 61000"
+        sql: "DELETE FROM rpc_data WHERE id >= 60950 AND id < 61000"
         expect:
           affected_rows: 50
       - name: "RC-repeat: concurrent INSERT 200"
@@ -229,32 +229,32 @@ test_cases:
         scm: |
           (begin
             (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
-            (insert (table "memcp-tests" "rc_data") (list "id" "val" "tag") b)
+            (insert (table "memcp-tests" "rpc_data") (list "id" "val" "tag") b)
             200)
       - name: "RC-repeat: count after ops"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+        sql: "SELECT COUNT(*) AS cnt FROM rpc_data"
         expect:
           rows: 1
           data:
             - cnt: 61150
       - name: "RC-repeat: deleted rows gone"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+        sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE id >= 60950 AND id < 61000"
         expect:
           rows: 1
           data:
             - cnt: 0
       - name: "RC-repeat: updated rows"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE val = -999 AND tag = 'updated'"
+        sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE val = -999 AND tag = 'updated'"
         expect:
           rows: 1
           data:
             - cnt: 50
       - name: "RC-repeat: inserted rows"
-        sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 100000"
+        sql: "SELECT COUNT(*) AS cnt FROM rpc_data WHERE id >= 100000"
         expect:
           rows: 1
           data:
             - cnt: 200
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS `rc_data`"
+  - sql: "DROP TABLE IF EXISTS `rpc_data`"

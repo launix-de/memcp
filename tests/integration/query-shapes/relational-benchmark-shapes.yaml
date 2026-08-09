@@ -19,20 +19,20 @@ metadata:
   isolated: true
 
 setup:
-  - sql: "DROP TABLE IF EXISTS cq_event"
-  - sql: "DROP TABLE IF EXISTS cq_assignment"
-  - sql: "DROP TABLE IF EXISTS cq_item"
-  - sql: "DROP TABLE IF EXISTS cq_parent"
-  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: "DROP TABLE IF EXISTS rbq_event"
+  - sql: "DROP TABLE IF EXISTS rbq_assignment"
+  - sql: "DROP TABLE IF EXISTS rbq_item"
+  - sql: "DROP TABLE IF EXISTS rbq_parent"
+  - sql: "DROP TABLE IF EXISTS rbq_ref"
   - sql: |
-      CREATE TABLE cq_parent (
+      CREATE TABLE rbq_parent (
         id INT PRIMARY KEY,
         owner_id INT,
         tenant_id INT,
         ref_id INT
       )
   - sql: |
-      CREATE TABLE cq_item (
+      CREATE TABLE rbq_item (
         id INT PRIMARY KEY,
         parent_id INT,
         ref_id INT,
@@ -40,13 +40,13 @@ setup:
         state INT
       )
   - sql: |
-      CREATE TABLE cq_ref (
+      CREATE TABLE rbq_ref (
         id INT PRIMARY KEY,
         group_id INT,
         label VARCHAR(32)
       )
   - sql: |
-      CREATE TABLE cq_assignment (
+      CREATE TABLE rbq_assignment (
         id INT PRIMARY KEY,
         actor_id INT,
         tenant_id INT,
@@ -54,41 +54,41 @@ setup:
         allowed BOOL
       )
   - sql: |
-      CREATE TABLE cq_event (
+      CREATE TABLE rbq_event (
         id INT PRIMARY KEY,
         item_id INT,
         status VARCHAR(16),
         sequence_no INT
       )
   - sql: |
-      INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
+      INSERT INTO rbq_parent (id, owner_id, tenant_id, ref_id) VALUES
         (1, 10, 100, 1000),
         (2, 20, 200, 2000),
         (3, 30, NULL, 3000),
         (4, 40, 100, NULL),
         (5, 50, 300, 5000)
   - sql: |
-      INSERT INTO cq_item (id, parent_id, ref_id, score, state) VALUES
+      INSERT INTO rbq_item (id, parent_id, ref_id, score, state) VALUES
         (11, 1, 1000, 5, 1),
         (12, 1, 1001, 9, NULL),
         (21, 2, 2000, 7, 1),
         (31, 3, 3000, 3, 0),
         (41, 4, NULL, 8, 1)
   - sql: |
-      INSERT INTO cq_ref (id, group_id, label) VALUES
+      INSERT INTO rbq_ref (id, group_id, label) VALUES
         (1000, 1, 'alpha'),
         (1001, 1, 'beta'),
         (2000, 2, 'gamma'),
         (3000, NULL, 'delta')
   - sql: |
-      INSERT INTO cq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
+      INSERT INTO rbq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
         (1, 7, 100, 1000, TRUE),
         (2, 7, 100, 1001, FALSE),
         (3, 8, 200, 2000, TRUE),
         (4, 7, NULL, NULL, TRUE),
         (5, 9, 300, NULL, NULL)
   - sql: |
-      INSERT INTO cq_event (id, item_id, status, sequence_no) VALUES
+      INSERT INTO rbq_event (id, item_id, status, sequence_no) VALUES
         (1, 11, 'open', 1),
         (2, 11, 'closed', 2),
         (3, 12, 'open', 1),
@@ -105,7 +105,7 @@ test_cases:
         MIN(score) AS min_score,
         MAX(score) AS max_score,
         AVG(score) > 6 AS average_above_six
-      FROM cq_item
+      FROM rbq_item
       GROUP BY COALESCE(state, -1)
       ORDER BY state_key
     expect:
@@ -133,12 +133,12 @@ test_cases:
   - name: "TPC-H Q2 shape: correlated minimum across a joined domain"
     sql: |
       SELECT i.id, r.label
-      FROM cq_item i
-      JOIN cq_ref r ON r.id = i.ref_id
+      FROM rbq_item i
+      JOIN rbq_ref r ON r.id = i.ref_id
       WHERE i.score = (
         SELECT MIN(i2.score)
-        FROM cq_item i2
-        JOIN cq_ref r2 ON r2.id = i2.ref_id
+        FROM rbq_item i2
+        JOIN rbq_ref r2 ON r2.id = i2.ref_id
         WHERE r2.group_id = r.group_id
       )
       ORDER BY r.label DESC, i.id
@@ -154,8 +154,8 @@ test_cases:
   - name: "TPC-H Q3 shape: joined revenue groups with top-k ordering"
     sql: |
       SELECT p.id, SUM(i.score) AS revenue
-      FROM cq_parent p
-      JOIN cq_item i ON i.parent_id = p.id
+      FROM rbq_parent p
+      JOIN rbq_item i ON i.parent_id = p.id
       WHERE p.tenant_id IS NOT NULL
       GROUP BY p.id
       ORDER BY revenue DESC, p.id
@@ -171,12 +171,12 @@ test_cases:
   - name: "TPC-H Q4 shape: correlated EXISTS followed by grouping"
     sql: |
       SELECT p.tenant_id, COUNT(*) AS parent_count
-      FROM cq_parent p
+      FROM rbq_parent p
       WHERE p.tenant_id IS NOT NULL
         AND EXISTS (
           SELECT 1
-          FROM cq_item i
-          JOIN cq_event e ON e.item_id = i.id
+          FROM rbq_item i
+          JOIN rbq_event e ON e.item_id = i.id
           WHERE i.parent_id = p.id
         )
       GROUP BY p.tenant_id
@@ -192,10 +192,10 @@ test_cases:
   - name: "TPC-H Q5 shape: wide join grouped by a dimension"
     sql: |
       SELECT r.group_id, SUM(i.score) AS total_score
-      FROM cq_parent p
-      JOIN cq_item i ON i.parent_id = p.id
-      JOIN cq_ref r ON r.id = i.ref_id
-      JOIN cq_assignment a
+      FROM rbq_parent p
+      JOIN rbq_item i ON i.parent_id = p.id
+      JOIN rbq_ref r ON r.id = i.ref_id
+      JOIN rbq_assignment a
         ON a.tenant_id = p.tenant_id AND a.allowed = TRUE
       GROUP BY r.group_id
       ORDER BY r.group_id
@@ -210,7 +210,7 @@ test_cases:
   - name: "TPC-H Q6 shape: filtered scalar aggregate"
     sql: |
       SELECT SUM(score * 2) AS weighted_score
-      FROM cq_item
+      FROM rbq_item
       WHERE score BETWEEN 5 AND 7
         AND state = 1
     expect:
@@ -223,8 +223,8 @@ test_cases:
     fail_comment: "join lowering retains the first bidirectional OR arm but drops the second matching arm"
     sql: |
       SELECT p.owner_id, a.actor_id, COUNT(*) AS pair_count
-      FROM cq_parent p
-      JOIN cq_assignment a
+      FROM rbq_parent p
+      JOIN rbq_assignment a
         ON a.tenant_id = p.tenant_id
        AND ((p.owner_id = 10 AND a.actor_id = 7)
          OR (p.owner_id = 20 AND a.actor_id = 8))
@@ -245,8 +245,8 @@ test_cases:
       SELECT r.group_id,
         SUM(CASE WHEN i.state = 1 THEN i.score ELSE 0 END) AS selected_score,
         SUM(i.score) AS total_score
-      FROM cq_item i
-      JOIN cq_ref r ON r.id = i.ref_id
+      FROM rbq_item i
+      JOIN rbq_ref r ON r.id = i.ref_id
       WHERE r.group_id IS NOT NULL
       GROUP BY r.group_id
       ORDER BY r.group_id
@@ -264,9 +264,9 @@ test_cases:
     sql: |
       SELECT r.label, e.sequence_no,
         SUM(i.score - e.sequence_no) AS profit
-      FROM cq_item i
-      JOIN cq_ref r ON r.id = i.ref_id
-      JOIN cq_event e ON e.item_id = i.id
+      FROM rbq_item i
+      JOIN rbq_ref r ON r.id = i.ref_id
+      JOIN rbq_event e ON e.item_id = i.id
       GROUP BY r.label, e.sequence_no
       ORDER BY r.label, e.sequence_no DESC
     expect:
@@ -291,9 +291,9 @@ test_cases:
   - name: "TPC-H Q10 shape: joined detail grouped and ranked by aggregate"
     sql: |
       SELECT p.id, p.owner_id, SUM(i.score) AS open_score
-      FROM cq_parent p
-      JOIN cq_item i ON i.parent_id = p.id
-      JOIN cq_event e ON e.item_id = i.id
+      FROM rbq_parent p
+      JOIN rbq_item i ON i.parent_id = p.id
+      JOIN rbq_event e ON e.item_id = i.id
       WHERE e.status = 'open'
       GROUP BY p.id, p.owner_id
       ORDER BY open_score DESC, p.id
@@ -311,12 +311,12 @@ test_cases:
     sql: |
       SELECT a.tenant_id,
         SUM(CASE WHEN a.allowed = TRUE THEN 1 ELSE 0 END) AS allowed_count
-      FROM cq_assignment a
+      FROM rbq_assignment a
       WHERE a.tenant_id IS NOT NULL
       GROUP BY a.tenant_id
       HAVING SUM(CASE WHEN a.allowed = TRUE THEN 1 ELSE 0 END) > (
         SELECT MIN(i.state)
-        FROM cq_item i
+        FROM rbq_item i
         WHERE i.state IS NOT NULL
       )
       ORDER BY a.tenant_id
@@ -333,8 +333,8 @@ test_cases:
       SELECT i.parent_id,
         SUM(CASE WHEN e.status = 'open' THEN 1 ELSE 0 END) AS open_count,
         SUM(CASE WHEN e.status = 'closed' THEN 1 ELSE 0 END) AS closed_count
-      FROM cq_item i
-      JOIN cq_event e ON e.item_id = i.id
+      FROM rbq_item i
+      JOIN rbq_event e ON e.item_id = i.id
       GROUP BY i.parent_id
       ORDER BY i.parent_id
     expect:
@@ -355,8 +355,8 @@ test_cases:
       SELECT grouped.child_count, COUNT(*) AS parent_count
       FROM (
         SELECT p.id, COUNT(i.id) AS child_count
-        FROM cq_parent p
-        LEFT JOIN cq_item i ON i.parent_id = p.id
+        FROM rbq_parent p
+        LEFT JOIN rbq_item i ON i.parent_id = p.id
         GROUP BY p.id
       ) grouped
       GROUP BY grouped.child_count
@@ -376,8 +376,8 @@ test_cases:
       SELECT
         SUM(CASE WHEN r.label LIKE 'a%' THEN i.score ELSE 0 END) AS selected_score,
         SUM(i.score) AS total_score
-      FROM cq_item i
-      JOIN cq_ref r ON r.id = i.ref_id
+      FROM rbq_item i
+      JOIN rbq_ref r ON r.id = i.ref_id
     expect:
       rows: 1
       data:
@@ -389,14 +389,14 @@ test_cases:
       SELECT totals.parent_id, totals.total_score
       FROM (
         SELECT i.parent_id, SUM(i.score) AS total_score
-        FROM cq_item i
+        FROM rbq_item i
         GROUP BY i.parent_id
       ) totals
       WHERE totals.total_score = (
         SELECT MAX(other.total_score)
         FROM (
           SELECT i2.parent_id, SUM(i2.score) AS total_score
-          FROM cq_item i2
+          FROM rbq_item i2
           GROUP BY i2.parent_id
         ) other
       )
@@ -410,11 +410,11 @@ test_cases:
   - name: "TPC-H Q16 shape: anti-membership with COUNT DISTINCT"
     sql: |
       SELECT i.state, COUNT(DISTINCT i.ref_id) AS distinct_refs
-      FROM cq_item i
+      FROM rbq_item i
       WHERE i.ref_id IS NOT NULL
         AND i.ref_id NOT IN (
           SELECT a.ref_id
-          FROM cq_assignment a
+          FROM rbq_assignment a
           WHERE a.allowed = FALSE
         )
       GROUP BY i.state
@@ -430,10 +430,10 @@ test_cases:
   - name: "TPC-H Q17 shape: correlated AVG filters an outer aggregate"
     sql: |
       SELECT SUM(i.score) AS below_average_score
-      FROM cq_item i
+      FROM rbq_item i
       WHERE i.score < (
         SELECT AVG(i2.score)
-        FROM cq_item i2
+        FROM rbq_item i2
         WHERE i2.parent_id = i.parent_id
       )
     expect:
@@ -444,11 +444,11 @@ test_cases:
   - name: "TPC-H Q18 shape: grouped IN subquery feeds an outer group"
     sql: |
       SELECT p.id, SUM(i.score) AS total_score
-      FROM cq_parent p
-      JOIN cq_item i ON i.parent_id = p.id
+      FROM rbq_parent p
+      JOIN rbq_item i ON i.parent_id = p.id
       WHERE p.id IN (
         SELECT i2.parent_id
-        FROM cq_item i2
+        FROM rbq_item i2
         GROUP BY i2.parent_id
         HAVING SUM(i2.score) > 10
       )
@@ -463,7 +463,7 @@ test_cases:
   - name: "TPC-H Q19 shape: disjoint OR branches contribute once"
     sql: |
       SELECT SUM(score) AS selected_score
-      FROM cq_item
+      FROM rbq_item
       WHERE (state = 1 AND score BETWEEN 5 AND 6)
          OR (state = 0 AND score BETWEEN 3 AND 4)
          OR (state IS NULL AND score BETWEEN 9 AND 10)
@@ -475,17 +475,17 @@ test_cases:
   - name: "TPC-H Q20 shape: grouped IN candidates plus correlated EXISTS"
     sql: |
       SELECT r.id, r.label
-      FROM cq_ref r
+      FROM rbq_ref r
       WHERE r.id IN (
         SELECT i.ref_id
-        FROM cq_item i
+        FROM rbq_item i
         WHERE i.ref_id IS NOT NULL
         GROUP BY i.ref_id
         HAVING SUM(i.score) >= 7
       )
         AND EXISTS (
           SELECT 1
-          FROM cq_assignment a
+          FROM rbq_assignment a
           WHERE a.ref_id = r.id
         )
       ORDER BY r.id
@@ -500,13 +500,13 @@ test_cases:
   - name: "TPC-H Q21 shape: EXISTS and NOT EXISTS share a child domain"
     sql: |
       SELECT i.id
-      FROM cq_item i
+      FROM rbq_item i
       WHERE EXISTS (
-        SELECT 1 FROM cq_event e
+        SELECT 1 FROM rbq_event e
         WHERE e.item_id = i.id AND e.status = 'closed'
       )
         AND NOT EXISTS (
-          SELECT 1 FROM cq_event e
+          SELECT 1 FROM rbq_event e
           WHERE e.item_id = i.id AND e.status = 'open'
         )
       ORDER BY i.id
@@ -519,12 +519,12 @@ test_cases:
     sql: |
       SELECT SUBSTRING(r.label, 1, 1) AS label_prefix,
         COUNT(*) AS ref_count
-      FROM cq_ref r
+      FROM rbq_ref r
       WHERE LENGTH(r.label) > (
-        SELECT AVG(LENGTH(r2.label)) FROM cq_ref r2
+        SELECT AVG(LENGTH(r2.label)) FROM rbq_ref r2
       )
         AND NOT EXISTS (
-          SELECT 1 FROM cq_assignment a WHERE a.ref_id = r.id
+          SELECT 1 FROM rbq_assignment a WHERE a.ref_id = r.id
         )
       GROUP BY SUBSTRING(r.label, 1, 1)
       ORDER BY label_prefix
@@ -536,8 +536,8 @@ test_cases:
 
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS cq_event"
-  - sql: "DROP TABLE IF EXISTS cq_assignment"
-  - sql: "DROP TABLE IF EXISTS cq_item"
-  - sql: "DROP TABLE IF EXISTS cq_parent"
-  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: "DROP TABLE IF EXISTS rbq_event"
+  - sql: "DROP TABLE IF EXISTS rbq_assignment"
+  - sql: "DROP TABLE IF EXISTS rbq_item"
+  - sql: "DROP TABLE IF EXISTS rbq_parent"
+  - sql: "DROP TABLE IF EXISTS rbq_ref"

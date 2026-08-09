@@ -21,20 +21,20 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS cq_large_parent"
   - sql: "DROP TABLE IF EXISTS cq_digit"
-  - sql: "DROP TABLE IF EXISTS cq_event"
-  - sql: "DROP TABLE IF EXISTS cq_assignment"
-  - sql: "DROP TABLE IF EXISTS cq_item"
-  - sql: "DROP TABLE IF EXISTS cq_parent"
-  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: "DROP TABLE IF EXISTS csa_event"
+  - sql: "DROP TABLE IF EXISTS csa_assignment"
+  - sql: "DROP TABLE IF EXISTS csa_item"
+  - sql: "DROP TABLE IF EXISTS csa_parent"
+  - sql: "DROP TABLE IF EXISTS csa_ref"
   - sql: |
-      CREATE TABLE cq_parent (
+      CREATE TABLE csa_parent (
         id INT PRIMARY KEY,
         owner_id INT,
         tenant_id INT,
         ref_id INT
       )
   - sql: |
-      CREATE TABLE cq_item (
+      CREATE TABLE csa_item (
         id INT PRIMARY KEY,
         parent_id INT,
         ref_id INT,
@@ -42,13 +42,13 @@ setup:
         state INT
       )
   - sql: |
-      CREATE TABLE cq_ref (
+      CREATE TABLE csa_ref (
         id INT PRIMARY KEY,
         group_id INT,
         label VARCHAR(32)
       )
   - sql: |
-      CREATE TABLE cq_assignment (
+      CREATE TABLE csa_assignment (
         id INT PRIMARY KEY,
         actor_id INT,
         tenant_id INT,
@@ -56,7 +56,7 @@ setup:
         allowed BOOL
       )
   - sql: |
-      CREATE TABLE cq_event (
+      CREATE TABLE csa_event (
         id INT PRIMARY KEY,
         item_id INT,
         status VARCHAR(16),
@@ -70,34 +70,34 @@ setup:
         ref_id INT
       )
   - sql: |
-      INSERT INTO cq_parent (id, owner_id, tenant_id, ref_id) VALUES
+      INSERT INTO csa_parent (id, owner_id, tenant_id, ref_id) VALUES
         (1, 10, 100, 1000),
         (2, 20, 200, 2000),
         (3, 30, NULL, 3000),
         (4, 40, 100, NULL),
         (5, 50, 300, 5000)
   - sql: |
-      INSERT INTO cq_item (id, parent_id, ref_id, score, state) VALUES
+      INSERT INTO csa_item (id, parent_id, ref_id, score, state) VALUES
         (11, 1, 1000, 5, 1),
         (12, 1, 1001, 9, NULL),
         (21, 2, 2000, 7, 1),
         (31, 3, 3000, 3, 0),
         (41, 4, NULL, 8, 1)
   - sql: |
-      INSERT INTO cq_ref (id, group_id, label) VALUES
+      INSERT INTO csa_ref (id, group_id, label) VALUES
         (1000, 1, 'alpha'),
         (1001, 1, 'beta'),
         (2000, 2, 'gamma'),
         (3000, NULL, 'delta')
   - sql: |
-      INSERT INTO cq_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
+      INSERT INTO csa_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
         (1, 7, 100, 1000, TRUE),
         (2, 7, 100, 1001, FALSE),
         (3, 8, 200, 2000, TRUE),
         (4, 7, NULL, NULL, TRUE),
         (5, 9, 300, NULL, NULL)
   - sql: |
-      INSERT INTO cq_event (id, item_id, status, sequence_no) VALUES
+      INSERT INTO csa_event (id, item_id, status, sequence_no) VALUES
         (1, 11, 'open', 1),
         (2, 11, 'closed', 2),
         (3, 12, 'open', 1),
@@ -117,11 +117,11 @@ test_cases:
     sql: |
       SELECT p.id,
         (SELECT i.id
-         FROM cq_item i
+         FROM csa_item i
          WHERE i.parent_id = p.id
          ORDER BY i.score DESC, i.id ASC
          LIMIT 1) AS top_item
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -141,11 +141,11 @@ test_cases:
     sql: |
       SELECT p.id,
         (SELECT i.id
-         FROM cq_item i
+         FROM csa_item i
          WHERE i.parent_id = p.id
          ORDER BY i.score DESC, i.id ASC
          LIMIT 1 OFFSET 1) AS second_item
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -164,8 +164,8 @@ test_cases:
   - name: "Correlated COUNT returns zero for a missing domain"
     sql: |
       SELECT p.id,
-        (SELECT COUNT(*) FROM cq_item i WHERE i.parent_id = p.id) AS item_count
-      FROM cq_parent p
+        (SELECT COUNT(*) FROM csa_item i WHERE i.parent_id = p.id) AS item_count
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -184,8 +184,8 @@ test_cases:
   - name: "Correlated SUM returns NULL for a missing domain"
     sql: |
       SELECT p.id,
-        (SELECT SUM(i.score) FROM cq_item i WHERE i.parent_id = p.id) AS total_score
-      FROM cq_parent p
+        (SELECT SUM(i.score) FROM csa_item i WHERE i.parent_id = p.id) AS total_score
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -204,10 +204,10 @@ test_cases:
   - name: "Equivalent correlated aggregates remain distinct projections"
     sql: |
       SELECT p.id,
-        (SELECT COUNT(*) FROM cq_item i WHERE i.parent_id = p.id) AS all_items,
-        (SELECT COUNT(*) FROM cq_item i WHERE i.parent_id = p.id AND i.state = 1) AS active_items,
-        (SELECT MAX(i.score) FROM cq_item i WHERE i.parent_id = p.id) AS max_score
-      FROM cq_parent p
+        (SELECT COUNT(*) FROM csa_item i WHERE i.parent_id = p.id) AS all_items,
+        (SELECT COUNT(*) FROM csa_item i WHERE i.parent_id = p.id AND i.state = 1) AS active_items,
+        (SELECT MAX(i.score) FROM csa_item i WHERE i.parent_id = p.id) AS max_score
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -240,12 +240,12 @@ test_cases:
         SELECT p.id,
           r.label AS ref_label,
           (SELECT COUNT(*)
-           FROM cq_event e
+           FROM csa_event e
            WHERE e.item_id IN (
-             SELECT i.id FROM cq_item i WHERE i.parent_id = p.id
+             SELECT i.id FROM csa_item i WHERE i.parent_id = p.id
            ) AND e.status = 'open') AS open_events
-        FROM cq_parent p
-        LEFT JOIN cq_ref r ON r.id = p.ref_id
+        FROM csa_parent p
+        LEFT JOIN csa_ref r ON r.id = p.ref_id
       ) d
       WHERE d.open_events > 0 OR d.ref_label IS NULL
       ORDER BY d.id
@@ -268,10 +268,10 @@ test_cases:
   - name: "Correlated aggregate HAVING is used as an EXISTS input"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM csa_parent p
       WHERE EXISTS (
         SELECT i.parent_id
-        FROM cq_item i
+        FROM csa_item i
         WHERE i.parent_id = p.id
         GROUP BY i.parent_id
         HAVING COUNT(*) >= 2
@@ -285,10 +285,10 @@ test_cases:
   - name: "Correlated aggregate HAVING preserves NOT EXISTS misses"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM csa_parent p
       WHERE NOT EXISTS (
         SELECT i.parent_id
-        FROM cq_item i
+        FROM csa_item i
         WHERE i.parent_id = p.id
         GROUP BY i.parent_id
         HAVING COUNT(*) >= 2
@@ -307,12 +307,12 @@ test_cases:
       SELECT p.id,
         EXISTS (
           SELECT i.parent_id
-          FROM cq_item i
+          FROM csa_item i
           WHERE i.parent_id = p.id
           GROUP BY i.parent_id
           HAVING COUNT(*) >= 2
         ) AS has_many
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -331,10 +331,10 @@ test_cases:
   - name: "EXPLAIN IR keeps grouped EXISTS logical and decorrelated"
     sql: |
       EXPLAIN IR SELECT p.id
-      FROM cq_parent p
+      FROM csa_parent p
       WHERE EXISTS (
         SELECT i.parent_id
-        FROM cq_item i
+        FROM csa_item i
         WHERE i.parent_id = p.id
         GROUP BY i.parent_id
         HAVING COUNT(*) >= 2
@@ -351,11 +351,11 @@ test_cases:
   - name: "LEFT JOIN ON with correlated EXISTS preserves unmatched rows"
     sql: |
       SELECT p.id, r.label
-      FROM cq_parent p
-      LEFT JOIN cq_ref r
+      FROM csa_parent p
+      LEFT JOIN csa_ref r
         ON r.id = p.ref_id
        AND EXISTS (
-         SELECT 1 FROM cq_item i
+         SELECT 1 FROM csa_item i
          WHERE i.parent_id = p.id AND i.ref_id = r.id
        )
       ORDER BY p.id
@@ -379,14 +379,14 @@ test_cases:
         (SELECT MAX(x.score)
          FROM (
            SELECT i.score, i.parent_id
-           FROM cq_item i
+           FROM csa_item i
            WHERE EXISTS (
-             SELECT 1 FROM cq_event e
+             SELECT 1 FROM csa_event e
              WHERE e.item_id = i.id
            )
          ) x
          WHERE x.parent_id = p.id) AS event_score
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -407,14 +407,14 @@ test_cases:
       SELECT p.id,
         CASE
           WHEN p.tenant_id IS NULL THEN EXISTS (
-            SELECT 1 FROM cq_assignment a WHERE a.tenant_id IS NULL
+            SELECT 1 FROM csa_assignment a WHERE a.tenant_id IS NULL
           )
           ELSE EXISTS (
-            SELECT 1 FROM cq_assignment a
+            SELECT 1 FROM csa_assignment a
             WHERE a.tenant_id = p.tenant_id AND a.allowed = TRUE
           )
         END AS permitted
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -435,13 +435,13 @@ test_cases:
       SELECT p.id,
         COALESCE((
           SELECT SUM((
-            SELECT COUNT(*) FROM cq_event e
+            SELECT COUNT(*) FROM csa_event e
             WHERE e.item_id = i.id AND e.status = 'open'
           ))
-          FROM cq_item i
+          FROM csa_item i
           WHERE i.parent_id = p.id
         ), 0) AS open_count
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -461,10 +461,10 @@ test_cases:
     sql: |
       SELECT p.id,
         (SELECT COUNT(*)
-         FROM cq_assignment a
+         FROM csa_assignment a
          WHERE a.tenant_id = p.tenant_id
            AND (a.ref_id = p.ref_id OR a.ref_id IS NULL)) AS grants
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -484,7 +484,7 @@ test_cases:
     sql: |
       SELECT SUM(
         (SELECT COUNT(*)
-         FROM cq_assignment a
+         FROM csa_assignment a
          WHERE a.tenant_id = p.tenant_id
            AND (a.ref_id = p.ref_id OR a.ref_id IS NULL))
       ) AS grants
@@ -498,25 +498,25 @@ test_cases:
     sql: |
       EXPLAIN SELECT p.id,
         (SELECT COUNT(*)
-         FROM cq_assignment a
+         FROM csa_assignment a
          WHERE a.tenant_id = p.tenant_id
            AND (a.ref_id = p.ref_id OR a.ref_id IS NULL)) AS grants
       FROM cq_large_parent p
     expect:
       contains:
-        - '"cq_assignment"'
+        - '"csa_assignment"'
         - "p.ref_id"
       not_contains:
         - "touch_keytable"
-        - ".grp:cq_assignment"
+        - ".grp:csa_assignment"
 
   - name: "Outer NULL key does not equal an inner NULL key"
     sql: |
       SELECT p.id,
         EXISTS (
-          SELECT 1 FROM cq_item i WHERE i.ref_id = p.ref_id
+          SELECT 1 FROM csa_item i WHERE i.ref_id = p.ref_id
         ) AS has_equal_ref
-      FROM cq_parent p
+      FROM csa_parent p
       ORDER BY p.id
     expect:
       rows: 5
@@ -535,13 +535,13 @@ test_cases:
   - name: "Nested OR keeps NOT EXISTS and nullable scalar predicates"
     sql: |
       SELECT p.id
-      FROM cq_parent p
+      FROM csa_parent p
       WHERE (
         NOT EXISTS (
-          SELECT 1 FROM cq_item i WHERE i.parent_id = p.id
+          SELECT 1 FROM csa_item i WHERE i.parent_id = p.id
         )
         OR COALESCE((
-          SELECT MAX(i.state) FROM cq_item i WHERE i.parent_id = p.id
+          SELECT MAX(i.state) FROM csa_item i WHERE i.parent_id = p.id
         ), 0) = 0
       )
         AND NOT (p.owner_id = 40)
@@ -556,8 +556,8 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS cq_large_parent"
   - sql: "DROP TABLE IF EXISTS cq_digit"
-  - sql: "DROP TABLE IF EXISTS cq_event"
-  - sql: "DROP TABLE IF EXISTS cq_assignment"
-  - sql: "DROP TABLE IF EXISTS cq_item"
-  - sql: "DROP TABLE IF EXISTS cq_parent"
-  - sql: "DROP TABLE IF EXISTS cq_ref"
+  - sql: "DROP TABLE IF EXISTS csa_event"
+  - sql: "DROP TABLE IF EXISTS csa_assignment"
+  - sql: "DROP TABLE IF EXISTS csa_item"
+  - sql: "DROP TABLE IF EXISTS csa_parent"
+  - sql: "DROP TABLE IF EXISTS csa_ref"

@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # Subselects in expressions (IN/EXISTS/scalar)
 
 metadata:
@@ -9,9 +10,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS t2"
   - sql: "DROP TABLE IF EXISTS t3"
   - sql: "DROP TABLE IF EXISTS t4"
-  - sql: "DROP TABLE IF EXISTS doc"
-  - sql: "DROP TABLE IF EXISTS doc_revision"
-  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: "DROP TABLE IF EXISTS es_doc"
+  - sql: "DROP TABLE IF EXISTS es_doc_revision"
+  - sql: "DROP TABLE IF EXISTS es_fop_files"
   - sql: "DROP TABLE IF EXISTS docType"
   - sql: "DROP TABLE IF EXISTS login"
   - sql: "DROP TABLE IF EXISTS userconfig"
@@ -19,9 +20,9 @@ setup:
   - sql: "CREATE TABLE t2 (owner INT, val INT)"
   - sql: "CREATE TABLE t3 (id INT PRIMARY KEY, ref INT)"
   - sql: "CREATE TABLE t4 (id INT PRIMARY KEY, description VARCHAR(20))"
-  - sql: "CREATE TABLE doc (id INT PRIMARY KEY, type INT, archive BOOL)"
-  - sql: "CREATE TABLE doc_revision (id INT PRIMARY KEY, doc INT, created INT, file INT)"
-  - sql: "CREATE TABLE fop_files (id INT PRIMARY KEY, filename VARCHAR(255), type VARCHAR(255))"
+  - sql: "CREATE TABLE es_doc (id INT PRIMARY KEY, type INT, archive BOOL)"
+  - sql: "CREATE TABLE es_doc_revision (id INT PRIMARY KEY, es_doc INT, created INT, file INT)"
+  - sql: "CREATE TABLE es_fop_files (id INT PRIMARY KEY, filename VARCHAR(255), type VARCHAR(255))"
   - sql: "CREATE TABLE docType (ID INT PRIMARY KEY, name VARCHAR(255))"
   - sql: "CREATE TABLE login (ID INT PRIMARY KEY)"
   - sql: "CREATE TABLE userconfig (ID INT PRIMARY KEY, Tables_Doc_defaultDoctype INT)"
@@ -38,12 +39,12 @@ setup:
   - sql: "INSERT INTO t3 (id, ref) VALUES (4, NULL)"
   - sql: "INSERT INTO t4 (id, description) VALUES (10, 'alpha')"
   - sql: "INSERT INTO t4 (id, description) VALUES (11, 'beta')"
-  - sql: "INSERT INTO doc (id, type, archive) VALUES (1, 7, FALSE)"
-  - sql: "INSERT INTO doc (id, type, archive) VALUES (2, NULL, FALSE)"
-  - sql: "INSERT INTO fop_files (id, filename, type) VALUES (1, 'Basics.pdf', 'application/pdf')"
-  - sql: "INSERT INTO fop_files (id, filename, type) VALUES (3, 'Angebot.pdf', 'application/pdf')"
-  - sql: "INSERT INTO doc_revision (id, doc, created, file) VALUES (1, 1, 1000, 1)"
-  - sql: "INSERT INTO doc_revision (id, doc, created, file) VALUES (2, 2, 2000, 3)"
+  - sql: "INSERT INTO es_doc (id, type, archive) VALUES (1, 7, FALSE)"
+  - sql: "INSERT INTO es_doc (id, type, archive) VALUES (2, NULL, FALSE)"
+  - sql: "INSERT INTO es_fop_files (id, filename, type) VALUES (1, 'Basics.pdf', 'application/pdf')"
+  - sql: "INSERT INTO es_fop_files (id, filename, type) VALUES (3, 'Angebot.pdf', 'application/pdf')"
+  - sql: "INSERT INTO es_doc_revision (id, es_doc, created, file) VALUES (1, 1, 1000, 1)"
+  - sql: "INSERT INTO es_doc_revision (id, es_doc, created, file) VALUES (2, 2, 2000, 3)"
   - sql: "INSERT INTO docType (ID, name) VALUES (7, 'General')"
   - sql: "INSERT INTO login (ID) VALUES (1)"
   - sql: "INSERT INTO userconfig (ID, Tables_Doc_defaultDoctype) VALUES (1, 7)"
@@ -262,10 +263,10 @@ test_cases:
   - name: "Scalar subselect in boolean NULL-or-equals expression"
     sql: >
       SELECT COUNT(1) AS cnt
-      FROM doc
-      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((doc.type) IS NULL))
-      OR ((doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
-      AND (NOT (doc.archive))
+      FROM es_doc
+      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((es_doc.type) IS NULL))
+      OR ((es_doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
+      AND (NOT (es_doc.archive))
     expect:
       rows: 1
       data:
@@ -274,10 +275,10 @@ test_cases:
   - name: "Scalar COUNT subselect in SELECT list with outer FROM table"
     sql: >
       SELECT 1,
-      (SELECT COUNT(1) FROM doc
-      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((doc.type) IS NULL))
-      OR ((doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
-      AND (NOT (doc.archive))
+      (SELECT COUNT(1) FROM es_doc
+      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((es_doc.type) IS NULL))
+      OR ((es_doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
+      AND (NOT (es_doc.archive))
       LIMIT 1) AS badgeDoc
       FROM login WHERE ID = 1
     expect:
@@ -288,10 +289,10 @@ test_cases:
   - name: "Sibling scalar subselects in outer projection stay isolated"
     sql: >
       SELECT
-      (SELECT COUNT(1) FROM doc
-      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((doc.type) IS NULL))
-      OR ((doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
-      AND (NOT (doc.archive))
+      (SELECT COUNT(1) FROM es_doc
+      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((es_doc.type) IS NULL))
+      OR ((es_doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
+      AND (NOT (es_doc.archive))
       LIMIT 1) AS badgeDoc,
       (SELECT SUM(1) FROM t2 WHERE owner = 2 LIMIT 1) AS siblingCount
       FROM login WHERE ID = 1
@@ -306,13 +307,13 @@ test_cases:
       SELECT t.* FROM (
         SELECT
           id,
-          (SELECT file FROM doc_revision WHERE doc = doc.id ORDER BY created DESC LIMIT 1) AS file,
-          (SELECT filename FROM fop_files
+          (SELECT file FROM es_doc_revision WHERE es_doc = es_doc.id ORDER BY created DESC LIMIT 1) AS file,
+          (SELECT filename FROM es_fop_files
             WHERE id = (
-              SELECT file FROM doc_revision WHERE doc = doc.id ORDER BY created DESC LIMIT 1
+              SELECT file FROM es_doc_revision WHERE es_doc = es_doc.id ORDER BY created DESC LIMIT 1
             )
           ) AS filename
-        FROM doc
+        FROM es_doc
       ) AS t
       ORDER BY id
     expect:
@@ -666,9 +667,9 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS userconfig"
   - sql: "DROP TABLE IF EXISTS login"
-  - sql: "DROP TABLE IF EXISTS fop_files"
-  - sql: "DROP TABLE IF EXISTS doc_revision"
-  - sql: "DROP TABLE IF EXISTS doc"
+  - sql: "DROP TABLE IF EXISTS es_fop_files"
+  - sql: "DROP TABLE IF EXISTS es_doc_revision"
+  - sql: "DROP TABLE IF EXISTS es_doc"
   - sql: "DROP TABLE IF EXISTS t4"
   - sql: "DROP TABLE IF EXISTS t3"
   - sql: "DROP TABLE IF EXISTS t2"
