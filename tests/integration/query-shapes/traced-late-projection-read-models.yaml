@@ -262,6 +262,8 @@ test_cases:
       rows_affected: 0
   - name: "Repeated scalar latest projections share a session cutoff"
     session_id: "trace_scalar_cutoff"
+    max_time: 1.0
+    max_plan_size: 30000
     sql: |
       SELECT
         p.id,
@@ -303,6 +305,8 @@ test_cases:
       rows_affected: 0
   - name: "Repeated scalar latest projections use the changed session cutoff"
     session_id: "trace_scalar_cutoff"
+    max_time: 1.0
+    max_plan_size: 30000
     sql: |
       SELECT
         p.id,
