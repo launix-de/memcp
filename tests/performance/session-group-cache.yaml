@@ -133,6 +133,30 @@ test_cases:
         - ".grp:"
         - "scan_exists"
 
+  - name: "projected session presence maps lookup domain to inner group key"
+    session_id: "sgc_sess"
+    sql: |
+      SELECT wrapped.id, wrapped.has_global_access
+      FROM (
+        SELECT id,
+          EXISTS (
+            SELECT TRUE
+            FROM sgc_acl access_rows
+            WHERE access_rows.usr = @actor_id
+              AND access_rows.category IS NULL
+            GROUP BY access_rows.usr
+            HAVING COUNT(*) > 0
+          ) AS has_global_access
+        FROM sgc_data
+      ) wrapped
+      ORDER BY wrapped.id
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          has_global_access: false
+
   - name: "session-filtered SUM GROUP BY (warm)"
     session_id: "sgc_sess"
     sql: |
@@ -287,3 +311,165 @@ test_cases:
       rows: 1
       data:
         - total: 1
+
+  - name: "set first aggregate factor"
+    session_id: "sgc_factor_a"
+    sql: "SET @factor = 2"
+    expect:
+      rows_affected: 0
+
+  - name: "session value in aggregate expression uses first domain"
+    session_id: "sgc_factor_a"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 700
+        - category: 2
+          total: 476
+        - category: 3
+          total: 532
+        - category: 4
+          total: 588
+        - category: 5
+          total: 644
+
+  - name: "set second aggregate factor"
+    session_id: "sgc_factor_b"
+    sql: "SET @factor = 3"
+    expect:
+      rows_affected: 0
+
+  - name: "session value in aggregate expression uses second domain"
+    session_id: "sgc_factor_b"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 1050
+        - category: 2
+          total: 714
+        - category: 3
+          total: 798
+        - category: 4
+          total: 882
+        - category: 5
+          total: 966
+
+  - name: "set unrelated aggregate session"
+    session_id: "sgc_factor_writer"
+    sql: "SET @factor = 9"
+    expect:
+      rows_affected: 0
+
+  - name: "write under unrelated aggregate session"
+    session_id: "sgc_factor_writer"
+    sql: "INSERT INTO sgc_data (category, owner, val) VALUES (1, 9, 5)"
+    expect:
+      affected_rows: 1
+
+  - name: "first aggregate domain remains correct after write"
+    session_id: "sgc_factor_a"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 710
+        - category: 2
+          total: 476
+        - category: 3
+          total: 532
+        - category: 4
+          total: 588
+        - category: 5
+          total: 644
+
+  - name: "second aggregate domain remains correct after write"
+    session_id: "sgc_factor_b"
+    sql: |
+      SELECT category, SUM(val * @factor) AS total
+      FROM sgc_data
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 5
+      data:
+        - category: 1
+          total: 1065
+        - category: 2
+          total: 714
+        - category: 3
+          total: 798
+        - category: 4
+          total: 882
+        - category: 5
+          total: 966
+
+  - name: "restore second membership domain"
+    session_id: "sgc_sess2"
+    sql: "SET @actor_id = 2"
+    expect:
+      rows_affected: 0
+
+  - name: "write from an unrelated session updates populated membership domains"
+    session_id: "sgc_writer"
+    sql: "INSERT INTO sgc_data (category, owner, val) VALUES (4, 9, 200)"
+    expect:
+      affected_rows: 1
+
+  - name: "second membership domain sees incremental changes"
+    session_id: "sgc_sess2"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @actor_id
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 2
+      data:
+        - category: 1
+          cnt: 5
+        - category: 4
+          cnt: 5
+
+  - name: "first membership domain remains isolated after write"
+    session_id: "sgc_sess"
+    sql: |
+      SELECT category, COUNT(*) AS cnt
+      FROM sgc_data
+      WHERE EXISTS (
+        SELECT 1 FROM sgc_acl
+        WHERE sgc_acl.usr = @actor_id
+          AND sgc_acl.category = sgc_data.category
+      )
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - category: 1
+          cnt: 5
+        - category: 2
+          cnt: 4
+        - category: 3
+          cnt: 4
