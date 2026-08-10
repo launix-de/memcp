@@ -167,6 +167,17 @@ test_cases:
     expect:
       rows: 10
 
+  - name: "Cross-join aggregate avoids an incrementally maintained cartesian cache"
+    sql: "EXPLAIN SELECT a.grp, COUNT(*) AS n FROM inv_conc a, inv_big b GROUP BY a.grp ORDER BY a.grp"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan"
+        - ".grp:query:"
+      result_not_contains:
+        - ".prejoin:"
+        - "initialize_cache_table"
+
   - name: "Concurrent: slow GROUP BY cross-join + INSERT during scan"
     steps:
       # Session A: slow cross-join GROUP BY (200*100 = 20k rows to scan)

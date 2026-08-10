@@ -22,6 +22,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import "regexp"
+import "strconv"
 import "strings"
 
 var SettingsHaveGoodBacktraces bool
@@ -151,20 +152,24 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 		}
 	}
 
+	numVars := p.NumVars
+	if required := requiredNumberedSlots(p.Body); required > numVars {
+		numVars = required
+	}
 	var vars Vars
-	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, p.NumVars), Outer: p.En, Nodefine: false}
+	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, numVars), Outer: p.En, Nodefine: false}
 	params := p.Params
 	if stripped, ok := scmerStripSourceInfo(params); ok {
 		params = stripped
 	}
 	if params.IsSlice() {
 		paramSlice := params.Slice()
-		if p.NumVars > 0 {
+		if numVars > 0 {
 			bindNamed := false
 			if !p.NumberedOnly {
 				named := make(map[Symbol]struct{}, len(paramSlice))
 				for i, param := range paramSlice {
-					if i >= p.NumVars {
+					if i >= numVars {
 						break
 					}
 					if stripped, ok := scmerStripSourceInfo(param); ok {
@@ -181,7 +186,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 				}
 			}
 			return func(args ...Scmer) Scmer {
-				for i := 0; i < p.NumVars; i++ {
+				for i := 0; i < numVars; i++ {
 					if i < len(args) {
 						en.VarsNumbered[i] = args[i]
 					} else {
@@ -267,21 +272,326 @@ func Optimize(val Scmer, env *Env) Scmer {
 }
 
 type optimizerMetainfo struct {
-	variableReplacement  map[Symbol]Scmer
-	setBlacklist         []Symbol
-	nextSlot             *int            // pointer to lambda's slot counter; nil outside lambda
-	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
-	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
-	loopDepth            int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
-	lambdaDepth          int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
-	beginDepth           int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
-	inlineDepth          int
-	inlineStack          map[Symbol]bool
+	variableReplacement   map[Symbol]Scmer
+	variableTypes         map[Symbol]*TypeDescriptor
+	numberedTypes         map[NthLocalVar]*TypeDescriptor
+	setBlacklist          []Symbol
+	nextSlot              *int // pointer to lambda's slot counter; nil outside lambda
+	pendingCallbackParams []*TypeDescriptor
+	pendingCallbackReturn *TypeDescriptor // structured escape information for the next lambda result
+	loopDepth             int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
+	lambdaDepth           int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
+	beginDepth            int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
+	inlineDepth           int
+	inlineStack           map[Symbol]bool
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
+	result.variableTypes = make(map[Symbol]*TypeDescriptor)
+	result.numberedTypes = make(map[NthLocalVar]*TypeDescriptor)
 	return
+}
+
+func rewriteNoEscapeListReturn(expr Scmer, flow *TypeDescriptor, nextSlot *int) Scmer {
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) < 2 || !scmerIsSymbol(items[0], "list") || nextSlot == nil || flow == nil {
+		return expr
+	}
+	rewrittenItems := append([]Scmer(nil), items...)
+	for i := 1; i < len(rewrittenItems); i++ {
+		if child := flow.Keys[strconv.Itoa(i-1)]; child != nil {
+			rewrittenItems[i] = rewriteNoEscapeListReturn(rewrittenItems[i], child, nextSlot)
+		}
+	}
+	if !flow.NoEscape {
+		return NewSlice(rewrittenItems)
+	}
+	count := len(items) - 1
+	start := *nextSlot
+	*nextSlot += count
+	rewritten := make([]Scmer, 0, count+3)
+	rewritten = append(rewritten, NewSymbol("!list"), NewNthLocalVar(NthLocalVar(start)), NewInt(int64(count)))
+	rewritten = append(rewritten, rewrittenItems[1:]...)
+	return NewSlice(rewritten)
+}
+
+func optimizerLambdaParts(lambda Scmer) ([]Scmer, Scmer, bool) {
+	items, ok := scmerSlice(lambda)
+	if !ok || len(items) < 3 || !scmerIsSymbol(items[0], "lambda") {
+		return nil, NewNil(), false
+	}
+	params, ok := scmerSlice(items[1])
+	if !ok {
+		return nil, NewNil(), false
+	}
+	return params, items[2], true
+}
+
+func listConstructorElements(items []Scmer) ([]Scmer, bool) {
+	if len(items) == 0 {
+		return nil, false
+	}
+	if scmerIsSymbol(items[0], "list") {
+		return items[1:], true
+	}
+	if scmerIsSymbol(items[0], "!list") && len(items) >= 3 {
+		return items[3:], true
+	}
+	if decl := DeclarationForValue(items[0]); decl != nil && decl.Name == "list" {
+		return items[1:], true
+	}
+	return nil, false
+}
+
+func trackedValuePath(expr Scmer, symbol Symbol) (string, bool) {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if sym, ok := scmerSymbol(expr); ok {
+		return "", sym == symbol
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) < 2 {
+		return "", false
+	}
+	var child string
+	switch {
+	case scmerIsSymbol(items[0], "car") && len(items) == 2:
+		child = "0"
+	case scmerIsSymbol(items[0], "cadr") && len(items) == 2:
+		child = "1"
+	case scmerIsSymbol(items[0], "nth") && len(items) == 3 && items[2].IsInt():
+		child = strconv.FormatInt(items[2].Int(), 10)
+	case scmerIsSymbol(items[0], "get_assoc") && len(items) == 3 && items[2].IsString():
+		child = String(items[2])
+	default:
+		return "", false
+	}
+	base, ok := trackedValuePath(items[1], symbol)
+	if !ok {
+		return "", false
+	}
+	if base == "" {
+		return child, true
+	}
+	return base + "/" + child, true
+}
+
+func callParameterDescriptor(call []Scmer, argIndex int) *TypeDescriptor {
+	decl := DeclarationForValue(call[0])
+	if decl == nil || decl.Type == nil || len(decl.Type.Params) == 0 {
+		return nil
+	}
+	idx := argIndex
+	if idx >= len(decl.Type.Params) {
+		idx = len(decl.Type.Params) - 1
+	}
+	if idx < 0 {
+		return nil
+	}
+	return decl.Type.Params[idx]
+}
+
+func analyzeTrackedEscapes(expr Scmer, symbol Symbol, resultEscapes bool, escaped map[string]bool) {
+	if path, ok := trackedValuePath(expr, symbol); ok {
+		if resultEscapes {
+			escaped[path] = true
+		}
+		return
+	}
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+		return
+	}
+	if scmerIsSymbol(items[0], "begin") || scmerIsSymbol(items[0], "!begin") || scmerIsSymbol(items[0], "begin_mut") {
+		for i := 1; i < len(items); i++ {
+			analyzeTrackedEscapes(items[i], symbol, resultEscapes && i == len(items)-1, escaped)
+		}
+		return
+	}
+	if scmerIsSymbol(items[0], "if") {
+		for i := 1; i < len(items); i++ {
+			analyzeTrackedEscapes(items[i], symbol, resultEscapes && i >= 2, escaped)
+		}
+		return
+	}
+	if scmerIsSymbol(items[0], "lambda") {
+		return
+	}
+	for i := 1; i < len(items); i++ {
+		param := callParameterDescriptor(items, i-1)
+		argEscapes := param == nil || !param.NoEscape
+		analyzeTrackedEscapes(items[i], symbol, argEscapes, escaped)
+	}
+}
+
+func callbackValueFlow(expr Scmer, escaped map[string]bool, path string, parentEscapes bool) *TypeDescriptor {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	escapes := parentEscapes || escaped[path]
+	td := &TypeDescriptor{Kind: "any", NoEscape: !escapes, Length: UnknownLength}
+	items, ok := scmerSlice(expr)
+	if !ok {
+		return td
+	}
+	elements, ok := listConstructorElements(items)
+	if !ok {
+		return td
+	}
+	td.Kind = "list"
+	td.Transfer = true
+	td.Length = len(elements)
+	td.Keys = make(map[string]*TypeDescriptor, len(elements))
+	for i, element := range elements {
+		key := strconv.Itoa(i)
+		childPath := key
+		if path != "" {
+			childPath = path + "/" + key
+		}
+		td.Keys[key] = callbackValueFlow(element, escaped, childPath, escapes)
+	}
+	return td
+}
+
+// CallbackReturnFlow describes which portions of producer's result can use its
+// lambda frame after following consumer's selected parameter through projections
+// and calls. Unknown consumers conservatively retain the complete value.
+func CallbackReturnFlow(producer, consumer Scmer, consumerParam int) *TypeDescriptor {
+	_, producerBody, producerOK := optimizerLambdaParts(producer)
+	params, consumerBody, consumerOK := optimizerLambdaParts(consumer)
+	if !producerOK {
+		return nil
+	}
+	escaped := make(map[string]bool)
+	if !consumerOK || consumerParam < 0 || consumerParam >= len(params) {
+		escaped[""] = true
+	} else if symbol, ok := scmerSymbol(params[consumerParam]); ok {
+		analyzeTrackedEscapes(consumerBody, symbol, true, escaped)
+	} else {
+		escaped[""] = true
+	}
+	return callbackValueFlow(producerBody, escaped, "", false)
+}
+
+func copyTypeDescriptor(td *TypeDescriptor) *TypeDescriptor {
+	if td == nil {
+		return &TypeDescriptor{Kind: "any", Length: UnknownLength}
+	}
+	result := *td
+	return &result
+}
+
+func callbackParameterType(td *TypeDescriptor) *TypeDescriptor {
+	if td == nil {
+		return nil
+	}
+	result := *td
+	result.Const = false
+	if len(td.Keys) > 0 {
+		result.Keys = make(map[string]*TypeDescriptor, len(td.Keys))
+		for key, child := range td.Keys {
+			result.Keys[key] = callbackParameterType(child)
+		}
+	}
+	result.Element = callbackParameterType(td.Element)
+	return &result
+}
+
+// CloneOptimizerExpression copies mutable AST containers so optimizer hooks can
+// analyze a speculative variant without rewriting the caller's original code.
+func CloneOptimizerExpression(expr Scmer) Scmer {
+	if expr.IsSourceInfo() {
+		source := *expr.SourceInfo()
+		source.value = CloneOptimizerExpression(source.value)
+		return NewSourceInfo(source)
+	}
+	if expr.GetTag() == tagAny {
+		if source, ok := expr.Any().(SourceInfo); ok {
+			source.value = CloneOptimizerExpression(source.value)
+			return NewSourceInfo(source)
+		}
+	}
+	items, ok := scmerSlice(expr)
+	if !ok {
+		return expr
+	}
+	cloned := make([]Scmer, len(items))
+	for i, item := range items {
+		cloned[i] = CloneOptimizerExpression(item)
+	}
+	return NewSlice(cloned)
+}
+
+func descriptorKey(td *TypeDescriptor, key string) *TypeDescriptor {
+	if td == nil || td.Keys == nil {
+		return &TypeDescriptor{Kind: "any", Length: UnknownLength}
+	}
+	return copyTypeDescriptor(td.Keys[key])
+}
+
+func optimizerExpressionDescriptor(expr Scmer, env *Env, ome *optimizerMetainfo) *TypeDescriptor {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsNthLocalVar() {
+		return ome.numberedTypes[expr.NthLocalVar()]
+	}
+	if sym, ok := scmerSymbol(expr); ok {
+		if td := ome.variableTypes[sym]; td != nil {
+			return td
+		}
+		if ti, exists := env.optimizerProcHint(sym); exists {
+			return ti.ToTypeDescriptor()
+		}
+		return nil
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	callName := ""
+	var returnType *TypeDescriptor
+	if decl := DeclarationForValue(items[0]); decl != nil {
+		callName = decl.Name
+		if decl.Type != nil && decl.Type.Return != nil {
+			returnType = decl.Type.Return
+		}
+	} else if sym, ok := scmerSymbol(items[0]); ok {
+		callName = string(sym)
+		if ti, exists := env.optimizerProcHint(sym); exists {
+			return ti.ToTypeDescriptor()
+		}
+	}
+	if len(items) < 2 {
+		return returnType
+	}
+	key := ""
+	switch {
+	case callName == "car" && len(items) == 2:
+		key = "0"
+	case callName == "cadr" && len(items) == 2:
+		key = "1"
+	case callName == "nth" && len(items) == 3 && items[2].IsInt():
+		key = strconv.FormatInt(items[2].Int(), 10)
+	case callName == "get_assoc" && len(items) == 3 && items[2].IsString():
+		key = String(items[2])
+	}
+	if key == "" {
+		return returnType
+	}
+	base := optimizerExpressionDescriptor(items[1], env, ome)
+	if base == nil || base.Keys == nil {
+		return returnType
+	}
+	if projected := base.Keys[key]; projected != nil {
+		return projected
+	}
+	return returnType
 }
 
 // IncrLoopDepth increments the loop nesting depth. Called by scan optimizer hooks
@@ -291,10 +601,37 @@ func (ome *optimizerMetainfo) IncrLoopDepth() { ome.loopDepth++ }
 // DecrLoopDepth decrements the loop nesting depth.
 func (ome *optimizerMetainfo) DecrLoopDepth() { ome.loopDepth-- }
 
+func (ome *optimizerMetainfo) applyPendingCallbackParams(params Scmer, child *optimizerMetainfo) {
+	list, ok := scmerSlice(params)
+	if !ok {
+		list = []Scmer{params}
+	}
+	for i, param := range list {
+		sym, ok := scmerSymbol(param)
+		if !ok {
+			continue
+		}
+		var td *TypeDescriptor
+		if i < len(ome.pendingCallbackParams) {
+			td = callbackParameterType(ome.pendingCallbackParams[i])
+		}
+		if td == nil {
+			continue
+		}
+		child.variableTypes[sym] = td
+		if replacement, ok := child.variableReplacement[sym]; ok && replacement.IsNthLocalVar() {
+			child.numberedTypes[replacement.NthLocalVar()] = td
+		}
+	}
+	ome.pendingCallbackParams = nil
+}
+
 // LoopDepth returns the current loop nesting depth.
 func (ome *optimizerMetainfo) LoopDepth() int { return ome.loopDepth }
 func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
+	result.variableTypes = make(map[Symbol]*TypeDescriptor)
+	result.numberedTypes = make(map[NthLocalVar]*TypeDescriptor)
 	for k, v := range ome.variableReplacement {
 		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
 	}
@@ -313,6 +650,8 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 // being wrapped in (outer ...) since they access the same VarsNumbered array.
 func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
+	result.variableTypes = ome.variableTypes
+	result.numberedTypes = ome.numberedTypes
 	for k, v := range ome.variableReplacement {
 		if v.IsNthLocalVar() {
 			result.variableReplacement[k] = v
@@ -321,8 +660,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 		}
 	}
 	result.setBlacklist = ome.setBlacklist
-	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
-	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
+	result.nextSlot = ome.nextSlot // shared scope shares VarsNumbered
 	result.loopDepth = ome.loopDepth
 	result.lambdaDepth = ome.lambdaDepth
 	result.beginDepth = ome.beginDepth
@@ -518,6 +856,41 @@ func assignedSymbolsInLambda(body Scmer) map[Symbol]bool {
 	return assigned
 }
 
+func requiredNumberedSlots(expr Scmer) int {
+	maxSlot := -1
+	var visit func(Scmer)
+	visit = func(current Scmer) {
+		if stripped, ok := scmerStripSourceInfo(current); ok {
+			current = stripped
+		}
+		if current.IsNthLocalVar() {
+			if slot := int(current.NthLocalVar()); slot > maxSlot {
+				maxSlot = slot
+			}
+			return
+		}
+		items, ok := scmerSlice(current)
+		if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+			return
+		}
+		if scmerIsSymbol(items[0], "lambda") {
+			return
+		}
+		if (scmerIsSymbol(items[0], "!list") || scmerIsSymbol(items[0], "!!list")) &&
+			len(items) >= 3 && items[1].IsNthLocalVar() && items[2].IsInt() {
+			lastSlot := int(items[1].NthLocalVar()) + int(items[2].Int()) - 1
+			if lastSlot > maxSlot {
+				maxSlot = lastSlot
+			}
+		}
+		for _, item := range items {
+			visit(item)
+		}
+	}
+	visit(expr)
+	return maxSlot + 1
+}
+
 func scmerStripSourceInfo(v Scmer) (Scmer, bool) {
 	if v.IsSourceInfo() {
 		si := v.SourceInfo()
@@ -580,6 +953,11 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 	if val.ptr == nil && val.aux == 0 {
 		return NewNil(), tiConstTransfer
 	}
+	if val.IsNthLocalVar() {
+		if td := ome.numberedTypes[val.NthLocalVar()]; td != nil {
+			return val, TypeInfoFromTD(td)
+		}
+	}
 
 	switch val.GetTag() {
 	case tagNil:
@@ -594,16 +972,30 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		return val, TypeInfo{kind: KindString, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagSymbol:
 		sym := mustSymbol(val)
+		varType := ome.variableTypes[sym]
 		if replacement, ok := ome.variableReplacement[sym]; ok {
 			if replacement.IsSymbol() && mustSymbol(replacement) == sym {
+				if varType != nil {
+					return val, TypeInfoFromTD(varType)
+				}
 				return val, tiTransfer
 			}
 			if slice, ok := scmerSlice(replacement); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
 				if s2, ok := scmerSymbol(slice[1]); ok && s2 == sym {
+					if varType != nil {
+						return val, TypeInfoFromTD(varType)
+					}
 					return val, tiTransfer
 				}
 			}
-			return OptimizeEx(replacement, env, ome, useResult)
+			result, ti := OptimizeEx(replacement, env, ome, useResult)
+			if varType != nil {
+				ti = TypeInfoFromTD(varType)
+			}
+			return result, ti
+		}
+		if varType != nil {
+			return val, TypeInfoFromTD(varType)
 		}
 		return val, tiTransfer
 	case tagSlice:
@@ -1061,9 +1453,17 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			for sym := range assigned {
 				delete(ome2.variableReplacement, sym)
 			}
-			numVars := int(ToInt(v[3]))
+			declaredNumVars := int(ToInt(v[3]))
+			numVars := declaredNumVars
 			slotIndex := numVars
+			if required := requiredNumberedSlots(v[2]); required > slotIndex {
+				slotIndex = required
+			}
 			ome2.nextSlot = &slotIndex
+			if ome.pendingCallbackReturn != nil {
+				v[2] = rewriteNoEscapeListReturn(v[2], ome.pendingCallbackReturn, &slotIndex)
+				ome.pendingCallbackReturn = nil
+			}
 			if list, ok := scmerSlice(params); ok {
 				for i, param := range list {
 					if i >= numVars {
@@ -1076,9 +1476,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			} else if sym, ok := scmerSymbol(params); ok && !assigned[sym] {
 				ome2.variableReplacement[sym] = NewNthLocalVar(0)
 			}
+			ome.applyPendingCallbackParams(params, &ome2)
 			var bodyType TypeInfo
 			v[2], bodyType = OptimizeEx(v[2], env, &ome2, true)
-			if slotIndex != numVars {
+			if slotIndex != declaredNumVars {
 				v[3] = NewInt(int64(slotIndex))
 			}
 			return NewSlice(v), bodyType.WithoutConst()
@@ -1106,22 +1507,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			slotIndex++
 		}
 		ome2.nextSlot = &slotIndex // allow !list/!!list to allocate extra slots
-		// Propagate callback parameter ownership from pendingCallbackOwned
-		if ome.pendingCallbackOwned != nil {
-			if ome2.ownedVars == nil {
-				ome2.ownedVars = make(map[Symbol]bool)
-			}
-			if list, ok := scmerSlice(params); ok {
-				for pi, param := range list {
-					if pi < len(ome.pendingCallbackOwned) && ome.pendingCallbackOwned[pi] {
-						if sym, ok := scmerSymbol(param); ok {
-							ome2.ownedVars[sym] = true
-						}
-					}
-				}
-			}
-			ome.pendingCallbackOwned = nil // consumed
+		if ome.pendingCallbackReturn != nil {
+			v[2] = rewriteNoEscapeListReturn(v[2], ome.pendingCallbackReturn, &slotIndex)
+			ome.pendingCallbackReturn = nil
 		}
+		ome.applyPendingCallbackParams(params, &ome2)
 		var bodyType TypeInfo
 		v[2], bodyType = OptimizeEx(v[2], env, &ome2, true)
 		// Set NumVars (may have grown due to !list allocations)
@@ -1171,18 +1561,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		value, valueTransfer, _ := optimizeExCompat(v[1], env, ome, true)
 		v[1] = value
 		transferOwnership = valueTransfer
-		// NthLocalVar doesn't carry transfer info — check ownedVars
-		if !valueTransfer && value.IsNthLocalVar() && ome.ownedVars != nil {
-			for sym, owned := range ome.ownedVars {
-				if owned {
-					if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == value.NthLocalVar() {
-						valueTransfer = true
-						transferOwnership = true
-						break
-					}
-				}
-			}
-		}
 		if headSym == Symbol("match") && valueTransfer {
 			v[0] = NewSymbol("match_mut")
 		}
@@ -1219,9 +1597,104 @@ func (oc *OptimizerContext) OptimizeSub(val Scmer, useResult bool) (Scmer, *Type
 	return result, ti.ToTypeDescriptor()
 }
 
-// SetCallbackOwned sets pendingCallbackOwned for the next lambda argument.
-func (oc *OptimizerContext) SetCallbackOwned(owned []bool) {
-	oc.Ome.pendingCallbackOwned = owned
+// AnalyzeCallback computes a callback result type without consuming pending
+// metadata or otherwise mutating the optimizer context used for emitted code.
+func (oc *OptimizerContext) AnalyzeCallback(callback Scmer, params []*TypeDescriptor) *TypeDescriptor {
+	analysisOme := newOptimizerMetainfo()
+	analysisOme.loopDepth = oc.Ome.loopDepth
+	analysis := OptimizerContext{Env: oc.Env, Ome: &analysisOme}
+	analysis.SetCallbackParamTypes(params)
+	_, result := analysis.OptimizeSub(CloneOptimizerExpression(callback), true)
+	return result
+}
+
+// OptimizeReducerCallback derives accumulator ownership from the neutral value
+// and the reducer's actual return flow. The descriptor join is monotonic: facts
+// are retained only while they hold for the initial value and every iteration.
+func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator *TypeDescriptor, values ...*TypeDescriptor) (Scmer, *TypeDescriptor) {
+	accumulator = normalizeOptimizerType(accumulator)
+	params := make([]*TypeDescriptor, len(values)+1)
+	copy(params[1:], values)
+	if !accumulator.Transfer {
+		params[0] = accumulator
+		oc.SetCallbackParamTypes(params)
+		optimized, result := oc.OptimizeSub(callback, true)
+		return optimized, normalizeOptimizerType(result)
+	}
+	loopType := accumulator
+	for {
+		params[0] = loopType
+		result := normalizeOptimizerType(oc.AnalyzeCallback(callback, params))
+		next, changed := mergeOptimizerTypes(loopType, result)
+		if !changed {
+			params[0] = next
+			oc.SetCallbackParamTypes(params)
+			optimized, finalResult := oc.OptimizeSub(callback, true)
+			return optimized, normalizeOptimizerType(finalResult)
+		}
+		loopType = next
+	}
+}
+
+func normalizeOptimizerType(td *TypeDescriptor) *TypeDescriptor {
+	if td == nil {
+		return &TypeDescriptor{Kind: "any", Length: UnknownLength}
+	}
+	return td
+}
+
+func mergeOptimizerTypes(current, result *TypeDescriptor) (*TypeDescriptor, bool) {
+	current = normalizeOptimizerType(current)
+	result = normalizeOptimizerType(result)
+	merged := &TypeDescriptor{
+		Kind:     current.Kind,
+		NoEscape: current.NoEscape && result.NoEscape,
+		Transfer: current.Transfer && result.Transfer,
+		Const:    current.Const && result.Const,
+		Length:   current.Length,
+	}
+	changed := merged.NoEscape != current.NoEscape || merged.Transfer != current.Transfer || merged.Const != current.Const
+	if merged.Kind != result.Kind {
+		merged.Kind = "any"
+		changed = merged.Kind != current.Kind || changed
+	}
+	if merged.Length != result.Length {
+		merged.Length = UnknownLength
+		changed = merged.Length != current.Length || changed
+	}
+	if len(current.Keys) > 0 && len(result.Keys) > 0 {
+		merged.Keys = make(map[string]*TypeDescriptor)
+		for key, currentKey := range current.Keys {
+			if resultKey := result.Keys[key]; resultKey != nil {
+				var keyChanged bool
+				merged.Keys[key], keyChanged = mergeOptimizerTypes(currentKey, resultKey)
+				changed = changed || keyChanged
+			}
+		}
+	}
+	if len(merged.Keys) != len(current.Keys) {
+		changed = true
+	}
+	if current.Element != nil && result.Element != nil {
+		var elementChanged bool
+		merged.Element, elementChanged = mergeOptimizerTypes(current.Element, result.Element)
+		changed = changed || elementChanged
+	} else if current.Element != nil {
+		changed = true
+	}
+	return merged, changed
+}
+
+// SetCallbackParamTypes supplies structural callback parameter types. Nested
+// Keys preserve ownership independently for projected list/association values.
+func (oc *OptimizerContext) SetCallbackParamTypes(types []*TypeDescriptor) {
+	oc.Ome.pendingCallbackParams = types
+}
+
+// SetCallbackReturnFlow provides structured escape information for the next
+// callback result, including independently tracked list/association entries.
+func (oc *OptimizerContext) SetCallbackReturnFlow(flow *TypeDescriptor) {
+	oc.Ome.pendingCallbackReturn = flow
 }
 
 // ApplyDefaultOptimization runs the standard optimization pipeline on a call
@@ -1245,20 +1718,25 @@ func FirstParameterMutable(mutName string) func(v []Scmer, oc *OptimizerContext,
 func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, mutName string) (Scmer, *TypeDescriptor) {
 	env := oc.Env
 	ome := oc.Ome
-	_, headOk := scmerSymbol(v[0])
+	head, _ := scmerSymbol(v[0])
 
 	allConstArgs := true
 	var transferOwnership bool
 	var firstArgType TypeInfo
+	argTypes := make([]TypeInfo, len(v))
 
-	// Look up declaration for callback ownership propagation
-	var callDecl *Declaration
-	if headOk {
-		callDecl = DeclarationForValue(v[0])
+	// Resolve native and symbolic call heads through the same declaration. Code
+	// generated by Scheme commonly contains either representation.
+	callDecl := DeclarationForValue(v[0])
+	callName := string(head)
+	if callDecl != nil {
+		callName = callDecl.Name
 	}
 
 	// Optimize all args with callback ownership propagation
 	for i := 0; i < len(v); i++ {
+		ome.pendingCallbackParams = nil
+		ome.pendingCallbackReturn = nil
 		if i > 0 && callDecl != nil {
 			paramIdx := i - 1
 			if callDecl.Type == nil || len(callDecl.Type.Params) == 0 {
@@ -1268,22 +1746,16 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			}
 			if paramIdx >= 0 && callDecl.Type != nil && paramIdx < len(callDecl.Type.Params) {
 				if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
-					owned := make([]bool, len(ti.Params))
-					hasAny := false
-					for pi, pt := range ti.Params {
-						if pt != nil && pt.Transfer {
-							owned[pi] = true
-							hasAny = true
-						}
-					}
-					if hasAny {
-						ome.pendingCallbackOwned = owned
-					}
+					ome.pendingCallbackParams = ti.Params
+					ome.pendingCallbackReturn = ti.Return
 				}
 			}
 		}
 		var ti TypeInfo
 		v[i], ti = OptimizeEx(v[i], env, ome, true)
+		ome.pendingCallbackParams = nil
+		ome.pendingCallbackReturn = nil
+		argTypes[i] = ti
 		if i == 1 {
 			firstArgType = ti
 		}
@@ -1303,28 +1775,12 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if mutName != "" {
 		firstArgFresh := false
 		if len(v) >= 2 {
-			firstArgFresh = firstArgType.Transfer() && !firstArgType.Const() && (firstArgType.Kind() == KindList || firstArgType.Kind() == KindAssoc)
 			arg1 := v[1]
 			if si, ok := arg1.Any().(SourceInfo); ok {
 				arg1 = si.value
 			}
-			if !firstArgFresh {
-				if inner, ok := scmerSlice(arg1); ok && len(inner) > 0 {
-					if d := DeclarationForValue(inner[0]); d != nil {
-						if d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
-							firstArgFresh = true
-						}
-					}
-				} else if arg1.IsNthLocalVar() {
-					for sym, owned := range ome.ownedVars {
-						if owned {
-							if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == arg1.NthLocalVar() {
-								firstArgFresh = true
-								break
-							}
-						}
-					}
-				}
+			if td := optimizerExpressionDescriptor(arg1, env, ome); td != nil {
+				firstArgFresh = td.Transfer && !td.Const
 			}
 		}
 		if firstArgFresh && len(v) >= 2 {
@@ -1349,8 +1805,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	// !list rewrite: when an argument is (list expr...) passed to a function
 	// whose parameter is annotated NoEscape:true, replace with (!list start count expr...)
 	// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
-	if headOk && ome.nextSlot != nil {
-		if decl := DeclarationForValue(v[0]); decl != nil && decl.Type != nil && len(decl.Type.Params) > 0 {
+	if !allConstArgs && ome.nextSlot != nil {
+		if decl := callDecl; decl != nil && decl.Type != nil && len(decl.Type.Params) > 0 {
 			for i := 1; i < len(v); i++ {
 				paramIdx := i - 1
 				if paramIdx >= len(decl.Type.Params) {
@@ -1364,7 +1820,11 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 					continue // unknown or escaping parameter
 				}
 				// Check if this argument is a (list ...) call
-				if inner, ok := scmerSlice(v[i]); ok && len(inner) >= 1 && scmerIsSymbol(inner[0], "list") {
+				if inner, ok := scmerSlice(v[i]); ok && len(inner) >= 1 {
+					innerDecl := DeclarationForValue(inner[0])
+					if !scmerIsSymbol(inner[0], "list") && (innerDecl == nil || innerDecl.Name != "list") {
+						continue
+					}
 					count := len(inner) - 1
 					if count == 0 {
 						continue // empty list, no benefit
@@ -1391,7 +1851,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	var procReturn TypeInfo
 	hasProcReturn := false
 	if d := DeclarationForValue(v[0]); d != nil {
-		if d.IsFoldable() && allConstArgs && d.Fn != nil {
+		argCount := len(v) - 1
+		if d.IsFoldable() && allConstArgs && d.Fn != nil && argCount >= d.MinParams() && argCount <= d.MaxParams() {
 			for i := range v {
 				v[i] = unwrapConstListFromCode(v[i])
 			}
@@ -1427,6 +1888,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			td.Params = procReturn.Extra.Params
 			td.Return = procReturn.Extra.Return
 			td.HasSideEffects = procReturn.Extra.HasSideEffects
+			td.Keys = procReturn.Extra.Keys
+			td.Element = procReturn.Extra.Element
 		}
 	} else if retTD != nil {
 		td.Kind = retTD.Kind
@@ -1434,8 +1897,41 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		td.Params = retTD.Params
 		td.Return = retTD.Return
 		td.HasSideEffects = retTD.HasSideEffects
+		td.Keys = retTD.Keys
+		td.Element = retTD.Element
 	} else {
 		td.Length = UnknownLength
+	}
+	if callName == "list" {
+		td.Kind = "list"
+		td.Transfer = true
+		td.Length = len(v) - 1
+		td.Keys = make(map[string]*TypeDescriptor, len(v)-1)
+		for i := 1; i < len(v); i++ {
+			td.Keys[strconv.Itoa(i-1)] = argTypes[i].ToTypeDescriptor()
+		}
+	} else if callName == "!list" && len(v) >= 3 {
+		td.Keys = make(map[string]*TypeDescriptor, len(v)-3)
+		for i := 3; i < len(v); i++ {
+			td.Keys[strconv.Itoa(i-3)] = argTypes[i].ToTypeDescriptor()
+		}
+	} else if len(v) >= 2 {
+		key := ""
+		switch {
+		case callName == "car" && len(v) == 2:
+			key = "0"
+		case callName == "cadr" && len(v) == 2:
+			key = "1"
+		case callName == "nth" && len(v) == 3 && v[2].IsInt():
+			key = strconv.FormatInt(v[2].Int(), 10)
+		case callName == "get_assoc" && len(v) == 3 && v[2].IsString():
+			key = String(v[2])
+		}
+		if key != "" {
+			if projected := descriptorKey(firstArgType.ToTypeDescriptor(), key); projected != nil {
+				td = projected
+			}
+		}
 	}
 	return NewSlice(v), td
 }

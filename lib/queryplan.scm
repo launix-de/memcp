@@ -3965,6 +3965,44 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(planner_table_row_count (source_schema src) (source_relation src))
 		nil)))
 
+(define planner_column_distinct_estimate (lambda (src column)
+	(if (or (not (source_is_base_table? src)) (nil? column))
+		nil
+		(try
+			(lambda ()
+				(reduce (get_schema (source_schema src) (source_relation src)) (lambda (found row)
+					(if (not (nil? found))
+						found
+						(if (equal?? (row "Field") column) (row "DistinctEstimate") nil)))
+					nil))
+			(lambda (_e) nil)))))
+
+(define planner_group_distinct_estimate (lambda (src keys row_count)
+	(reduce keys (lambda (estimate key)
+		(if (nil? estimate)
+			nil
+			(begin
+				(define column (direct_column_name_for_alias src key))
+				(define distinct (planner_column_distinct_estimate src column))
+				(if (nil? distinct) nil (min row_count (* estimate distinct))))))
+		1)))
+
+(define direct_base_group_plan_preferred? (lambda (stage)
+	(begin
+		(define src (gs_input stage))
+		(define keys (gs_keys stage))
+		(define rows (planner_source_row_count src))
+		(define distinct (if (or (nil? rows) (empty_list? keys))
+			nil
+			(planner_group_distinct_estimate src keys rows)))
+		(and (source_is_base_table? src)
+			(and (empty_list? (gs_order stage))
+				(and (empty_list? (group_stage_session_domain_keys stage))
+					(and (not (nil? rows))
+						(and (>= rows 1024)
+							(and (not (nil? distinct))
+								(>= (* distinct 4) rows))))))))))
+
 (define source_join_present? (lambda (src)
 	(begin
 		(define join_expr (source_join_expr src))
@@ -6221,7 +6259,7 @@ dependency preparation does not emit free outer-row symbols. */
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
 				(list (quote optimize) (lower_column_expr_for_alias src condition)))
-			(quoted_runtime_list '())
+			(list (quote list))
 			(list (quote lambda) '() 1)
 			(quote +)
 			0
@@ -6259,7 +6297,7 @@ dependency preparation does not emit free outer-row symbols. */
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
 				(list (quote optimize) lowered_condition))
-			(quoted_runtime_list '())
+			(list (quote list))
 			(list (quote lambda) '() 1)
 			(quote +)
 			0
@@ -6875,26 +6913,6 @@ is still available and remains an ordinary scalar expression through untangle. *
 									(list (quote equal??) (nth params i) (nth (nth pairs i) 0))))
 									true))))))))))
 
-(define assoc_keys_as_dataset_rows (lambda (dict width)
-	(map (extract_assoc dict (lambda (k v) k))
-		(lambda (k)
-			(if (list? k)
-				k
-				(if (<= width 1)
-					(list k)
-					(map (produceN width) (lambda (_) nil))))))))
-
-(define assoc_keys_values_as_dataset_rows (lambda (dict width)
-	(map (extract_assoc dict (lambda (k v)
-		(merge (list
-			(if (list? k)
-				k
-				(if (<= width 1)
-					(list k)
-					(map (produceN width) (lambda (_) nil))))
-			v))))
-		(lambda (row) row))))
-
 (define runtime_cons_list_expr (lambda (exprs)
 	(if (empty_list? exprs)
 		(quoted_runtime_list '())
@@ -7017,6 +7035,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 								(and (not (nil? parts))
 									(equal? (scalar_order_signature parts) signature)))))
 						true)))))))
+
+(define non_scalar_order_aggregates (lambda (ags)
+	(filter ags (lambda (ag) (nil? (scalar_order_aggregate_parts ag))))))
 
 (define group_aggregate_read_expr (lambda (grouptbl ag)
 	(begin
@@ -7186,38 +7207,6 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(list (quote lambda) '() true)
 		true)))
 
-(define build_group_collect_plan (lambda (schema tbl alias grouptbl keys key_names condition)
-	(if (equal? keys '(1))
-		(build_group_constant_key_insert_plan schema grouptbl)
-		(begin
-			(define src (list alias schema tbl false nil))
-			(define keycols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-			(define condition_cols (extract_columns_for_alias src condition))
-			(define filtercols (merge_unique (list keycols condition_cols)))
-			(list (quote scan)
-				'(session "__memcp_tx")
-				(list (quote table) schema tbl)
-				(cons (quote list) filtercols)
-				(list (quote lambda)
-					(map filtercols (lambda (col) (symbol (concat alias "." col))))
-					(list (quote optimize) (lower_column_expr_for_alias src condition)))
-				(cons (quote list) keycols)
-				(list (quote lambda)
-					(map keycols (lambda (col) (symbol (concat alias "." col))))
-					(cons (quote list) (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
-				(list (quote lambda) (list (quote acc) (quote rowvals))
-					(list (quote set_assoc) (quote acc) (quote rowvals) true))
-				(quoted_runtime_list '())
-				(list (quote lambda) (list (quote acc) (quote sharddict))
-					(list (quote insert)
-						(list (quote table) schema grouptbl)
-						(cons (quote list) key_names)
-						(list (quote assoc_keys_as_dataset_rows) (quote sharddict) (count keys))
-						(quoted_runtime_list '())
-						(list (quote lambda) '() true)
-						true))
-				false)))))
-
 (define build_query_group_collect_plan (lambda (input grouptbl keys key_names)
 	(begin
 		(define schema (qb_schema input))
@@ -7234,16 +7223,10 @@ is still available and remains an ordinary scalar expression through untangle. *
 				(map key_names (lambda (col) (symbol col)))
 				(runtime_cons_list_expr (map key_names (lambda (col) (symbol col)))))
 			(list (quote lambda) (list (quote acc) (quote rowvals))
-				(list (quote set_assoc) (quote acc) (quote rowvals) true))
+				(list (quote set_assoc) (quote acc) (quote rowvals) (list (quote list))))
 			(quoted_runtime_list '())
 			(list (quote lambda) (list (quote acc) (quote sharddict))
-				(list (quote insert)
-					(list (quote table) schema grouptbl)
-					(cons (quote list) key_names)
-					(list (quote assoc_keys_as_dataset_rows) (quote sharddict) (count keys))
-					(quoted_runtime_list '())
-					(list (quote lambda) '() true)
-					true))
+				(group_insert_batches_expr schema grouptbl key_names '() (quote sharddict)))
 			false))))
 
 (define build_group_ordered_scalar_column (lambda (schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
@@ -7581,7 +7564,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
 		(define merge_groups (list (quote lambda) (list (quote acc) (quote grouped))
-			(list (quote merge_assoc_mut) (quote acc) (quote grouped) merge_payload)))
+			(list (quote merge_assoc) (quote acc) (quote grouped) merge_payload)))
 		(list (quote scan)
 			'(session "__memcp_tx")
 			table_expr
@@ -7592,16 +7575,55 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(cons (quote list) mapcols)
 			(list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(runtime_cons_list_expr (list key_expr payload_expr)))
+				(list (quote list) key_expr payload_expr))
 			(list (quote lambda) (list (quote acc) (quote rowvals))
-				(list (quote set_assoc_mut)
+				(list (quote set_assoc)
 					(quote acc)
 					(list (quote car) (quote rowvals))
 					(list (quote cadr) (quote rowvals))
 					merge_payload))
-			(quoted_runtime_list '())
+			(list (quote list))
 			merge_groups
 			false))))
+
+(define base_group_membership_parts (lambda (src condition)
+	(begin
+		(define membership (driver_membership_for_source src condition))
+		(define table_expr (if (nil? membership)
+			nil
+			(recset_project_join_expr_for_membership src membership)))
+		(list table_expr
+			(strip_driver_membership_for_source src condition (if (nil? table_expr) nil membership))))))
+
+(define build_base_group_into_plan (lambda (schema tbl alias src grouptbl keys key_names condition ags)
+	(begin
+		(define membership_parts (base_group_membership_parts src condition))
+		(define membership_expr (car membership_parts))
+		(define effective_condition (cadr membership_parts))
+		(define membership_var (symbol "__group_membership_recset"))
+		(define source_expr (if (nil? membership_expr) (source_table_expr src) membership_var))
+		(define grouped_scan (build_base_group_scan_assoc_plan schema tbl alias source_expr keys effective_condition ags))
+		(define grouped_expr (if (equal? keys '(1))
+			(list (quote if)
+				(list (quote equal?) (list (quote count) (quote grouped)) 0)
+				(list (quote set_assoc)
+					(quote grouped)
+					(runtime_cons_list_expr keys)
+					(runtime_cons_list_expr (map ags (lambda (ag) (nth ag 2)))))
+				(quote grouped))
+			(quote grouped)))
+		(define plan (list
+			(list (quote lambda) (list (quote grouped))
+				(list
+					(list (quote lambda) (list (quote grouped))
+						(group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name)))
+					grouped_expr))
+			grouped_scan))
+		(if (nil? membership_expr)
+			plan
+			(list
+				(list (quote lambda) (list membership_var) plan)
+				membership_expr)))))
 
 (define direct_group_rowassoc_from_params_expr (lambda (key_names ags)
 	(begin
@@ -7614,6 +7636,14 @@ is still available and remains an ordinary scalar expression through untangle. *
 
 (define direct_group_map_params (lambda (key_names ags)
 	(map (merge (list key_names (map ags aggregate_col_name))) symbol)))
+
+(define direct_group_assoc_from_key_payload_expr (lambda (key_names ags)
+	(begin
+		(define key_pairs (merge (map (produceN (count key_names)) (lambda (i)
+			(list (nth key_names i) (list (quote nth) (quote __group_key) i))))))
+		(define agg_pairs (merge (map (produceN (count ags)) (lambda (i)
+			(list (aggregate_col_name (nth ags i)) (list (quote nth) (quote __group_payload) i))))))
+		(runtime_cons_list_expr (merge (list key_pairs agg_pairs))))))
 
 (define lower_direct_base_group_stage (lambda (stage fields order_items offset_value limit_value)
 	(begin
@@ -7628,7 +7658,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define offset_expr (coalesceNil offset_value 0))
 		(define limit_expr (coalesceNil limit_value -1))
 		(define normalized_order (coalesceNil order_items '()))
-		(define raw_rows_expr (list (quote assoc_keys_values_as_dataset_rows) (quote grouped) (count key_names)))
+		(if (not (empty_list? normalized_order))
+			(neumann_fail "build_queryplan" "direct GROUP BY requires unordered output")
+			true)
 		(define candidate_membership (driver_membership_for_source src condition))
 		(define membership_stage (if (nil? candidate_membership) nil (nth candidate_membership 0)))
 		(define membership (if (and (list? membership_stage)
@@ -7648,50 +7680,29 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(source_table_expr src)
 			membership_var))
 		(define grouped_scan (build_base_group_scan_assoc_plan schema tbl alias table_expr keys effective_condition ags))
+		(define rowassoc_expr (direct_group_assoc_from_key_payload_expr key_names ags))
+		(define having_expr (replace_direct_group_expr alias keys key_names ags (coalesceNil (gs_having stage) true)))
+		(define emit_expr (list (quote resultrow)
+			(direct_group_result_assoc_expr alias keys key_names ags fields)))
+		(define group_reduce (list (quote lambda)
+			(list (quote __accepted) (quote __group_key) (quote __group_payload))
+			(list (quote begin)
+				(list (quote define) (quote rowassoc) rowassoc_expr)
+				(list (quote if) having_expr
+					(list (quote if) (list (quote <) (quote __accepted) offset_expr)
+						(list (quote +) (quote __accepted) 1)
+						(list (quote if)
+							(list (quote or)
+								(list (quote equal?) limit_expr -1)
+								(list (quote <) (list (quote -) (quote __accepted) offset_expr) limit_expr))
+							(list (quote begin) emit_expr (list (quote +) (quote __accepted) 1))
+							(quote __accepted)))
+					(quote __accepted)))))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(if (empty_list? normalized_order)
-					(list
-						(list (quote lambda) (list (quote rows))
-							(list (quote map)
-								(list (quote slice)
-									(quote rows)
-									offset_expr
-									(list (quote if)
-										(list (quote equal?) limit_expr -1)
-										(list (quote count) (quote rows))
-										(list (quote min) (list (quote count) (quote rows)) (list (quote +) offset_expr limit_expr))))
-								(list (quote lambda) (list (quote row))
-									(list
-										(list (quote lambda) (list (quote rowassoc))
-											(list (quote resultrow)
-												(direct_group_result_assoc_expr alias keys key_names ags fields)))
-										(direct_group_assoc_expr key_names ags)))))
-						raw_rows_expr)
-					(list (quote scan_order)
-						'(session "__memcp_tx")
-						(list (quote map)
-							raw_rows_expr
-							(list (quote lambda) (list (quote row))
-								(direct_group_assoc_expr key_names ags)))
-						(quoted_runtime_list '())
-						(list (quote lambda) '() true)
-						(cons (quote list) (direct_group_order_columns alias keys key_names ags normalized_order))
-						(cons (quote list) (order_dirs normalized_order))
-						0
-						offset_expr
-						limit_expr
-						(cons (quote list) (merge (list key_names (map ags aggregate_col_name))))
-						(list (quote lambda)
-							(direct_group_map_params key_names ags)
-							(list
-								(list (quote lambda) (list (quote rowassoc))
-									(list (quote resultrow)
-										(direct_group_result_assoc_expr alias keys key_names ags fields)))
-								(direct_group_rowassoc_from_params_expr key_names ags)))
-						nil
-						nil
-						false)))
+				(list (quote begin)
+					(list (quote reduce_assoc) (quote grouped) group_reduce 0)
+					nil))
 			(if (nil? membership_table_expr)
 				grouped_scan
 				(list
@@ -7745,16 +7756,37 @@ is still available and remains an ordinary scalar expression through untangle. *
 			nil
 			false))))
 
+(define group_insert_batch_size 4096)
+
+(define group_insert_batches (lambda (target columns collision_cols collision_fn grouped)
+	((lambda (state)
+		(if (equal? (car state) 0)
+			0
+			(insert target columns (cadr state) collision_cols collision_fn true)))
+		(reduce_assoc grouped
+			(lambda (state key payload)
+				(begin
+					(define count (car state))
+					(define rows (cons (merge (list key payload)) (cadr state)))
+					(if (>= (+ count 1) group_insert_batch_size)
+						(begin
+							(insert target columns rows collision_cols collision_fn true)
+							(list 0 (list)))
+						(list (+ count 1) rows))))
+			(list 0 (list))))))
+
+(define group_insert_batches_expr (lambda (schema grouptbl key_names value_cols grouped_expr)
+	(list (quote group_insert_batches)
+		(list (quote table) schema grouptbl)
+		(cons (quote list) (merge (list key_names value_cols)))
+		(group_upsert_collision_cols value_cols)
+		(group_upsert_collision_lambda value_cols)
+		grouped_expr)))
+
 (define group_insert_finish_expr (lambda (schema grouptbl key_names value_cols)
 	(list (quote !begin)
 		(group_cleanup_missing_keys_plan schema grouptbl key_names)
-		(list (quote insert)
-			(list (quote table) schema grouptbl)
-			(cons (quote list) (merge (list key_names value_cols)))
-			(list (quote assoc_keys_values_as_dataset_rows) (quote grouped) (count key_names))
-			(group_upsert_collision_cols value_cols)
-			(group_upsert_collision_lambda value_cols)
-			true))))
+		(group_insert_batches_expr schema grouptbl key_names value_cols (quote grouped)))))
 
 (define build_query_group_aggregates_insert_plan_using (lambda (input grouptbl keys key_names ags output_ags)
 	(begin
@@ -9379,11 +9411,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 						nil)
 					(list (quote touch_keytable) (list (quote table) schema grouptbl)))
 				(list (group_stage_session_binding_missing_expr stage schema grouptbl keys key_names))))))
-		(define collect_plan (if query_input_carrier
+		(define collect_plan (if (not query_input_carrier)
+			nil
 			(if (union_block? src)
 				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
-				(build_query_group_collect_plan prepared_src grouptbl keys key_names))
-			(build_group_collect_plan schema tbl alias grouptbl keys key_names condition)))
+				(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
+		(define base_group_into_plan (if (or query_input_carrier scalar_order_base_stage)
+			nil
+			(build_base_group_into_plan schema tbl alias src grouptbl keys key_names condition
+				(non_scalar_order_aggregates ags))))
 		(define cleanup_plan (if (query_block? src)
 			nil
 			(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
@@ -9444,17 +9480,13 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 					(list (quote !begin)
 						nested_prepare_expr
 						(if initializer_owner
-							(if (nil? cleanup_plan)
+							(list (quote if) keytable_init
 								(list (quote !begin)
-									keytable_init
-									collect_plan)
-								(list (quote if) keytable_init
-									(list (quote !begin)
-										collect_plan
-										cleanup_plan)
-									nil))
-							nil)
-						aggregate_prepare_expr)))))))
+									aggregate_prepare_expr
+									base_group_into_plan
+									cleanup_plan)
+								aggregate_prepare_expr)
+							aggregate_prepare_expr))))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
 	(begin
@@ -10374,7 +10406,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(begin
 				(define group_stage (make_group_stage_for_block block src))
-				(if (direct_base_group_stage_supported? block group_stage)
+				(if (direct_base_group_plan_preferred? group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
 					(lower_group_stage group_stage)))
 			(begin
@@ -10685,6 +10717,8 @@ source remain residual so they observe the null-extended row. */
 		_ (list (quote list)))))
 
 (define join_sorted_rows_plan_with_mapper (lambda (rows_plan order_items offset_value limit_value mapper)
+	/* TODO(planner-scalability): delete this fallback. Unbounded joined rows must
+	flow through scan_order or a canonical physical temp relation. */
 	(begin
 		(define offset_expr (coalesceNil offset_value 0))
 		(define limit_expr (coalesceNil limit_value -1))
@@ -11101,6 +11135,342 @@ source remain residual so they observe the null-extended row. */
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
 		order_items offset_value limit_value allow_membership_carrier nil stages)))
 
+(define build_join_scan_sink (lambda (schema sources default_alias needed_exprs final_condition sink_expr stages)
+	(build_join_scan_pipeline_using_recipe
+		schema sources sources default_alias needed_exprs final_condition sink_expr
+		'() 0 -1 false nil stages)))
+
+/* ------------------------------------------------------------------------- */
+/* Canonical physical prejoin carriers                                       */
+
+(define prejoin_primary_key_columns (lambda (src)
+	(map (filter (get_schema (source_schema src) (source_relation src)) (lambda (col)
+		(equal?? (col "Key") "PRI"))) (lambda (col) (col "Field")))))
+
+(define prejoin_source_position (lambda (sources alias)
+	(reduce (produceN (count sources)) (lambda (found i)
+		(if (not (nil? found))
+			found
+			(if (equal?? (source_alias (nth sources i)) alias) i nil)))
+		nil)))
+
+(define prejoin_column_name (lambda (sources alias col)
+	(begin
+		(define pos (prejoin_source_position sources alias))
+		(if (nil? pos)
+			(neumann_fail "build_queryplan" (concat "prejoin source alias not found: " alias))
+			(concat "s" pos "_" (fnv_hash (string col)))))))
+
+(define prejoin_source_table_key (lambda (src)
+	(list (source_schema src) (source_relation src))))
+
+(define prejoin_sources_distinct? (lambda (sources)
+	(equal? (count sources)
+		(count (reduce sources (lambda (keys src)
+			(append_unique keys (serialize (prejoin_source_table_key src)))) '())))))
+
+(define prejoin_sources_supported? (lambda (sources)
+	(and (not (empty_list? sources))
+		(and (prejoin_sources_distinct? sources)
+			(reduce sources (lambda (supported src)
+				(and supported
+					(and (source_is_base_table? src)
+						(and (not (source_outer? src))
+							(not (empty_list? (prejoin_primary_key_columns src)))))))
+				true)))))
+
+(define physical_prejoin_supported? (lambda (block)
+	(and (query_block? block)
+		(and (empty_list? (qb_stages block))
+			(and (> (count (qb_sources block)) 1)
+				(and (prejoin_sources_supported? (qb_sources block))
+					(and (not (equal? (prejoin_join_condition (qb_sources block)) true))
+						(not (expr_contains_session_dependency? (source_join_exprs (qb_sources block)))))))))))
+
+(define prejoin_query_exprs (lambda (block fields)
+	(merge (list
+		(extract_assoc fields (lambda (_title expr) expr))
+		(list (coalesceNil (qb_where block) true))
+		(qb_group block)
+		(if (nil? (qb_having block)) '() (list (qb_having block)))
+		(order_exprs (qb_order block))
+		(source_join_exprs (qb_sources block))
+		(extract_assoc (qb_hidden block) (lambda (_title expr) expr))))))
+
+(define prejoin_columns_by_alias (lambda (block fields)
+	(begin
+		(define sources (qb_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+		(define referenced (reduce (prejoin_query_exprs block fields) (lambda (columns expr)
+			(collect_join_columns_acc sources default_alias nil expr columns)) '()))
+		(reduce sources (lambda (columns src)
+			(qassoc_set columns (source_alias src)
+				(merge_unique (list
+					(qassoc_get columns (source_alias src) '())
+					(prejoin_primary_key_columns src)))))
+			referenced))))
+
+(define prejoin_source_for_expr (lambda (sources default_alias tblvar tbl_ignorecase col col_ignorecase)
+	(if (nil? tblvar)
+		(source_for_unqualified_column sources default_alias col col_ignorecase)
+		(source_for_alias sources default_alias tblvar tbl_ignorecase))))
+
+(define prejoin_rewrite_expr (lambda (sources default_alias prejoin_alias expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(begin
+			(define src (prejoin_source_for_expr sources default_alias tblvar tbl_ignorecase col col_ignorecase))
+			(if (nil? src)
+				expr
+				(list (quote get_column) prejoin_alias false
+					(prejoin_column_name sources (source_alias src) (resolve_physical_column_name src col col_ignorecase)) false)))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(prejoin_rewrite_expr sources default_alias prejoin_alias
+			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(prejoin_rewrite_expr sources default_alias prejoin_alias item))))
+		_ expr)))
+
+(define prejoin_rewrite_fields (lambda (sources default_alias prejoin_alias fields)
+	(map_assoc fields (lambda (_title expr)
+		(prejoin_rewrite_expr sources default_alias prejoin_alias expr)))))
+
+(define prejoin_join_condition (lambda (sources)
+	(combine_where_terms (source_join_exprs sources) true)))
+
+(define prejoin_table_name (lambda (sources default_alias)
+	(begin
+		(define canonical_alias "__prejoin")
+		(define signature (list
+			"physical-prejoin-v2"
+			(map sources prejoin_source_table_key)
+			(prejoin_rewrite_expr sources default_alias canonical_alias (prejoin_join_condition sources))))
+		(concat ".prejoin:" (fnv_hash (serialize signature))))))
+
+(define prejoin_primary_key_exprs (lambda (sources)
+	(merge (map sources (lambda (src)
+		(map (prejoin_primary_key_columns src) (lambda (col)
+			(list (quote get_column) (source_alias src) false col false))))))))
+
+(define prejoin_primary_key_names (lambda (sources)
+	(merge (map sources (lambda (src)
+		(map (prejoin_primary_key_columns src) (lambda (col)
+			(prejoin_column_name sources (source_alias src) col))))))))
+
+(define prejoin_create_columns (lambda (sources)
+	(begin
+		(define key_names (prejoin_primary_key_names sources))
+		(cons (quote list)
+			(cons (list (quote list) "unique" "rows" (cons (quote list) key_names))
+				(map key_names (lambda (col)
+					(list (quote list) "column" col "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))))))
+
+(define prejoin_sources_without_join_conditions (lambda (sources)
+	(map sources (lambda (src) (source_with_join_expr src true)))))
+
+(define prejoin_insert_expr (lambda (schema table_name column_names values)
+	(list (quote insert)
+		(list (quote table) schema table_name)
+		(cons (quote list) column_names)
+		(list (quote list) (cons (quote list) values))
+		(quoted_runtime_list '())
+		(list (quote lambda) '() true)
+		true)))
+
+(define prejoin_initial_fill_plan (lambda (block table_name)
+	(begin
+		(define sources (qb_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+		(define key_exprs (prejoin_primary_key_exprs sources))
+		(define condition (prejoin_join_condition sources))
+		(define values (map key_exprs (lambda (expr)
+			(lower_column_expr_for_join sources default_alias expr))))
+		(build_join_scan_sink
+			(qb_schema block)
+			(prejoin_sources_without_join_conditions sources)
+			default_alias
+			(merge (list key_exprs (list condition)))
+			condition
+			(prejoin_insert_expr (qb_schema block) table_name (prejoin_primary_key_names sources) values)
+			'()))))
+
+(define prejoin_replace_trigger_expr (lambda (sources default_alias trigger_alias dict_symbol expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(begin
+			(define src (prejoin_source_for_expr sources default_alias tblvar tbl_ignorecase col col_ignorecase))
+			(if (nil? src)
+				expr
+				(begin
+					(define physical_col (resolve_physical_column_name src col col_ignorecase))
+					(if (equal?? (source_alias src) trigger_alias)
+						(list (quote get_assoc) dict_symbol physical_col)
+						(list (quote get_column) (source_alias src) false physical_col false)))))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(prejoin_replace_trigger_expr sources default_alias trigger_alias dict_symbol
+			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(prejoin_replace_trigger_expr sources default_alias trigger_alias dict_symbol item))))
+		_ expr)))
+
+(define prejoin_trigger_insert_plan (lambda (block table_name trigger_src dict_symbol)
+	(begin
+		(define sources (qb_sources block))
+		(define trigger_alias (source_alias trigger_src))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+		(define remaining (prejoin_sources_without_join_conditions
+			(filter sources (lambda (src) (not (equal?? (source_alias src) trigger_alias))))))
+		(define remaining_default (source_alias (car remaining)))
+		(define condition (prejoin_replace_trigger_expr sources default_alias trigger_alias dict_symbol
+			(prejoin_join_condition sources)))
+		(define key_exprs (map (prejoin_primary_key_exprs sources) (lambda (expr)
+			(prejoin_replace_trigger_expr sources default_alias trigger_alias dict_symbol expr))))
+		(define values (map key_exprs (lambda (expr)
+			(lower_column_expr_for_join remaining remaining_default expr))))
+		(build_join_scan_sink
+			(qb_schema block)
+			remaining
+			remaining_default
+			(merge (list key_exprs (list condition)))
+			condition
+			(prejoin_insert_expr (qb_schema block) table_name (prejoin_primary_key_names sources) values)
+			'()))))
+
+(define prejoin_trigger_delete_plan (lambda (block table_name trigger_src dict_symbol)
+	(begin
+		(define sources (qb_sources block))
+		(define alias (source_alias trigger_src))
+		(define key_cols (prejoin_primary_key_columns trigger_src))
+		(define cache_cols (map key_cols (lambda (col) (prejoin_column_name sources alias col))))
+		(define params (map cache_cols symbol))
+		(define terms (map (produceN (count key_cols)) (lambda (i)
+			(list (quote equal?) (nth params i) (list (quote get_assoc) dict_symbol (nth key_cols i))))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(list (quote table) (qb_schema block) table_name)
+			(cons (quote list) cache_cols)
+			(list (quote lambda) params (combine_where_terms terms true))
+			(quoted_runtime_list (list "$update"))
+			(list (quote lambda) (list (symbol "$update")) (list (symbol "$update")))
+			(quote +) 0 nil false))))
+
+(define prejoin_deferred_trigger (lambda (body)
+	(list (quote quote)
+		(list (quote deferred_trigger)
+			(list (quote lambda) (list (quote OLD) (quote NEW)) body)))))
+
+(define prejoin_create_trigger_plan (lambda (src name timing body)
+	(list (quote createtrigger)
+		(list (quote table) (source_schema src) (source_relation src))
+		name timing "" (prejoin_deferred_trigger body) false)))
+
+(define prejoin_trigger_registration_plans (lambda (block table_name)
+	(merge (map (qb_sources block) (lambda (src)
+		(begin
+			(define prefix (concat ".prejoin:" table_name "|" (source_relation src) "|"))
+			(define delete_body (prejoin_trigger_delete_plan block table_name src (quote OLD)))
+			(define insert_body (prejoin_trigger_insert_plan block table_name src (quote NEW)))
+			(list
+				(prejoin_create_trigger_plan src (concat prefix "after_delete") "after_delete" delete_body)
+				(prejoin_create_trigger_plan src (concat prefix "after_insert") "after_insert" insert_body)
+				(prejoin_create_trigger_plan src (concat prefix "after_update") "after_update"
+					(list (quote !begin) delete_body insert_body))
+				(prejoin_create_trigger_plan src (concat prefix "after_drop_table") "after_drop_table"
+					(list (quote droptable) (qb_schema block) table_name true))
+				(prejoin_create_trigger_plan src (concat prefix "after_drop_column") "after_drop_column"
+					(list (quote droptable) (qb_schema block) table_name true)))))))))
+
+(define prejoin_lookup_computed_column_plan (lambda (block table_name sources src col)
+	(begin
+		(define alias (source_alias src))
+		(define key_cols (prejoin_primary_key_columns src))
+		(define input_cols (map key_cols (lambda (key_col)
+			(prejoin_column_name sources alias key_col))))
+		(define filter_params (map key_cols (lambda (key_col) (symbol (concat alias "." key_col)))))
+		(define filter_terms (map (produceN (count key_cols)) (lambda (i)
+			(list (quote equal?) (nth filter_params i) (list (quote outer) (symbol (nth input_cols i)))))))
+		(define value_symbol (symbol (concat alias "." col)))
+		(define reduce_expr (list (quote lambda) (list (quote _old) (quote new)) (quote new)))
+		(define computor (list (quote lambda)
+			(map input_cols symbol)
+			(list (quote scan)
+				'(session "__memcp_tx")
+				(source_table_expr src)
+				(cons (quote list) key_cols)
+				(list (quote lambda) filter_params (combine_where_terms filter_terms true))
+				(quoted_runtime_list (list col))
+				(list (quote lambda) (list value_symbol) value_symbol)
+				reduce_expr nil reduce_expr false)))
+		(list (quote createcolumn)
+			(list (quote table) (qb_schema block) table_name)
+			(prejoin_column_name sources alias col)
+			"any"
+			(quoted_runtime_list '())
+			(quoted_runtime_list '("temp" true))
+			(cons (quote list) input_cols)
+			computor))))
+
+(define prejoin_computed_column_plans (lambda (block fields table_name)
+	(begin
+		(define sources (qb_sources block))
+		(define columns_by_alias (prejoin_columns_by_alias block fields))
+		(merge (map sources (lambda (src)
+			(begin
+				(define key_cols (prejoin_primary_key_columns src))
+				(define requested (qassoc_get columns_by_alias (source_alias src) '()))
+				(map (filter requested (lambda (col) (not (contains? key_cols col)))) (lambda (col)
+					(prejoin_lookup_computed_column_plan block table_name sources src col))))))))))
+
+(define prejoin_rewritten_block (lambda (block fields table_name)
+	(begin
+		(define sources (qb_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+		(define alias table_name)
+		(make_query_block
+			(qb_schema block)
+			(list (list alias (qb_schema block) table_name false true))
+			(prejoin_rewrite_fields sources default_alias alias fields)
+			(prejoin_rewrite_expr sources default_alias alias (qb_where block))
+			(map (qb_group block) (lambda (expr) (prejoin_rewrite_expr sources default_alias alias expr)))
+			(if (nil? (qb_having block)) nil (prejoin_rewrite_expr sources default_alias alias (qb_having block)))
+			(map (qb_order block) (lambda (item) (match item
+				'(expr dir) (list (prejoin_rewrite_expr sources default_alias alias expr) dir)
+				_ (neumann_fail "build_queryplan" "malformed prejoin ORDER BY item"))))
+			(qb_limit block)
+			(qb_offset block)
+			(prejoin_rewrite_fields sources default_alias alias (qb_hidden block))
+			'()
+			(qassoc_set (qb_facts block) (quote default_alias) alias)))))
+
+(define physical_prejoin_plan (lambda (block)
+	(begin
+		(if (not (physical_prejoin_supported? block))
+			(neumann_fail "build_queryplan" "physical prejoin requires distinct inner base tables with primary keys")
+			true)
+		(define sources (qb_sources block))
+		(define fields (expand_query_block_fields sources (qb_fields block)))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+		(define table_name (prejoin_table_name sources default_alias))
+		(define table_expr (list (quote table) (qb_schema block) table_name))
+		(define prepare_plan (list (quote !begin)
+			(list (quote createtable) (qb_schema block) table_name
+				(prejoin_create_columns sources) (quoted_runtime_list '("engine" "cache")) true)
+			(list (quote initialize_cache_table)
+				table_expr
+				(cons (quote list) (map sources source_table_expr))
+				(list (quote lambda) '() (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
+				(list (quote lambda) '() (prejoin_initial_fill_plan block table_name)))
+			(cons (quote !begin) (prejoin_computed_column_plans block fields table_name))
+			(list (quote touch_keytable) table_expr)))
+		(list prepare_plan (prejoin_rewritten_block block fields table_name)))))
+
+(define lower_query_block_through_prejoin (lambda (block)
+	(begin
+		(define prejoin (physical_prejoin_plan block))
+		(list (quote !begin)
+			(nth prejoin 0)
+			(lower_single_source_query_block (nth prejoin 1))))))
+
 (define build_join_scan_rows (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(begin
 		(define row_expr (list (quote resultrow)
@@ -11248,7 +11618,9 @@ source remain residual so they observe the null-extended row. */
 	(begin
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-			(lower_group_stage (make_group_stage_for_query_block block))
+			(if (physical_prejoin_supported? block)
+				(lower_query_block_through_prejoin block)
+				(lower_group_stage (make_group_stage_for_query_block block)))
 			(begin
 				(define sources (qb_sources block))
 				(define first_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
@@ -11357,24 +11729,26 @@ source remain residual so they observe the null-extended row. */
 								(qb_offset block)
 								(qb_limit block)
 								stage_catalog)
-							(join_sorted_rows_plan
-								(build_join_scan_rows_with_mapper
-									(qb_schema block)
-									scan_sources
-									scan_sources
-									first_alias
-									needed_exprs
-									final_condition
-									(lower_join_result_row_assoc sources first_alias fields order_items)
-									'()
-									0
-									-1
-									(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))
-									stage_catalog)
-								fields
-								order_items
-								(qb_offset block)
-								(qb_limit block))))))
+							(if (physical_prejoin_supported? block)
+								(lower_query_block_through_prejoin block)
+								(join_sorted_rows_plan
+									(build_join_scan_rows_with_mapper
+										(qb_schema block)
+										scan_sources
+										scan_sources
+										first_alias
+										needed_exprs
+										final_condition
+										(lower_join_result_row_assoc sources first_alias fields order_items)
+										'()
+										0
+										-1
+										(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))
+										stage_catalog)
+									fields
+									order_items
+									(qb_offset block)
+									(qb_limit block)))))))
 				lowered_plan
 )))))
 
@@ -11643,17 +12017,108 @@ source remain residual so they observe the null-extended row. */
 				(define stage (make_group_stage_for_block branch src))
 				(define final_block (group_stage_final_block stage (group_stage_final_extra_sources stage)))
 				(if (union_ordered_branch_supported? final_block)
-					(list (list (lower_group_stage_prepare_using (list stage) (list stage) stage)) final_block)
+					(list (list (lower_group_stage_prepare_using (list stage) (list stage) stage)) final_block nil)
 					nil))))))
+
+(define union_semijoin_equal_parts (lambda (driver lookup expr)
+	(match expr
+		((symbol equal??) left right) (begin
+			(define lookup_left (direct_column_name_for_alias lookup left))
+			(define driver_right (direct_column_name_for_alias driver right))
+			(if (and (not (nil? lookup_left)) (not (nil? driver_right)))
+				(list lookup_left driver_right)
+				(begin
+					(define lookup_right (direct_column_name_for_alias lookup right))
+					(define driver_left (direct_column_name_for_alias driver left))
+					(if (and (not (nil? lookup_right)) (not (nil? driver_left)))
+						(list lookup_right driver_left)
+						nil))))
+		((quote equal??) left right) (union_semijoin_equal_parts driver lookup
+			(list (symbol "equal??") left right))
+		_ nil)))
+
+(define union_semijoin_branch_stream_plan (lambda (branch)
+	(begin
+		(define sources (qb_sources branch))
+		(if (not (equal? (count sources) 2))
+			nil
+			(begin
+				(define driver (car sources))
+				(define lookup (cadr sources))
+				(define default_alias (qassoc_get (qb_facts branch) (quote default_alias) (source_alias driver)))
+				(define visible_exprs (merge (list
+					(extract_assoc (qb_fields branch) (lambda (_title expr) expr))
+					(list (qb_where branch))
+					(extract_assoc (qb_hidden branch) (lambda (_title expr) expr)))))
+				(define lookup_unused (not (reduce visible_exprs (lambda (used expr)
+					(or used (expr_refs_sources? default_alias (list lookup) expr))) false)))
+				(define join_parts (union_semijoin_equal_parts driver lookup (source_join_expr lookup)))
+				(define lookup_keys (prejoin_primary_key_columns lookup))
+				(if (not (and lookup_unused
+					(and (not (source_outer? driver))
+						(and (not (source_outer? lookup))
+							(and (equal? (coalesceNil (source_join_expr driver) true) true)
+								(and (not (nil? join_parts))
+									(and (equal? (count lookup_keys) 1)
+										(equal? (car lookup_keys) (car join_parts)))))))))
+					nil
+					(begin
+						(define rewritten (make_query_block
+							(qb_schema branch)
+							(list (source_with_join_expr driver true))
+							(qb_fields branch)
+							(qb_where branch)
+							(qb_group branch)
+							(qb_having branch)
+							(qb_order branch)
+							(qb_limit branch)
+							(qb_offset branch)
+							(qb_hidden branch)
+							(qb_stages branch)
+							(qb_facts branch)))
+						(define lookup_recset (list (quote scan_recset)
+							'(session "__memcp_tx")
+							(source_table_expr lookup)
+							(quoted_runtime_list '())
+							(list (quote lambda) '() true)))
+						(define driver_recset (list (quote recset_project_join)
+							'(session "__memcp_tx")
+							lookup_recset
+							(quoted_runtime_list (list (car join_parts)))
+							(source_table_expr driver)
+							(quoted_runtime_list (list (cadr join_parts)))))
+						(if (union_ordered_branch_supported? rewritten)
+							(list '() rewritten driver_recset)
+							nil))))))))
+
+(define prejoined_union_branch_stream_plan (lambda (branch)
+	(begin
+		(define prejoin (physical_prejoin_plan branch))
+		(define prepare (nth prejoin 0))
+		(define rewritten (nth prejoin 1))
+		(define stream (if (union_ordered_branch_supported? rewritten)
+			(list '() rewritten nil)
+			(if (grouped_union_branch? rewritten)
+				(grouped_union_branch_stream_plan rewritten)
+				nil)))
+		(if (nil? stream)
+			nil
+			(list (cons prepare (nth stream 0)) (nth stream 1) (nth stream 2))))))
 
 (define union_ordered_branch_stream_plan (lambda (branch)
 	(if (not (query_block? branch))
 		nil
 		(if (union_ordered_branch_supported? branch)
-			(list '() branch)
-			(if (grouped_union_branch? branch)
-				(grouped_union_branch_stream_plan branch)
-				nil)))))
+			(list '() branch nil)
+			(begin
+				(define semijoin (union_semijoin_branch_stream_plan branch))
+				(if (not (nil? semijoin))
+					semijoin
+					(if (physical_prejoin_supported? branch)
+						(prejoined_union_branch_stream_plan branch)
+						(if (grouped_union_branch? branch)
+							(grouped_union_branch_stream_plan branch)
+							nil))))))))
 
 (define union_ordered_branch_streamable? (lambda (branch)
 	(not (nil? (union_ordered_branch_stream_plan branch)))))
@@ -11668,7 +12133,7 @@ source remain residual so they observe the null-extended row. */
 				(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
 				(lower_column_expr_for_alias src expr))))))
 
-(define union_ordered_scan_spec (lambda (branch titles order_positions)
+(define union_ordered_scan_spec (lambda (branch titles order_positions table_override)
 	(begin
 		(if (not (union_ordered_branch_supported? branch))
 			(neumann_fail "build_queryplan" "UNION ALL ORDER BY requires simple single-source branches")
@@ -11696,7 +12161,7 @@ source remain residual so they observe the null-extended row. */
 				(cons (quote list) (merge (map (produceN (count titles)) (lambda (i)
 					(list (nth titles i) (lower_column_expr_for_alias src (nth exprs i))))))))))
 		(list
-			(source_table_expr src)
+			(coalesceNil table_override (source_table_expr src))
 			filtercols
 			filter_expr
 			sortcols
@@ -11713,7 +12178,8 @@ source remain residual so they observe the null-extended row. */
 			(begin
 				(define prepared (map plans (lambda (plan) (nth plan 1))))
 				(define prepares (merge (map plans (lambda (plan) (nth plan 0)))))
-				(define specs (map prepared (lambda (branch) (union_ordered_scan_spec branch titles order_positions))))
+				(define specs (map plans (lambda (plan)
+					(union_ordered_scan_spec (nth plan 1) titles order_positions (nth plan 2)))))
 				(define scan_plan (list (quote scan_order_multi)
 					'(session "__memcp_tx")
 					(cons (quote list) (map specs (lambda (spec) (nth spec 0))))
@@ -11757,6 +12223,8 @@ source remain residual so they observe the null-extended row. */
 		(qb_facts block))))
 
 (define lower_query_block_capture_rows (lambda (block)
+	/* TODO(planner-scalability): delete this UNION list collector; ordered UNION
+	branches belong in scan_order_multi, with canonical temp tables as barriers. */
 	(begin
 		(define state (symbol "__union_rows"))
 		(define emit (symbol "__union_emit"))

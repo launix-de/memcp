@@ -35,6 +35,21 @@ test_cases:
         - a: 3
           s: 7
 
+  - name: "Grouped order reads the physical keytable"
+    sql: "EXPLAIN SELECT a, SUM(b) AS s FROM tbl GROUP BY a ORDER BY a LIMIT 2"
+    expect:
+      rows: 1
+      result_contains:
+        - "touch_keytable"
+        - ".grp:"
+        - "group_insert_batches"
+        - "scan_order"
+      result_not_contains:
+        - "scan_group_into"
+        - "assoc_keys_as_dataset_rows"
+        - "assoc_keys_values_as_dataset_rows"
+        - "(sort rows"
+
   - name: "Group by modulo expression"
     sql: "SELECT a % 2 AS g, COUNT(*) AS c, SUM(b) AS s FROM tbl GROUP BY a % 2"
     expect:
