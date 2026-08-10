@@ -400,10 +400,10 @@ func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
 // It never reads u.columns without holding the shard lock and loads on demand.
 func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 	if u.hasWriteOwner() {
-		return u.getColumnStorageOrPanicEx(colName, true)
+		return u.getColumnStorageOrPanicEx(colName, true, nil)
 	}
 	if tx := CurrentTx(); tx != nil && tx.HasShardWrite(u) {
-		return u.getColumnStorageOrPanicEx(colName, true)
+		return u.getColumnStorageOrPanicEx(colName, true, tx)
 	}
 	// try under read lock
 	u.mu.RLock()
@@ -434,7 +434,7 @@ func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 	return u.ensureColumnLoaded(colName, false)
 }
 
-func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked bool) ColumnStorage {
+func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked bool, currentTx *TxContext) ColumnStorage {
 	if alreadyLocked {
 		cs, present := u.columns[colName]
 		if !present {
@@ -462,8 +462,12 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 		}
 		return u.ensureColumnLoaded(colName, true)
 	}
-	// alreadyLocked=false: caller guarantees that it does not own the shard's
-	// write lock. Avoid a goroutine-local transaction lookup on every column.
+	if currentTx == nil {
+		currentTx = CurrentTx()
+	}
+	if currentTx != nil && currentTx.HasShardWrite(u) {
+		return u.getColumnStorageOrPanicEx(colName, true, currentTx)
+	}
 	u.mu.RLock()
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
@@ -721,7 +725,7 @@ func (t *storageShard) hasWriteOwner() bool {
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
 func (t *storageShard) rowValueByRecidLocked(recid uint32, col string) scm.Scmer {
 	if recid < t.main_count {
-		cs := t.getColumnStorageOrPanicEx(col, true)
+		cs := t.getColumnStorageOrPanicEx(col, true, nil)
 		return cs.GetValue(recid)
 	}
 	return t.getDelta(int(recid-t.main_count), col)
@@ -854,7 +858,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						continue
 					}
 					k := colDesc.Name
-					cs := t.getColumnStorageOrPanicEx(k, true)
+					cs := t.getColumnStorageOrPanicEx(k, true, nil)
 					colidx, ok := t.deltaColumns[k]
 					if !ok {
 						colidx = len(t.deltaColumns)
@@ -1131,7 +1135,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if alreadyLocked {
 					triggerDeletedRow = make(dataset, len(t.t.Columns))
 					for i, col := range t.t.Columns {
-						cs := t.getColumnStorageOrPanicEx(col.Name, true)
+						cs := t.getColumnStorageOrPanicEx(col.Name, true, nil)
 						if idx < t.main_count {
 							triggerDeletedRow[i] = cs.GetValue(idx)
 						} else {
@@ -1142,7 +1146,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.mu.RLock()
 					triggerDeletedRow = make(dataset, len(t.t.Columns))
 					for i, col := range t.t.Columns {
-						cs := t.getColumnStorageOrPanicEx(col.Name, true)
+						cs := t.getColumnStorageOrPanicEx(col.Name, true, nil)
 						if idx < t.main_count {
 							triggerDeletedRow[i] = cs.GetValue(idx)
 						} else {
@@ -1422,7 +1426,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		} else if len(col) > 12 && col[:12] == "$invalidate:" {
 			mr.isInvalidate[i] = true
 			cacheColName := col[12:]
-			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked, currentTx)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.invalidateProxy[i] = proxy
 			}
@@ -1430,7 +1434,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.isIncrement[i] = true
 			mr.hasIncrementCol = true
 			cacheColName := col[11:]
-			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked, currentTx)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.incrementProxy[i] = proxy
 			}
@@ -1438,7 +1442,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.isSet[i] = true
 			mr.hasSetCol = true
 			cacheColName := col[5:]
-			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked, currentTx)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.setProxy[i] = proxy
 			}
@@ -1446,7 +1450,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.isBreak[i] = true
 			mr.hasBreakCol = true
 		} else {
-			mr.mainCols[i] = t.getColumnStorageOrPanicEx(col, alreadyLocked)
+			mr.mainCols[i] = t.getColumnStorageOrPanicEx(col, alreadyLocked, currentTx)
 		}
 	}
 	// Pre-allocate tagClosure fn ptrs (hoisted, one per pseudo-col type per column).

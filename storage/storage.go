@@ -879,6 +879,10 @@ func Init(en scm.Env) {
 			}
 
 			isOuter := len(a) > layout.limitIdx+5 && scm.ToBool(a[layout.limitIdx+5])
+			notFoundValue := neutral
+			if len(a) > layout.limitIdx+6 {
+				notFoundValue = a[layout.limitIdx+6]
+			}
 
 			if list, ok := scmerSlice(tableArg); ok {
 				result := neutral
@@ -966,16 +970,19 @@ func Init(en scm.Env) {
 					}
 					result = reducefn(result, mapfn(mapparams...))
 				}
+				if !hadValue && !isOuter {
+					result = notFoundValue
+				}
 				return result
 			}
 
 			if tableArg.IsCustom(TagRecSet) {
-				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
+				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue)
 			}
 
 			t := TableFromScmer(a[layout.tableIdx])
 
-			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter)
+			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
@@ -993,6 +1000,7 @@ func Init(en scm.Env) {
 				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc", Transfer: true}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+				{Kind: "any", ParamName: "notFoundValue", ParamDesc: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrder,
@@ -1019,6 +1027,7 @@ func Init(en scm.Env) {
 			// 13: reduce (optional)
 			// 14: neutral (optional)
 			// 15: isOuter (optional)
+			// 16: notFoundValue (optional)
 			currentTx := scmerToTxContext(a[0])
 			tables := mustScmerSlice(a[1], "tables")
 			filterColsArr := mustScmerSlice(a[2], "filterColumns")
@@ -1043,6 +1052,10 @@ func Init(en scm.Env) {
 				neutral = a[14]
 			}
 			isOuter := len(a) > 15 && scm.ToBool(a[15])
+			notFoundValue := neutral
+			if len(a) > 16 {
+				notFoundValue = a[16]
+			}
 
 			if len(filterColsArr) != n || len(filterFnArr) != n || len(sortcolsArr) != n || len(mapColsArr) != n || len(mapFnArr) != n {
 				panic("scan_order_multi: all per-table arrays must have the same length")
@@ -1071,7 +1084,7 @@ func Init(en scm.Env) {
 				}
 			}
 
-			return scanOrderMulti(currentTx, specs, sortdirs, int(limitPartitionCols), int(offset), int(limit), aggregate, neutral, isOuter)
+			return scanOrderMulti(currentTx, specs, sortdirs, int(limitPartitionCols), int(offset), int(limit), aggregate, neutral, isOuter, notFoundValue)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
@@ -1091,6 +1104,7 @@ func Init(en scm.Env) {
 				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) aggregation function", Optional: true},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for reduce", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, emit null row when no hits", Optional: true},
+				{Kind: "any", ParamName: "notFoundValue", ParamDesc: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrderMulti,

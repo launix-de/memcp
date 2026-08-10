@@ -674,7 +674,7 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 			}
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			cNeedsTxReader[i] = true
@@ -842,7 +842,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			cNeedsTxReader[i] = true
@@ -1099,7 +1099,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			conditionBatchSubidx[i] = subidx + 1
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			cNeedsTxReader[i] = true

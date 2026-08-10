@@ -272,7 +272,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			cNeedsTxReader[i] = true
@@ -420,7 +420,7 @@ func (t *storageShard) collectProjectJoinKeys(recids []uint32, sourceKeyCols []s
 	readers := make([]ColumnReader, len(sourceKeyCols))
 	needsTxReader := make([]bool, len(sourceKeyCols))
 	for i, col := range sourceKeyCols {
-		cols[i] = t.getColumnStorageOrPanicEx(col, skipShardReadLock)
+		cols[i] = t.getColumnStorageOrPanicEx(col, skipShardReadLock, currentTx)
 		readers[i] = newCachedColumnReaderTx(cols[i], currentTx)
 		if proxy, ok := cols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			needsTxReader[i] = true
@@ -557,7 +557,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	targetReaders := make([]ColumnReader, len(targetKeyCols))
 	targetNeedsTxReader := make([]bool, len(targetKeyCols))
 	for i, col := range targetKeyCols {
-		targetCols[i] = t.getColumnStorageOrPanicEx(col, skipShardReadLock)
+		targetCols[i] = t.getColumnStorageOrPanicEx(col, skipShardReadLock, currentTx)
 		targetReaders[i] = newCachedColumnReaderTx(targetCols[i], currentTx)
 		if proxy, ok := targetCols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			targetNeedsTxReader[i] = true
@@ -841,7 +841,7 @@ func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string,
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -925,7 +925,7 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1103,7 +1103,7 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
