@@ -91,6 +91,12 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	if len(innerScanSlice) > 10 && scm.ToBool(innerScanSlice[10]) {
 		return scm.NewNil()
 	}
+	// Delaying an effectful mapper until a batch flush changes observable
+	// behavior. In particular, query-root resultrow callbacks must stay in the
+	// nested scan pipeline instead of being buffered as Scheme values.
+	if scanExprMayHaveSideEffects(innerScanSlice[6]) {
+		return scm.NewNil()
+	}
 
 	// The inner scan must actually reference at least one outer param
 	// (otherwise it's a cross-join where batching adds overhead for no gain
