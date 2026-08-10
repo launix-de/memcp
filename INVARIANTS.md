@@ -93,6 +93,37 @@ reordering. The same logical helper may lower to a group cache, direct scan,
 `scan_exists`, RecSet, ORC, `scan_order_multi`, or temp table depending on
 costs and semantics.
 
+## Join Order Has A Single Owner
+
+Join ordering is a logical optimization. Once `join_reorder` has selected the
+driver and ordered the dependent sources in a join cloud, physical lowering
+must preserve that order when it emits nested scans. It must not choose another
+driver, split the sources into a different execution order, or otherwise make
+a second join-order decision.
+
+Physical lowering still chooses the operator and carrier for each source in
+that fixed order. Depending on the cost and semantics, a source may become a
+direct subscan, group keytable, computed-column-filtered slice of a source
+keytable, RecSet, ORC column, or another storage-engine carrier. Operator choice
+must not change source order.
+
+## Relational Results Stay In The Storage Engine
+
+Base and intermediate relational data already lives in the in-memory storage
+engine. Execution must consume it through `scan`, `scan_order`,
+`scan_order_multi`, RecSets, ORC columns, group keytables, or another explicitly
+selected storage-engine carrier. It must not copy a relational result into a
+Scheme list, association list, FastDict, or query-local memo merely to join,
+order, limit, or probe it.
+
+Small planner metadata, scalar runtime values, and aggregate state may use
+Scheme data structures. A physical carrier must remain the single relational
+representation of its result: choosing a direct/grouped subscan must not also
+build the complete keytable, and choosing a keytable must not duplicate it into
+a Scheme-side relation. A requested subset of an existing source keytable may
+be evaluated through computed-column filters instead of constructing another
+carrier.
+
 ## LIMIT Is A Scan Boundary
 
 Every physical operator that owns a SQL `LIMIT` must lower to `scan_order` or
@@ -101,10 +132,35 @@ Every physical operator that owns a SQL `LIMIT` must lower to `scan_order` or
 never be copied into a Scheme list or association structure for a later
 `sort`/`slice` step.
 
+`scan_order` may also be used when row order is semantically irrelevant. In
+that mode it still owns OFFSET/LIMIT and may use top-k pruning: it need not
+filter or materialize every qualifying row before selecting the required
+number of rows.
+
 Decorrelated helpers remain nested scans or independently prepared relational
 carriers. They must not replace the limited root scan with a complete lookup
 table. Projection-only helpers belong in the limited scan's map callback so
 rows rejected by filtering, ordering, offset, or limit never invoke them.
+
+## Predicate Placement In Join Clouds
+
+Physical lowering partitions the complete ON/WHERE predicate across the scans
+of the already ordered join cloud. Each conjunct belongs in the scan filter at
+the point where its referenced bindings and its required outer-join semantics
+are available. This is not simply an "innermost possible" rule: the correct
+scan is determined by the bindings and null-extension boundary of that term.
+
+Every conjunct must appear exactly once at a semantically valid scan or remain
+as an explicit residual predicate. Predicate placement must never weaken or
+drop a join condition, turn an equijoin into a cross product, or evaluate a
+nullable-side WHERE term as though it were an ON term.
+
+## Functional Plans, Optimizer-Owned Mutation
+
+The query planner emits the functional operator API. It must not select `_mut`
+variants to force an execution strategy. Replacing a functional operation with
+its mutable implementation is exclusively an optimizer decision based on
+proven ownership and lifetime information.
 
 ## No Subquery Fallback
 
@@ -207,6 +263,11 @@ The logical stage must distinguish:
 Physical lowering may implement `single_or_error` with `scan_order` partition
 limits, `LIMIT 2`, reducers, promise/session state, or another efficient
 mechanism. It must never silently degrade to `LIMIT 1`.
+
+For a scalar cardinality check, top-k of two rows is sufficient and should be
+used whenever the chosen scan supports it: zero rows produces `NULL`, one row
+produces the scalar value, and observing the second row proves the
+more-than-one-row error. The operator need not scan the remaining matches.
 
 ## EXISTS, IN, and NOT IN
 
