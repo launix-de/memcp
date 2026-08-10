@@ -5532,29 +5532,6 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(merge (map direct_stages (lambda (nested_stage)
 			(get_assoc closure_index (logical_stage_key nested_stage))))))))))
 
-(define lower_scalar_query_point_probe (lambda (input value_expr keys lookup_keys)
-	(begin
-		(define sources (qb_sources input))
-		(if (not (and (single_source? sources) (source_is_base_table? (car sources))))
-			nil
-			(begin
-				(define src (car sources))
-				(define condition (combine_where (source_join_expr src) (coalesceNil (qb_where input) true)))
-				(define keycols (map keys (lambda (key) (direct_column_name_for_alias src key))))
-				(define valuecol (direct_column_name_for_alias src value_expr))
-				(define direct_keys (reduce keycols (lambda (ok col) (and ok (not (nil? col)))) true))
-				(if (and (equal? condition true)
-					(and direct_keys
-						(and (not (nil? valuecol))
-							(and (not (empty_list? keycols)) (equal? (count keycols) (count lookup_keys))))))
-					(list (quote scan_order_point)
-						'(session "__memcp_tx")
-						(source_table_expr src)
-						(quoted_runtime_list keycols)
-						(cons (quote list) lookup_keys)
-						valuecol)
-					nil))))))
-
 (define lower_direct_scalar_query_probe (lambda (input value_expr)
 	(begin
 		(define sources (qb_sources input))
@@ -5618,12 +5595,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(define prepared_input (if (empty_list? prepare_stages)
 			(query_block_with_stage_catalog raw_prepared_input '())
 			raw_prepared_input))
-		(define point_probe (lower_scalar_query_point_probe input value_expr keys lookup_keys))
-		(define direct_probe (if (not (nil? point_probe))
-			point_probe
-			(if (empty_list? prepare_stages)
-				(lower_direct_scalar_query_probe prepared_input value_expr)
-				nil)))
+		(define direct_probe (if (empty_list? prepare_stages)
+			(lower_direct_scalar_query_probe prepared_input value_expr)
+			nil))
 		(define rows_plan (if (nil? direct_probe)
 			(lower_query_block_as_dataset_rows prepared_input (list "__value" value_expr))
 			nil))
@@ -5908,51 +5882,35 @@ dependency preparation does not emit free outer-row symbols. */
 				(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key))))
 			(begin
 				(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-				(define point_keycols (map keys (lambda (key) (direct_column_name_for_alias src key))))
-				(define point_valuecol (direct_column_name_for_alias src value_expr))
-				(define point_keys_direct (reduce point_keycols (lambda (ok col) (and ok (not (nil? col)))) true))
-				(define point_probe (and (equal? condition true)
-					(and (empty_list? order_exprs)
-						(and (equal? offset_value 0)
-							(and point_keys_direct
-								(and (not (nil? point_valuecol)) (not (empty_list? point_keycols))))))))
 				(define condition_cols (extract_columns_for_alias src condition))
 				(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 				(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
 				(define value_cols (extract_columns_for_alias src value_expr))
 				(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
 				(define mapcols (merge_unique (list value_cols)))
-				(if point_probe
-					(list (quote scan_order_point)
-						'(session "__memcp_tx")
-						(source_table_expr src)
-						(quoted_runtime_list point_keycols)
-						(cons (quote list) (map lookup_keys (lambda (key)
-							(lower_column_expr_for_join sources default_alias key))))
-						point_valuecol)
-					(list (quote scan_order)
-						'(session "__memcp_tx")
-						(source_table_expr src)
-						(cons (quote list) filtercols)
-						(list (quote lambda)
-							(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-							(list (quote optimize)
-								(cons (quote and)
-									(cons
-										(lower_column_expr_for_alias src condition)
-										(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
-						(cons (quote list) order_cols)
-						(cons (quote list) dirs)
-						0
-						(coalesceNil offset_value 0)
-						1
-						(cons (quote list) mapcols)
-						(list (quote lambda)
-							(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
-							(lower_column_expr_for_alias src value_expr))
-						(scalar_once_reduce_first)
-						nil
-						false))))))
+				(list (quote scan_order)
+					'(session "__memcp_tx")
+					(source_table_expr src)
+					(cons (quote list) filtercols)
+					(list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+						(list (quote optimize)
+							(cons (quote and)
+								(cons
+									(lower_column_expr_for_alias src condition)
+									(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+					(cons (quote list) order_cols)
+					(cons (quote list) dirs)
+					0
+					(coalesceNil offset_value 0)
+					1
+					(cons (quote list) mapcols)
+					(list (quote lambda)
+						(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+						(lower_column_expr_for_alias src value_expr))
+					(scalar_once_reduce_first)
+					nil
+					false)))))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
@@ -6167,6 +6125,8 @@ dependency preparation does not emit free outer-row symbols. */
 
 (define scan_order_sort_callback_symbols (lambda (driver_cols bound_symbols expr)
 	(match expr
+		((symbol session) "__memcp_tx") (symbol "$tx")
+		((quote session) "__memcp_tx") (symbol "$tx")
 		((symbol quote) _value) expr
 		((symbol lambda) params body) (list (quote lambda) params
 			(scan_order_sort_callback_symbols driver_cols (merge_unique (list bound_symbols params)) body))
@@ -6191,44 +6151,14 @@ dependency preparation does not emit free outer-row symbols. */
 	(scan_order_sort_callback_symbols driver_cols '()
 		(lower_column_expr_for_alias src expr))))
 
-(define scalar_point_sort_descriptor (lambda (driver_src stage requested_col)
-	(begin
-		(define ag (scalar_first_probe_aggregate stage requested_col))
-		(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
-		(define inner_src (gs_input stage))
-		(define keys (gs_keys stage))
-		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-		(define condition (qassoc_get (gs_facts stage) (quote condition) true))
-		(if (or (nil? parts) (not (source_is_base_table? inner_src)))
-			nil
-			(begin
-				(define inner_cols (map keys (lambda (key) (direct_column_name_for_alias inner_src key))))
-				(define outer_cols (map lookup_keys (lambda (key) (direct_column_name_for_alias driver_src key))))
-				(define value_col (direct_column_name_for_alias inner_src (nth parts 0)))
-				(define direct (reduce (merge (list inner_cols outer_cols (list value_col)))
-					(lambda (ok col) (and ok (not (nil? col)))) true))
-				(if (and direct
-					(and (equal? condition true)
-						(and (empty_list? (nth parts 1))
-							(and (equal? (nth parts 3) 0)
-								(and (not (empty_list? keys)) (equal? (count keys) (count lookup_keys)))))))
-					(list (quote list)
-						(list (quote quote) (quote scan_order_point))
-						(source_table_expr inner_src)
-						(quoted_runtime_list inner_cols)
-						(quoted_runtime_list outer_cols)
-						value_col)
-					nil))))))
-
 (define scan_order_sort_column_for_alias (lambda (src expr)
 	(match expr
 		((symbol scalar_first_probe) stage requested_col)
-		(coalesceNil (scalar_point_sort_descriptor src stage requested_col)
-			(begin
-				(define cols (extract_columns_for_alias src expr))
-				(list (quote lambda)
-					(map cols (lambda (col) (symbol col)))
-					(lower_scan_order_sort_expr_for_alias src cols expr))))
+		(begin
+			(define cols (merge_unique (list (extract_columns_for_alias src expr) (list "$tx"))))
+			(list (quote lambda)
+				(map cols (lambda (col) (symbol col)))
+				(lower_scan_order_sort_expr_for_alias src cols expr)))
 		((symbol scalar_first_probe) stage requested_col _stages)
 		(scan_order_sort_column_for_alias src (list (quote scalar_first_probe) stage requested_col))
 		((quote scalar_first_probe) stage requested_col)

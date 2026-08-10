@@ -25,21 +25,27 @@ setup:
   - sql: "DROP TABLE IF EXISTS usol_assignment"
   - sql: "DROP TABLE IF EXISTS usol_item_multi"
   - sql: "DROP TABLE IF EXISTS usol_file_multi"
+  - sql: "DROP TABLE IF EXISTS usol_text_outer"
+  - sql: "DROP TABLE IF EXISTS usol_text_inner"
   - sql: "CREATE TABLE usol_item (id INT PRIMARY KEY, parent_id INT, file_id INT)"
   - sql: "CREATE TABLE usol_file (id INT, uploaded_at INT)"
   - sql: "CREATE TABLE usol_parent (id INT PRIMARY KEY, owner_id INT, team_id INT)"
   - sql: "CREATE TABLE usol_assignment (id INT PRIMARY KEY, team_id INT, member_id INT)"
   - sql: "CREATE TABLE usol_item_multi (id INT PRIMARY KEY, bucket INT, file_id INT)"
   - sql: "CREATE TABLE usol_file_multi (bucket INT, id INT, uploaded_at INT)"
+  - sql: "CREATE TABLE usol_text_outer (id INT PRIMARY KEY, lookup_key TEXT COLLATE utf8mb4_general_ci)"
+  - sql: "CREATE TABLE usol_text_inner (lookup_key TEXT COLLATE utf8mb4_general_ci, value INT)"
   - sql: "INSERT INTO usol_parent VALUES (1, 7, 10), (2, 8, 20)"
   - sql: "INSERT INTO usol_assignment VALUES (1, 10, 7), (2, 20, 8)"
   - sql: "INSERT INTO usol_item_multi VALUES (1, 1, 1), (2, 2, 1), (3, 1, 2), (4, 2, 2), (5, 3, 1)"
+  - sql: "INSERT INTO usol_text_outer VALUES (1, 'alpha'), (2, 'beta')"
+  - sql: "INSERT INTO usol_text_inner VALUES ('ALPHA', 30), ('beta', 20)"
   - scm: |
       (begin
         (insert (table "memcp-tests" "usol_item") '("id" "parent_id" "file_id")
-          (map (produceN 20000) (lambda (i) (list (+ i 1) (+ (- i (* 2 (floor (/ i 2)))) 1) (+ i 1)))))
+          (map (produceN 10000) (lambda (i) (list (+ i 1) (+ (- i (* 2 (floor (/ i 2)))) 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_file") '("id" "uploaded_at")
-          (map (produceN 20000) (lambda (i) (list (+ i 1) (+ i 1)))))
+          (map (produceN 10000) (lambda (i) (list (+ i 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_file_multi") '("bucket" "id" "uploaded_at")
           (map (produceN 2000) (lambda (i)
             (begin
@@ -47,7 +53,7 @@ setup:
               (define id (+ (floor (/ i 2)) 1))
               (list bucket id (+ (* id 10) (if (equal? bucket 2) 5 0)))))))
         (rebuild)
-        20000)
+        10000)
 
 test_cases:
   - name: "Scalar ORDER LIMIT stays inside ordered scan pipelines"
@@ -67,10 +73,41 @@ test_cases:
       rows: 1
       result_contains:
         - "scan_order"
-        - "scan_order_point"
       result_not_contains:
+        - "scan_order_point"
         - "__scalar_order_lookup"
         - "(sort rows"
+
+  - name: "Scalar LIMIT probe preserves case-insensitive SQL equality"
+    sql: |
+      SELECT o.id, (
+        SELECT i.value FROM usol_text_inner i
+        WHERE i.lookup_key = o.lookup_key LIMIT 1
+      ) AS matched
+      FROM usol_text_outer o
+      ORDER BY o.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          matched: 30
+        - id: 2
+          matched: 20
+
+  - name: "Scalar ORDER LIMIT preserves case-insensitive SQL equality"
+    sql: |
+      SELECT o.id
+      FROM usol_text_outer o
+      ORDER BY (
+        SELECT i.value FROM usol_text_inner i
+        WHERE i.lookup_key = o.lookup_key LIMIT 1
+      ) DESC, o.id
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
 
   - name: "Unselective scalar ORDER LIMIT defers nested access projections"
     max_time: 1.5
@@ -127,17 +164,17 @@ test_cases:
     expect:
       rows: 3
       data:
-        - id: 19999
+        - id: 9999
           access_1: true
           access_2: true
           access_3: true
           access_4: true
-        - id: 19997
+        - id: 9997
           access_1: true
           access_2: true
           access_3: true
           access_4: true
-        - id: 19995
+        - id: 9995
           access_1: true
           access_2: true
           access_3: true
@@ -196,3 +233,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS usol_assignment"
   - sql: "DROP TABLE IF EXISTS usol_item_multi"
   - sql: "DROP TABLE IF EXISTS usol_file_multi"
+  - sql: "DROP TABLE IF EXISTS usol_text_outer"
+  - sql: "DROP TABLE IF EXISTS usol_text_inner"

@@ -16,7 +16,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestGetColumnStorageOrPanicExAddsSchemaColumnWhenLocked(t *testing.T) {
 	db := &database{Name: "system"}
@@ -39,7 +42,7 @@ func TestGetColumnStorageOrPanicExAddsSchemaColumnWhenLocked(t *testing.T) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	col := shard.getColumnStorageOrPanicEx("database", true)
+	col := shard.getColumnStorageOrPanicEx("database", true, nil)
 	if col == nil {
 		t.Fatal("expected sparse storage for schema column missing from shard map")
 	}
@@ -48,5 +51,39 @@ func TestGetColumnStorageOrPanicExAddsSchemaColumnWhenLocked(t *testing.T) {
 	}
 	if _, ok := shard.columns["database"]; !ok {
 		t.Fatal("expected column to be inserted into shard map")
+	}
+}
+
+func TestGetColumnStorageOrPanicExUsesTransactionWriteOwnership(t *testing.T) {
+	shard := &storageShard{
+		t: &table{
+			schema: &database{Name: "system"},
+			Name:   "access",
+			Columns: []*column{
+				{Name: "username"},
+			},
+		},
+		columns: map[string]ColumnStorage{"username": new(StorageSparse)},
+	}
+	tx := NewTxContext(TxCursorStability)
+	done := make(chan ColumnStorage, 1)
+
+	go func() {
+		shard.mu.Lock()
+		tx.EnterShardWrite(shard)
+		defer func() {
+			tx.ExitShardWrite(shard)
+			shard.mu.Unlock()
+		}()
+		done <- shard.getColumnStorageOrPanicEx("username", false, tx)
+	}()
+
+	select {
+	case col := <-done:
+		if col == nil {
+			t.Fatal("expected column storage")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("column lookup re-entered the shard read lock despite transaction write ownership")
 	}
 }

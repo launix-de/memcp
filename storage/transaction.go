@@ -108,6 +108,7 @@ type TxContext struct {
 	Depth         uint32 // nesting depth for savepoints / triggers
 	Session       scm.Scmer
 	SessionState  *scm.SessionState // cached to avoid GLS stack-walking
+	querySeq      atomic.Uint64     // autocommit statement generation for cancellation checks
 
 	// Per-shard state, nil until first write (zero-alloc for read-only transactions).
 	shards map[*storageShard]*storageShardTransaction
@@ -613,6 +614,18 @@ func SessionStateFromTx(tx *TxContext) *scm.SessionState {
 	return scm.GetCurrentSessionState()
 }
 
+// querySeqFromTx returns the statement generation cached by an autocommit
+// transaction. Explicit transactions can serve multiple concurrent statements,
+// so their generation must remain statement-local in GLS.
+func querySeqFromTx(tx *TxContext) uint64 {
+	if tx != nil && tx.autoCommit {
+		if seq := tx.querySeq.Load(); seq != 0 {
+			return seq
+		}
+	}
+	return scm.CurrentQuerySeq()
+}
+
 // WithAutocommit executes fn inside an implicit TxCursorStability transaction
 // if no explicit transaction is already active in session, and commits it
 // afterwards. If an explicit transaction is active (session["transaction"] != nil),
@@ -628,8 +641,10 @@ func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Sc
 	}
 
 	tx := NewTxContext(TxCursorStability)
+	tx.autoCommit = true
 	tx.Session = scm.NewFunc(sessionFn)
 	tx.SessionState = scm.GetCurrentSessionState()
+	tx.querySeq.Store(scm.CurrentQuerySeq())
 	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 
 	var result scm.Scmer
