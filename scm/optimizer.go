@@ -160,22 +160,25 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	if params.IsSlice() {
 		paramSlice := params.Slice()
 		if p.NumVars > 0 {
-			named := make(map[Symbol]struct{}, len(paramSlice))
-			for i, param := range paramSlice {
-				if i >= p.NumVars {
-					break
+			bindNamed := false
+			if !p.NumberedOnly {
+				named := make(map[Symbol]struct{}, len(paramSlice))
+				for i, param := range paramSlice {
+					if i >= p.NumVars {
+						break
+					}
+					if stripped, ok := scmerStripSourceInfo(param); ok {
+						param = stripped
+					}
+					if param.IsSymbol() && !param.SymbolEquals("_") {
+						named[mustSymbol(param)] = struct{}{}
+					}
 				}
-				if stripped, ok := scmerStripSourceInfo(param); ok {
-					param = stripped
+				bindNamed = procBodyUsesNamedParam(p.Body, named)
+				if bindNamed {
+					vars = make(Vars, len(named))
+					en.Vars = vars
 				}
-				if param.IsSymbol() && !param.SymbolEquals("_") {
-					named[mustSymbol(param)] = struct{}{}
-				}
-			}
-			bindNamed := procBodyUsesNamedParam(p.Body, named)
-			if bindNamed {
-				vars = make(Vars, len(named))
-				en.Vars = vars
 			}
 			return func(args ...Scmer) Scmer {
 				for i := 0; i < p.NumVars; i++ {
@@ -227,10 +230,13 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	if params.IsSymbol() {
 		sym := mustSymbol(params)
 		if p.NumVars > 0 {
-			bindNamed := procBodyUsesNamedParam(p.Body, map[Symbol]struct{}{sym: {}})
-			if bindNamed {
-				vars = make(Vars, 1)
-				en.Vars = vars
+			bindNamed := false
+			if !p.NumberedOnly {
+				bindNamed = procBodyUsesNamedParam(p.Body, map[Symbol]struct{}{sym: {}})
+				if bindNamed {
+					vars = make(Vars, 1)
+					en.Vars = vars
+				}
 			}
 			return func(args ...Scmer) Scmer {
 				argsList := NewSlice(args)
