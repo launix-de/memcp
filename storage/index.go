@@ -697,9 +697,11 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
 				continue
 			}
-			av := a.data[colIdx]
-			bv := b.data[colIdx]
-			if !state.precomputedDelta {
+			var av, bv scm.Scmer
+			if state.precomputedDelta {
+				av = a.data[colIdx]
+				bv = b.data[colIdx]
+			} else {
 				av = s.getDeltaColValue(a.data, colIdx)
 				bv = s.getDeltaColValue(b.data, colIdx)
 			}

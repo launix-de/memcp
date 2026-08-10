@@ -2214,7 +2214,10 @@ instead of capturing whichever session populated the carrier first. */
 			(match item '(expr dir) (list (requalify_single_source_expr inner_alias alias expr) dir)))))
 		(define sortcols (order_cols_for_alias derived_src order_items))
 		(define sortdirs (window_order_dirs_for_orc order_items))
-		(define rn_col (concat "__derived_row_number_" (fnv_hash (serialize (list alias sortcols sortdirs (qb_limit inner) (qb_offset inner))))))
+		(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
+		(define filtercols (extract_columns_for_alias derived_src inner_where))
+		(define rn_col (concat "__derived_row_number_" (fnv_hash (serialize (list
+			alias sortcols sortdirs inner_where (qb_limit inner) (qb_offset inner))))))
 		(define rn_stage (make_window_stage
 			(concat "window-row-number:" rn_col)
 			derived_src
@@ -2222,13 +2225,20 @@ instead of capturing whichever session populated the carrier first. */
 			sortcols
 			sortdirs
 			0
-			'()
-			(list (quote lambda) (list (quote $set))
-				(list (quote cons) (symbol "$set") (list (quote list))))
+			filtercols
+			(list (quote lambda)
+				(cons (quote $set) (map filtercols (lambda (col) (symbol (concat alias "." col)))))
+				(list (quote list)
+					(symbol "$set")
+					(list (quote optimize) (lower_column_expr_for_alias derived_src inner_where))))
 			(list (quote lambda) (list (quote acc) (quote mapped))
-				(list (quote begin)
-					(list (list (quote car) (quote mapped)) (list (quote +) (quote acc) 1))
-					(list (quote +) (quote acc) 1)))
+				(list (quote if) (list (quote cadr) (quote mapped))
+					(list (quote begin)
+						(list (list (quote car) (quote mapped)) (list (quote +) (quote acc) 1))
+						(list (quote +) (quote acc) 1))
+					(list (quote begin)
+						(list (list (quote car) (quote mapped)) 0)
+						(quote acc))))
 			0
 			(list (list (quote kind) (quote ordered-window)))))
 		(define rn_expr (list (quote get_column) alias false rn_col false))
@@ -2236,7 +2246,6 @@ instead of capturing whichever session populated the carrier first. */
 		(define upper_bound (+ offset_value (qb_limit inner)))
 		(define lower_filter (if (> offset_value 0) (list (quote >) rn_expr offset_value) true))
 		(define limit_filter (combine_where lower_filter (list (quote <=) rn_expr upper_bound)))
-		(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
 		(define derived_filter (combine_where inner_where limit_filter))
 		(list
 			(cons (source_with_join_expr derived_src derived_filter) helper_sources)
@@ -12175,6 +12184,25 @@ source remain residual so they observe the null-extended row. */
 			nil
 			(list (cons prepare (nth stream 0)) (nth stream 1) (nth stream 2))))))
 
+(define row_number_union_branch_stream_plan (lambda (branch)
+	(begin
+		(define cataloged (query_block_with_full_stage_catalog branch))
+		(define stages (qb_stages cataloged))
+		(if (not (and (equal? (count stages) 1) (row_number_stage? (car stages))))
+			nil
+			(begin
+				(define stage_lookup (query_block_stage_lookup cataloged))
+				(define dependency_graph (stage_dependency_graph stage_lookup))
+				(define prepared (query_block_without_stages_after_prepare_using stage_lookup cataloged))
+				(if (union_ordered_branch_supported? prepared)
+					(list
+						(merge (list
+							(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup stages)
+							(lower_stage_materialize_all stages)))
+						prepared
+						nil)
+					nil))))))
+
 (define union_ordered_branch_stream_plan (lambda (branch)
 	(if (not (query_block? branch))
 		nil
@@ -12188,10 +12216,7 @@ source remain residual so they observe the null-extended row. */
 						(prejoined_union_branch_stream_plan branch)
 						(if (grouped_union_branch? branch)
 							(grouped_union_branch_stream_plan branch)
-							nil))))))))
-
-(define union_ordered_branch_streamable? (lambda (branch)
-	(not (nil? (union_ordered_branch_stream_plan branch)))))
+							(row_number_union_branch_stream_plan branch)))))))))
 
 (define union_sort_column_for_alias (lambda (src expr)
 	(match expr
@@ -12269,64 +12294,6 @@ source remain residual so they observe the null-extended row. */
 					(cons (quote begin) (merge (list prepares (list scan_plan))))))
 			(neumann_fail "build_queryplan" "UNION ALL ORDER BY requires streamable branches")))))
 
-(define union_materialized_order_fields (lambda (branch order_positions)
-	(begin
-		(define exprs (projection_exprs (qb_fields branch)))
-		(merge (list
-			(qb_fields branch)
-			(merge (map (produceN (count order_positions)) (lambda (i)
-				(list (concat "__order_" i) (nth exprs (nth order_positions i)))))))))))
-
-(define query_block_with_fields (lambda (block fields)
-	(make_query_block
-		(qb_schema block)
-		(qb_sources block)
-		fields
-		(qb_where block)
-		(qb_group block)
-		(qb_having block)
-		(qb_order block)
-		(qb_limit block)
-		(qb_offset block)
-		(qb_hidden block)
-		(qb_stages block)
-		(qb_facts block))))
-
-(define lower_query_block_capture_rows (lambda (block)
-	/* TODO(planner-scalability): delete this UNION list collector; ordered UNION
-	branches belong in scan_order_multi, with canonical temp tables as barriers. */
-	(begin
-		(define state (symbol "__union_rows"))
-		(define emit (symbol "__union_emit"))
-		(define row (symbol "__union_row"))
-		(list
-			(list (quote lambda) (list state emit)
-				(list (quote begin)
-					(list state "rows" (list (quote list)))
-					(list (quote define) (quote resultrow)
-						(list (quote lambda) (list row)
-							(list state "rows"
-								(list (quote append) (list state "rows") (list (quote cons) row (list (quote list)))))))
-					(lower_query_block_with_stages block)
-					(list state "rows")))
-			(list (quote newsession))
-			(quote resultrow)))))
-
-(define lower_union_all_materialized_ordered (lambda (block titles width)
-	(begin
-		(define branches (union_branches block))
-		(define aligned (map branches (lambda (branch) (union_align_branch_fields branch titles width))))
-		(define order_positions (union_order_positions titles (union_order block)))
-		(define rows_plan (cons (quote merge) (map aligned (lambda (branch)
-			(lower_query_block_capture_rows
-				(query_block_with_fields branch (union_materialized_order_fields branch order_positions)))))))
-		(join_sorted_rows_plan
-			rows_plan
-			(qb_fields (car aligned))
-			(union_order block)
-			(union_offset block)
-			(union_limit block)))))
-
 (define union_direct_order_supported? (lambda (block)
 	(begin
 		(define branches (union_branches block))
@@ -12364,11 +12331,7 @@ source remain residual so they observe the null-extended row. */
 				(define titles (projection_titles (qb_fields first_branch)))
 				(define width (count (qb_fields first_branch)))
 				(if (not (empty_list? (union_order block)))
-					(if (reduce branches (lambda (ok branch)
-						(and ok (union_ordered_branch_streamable? (union_align_branch_fields branch titles width))))
-						true)
-						(lower_union_all_ordered block titles width)
-						(lower_union_all_materialized_ordered block titles width))
+					(lower_union_all_ordered block titles width)
 					(if (or (not (nil? (union_limit block))) (not (nil? (union_offset block))))
 						(lower_union_all_ordered block titles width)
 						(cons (quote begin)
