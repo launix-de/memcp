@@ -10231,7 +10231,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 (define query_block_stages_to_prepare (lambda (block)
 	(query_block_stages_to_prepare_using (qb_stages block) block)))
 
-(define lower_query_block_with_cataloged_stages (lambda (block)
+(define prepare_simple_query_block_physical_core (lambda (block)
 	(begin
 		(define stage_lookup (query_block_stage_lookup block))
 		(if (empty_list? (qb_stages block))
@@ -10244,48 +10244,60 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 					(scalar_query_probe_recipe_bindings probe_recipe_plans))
 				(define probe_recipe_prepares
 					(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
-				(if (empty_list? probe_recipe_bindings)
-					(lower_query_block_core recipe_block)
-					(cons (quote !begin) (merge (list
+				(list
+					(merge (list probe_recipe_prepares probe_recipe_bindings))
+					recipe_block))
+			(begin
+				(define stage_catalog (query_block_stage_catalog block))
+				(define eager_stages (query_block_stages_to_prepare_using stage_lookup block))
+				(define dependency_graph (stage_dependency_graph stage_lookup))
+				(define raw_prepared_block (if (single_source? (qb_sources block))
+					(query_block_without_stages_after_prepare_using stage_lookup block)
+					(query_block_with_prepared_sources_using stage_lookup block)))
+				(define probe_recipe_entries
+					(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
+				(define probe_recipe_plans
+					(scalar_query_probe_recipe_plans_using_graph
+						stage_lookup dependency_graph probe_recipe_entries))
+				(define prepared_block
+					(query_block_with_scalar_query_probe_recipes raw_prepared_block probe_recipe_entries))
+				(define probe_recipe_bindings
+					(scalar_query_probe_recipe_bindings probe_recipe_plans))
+				(define probe_recipe_prepares
+					(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
+				(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
+				(define core_block (query_block_without_stages
+					(query_block_with_stage_catalog prepared_block lazy_catalog)))
+				(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
+				(list
+					(merge (list
 						probe_recipe_prepares
 						probe_recipe_bindings
-						(list (lower_query_block_core recipe_block)))))))
+						(lazy_stage_prepare_bindings stage_catalog lazy_stages)
+						(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup eager_stages)))
+					core_block))))))
+
+(define lower_simple_query_block_with_cataloged_stages (lambda (block)
+	(begin
+		(define prepared (prepare_simple_query_block_physical_core block))
+		(define prelude (nth prepared 0))
+		(define core_block (nth prepared 1))
+		(if (empty_list? prelude)
+			(lower_query_block_core core_block)
+			(cons (quote !begin) (merge (list
+				prelude
+				(list (lower_query_block_core core_block)))))))))
+
+(define lower_query_block_with_cataloged_stages (lambda (block)
+	(if (empty_list? (qb_stages block))
+		(lower_simple_query_block_with_cataloged_stages block)
+		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
+			(lower_grouped_query_block_with_stages block)
 			(begin
-				(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-					(lower_grouped_query_block_with_stages block)
-					(begin
-						(define fused_row_number (lower_fused_row_number_block block))
-						(if (not (nil? fused_row_number))
-							fused_row_number
-							(begin
-								(define stage_catalog (query_block_stage_catalog block))
-								(define eager_stages (query_block_stages_to_prepare_using stage_lookup block))
-								(define dependency_graph (stage_dependency_graph stage_lookup))
-								(define raw_prepared_block (if (single_source? (qb_sources block))
-									(query_block_without_stages_after_prepare_using stage_lookup block)
-									(query_block_with_prepared_sources_using stage_lookup block)))
-								(define probe_recipe_entries
-									(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
-								(define probe_recipe_plans
-									(scalar_query_probe_recipe_plans_using_graph
-										stage_lookup dependency_graph probe_recipe_entries))
-								(define prepared_block
-									(query_block_with_scalar_query_probe_recipes raw_prepared_block probe_recipe_entries))
-								(define probe_recipe_bindings
-									(scalar_query_probe_recipe_bindings probe_recipe_plans))
-								(define probe_recipe_prepares
-									(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
-								(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
-								(define core_block (query_block_without_stages
-									(query_block_with_stage_catalog prepared_block lazy_catalog)))
-								(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
-								(cons (quote !begin)
-									(merge (list
-										probe_recipe_prepares
-										probe_recipe_bindings
-										(lazy_stage_prepare_bindings stage_catalog lazy_stages)
-										(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup eager_stages)
-										(list (lower_query_block_core core_block)))))))))))))))
+				(define fused_row_number (lower_fused_row_number_block block))
+				(if (not (nil? fused_row_number))
+					fused_row_number
+					(lower_simple_query_block_with_cataloged_stages block)))))))
 
 (define lower_query_block_with_stages (lambda (block)
 	(lower_query_block_with_cataloged_stages (query_block_with_full_stage_catalog block))))
@@ -12203,11 +12215,20 @@ source remain residual so they observe the null-extended row. */
 						nil)
 					nil))))))
 
+(define prepared_union_branch_stream_plan (lambda (branch)
+	(begin
+		(define prepared (prepare_simple_query_block_physical_core
+			(query_block_with_full_stage_catalog branch)))
+		(define core_block (nth prepared 1))
+		(if (union_ordered_branch_supported? core_block)
+			(list (nth prepared 0) core_block nil)
+			nil))))
+
 (define union_ordered_branch_stream_plan (lambda (branch)
 	(if (not (query_block? branch))
 		nil
 		(if (union_ordered_branch_supported? branch)
-			(list '() branch nil)
+			(prepared_union_branch_stream_plan branch)
 			(begin
 				(define semijoin (union_semijoin_branch_stream_plan branch))
 				(if (not (nil? semijoin))
@@ -12216,17 +12237,14 @@ source remain residual so they observe the null-extended row. */
 						(prejoined_union_branch_stream_plan branch)
 						(if (grouped_union_branch? branch)
 							(grouped_union_branch_stream_plan branch)
-							(row_number_union_branch_stream_plan branch)))))))))
+							(begin
+								(define row_number (row_number_union_branch_stream_plan branch))
+								(if (not (nil? row_number))
+									row_number
+									(prepared_union_branch_stream_plan branch)))))))))))
 
 (define union_sort_column_for_alias (lambda (src expr)
-	(match expr
-		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) (order_column_for_alias src expr)
-		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) (order_column_for_alias src expr)
-		_ (begin
-			(define cols (extract_columns_for_alias src expr))
-			(list (quote lambda)
-				(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
-				(lower_column_expr_for_alias src expr))))))
+	(scan_order_sort_column_for_alias src expr)))
 
 (define union_ordered_scan_spec (lambda (branch titles order_positions table_override)
 	(begin
