@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # Scalar subquery deduplication (join-merge optimization)
 # When two or more scalar subqueries reference the same table with the same
 # condition and field, the inner scan should be performed only once per outer row.
@@ -18,7 +19,9 @@ setup:
   - sql: |
       CREATE TABLE jd_ref (id INT, label VARCHAR(40), score INT)
   - sql: |
-      INSERT INTO jd_ref (id, label, score) VALUES (10, 'Alpha', 100), (20, 'Beta', 200)
+      INSERT INTO jd_ref (id, label, score) VALUES
+        (10, 'Alpha', 100), (20, 'Beta', 200), (30, NULL, 300),
+        (40, NULL, 400), (40, 'duplicate', 401)
 
 test_cases:
 
@@ -160,8 +163,8 @@ test_cases:
       rows: 1
       data:
         - id: 1
-          total1: 2
-          total2: 2
+          total1: 5
+          total2: 5
 
   # Error: multiple rows for identical subquery still errors (semantics preserved)
   - name: "Multiple rows still errors even for deduplicated subquery"
@@ -171,6 +174,55 @@ test_cases:
         (SELECT id FROM jd_item WHERE jd_item.ref_id = 10) AS c2
     expect:
       error: true
+      contains:
+        - "scalar subselect returned more than one row"
+
+  - name: "Scalar cardinality check physically reads at most two rows per key"
+    sql: |
+      EXPLAIN
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS label
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "jd_ref"
+        - '\n\t\t\t\t\t0\n\t\t\t\t\t2\n'
+      result_not_contains:
+        - "scan_order_point"
+        - ".grp:jd_ref"
+
+  - name: "Scalar probe distinguishes no row from its internal initializer"
+    sql: |
+      SELECT (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.id + 998) AS label
+      FROM jd_item
+      WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - label: null
+
+  - name: "Scalar probe preserves a matching NULL value"
+    sql: |
+      SELECT (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.id + 29) AS label
+      FROM jd_item
+      WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - label: null
+
+  - name: "Scalar probe detects a second row after a NULL value"
+    sql: |
+      SELECT (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.id + 39) AS label
+      FROM jd_item
+      WHERE id = 1
+    expect:
+      error: true
+      contains:
+        - "scalar subselect returned more than one row"
 
   # NULL outer ref: both identical subqueries return NULL
   - name: "NULL outer ref produces NULL in all identical subqueries"

@@ -1735,6 +1735,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	// Optimize all args with callback ownership propagation
 	for i := 0; i < len(v); i++ {
+		ome.pendingCallbackParams = nil
+		ome.pendingCallbackReturn = nil
 		if i > 0 && callDecl != nil {
 			paramIdx := i - 1
 			if callDecl.Type == nil || len(callDecl.Type.Params) == 0 {
@@ -1751,6 +1753,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 		var ti TypeInfo
 		v[i], ti = OptimizeEx(v[i], env, ome, true)
+		ome.pendingCallbackParams = nil
+		ome.pendingCallbackReturn = nil
 		argTypes[i] = ti
 		if i == 1 {
 			firstArgType = ti

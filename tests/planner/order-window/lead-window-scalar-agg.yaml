@@ -83,6 +83,9 @@ test_cases:
       GROUP BY parent
     expect:
       rows: 2
+      result_contains:
+        - '"cnt_with_next": 2, "parent": 1'
+        - '"cnt_with_next": 1, "parent": 2'
 
   - name: "COUNT over LEAD derived table grouped directly"
     sql: |

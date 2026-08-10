@@ -173,3 +173,15 @@ test_cases:
         (if (not (equal? plan "(>)"))
           (error (concat "invalid arity changed during optimization: " plan)))
         true)
+
+  - name: "named callback ownership does not leak into a sibling lambda"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'list
+            (list 'reduce (list 'list 1) 'named_reducer (list 'list))
+            (list 'lambda (list 'borrowed)
+              (list 'set_assoc 'borrowed "seen" true))))))
+        (if (match plan (regex "set_assoc_mut" _) true false)
+          (error (concat "callback ownership leaked into sibling lambda: " plan)))
+        true)

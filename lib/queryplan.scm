@@ -1056,6 +1056,9 @@ instead of capturing whichever session populated the carrier first. */
 (define scalar_aggregate_probe_expr (lambda (stage col)
 	(list (quote scalar_aggregate_probe) stage col)))
 
+(define scalar_cardinality_probe_expr (lambda (stage col)
+	(list (quote scalar_cardinality_probe) stage col)))
+
 (define scalar_aggregate_probe_outer_exprs (lambda (stage)
 	(merge (list
 		(qassoc_get (gs_facts stage) (quote lookup-keys) '())
@@ -1292,6 +1295,22 @@ instead of capturing whichever session populated the carrier first. */
 								(not (stage_has_residual_outer_refs? stage))))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
 								(source_is_base_table? (gs_input stage)))))))))))
+
+(define scalar_cardinality_probe_stage? (lambda (stage)
+	(if (not (group_stage? stage))
+		false
+		(begin
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define ags (gs_aggregates stage))
+			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
+				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote single_or_error))
+					(and (not (empty_list? lookup_keys))
+						(and (equal? (count (gs_keys stage)) (count lookup_keys))
+							(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
+								(and (equal? (coalesceNil (gs_having stage) true) true)
+									(and (source_is_base_table? (gs_input stage))
+										(and (equal? (count ags) 2)
+											(equal? (nth ags 1) aggregate_count_descriptor)))))))))))))
 
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
@@ -5372,6 +5391,11 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(extract_columns_for_alias src expr))))
 		((quote scalar_aggregate_probe) stage requested_col)
 		(extract_columns_for_alias src (list (quote scalar_aggregate_probe) stage requested_col))
+		((symbol scalar_cardinality_probe) stage _requested_col)
+		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
+			(extract_columns_for_alias src key))))
+		((quote scalar_cardinality_probe) stage requested_col)
+		(extract_columns_for_alias src (list (quote scalar_cardinality_probe) stage requested_col))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
@@ -5399,6 +5423,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col)
+		((symbol scalar_cardinality_probe) stage requested_col)
+		(lower_scalar_cardinality_probe_expr (list src) (source_alias src) stage requested_col)
+		((quote scalar_cardinality_probe) stage requested_col)
+		(lower_scalar_cardinality_probe_expr (list src) (source_alias src) stage requested_col)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias src item))))
@@ -5960,6 +5988,57 @@ dependency preparation does not emit free outer-row symbols. */
 			nil
 			false))))
 
+(define lower_scalar_cardinality_probe_expr (lambda (sources default_alias stage requested_col)
+	(begin
+		(if (not (scalar_cardinality_probe_stage? stage))
+			(neumann_fail "build_queryplan" "scalar cardinality probe requires scalar_single base stage")
+			true)
+		(define src (gs_input stage))
+		(define keys (gs_keys stage))
+		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(if (not (equal? (count keys) (count lookup_keys)))
+			(neumann_fail "build_queryplan" "scalar cardinality probe key/domain mismatch")
+			true)
+		(define ag (scalar_first_probe_aggregate stage requested_col))
+		(if (nil? ag)
+			(neumann_fail "build_queryplan" "scalar cardinality probe references unknown aggregate column")
+			true)
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define value_expr (nth ag 0))
+		(define condition_cols (extract_columns_for_alias src condition))
+		(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define value_cols (extract_columns_for_alias src value_expr))
+		(define filtercols (merge_unique (list condition_cols key_cols)))
+		(define unset (list (quote quote) (quote __scalar_cardinality_unset)))
+		(list (quote scan_order)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(list (quote optimize)
+					(cons (quote and)
+						(cons
+							(lower_column_expr_for_alias src condition)
+							(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+			'(list)
+			'(list)
+			0
+			0
+			2
+			(cons (quote list) value_cols)
+			(list (quote lambda)
+				(map value_cols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(lower_column_expr_for_alias src value_expr))
+			(list (quote lambda) '((quote acc) (quote value))
+				(list (quote if)
+					(list (quote equal?) (quote acc) unset)
+					(quote value)
+					(list (quote error) "scalar subselect returned more than one row")))
+			unset
+			false
+			nil))))
+
 (define collect_join_columns_acc (lambda (sources default_alias target_alias expr columns_by_alias)
 	(match expr
 		((symbol driver_membership_probe) _stage probe)
@@ -5985,6 +6064,11 @@ dependency preparation does not emit free outer-row symbols. */
 			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
 		((quote scalar_aggregate_probe) stage requested_col)
 		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_aggregate_probe) stage requested_col) columns_by_alias)
+		((symbol scalar_cardinality_probe) stage _requested_col)
+		(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (acc key)
+			(collect_join_columns_acc sources default_alias target_alias key acc)) columns_by_alias)
+		((quote scalar_cardinality_probe) stage requested_col)
+		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_cardinality_probe) stage requested_col) columns_by_alias)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (if (nil? tblvar)
 				(source_for_unqualified_column sources default_alias col col_ignorecase)
@@ -6028,6 +6112,10 @@ dependency preparation does not emit free outer-row symbols. */
 		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col)
+		((symbol scalar_cardinality_probe) stage requested_col)
+		(lower_scalar_cardinality_probe_expr sources default_alias stage requested_col)
+		((quote scalar_cardinality_probe) stage requested_col)
+		(lower_scalar_cardinality_probe_expr sources default_alias stage requested_col)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (if (nil? tblvar)
 				(source_for_unqualified_column sources default_alias col col_ignorecase)
@@ -6533,6 +6621,10 @@ dependency preparation does not emit free outer-row symbols. */
 		(lower_scalar_aggregate_probe_expr '() nil stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr '() nil stage requested_col)
+		((symbol scalar_cardinality_probe) stage requested_col)
+		(lower_scalar_cardinality_probe_expr '() nil stage requested_col)
+		((quote scalar_cardinality_probe) stage requested_col)
+		(lower_scalar_cardinality_probe_expr '() nil stage requested_col)
 		((symbol union_count) block) (lower_union_count_expr block)
 		((quote union_count) block) (lower_union_count_expr block)
 		(cons head tail) (cons head (map tail lower_scalar_marker_expr))
@@ -8121,6 +8213,12 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 			(scalar_aggregate_probe_stage? stage)))))
 
+(define scalar_cardinality_probe_stage_output_source? (lambda (stages src)
+	(and (stage_output_relation? (source_relation src))
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(scalar_cardinality_probe_stage? stage)))))
+
 /* A selective LEFT JOIN may evaluate a grouped base-table source as a keyed
 aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 (define direct_group_probe_input (lambda (stage)
@@ -8289,7 +8387,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(define direct (direct_group_probe_stage_for_block_source stages sources src consumers))
 				(define stage (coalesceNil direct original))
 				(if (or (scalar_or_presence_probe_stage? stage)
-					(scalar_aggregate_probe_stage? stage))
+					(or (scalar_aggregate_probe_stage? stage)
+						(scalar_cardinality_probe_stage? stage)))
 					(list src stage)
 					nil))))
 			(lambda (entry) (not (nil? entry)))))
@@ -8320,6 +8419,22 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 
 (define rewrite_scalar_first_probe_expr_using_index (lambda (stages index default_alias expr)
 	(match expr
+		((symbol if)
+			((symbol >) ((symbol coalesceNil) ((symbol get_column) count_alias count_tbl_ic count_col count_col_ic) 0) 1)
+			((symbol error) message)
+			((symbol get_column) value_alias value_tbl_ic value_col value_col_ic)) (begin
+			(define entry (probe_stage_entry_for_alias_using_index index default_alias count_alias count_tbl_ic))
+			(if (or (nil? entry)
+				(or (not (equal?? count_alias value_alias))
+					(or (not (equal? message "scalar subselect returned more than one row"))
+						(not (equal? count_col (aggregate_col_name aggregate_count_descriptor))))))
+				expr
+				(begin
+					(define stage (nth entry 0))
+					(if (and (scalar_cardinality_probe_stage? stage)
+						(not (nil? (scalar_first_probe_aggregate stage value_col))))
+						(scalar_cardinality_probe_expr stage value_col)
+						expr))))
 		((symbol get_column) tblvar tbl_ignorecase col _col_ignorecase) (begin
 			(define entry (probe_stage_entry_for_alias_using_index index default_alias tblvar tbl_ignorecase))
 			(if (nil? entry)
@@ -8590,6 +8705,18 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 								(probe_context_small_enough? probe_sources))))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
 
+(define scalar_cardinality_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src)
+	(if (not (scalar_cardinality_probe_stage_output_source? stages src))
+		false
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(define probe_sources (filter sources (lambda (candidate)
+				(not (equal? (source_alias candidate) (source_alias src))))))
+			(and (stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
+				(or (probe_limit_small_enough? limit_value)
+					(or (probe_context_small_enough? probe_sources)
+						(probe_context_unique_point? probe_sources default_alias driver_condition))))))))
+
 (define direct_group_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition consumers src)
 	(begin
 		(define stage (direct_group_probe_stage_for_block_source stages sources src consumers))
@@ -8610,8 +8737,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 			(probeable_stage_output_source_for_block? stages sources default_alias limit_value src)
 			(or
 				(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src)
-				(direct_group_probe_output_source_for_block?
-					stages sources default_alias limit_value driver_condition consumers src)))))))
+				(or
+					(scalar_cardinality_probe_output_source_for_block?
+						stages sources default_alias limit_value driver_condition src)
+					(direct_group_probe_output_source_for_block?
+						stages sources default_alias limit_value driver_condition consumers src))))))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
 	(begin
@@ -8800,6 +8930,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 		(list stage)
 		((quote scalar_aggregate_probe) stage _requested_col)
 		(list stage)
+		((symbol scalar_cardinality_probe) stage _requested_col)
+		(list stage)
+		((quote scalar_cardinality_probe) stage _requested_col)
+		(list stage)
 		((symbol grouped_scalar_top) stage)
 		(list stage)
 		((quote grouped_scalar_top) stage)
@@ -8909,7 +9043,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 
 (define scalar_probe_consumed_stages_many_using_graph (lambda (graph stages)
 	(unique_stages_by_id (merge (list
-		(filter (coalesceNil stages '()) scalar_aggregate_probe_stage?)
+		(filter (coalesceNil stages '()) (lambda (stage)
+			(or (scalar_aggregate_probe_stage? stage) (scalar_cardinality_probe_stage? stage))))
 		(stage_dependency_closure_many_using_graph graph
 			(filter (coalesceNil stages '()) scalar_or_presence_probe_stage?)))))))
 
