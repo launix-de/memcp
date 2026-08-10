@@ -132,8 +132,9 @@ DEFAULT_MAX_TIME_SEC = 5.0
 # plan-node count regardless of CPU speed. A correct plan for a nested query is
 # a few KB; the observed nested-correlated-subselect blow-up was 342 KB / 1578
 # helper nodes. Per-case `max_plan_size` / suite `metadata.max_plan_size`
-# override it; set to 0 to disable the check for a case/suite.
-DEFAULT_MAX_PLAN_SIZE = int(os.environ.get("MEMCP_MAX_PLAN_SIZE", "200000"))
+# override it. Limits must stay positive so individual suites cannot disable
+# the regression gate.
+DEFAULT_MAX_PLAN_SIZE = 200000
 MEMCP_START_TIMEOUT = int(os.environ.get("MEMCP_START_TIMEOUT", "180"))
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
