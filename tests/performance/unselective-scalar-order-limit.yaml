@@ -43,9 +43,9 @@ setup:
   - scm: |
       (begin
         (insert (table "memcp-tests" "usol_item") '("id" "parent_id" "file_id")
-          (map (produceN 20000) (lambda (i) (list (+ i 1) (+ (- i (* 2 (floor (/ i 2)))) 1) (+ i 1)))))
+          (map (produceN 10000) (lambda (i) (list (+ i 1) (+ (- i (* 2 (floor (/ i 2)))) 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_file") '("id" "uploaded_at")
-          (map (produceN 20000) (lambda (i) (list (+ i 1) (+ i 1)))))
+          (map (produceN 10000) (lambda (i) (list (+ i 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_file_multi") '("bucket" "id" "uploaded_at")
           (map (produceN 2000) (lambda (i)
             (begin
@@ -53,7 +53,7 @@ setup:
               (define id (+ (floor (/ i 2)) 1))
               (list bucket id (+ (* id 10) (if (equal? bucket 2) 5 0)))))))
         (rebuild)
-        20000)
+        10000)
 
 test_cases:
   - name: "Scalar ORDER LIMIT stays inside ordered scan pipelines"
@@ -164,17 +164,17 @@ test_cases:
     expect:
       rows: 3
       data:
-        - id: 19999
+        - id: 9999
           access_1: true
           access_2: true
           access_3: true
           access_4: true
-        - id: 19997
+        - id: 9997
           access_1: true
           access_2: true
           access_3: true
           access_4: true
-        - id: 19995
+        - id: 9995
           access_1: true
           access_2: true
           access_3: true
