@@ -14,13 +14,15 @@ setup:
       CREATE TABLE lookup_group_items (
         id INT PRIMARY KEY,
         code VARCHAR(16),
+        bucket VARCHAR(8),
         label VARCHAR(64)
       )
   - scm: |
       (begin
-        (insert (table "memcp-tests" "lookup_group_items") '("id" "code" "label")
+        (insert (table "memcp-tests" "lookup_group_items") '("id" "code" "bucket" "label")
           (map (produceN 20000) (lambda (i)
-            (list i (concat "c" i) (concat "label " i)))))
+            (list i (concat "c" i) (concat "b" (mod i 4)) (concat "label " i)))))
+        (rebuild true)
         20000)
 
 cleanup:
@@ -38,3 +40,136 @@ test_cases:
       LIMIT 20000
     expect:
       rows: 20000
+
+  - name: "warm large lookup group repeats the direct aggregate scan"
+    timeout: 10
+    max_time: 2
+    sql: |
+      SELECT code AS value, MIN(label) AS description
+      FROM lookup_group_items
+      WHERE TRUE
+      GROUP BY code
+      LIMIT 20000
+    expect:
+      rows: 20000
+
+  - name: "high-cardinality group uses a direct physical aggregate scan"
+    sql: |
+      EXPLAIN SELECT code AS value, MIN(label) AS description
+      FROM lookup_group_items
+      WHERE TRUE
+      GROUP BY code
+      LIMIT 20000
+    expect:
+      rows: 1
+      result_contains:
+        - "scan"
+        - "reduce_assoc"
+        - "set_assoc_mut"
+        - "merge_assoc_mut"
+        - "!list"
+      result_not_contains:
+        - ".grp:lookup_group_items:"
+        - "scan_group"
+        - "scan_group_into"
+        - "assoc_keys_as_dataset_rows"
+        - "assoc_keys_values_as_dataset_rows"
+        - "resultrow (cons"
+
+  - name: "cold low-cardinality group initializes the reusable keytable"
+    sql: |
+      SELECT bucket AS value, COUNT(*) AS amount
+      FROM lookup_group_items
+      WHERE TRUE
+      GROUP BY bucket
+    expect:
+      rows: 4
+
+  - name: "warm low-cardinality group reuses the maintained keytable"
+    sql: |
+      SELECT bucket AS value, COUNT(*) AS amount
+      FROM lookup_group_items
+      WHERE TRUE
+      GROUP BY bucket
+    expect:
+      rows: 4
+
+  - name: "low-cardinality group keeps a reusable keytable"
+    sql: |
+      EXPLAIN SELECT bucket AS value, COUNT(*) AS amount
+      FROM lookup_group_items
+      WHERE TRUE
+      GROUP BY bucket
+    expect:
+      rows: 1
+      result_contains:
+        - ".grp:lookup_group_items:"
+        - "scan"
+        - "group_insert_batches"
+      result_not_contains:
+        - "scan_group_into"
+        - "assoc_keys_as_dataset_rows"
+        - "assoc_keys_values_as_dataset_rows"
+
+  - name: "scan optimizer mutates only an owned projected map value"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+            (list "id") (list 'lambda (list 'id) true)
+            (list "id") (list 'lambda (list 'id) (list 'list 'id (list 'list)))
+            (list 'lambda (list 'acc 'row)
+              (list 'begin (list 'set_assoc (list 'cadr 'row) "seen" true) 'acc))
+            0 nil false))))
+        (if (not (match plan (regex "set_assoc_mut" _) true false))
+          (error (concat "owned projected value was not propagated: " plan)))
+        true)
+
+  - name: "scan optimizer keeps a borrowed projected map value immutable"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+            (list "id") (list 'lambda (list 'id) true)
+            (list "id") (list 'lambda (list 'id) (list 'list 'id (list 'list)))
+            (list 'lambda (list 'acc 'row)
+              (list 'begin (list 'set_assoc (list 'car 'row) "seen" true) 'acc))
+            0 nil false))))
+        (if (match plan (regex "set_assoc_mut" _) true false)
+          (error (concat "borrowed projected value became mutable: " plan)))
+        true)
+
+  - name: "scan optimizer rejects a borrowed neutral accumulator"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+            (list "id") (list 'lambda (list 'id) true)
+            (list "id") (list 'lambda (list 'id) 'id)
+            (list 'lambda (list 'acc 'row) (list 'set_assoc 'acc 'row true))
+            (list 'quote (list "existing" true)) nil false))))
+        (if (match plan (regex "set_assoc_mut" _) true false)
+          (error (concat "borrowed neutral accumulator became mutable: " plan)))
+        true)
+
+  - name: "scan optimizer rejects a reducer that returns borrowed input"
+    scm: |
+      (begin
+        (define plan (serialize (optimize
+          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+            (list "id") (list 'lambda (list 'id) true)
+            (list "id") (list 'lambda (list 'id) 'id)
+            (list 'lambda (list 'acc 'row)
+              (list 'begin (list 'set_assoc 'acc 'row true) 'row))
+            (list 'list) nil false))))
+        (if (match plan (regex "set_assoc_mut" _) true false)
+          (error (concat "non-preserving reducer received owned accumulator: " plan)))
+        true)
+
+  - name: "constant folding does not execute invalid callback arity"
+    scm: |
+      (begin
+        (define plan (serialize (optimize (list '>))))
+        (if (not (equal? plan "(>)"))
+          (error (concat "invalid arity changed during optimization: " plan)))
+        true)

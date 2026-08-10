@@ -232,6 +232,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
 	(list 'begin
+		/* TODO(planner-scalability): expose catalog metadata as a physical
+		relation instead of constructing a cardinality-dependent SCM list. */
 		/* Materialize the table list at runtime but BEFORE the scan starts, so
 		info_schema_table_row's (show schema tbl true) calls do not execute inside
 		a scan callback where locks are held (which deadlocks). */

@@ -325,6 +325,13 @@ type table struct {
 
 	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
 
+	// cacheInitMu guards the one-time initializer for canonical planner caches.
+	// The table object is removed on cache eviction, so initialization state has
+	// exactly the same lifetime as the cached relation itself.
+	cacheInitMu         sync.Mutex
+	cacheInitialized    bool
+	cacheInitializerRun *cacheInitializerRun
+
 	// ddlMu is the table-local schema contract:
 	//   - Lock(): column/trigger/ORC metadata on this table may change
 	//   - RLock(): rebuild/repartition may assume table-local schema stability

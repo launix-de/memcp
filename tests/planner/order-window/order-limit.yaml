@@ -22,10 +22,16 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS ord_t"
+  - sql: "DROP TABLE IF EXISTS ord_join_left"
+  - sql: "DROP TABLE IF EXISTS ord_join_right"
   - sql: "CREATE TABLE ord_t (a INT, b INT)"
+  - sql: "CREATE TABLE ord_join_left (id INT PRIMARY KEY, ref_id INT)"
+  - sql: "CREATE TABLE ord_join_right (id INT PRIMARY KEY, rank_value INT)"
   - sql: |
       INSERT INTO ord_t (a,b) VALUES
       (1,2),(1,1),(2,2),(2,0),(3,1)
+  - sql: "INSERT INTO ord_join_left VALUES (1,10),(2,20),(3,30)"
+  - sql: "INSERT INTO ord_join_right VALUES (10,3),(20,1),(30,2)"
 
 test_cases:
   - name: "Top-1 by a DESC"
@@ -165,6 +171,38 @@ test_cases:
         - a: 2
           s: 2
 
+  - name: "Joined order uses the ordered relation as physical driver"
+    sql: |
+      EXPLAIN SELECT l.id
+      FROM ord_join_left l
+      JOIN ord_join_right r ON r.id = l.ref_id
+      ORDER BY r.rank_value
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "(sort rows"
+        - "(slice sorted"
+
+  - name: "Cross-source computed order uses a physical carrier"
+    sql: |
+      EXPLAIN SELECT l.id
+      FROM ord_join_left l
+      JOIN ord_join_right r ON r.id = l.ref_id
+      ORDER BY l.id + r.rank_value
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - ".prejoin:"
+        - "initialize_cache_table"
+        - "scan_order"
+      result_not_contains:
+        - "(sort rows"
+        - "(slice sorted"
+
   - name: "ORDER BY DESC OFFSET beyond rows returns empty"
     sql: "SELECT a FROM ord_t ORDER BY a DESC LIMIT 2 OFFSET 10"
     expect:
@@ -251,3 +289,5 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ord_t"
+  - sql: "DROP TABLE IF EXISTS ord_join_left"
+  - sql: "DROP TABLE IF EXISTS ord_join_right"

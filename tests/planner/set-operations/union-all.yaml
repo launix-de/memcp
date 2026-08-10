@@ -165,6 +165,26 @@ test_cases:
         - ID: 3
           name: "image3.png"
 
+  - name: "Ordered joined UNION branch uses physical merge carriers"
+    sql: |
+      EXPLAIN
+      SELECT f.ID AS value
+      FROM ua_fop_files f
+      JOIN renderjob r ON r.result = f.ID
+      UNION ALL
+      SELECT ID AS value FROM ua_fop_files
+      ORDER BY value
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order_multi"
+        - ".prejoin:"
+        - "initialize_cache_table"
+      result_not_contains:
+        - "__union_rows"
+        - "(sort rows"
+
   # === scan_order_multi: cross-table merge, 3+ branches, computed sort ===
 
   - name: "UNION ALL ORDER BY across different tables"

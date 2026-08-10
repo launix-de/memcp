@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "io"
+import "sort"
 import "unsafe"
 import "github.com/carli2/hybridsort"
 import "sync"
@@ -348,7 +349,7 @@ func isScanPseudoColName(name string) bool {
 // registered with the session so that ReleaseAllLocks() can free it later.
 // Acquiring any lock requires an exclusive wait (drain other owners), then
 // drains in-flight shard readers by briefly acquiring each shard's write lock.
-func lockTable(schema, name string, write bool, ss *scm.SessionState) {
+func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) func() {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("LOCK TABLES: unknown database: " + schema)
@@ -360,6 +361,12 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	// LOCK TABLES itself is serialized FIFO per table. This avoids a thundering
 	// herd when many sessions repeatedly lock the same hot table (e.g. cron).
 	cond := t.getTableLockCond()
+	if owner := t.tableLockOwner.Load(); owner != nil && owner == ss {
+		if write && !t.tableLockWrite.Load() {
+			panic("LOCK TABLES: cannot upgrade an existing READ lock")
+		}
+		return func() {}
+	}
 	if ss != nil {
 		ss.BeginLockWait()
 		defer ss.EndLockWait()
@@ -398,8 +405,13 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 		s.mu.Unlock()
 	}
 	acquired = true
+	return t.unlockTable
+}
+
+func lockTable(schema, name string, write bool, ss *scm.SessionState) {
+	unlock := acquireTableLock(schema, name, write, ss)
 	if ss != nil {
-		ss.AddLock(t.unlockTable)
+		ss.AddLock(unlock)
 	}
 }
 
@@ -731,9 +743,9 @@ func Init(en scm.Env) {
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},
 				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true},
+				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
+				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
@@ -843,9 +855,9 @@ func Init(en scm.Env) {
 				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "int", ParamName: "stride", ParamDesc: "number of batchdata entries per batch row"},
 				{Kind: "list", ParamName: "batchdata", ParamDesc: "flat batch buffer accessed via #N pseudo columns"},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results", Optional: true},
+				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results", Optional: true},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
+				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
@@ -901,6 +913,9 @@ func Init(en scm.Env) {
 
 			isOuter := len(a) > layout.limitIdx+5 && scm.ToBool(a[layout.limitIdx+5])
 
+			// TODO(planner-scalability): remove list-backed relational scans after
+			// metadata/RDF callers use physical carriers. Query plans must never
+			// materialize cardinality-dependent rows into SCM lists.
 			if list, ok := scmerSlice(tableArg); ok {
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
@@ -1011,7 +1026,7 @@ func Init(en scm.Env) {
 				{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read"},
 				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},
 				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc", Transfer: true}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc"}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
@@ -1829,6 +1844,22 @@ func Init(en scm.Env) {
 			}
 
 			baseSchema := baseTable.schema.Name
+			type computedKey struct {
+				computor scm.Scmer
+				inputs   []string
+			}
+			computedKeys := make(map[string]computedKey)
+			baseTable.ddlMu.RLock()
+			for _, col := range baseTable.Columns {
+				if col.Computor.IsNil() || len(col.OrcSortCols) > 0 {
+					continue
+				}
+				computedKeys[col.Name] = computedKey{
+					computor: col.Computor,
+					inputs:   append([]string(nil), col.ComputorInputCols...),
+				}
+			}
+			baseTable.ddlMu.RUnlock()
 
 			// Helper: build (and (equal? x1 y1) (equal? x2 y2) ...) or just (equal? x y) for single key
 			buildAndEquals := func(xs, ys []scm.Scmer) scm.Scmer {
@@ -1871,11 +1902,31 @@ func Init(en scm.Env) {
 				return syms
 			}
 
-			// Helper: build (get_assoc <sym> "col") list
+			// DELETE captures a complete OLD row, including computed values. INSERT
+			// NEW rows only contain stored columns, so evaluate missing computed keys
+			// from their physical inputs without rescanning the mutated base row.
+			valueFromDict := func(sym, col string) scm.Scmer {
+				computed, ok := computedKeys[col]
+				if !ok || sym == "OLD" {
+					return fkGetAssocExpr(sym, col)
+				}
+				args := make([]scm.Scmer, 1, 1+len(computed.inputs))
+				args[0] = scm.NewSymbol("list")
+				for _, input := range computed.inputs {
+					args = append(args, fkGetAssocExpr(sym, input))
+				}
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("apply"),
+					computed.computor,
+					scm.NewSlice(args),
+				})
+			}
+
+			// Helper: build row-dictionary value expressions for columns.
 			getAssocs := func(sym string, cols []string) []scm.Scmer {
 				result := make([]scm.Scmer, len(cols))
 				for i, col := range cols {
-					result[i] = fkGetAssocExpr(sym, col)
+					result[i] = valueFromDict(sym, col)
 				}
 				return result
 			}
@@ -1913,12 +1964,13 @@ func Init(en scm.Env) {
 
 			// Build insert: (insert kt_schema kt_name (list kt_cols...) (list (list vals...)) (list) (lambda () true) true)
 			buildInsert := func(dictSym string) scm.Scmer {
+				values := append([]scm.Scmer{scm.NewSymbol("list")}, getAssocs(dictSym, baseCols)...)
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("insert"),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
 					scanFilterCols(ktCols),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
-						fkValListExpr(dictSym, baseCols)}),
+						scm.NewSlice(values)}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewBool(true)}),
 					scm.NewBool(true),
@@ -2028,6 +2080,52 @@ func Init(en scm.Env) {
 				{Kind: "table", ParamName: "kt_table"},
 				{Kind: "string", ParamName: "tblvar", ParamDesc: "table alias used in scan column prefixes"},
 				{Kind: "list", ParamName: "key_pairs", ParamDesc: "list of (base_col kt_col) pairs"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "initialize_cache_table",
+		Desc: "registers maintenance, locks source tables for a consistent snapshot, and runs a canonical planner-cache initializer exactly once",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			tbl := TableFromScmer(a[0])
+			initialized := tbl.initializeCache(func() {
+				scm.Apply(a[2])
+
+				sources := mustScmerSlice(a[1], "source tables")
+				sourceTables := make([]*table, len(sources))
+				for i, source := range sources {
+					sourceTables[i] = TableFromScmer(source)
+				}
+				sort.Slice(sourceTables, func(i, j int) bool {
+					left := sourceTables[i].schema.Name + "\x00" + sourceTables[i].Name
+					right := sourceTables[j].schema.Name + "\x00" + sourceTables[j].Name
+					return left < right
+				})
+
+				ss := scm.GetCurrentSessionState()
+				if ss == nil {
+					panic("cache initialization requires a query session")
+				}
+				unlocks := make([]func(), 0, len(sourceTables))
+				defer func() {
+					for i := len(unlocks) - 1; i >= 0; i-- {
+						unlocks[i]()
+					}
+				}()
+				for _, source := range sourceTables {
+					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, ss))
+				}
+				scm.Apply(a[3])
+			})
+			return scm.NewBool(initialized)
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", ParamName: "table"},
+				{Kind: "list", ParamName: "source_tables"},
+				{Kind: "func", ParamName: "register_maintenance", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "initializer", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

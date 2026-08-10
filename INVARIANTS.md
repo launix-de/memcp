@@ -124,6 +124,23 @@ a Scheme-side relation. A requested subset of an existing source keytable may
 be evaluated through computed-column filters instead of constructing another
 carrier.
 
+List-backed relations do not provide indexes, statistics, range braking,
+late materialization, bounded memory, spill, incremental maintenance, or the
+storage engine's batch and concurrency behavior. They therefore cannot be a
+cost-based alternative, even when they benchmark faster for small inputs.
+
+Use the existing scalable physical representations instead:
+
+- fused `scan` / `scan_order` pipelines for streamable work
+- `scan_order_multi` for ordered UNION inputs
+- RecSets for query-local membership
+- canonical keytables for groups and aggregate domains
+- ORC/temp columns for reusable ordered computation
+- canonically named query-local temp tables for unavoidable relational barriers
+
+Lists remain valid for bounded scalar tuples, operator arguments, parser data,
+and final API row values. Their size must be independent of relation cardinality.
+
 ## LIMIT Is A Scan Boundary
 
 Every physical operator that owns a SQL `LIMIT` must lower to `scan_order` or

@@ -240,6 +240,11 @@ func ensureSystemStatistic() {
 // TODO: measurements are temporary; remove later (nanoseconds)
 func safeLogScan(schema, table string, ordered bool, filter, order, indexCols string, inputCount, candidateCount, outputCount, analyzeNs, execNs int64) {
 	defer func() { _ = recover() }()
+	// The telemetry sink must not observe itself: querying scan statistics would
+	// otherwise append more scan rows while that same relation is being read.
+	if schema == "system_statistic" && table == "scans" {
+		return
+	}
 	db := GetDatabase("system_statistic")
 	if db == nil {
 		return

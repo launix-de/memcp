@@ -121,7 +121,7 @@ test_cases:
         - category: 3
           cnt: 4
 
-  - name: "session-dependent grouping projects one membership recset"
+  - name: "session-dependent grouping projects one membership recset into its carrier"
     session_id: "sgc_sess"
     sql: |
       EXPLAIN SELECT category, COUNT(*) AS cnt
@@ -137,9 +137,14 @@ test_cases:
       result_contains:
         - "scan_recset"
         - "recset_project_join"
+        - ".grp:sgc_data:"
+        - "group_insert_batches"
+      result_occurrences:
+        - text: "recset_project_join"
+          count: 1
       result_not_contains:
-        - ".grp:"
-        - "scan_exists"
+        - "scan_group_into"
+        - "assoc_keys_values_as_dataset_rows"
 
   - name: "projected session presence maps lookup domain to inner group key"
     session_id: "sgc_sess"

@@ -31,16 +31,21 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	// 5=sortcols, 6=sortdirs, 7=perTableOffset, 8=perTableLimit,
 	// 9=partCols, 10=offset, 11=limit, 12=mapCols, 13=mapFns,
 	// 14=reduce, 15=neutral, 16=isOuter
+	rawReduce := scm.NewNil()
+	if len(v) > 14 {
+		rawReduce = v[14]
+	}
 	for i := 1; i <= 13 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
-	oc.Ome.IncrLoopDepth()
-	if len(v) > 14 && !v[14].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false})
-		v[14], _ = oc.OptimizeSub(v[14], true)
-	}
+	neutralType := unknownScanType()
 	if len(v) > 15 {
-		v[15], _ = oc.OptimizeSub(v[15], true)
+		v[15], neutralType = oc.OptimizeSub(v[15], true)
+		neutralType = normalizeScanType(neutralType)
+	}
+	oc.Ome.IncrLoopDepth()
+	if !rawReduce.IsNil() {
+		v[14], _ = oc.OptimizeReducerCallback(rawReduce, neutralType, unknownScanType())
 	}
 	if len(v) > 16 {
 		v[16], _ = oc.OptimizeSub(v[16], true)
@@ -60,16 +65,23 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	// 	return oc.OptimizeSub(rewritten, useResult)
 	// }
 	mapEnd, reduceIdx, neutralIdx, outerIdx := 11, 12, 13, 14
+	rawReduce := scm.NewNil()
+	if len(v) > reduceIdx {
+		rawReduce = v[reduceIdx]
+	}
 	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
-	oc.Ome.IncrLoopDepth()
-	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false})
-		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
-	}
+	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
-		v[neutralIdx], _ = oc.OptimizeSub(v[neutralIdx], true)
+		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
+		neutralType = normalizeScanType(neutralType)
+	}
+	oc.Ome.IncrLoopDepth()
+	if !rawReduce.IsNil() {
+		// The value shape differs between shard-local and shard-collect phases,
+		// but the accumulator starts from the same structured neutral value.
+		v[reduceIdx], _ = oc.OptimizeReducerCallback(rawReduce, neutralType, unknownScanType())
 	}
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)

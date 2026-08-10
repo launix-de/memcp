@@ -39,33 +39,61 @@ func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
 // optimizeScan is the Optimize hook for the scan declaration.
-// It explicitly controls callback ownership for the reduce and reduce2 lambdas,
-// ensuring the accumulator parameter is marked as owned (enabling _mut swaps
-// like set_assoc → set_assoc_mut inside the reduce body).
+// It propagates the optimizer's structural callback types through map, reduce,
+// and reduce2, including ownership of individual list/association keys.
 func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceIdx, neutralIdx, reduce2Idx, outerIdx int) (scm.Scmer, *scm.TypeDescriptor) {
-	// Non-callback args (tx, table, filtercols, mapcols, etc.) at loop depth 0
+	const mapIdx = 6
+	rawMap := v[mapIdx]
+	var rawReduce, rawReduce2 scm.Scmer
+	if len(v) > reduceIdx {
+		rawReduce = v[reduceIdx]
+	}
+	if len(v) > reduce2Idx {
+		rawReduce2 = v[reduce2Idx]
+	}
+
+	// Optimize scalar/operator arguments independently of callback ownership.
 	for i := 1; i <= mapEnd && i < len(v); i++ {
-		v[i], _ = oc.OptimizeSub(v[i], true)
+		if i != mapIdx {
+			v[i], _ = oc.OptimizeSub(v[i], true)
+		}
 	}
-	// Callback lambdas execute per-row → increment loop depth so the optimizer
-	// does not inline hoisted defines (like table pointers) back into the loop.
-	oc.Ome.IncrLoopDepth()
-	if len(v) > reduceIdx && !v[reduceIdx].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false})
-		v[reduceIdx], _ = oc.OptimizeSub(v[reduceIdx], true)
-	}
+	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
-		v[neutralIdx], _ = oc.OptimizeSub(v[neutralIdx], true)
+		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
+		neutralType = normalizeScanType(neutralType)
 	}
-	if len(v) > reduce2Idx && !v[reduce2Idx].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false})
-		v[reduce2Idx], _ = oc.OptimizeSub(v[reduce2Idx], true)
+	if !rawReduce.IsNil() {
+		oc.SetCallbackReturnFlow(scm.CallbackReturnFlow(rawMap, rawReduce, 1))
+	}
+	oc.Ome.IncrLoopDepth()
+	optimizedMap, mapType := oc.OptimizeSub(rawMap, true)
+	v[mapIdx] = optimizedMap
+	mapType = normalizeScanType(mapType)
+
+	reduceType := neutralType
+	if !rawReduce.IsNil() {
+		v[reduceIdx], reduceType = oc.OptimizeReducerCallback(rawReduce, neutralType, mapType)
+	}
+	if !rawReduce2.IsNil() {
+		v[reduce2Idx], reduceType = oc.OptimizeReducerCallback(rawReduce2, reduceType, reduceType)
 	}
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
 	oc.Ome.DecrLoopDepth()
-	return scm.NewSlice(v), nil
+	return scm.NewSlice(v), reduceType
+}
+
+func unknownScanType() *scm.TypeDescriptor {
+	return &scm.TypeDescriptor{Kind: "any", Length: scm.UnknownLength}
+}
+
+func normalizeScanType(td *scm.TypeDescriptor) *scm.TypeDescriptor {
+	if td == nil {
+		return unknownScanType()
+	}
+	return td
 }
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
@@ -326,6 +354,9 @@ func scanMapColsHaveSideEffects(v scm.Scmer) bool {
 }
 
 func scanExprMayHaveSideEffects(v scm.Scmer) bool {
+	if declaration := scm.DeclarationForValue(v); declaration != nil && declaration.Type != nil && declaration.Type.HasSideEffects {
+		return true
+	}
 	if name, ok := scanSymbolName(v); ok {
 		switch name {
 		case "set", "define", "insert", "update", "delete", "createcolumn", "dropcolumn", "createtable", "droptable", "createkey", "dropkey", "resultrow", "print", "error", "$update":
