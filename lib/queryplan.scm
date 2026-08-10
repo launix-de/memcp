@@ -6567,6 +6567,14 @@ dependency preparation does not emit free outer-row symbols. */
 
 (define extract_aggregates (lambda (expr)
 	(match expr
+		((symbol scalar_aggregate_probe) stage requested_col)
+		(if (qassoc_get (gs_facts stage) (quote direct_group_probe) false)
+			'()
+			(merge_unique (map (list stage requested_col) extract_aggregates)))
+		((quote scalar_aggregate_probe) stage requested_col)
+		(if (qassoc_get (gs_facts stage) (quote direct_group_probe) false)
+			'()
+			(merge_unique (map (list stage requested_col) extract_aggregates)))
 		((symbol count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
 		((quote count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
 		((symbol aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
@@ -8081,6 +8089,129 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 			(scalar_aggregate_probe_stage? stage)))))
 
+/* A selective LEFT JOIN may evaluate a grouped base-table source as a keyed
+aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
+(define direct_group_probe_input (lambda (stage)
+	(begin
+		(define input (if (group_stage? stage) (gs_input stage) nil))
+		(if (and (query_block? input)
+			(and (single_source? (qb_sources input))
+				(and (source_is_base_table? (car (qb_sources input)))
+					(and (empty_list? (qb_stages input))
+						(and (empty_list? (qb_group input))
+							(and (nil? (qb_having input))
+								(and (empty_list? (qb_order input))
+									(and (nil? (qb_limit input)) (nil? (qb_offset input))))))))))
+			input
+			nil))))
+
+(define direct_group_probe_key_ref? (lambda (stage_alias key_name expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(and (equal?? tblvar stage_alias) (equal?? col key_name))
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(and (equal?? tblvar stage_alias) (equal?? col key_name))
+		_ false)))
+
+(define direct_group_probe_lookup_from_term (lambda (stage_alias key_name term)
+	(match term
+		'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
+			(if (direct_group_probe_key_ref? stage_alias key_name left)
+				(if (expr_refs_alias? nil stage_alias right) nil right)
+				(if (direct_group_probe_key_ref? stage_alias key_name right)
+					(if (expr_refs_alias? nil stage_alias left) nil left)
+					nil))
+			nil)
+		_ nil)))
+
+(define direct_group_probe_lookup_keys (lambda (stage src)
+	(begin
+		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
+		(define key_names (group_key_cols (gs_keys stage)))
+		(define lookups (map key_names (lambda (key_name)
+			(reduce terms (lambda (found term)
+				(coalesceNil found (direct_group_probe_lookup_from_term (source_alias src) key_name term)))
+				nil))))
+		(if (and (equal? (count terms) (count key_names))
+			(reduce lookups (lambda (complete lookup) (and complete (not (nil? lookup)))) true))
+			lookups
+			nil))))
+
+(define direct_group_probe_expr_refs_key? (lambda (stage_alias key_names expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(and (equal?? tblvar stage_alias) (contains? key_names col))
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(and (equal?? tblvar stage_alias) (contains? key_names col))
+		(cons head tail) (or
+			(direct_group_probe_expr_refs_key? stage_alias key_names head)
+			(reduce tail (lambda (found item)
+				(or found (direct_group_probe_expr_refs_key? stage_alias key_names item))) false))
+		_ false)))
+
+(define direct_group_probe_consumers_safe? (lambda (stage src consumers)
+	(not (direct_group_probe_expr_refs_key?
+		(source_alias src)
+		(group_key_cols (gs_keys stage))
+		consumers))))
+
+(define source_join_consumers_except (lambda (sources excluded_src)
+	(map
+		(filter (coalesceNil sources '()) (lambda (src)
+			(not (equal? (source_alias src) (source_alias excluded_src)))))
+		source_join_expr)))
+
+(define direct_group_probe_stage_for_block_source (lambda (stages sources src consumers)
+	(if (expr_refs_alias? nil (source_alias src) (source_join_consumers_except sources src))
+		nil
+		(direct_group_probe_stage_for_source stages src consumers))))
+
+(define direct_group_probe_aggregates_safe? (lambda (stage)
+	(reduce (stage_aggregates_for_fields (gs_output stage)) (lambda (safe ag)
+		(and safe (nil? (nth ag 2)))) true)))
+
+(define direct_group_probe_stage_for_source (lambda (stages src consumers)
+	(if (or (nil? consumers)
+		(not (and (source_outer? src) (stage_output_relation? (source_relation src)))))
+		nil
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(define input (direct_group_probe_input stage))
+			(define lookups (if (nil? input) nil (direct_group_probe_lookup_keys stage src)))
+			(if (or (not (nil? (qassoc_get (gs_facts stage) (quote purpose) nil)))
+				(or (nil? input)
+					(or (nil? lookups)
+						(or (not (equal? (coalesceNil (gs_having stage) true) true))
+							(or (not (direct_group_probe_aggregates_safe? stage))
+								(not (direct_group_probe_consumers_safe? stage src consumers)))))))
+				nil
+				(begin
+					(define input_src (car (qb_sources input)))
+					(define condition (combine_where (qb_where input) (source_join_expr input_src)))
+					(define facts (qassoc_set
+						(qassoc_set
+							(qassoc_set
+								(qassoc_set
+									(gs_facts stage)
+									(quote purpose)
+									(quote scalar_aggregate))
+								(quote cardinality_mode)
+								(quote many))
+							(quote lookup-keys) lookups)
+						(quote direct_group_probe) true))
+					(make_group_stage
+						(gs_id stage)
+						input_src
+						(gs_domain stage)
+						(gs_keys stage)
+						(gs_aggregates stage)
+						(gs_having stage)
+						(gs_output stage)
+						(gs_order stage)
+						(gs_limit stage)
+						(gs_offset stage)
+						(qassoc_set facts (quote condition) condition)))))))))
+
 (define presence_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
 		(begin
@@ -8118,31 +8249,38 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(if insensitive (quote insensitive) (quote exact))
 		(if (and insensitive (string? alias)) (toLower alias) alias))))
 
-(define probe_stage_alias_index (lambda (stages sources)
+(define probe_stage_alias_index (lambda (stages sources consumers)
 	(begin
-		(define probe_stages (unique_stages_by_id (filter
-			(map (coalesceNil sources '()) (lambda (src)
-				(source_stage_output_stage stages src)))
-			(lambda (stage) (or (scalar_or_presence_probe_stage? stage)
-				(scalar_aggregate_probe_stage? stage))))))
-		(define closures (stage_dependency_closure_index_using_graph
-			(stage_dependency_graph stages) probe_stages))
-		(reduce (coalesceNil sources '()) (lambda (index src)
+		(define entries (filter (map (coalesceNil sources '()) (lambda (src)
 			(begin
-				(define stage (source_stage_output_stage stages src))
+				(define original (source_stage_output_stage stages src))
+				(define direct (direct_group_probe_stage_for_block_source stages sources src consumers))
+				(define stage (coalesceNil direct original))
 				(if (or (scalar_or_presence_probe_stage? stage)
 					(scalar_aggregate_probe_stage? stage))
-					(begin
-						(define entry (list stage (get_assoc closures (logical_stage_key stage))))
-						(define exact_key (probe_stage_alias_key (source_alias src) false))
-						(define insensitive_key (probe_stage_alias_key (source_alias src) true))
-						(define with_exact (if (has_assoc? index exact_key)
-							index
-							(set_assoc index exact_key entry)))
-						(if (has_assoc? with_exact insensitive_key)
-							with_exact
-							(set_assoc with_exact insensitive_key entry)))
-					index))) '()))))
+					(list src stage)
+					nil))))
+			(lambda (entry) (not (nil? entry)))))
+		(define probe_stages (unique_stages_by_id (map entries (lambda (entry) (nth entry 1)))))
+		(define closures (stage_dependency_closure_index_using_graph
+			(stage_dependency_graph stages) probe_stages))
+		(reduce entries (lambda (index entry)
+			(begin
+				(define src (nth entry 0))
+				(define stage (nth entry 1))
+				(define direct (qassoc_get (gs_facts stage) (quote direct_group_probe) false))
+				(begin
+					(define index_entry (list stage (if direct
+						(list stage)
+						(get_assoc closures (logical_stage_key stage)))))
+					(define exact_key (probe_stage_alias_key (source_alias src) false))
+					(define insensitive_key (probe_stage_alias_key (source_alias src) true))
+					(define with_exact (if (has_assoc? index exact_key)
+						index
+						(set_assoc index exact_key index_entry)))
+					(if (has_assoc? with_exact insensitive_key)
+						with_exact
+						(set_assoc with_exact insensitive_key index_entry))))) '()))))
 
 (define probe_stage_entry_for_alias_using_index (lambda (index default_alias tblvar tbl_ignorecase)
 	(get_assoc index
@@ -8158,7 +8296,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 					(define stage (nth entry 0))
 					(define dependencies (nth entry 1))
 					(if (scalar_aggregate_probe_stage? stage)
-						(scalar_aggregate_probe_expr stage col)
+						(coalesceNil
+							(scalar_first_stage_key_lookup_expr stage col)
+							(scalar_aggregate_probe_expr stage col))
 						(coalesceNil
 							(scalar_first_stage_key_lookup_expr stage col)
 							(scalar_first_probe_expr stage col dependencies))))))
@@ -8171,7 +8311,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 
 (define rewrite_scalar_first_probe_expr (lambda (stages sources default_alias expr)
 	(rewrite_scalar_first_probe_expr_using_index stages
-		(probe_stage_alias_index stages sources) default_alias expr)))
+		(probe_stage_alias_index stages sources nil) default_alias expr)))
 
 (define rewrite_scalar_first_probe_fields_using_index (lambda (stages index default_alias fields)
 	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
@@ -8293,6 +8433,47 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(and (> limit_value 0)
 			(<= limit_value 512)))))
 
+(define source_column_bound_by_equality? (lambda (src col condition)
+	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
+		(if found
+			true
+			(match term
+				'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
+					(or
+						(and (equal?? (direct_column_name_for_alias src left) col)
+							(not (expr_refs_alias? (source_alias src) (source_alias src) right)))
+						(and (equal?? (direct_column_name_for_alias src right) col)
+							(not (expr_refs_alias? (source_alias src) (source_alias src) left))))
+					false)
+				_ false)))
+		false)))
+
+(define source_unique_point_condition? (lambda (src condition)
+	(if (not (source_is_base_table? src))
+		false
+		(try
+			(lambda ()
+				(begin
+					(define info (show (source_schema src) (source_relation src) true))
+					(define uniques ((info "meta") "Unique"))
+					(reduce uniques (lambda (found unique_key)
+						(or found
+							(reduce (unique_key "Cols") (lambda (complete col)
+								(and complete (source_column_bound_by_equality? src col condition)))
+								true)))
+						false)))
+			(lambda (_e) false)))))
+
+(define probe_context_unique_point? (lambda (sources default_alias condition)
+	(if (not (single_source? sources))
+		false
+		(begin
+			(define src (car sources))
+			(define combined (combine_where condition (source_join_expr src)))
+			(and
+				(stage_lookup_expr_resolves_in_sources? sources default_alias combined)
+				(source_unique_point_condition? src combined))))))
+
 (define scalar_aggregate_probe_aggregate_safe? (lambda (ag)
 	(or
 		(aggregate_count_like? ag)
@@ -8377,11 +8558,28 @@ is still available and remains an ordinary scalar expression through untangle. *
 								(probe_context_small_enough? probe_sources))))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
 
-(define probe_output_sources_for_block (lambda (stages sources default_alias limit_value)
+(define direct_group_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition consumers src)
+	(begin
+		(define stage (direct_group_probe_stage_for_block_source stages sources src consumers))
+		(if (nil? stage)
+			false
+			(begin
+				(define probe_sources (filter sources (lambda (candidate)
+					(not (equal? (source_alias candidate) (source_alias src))))))
+				(and
+					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
+					(or (probe_limit_small_enough? limit_value)
+						(or (probe_context_small_enough? probe_sources)
+							(probe_context_unique_point? probe_sources default_alias driver_condition)))))))))
+
+(define probe_output_sources_for_block (lambda (stages sources default_alias limit_value driver_condition consumers)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(or
 			(probeable_stage_output_source_for_block? stages sources default_alias limit_value src)
-			(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src))))))
+			(or
+				(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src)
+				(direct_group_probe_output_source_for_block?
+					stages sources default_alias limit_value driver_condition consumers src)))))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
 	(begin
@@ -8701,21 +8899,36 @@ is still available and remains an ordinary scalar expression through untangle. *
 (define stages_without_probe_sources (lambda (stages probe_sources)
 	(begin
 		(define graph (stage_dependency_graph stages))
-		(stages_without_consumed_probes_using_graph graph stages
-			(stage_outputs_from_sources_using stages probe_sources)))))
+		(define consumed (stages_without_consumed_probes_using_graph graph stages
+			(stage_outputs_from_sources_using stages probe_sources)))
+		(define direct_ids (stage_output_source_ids (filter probe_sources (lambda (src)
+			(not (nil? (direct_group_probe_stage_for_source stages src (list true))))))))
+		(stages_without_ids consumed direct_ids))))
+
+(define query_block_probe_consumers (lambda (block)
+	(list
+		(qb_fields block)
+		(qb_where block)
+		(qb_group block)
+		(qb_having block)
+		(qb_order block)
+		(qb_hidden block))))
 
 (define query_block_with_scalar_first_probes_using (lambda (stages block)
 	(begin
 		(define stage_list (lowering_catalog_stages stages))
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
+		(define consumers (query_block_probe_consumers block))
 		(define prelimit_sources (prelimit_sources_for sources default_alias
 			(coalesceNil (qb_where block) true) (coalesceNil (qb_order block) '())))
 		(define prelimit_aliases (map prelimit_sources source_alias))
-		(define unbounded_probe_candidates (probe_output_sources_for_block stages sources default_alias nil))
+		(define unbounded_probe_candidates (probe_output_sources_for_block
+			stages sources default_alias nil (qb_where block) consumers))
 		(define unbounded_probe_aliases (map unbounded_probe_candidates source_alias))
 		(define probe_candidates (filter
-			(probe_output_sources_for_block stages sources default_alias (qb_limit block))
+			(probe_output_sources_for_block stages sources default_alias
+				(qb_limit block) (qb_where block) consumers)
 			(lambda (src)
 				(or (not (contains? prelimit_aliases (source_alias src)))
 					(contains? unbounded_probe_aliases (source_alias src))))))
@@ -8728,7 +8941,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define probe_sources (if (nil? retained_order_alias)
 			probe_candidates
 			(merge_unique (list probe_candidates (list (nth order_lookup 0))))))
-		(define probe_index (probe_stage_alias_index stages probe_sources))
+		(define probe_index (probe_stage_alias_index stages probe_sources consumers))
 		(define rewritten_sources (rewrite_scalar_first_probe_sources_using_index stages sources probe_index default_alias))
 		(make_query_block
 			(qb_schema block)
@@ -9792,7 +10005,8 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '()))
-		(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block all_stages sources default_alias (qb_limit block))))
+		(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block
+			all_stages sources default_alias (qb_limit block) (qb_where block) (query_block_probe_consumers block))))
 		(define stage_output_ids (stage_output_source_ids sources))
 		(define direct (filter (qb_stages block) (lambda (stage)
 			(and

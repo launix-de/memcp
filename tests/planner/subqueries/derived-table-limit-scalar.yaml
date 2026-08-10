@@ -37,6 +37,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS dtl_access_tenant"
   - sql: "DROP TABLE IF EXISTS dtl_access_location"
   - sql: "DROP TABLE IF EXISTS dtl_global_access"
+  - sql: "DROP TABLE IF EXISTS dtl_group_parent"
+  - sql: "DROP TABLE IF EXISTS dtl_group_child"
   - sql: "CREATE TABLE dtl_main (ID INT PRIMARY KEY, name TEXT, category INT)"
   - sql: "CREATE TABLE dtl_hist (ID INT PRIMARY KEY, parent INT, val INT, ts INT)"
   - sql: "CREATE TABLE dtl_ref (ID INT PRIMARY KEY, label TEXT)"
@@ -57,6 +59,21 @@ setup:
   - sql: "INSERT INTO dtl_access_link VALUES (1, 11, 100, 1000), (2, 11, 200, 2000), (3, 12, 100, 1000), (4, 11, NULL, NULL)"
   - sql: "CREATE TABLE dtl_global_access (ID INT PRIMARY KEY, account_id INT, tenant_id INT)"
   - sql: "INSERT INTO dtl_global_access VALUES (1, 11, NULL), (2, 11, NULL), (3, 11, NULL), (4, 11, NULL), (5, 12, NULL)"
+  - sql: "CREATE TABLE dtl_group_parent (ID INT PRIMARY KEY, label TEXT)"
+  - sql: "CREATE TABLE dtl_group_child (ID INT PRIMARY KEY, parent_id INT, amount INT)"
+  - scm: |
+      (begin
+        (insert
+          (table "memcp-tests" "dtl_group_parent")
+          '("ID" "label")
+          (map (produceN 1201) (lambda (i) (list (+ i 1) (concat "parent-" (+ i 1))))))
+        (insert
+          (table "memcp-tests" "dtl_group_child")
+          '("ID" "parent_id" "amount")
+          (map (produceN 200) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
+        true)
+  - sql: "CREATE INDEX dtl_group_child_parent ON dtl_group_child (parent_id)"
+  - scm: '(rebuild)'
   # Simulate a v3 carrier retained across a planner upgrade. Its stale computed
   # presence column makes all four carrier keys look like successful probes.
   - scm: |
@@ -774,6 +791,129 @@ test_cases:
   - name: "Remove stale physical carrier fixture"
     scm: '(droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)'
 
+  - name: "Selective parent probes only the demanded grouped key"
+    sql: |
+      SELECT p.ID, grouped.total
+      FROM dtl_group_parent p
+      LEFT JOIN (
+        SELECT c.parent_id, SUM(c.amount) AS total
+        FROM dtl_group_child c
+        GROUP BY c.parent_id
+      ) grouped ON grouped.parent_id = p.ID
+      WHERE p.ID = 177
+    expect:
+      rows: 1
+      data:
+        - ID: 177
+          total: 177
+
+  - name: "Selective grouped LEFT JOIN lowers to a nested base scan"
+    sql: |
+      EXPLAIN
+      SELECT p.ID, grouped.total
+      FROM dtl_group_parent p
+      LEFT JOIN (
+        SELECT c.parent_id, SUM(c.amount) AS total
+        FROM dtl_group_child c
+        GROUP BY c.parent_id
+      ) grouped ON grouped.parent_id = p.ID
+      WHERE p.ID = 177
+    expect:
+      contains:
+        - '"dtl_group_child"'
+        - "(outer (var 0))"
+      not_contains:
+        - ".grp:query:"
+        - "createcolumn"
+
+  - name: "Broad grouped LEFT JOIN retains reusable carrier plan"
+    sql: |
+      EXPLAIN
+      SELECT p.ID, grouped.total
+      FROM dtl_group_parent p
+      LEFT JOIN (
+        SELECT c.parent_id, SUM(c.amount) AS total
+        FROM dtl_group_child c
+        GROUP BY c.parent_id
+      ) grouped ON grouped.parent_id = p.ID
+      WHERE p.ID > 0
+    expect:
+      contains:
+        - ".grp:query:"
+        - "createcolumn"
+
+  - name: "Grouped probe retains the derived input WHERE condition"
+    sql: |
+      SELECT p.ID, grouped.total
+      FROM dtl_group_parent p
+      LEFT JOIN (
+        SELECT c.parent_id, SUM(c.amount) AS total
+        FROM dtl_group_child c
+        WHERE c.amount > 190
+        GROUP BY c.parent_id
+      ) grouped ON grouped.parent_id = p.ID
+      WHERE p.ID IN (177, 199)
+      ORDER BY p.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 177
+          total: null
+        - ID: 199
+          total: 199
+
+  - name: "Grouped LEFT JOIN keeps missing aggregate NULL"
+    sql: |
+      SELECT p.ID, grouped.total
+      FROM dtl_group_parent p
+      LEFT JOIN (
+        SELECT c.parent_id, SUM(c.amount) AS total
+        FROM dtl_group_child c
+        GROUP BY c.parent_id
+      ) grouped ON grouped.parent_id = p.ID
+      WHERE p.ID = 201
+    expect:
+      rows: 1
+      data:
+        - ID: 201
+          total: null
+
+  - name: "Grouped LEFT JOIN keeps projected key NULL for a missing group"
+    sql: |
+      SELECT p.ID, grouped.parent_id, grouped.total
+      FROM dtl_group_parent p
+      LEFT JOIN (
+        SELECT c.parent_id, SUM(c.amount) AS total
+        FROM dtl_group_child c
+        GROUP BY c.parent_id
+      ) grouped ON grouped.parent_id = p.ID
+      WHERE p.ID = 201
+    expect:
+      rows: 1
+      data:
+        - ID: 201
+          parent_id: null
+          total: null
+
+  - name: "Grouped LEFT JOIN keeps aggregate ON predicate in outer join"
+    sql: |
+      SELECT p.ID, grouped.total
+      FROM dtl_group_parent p
+      LEFT JOIN (
+        SELECT c.parent_id, SUM(c.amount) AS total
+        FROM dtl_group_child c
+        GROUP BY c.parent_id
+      ) grouped ON grouped.parent_id = p.ID AND grouped.total > 190
+      WHERE p.ID IN (177, 199)
+      ORDER BY p.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 177
+          total: null
+        - ID: 199
+          total: 199
+
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtl_main"
@@ -786,3 +926,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS dtl_access_tenant"
   - sql: "DROP TABLE IF EXISTS dtl_access_location"
   - sql: "DROP TABLE IF EXISTS dtl_global_access"
+  - sql: "DROP TABLE IF EXISTS dtl_group_parent"
+  - sql: "DROP TABLE IF EXISTS dtl_group_child"
