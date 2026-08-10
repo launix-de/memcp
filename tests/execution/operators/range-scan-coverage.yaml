@@ -254,9 +254,11 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "resultrow '("
+        - "touch_keytable"
+        - ".grp:rs_data:"
       result_not_contains:
-        - "resultrow (cons"
+        - "assoc_keys_as_dataset_rows"
+        - "assoc_keys_values_as_dataset_rows"
 
   - name: "EXPLAIN JOIN"
     sql: "EXPLAIN SELECT a.id, b.id FROM rs_data a JOIN rs_data b ON a.val = b.val WHERE a.id < 5"

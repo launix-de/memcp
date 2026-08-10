@@ -91,9 +91,9 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	if len(innerScanSlice) > 10 && scm.ToBool(innerScanSlice[10]) {
 		return scm.NewNil()
 	}
-	// Delaying an effectful mapper until a batch flush changes observable
-	// behavior. In particular, query-root resultrow callbacks must stay in the
-	// nested scan pipeline instead of being buffered as Scheme values.
+	// Batch rewriting delays the inner mapper until a flush. Keep effectful
+	// mappers in their original nested pipeline so result emission, cache
+	// initialization, and other declared effects retain row-by-row semantics.
 	if scanExprMayHaveSideEffects(innerScanSlice[6]) {
 		return scm.NewNil()
 	}

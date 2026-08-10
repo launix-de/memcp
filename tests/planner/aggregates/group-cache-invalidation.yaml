@@ -359,6 +359,18 @@ test_cases:
         - name: "Sales"
           s: 150
 
+  - name: "Joined GROUP BY uses an incrementally maintained physical prejoin"
+    sql: "EXPLAIN SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 1
+      result_contains:
+        - ".prejoin:"
+        - "initialize_cache_table"
+        - "createtrigger"
+      result_not_contains:
+        - "assoc_keys_as_dataset_rows"
+        - "assoc_keys_values_as_dataset_rows"
+
   - name: "Insert new employee into existing dept"
     sql: "INSERT INTO sc_emp (id, dept_id, salary) VALUES (4, 2, 250)"
 

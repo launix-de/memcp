@@ -2500,9 +2500,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.srState = WRITE // mark as live so ensureLoaded() won't reset columns
 	t.storeNext(result)
 	result.mu.Lock() // interlock so no one will rebuild the shard twice
+	result.enterWriteOwner()
 	resultLocked := true
 	defer func() {
 		if resultLocked {
+			result.exitWriteOwner()
 			result.mu.Unlock()
 		}
 	}()
@@ -2901,6 +2903,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		removedFromCache = true
 	}
 	// Unlock result before registration (ComputeSize needs RLock)
+	result.exitWriteOwner()
 	result.mu.Unlock()
 	resultLocked = false
 	// Register the new shard with CacheManager

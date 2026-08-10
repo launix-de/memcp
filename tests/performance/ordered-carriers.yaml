@@ -1,0 +1,84 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# Performance regression for physical ordered carriers.
+
+metadata:
+  version: "1.0"
+  description: "Performance: ordered UNION over a joined branch"
+  isolated: true
+
+test_cases:
+  - name: "ordered union lowers an unused unique lookup to a recset semijoin"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `pb_order_fact`"
+      - sql: "DROP TABLE IF EXISTS `pb_order_dim`"
+      - sql: "CREATE TABLE `pb_order_fact` (id INT PRIMARY KEY, category INT, value INT)"
+      - sql: "CREATE TABLE `pb_order_dim` (cat_id INT PRIMARY KEY, label TEXT)"
+    sql: |
+      EXPLAIN SELECT f.id AS result_id
+      FROM pb_order_fact f
+      JOIN pb_order_dim d ON d.cat_id = f.category
+      UNION ALL
+      SELECT id AS result_id FROM pb_order_fact
+      ORDER BY result_id DESC
+      LIMIT 100
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order_multi"
+        - "recset_project_join"
+      result_not_contains:
+        - ".prejoin:"
+        - "initialize_cache_table"
+        - "__union_rows"
+
+  - name: "ordered union recset semijoin preserves rows and limit"
+    setup:
+      - sql: "INSERT INTO pb_order_fact (id, category, value) VALUES (1, 1, 10), (2, 2, 20), (3, 3, 30)"
+      - sql: "INSERT INTO pb_order_dim (cat_id, label) VALUES (1, 'one'), (3, 'three')"
+    sql: |
+      SELECT f.id AS result_id
+      FROM pb_order_fact f
+      JOIN pb_order_dim d ON d.cat_id = f.category
+      UNION ALL
+      SELECT id AS result_id FROM pb_order_fact
+      ORDER BY result_id DESC
+      LIMIT 4
+    expect:
+      rows: 4
+      data:
+        - result_id: 3
+        - result_id: 3
+        - result_id: 2
+        - result_id: 1
+
+  # Warmups exercise the physical RecSet projection and ordered merge.
+  - name: "Perf: ORDERED JOIN UNION LIMIT"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `pb_order_fact`"
+      - sql: "DROP TABLE IF EXISTS `pb_order_dim`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `pb_order_fact` (id INT PRIMARY KEY, category INT, value INT)"
+      - sql: "CREATE TABLE `pb_order_dim` (cat_id INT PRIMARY KEY, label TEXT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71)))))
+            (insert (table "{database}" "pb_order_fact") '("id" "category" "value") rows)
+            (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
+            (insert (table "{database}" "pb_order_dim") '("cat_id" "label") dims)
+            (rebuild)
+            "ok")
+    sql: |
+      SELECT f.id AS result_id
+      FROM pb_order_fact f
+      JOIN pb_order_dim d ON d.cat_id = f.category
+      UNION ALL
+      SELECT id AS result_id FROM pb_order_fact
+      ORDER BY result_id DESC
+      LIMIT 100
+    threshold_ms: 30000
+    expect:
+      rows: 100
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS pb_order_fact"
+  - sql: "DROP TABLE IF EXISTS pb_order_dim"
