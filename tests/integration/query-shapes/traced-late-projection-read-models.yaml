@@ -466,6 +466,43 @@ test_cases:
         - id: 2
           access_a: false
           access_b: false
+  - name: "Repeated nested access predicates reuse decorrelated stages"
+    max_time: 1.0
+    max_planner_time_ms: 500
+    max_compile_phase_ms:
+      untangle_ns: 180
+      recipe_emit_ns: 180
+    max_compile_metrics:
+      group_stages: 4
+      plan_nodes: 2500
+    max_plan_size: 40000
+    sql: |
+      SELECT item.id,
+        COALESCE((
+          SELECT CASE WHEN
+            EXISTS (SELECT TRUE FROM trace_wide_assignment member WHERE member.team_id = parent.team_id AND member.member_id = 7 LIMIT 1)
+            AND EXISTS (SELECT TRUE FROM trace_wide_assignment member WHERE member.team_id = parent.team_id AND member.member_id = 7 LIMIT 1)
+            AND CASE WHEN parent.is_public THEN TRUE ELSE
+              EXISTS (SELECT TRUE FROM trace_wide_assignment member WHERE member.team_id = parent.team_id AND member.member_id = 7 LIMIT 1)
+              AND EXISTS (SELECT TRUE FROM trace_wide_assignment member WHERE member.team_id = parent.team_id AND member.member_id = 7 LIMIT 1)
+              AND EXISTS (SELECT TRUE FROM trace_wide_assignment member WHERE member.team_id = parent.team_id AND member.member_id = 7 LIMIT 1)
+              AND EXISTS (SELECT TRUE FROM trace_wide_assignment member WHERE member.team_id = parent.team_id AND member.member_id = 7 LIMIT 1)
+            END
+          THEN TRUE ELSE FALSE END
+          FROM trace_wide_parent parent
+          WHERE parent.id = item.parent_id
+          LIMIT 1
+        ), FALSE) AS can_view
+      FROM trace_wide_prop item
+      WHERE item.id IN (1, 2)
+      ORDER BY item.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          can_view: true
+        - id: 2
+          can_view: false
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_config"

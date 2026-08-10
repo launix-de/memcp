@@ -3131,31 +3131,43 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 					(merge_unique (list (nth probe_result 2) (nth in_result 2)))))
 			_ (neumann_fail "untangle_query" "unknown dependent subquery marker")))))
 
-(define btw2025_decorrelate_expr_with_stages (lambda (expr ctx)
-	(match expr
-		((symbol dependent-subquery) _kind _probe _subquery _outer_sources)
-		(btw2025_resolve_dependent_subquery expr ctx)
-		((quote dependent-subquery) _kind _probe _subquery _outer_sources)
-		(btw2025_resolve_dependent_subquery expr ctx)
-		(cons head tail)
-		(combine_stage_rewrite_results head (map tail (lambda (item)
-			(btw2025_decorrelate_expr_with_stages item ctx))))
-		_ (list expr '() '()))))
-
 (define btw2025_dependent_marker_key (lambda (expr)
 	(if (dependent_subquery_marker? expr)
 		(concat "dependent:" (fnv_hash (string expr)))
 		nil)))
 
-(define btw2025_decorrelate_field_expr_using (lambda (expr ctx resolved)
+(define btw2025_decorrelate_exprs_using (lambda (exprs ctx resolved)
+	(match exprs
+		(cons expr rest) (begin
+			(define current (btw2025_decorrelate_expr_using expr ctx resolved))
+			(define tail (btw2025_decorrelate_exprs_using rest ctx (nth current 1)))
+			(list (cons (nth current 0) (nth tail 0)) (nth tail 1)))
+		_ (list '() resolved))))
+
+(define btw2025_decorrelate_expr_using (lambda (expr ctx resolved)
 	(begin
 		(define key (btw2025_dependent_marker_key expr))
 		(if (and (not (nil? key)) (has_assoc? resolved key))
 			(list (resolved key) resolved)
-			(begin
-				(define rewritten (btw2025_decorrelate_expr_with_stages expr ctx))
-				(list rewritten
-					(if (nil? key) resolved (set_assoc resolved key rewritten))))))))
+			(match expr
+				((symbol dependent-subquery) _kind _probe _subquery _outer_sources) (begin
+					(define rewritten (btw2025_resolve_dependent_subquery expr ctx))
+					(list rewritten (set_assoc resolved key rewritten)))
+				((quote dependent-subquery) _kind _probe _subquery _outer_sources) (begin
+					(define rewritten (btw2025_resolve_dependent_subquery expr ctx))
+					(list rewritten (set_assoc resolved key rewritten)))
+				(cons head tail) (begin
+					(define rewritten_tail (btw2025_decorrelate_exprs_using tail ctx resolved))
+					(list
+						(combine_stage_rewrite_results head (nth rewritten_tail 0))
+						(nth rewritten_tail 1)))
+				_ (list (list expr '() '()) resolved))))))
+
+(define btw2025_decorrelate_expr_with_stages (lambda (expr ctx)
+	(nth (btw2025_decorrelate_expr_using expr ctx '()) 0)))
+
+(define btw2025_decorrelate_field_expr_using (lambda (expr ctx resolved)
+	(btw2025_decorrelate_expr_using expr ctx resolved)))
 
 (define btw2025_decorrelate_fields_with_stages_using (lambda (fields ctx resolved)
 	(match (coalesceNil fields '())
@@ -9113,7 +9125,7 @@ is still available and remains an ordinary scalar expression through untangle. *
 			(if (equal? keys '(1))
 				(list (build_group_constant_key_insert_plan schema grouptbl))
 				(if (reduce keys (lambda (session_only key)
-						(and session_only (query_session_read? key))) true)
+					(and session_only (query_session_read? key))) true)
 					(list (build_group_session_key_insert_plan schema grouptbl key_names keys))
 					'()))
 			'()))
