@@ -51,6 +51,65 @@ test_cases:
         - result_id: 2
         - result_id: 1
 
+  - name: "filtered bounded union branches stay in physical carriers"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ordered_source_a"
+      - sql: "DROP TABLE IF EXISTS ordered_source_b"
+      - sql: "CREATE TABLE ordered_source_a (id INT PRIMARY KEY, value INT)"
+      - sql: "CREATE TABLE ordered_source_b (id INT PRIMARY KEY, value INT)"
+      - sql: "INSERT INTO ordered_source_a (id, value) VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50)"
+      - sql: "INSERT INTO ordered_source_b (id, value) VALUES (10, 7), (11, 8)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ordered_source_b"
+      - sql: "DROP TABLE IF EXISTS ordered_source_a"
+    steps:
+      - sql: |
+          EXPLAIN
+          SELECT id FROM (
+            SELECT id FROM ordered_source_a WHERE value <= 30 ORDER BY id DESC LIMIT 2
+          ) AS bounded_a
+          UNION ALL
+          SELECT id FROM (
+            SELECT value AS id FROM ordered_source_b ORDER BY value ASC LIMIT 1
+          ) AS bounded_b
+          ORDER BY id
+        expect:
+          contains:
+            - "scan_order_multi"
+          not_contains:
+            - "__union_rows"
+            - "(sort rows"
+      - sql: |
+          SELECT id FROM (
+            SELECT id FROM ordered_source_a WHERE value <= 30 ORDER BY id DESC LIMIT 2
+          ) AS bounded_a
+          UNION ALL
+          SELECT id FROM (
+            SELECT value AS id FROM ordered_source_b ORDER BY value ASC LIMIT 1
+          ) AS bounded_b
+          ORDER BY id
+        expect:
+          rows: 3
+          data:
+            - id: 2
+            - id: 3
+            - id: 7
+      - sql: |
+          SELECT id FROM (
+            SELECT id FROM ordered_source_a WHERE value <= 30 ORDER BY id DESC LIMIT 2
+          ) AS bounded_a
+          UNION ALL
+          SELECT id FROM (
+            SELECT value AS id FROM ordered_source_b ORDER BY value ASC LIMIT 1
+          ) AS bounded_b
+          ORDER BY id
+        expect:
+          rows: 3
+          data:
+            - id: 2
+            - id: 3
+            - id: 7
+
   # Warmups exercise the physical RecSet projection and ordered merge.
   - name: "Perf: ORDERED JOIN UNION LIMIT"
     setup:
