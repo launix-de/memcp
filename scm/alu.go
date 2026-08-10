@@ -52,6 +52,26 @@ func sqlLiteralArithmetic(a, b Scmer, subtract bool) Scmer {
 	return NewFloat(result)
 }
 
+func roundSQLDecimalOutput(value float64, scale int) float64 {
+	factor := math.Pow10(scale)
+	scaled := value * factor
+	if math.IsNaN(scaled) || math.IsInf(scaled, 0) {
+		return value
+	}
+
+	// Exact DECIMAL half values can land one binary ULP to either side after
+	// arithmetic. Snap only that representation error to the half boundary;
+	// values farther away retain normal half-away-from-zero rounding.
+	half := math.Round(scaled*2) / 2
+	ulpUp := math.Abs(math.Nextafter(scaled, math.Inf(1)) - scaled)
+	ulpDown := math.Abs(scaled - math.Nextafter(scaled, math.Inf(-1)))
+	tolerance := 2 * math.Max(ulpUp, ulpDown)
+	if math.Abs(scaled-half) <= tolerance {
+		scaled = half
+	}
+	return math.Round(scaled) / factor
+}
+
 func init_alu() {
 	// string functions
 	DeclareTitle("Arithmetic / Logic")
@@ -609,12 +629,11 @@ func init_alu() {
 			if scale < 0 || scale > 15 {
 				return a[0]
 			}
-			factor := math.Pow10(int(scale))
 			value := a[0].Float()
 			if math.IsNaN(value) || math.IsInf(value, 0) {
 				return a[0]
 			}
-			return NewFloat(math.Round(value*factor) / factor)
+			return NewFloat(roundSQLDecimalOutput(value, scale))
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{

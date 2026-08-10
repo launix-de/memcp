@@ -6669,12 +6669,28 @@ is still available and remains an ordinary scalar expression through untangle. *
 				(nth dimensions 1)
 				nil)))))
 
+(define decimal_derived_column_scale (lambda (relation col)
+	(begin
+		(define normalized (normalize_query_ast relation))
+		(if (query_block? normalized)
+			(reduce_assoc (qb_fields normalized) (lambda (best title expr)
+				(if (and (string? title) (string? col)
+					(equal? (toLower title) (toLower col)))
+					(decimal_expr_scale (qb_sources normalized) expr)
+					best)) nil)
+			nil))))
+
+(define decimal_source_column_scale (lambda (src col)
+	(begin
+		(define derived_scale (decimal_derived_column_scale (source_relation src) col))
+		(if (nil? derived_scale) (decimal_column_scale src col) derived_scale))))
+
 (define decimal_column_scale_for_sources (lambda (sources tblvar col)
 	(reduce (coalesceNil sources '()) (lambda (best src)
 		(if (and (or (nil? tblvar) (equal?? tblvar (source_alias src)))
 			(not (stage_output_relation? (source_relation src))))
 			(begin
-				(define scale (decimal_column_scale src col))
+				(define scale (decimal_source_column_scale src col))
 				(if (nil? scale) best (if (nil? best) scale (max best scale))))
 			best)) nil)))
 
@@ -6708,7 +6724,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(if (query_block? normalized)
 			(make_query_block
 				(qb_schema normalized)
-				(qb_sources normalized)
+				(map (qb_sources normalized) (lambda (src)
+					(source_with_relation src
+						(sanitize_decimal_aggregate_outputs (source_relation src)))))
 				(sanitize_decimal_aggregate_fields (qb_sources normalized) (qb_fields normalized))
 				(qb_where normalized)
 				(qb_group normalized)
