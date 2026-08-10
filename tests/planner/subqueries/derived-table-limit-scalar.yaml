@@ -788,6 +788,120 @@ test_cases:
       result_not_contains:
         - "(and (coalesceNil (__scalar_query_probe_"
 
+  - name: "Ordered root LEFT JOIN streams nested scans"
+    sql: |
+      SELECT m.ID, ref.label
+      FROM dtl_join_main m
+      LEFT JOIN dtl_join_ref ref ON ref.ID = m.first_ref
+      WHERE m.second_ref = 20
+      ORDER BY m.ID
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          label: "ten"
+
+  - name: "Physical ordered root LEFT JOIN does not collect subrows"
+    sql: |
+      EXPLAIN
+      SELECT m.ID, ref.label
+      FROM dtl_join_main m
+      LEFT JOIN dtl_join_ref ref ON ref.ID = m.first_ref
+      WHERE m.second_ref = 20
+      ORDER BY m.ID
+      LIMIT 1
+    expect:
+      result_contains:
+        - "scan_order"
+        - "dtl_join_main"
+        - "dtl_join_ref"
+      result_not_contains:
+        - "(acc subrows)"
+
+  - name: "Streaming root LEFT JOIN preserves missing rows"
+    sql: |
+      SELECT m.ID, ref.label
+      FROM dtl_join_main m
+      LEFT JOIN dtl_join_ref ref ON ref.ID = m.first_ref
+      ORDER BY m.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          label: "ten"
+        - ID: 2
+          label: "twenty"
+        - ID: 3
+          label: null
+
+  - name: "Streaming root preserves cascaded LEFT JOIN bindings"
+    sql: |
+      SELECT m.ID, first_ref.label AS first_label, second_ref.label AS second_label
+      FROM dtl_join_main m
+      LEFT JOIN dtl_join_ref first_ref ON first_ref.ID = m.first_ref
+      LEFT JOIN dtl_join_ref second_ref ON second_ref.ID = m.second_ref
+      ORDER BY m.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          first_label: "ten"
+          second_label: "twenty"
+        - ID: 2
+          first_label: "twenty"
+          second_label: "thirty"
+        - ID: 3
+          first_label: null
+          second_label: "ten"
+
+  - name: "Streaming root INNER JOIN preserves multiple matches"
+    sql: |
+      SELECT m.ID, access.ID AS access_id
+      FROM dtl_join_main m
+      JOIN dtl_global_access access
+        ON access.account_id = 11 AND m.ID = 1
+      ORDER BY access.ID
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          access_id: 1
+        - ID: 1
+          access_id: 2
+        - ID: 1
+          access_id: 3
+        - ID: 1
+          access_id: 4
+
+  - name: "Unordered streaming INNER JOIN emits every matching row"
+    sql: |
+      SELECT m.ID, ref.label
+      FROM dtl_join_main m
+      JOIN dtl_join_ref ref ON ref.ID = m.first_ref
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          label: "ten"
+        - ID: 2
+          label: "twenty"
+
+  - name: "Physical unordered root join stays a direct scan pipeline"
+    sql: |
+      EXPLAIN
+      SELECT m.ID, ref.label
+      FROM dtl_join_main m
+      JOIN dtl_join_ref ref ON ref.ID = m.first_ref
+    expect:
+      result_contains:
+        - "scan"
+        - "resultrow"
+      result_not_contains:
+        - "scan_batch"
+        - "__batchbuf"
+        - "(acc subrows)"
+
   - name: "Remove stale physical carrier fixture"
     scm: '(droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)'
 

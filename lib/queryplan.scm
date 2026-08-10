@@ -10924,14 +10924,14 @@ source remain residual so they observe the null-extended row. */
 						(source_outer? src))))
 			_ (neumann_fail "build_queryplan" "malformed ROW_NUMBER stage")))))
 
-(define build_join_scan_rows_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier column_recipe stages)
+(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier column_recipe stages collect_rows)
 	(if (empty_list? sources)
 		(if (equal? (coalesceNil final_condition true) true)
-			(runtime_cons_list_expr (list row_expr))
+			(if collect_rows (runtime_cons_list_expr (list row_expr)) row_expr)
 			(list (quote if)
 				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias final_condition))
-				(runtime_cons_list_expr (list row_expr))
-				(list (quote list))))
+				(if collect_rows (runtime_cons_list_expr (list row_expr)) row_expr)
+				(if collect_rows (list (quote list)) nil)))
 		(begin
 			(define src (car sources))
 			(if (not (source_is_base_table? src))
@@ -10974,12 +10974,17 @@ source remain residual so they observe the null-extended row. */
 				(list (quote optimize) lowered_filter_condition)))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_rows_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_carrier column_recipe stages)))
-			(define reduce_expr (list (quote lambda) (list (quote acc) (quote subrows))
-				(list (quote if)
-					(list (quote nil?) (quote subrows))
-					(quote acc)
-					(list (quote merge) (quote acc) (quote subrows)))))
+				(build_join_scan_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_carrier column_recipe stages collect_rows)))
+			(define reduce_expr (if collect_rows
+				(list (quote lambda) (list (quote acc) (quote subrows))
+					(list (quote if)
+						(list (quote nil?) (quote subrows))
+						(quote acc)
+						(list (quote merge) (quote acc) (quote subrows))))
+				nil))
+			(if (and (not collect_rows) (not (nil? row_number_stage_filter)))
+				(neumann_fail "build_queryplan" "streaming join scan cannot consume a ROW_NUMBER stage")
+				true)
 			(define scan_expr
 				(if (not (nil? row_number_stage_filter))
 					(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe)
@@ -10992,7 +10997,7 @@ source remain residual so they observe the null-extended row. */
 							(cons (quote list) mapcols)
 							map_expr
 							reduce_expr
-							(list (quote list))
+							(if collect_rows (list (quote list)) nil)
 							nil
 							(source_outer? src))
 						(list (quote scan_order)
@@ -11008,7 +11013,7 @@ source remain residual so they observe the null-extended row. */
 							(cons (quote list) mapcols)
 							map_expr
 							reduce_expr
-							(list (quote list))
+							(if collect_rows (list (quote list)) nil)
 							(source_outer? src)))))
 			(if membership_filter
 				(list
@@ -11016,26 +11021,32 @@ source remain residual so they observe the null-extended row. */
 					membership_table_expr)
 				scan_expr)))))
 
+(define build_join_scan_rows_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier column_recipe stages)
+	(build_join_scan_with_mapper_using_recipe
+		schema all_sources sources default_alias needed_exprs final_condition row_expr
+		order_items offset_value limit_value allow_membership_carrier column_recipe stages true)))
+
+(define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier column_recipe stages)
+	(build_join_scan_with_mapper_using_recipe
+		schema all_sources sources default_alias needed_exprs final_condition row_expr
+		order_items offset_value limit_value allow_membership_carrier column_recipe stages false)))
+
 (define build_join_scan_rows_with_mapper (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier stages)
 	(build_join_scan_rows_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
 		order_items offset_value limit_value allow_membership_carrier nil stages)))
 
 (define build_join_scan_rows (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
-	(build_join_scan_rows_with_mapper
-		schema
-		sources
-		sources
-		default_alias
-		needed_exprs
-		final_condition
-		(list (quote resultrow)
-			(cons (quote list) (lower_join_result_fields sources default_alias fields)))
-		order_items
-		offset_value
-		limit_value
-		true
-		stages)))
+	(begin
+		(define row_expr (list (quote resultrow)
+			(cons (quote list) (lower_join_result_fields sources default_alias fields))))
+		(if (empty_list? (filter (lowering_catalog_stages stages) row_number_stage?))
+			(build_join_scan_pipeline_using_recipe
+				schema sources sources default_alias needed_exprs final_condition row_expr
+				order_items offset_value limit_value true nil stages)
+			(build_join_scan_rows_with_mapper
+				schema sources sources default_alias needed_exprs final_condition row_expr
+				order_items offset_value limit_value true stages)))))
 
 (define lower_query_block_as_dataset_rows (lambda (block fields)
 	(begin
