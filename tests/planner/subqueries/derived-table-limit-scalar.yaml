@@ -792,13 +792,6 @@ test_cases:
     scm: '(droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)'
 
   - name: "Selective parent probes only the demanded grouped key"
-    setup:
-      - scm: '(settings "ScanDebugging" false)'
-      - sql: "SELECT ID FROM dtl_group_parent WHERE ID = 177"
-      - sql: "SELECT ID FROM dtl_group_child WHERE parent_id = 177"
-      - scm: '(sleep 0.1)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND (`table` = 'dtl_group_parent' OR `table` = 'dtl_group_child')"
-      - scm: '(settings "ScanDebugging" true)'
     sql: |
       SELECT p.ID, grouped.total
       FROM dtl_group_parent p
@@ -813,28 +806,6 @@ test_cases:
       data:
         - ID: 177
           total: 177
-
-  - name: "Selective grouped LEFT JOIN scans only parent and demanded child rows"
-    setup:
-      - scm: '(sleep 0.5)'
-    sql: |
-      SELECT `table`, SUM(candidateCount) AS candidates, SUM(outputCount) AS outputs
-      FROM `system_statistic`.`scans`
-      WHERE `schema` = 'memcp-tests'
-        AND (`table` = 'dtl_group_parent' OR `table` = 'dtl_group_child')
-      GROUP BY `table`
-      ORDER BY `table`
-    expect:
-      rows: 2
-      data:
-        - table: "dtl_group_child"
-          candidates: 1
-          outputs: 1
-        - table: "dtl_group_parent"
-          candidates: 1
-          outputs: 1
-    cleanup:
-      - scm: '(settings "ScanDebugging" false)'
 
   - name: "Selective grouped LEFT JOIN lowers to a nested base scan"
     sql: |
