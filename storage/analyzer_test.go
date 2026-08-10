@@ -58,6 +58,65 @@ func TestBoundaryEqual(t *testing.T) {
 	}
 }
 
+func TestBoundaryEqualResolvesNestedOuterNumberedVar(t *testing.T) {
+	root := &scm.Env{Vars: make(scm.Vars), VarsNumbered: []scm.Scmer{scm.NewInt(33)}}
+	middle := &scm.Env{Vars: make(scm.Vars), VarsNumbered: []scm.Scmer{scm.NewInt(22)}, Outer: root}
+	immediate := &scm.Env{Vars: make(scm.Vars), VarsNumbered: []scm.Scmer{scm.NewInt(11)}, Outer: middle}
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewNthLocalVar(0),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("outer"),
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("outer"),
+				scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("outer"),
+					scm.NewNthLocalVar(0),
+				}),
+			}),
+		}),
+	})
+	cond := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("key")}),
+		Body:   body,
+		En:     immediate,
+	})
+
+	bounds := extractBoundaries([]string{"k0"}, cond)
+	if len(bounds) != 1 {
+		t.Fatalf("expected nested outer key to produce one boundary, got %d", len(bounds))
+	}
+	if bounds[0].col != "k0" || bounds[0].matcher.Kind() != "equal" {
+		t.Fatalf("unexpected nested outer boundary: %#v", bounds[0])
+	}
+	if got := scm.ToInt(bounds[0].lower); got != 33 {
+		t.Fatalf("nested outer boundary = %d, want 33", got)
+	}
+}
+
+func TestBoundaryEqualMissingOuterFrameIsNotExtracted(t *testing.T) {
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewNthLocalVar(0),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("outer"),
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("outer"),
+				scm.NewNthLocalVar(0),
+			}),
+		}),
+	})
+	cond := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("key")}),
+		Body:   body,
+		En:     &scm.Env{Vars: make(scm.Vars)},
+	})
+
+	if bounds := extractBoundaries([]string{"k0"}, cond); len(bounds) != 0 {
+		t.Fatalf("missing outer frame produced boundaries: %#v", bounds)
+	}
+}
+
 // TestBoundaryRange verifies that < produces RangeMatcher.
 func TestBoundaryRange(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{

@@ -413,6 +413,42 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 		return 0, false
 	}
+	resolveOuterReference := func(node scm.Scmer) (scm.Scmer, bool) {
+		depth := 0
+		for {
+			parts, ok := scmerSlice(node)
+			if !ok || len(parts) != 2 || !scanSymbolIs(parts[0], "outer") {
+				break
+			}
+			depth++
+			node = parts[1]
+		}
+		if depth == 0 {
+			return scm.NewNil(), false
+		}
+
+		env := p.En
+		for level := 1; level < depth && env != nil; level++ {
+			env = env.Outer
+		}
+		if env == nil {
+			return scm.NewNil(), false
+		}
+		if node.IsSymbol() {
+			sym := scm.Symbol(node.String())
+			if binding := env.FindRead(sym); binding != nil {
+				value, ok := binding.Vars[sym]
+				return value, ok
+			}
+		}
+		if node.IsNthLocalVar() {
+			idx := int(node.NthLocalVar())
+			if idx < len(env.VarsNumbered) {
+				return env.VarsNumbered[idx], true
+			}
+		}
+		return scm.NewNil(), false
+	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
 		if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() || v.IsCustom(TagRecSet) {
@@ -425,26 +461,9 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 		}
-		if v.IsSlice() {
-			val := v.Slice()
-			if len(val) > 0 && val[0].SymbolEquals("outer") {
-				if val[1].IsSymbol() {
-					sym := scm.Symbol(val[1].String())
-					if val2, ok := p.En.Vars[sym]; ok {
-						if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
-							return val2, true
-						}
-					}
-				} else if val[1].IsNthLocalVar() {
-					// (outer NthLocalVar(i)) — free variable from outer captured environment
-					idx := int(val[1].NthLocalVar())
-					if p.En.VarsNumbered != nil && idx < len(p.En.VarsNumbered) {
-						val2 := p.En.VarsNumbered[idx]
-						if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
-							return val2, true
-						}
-					}
-				}
+		if val2, ok := resolveOuterReference(v); ok {
+			if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
+				return val2, true
 			}
 		}
 		if isIndependent(params, v) {
