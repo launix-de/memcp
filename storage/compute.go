@@ -503,6 +503,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			scanReduceFn,
 			col.OrcReduceInit,
 			false,
+			col.OrcReduceInit,
 		)
 	})
 }

@@ -30,7 +30,7 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=filterCols, 4=filterFns,
 	// 5=sortcols, 6=sortdirs, 7=perTableOffset, 8=perTableLimit,
 	// 9=partCols, 10=offset, 11=limit, 12=mapCols, 13=mapFns,
-	// 14=reduce, 15=neutral, 16=isOuter
+	// 14=reduce, 15=neutral, 16=isOuter, 17=notFoundValue
 	for i := 1; i <= 13 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
@@ -44,6 +44,9 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	}
 	if len(v) > 16 {
 		v[16], _ = oc.OptimizeSub(v[16], true)
+	}
+	if len(v) > 17 {
+		v[17], _ = oc.OptimizeSub(v[17], true)
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
@@ -59,7 +62,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	// if rewritten := tryScanOrderBatchRewrite(v); !rewritten.IsNil() {
 	// 	return oc.OptimizeSub(rewritten, useResult)
 	// }
-	mapEnd, reduceIdx, neutralIdx, outerIdx := 11, 12, 13, 14
+	mapEnd, reduceIdx, neutralIdx, outerIdx, notFoundIdx := 11, 12, 13, 14, 15
 	for i := 1; i <= mapEnd && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
@@ -73,6 +76,9 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	}
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
+	}
+	if len(v) > notFoundIdx {
+		v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
@@ -589,7 +595,7 @@ func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 // results from all tables' shards into a single globally sorted stream.
 // Each table has its own filter, sort columns and map function, but sort
 // directions, offset/limit, reduce and neutral are shared.
-func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
 	execStart := time.Now()
 	ss := SessionStateFromTx(currentTx)
 
@@ -951,6 +957,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		nullRow := buildOuterNullCallbackRow(cbCols)
 		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...))
 	}
+	if !hadValue && !isOuter {
+		akkumulator = notFoundValue
+	}
 	execNs := time.Since(execStart).Nanoseconds()
 	for i := range tables {
 		tableStats := stats[i]
@@ -988,9 +997,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 }
 
 // scan_order delegates to scanOrderMulti with a single-element table spec.
-func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
 	if len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !aggregate.IsNil() && !isOuter {
-		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral)
+		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral, notFoundValue)
 	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		table:          t,
@@ -1001,13 +1010,13 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 		callback:       callback,
 		perTableOffset: -1,
 		perTableLimit:  -1,
-	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter)
+	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter, notFoundValue)
 }
 
 // scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
-func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	bounds := extractBoundaries(conditionCols, condition)
@@ -1056,7 +1065,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 		panic(firstErr)
 	}
 	if foundShard == nil {
-		return neutral
+		return notFoundValue
 	}
 	mapper := foundShard.OpenMapReducer(callbackCols, callback, aggregate, false, 0, nil, currentTx)
 	result := mapper.Stream(neutral, []uint32{foundID}, nil)
@@ -1107,7 +1116,7 @@ func (t *table) scanOrderPointValue(currentTx *TxContext, keyCols []string, keyV
 	return value
 }
 
-func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
 	if currentTx == nil {
 		currentTx = r.tx
 	}
@@ -1120,7 +1129,7 @@ func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condit
 		callback:       callback,
 		perTableOffset: -1,
 		perTableLimit:  -1,
-	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter)
+	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter, notFoundValue)
 }
 
 // streamOrBreak calls mapper.Stream and catches a breakSentinel panic (from $break
