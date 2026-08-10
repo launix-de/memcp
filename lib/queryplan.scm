@@ -11119,7 +11119,8 @@ source remain residual so they observe the null-extended row. */
 		(and (empty_list? (qb_stages block))
 			(and (> (count (qb_sources block)) 1)
 				(and (prejoin_sources_supported? (qb_sources block))
-					(not (expr_contains_session_dependency? (source_join_exprs (qb_sources block))))))))))
+					(and (not (equal? (prejoin_join_condition (qb_sources block)) true))
+						(not (expr_contains_session_dependency? (source_join_exprs (qb_sources block)))))))))))
 
 (define prejoin_query_exprs (lambda (block fields)
 	(merge (list
