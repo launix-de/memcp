@@ -645,7 +645,10 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwner()
+	skipShardReadLock := currentTx != nil && currentTx.HasShardWrite(t)
+	if currentTx == nil {
+		skipShardReadLock = t.hasWriteOwner()
+	}
 	t.ensureMainCount(skipShardReadLock)
 	var recsetPart *recSetShard
 	if recsetFilter != nil {

@@ -108,6 +108,7 @@ type TxContext struct {
 	Depth         uint32 // nesting depth for savepoints / triggers
 	Session       scm.Scmer
 	SessionState  *scm.SessionState // cached to avoid GLS stack-walking
+	querySeq      atomic.Uint64     // current statement generation for cancellation checks
 
 	// Per-shard state, nil until first write (zero-alloc for read-only transactions).
 	shards map[*storageShard]*storageShardTransaction
@@ -613,6 +614,17 @@ func SessionStateFromTx(tx *TxContext) *scm.SessionState {
 	return scm.GetCurrentSessionState()
 }
 
+// querySeqFromTx returns the statement generation cached on the transaction.
+// The fallback supports storage calls made outside the SQL transaction wrapper.
+func querySeqFromTx(tx *TxContext) uint64 {
+	if tx != nil {
+		if seq := tx.querySeq.Load(); seq != 0 {
+			return seq
+		}
+	}
+	return scm.CurrentQuerySeq()
+}
+
 // WithAutocommit executes fn inside an implicit TxCursorStability transaction
 // if no explicit transaction is already active in session, and commits it
 // afterwards. If an explicit transaction is active (session["transaction"] != nil),
@@ -624,12 +636,18 @@ func SessionStateFromTx(tx *TxContext) *scm.SessionState {
 // transaction, enabling a single fsync per statement instead of one per write.
 func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Scmer {
 	if !sessionFn(scm.NewString("transaction")).IsNil() {
+		if txScmer := sessionFn(scm.NewString("__memcp_tx")); !txScmer.IsNil() {
+			if tx, ok := txScmer.Any().(*TxContext); ok {
+				tx.querySeq.Store(scm.CurrentQuerySeq())
+			}
+		}
 		return scm.Apply(fn)
 	}
 
 	tx := NewTxContext(TxCursorStability)
 	tx.Session = scm.NewFunc(sessionFn)
 	tx.SessionState = scm.GetCurrentSessionState()
+	tx.querySeq.Store(scm.CurrentQuerySeq())
 	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 
 	var result scm.Scmer

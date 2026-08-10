@@ -462,10 +462,8 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 		}
 		return u.ensureColumnLoaded(colName, true)
 	}
-	// alreadyLocked=false: caller guarantees ownsWrite=false — skip hasWriteOwner().
-	if tx := CurrentTx(); tx != nil && tx.HasShardWrite(u) {
-		return u.getColumnStorageOrPanicEx(colName, true)
-	}
+	// alreadyLocked=false: caller guarantees that it does not own the shard's
+	// write lock. Avoid a goroutine-local transaction lookup on every column.
 	u.mu.RLock()
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
