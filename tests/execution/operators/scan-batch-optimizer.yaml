@@ -142,7 +142,7 @@ test_cases:
       data_not_contains:
         - code: "scan_batch"
 
-  - name: "Grouped LEFT JOIN group cache keeps outer key as dynamic lookup"
+  - name: "Grouped LEFT JOIN carrier keeps outer key as dynamic lookup"
     sql: |
       SELECT c.cid, g.total
       FROM sb_customers c
@@ -163,7 +163,7 @@ test_cases:
         - cid: 3
           total: 350
 
-  - name: "EXPLAIN grouped LEFT JOIN group cache uses outer key lookup"
+  - name: "EXPLAIN grouped LEFT JOIN carrier uses outer key lookup"
     sql: |
       EXPLAIN SELECT c.cid, g.total
       FROM sb_customers c

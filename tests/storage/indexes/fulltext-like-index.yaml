@@ -169,7 +169,7 @@ test_cases:
   # early = runs 1-2, late = runs 5-8.
 
   # -- Test 1: LIKE needle-in-haystack (5 matches in 30k) --
-  - name: "EXPLAIN LIKE aggregate uses canonical group cache"
+  - name: "EXPLAIN LIKE aggregate uses canonical group carrier"
     sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       contains:
@@ -301,7 +301,7 @@ test_cases:
       - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, `table`, index_cols, inputCount, outputCount, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%' ORDER BY timestamp LIMIT 16"
 
   # -- Test 3: LIKE + Range (must be >= 3x faster) --
-  - name: "EXPLAIN LIKE+Range aggregate uses canonical group cache"
+  - name: "EXPLAIN LIKE+Range aggregate uses canonical group carrier"
     sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
     expect:
       contains:

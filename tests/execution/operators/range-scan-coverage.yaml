@@ -303,6 +303,7 @@ test_cases:
         - "ordered_scans"
         - "exists_scans"
         - "group_caches"
+        - "group_carriers"
 
   - name: "EXPLAIN IR exposes planner stages"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"

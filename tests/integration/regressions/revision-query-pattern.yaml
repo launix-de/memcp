@@ -79,7 +79,7 @@ test_cases:
         - {id: 2, title: "Contract B", file: "draft.pdf"}
         - {id: 3, title: "Invoice C", file: "invoice_v2.pdf"}
 
-  - name: "EXPLAIN derived ROW_NUMBER join avoids ORC column"
+  - name: "EXPLAIN derived ROW_NUMBER join avoids ORC carrier"
     sql: |
       EXPLAIN SELECT doc.id, doc.title, dr.file
       FROM doc

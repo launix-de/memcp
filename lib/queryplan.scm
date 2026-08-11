@@ -13283,4 +13283,6 @@ build_queryplan contract. */
 					(plan_count plan (quote scan_order))
 					(plan_count plan (quote scan_order_multi)))
 				"exists_scans" (plan_count plan (quote scan_exists))
-				"group_caches" (plan_count plan (quote touch_keytable)))))))
+				"group_caches" (plan_count plan (quote touch_keytable))
+				/* Backward-compatible telemetry alias; use group_caches in new integrations. */
+				"group_carriers" (plan_count plan (quote touch_keytable)))))))

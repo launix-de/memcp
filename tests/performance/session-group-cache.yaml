@@ -121,7 +121,7 @@ test_cases:
         - category: 3
           cnt: 4
 
-  - name: "session-dependent grouping projects one membership RecSet into its group cache"
+  - name: "session-dependent grouping projects one membership recset into its carrier"
     session_id: "sgc_sess"
     sql: |
       EXPLAIN SELECT category, COUNT(*) AS cnt
@@ -264,7 +264,7 @@ test_cases:
     expect:
       rows: 0
 
-  - name: "restored session binding reuses the correct group-cache slice"
+  - name: "restored session binding reuses the correct carrier slice"
     session_id: "sgc_sess"
     sql: |
       SELECT category, COUNT(*) AS cnt

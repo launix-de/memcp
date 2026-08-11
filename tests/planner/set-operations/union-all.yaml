@@ -165,7 +165,7 @@ test_cases:
         - ID: 3
           name: "image3.png"
 
-  - name: "Ordered joined UNION branch uses physical merge scan sources"
+  - name: "Ordered joined UNION branch uses physical merge carriers"
     sql: |
       EXPLAIN
       SELECT f.ID AS value

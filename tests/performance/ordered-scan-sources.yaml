@@ -51,7 +51,7 @@ test_cases:
         - result_id: 2
         - result_id: 1
 
-  - name: "filtered bounded union branches stay in physical scan sources"
+  - name: "filtered bounded union branches stay in physical carriers"
     setup:
       - sql: "DROP TABLE IF EXISTS ordered_source_a"
       - sql: "DROP TABLE IF EXISTS ordered_source_b"

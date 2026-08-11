@@ -211,7 +211,7 @@ test_cases:
         - id: 2
           matched: 20
 
-  - name: "Nested decorrelation intermediate-relation probes keep their key boundary"
+  - name: "Nested decorrelation carrier probes keep their key boundary"
     sql: |
       SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS indexed
       FROM `system_statistic`.`scans`

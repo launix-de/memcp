@@ -85,7 +85,7 @@ test_cases:
           s: 150
 
   # --- Inspect lowering after GROUP BY ---
-  - name: "GROUP BY lowering uses canonical group cache"
+  - name: "GROUP BY lowering uses canonical keytable carrier"
     sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -94,7 +94,7 @@ test_cases:
         - "createcolumn"
         - ".grp:sc_base:"
 
-  - name: "GROUP BY lowering prepares each canonical group cache once"
+  - name: "GROUP BY lowering prepares each canonical carrier once"
     sql: "EXPLAIN SELECT dept, COUNT(*) AS c, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -152,7 +152,7 @@ test_cases:
         - dept: "Sales"
           s: 200
 
-  - name: "GROUP BY lowering after INSERT reuses canonical group cache"
+  - name: "GROUP BY lowering after INSERT reuses canonical keytable carrier"
     sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -221,7 +221,7 @@ test_cases:
         - dept: "Marketing"
           s: 80
 
-  - name: "GROUP BY lowering after DELETE keeps canonical group cache"
+  - name: "GROUP BY lowering after DELETE keeps canonical keytable carrier"
     sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -386,7 +386,7 @@ test_cases:
         - "assoc_keys_as_dataset_rows"
         - "assoc_keys_values_as_dataset_rows"
 
-  - name: "Prejoin keeps a local WHERE predicate outside the shared group cache"
+  - name: "Prejoin keeps a local WHERE predicate outside the shared carrier"
     sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id WHERE e.salary >= 150 GROUP BY d.name ORDER BY d.name"
     expect:
       rows: 2

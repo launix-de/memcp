@@ -307,7 +307,7 @@ test_cases:
         - did: 4
           total_sal: null
 
-  - name: "EXPLAIN correlated SUM subselect uses reusable group cache"
+  - name: "EXPLAIN correlated SUM subselect uses reusable group carrier"
     sql: |
       EXPLAIN SELECT d.did,
         (SELECT SUM(e.salary) FROM sq_emp e WHERE e.did = d.did) AS total_sal
