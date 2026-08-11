@@ -1,3 +1,12 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Date type and date function regression tests.
+
 metadata:
   version: "1.0"
   description: "Date type and date functions: tagDate, DATE column, DATE literal, INTERVAL, EXTRACT, DATE_ADD, DATE_SUB, CURRENT_DATE"
@@ -16,7 +25,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - dt: "2024-06-15 10:30:00"
+        - dt: "2024-06-15"
           ts: "2024-06-15 10:30:00"
 
   # --- INSERT unix timestamp integer ---
@@ -28,7 +37,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - dt: "2024-01-01 00:00:00"
+        - dt: "2024-01-01"
 
   # --- INSERT date-only string ---
   - name: "Insert date-only string"
@@ -39,7 +48,30 @@ test_cases:
     expect:
       rows: 1
       data:
-        - dt: "2024-12-25 00:00:00"
+        - dt: "2024-12-25"
+
+  - name: "DATE provenance survives a derived table"
+    sql: "SELECT d.dt FROM (SELECT dt FROM date_test WHERE id = 3) AS d"
+    expect:
+      rows: 1
+      data:
+        - dt: "2024-12-25"
+
+  - name: "Grouped DATE column keeps DATE output type"
+    sql: "SELECT dt, COUNT(*) AS n FROM date_test WHERE id = 3 GROUP BY dt"
+    expect:
+      rows: 1
+      data:
+        - dt: "2024-12-25"
+          n: 1
+
+  - name: "DATE aggregate keeps DATE output type"
+    sql: "SELECT MIN(dt) AS first_date, MAX(dt) AS last_date FROM date_test WHERE id IN (2, 3)"
+    expect:
+      rows: 1
+      data:
+        - first_date: "2024-01-01"
+          last_date: "2024-12-25"
 
   # --- NULL in DATE column ---
   - name: "Insert NULL date"
@@ -104,7 +136,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-03-15 00:00:00"
+        - d: "2024-03-15"
 
   # --- DATE literal in comparison ---
   - name: "DATE literal comparison"
@@ -143,21 +175,21 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-01-11 00:00:00"
+        - d: "2024-01-11"
 
   - name: "DATE_ADD months"
     sql: "SELECT DATE_ADD(DATE '2024-01-15', INTERVAL 3 MONTH) AS d"
     expect:
       rows: 1
       data:
-        - d: "2024-04-15 00:00:00"
+        - d: "2024-04-15"
 
   - name: "DATE_ADD years"
     sql: "SELECT DATE_ADD(DATE '2024-03-15', INTERVAL 1 YEAR) AS d"
     expect:
       rows: 1
       data:
-        - d: "2025-03-15 00:00:00"
+        - d: "2025-03-15"
 
   # --- DATE_SUB ---
   - name: "DATE_SUB days"
@@ -165,7 +197,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-05-31 00:00:00"
+        - d: "2024-05-31"
 
   # --- INTERVAL arithmetic: date + interval ---
   - name: "Date plus interval"
@@ -173,21 +205,21 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-03-31 00:00:00"
+        - d: "2024-03-31"
 
   - name: "Date minus interval"
     sql: "SELECT DATE '1998-12-01' - INTERVAL 90 DAY AS d"
     expect:
       rows: 1
       data:
-        - d: "1998-09-02 00:00:00"
+        - d: "1998-09-02"
 
   - name: "Date minus interval with leading field precision"
     sql: "SELECT DATE '1998-12-01' - INTERVAL '90' DAY (3) AS d"
     expect:
       rows: 1
       data:
-        - d: "1998-09-02 00:00:00"
+        - d: "1998-09-02"
 
   - name: "Interval precision requires digits"
     sql: "SELECT DATE '1998-12-01' - INTERVAL '90' DAY () AS d"
@@ -199,7 +231,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "1996-03-15 00:00:00"
+        - d: "1996-03-15"
 
   # --- CURRENT_DATE ---
   - name: "CURRENT_DATE is not null"
@@ -215,7 +247,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-06-15 00:00:00"
+        - d: "2024-06-15"
 
   # --- DATEDIFF ---
   - name: "DATEDIFF positive"
@@ -267,14 +299,14 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-04-15 00:00:00"
+        - d: "2024-04-15"
 
   - name: "DATE_SUB years"
     sql: "SELECT DATE_SUB(DATE '2024-06-15', INTERVAL 1 YEAR) AS d"
     expect:
       rows: 1
       data:
-        - d: "2023-06-15 00:00:00"
+        - d: "2023-06-15"
 
   - name: "DATE_SUB hours"
     sql: "SELECT DATE_SUB('2024-06-15 14:30:00', INTERVAL 2 HOUR) AS d"
@@ -302,7 +334,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-06-08 00:00:00"
+        - d: "2024-06-08"
 
   # --- DATE_ADD additional units ---
   - name: "DATE_ADD hours"
@@ -311,6 +343,13 @@ test_cases:
       rows: 1
       data:
         - d: "2024-06-15 13:00:00"
+
+  - name: "DATE plus sub-day interval returns DATETIME"
+    sql: "SELECT DATE_ADD(DATE '2024-06-15', INTERVAL 3 HOUR) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 03:00:00"
 
   - name: "DATE_ADD minutes"
     sql: "SELECT DATE_ADD('2024-06-15 10:00:00', INTERVAL 45 MINUTE) AS d"
@@ -331,7 +370,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "2024-06-29 00:00:00"
+        - d: "2024-06-29"
 
   # --- EXTRACT additional fields ---
   - name: "EXTRACT HOUR"

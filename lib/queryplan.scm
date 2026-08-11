@@ -6747,6 +6747,126 @@ is still available and remains an ordinary scalar expression through untangle. *
 					(union_facts normalized))
 				normalized)))))
 
+/* Scmer and the storage engine intentionally keep temporal values generic.
+The SQL compiler retains the declared DATE/DATETIME/TIMESTAMP provenance and
+formats only visible result fields, after all relational operations have kept
+working on the original values. */
+(define temporal_column_type (lambda (src col)
+	(if (or (not (string? (source_schema src))) (not (string? (source_relation src))))
+		nil
+		(begin
+			(define info (find (get_schema (source_schema src) (source_relation src))
+				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
+			(define raw_type (toLower (if (nil? info) "" (coalesceNil (info "RawType") ""))))
+			(match raw_type
+				"date" "DATE"
+				"datetime" "DATETIME"
+				"timestamp" "TIMESTAMP"
+				_ nil)))))
+
+(define temporal_derived_column_type (lambda (relation col)
+	(begin
+		(define normalized (normalize_query_ast relation))
+		(if (query_block? normalized)
+			(reduce_assoc (qb_fields normalized) (lambda (best title expr)
+				(if (and (nil? best) (string? title) (string? col)
+					(equal? (toLower title) (toLower col)))
+					(temporal_expr_type (qb_sources normalized) expr)
+					best)) nil)
+			nil))))
+
+(define temporal_source_column_type (lambda (src col)
+	(begin
+		(define derived_type (temporal_derived_column_type (source_relation src) col))
+		(if (nil? derived_type) (temporal_column_type src col) derived_type))))
+
+(define temporal_column_type_for_sources (lambda (sources tblvar col)
+	(reduce (coalesceNil sources '()) (lambda (best src)
+		(if (and (nil? best)
+			(or (nil? tblvar) (equal?? tblvar (source_alias src)))
+			(not (stage_output_relation? (source_relation src))))
+			(temporal_source_column_type src col)
+			best)) nil)))
+
+(define temporal_date_arithmetic_type (lambda (sources value unit)
+	(begin
+		(define value_type (temporal_expr_type sources value))
+		(if (and (equal? value_type "DATE") (string? unit))
+			(match (toLower unit)
+				"hour" "DATETIME"
+				"minute" "DATETIME"
+				"second" "DATETIME"
+				"microsecond" "DATETIME"
+				_ "DATE")
+			value_type))))
+
+(define temporal_expr_type (lambda (sources expr)
+	(match expr
+		((symbol get_column) tblvar _ignorecase col _col_ignorecase)
+		(temporal_column_type_for_sources sources tblvar col)
+		((quote get_column) tblvar _ignorecase col _col_ignorecase)
+		(temporal_column_type_for_sources sources tblvar col)
+		((symbol date_trunc_day) _value) "DATE"
+		((quote date_trunc_day) _value) "DATE"
+		((symbol current_date)) "DATE"
+		((quote current_date)) "DATE"
+		((symbol date_add) value _amount unit) (temporal_date_arithmetic_type sources value unit)
+		((quote date_add) value _amount unit) (temporal_date_arithmetic_type sources value unit)
+		((symbol date_sub) value _amount unit) (temporal_date_arithmetic_type sources value unit)
+		((quote date_sub) value _amount unit) (temporal_date_arithmetic_type sources value unit)
+		((symbol aggregate) value reducer _neutral)
+		(if (or (equal? reducer min) (equal? reducer max)
+			(equal? reducer (quote min)) (equal? reducer (quote max)))
+			(temporal_expr_type sources value)
+			nil)
+		((quote aggregate) value reducer _neutral)
+		(if (or (equal? reducer min) (equal? reducer max)
+			(equal? reducer (quote min)) (equal? reducer (quote max)))
+			(temporal_expr_type sources value)
+			nil)
+		((symbol now)) "TIMESTAMP"
+		((quote now)) "TIMESTAMP"
+		((symbol utc_timestamp)) "TIMESTAMP"
+		((quote utc_timestamp)) "TIMESTAMP"
+		((symbol from_unixtime) _value) "DATETIME"
+		((quote from_unixtime) _value) "DATETIME"
+		((symbol sql_temporal_output) _value sql_type) sql_type
+		((quote sql_temporal_output) _value sql_type) sql_type
+		_ nil)))
+
+(define sanitize_temporal_output_fields (lambda (sources fields)
+	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
+		(begin
+			(define sql_type (temporal_expr_type sources expr))
+			(if (nil? sql_type) expr (list (quote sql_temporal_output) expr sql_type)))))))
+
+(define sanitize_temporal_outputs (lambda (query)
+	(begin
+		(define normalized (normalize_query_ast query))
+		(if (query_block? normalized)
+			(make_query_block
+				(qb_schema normalized)
+				(qb_sources normalized)
+				(sanitize_temporal_output_fields (qb_sources normalized) (qb_fields normalized))
+				(qb_where normalized)
+				(qb_group normalized)
+				(qb_having normalized)
+				(qb_order normalized)
+				(qb_limit normalized)
+				(qb_offset normalized)
+				(qb_hidden normalized)
+				(qb_stages normalized)
+				(qb_facts normalized))
+			(if (union_block? normalized)
+				(make_union_block
+					(union_mode normalized)
+					(map (union_branches normalized) sanitize_temporal_outputs)
+					(union_order normalized)
+					(union_limit normalized)
+					(union_offset normalized)
+					(union_facts normalized))
+				normalized)))))
+
 (define stage_aggregates_for_fields (lambda (fields)
 	(merge_unique (extract_assoc fields (lambda (_title expr) (extract_aggregates expr))))))
 
@@ -12388,7 +12508,7 @@ build_queryplan contract. */
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan
 		(join_reorder
-			(untangle_query_term (sanitize_decimal_aggregate_outputs ast) nil)))))
+			(untangle_query_term (sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast)) nil)))))
 
 (define neumann_compile_ir_pipeline (lambda (ir)
 	(build_queryplan
