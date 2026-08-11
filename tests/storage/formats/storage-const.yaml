@@ -1,3 +1,4 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
 # StorageConst compression test suite
 # Verifies that columns with a single distinct value are compressed to StorageConst
 # after rebuild. Uses scm:(rebuild) and (show ... 0 true) to inspect storage type.
@@ -9,6 +10,7 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS sc_int"
+  - sql: "DROP TABLE IF EXISTS sc_untouched"
   - sql: "DROP TABLE IF EXISTS sc_str"
   - sql: "DROP TABLE IF EXISTS sc_null"
   - sql: "DROP TABLE IF EXISTS sc_mixed"
@@ -32,6 +34,16 @@ test_cases:
     expect:
       affected_rows: 50
 
+  - name: "Create table-local rebuild control table"
+    sql: "CREATE TABLE sc_untouched (id INT, val TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert delta rows into table-local rebuild control"
+    sql: "INSERT INTO sc_untouched VALUES (1,7),(2,7),(3,7)"
+    expect:
+      affected_rows: 3
+
   - name: "Int-const: verify value before rebuild"
     sql: "SELECT val FROM sc_int WHERE id = 25"
     expect:
@@ -39,8 +51,8 @@ test_cases:
       data:
         - val: 42
 
-  - name: "Int-const: rebuild to trigger StorageConst"
-    scm: "(rebuild)"
+  - name: "Int-const: table-local rebuild to trigger StorageConst"
+    scm: '(rebuild (table "memcp-tests" "sc_int") true false)'
 
   - name: "Int-const: verify val column is const[42] after rebuild"
     scm: |
@@ -51,6 +63,16 @@ test_cases:
         (set compr (get_assoc col "compression"))
         (if (equal? compr "const[42]") "ok"
           (error (concat "expected const[42], got " compr))))
+
+  - name: "Int-const: table-local rebuild leaves other table in delta storage"
+    scm: |
+      (begin
+        (set shard (show "memcp-tests" "sc_untouched" 0 true))
+        (set cols (get_assoc shard "columns"))
+        (set col (nth (filter cols (lambda (c) (equal? (get_assoc c "name") "val"))) 0))
+        (set compr (get_assoc col "compression"))
+        (if (not (equal? compr "const[7]")) "ok"
+          (error "table-local rebuild compacted an unrelated table")))
 
   - name: "Int-const: read first row after rebuild"
     sql: "SELECT val FROM sc_int WHERE id = 0"
@@ -270,6 +292,7 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS sc_int"
+  - sql: "DROP TABLE IF EXISTS sc_untouched"
   - sql: "DROP TABLE IF EXISTS sc_str"
   - sql: "DROP TABLE IF EXISTS sc_null"
   - sql: "DROP TABLE IF EXISTS sc_mixed"

@@ -1,3 +1,5 @@
+# Copyright (C) 2023-2026  Carl-Philip Hänsch
+
 metadata:
   version: "1.0"
   description: "Memory pressure management"
@@ -119,8 +121,12 @@ test_cases:
     scm: (stat)
     expect: {}
 
-  - name: "MP: set MaxRamBytes to 1MB (evict temp keytables + columns)"
-    scm: (settings "MaxRamBytes" 1048576)
+  - name: "MP: let planner cache entries become evictable"
+    scm: (sleep 1.1)
+    expect: {}
+
+  - name: "MP: force eviction of temp keytables and columns"
+    scm: (settings "MaxRamBytes" 1)
     expect: {}
 
   - name: "MP: stat after temp eviction"
@@ -130,6 +136,19 @@ test_cases:
   - name: "MP: reset MaxRamBytes to 0 (before recovery test)"
     scm: (settings "MaxRamBytes" 0)
     expect: {}
+
+  - name: "MP: base-table mutation ignores evicted aggregate dependencies"
+    sql: "UPDATE `memcp-tests`.mp_pressure SET b = b + 10 WHERE id = 1000"
+    expect:
+      affected_rows: 1
+
+  - name: "MP: aggregate is rebuilt correctly after eviction and mutation"
+    sql: "SELECT a, SUM(b) AS sb FROM `memcp-tests`.mp_pressure WHERE a = 321918 GROUP BY a"
+    expect:
+      rows: 1
+      data:
+        - a: 321918
+          sb: 347262
 
   - name: "MP: GROUP BY still works after temp keytable eviction"
     sql: "SELECT a, SUM(b) AS sb FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 3"
