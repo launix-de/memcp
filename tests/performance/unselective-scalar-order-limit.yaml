@@ -112,6 +112,9 @@ test_cases:
   - name: "Unselective scalar ORDER LIMIT defers nested access projections"
     max_time: 1.5
     max_plan_size: 100000
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` LIKE '.grp:query:%'"
     sql: |
       SELECT projected.id, projected.access_1, projected.access_2,
         projected.access_3, projected.access_4
@@ -179,6 +182,48 @@ test_cases:
           access_2: true
           access_3: true
           access_4: true
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
+  - name: "Nested direct outer correlation preserves scalar results"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` LIKE '.grp:usol_text_inner:%'"
+    sql: |
+      SELECT outer_row.id, (
+        SELECT (
+          SELECT inner_row.value
+          FROM usol_text_inner inner_row
+          WHERE inner_row.lookup_key = outer_row.lookup_key
+          LIMIT 1
+        )
+        FROM usol_parent middle_row
+        WHERE middle_row.id = outer_row.id
+        LIMIT 1
+      ) AS matched
+      FROM usol_text_outer outer_row
+      ORDER BY outer_row.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          matched: 30
+        - id: 2
+          matched: 20
+
+  - name: "Nested decorrelation carrier probes keep their key boundary"
+    sql: |
+      SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS indexed
+      FROM `system_statistic`.`scans`
+      WHERE `schema` = 'memcp-tests'
+        AND `table` LIKE '.grp:usol_text_inner:%'
+        AND index_cols = 'k0'
+    expect:
+      rows: 1
+      data:
+        - indexed: 1
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
 
   - name: "Composite scalar ORDER lookup preserves every key component"
     max_time: 1.5
