@@ -17,6 +17,7 @@ setup:
   - sql: "CREATE TABLE char_strict (id INT, s CHAR(5) UNIQUE)"
   - sql: "CREATE TABLE mixed_col (id INT, x any)"
   - sql: "CREATE TABLE dec_scale0 (id INT, val DECIMAL(10,0))"
+  - sql: "CREATE TABLE dec_output_stage (amount DECIMAL(10,2), factor DECIMAL(10,2))"
 
 test_cases:
 
@@ -42,6 +43,40 @@ test_cases:
       rows: 1
       data:
         - { total: 113.06 }
+
+  - name: "Insert decimal output boundary values"
+    sql: "INSERT INTO dec_output_stage VALUES (0.10, 1.00), (0.20, 1.00)"
+    expect:
+      affected_rows: 2
+
+  - name: "Derived decimal aggregate hides binary float residue"
+    sql: "SELECT SUM(value) AS total FROM (SELECT amount * factor AS value FROM dec_output_stage) AS derived_values"
+    expect:
+      rows: 1
+      result_contains: '"total": 0.3'
+      result_not_contains: '0.30000000000000004'
+      data:
+        - { total: 0.3 }
+
+  - name: "Output boundary preserves deliberate DOUBLE precision"
+    sql: "SELECT 1.0000000000000002 AS precise_value"
+    expect:
+      rows: 1
+      result_contains: '"precise_value": 1.0000000000000002'
+
+  - name: "Create decimal aggregate view"
+    sql: "CREATE VIEW dec_output_view AS SELECT SUM(amount * factor) AS total FROM dec_output_stage"
+    expect:
+      affected_rows: 1
+
+  - name: "Decimal aggregate view hides binary float residue"
+    sql: "SELECT total FROM dec_output_view"
+    expect:
+      rows: 1
+      result_contains: '"total": 0.3'
+      result_not_contains: '0.30000000000000004'
+      data:
+        - { total: 0.3 }
 
   - name: "Insert negative DECIMAL"
     sql: "INSERT INTO dec_basic (id, price, qty) VALUES (4, -25.30, 10)"
@@ -594,6 +629,7 @@ test_cases:
         - { total: 5500 }
 
 cleanup:
+  - sql: "DROP VIEW IF EXISTS dec_output_view"
   - sql: "DROP TABLE IF EXISTS dec_basic"
   - sql: "DROP TABLE IF EXISTS dec_nn"
   - sql: "DROP TABLE IF EXISTS int_strict"
@@ -603,5 +639,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS char_strict"
   - sql: "DROP TABLE IF EXISTS mixed_col"
   - sql: "DROP TABLE IF EXISTS dec_scale0"
+  - sql: "DROP TABLE IF EXISTS dec_output_stage"
   - sql: "DROP TABLE IF EXISTS dec_rebuild"
   - sql: "DROP TABLE IF EXISTS dec_multiples"
