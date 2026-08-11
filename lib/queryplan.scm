@@ -10163,9 +10163,16 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 			(merge (list ensure_agg_columns agg_plans computed_order_plans))))
 		(define base_group_fill (symbol "__group_base_fill"))
 		(define base_group_fill_call (list base_group_fill))
+		(define finalize_group_fill (list (quote rebuild) (list (quote table) schema grouptbl) true false))
 		(define initial_fill_expr (if (nil? base_group_into_plan)
 			nil
-			(cons (quote !begin) (filter (list aggregate_prepare_expr base_group_fill_call cleanup_plan) (lambda (expr) (not (nil? expr)))))))
+			(list (quote initialize_cache_table)
+				(list (quote table) schema grouptbl)
+				(list (quote list) (source_table_expr src))
+				(list (quote lambda) '()
+					(cons (quote !begin) (filter (list aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
+				base_group_fill
+				(list (quote lambda) '() finalize_group_fill))))
 		(define create_options (if (nil? initial_fill_expr)
 			(quoted_runtime_list '("engine" "memory"))
 			(list (quote list)

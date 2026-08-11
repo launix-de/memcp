@@ -1209,9 +1209,23 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 		if !db.schemalock.TryLock() {
 			return false // schemalock is held (e.g. by CreateTable); retry later
 		}
-		db.tables.Remove(tbl.Name) // no-op if already removed by DropTable
+		if db.tables.Get(tbl.Name) != tbl {
+			db.schemalock.Unlock()
+			return true
+		}
+		if !tbl.beginCacheEviction() {
+			db.schemalock.Unlock()
+			return false
+		}
+		db.tables.Remove(tbl.Name)
 		db.saveLockedWithDurabilityAndUnlock(tbl.PersistencyMode == Safe)
+	} else if !tbl.beginCacheEviction() {
+		return false
 	}
+	// The table's self-cleanup hooks remove exactly the source-table triggers
+	// installed for its computed columns. Trigger target pins above make this
+	// safe even when a writer snapshotted a trigger concurrently.
+	tbl.ExecuteTableLifecycleTriggers(AfterDropTable)
 	// remove all shard+index+temp column registrations for this table (recursive)
 	for _, c := range tbl.Columns {
 		if c.IsTemp {

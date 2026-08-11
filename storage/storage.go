@@ -2063,6 +2063,7 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
+					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUse, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
@@ -2071,6 +2072,8 @@ func Init(en scm.Env) {
 					IsSystem: true,
 					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
 					Func:     buildFKProc(td.body),
+					Acquire:  ktTable.acquireCacheUse,
+					Release:  ktTable.releaseCacheUse,
 				})
 			}
 			// Lifecycle cleanup: when the base table is dropped/shape-changed, the keytable
@@ -2092,6 +2095,7 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
+					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUse, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
@@ -2100,6 +2104,8 @@ func Init(en scm.Env) {
 					IsSystem: true,
 					Priority: 90,
 					Func:     buildFKProc(dropBody),
+					Acquire:  ktTable.acquireCacheUse,
+					Release:  ktTable.releaseCacheUse,
 				})
 			}
 			return scm.NewBool(true)
@@ -2120,8 +2126,6 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			tbl := TableFromScmer(a[0])
 			initialized := tbl.initializeCache(func() {
-				scm.Apply(a[2])
-
 				sources := mustScmerSlice(a[1], "source tables")
 				sourceTables := make([]*table, len(sources))
 				for i, source := range sources {
@@ -2146,7 +2150,13 @@ func Init(en scm.Env) {
 				for _, source := range sourceTables {
 					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, ss))
 				}
+				// Install maintenance while source writes are blocked. Once the
+				// locks are released, every later mutation observes the triggers.
+				scm.Apply(a[2])
 				scm.Apply(a[3])
+				if len(a) > 4 {
+					scm.Apply(a[4])
+				}
 			})
 			return scm.NewBool(initialized)
 		},
@@ -2156,6 +2166,7 @@ func Init(en scm.Env) {
 				{Kind: "list", ParamName: "source_tables"},
 				{Kind: "func", ParamName: "register_maintenance", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "func", ParamName: "initializer", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "finalizer", ParamDesc: "optional zero-argument finalizer run under the same source-table locks after initialization", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}, Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
