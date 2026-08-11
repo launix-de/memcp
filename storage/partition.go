@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "github.com/carli2/hybridsort"
+import "sort"
 import "sync"
 import "sync/atomic"
 import "time"
@@ -52,7 +53,7 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
 }
 
-func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_old func(*storageShard, bool)) <-chan struct{} {
+func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnboundaries, callback_old func(*storageShard, bool)) <-chan struct{} {
 	callback := callback_old
 	if scm.Trace != nil {
 		// hook on tracing
@@ -76,8 +77,19 @@ func (t *table) iterateShardsParallel(boundaries []columnboundaries, callback_ol
 		doneCh := make(chan struct{})
 		var done sync.WaitGroup
 		done.Add(len(shards))
+		startWorker := gls.Go
+		if currentTx != nil && currentTx.autoCommit {
+			startWorker = func(worker func()) {
+				go func() {
+					withTxSession(currentTx, func() scm.Scmer {
+						worker()
+						return scm.NewNil()
+					})
+				}()
+			}
+		}
 		for i := 0; i < workers; i++ {
-			gls.Go(func() {
+			startWorker(func() {
 				for s := range jobs {
 					release := s.GetRead()
 					callback(s, false)
@@ -156,6 +168,18 @@ func collectRelevantShards(schema []shardDimension, boundaries []columnboundarie
 	return result
 }
 
+func partitionForValue(dimension shardDimension, value scm.Scmer) int {
+	return sort.Search(len(dimension.Pivots), func(i int) bool {
+		return !scm.Less(dimension.Pivots[i], value)
+	})
+}
+
+func valueEqualsPivot(dimension shardDimension, partition int, value scm.Scmer) bool {
+	return partition < len(dimension.Pivots) &&
+		!scm.Less(value, dimension.Pivots[partition]) &&
+		!scm.Less(dimension.Pivots[partition], value)
+}
+
 func collectRelevantShardsIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, result *[]*storageShard) {
 	if len(schema) == 0 {
 		for _, s := range shards {
@@ -175,46 +199,15 @@ func collectRelevantShardsIndex(schema []shardDimension, boundaries []columnboun
 			// iterate this axis over boundaries
 			min := 0
 			if !b.lower.IsNil() {
-				// lower bound is given -> find lowest part
-				max := schema[0].NumPartitions - 1
-				for min < max {
-					pivot := (min + max - 1) / 2
-					if !b.lowerInclusive {
-						if scm.Less(b.lower, schema[0].Pivots[pivot]) {
-							max = pivot
-						} else {
-							min = pivot + 1
-						}
-					} else {
-						if !scm.Less(schema[0].Pivots[pivot], b.lower) {
-							max = pivot
-						} else {
-							min = pivot + 1
-						}
-					}
+				min = partitionForValue(schema[0], b.lower)
+				if !b.lowerInclusive && valueEqualsPivot(schema[0], min, b.lower) {
+					min++
 				}
 			}
 
 			max := schema[0].NumPartitions - 1 // smaller than max
 			if !b.upper.IsNil() {
-				// upper bound is given -> find highest part
-				umin := min
-				for umin < max {
-					pivot := (umin + max - 1) / 2
-					if !b.upperInclusive {
-						if scm.Less(b.upper, schema[0].Pivots[pivot]) {
-							umin = pivot + 1
-						} else {
-							max = pivot
-						}
-					} else {
-						if !scm.Less(schema[0].Pivots[pivot], b.upper) {
-							umin = pivot + 1
-						} else {
-							max = pivot
-						}
-					}
-				}
+				max = partitionForValue(schema[0], b.upper)
 			}
 
 			for i := min; i <= max; i++ {
