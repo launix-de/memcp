@@ -15,7 +15,7 @@
 
 metadata:
   version: "1.0"
-  description: "Trace-derived grouped aggregate carrier contracts"
+  description: "Trace-derived group-cache contracts"
   isolated: true
 
 setup:

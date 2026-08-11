@@ -320,7 +320,7 @@ type scanOrderTableSpec struct {
 	perTableLimit  int
 }
 
-func (s *scanOrderTableSpec) carrierTable() *table {
+func (s *scanOrderTableSpec) backingTable() *table {
 	if s.recset != nil {
 		return s.recset.table
 	}
@@ -499,7 +499,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	// Launch shard-parallel scans for each table
 	for ti := range tables {
 		spec := &tables[ti]
-		t := spec.carrierTable()
+		t := spec.backingTable()
 		touchTempColumns(t, spec.conditionCols, spec.callbackCols)
 
 		// Per-table top-K hint: when perTableLimit is set, each shard only
@@ -842,7 +842,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			continue
 		}
 		spec := &tables[i]
-		tbl := spec.carrierTable()
+		tbl := spec.backingTable()
 		filterEnc := ""
 		if proc, ok := spec.condition.Any().(scm.Proc); ok {
 			var params []scm.Scmer

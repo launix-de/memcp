@@ -302,6 +302,7 @@ test_cases:
         - "scans"
         - "ordered_scans"
         - "exists_scans"
+        - "group_caches"
         - "group_carriers"
 
   - name: "EXPLAIN IR exposes planner stages"

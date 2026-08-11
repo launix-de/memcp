@@ -370,6 +370,7 @@ test_cases:
       plan_nodes: 6000
       scans: 64
       group_carriers: 8
+      group_caches: 8
     max_plan_size: 100000
     sql: |
       SELECT projected.*

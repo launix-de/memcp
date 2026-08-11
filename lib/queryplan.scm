@@ -49,8 +49,8 @@ ordering/deduplication, deduplicated domains and once-limit/scalar caches.
 Group stages are referenced from query-block sources through logical
 stage-output relations.  Those aliases are stable enough for expression rewrites
 such as SUM(x) -> stage_alias.agg, but they are not physical table names.
-build_queryplan resolves a stage-output through a group-carrier decision.  The
-default carrier is a generated keytable; later optimizers may choose an existing
+build_queryplan resolves a stage-output through a group-cache decision.  The
+default group cache is a generated keytable; later optimizers may choose an existing
 referenced table when the final group/domain keys match a foreign-key entity.
 Window functions are not ORCs by default.  If the query is unordered and has a
 single window domain, build_queryplan should run the main scan in that window
@@ -600,8 +600,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 			outer_sources))))))
 
 /* Session reads affect a dependent helper like outer-column reads do. Keep
-their expressions in Domain D so reusable carriers are keyed by the binding
-instead of capturing whichever session populated the carrier first. */
+their expressions in Domain D so reusable group caches are keyed by the binding
+instead of capturing whichever session populated the cache first. */
 (define query_expr_session_reads (lambda (expr)
 	(match expr
 		((symbol session) "__memcp_tx") '()
@@ -5676,9 +5676,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(ir_context_of ir)
 			(ir_return ir)))))
 
-(define group_stage_carrier_owner_key (lambda (stage)
+(define group_stage_cache_owner_key (lambda (stage)
 	(if (group_stage? stage)
-		(concat (group_stage_carrier_schema stage) "\n" (group_stage_carrier_relation stage))
+		(concat (group_stage_cache_schema stage) "\n" (group_stage_cache_relation stage))
 		(concat "stage\n" (logical_stage_key stage)))))
 
 (define group_stage_with_initializer_owner (lambda (stage owner)
@@ -6649,9 +6649,9 @@ dependency preparation does not emit free outer-row symbols. */
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define ags (gs_aggregates stage))
 		(define key_names (group_key_cols keys))
-		(define carrier (group_stage_carrier stage))
-		(define schema (group_carrier_schema carrier))
-		(define grouptbl (group_carrier_relation carrier))
+		(define cache (group_stage_cache stage))
+		(define schema (group_cache_schema cache))
+		(define grouptbl (group_cache_relation cache))
 		(define group_src (list grouptbl schema grouptbl false nil))
 		(define value_expr (replace_group_expr alias grouptbl keys key_names ags (first_projection_expr (gs_output stage))))
 		(define replaced_order (map (coalesceNil (gs_order stage) '()) (lambda (item)
@@ -6790,14 +6790,14 @@ dependency preparation does not emit free outer-row symbols. */
 			true)
 		(define key_names (group_key_cols keys))
 		(define filter_key_names (map (produceN (count lookup_keys)) (lambda (i) (nth key_names i))))
-		(define carrier_schema (coalesceNil (group_stage_carrier_schema stage) fallback_schema))
+		(define cache_schema (coalesceNil (group_stage_cache_schema stage) fallback_schema))
 		(define key_terms (map (produceN (count lookup_keys)) (lambda (i)
 			(list (quote equal??)
 				(symbol (nth key_names i))
 				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
 		(list (quote scan_exists)
 			'(session "__memcp_tx")
-			(list (quote table) carrier_schema (group_stage_carrier_relation stage))
+			(list (quote table) cache_schema (group_stage_cache_relation stage))
 			(cons (quote list) filter_key_names)
 			(list (quote lambda)
 				(map filter_key_names symbol)
@@ -7353,17 +7353,17 @@ working on the original values. */
 (define canonicalize_group_stage_local_exprs (lambda (alias exprs)
 	(map (coalesceNil exprs '()) (lambda (expr) (canonicalize_group_stage_local_expr alias expr)))))
 
-(define make_group_keytable_carrier (lambda (schema relation)
+(define make_group_keytable_cache (lambda (schema relation)
 	(list (quote group-keytable) schema relation)))
 
-(define group_carrier_kind (lambda (carrier)
-	(if (list? carrier) (nth carrier 0) nil)))
+(define group_cache_kind (lambda (cache)
+	(if (list? cache) (nth cache 0) nil)))
 
-(define group_carrier_schema (lambda (carrier)
-	(if (list? carrier) (nth carrier 1) nil)))
+(define group_cache_schema (lambda (cache)
+	(if (list? cache) (nth cache 1) nil)))
 
-(define group_carrier_relation (lambda (carrier)
-	(if (list? carrier) (nth carrier 2) nil)))
+(define group_cache_relation (lambda (cache)
+	(if (list? cache) (nth cache 2) nil)))
 
 (define group_stage_schema (lambda (stage)
 	(begin
@@ -7392,30 +7392,30 @@ working on the original values. */
 				(concat "query:" (fnv_hash (string input)))
 				(source_relation input))))))
 
-(define group_stage_default_carrier (lambda (stage)
+(define group_stage_default_cache (lambda (stage)
 	(begin
 		(define schema (group_stage_schema stage))
 		(define tbl (group_stage_input_name stage))
 		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(make_group_keytable_carrier schema (group_table_name
+		(make_group_keytable_cache schema (group_table_name
 			schema
 			tbl
 			canonical_group_stage_alias
 			(canonicalize_group_stage_local_exprs alias keys)
 			(canonicalize_group_stage_local_expr alias condition))))))
 
-(define group_stage_carrier (lambda (stage)
+(define group_stage_cache (lambda (stage)
 	(coalesceNil
-		(qassoc_get (gs_facts stage) (quote carrier) nil)
-		(group_stage_default_carrier stage))))
+		(qassoc_get (gs_facts stage) (quote group_cache) nil)
+		(group_stage_default_cache stage))))
 
-(define group_stage_carrier_relation (lambda (stage)
-	(group_carrier_relation (group_stage_carrier stage))))
+(define group_stage_cache_relation (lambda (stage)
+	(group_cache_relation (group_stage_cache stage))))
 
-(define group_stage_carrier_schema (lambda (stage)
-	(group_carrier_schema (group_stage_carrier stage))))
+(define group_stage_cache_schema (lambda (stage)
+	(group_cache_schema (group_stage_cache stage))))
 
 (define group_key_cols (lambda (keys)
 	(map (produceN (count keys)) group_key_col_name)))
@@ -8682,8 +8682,8 @@ ever-larger subtrees. */
 
 (define lowering_catalog? (lambda (catalog)
 	(match catalog
-		((symbol lowering-catalog) _stages _id_index _carrier_index _parent) true
-		((quote lowering-catalog) _stages _id_index _carrier_index _parent) true
+		((symbol lowering-catalog) _stages _id_index _group_cache_index _parent) true
+		((quote lowering-catalog) _stages _id_index _group_cache_index _parent) true
 		_ false)))
 
 (define lowering_catalog_stages (lambda (catalog)
@@ -8697,7 +8697,7 @@ ever-larger subtrees. */
 				local_stages)))))
 
 (define lowering_catalog_id_index (lambda (catalog) (nth catalog 2)))
-(define lowering_catalog_carrier_index (lambda (catalog) (nth catalog 3)))
+(define lowering_catalog_group_cache_index (lambda (catalog) (nth catalog 3)))
 (define lowering_catalog_parent (lambda (catalog) (nth catalog 4)))
 
 (define make_indexed_lowering_catalog (lambda (stages parent)
@@ -8705,7 +8705,7 @@ ever-larger subtrees. */
 		(quote lowering-catalog)
 		stages
 		(stage_dependency_id_index stages)
-		(stage_dependency_carrier_index stages)
+		(stage_dependency_group_cache_index stages)
 		parent)))
 
 (define make_lowering_catalog (lambda (stages)
@@ -8766,8 +8766,8 @@ ever-larger subtrees. */
 					true)
 				(source_with_schema_relation
 					src
-					(group_stage_carrier_schema stage)
-					(group_stage_carrier_relation stage)))))))
+					(group_stage_cache_schema stage)
+					(group_stage_cache_relation stage)))))))
 
 (define physicalize_stage_output_sources (lambda (stages sources)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -8804,7 +8804,7 @@ ever-larger subtrees. */
 	(begin
 		(define stage (if (stage_output_relation? (source_relation src))
 			(source_stage_output_stage stages src)
-			(stage_for_carrier_source stages src)))
+			(stage_for_group_cache_source stages src)))
 		(define purpose (if (group_stage? stage)
 			(qassoc_get (gs_facts stage) (quote purpose) nil)
 			nil))
@@ -8839,7 +8839,7 @@ ever-larger subtrees. */
 			(scalar_cardinality_probe_stage? stage)))))
 
 /* A selective LEFT JOIN may evaluate a grouped base-table source as a keyed
-aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
+aggregate scan. Keep every ambiguous outer-join shape on the shared group cache. */
 (define direct_group_probe_input (lambda (stage)
 	(begin
 		(define input (if (group_stage? stage) (gs_input stage) nil))
@@ -9402,30 +9402,30 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 			(or found (equal? (source_alias src) (source_alias probe_src))))
 			false))))))
 
-(define stage_for_carrier_source (lambda (stages src)
+(define stage_for_group_cache_source (lambda (stages src)
 	(if (lowering_catalog? stages)
 		(begin
-			(define index (lowering_catalog_carrier_index stages))
-			(define key (stage_dependency_carrier_key (source_schema src) (source_relation src)))
+			(define index (lowering_catalog_group_cache_index stages))
+			(define key (stage_dependency_group_cache_key (source_schema src) (source_relation src)))
 			(define local (get_assoc index key))
 			(if (not (nil? local))
 				local
 				(begin
 					(define parent (lowering_catalog_parent stages))
-					(if (lowering_catalog? parent) (stage_for_carrier_source parent src) nil))))
+					(if (lowering_catalog? parent) (stage_for_group_cache_source parent src) nil))))
 		(reduce (coalesceNil stages '()) (lambda (found stage)
 			(if (not (nil? found))
 				found
 				(if (and (group_stage? stage)
-					(and (equal? (group_stage_carrier_schema stage) (source_schema src))
-						(equal? (group_stage_carrier_relation stage) (source_relation src))))
+					(and (equal? (group_stage_cache_schema stage) (source_schema src))
+						(equal? (group_stage_cache_relation stage) (source_relation src))))
 					stage
 					nil)))
 			nil))))
 
-(define carrier_stages_from_sources (lambda (stages sources)
+(define group_cache_stages_from_sources (lambda (stages sources)
 	(filter (map (coalesceNil sources '()) (lambda (src)
-		(stage_for_carrier_source stages src)))
+		(stage_for_group_cache_source stages src)))
 		(lambda (stage) (not (nil? stage))))))
 
 (define stage_dependency_id_index (lambda (stages)
@@ -9438,21 +9438,21 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(set_assoc index (gs_id stage) stage)
 				index)) '()))))
 
-(define stage_dependency_carrier_key (lambda (schema relation)
+(define stage_dependency_group_cache_key (lambda (schema relation)
 	(list schema relation)))
 
-(define stage_dependency_carrier_index (lambda (stages)
+(define stage_dependency_group_cache_index (lambda (stages)
 	(if (lowering_catalog? stages)
 		(if (lowering_catalog? (lowering_catalog_parent stages))
-			(stage_dependency_carrier_index (lowering_catalog_stages stages))
-			(lowering_catalog_carrier_index stages))
+			(stage_dependency_group_cache_index (lowering_catalog_stages stages))
+			(lowering_catalog_group_cache_index stages))
 		(reduce (coalesceNil stages '()) (lambda (index stage)
 			(if (not (group_stage? stage))
 				index
 				(set_assoc index
-					(stage_dependency_carrier_key
-						(group_stage_carrier_schema stage)
-						(group_stage_carrier_relation stage))
+					(stage_dependency_group_cache_key
+						(group_stage_cache_schema stage)
+						(group_stage_cache_relation stage))
 					stage))) '()))))
 
 (define stage_dependencies_from_output_sources (lambda (id_index sources)
@@ -9464,7 +9464,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				nil))))
 		(lambda (stage) (not (nil? stage)))))))
 
-(define group_stage_direct_dependencies_using_indexes (lambda (id_index carrier_index stage)
+(define group_stage_direct_dependencies_using_indexes (lambda (id_index group_cache_index stage)
 	(begin
 		(define input (gs_input stage))
 		(if (query_block? input)
@@ -9473,12 +9473,12 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(stage_dependencies_from_output_sources id_index (qb_sources input)))))
 			(if (source_is_base_table? input)
 				(begin
-					(define carrier_key (stage_dependency_carrier_key
+					(define group_cache_key (stage_dependency_group_cache_key
 						(source_schema input)
 						(source_relation input)))
-					(define carrier_stage (get_assoc carrier_index carrier_key))
-					(if (not (nil? carrier_stage))
-						(list carrier_stage)
+					(define group_cache_stage (get_assoc group_cache_index group_cache_key))
+					(if (not (nil? group_cache_stage))
+						(list group_cache_stage)
 						'()))
 				'())))))
 
@@ -9486,11 +9486,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 	(begin
 		(define available_stages (unique_stages_by_id (lowering_catalog_stages stages)))
 		(define id_index (stage_dependency_id_index stages))
-		(define carrier_index (stage_dependency_carrier_index stages))
+		(define group_cache_index (stage_dependency_group_cache_index stages))
 		(reduce available_stages (lambda (graph stage)
 			(set_assoc graph (logical_stage_key stage)
 				(if (group_stage? stage)
-					(group_stage_direct_dependencies_using_indexes id_index carrier_index stage)
+					(group_stage_direct_dependencies_using_indexes id_index group_cache_index stage)
 					'()))) '()))))
 
 (define stage_dependency_closure_index_visit (lambda (graph stage states closures)
@@ -9875,9 +9875,9 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
-		(define carrier (group_stage_carrier stage))
-		(define schema (group_carrier_schema carrier))
-		(define grouptbl (group_carrier_relation carrier))
+		(define cache (group_stage_cache stage))
+		(define schema (group_cache_schema cache))
+		(define grouptbl (group_cache_relation cache))
 		(define original_output (gs_output stage))
 		(define resolved_output (map_assoc original_output (lambda (_title expr)
 			(canonical_column_expr_for_alias alias expr))))
@@ -9945,11 +9945,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 (define stage_prepare_identity (lambda (stage)
 	(if (group_stage? stage)
 		(begin
-			(define carrier (group_stage_carrier stage))
+			(define cache (group_stage_cache stage))
 			(list
 				(quote group)
-				(group_carrier_schema carrier)
-				(group_carrier_relation carrier)
+				(group_cache_schema cache)
+				(group_cache_relation cache)
 				(map (gs_aggregates stage) aggregate_col_name)
 				(map (gs_order stage) (lambda (item) (fnv_hash (serialize item))))
 				(if (source_is_base_table? (gs_input stage))
@@ -9959,24 +9959,24 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 						(qassoc_get (gs_facts stage) (quote cardinality_mode) nil)))))
 		(logical_stage_key stage))))
 
-(define lower_unique_stage_prepares_acc (lambda (stages seen initialized_carriers prepare)
+(define lower_unique_stage_prepares_acc (lambda (stages seen initialized_group_caches prepare)
 	(match (coalesceNil stages '())
 		(cons stage rest) (begin
-			(define shared_carrier (and (group_stage? stage) (source_is_base_table? (gs_input stage))))
-			(define carrier_key (if shared_carrier (group_stage_carrier_owner_key stage) nil))
-			(define initializer_owner (or (not shared_carrier) (not (has_assoc? initialized_carriers carrier_key))))
-			(define prepared_stage (if shared_carrier
+			(define shared_group_cache (and (group_stage? stage) (source_is_base_table? (gs_input stage))))
+			(define group_cache_key (if shared_group_cache (group_stage_cache_owner_key stage) nil))
+			(define initializer_owner (or (not shared_group_cache) (not (has_assoc? initialized_group_caches group_cache_key))))
+			(define prepared_stage (if shared_group_cache
 				(group_stage_with_initializer_owner stage initializer_owner)
 				stage))
 			(define plan (prepare prepared_stage))
 			(define identity (stage_prepare_identity stage))
-			(define next_carriers (if (and shared_carrier initializer_owner)
-				(set_assoc initialized_carriers carrier_key true)
-				initialized_carriers))
+			(define next_group_caches (if (and shared_group_cache initializer_owner)
+				(set_assoc initialized_group_caches group_cache_key true)
+				initialized_group_caches))
 			(if (has_assoc? seen identity)
-				(lower_unique_stage_prepares_acc rest seen next_carriers prepare)
+				(lower_unique_stage_prepares_acc rest seen next_group_caches prepare)
 				(cons plan
-					(lower_unique_stage_prepares_acc rest (set_assoc seen identity true) next_carriers prepare))))
+					(lower_unique_stage_prepares_acc rest (set_assoc seen identity true) next_group_caches prepare))))
 		_ '())))
 
 (define lower_unique_stage_prepares (lambda (stages prepare)
@@ -10010,14 +10010,14 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
 			true)
-		(define carrier (group_stage_carrier stage))
-		(if (not (equal? (group_carrier_kind carrier) (quote group-keytable)))
-			(neumann_fail "build_queryplan" "foreign-key backed group carriers are not lowered yet")
+		(define cache (group_stage_cache stage))
+		(if (not (equal? (group_cache_kind cache) (quote group-keytable)))
+			(neumann_fail "build_queryplan" "foreign-key-backed group caches are not lowered yet")
 			true)
-		(define schema (group_carrier_schema carrier))
+		(define schema (group_cache_schema cache))
 		(define tbl (group_stage_input_name stage))
 		(define alias (group_stage_input_alias stage))
-		(define query_input_carrier (or (query_block? src) (union_block? src)))
+		(define query_input (or (query_block? src) (union_block? src)))
 		(define rewritten_src (if (query_block? src)
 			(query_block_with_presence_probes_using stage_lookup src)
 			src))
@@ -10047,7 +10047,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
 		(define key_names (group_key_cols keys))
 		(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
-		(define grouptbl (group_carrier_relation carrier))
+		(define grouptbl (group_cache_relation cache))
 		(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
 		(define scalar_single_stage (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single)))
 		(define scalar_query_stage (and (query_block? src)
@@ -10055,7 +10055,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote single_or_error))
 					(and (equal? (count ags) 2)
 						(equal? (cadr ags) aggregate_count_descriptor))))))
-		(define scalar_order_base_stage (and (not query_input_carrier)
+		(define scalar_order_base_stage (and (not query_input)
 			(compatible_scalar_order_aggregates? ags)))
 		(define scalar_aggregate_stage (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate)))
 		(define prepared_src (if (query_block? rewritten_src)
@@ -10075,8 +10075,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(query_block_stages_to_prepare_using prepare_catalog rewritten_src)
 				(available_stage_outputs_from_sources_using prepare_catalog (qb_sources rewritten_src))
 				(available_stage_outputs_from_sources_using prepare_catalog (group_stage_final_extra_source_refs stage))
-				(carrier_stages_from_sources prepare_catalog (qb_sources rewritten_src))
-				(carrier_stages_from_sources prepare_catalog (group_stage_final_extra_source_refs stage))
+				(group_cache_stages_from_sources prepare_catalog (qb_sources rewritten_src))
+				(group_cache_stages_from_sources prepare_catalog (group_stage_final_extra_source_refs stage))
 				(query_block_probe_expr_stages rewritten_src)))
 			'()))
 		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
@@ -10106,7 +10106,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 		(define create_cols (cons (quote list)
 			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
 				key_columns)))
-		(define ensure_agg_columns (if (or query_input_carrier scalar_order_base_stage)
+		(define ensure_agg_columns (if (or query_input scalar_order_base_stage)
 			(map ags (lambda (ag)
 				(list (quote createcolumn)
 					(list (quote table) schema grouptbl)
@@ -10115,19 +10115,19 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 					(quoted_runtime_list '())
 					(quoted_runtime_list '()))))
 			'()))
-		(define collect_plan (if (not query_input_carrier)
+		(define collect_plan (if (not query_input)
 			nil
 			(if (union_block? src)
 				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
 				(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
-		(define base_group_into_plan (if (or query_input_carrier scalar_order_base_stage)
+		(define base_group_into_plan (if (or query_input scalar_order_base_stage)
 			nil
 			(build_base_group_into_plan schema tbl alias src grouptbl keys key_names condition
 				(non_scalar_order_aggregates ags))))
 		(define cleanup_plan (if (query_block? src)
 			nil
 			(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
-		(define agg_plans (if query_input_carrier
+		(define agg_plans (if query_input
 			(if (empty_list? ags)
 				'()
 				(list (if (union_block? src)
@@ -10136,7 +10136,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 			(if scalar_order_base_stage
 				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
 				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
-		(define empty_aggregate_seed_plans (if (and query_input_carrier
+		(define empty_aggregate_seed_plans (if (and query_input
 			(and initializer_owner
 				(and (not scalar_single_stage)
 					(not (empty_list? ags)))))
@@ -10178,12 +10178,12 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 			(list (quote list)
 				"engine" "memory"
 				"oninit" (list (quote lambda) '() initial_fill_expr))))
-		(define carrier_created (symbol "__group_carrier_created"))
+		(define group_cache_created (symbol "__group_cache_created"))
 		(define keytable_init (list
-			(list (quote lambda) (list carrier_created)
+			(list (quote lambda) (list group_cache_created)
 				(list (quote !begin)
 					(list (quote touch_keytable) (list (quote table) schema grouptbl))
-					carrier_created))
+					group_cache_created))
 			(list (quote createtable) schema grouptbl create_cols create_options true)))
 		(define lowered_plan (if scalar_query_stage
 			(list (quote !begin)
@@ -10191,7 +10191,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(if initializer_owner keytable_init nil)
 				ensure_agg_expr
 				(build_scalar_single_query_stage_fill_plan prepared_src grouptbl keys key_names (car lowering_ags) (cadr lowering_ags)))
-			(if query_input_carrier
+			(if query_input
 				(cons (quote !begin)
 					(merge (list
 						nested_prepare
@@ -10211,8 +10211,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 						nested_prepare_expr
 						(if initializer_owner
 							(list
-								(list (quote lambda) (list carrier_created)
-									(list (quote if) carrier_created
+								(list (quote lambda) (list group_cache_created)
+									(list (quote if) group_cache_created
 										nil
 										(list (quote if) (group_stage_session_binding_missing_expr stage schema grouptbl keys key_names)
 											(list (quote !begin)
@@ -10857,19 +10857,19 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 (define query_block_stages_to_prepare_base (lambda (block)
 	(query_block_stages_to_prepare_base_using (qb_stages block) block)))
 
-(define selected_group_carrier_keys (lambda (stages)
+(define selected_group_cache_keys (lambda (stages)
 	(reduce (coalesceNil stages '()) (lambda (keys stage)
 		(if (and (group_stage? stage) (source_is_base_table? (gs_input stage)))
-			(set_assoc keys (group_stage_carrier_owner_key stage) true)
+			(set_assoc keys (group_stage_cache_owner_key stage) true)
 			keys))
 		'())))
 
-(define include_shared_group_carrier_stages (lambda (block_stages selected)
+(define include_shared_group_cache_stages (lambda (block_stages selected)
 	(begin
-		(define selected_carriers (selected_group_carrier_keys selected))
+		(define selected_group_caches (selected_group_cache_keys selected))
 		(define selected_ids (reduce (coalesceNil selected '()) (lambda (ids stage)
 			(set_assoc ids (gs_id stage) true)) '()))
-		(if (empty_list? selected_carriers)
+		(if (empty_list? selected_group_caches)
 			selected
 			(filter (coalesceNil block_stages '()) (lambda (stage)
 				(or
@@ -10878,14 +10878,14 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 						(group_stage? stage)
 						(and
 							(source_is_base_table? (gs_input stage))
-							(has_assoc? selected_carriers (group_stage_carrier_owner_key stage)))))))))))
+							(has_assoc? selected_group_caches (group_stage_cache_owner_key stage)))))))))))
 
 (define query_block_stages_to_prepare_using (lambda (all_stages block)
 	(begin
 		(define prelimit_stage_ids (if (late_projection_candidate_block? block)
 			(stage_ids_for_sources_with_closure all_stages (query_block_prelimit_sources block))
 			nil))
-		(include_shared_group_carrier_stages
+		(include_shared_group_cache_stages
 			(qb_stages block)
 			(filter (query_block_stages_to_prepare_base_using all_stages block) (lambda (stage)
 				(or
@@ -10932,7 +10932,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
 				(define core_block (query_block_without_stages
 					(query_block_with_stage_catalog prepared_block lazy_catalog)))
-				(define lazy_stages (carrier_stages_from_sources lazy_catalog (qb_sources core_block)))
+				(define lazy_stages (group_cache_stages_from_sources lazy_catalog (qb_sources core_block)))
 				(list
 					(merge (list
 						probe_recipe_prepares
@@ -10982,11 +10982,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 (define source_table_expr_using (lambda (stages src)
 	(begin
 		(define table_expr (source_table_expr src))
-		(define carrier_stage (stage_for_carrier_source stages src))
-		(if (nil? carrier_stage)
+		(define group_cache_stage (stage_for_group_cache_source stages src))
+		(if (nil? group_cache_stage)
 			table_expr
 			(list (quote !begin)
-				(stage_prepare_call_expr carrier_stage)
+				(stage_prepare_call_expr group_cache_stage)
 				table_expr)))))
 
 (define stage_prepare_key (lambda (stage)
@@ -11018,7 +11018,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 
 (define lower_query_block_core_with_lazy_prepares (lambda (stage_catalog block)
 	(begin
-		(define lazy_stages (carrier_stages_from_sources stage_catalog (qb_sources block)))
+		(define lazy_stages (group_cache_stages_from_sources stage_catalog (qb_sources block)))
 		(define core_plan (lower_query_block_core block))
 		(if (empty_list? lazy_stages)
 			core_plan
@@ -11778,7 +11778,7 @@ source remain residual so they observe the null-extended row. */
 						(source_outer? src))))
 			_ (neumann_fail "build_queryplan" "malformed ROW_NUMBER stage")))))
 
-(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier column_recipe stages collect_rows)
+(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages collect_rows)
 	(if (empty_list? sources)
 		(if (equal? (coalesceNil final_condition true) true)
 			(if collect_rows (runtime_cons_list_expr (list row_expr)) row_expr)
@@ -11798,7 +11798,7 @@ source remain residual so they observe the null-extended row. */
 			(define condition (combine_where (source_join_expr src) local_condition))
 			(define membership (driver_membership_for_source src condition))
 			(define delay_limit_after_join (ordered_join_limit_requires_complete_rows? sources default_alias final_condition offset_value limit_value))
-			(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_carrier)))
+			(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
 				nil
 				(recset_project_join_expr_for_membership src membership)))
 			(define membership_driver (and (not (nil? membership_table_expr)) (empty_list? (cdr sources))))
@@ -11828,7 +11828,7 @@ source remain residual so they observe the null-extended row. */
 				(list (quote optimize) lowered_filter_condition)))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_carrier column_recipe stages collect_rows)))
+				(build_join_scan_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_recset column_recipe stages collect_rows)))
 			(define reduce_expr (if collect_rows
 				(list (quote lambda) (list (quote acc) (quote subrows))
 					(list (quote if)
@@ -11875,20 +11875,20 @@ source remain residual so they observe the null-extended row. */
 					membership_table_expr)
 				scan_expr)))))
 
-(define build_join_scan_rows_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier column_recipe stages)
+(define build_join_scan_rows_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
-		order_items offset_value limit_value allow_membership_carrier column_recipe stages true)))
+		order_items offset_value limit_value allow_membership_recset column_recipe stages true)))
 
-(define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier column_recipe stages)
+(define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
-		order_items offset_value limit_value allow_membership_carrier column_recipe stages false)))
+		order_items offset_value limit_value allow_membership_recset column_recipe stages false)))
 
-(define build_join_scan_rows_with_mapper (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier stages)
+(define build_join_scan_rows_with_mapper (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset stages)
 	(build_join_scan_rows_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
-		order_items offset_value limit_value allow_membership_carrier nil stages)))
+		order_items offset_value limit_value allow_membership_recset nil stages)))
 
 (define build_join_scan_sink (lambda (schema sources default_alias needed_exprs final_condition sink_expr stages)
 	(build_join_scan_pipeline_using_recipe
@@ -11896,7 +11896,7 @@ source remain residual so they observe the null-extended row. */
 		'() 0 -1 false nil stages)))
 
 /* ------------------------------------------------------------------------- */
-/* Canonical physical prejoin carriers                                       */
+/* Canonical physical prejoin relations                                      */
 
 (define prejoin_primary_key_columns (lambda (src)
 	(map (filter (get_schema (source_schema src) (source_relation src)) (lambda (col)
@@ -11998,7 +11998,7 @@ source remain residual so they observe the null-extended row. */
 
 /* Inner-join predicates remain in the logical query-block through reordering.
 The physical prejoin extracts only multi-source conjuncts; local WHERE filters
-remain query-specific and are evaluated over the cached carrier. */
+remain query-specific and are evaluated over the cached intermediate relation. */
 (define prejoin_where_join_terms (lambda (block)
 	(filter (split_and_terms (coalesceNil (qb_where block) true)) (lambda (term)
 		(prejoin_where_join_term? block term)))))
@@ -12379,7 +12379,7 @@ remain query-specific and are evaluated over the cached carrier. */
 				(begin
 					(define stage (if (stage_output_relation? (source_relation src))
 						(stage_for_output_relation stages (source_relation src))
-						(stage_for_carrier_source stages src)))
+						(stage_for_group_cache_source stages src)))
 					(define requested_cols (qassoc_get order_columns (source_alias src) '()))
 					(define requested_col (if (empty_list? requested_cols) nil (car requested_cols)))
 					(if (and (scalar_order_lookup_stage? stage requested_col)
@@ -13290,4 +13290,6 @@ build_queryplan contract. */
 					(plan_count plan (quote scan_order))
 					(plan_count plan (quote scan_order_multi)))
 				"exists_scans" (plan_count plan (quote scan_exists))
+				"group_caches" (plan_count plan (quote touch_keytable))
+				/* Backward-compatible telemetry alias; use group_caches in new integrations. */
 				"group_carriers" (plan_count plan (quote touch_keytable)))))))

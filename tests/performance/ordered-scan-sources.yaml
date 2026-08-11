@@ -1,5 +1,5 @@
 # Copyright (C) 2026 Carl-Philip Haensch
-# Performance regression for physical ordered carriers.
+# Performance regression for ordered scan sources.
 
 metadata:
   version: "1.0"

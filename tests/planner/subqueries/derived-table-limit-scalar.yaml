@@ -74,8 +74,8 @@ setup:
         true)
   - sql: "CREATE INDEX dtl_group_child_parent ON dtl_group_child (parent_id)"
   - scm: '(rebuild)'
-  # Simulate a v3 carrier retained across a planner upgrade. Its stale computed
-  # presence column makes all four carrier keys look like successful probes.
+  # Simulate a v3 group cache retained across a planner upgrade. Its stale computed
+  # presence column makes all four group-cache keys look like successful probes.
   - scm: |
       (begin
         (droptable "memcp-tests" ".grp:dtl_global_access:c686880da9e520fc" true)

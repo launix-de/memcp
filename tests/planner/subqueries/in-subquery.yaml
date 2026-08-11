@@ -1514,7 +1514,7 @@ test_cases:
         - "touch_keytable"
 
   - name: "IN UNION with nested reference EXISTS prepares query carriers"
-    fail_comment: "nested reference-style EXISTS carriers must be prepared before physical scans reference them"
+    fail_comment: "nested reference-style EXISTS intermediate relations must be prepared before physical scans reference them"
     setup:
       - sql: "DROP TABLE IF EXISTS in_ref_doc"
       - sql: "DROP TABLE IF EXISTS in_ref_file"
@@ -1642,7 +1642,7 @@ test_cases:
             - "dependent-subquery"
 
   - name: "IN UNION with nested reference scalar prepares query carriers"
-    fail_comment: "nested stage-output carriers must be prepared before physical reads"
+    fail_comment: "nested stage-output intermediate relations must be prepared before physical reads"
     max_plan_size: 60000
     setup:
       - sql: "DROP TABLE IF EXISTS in_stage_dep_doc"

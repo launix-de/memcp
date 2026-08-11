@@ -15,7 +15,7 @@
 
 metadata:
   version: "1.0"
-  description: "Concurrent callers wait for cold canonical group-carrier initialization"
+  description: "Concurrent callers wait for cold canonical group-cache initialization"
   isolated: true
 
 setup:
@@ -65,7 +65,7 @@ test_cases:
         - marker_count: 1
 
   - name: "Cold aggregate caller 1/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: &empty_sum
       rows: 1
@@ -73,57 +73,57 @@ test_cases:
         - total: null
 
   - name: "Cold aggregate caller 2/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 3/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 4/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 5/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 6/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 7/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 8/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 9/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 10/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 11/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
   - name: "Cold aggregate caller 12/12"
-    parallel: cold_group_carrier
+    parallel: cold_group_cache
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
