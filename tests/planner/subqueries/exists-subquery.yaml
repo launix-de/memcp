@@ -130,7 +130,7 @@ test_cases:
         - ID: 1
           name: "Alice"
 
-  - name: "EXPLAIN correlated EXISTS can use RecSet projection carrier"
+  - name: "EXPLAIN correlated EXISTS can use RecSet projection scan source"
     sql: |
       EXPLAIN SELECT ID, name FROM exists_customers c
       WHERE EXISTS (
@@ -541,7 +541,7 @@ test_cases:
         - {ID: 2, can_read: true}
         - {ID: 3, can_read: false}
 
-  - name: "Scalar query recipes reuse shared presence carrier preparation"
+  - name: "Scalar query recipes reuse shared presence group-cache preparation"
     sql: |
       SELECT c.ID,
         COALESCE((
@@ -587,7 +587,7 @@ test_cases:
         - {ID: 2, allowed_a: true, allowed_b: true}
         - {ID: 3, allowed_a: false, allowed_b: false}
 
-  - name: "EXPLAIN prepares shared scalar recipe presence carriers once"
+  - name: "EXPLAIN prepares shared scalar recipe presence group caches once"
     sql: |
       EXPLAIN SELECT c.ID,
         COALESCE((

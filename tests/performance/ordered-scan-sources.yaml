@@ -1,5 +1,5 @@
 # Copyright (C) 2026 Carl-Philip Haensch
-# Performance regression for physical ordered carriers.
+# Performance regression for ordered scan sources.
 
 metadata:
   version: "1.0"
@@ -51,7 +51,7 @@ test_cases:
         - result_id: 2
         - result_id: 1
 
-  - name: "filtered bounded union branches stay in physical carriers"
+  - name: "filtered bounded union branches stay in physical scan sources"
     setup:
       - sql: "DROP TABLE IF EXISTS ordered_source_a"
       - sql: "DROP TABLE IF EXISTS ordered_source_b"

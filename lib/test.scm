@@ -250,8 +250,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define canonical_group_count_stage (make_group_stage "group-count" canonical_group_source '()
 		canonical_group_keys (list canonical_group_count) nil '() '() nil nil '()))
 	(assert (equal?
-		(group_stage_carrier_relation canonical_group_sum_stage)
-		(group_stage_carrier_relation canonical_group_count_stage))
+		(group_stage_cache_relation canonical_group_sum_stage)
+		(group_stage_cache_relation canonical_group_count_stage))
 		true "group keytable identity excludes aggregate columns")
 	(define rebind_child_ag (list 1 (quote +) 0))
 	(define rebind_child_stage (make_group_stage
@@ -359,15 +359,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (gs_id (stage_for_output_relation prepared_lowering_catalog
 		(make_stage_output_relation "nested-catalog-stage"))) "nested-catalog-stage")
 		true "indexed physical catalog resolves stage-output relations")
-	(define outer_catalog_carrier_source (list
-		"carrier"
-		(group_stage_carrier_schema outer_catalog_stage)
-		(group_stage_carrier_relation outer_catalog_stage)
+	(define outer_catalog_group_cache_source (list
+		"group-cache-source"
+		(group_stage_cache_schema outer_catalog_stage)
+		(group_stage_cache_relation outer_catalog_stage)
 		false
 		nil))
-	(assert (equal? (gs_id (stage_for_carrier_source prepared_lowering_catalog outer_catalog_carrier_source))
+	(assert (equal? (gs_id (stage_for_group_cache_source prepared_lowering_catalog outer_catalog_group_cache_source))
 		"outer-catalog-stage")
-		true "indexed physical catalog resolves carrier sources")
+		true "indexed physical catalog resolves group-cache sources")
 	(define local_catalog_stage (make_group_stage
 		"local-catalog-stage"
 		(list "local" "memcp-tests" "local_source" false nil)
@@ -380,9 +380,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"child lowering catalog resolves local stages")
 	(assert (equal? (gs_id (stage_by_id child_lowering_catalog "nested-catalog-stage")) "nested-catalog-stage") true
 		"child lowering catalog inherits root stage lookup")
-	(assert (equal? (gs_id (stage_for_carrier_source child_lowering_catalog outer_catalog_carrier_source))
+	(assert (equal? (gs_id (stage_for_group_cache_source child_lowering_catalog outer_catalog_group_cache_source))
 		"outer-catalog-stage") true
-		"child lowering catalog inherits root carrier lookup")
+		"child lowering catalog inherits root group-cache lookup")
 	(assert (count (lowering_catalog_stages child_lowering_catalog)) (+ (count indexed_catalog_stages) 1)
 		"child lowering catalog exposes local and inherited stages without changing the root")
 	(define extended_list_catalog

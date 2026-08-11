@@ -96,7 +96,7 @@ test_cases:
       ) candidate
     expect:
       rows: 0
-  - name: "Multi-source derived LIMIT stays a logical one-row carrier"
+  - name: "Multi-source derived LIMIT stays a logical one-row stage output"
     sql: |
       EXPLAIN IR
       SELECT candidate.id, candidate.label

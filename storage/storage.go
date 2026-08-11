@@ -897,7 +897,7 @@ func Init(en scm.Env) {
 			}
 
 			// TODO(planner-scalability): remove list-backed relational scans after
-			// metadata/RDF callers use physical carriers. Query plans must never
+			// metadata/RDF callers use physical scan sources. Query plans must never
 			// materialize cardinality-dependent rows into SCM lists.
 			if list, ok := scmerSlice(tableArg); ok {
 				result := neutral

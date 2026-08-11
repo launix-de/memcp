@@ -1,7 +1,22 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Fulltext LIKE index tests
 # Verifies that non-prefix LIKE patterns produce correct results with ORDER BY,
 # that repeated queries remain correct after cache/index warmup, and that the
-# new planner lowers aggregate LIKE shapes through deterministic group carriers
+# new planner lowers aggregate LIKE shapes through deterministic group caches
 # instead of relying on flaky scan timing diagnostics.
 
 metadata:
@@ -154,7 +169,7 @@ test_cases:
   # early = runs 1-2, late = runs 5-8.
 
   # -- Test 1: LIKE needle-in-haystack (5 matches in 30k) --
-  - name: "EXPLAIN LIKE aggregate uses canonical group carrier"
+  - name: "EXPLAIN LIKE aggregate uses canonical group cache"
     sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       contains:
@@ -207,12 +222,12 @@ test_cases:
 
   - name: "LIKE speedup >= 3x"
     sql: |
-      SELECT full_ns, carrier_ns,
-        CASE WHEN full_ns > 0 AND carrier_ns > 0 AND carrier_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
+      SELECT full_ns, cache_ns,
+        CASE WHEN full_ns > 0 AND cache_ns > 0 AND cache_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
           SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN exec_ns ELSE 0 END) AS full_ns,
-          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS carrier_ns
+          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS cache_ns
         FROM `system_statistic`.`scans`
         WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'
       ) s
@@ -286,7 +301,7 @@ test_cases:
       - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, `table`, index_cols, inputCount, outputCount, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%' ORDER BY timestamp LIMIT 16"
 
   # -- Test 3: LIKE + Range (must be >= 3x faster) --
-  - name: "EXPLAIN LIKE+Range aggregate uses canonical group carrier"
+  - name: "EXPLAIN LIKE+Range aggregate uses canonical group cache"
     sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
     expect:
       contains:
@@ -338,12 +353,12 @@ test_cases:
 
   - name: "LIKE+Range speedup >= 3x"
     sql: |
-      SELECT full_ns, carrier_ns,
-        CASE WHEN full_ns > 0 AND carrier_ns > 0 AND carrier_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
+      SELECT full_ns, cache_ns,
+        CASE WHEN full_ns > 0 AND cache_ns > 0 AND cache_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
           SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN exec_ns ELSE 0 END) AS full_ns,
-          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS carrier_ns
+          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS cache_ns
         FROM `system_statistic`.`scans`
         WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'
       ) s

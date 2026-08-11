@@ -792,13 +792,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	return cols
 }
 
-func splitRecSetBoundary(b boundaries, carrier *table) (boundaries, *recSet) {
+func splitRecSetBoundary(b boundaries, backingTable *table) (boundaries, *recSet) {
 	var rs *recSet
 	prefixLen := 0
 	for prefixLen < len(b) && matcherKindEqual(b[prefixLen].matcher, RecSetMatcher) {
 		if rs == nil && b[prefixLen].lower.IsCustom(TagRecSet) {
 			candidate := RecSetFromScmer(b[prefixLen].lower)
-			if candidate != nil && candidate.table == carrier {
+			if candidate != nil && candidate.table == backingTable {
 				rs = candidate
 			}
 		}

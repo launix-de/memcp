@@ -15,7 +15,7 @@
 
 metadata:
   version: "1.0"
-  description: "Trace-derived grouped aggregate carrier contracts"
+  description: "Trace-derived group-cache contracts"
   isolated: true
 
 setup:
@@ -65,7 +65,7 @@ test_cases:
       data:
         - total: 3
           memberships: 2
-  - name: "Grouped derived COUNT keeps carriers out of logical IR"
+  - name: "Grouped derived COUNT keeps physical scan sources out of logical IR"
     max_plan_size: 20000
     sql: |
       EXPLAIN IR

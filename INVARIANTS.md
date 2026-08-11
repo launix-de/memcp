@@ -39,7 +39,7 @@ Each phase has a distinct job:
 - parser: preserve SQL syntax and produce neutral AST/query terms
 - `untangle_query`: build a decorrelated logical IR
 - `join_reorder` / optimize: choose logical order and record costing facts
-- `build_queryplan`: choose physical carriers/operators and emit Scheme code
+- `build_queryplan`: choose physical scan sources/operators and emit Scheme code
 
 Do not move physical decisions into `untangle_query`. Do not leave logical
 decorrelation work for `build_queryplan`.
@@ -73,7 +73,7 @@ After `untangle_query`, the IR must not contain physical artifacts:
 
 - no `scan` / `scan_order` logical operators
 - no `.grp:*` physical helper relation names
-- no ORC/temp column physical carrier names
+- no physical intermediate-relation names such as ORC/temp columns
 - no RecSet physical values
 - no storage-specific helper relation names
 
@@ -101,28 +101,37 @@ must preserve that order when it emits nested scans. It must not choose another
 driver, split the sources into a different execution order, or otherwise make
 a second join-order decision.
 
-Physical lowering still chooses the operator and carrier for each source in
+Physical lowering still chooses the operator and scan source for each source in
 that fixed order. Depending on the cost and semantics, a source may become a
 direct subscan, group keytable, computed-column-filtered slice of a source
-keytable, RecSet, ORC column, or another storage-engine carrier. Operator choice
+keytable, RecSet, ORC column, or another storage-engine scan source. Operator choice
 must not change source order.
 
 ## Relational Results Stay In The Storage Engine
 
+A **scan source** is a storage-engine representation that `scan`, `scan_order`,
+or another physical scan operator can consume. Base tables, RecSets, group
+keytables, and query-local temporary tables are scan sources. An
+**intermediate relation** is a relational result materialized in such a scan
+source between physical plan stages. A **group cache** is a reusable
+intermediate relation for grouped keys and aggregates; its default physical
+representation is a **group keytable**. Use these specific terms rather than
+an ambiguous umbrella term.
+
 Base and intermediate relational data already lives in the in-memory storage
 engine. Execution must consume it through `scan`, `scan_order`,
 `scan_order_multi`, RecSets, ORC columns, group keytables, or another explicitly
-selected storage-engine carrier. It must not copy a relational result into a
+selected storage-engine scan source. It must not copy a relational result into a
 Scheme list, association list, FastDict, or query-local memo merely to join,
 order, limit, or probe it.
 
 Small planner metadata, scalar runtime values, and aggregate state may use
-Scheme data structures. A physical carrier must remain the single relational
+Scheme data structures. A physical scan source must remain the single relational
 representation of its result: choosing a direct/grouped subscan must not also
 build the complete keytable, and choosing a keytable must not duplicate it into
 a Scheme-side relation. A requested subset of an existing source keytable may
 be evaluated through computed-column filters instead of constructing another
-carrier.
+intermediate relation.
 
 List-backed relations do not provide indexes, statistics, range braking,
 late materialization, bounded memory, spill, incremental maintenance, or the
@@ -154,8 +163,8 @@ that mode it still owns OFFSET/LIMIT and may use top-k pruning: it need not
 filter or materialize every qualifying row before selecting the required
 number of rows.
 
-Decorrelated helpers remain nested scans or independently prepared relational
-carriers. They must not replace the limited root scan with a complete lookup
+Decorrelated helpers remain nested scans or independently prepared intermediate
+relations. They must not replace the limited root scan with a complete lookup
 table. Projection-only helpers belong in the limited scan's map callback so
 rows rejected by filtering, ordering, offset, or limit never invoke them.
 
@@ -254,13 +263,13 @@ from the rewritten source set, after inherited scalar probes and correlation
 bindings have been resolved. Choosing a key from the pre-rewrite source set can
 leave free aliases in the physical plan.
 
-Carrier projection is valid only when all semantic inputs are represented:
+Intermediate-relation projection is valid only when all semantic inputs are represented:
 
 - every key has a matching projected driver column or an explicit external
   binding
-- the full local filter remains attached to the carrier build or as a residual
+- the full local filter remains attached to the intermediate-relation build or as a residual
   predicate
-- session-dependent carriers are query-local and cannot be reused across
+- session-dependent intermediate relations are query-local and cannot be reused across
   different session bindings
 - NULL and empty-domain behavior remains that of the logical stage
 
@@ -344,7 +353,7 @@ Materialize only when a real semantic or physical barrier exists:
 - conflicting window order requiring ORC
 - shared CTE/DAG root
 - explicit materialization semantics
-- physical cost model chooses a query-local carrier such as RecSet
+- physical cost model chooses a query-local scan source such as RecSet
 - temp table as last-resort physical barrier
 
 ## UNION
@@ -375,8 +384,8 @@ partitioning. Otherwise different outer bindings mix into the same window.
 ## Cost Model and Physical Lowering
 
 Lowering decisions must become cost-aware and explicit. Do not add scattered
-special-case branches when the decision is really "which physical carrier is
-cheapest for this logical stage?"
+special-case branches when the decision is really "which physical scan source
+or intermediate relation is cheapest for this logical stage?"
 
 The lowerer/cost model may consider:
 
@@ -384,13 +393,13 @@ The lowerer/cost model may consider:
 - filter selectivity
 - distinct domain/key counts
 - order/limit compatibility
-- warm/cold state of reusable carriers
+- warm/cold state of reusable group caches and intermediate relations
 - expected reuse count
 - build cost vs probe cost
 - memory footprint
 - compile-time cost
 - index/auto-index availability
-- telemetry from previous scans or carrier builds
+- telemetry from previous scans or intermediate-relation builds
 
 Physical options include:
 
@@ -414,7 +423,7 @@ Derive physical helper names from:
 
 - source identity
 - full normalized key set
-- canonical filter/condition forms when they affect the carrier result
+- canonical filter/condition forms when they affect the cached or materialized result
 - semantic facts that change the result
 
 Never derive helper identity from visible aliases, wrapper-local aliases, or

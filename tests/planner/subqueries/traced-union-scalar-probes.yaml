@@ -113,7 +113,7 @@ setup:
   - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
 
 test_cases:
-  - name: "ordered UNION scalar probes use the multi-scan carrier"
+  - name: "ordered UNION scalar probes use the multi-scan source"
     sql: |
       EXPLAIN
       SELECT *

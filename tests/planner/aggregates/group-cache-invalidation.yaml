@@ -1,6 +1,21 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Group table cache invalidation preparation tests
 # Validates that GROUP BY results update correctly after DML on the base table.
-# Also checks that GROUP BY lowers to a canonical keytable/computed-column carrier
+# Also checks that GROUP BY lowers to a canonical group keytable with computed columns
 # without depending on legacy physical table names.
 
 metadata:
@@ -70,7 +85,7 @@ test_cases:
           s: 150
 
   # --- Inspect lowering after GROUP BY ---
-  - name: "GROUP BY lowering uses canonical keytable carrier"
+  - name: "GROUP BY lowering uses canonical group cache"
     sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -79,7 +94,7 @@ test_cases:
         - "createcolumn"
         - ".grp:sc_base:"
 
-  - name: "GROUP BY lowering prepares each canonical carrier once"
+  - name: "GROUP BY lowering prepares each canonical group cache once"
     sql: "EXPLAIN SELECT dept, COUNT(*) AS c, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -137,7 +152,7 @@ test_cases:
         - dept: "Sales"
           s: 200
 
-  - name: "GROUP BY lowering after INSERT reuses canonical keytable carrier"
+  - name: "GROUP BY lowering after INSERT reuses canonical group cache"
     sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -206,7 +221,7 @@ test_cases:
         - dept: "Marketing"
           s: 80
 
-  - name: "GROUP BY lowering after DELETE keeps canonical keytable carrier"
+  - name: "GROUP BY lowering after DELETE keeps canonical group cache"
     sql: "EXPLAIN SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 1
@@ -371,7 +386,7 @@ test_cases:
         - "assoc_keys_as_dataset_rows"
         - "assoc_keys_values_as_dataset_rows"
 
-  - name: "Prejoin keeps a local WHERE predicate outside the shared carrier"
+  - name: "Prejoin keeps a local WHERE predicate outside the shared group cache"
     sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id WHERE e.salary >= 150 GROUP BY d.name ORDER BY d.name"
     expect:
       rows: 2

@@ -229,7 +229,7 @@ test_cases:
       result_not_contains:
         - "scalar-once:b1ecb2795b4bbb34"
         - "__exists_2ff8679a7aafb8ea"
-  - name: "Repeated scalar latest projections reuse one key carrier"
+  - name: "Repeated scalar latest projections reuse one group cache"
     sql: |
       SELECT
         p.id,
@@ -369,7 +369,7 @@ test_cases:
     max_compile_metrics:
       plan_nodes: 6000
       scans: 64
-      group_carriers: 8
+      group_caches: 8
     max_plan_size: 100000
     sql: |
       SELECT projected.*
