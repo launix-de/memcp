@@ -4028,6 +4028,75 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(list (quote outer_join) (source_outer? src))
 		(list (quote join_filter) (source_join_present? src)))))
 
+/* Promote a small, locally filtered base relation within the leading inner
+join segment. This keeps outer/stage relations and explicit JOIN dependencies
+in place while giving comma joins a selective physical driver. */
+(define reorderable_inner_driver_source? (lambda (src)
+	(and (source_is_base_table? src)
+		(not (source_outer? src))
+		(or (nil? (source_join_expr src)) (equal? (source_join_expr src) true)))))
+
+(define multiple_reorderable_inner_sources? (lambda (sources)
+	(and (not (empty_list? sources))
+		(not (empty_list? (cdr sources)))
+		(reorderable_inner_driver_source? (car sources))
+		(reorderable_inner_driver_source? (car (cdr sources))))))
+
+(define leading_reorderable_inner_sources (lambda (sources)
+	(match (coalesceNil sources '())
+		(cons src rest) (if (reorderable_inner_driver_source? src)
+			(cons src (leading_reorderable_inner_sources rest))
+			'())
+		_ '())))
+
+(define source_has_local_filter? (lambda (src default_alias condition)
+	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
+		(or found
+			(and (expr_refs_alias? default_alias (source_alias src) term)
+				(expr_only_refs_alias? default_alias (source_alias src) term))))
+		false)))
+
+(define sources_share_condition? (lambda (left right default_alias condition)
+	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
+		(or found
+			(and (expr_refs_alias? default_alias (source_alias left) term)
+				(expr_refs_alias? default_alias (source_alias right) term))))
+		false)))
+
+(define prefer_smaller_filtered_source (lambda (current candidate)
+	(if (nil? current)
+		candidate
+		(begin
+			(define current_rows (planner_source_row_count current))
+			(define candidate_rows (planner_source_row_count candidate))
+			(if (and (not (nil? candidate_rows))
+				(or (nil? current_rows) (< candidate_rows current_rows)))
+				candidate
+				current)))))
+
+(define selective_inner_driver (lambda (sources default_alias condition)
+	(reduce (leading_reorderable_inner_sources sources) (lambda (selected src)
+		(if (source_has_local_filter? src default_alias condition)
+			(prefer_smaller_filtered_source selected src)
+			selected))
+		nil)))
+
+(define promote_source_to_front (lambda (sources selected)
+	(cons selected
+		(filter sources (lambda (src) (not (equal? (source_alias src) (source_alias selected))))))))
+
+(define reorder_selective_inner_sources (lambda (sources default_alias condition stages order_items limit_value preserve_order_driver)
+	(if (or (and preserve_order_driver (source_order_limit_driver? (car sources) order_items limit_value))
+		(source_row_number_limit_driver? stages (car sources)))
+		sources
+		(begin
+			(define driver (selective_inner_driver sources default_alias condition))
+			(if (or (nil? driver)
+				(equal? (source_alias driver) (source_alias (car sources)))
+				(not (sources_share_condition? driver (car sources) default_alias condition)))
+				sources
+				(promote_source_to_front sources driver))))))
+
 (define left_join_strategy_options (lambda (src)
 	(if (not (source_outer? src))
 		nil
@@ -4459,11 +4528,18 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 						(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
 						(define exists_src (first_exists_recset_source (qb_stages block) sources default_alias (qb_where block)))
 						(if (nil? exists_src)
-							(if (query_block_needs_reorder_facts? block)
-								(query_block_with_reorder_facts
+							(begin
+								(define reordered_sources (if (not (multiple_reorderable_inner_sources? sources))
+									sources
+									(reorder_selective_inner_sources
+										sources default_alias (qb_where block) (qb_stages block) (qb_order block) (qb_limit block)
+										(and (query_limit_active? (qb_offset block) (qb_limit block))
+											(empty_list? (qb_group block))
+											(not (query_block_has_aggregates? block))))))
+								(define reordered_block
 									(make_query_block
 										(qb_schema block)
-										(qb_sources block)
+										reordered_sources
 										(qb_fields block)
 										(qb_where block)
 										(qb_group block)
@@ -4473,9 +4549,12 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 										(qb_offset block)
 										(qb_hidden block)
 										(map (qb_stages block) join_reorder_stage)
-										(qb_facts block))
-									(query_block_reorder_telemetry block))
-								block)
+										(qb_facts block)))
+								(if (query_block_needs_reorder_facts? block)
+									(query_block_with_reorder_facts
+										reordered_block
+										(query_block_reorder_telemetry block))
+									reordered_block))
 							(begin
 								(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation exists_src))))
 								(define stage_id (gs_id stage))
@@ -4496,10 +4575,17 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 									stage
 									probe
 									(qb_where block)))
+								(define reordered_driver_sources (if (not (multiple_reorderable_inner_sources? driver_sources))
+									driver_sources
+									(reorder_selective_inner_sources
+										driver_sources default_alias base_where (qb_stages block) (qb_order block) (qb_limit block)
+										(and (query_limit_active? (qb_offset block) (qb_limit block))
+											(empty_list? (qb_group block))
+											(not (query_block_has_aggregates? block))))))
 								(query_block_with_reorder_facts
 									(make_query_block
 										(qb_schema block)
-										driver_sources
+										reordered_driver_sources
 										(rewrite_consumer (qb_fields block))
 										base_where
 										(rewrite_consumer (qb_group block))

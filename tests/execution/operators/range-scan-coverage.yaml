@@ -17,6 +17,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS rs_right"
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_dim"
+  - sql: "DROP TABLE IF EXISTS perf_tiny"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
 
@@ -342,6 +343,11 @@ test_cases:
     expect:
       rows: 0
 
+  - name: "Create disconnected tiny table for reorder"
+    sql: "CREATE TABLE perf_tiny (id INT PRIMARY KEY, flag INT)"
+    expect:
+      rows: 0
+
   - name: "Insert selective join dimension rows"
     sql: "INSERT INTO perf_dim VALUES (1, 'one'), (2, 'two')"
     expect:
@@ -351,6 +357,11 @@ test_cases:
     sql: "INSERT INTO perf_main VALUES (1,1,'a'),(2,1,'b'),(3,2,'c')"
     expect:
       affected_rows: 3
+
+  - name: "Insert disconnected tiny row"
+    sql: "INSERT INTO perf_tiny VALUES (1, 1)"
+    expect:
+      affected_rows: 1
 
   - name: "EXPLAIN IR swaps to selective driver"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
@@ -373,6 +384,52 @@ test_cases:
       not_contains:
         - "inner_select"
         - "dependent-subquery"
+
+  - name: "EXPLAIN REORDER promotes a selective comma-join dimension"
+    sql: "EXPLAIN REORDER SELECT d.label, m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one'"
+    expect:
+      rows: 1
+      result_contains:
+        - '((\"d\" \"memcp-tests\" \"perf_dim\" false nil)'
+      result_not_contains:
+        - '((\"m\" \"memcp-tests\" \"perf_main\" false nil)'
+
+  - name: "Selective comma-join dimension preserves results"
+    sql: "SELECT d.label, m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one' ORDER BY m.id"
+    expect:
+      rows: 2
+      data:
+        - label: "one"
+          id: 1
+        - label: "one"
+          id: 2
+
+  - name: "EXPLAIN REORDER preserves an ungrouped ordered-limit driver"
+    sql: "EXPLAIN REORDER SELECT m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one' ORDER BY m.id LIMIT 1"
+    expect:
+      rows: 1
+      result_contains:
+        - '((\"m\" \"memcp-tests\" \"perf_main\" false nil)'
+      result_not_contains:
+        - '((\"d\" \"memcp-tests\" \"perf_dim\" false nil)'
+
+  - name: "EXPLAIN REORDER promotes through grouped ORDER LIMIT"
+    sql: "EXPLAIN REORDER SELECT d.label, COUNT(*) AS matches FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one' GROUP BY d.label ORDER BY matches DESC LIMIT 1"
+    expect:
+      rows: 1
+      result_contains:
+        - '((\"d\" \"memcp-tests\" \"perf_dim\" false nil)'
+      result_not_contains:
+        - '((\"m\" \"memcp-tests\" \"perf_main\" false nil)'
+
+  - name: "EXPLAIN REORDER avoids a disconnected selective driver"
+    sql: "EXPLAIN REORDER SELECT m.id FROM perf_main m, perf_dim d, perf_tiny x WHERE m.category = d.cat_id AND d.label = 'one' AND x.flag = 1"
+    expect:
+      rows: 1
+      result_contains:
+        - '((\"m\" \"memcp-tests\" \"perf_main\" false nil)'
+      result_not_contains:
+        - '((\"x\" \"memcp-tests\" \"perf_tiny\" false nil)'
 
   - name: "Create physical pushdown tables"
     sql: "CREATE TABLE pushdown_main (id INT PRIMARY KEY, lookup_id INT, payload VARCHAR(20))"
@@ -641,5 +698,8 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS rs_multi"
   - sql: "DROP TABLE IF EXISTS rs_left"
   - sql: "DROP TABLE IF EXISTS rs_right"
+  - sql: "DROP TABLE IF EXISTS perf_main"
+  - sql: "DROP TABLE IF EXISTS perf_dim"
+  - sql: "DROP TABLE IF EXISTS perf_tiny"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
