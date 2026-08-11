@@ -1368,6 +1368,7 @@ Patterns can be any of:
 	init_date()
 	init_timezone()
 	init_vector()
+	init_joinorder()
 	init_parser()
 	init_sync()
 	init_scheduler()
