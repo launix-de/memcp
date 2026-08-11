@@ -186,6 +186,41 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"c"
 			(list (quote and) "d" (list (quote and) "e" "f")))
 		true)) '("a" "b" "c" "d" "e" "f")) true "combine_where_terms flattens nested AND terms")
+	(define graph_col (lambda (alias column)
+		(list (quote get_column) alias false column false)))
+	(define graph_sources (list
+		(list "a" "memcp-tests" "graph_a" false nil)
+		(list "b" "memcp-tests" "graph_b" false
+			(list (quote equal??) (graph_col "a" "id") (graph_col "b" "a_id")))
+		(list "c" "memcp-tests" "graph_c" false
+			(list (quote equal??) (graph_col "b" "id") (graph_col "c" "b_id")))))
+	(define graph_where (list (quote and)
+		(list (quote >) (graph_col "a" "score") 10)
+		(list (quote equal??)
+			(list (quote +) (graph_col "a" "id") (graph_col "b" "id"))
+			(graph_col "c" "all_id"))))
+	(define graph_block (make_query_block "memcp-tests" graph_sources '() graph_where
+		nil nil nil nil nil '() '() '()))
+	(define graph_view (extract_join_hypergraph graph_block))
+	(assert (equal? (count (qassoc_get graph_view 'nodes '())) 3) true "join hypergraph contains every logical source")
+	(assert (equal? (count (qassoc_get graph_view 'locals '())) 1) true "join hypergraph separates local predicates")
+	(assert (equal? (count (qassoc_get graph_view 'edges '())) 2) true "join hypergraph extracts binary ON edges")
+	(assert (equal? (count (qassoc_get graph_view 'hyperedges '())) 1) true "join hypergraph preserves predicates spanning three aliases")
+	(assert (equal? (count (qassoc_get graph_view 'residuals '())) 0) true "join hypergraph has no residual for referenced predicates")
+	(assert (equal? (qb_where graph_block) graph_where) true "join hypergraph extraction leaves WHERE in its query-block")
+	(assert (equal? (map (qb_sources graph_block) source_join_expr)
+		(map graph_sources source_join_expr)) true "join hypergraph extraction leaves ON predicates on their sources")
+	(define outer_graph_sources (list
+		(list "a" "memcp-tests" "graph_a" false nil)
+		(list "c" "memcp-tests" "graph_c" false nil)
+		(list "b" "memcp-tests" "graph_b" true
+			(list (quote equal??) (graph_col "a" "id") (graph_col "b" "a_id")))))
+	(define outer_graph (extract_join_hypergraph (make_query_block
+		"memcp-tests" outer_graph_sources '() true nil nil nil nil nil '() '() '())))
+	(define outer_barrier (car (qassoc_get outer_graph 'barriers '())))
+	(assert (equal? (qassoc_get outer_barrier 'owner nil) "b") true "join hypergraph identifies the nullable outer-join source")
+	(assert (equal? (qassoc_get outer_barrier 'preserved '()) '("a" "c")) true "outer-join barrier preserves the complete left input")
+	(assert (equal? (qassoc_get outer_barrier 'references '()) '("a" "b")) true "outer-join barrier records aliases referenced by ON")
 	(define probe_outer_column (list (quote get_column) "outer_row" true "id" true))
 	(define probe_param (symbol "__probe_key_0"))
 	(define probe_param_index (scalar_query_probe_param_index (list probe_outer_column) (list probe_param)))

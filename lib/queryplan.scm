@@ -3868,6 +3868,109 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 /* ------------------------------------------------------------------------- */
 /* Reorder/optimise scaffold                                                  */
 
+/* Join reordering can consume a logical hypergraph view of the query block. The
+extractor deliberately does not rewrite sources or move predicates: WHERE and
+ON terms remain owned by the query-block until physical lowering. */
+(define join_hypergraph_expr_aliases (lambda (default_alias aliases expr)
+	(filter (coalesceNil aliases '()) (lambda (alias)
+		(expr_refs_alias? default_alias alias expr)))))
+
+(define make_join_hypergraph_predicate (lambda (aliases origin owner predicate)
+	(list
+		(list (quote aliases) (coalesceNil aliases '()))
+		(list (quote origin) origin)
+		(list (quote owner) owner)
+		(list (quote predicate) predicate))))
+
+(define join_hypergraph_predicate_kind (lambda (entry)
+	(match (count (qassoc_get entry (quote aliases) '()))
+		0 (quote residual)
+		1 (quote local)
+		2 (quote edge)
+		_ (quote hyperedge))))
+
+(define join_hypergraph_where_predicates (lambda (block default_alias aliases)
+	(if (equal? (coalesceNil (qb_where block) true) true)
+		'()
+		(map (split_and_terms (qb_where block)) (lambda (predicate)
+			(make_join_hypergraph_predicate
+				(join_hypergraph_expr_aliases default_alias aliases predicate)
+				(quote where)
+				nil
+				predicate))))))
+
+(define join_hypergraph_source_predicates (lambda (sources default_alias aliases)
+	(merge (map (coalesceNil sources '()) (lambda (src)
+		(begin
+			(define join_expr (coalesceNil (source_join_expr src) true))
+			(if (equal? join_expr true)
+				'()
+				(map (split_and_terms join_expr) (lambda (predicate)
+					(make_join_hypergraph_predicate
+						(merge_unique (list
+							(join_hypergraph_expr_aliases default_alias aliases predicate)
+							(list (source_alias src))))
+						(quote on)
+						(source_alias src)
+						predicate))))))))))
+
+(define join_hypergraph_node_kind (lambda (src)
+	(if (stage_output_relation? (source_relation src))
+		(quote stage-output)
+		(if (query_block? (source_relation src))
+			(quote derived)
+			(quote base)))))
+
+(define join_hypergraph_nodes (lambda (sources)
+	(mapIndex (coalesceNil sources '()) (lambda (position src)
+		(list
+			(list (quote alias) (source_alias src))
+			(list (quote position) position)
+			(list (quote kind) (join_hypergraph_node_kind src))
+			(list (quote outer_join) (source_outer? src)))))))
+
+(define join_hypergraph_outer_barriers_acc (lambda (sources preceding_aliases default_alias aliases)
+	(match (coalesceNil sources '())
+		(cons src rest) (begin
+			(define alias (source_alias src))
+			(define next_preceding (append preceding_aliases alias))
+			(define remaining (join_hypergraph_outer_barriers_acc
+				rest next_preceding default_alias aliases))
+			(if (source_outer? src)
+				(cons
+					(list
+						(list (quote kind) (quote left-outer))
+						(list (quote owner) alias)
+						(list (quote preserved) preceding_aliases)
+						(list (quote references)
+							(join_hypergraph_expr_aliases default_alias aliases
+								(coalesceNil (source_join_expr src) true)))
+						(list (quote predicate) (source_join_expr src)))
+					remaining)
+				remaining))
+		_ '())))
+
+(define join_hypergraph_predicates_of_kind (lambda (predicates kind)
+	(filter predicates (lambda (entry)
+		(equal? (join_hypergraph_predicate_kind entry) kind)))))
+
+(define extract_join_hypergraph (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define aliases (source_aliases sources))
+		(define default_alias (if (empty_list? aliases) nil (car aliases)))
+		(define predicates (merge (list
+			(join_hypergraph_where_predicates block default_alias aliases)
+			(join_hypergraph_source_predicates sources default_alias aliases))))
+		(list
+			(list (quote nodes) (join_hypergraph_nodes sources))
+			(list (quote locals) (join_hypergraph_predicates_of_kind predicates (quote local)))
+			(list (quote edges) (join_hypergraph_predicates_of_kind predicates (quote edge)))
+			(list (quote hyperedges) (join_hypergraph_predicates_of_kind predicates (quote hyperedge)))
+			(list (quote residuals) (join_hypergraph_predicates_of_kind predicates (quote residual)))
+			(list (quote barriers)
+				(join_hypergraph_outer_barriers_acc sources '() default_alias aliases))))))
+
 (define planner_literal_value (lambda (expr)
 	(match expr
 		((symbol session) key) (try
