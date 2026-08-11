@@ -429,6 +429,15 @@ test_cases:
     sql: "SELECT DATE('2025-06-15 12:30:00') AS d"
     expect:
       rows: 1
+      data:
+        - d: "2025-06-15"
+
+  - name: "PostgreSQL DATE column uses date-only output"
+    sql: "SELECT ship_date FROM psql_decimal_range LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - ship_date: "1994-06-15"
 
   # === DATE_ADD / DATE_SUB ===
   - name: "DATE_ADD"
@@ -457,7 +466,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - d: "1998-09-02 00:00:00"
+        - d: "1998-09-02"
 
   # === CONVERT ===
   - name: "CONVERT to SIGNED"

@@ -301,7 +301,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "DATE_ADD" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_add e n unit))
 		(parser '((atom "DATE_SUB" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_sub e n unit))
 		/* DATE('str') - parse date string; DATE(expr) - truncate to day */
-		(parser '((atom "DATE" true) (define s psql_string)) '('parse_date s))
+		(parser '((atom "DATE" true) (define s psql_string)) '('date_trunc_day '('parse_date s)))
 		(parser '((atom "DATE" true) "(" (define e psql_expression) ")") '('date_trunc_day e))
 		/* SUBSTRING(expr FROM start FOR len) - SQL standard syntax */
 		(parser '((atom "SUBSTRING" true) "(" (define s psql_expression) (atom "FROM" true) (define start psql_expression) (atom "FOR" true) (define len psql_expression) ")") '((quote sql_substr) s start len))

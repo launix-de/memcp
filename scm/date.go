@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -65,9 +65,46 @@ func toTime(v Scmer) (time.Time, bool) {
 	}
 }
 
+func sqlTemporalOutput(value Scmer, sqlType string) Scmer {
+	if value.IsNil() {
+		return NewNil()
+	}
+	t, ok := toTime(value)
+	if !ok {
+		return value
+	}
+	switch strings.ToUpper(sqlType) {
+	case "DATE":
+		return NewString(t.UTC().Format("2006-01-02"))
+	case "DATETIME", "TIMESTAMP":
+		if value.GetTag() == tagDate {
+			return NewString(DateToDisplay(value, GetCurrentSessionLocation()))
+		}
+		return NewString(t.In(GetCurrentSessionLocation()).Format("2006-01-02 15:04:05"))
+	default:
+		return value
+	}
+}
+
 func init_date() {
 	// string functions
 	DeclareTitle("Date")
+
+	Declare(&Globalenv, &Declaration{
+		Name: "sql_temporal_output",
+		Desc: "formats a temporal SQL result according to its compiler-tracked declared type",
+		Fn: func(a ...Scmer) Scmer {
+			return sqlTemporalOutput(a[0], a[1].String())
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "value", ParamDesc: "type-flexible temporal value"},
+				{Kind: "string", ParamName: "sql_type", ParamDesc: "declared SQL temporal type"},
+			},
+			Return: &TypeDescriptor{Kind: "any"},
+			Const:  true,
+		},
+	})
 
 	Declare(&Globalenv, &Declaration{
 		Name: "now",

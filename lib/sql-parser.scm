@@ -771,7 +771,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
 
 		/* DATE literal: DATE 'yyyy-mm-dd' */
-		(parser '((atom "DATE" true) (define s sql_string)) '('parse_date s))
+		(parser '((atom "DATE" true) (define s sql_string)) '('date_trunc_day '('parse_date s)))
 
 		/* CURRENT_DATE / CURRENT_DATE() */
 		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date))
