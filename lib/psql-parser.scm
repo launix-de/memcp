@@ -139,6 +139,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define extract_title (lambda (expr) (match expr
 		'((symbol get_column) nil _ col _) col
 		'((symbol get_column) tblvar _ col _) col /* x.y -> (concat tblvar "." col) */
+		'((symbol count_distinct) _) "count"
+		'((symbol sql_avg_divide) _ _) "avg"
+		'((symbol aggregate) _ (symbol sql_sum_reduce) _) "sum"
+		'((symbol aggregate) _ (symbol +) 0) "count"
+		'((symbol aggregate) _ (symbol min) _) "min"
+		'((symbol aggregate) _ (symbol max) _) "max"
 		(cons sym args) /* function call */ (concat (cons sym (map args extract_title)))
 		(concat expr)
 	)))

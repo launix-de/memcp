@@ -46,6 +46,27 @@ setup:
         5000)
 
 test_cases:
+  - name: "Unaliased aggregates use PostgreSQL result column names"
+    sql: "SELECT COUNT(val), SUM(val), AVG(val), MIN(val), MAX(val) FROM psql_data"
+    expect:
+      rows: 1
+      data:
+        - { count: 4, sum: 110, avg: 27.5, min: 10, max: 50 }
+
+  - name: "Unaliased COUNT DISTINCT uses PostgreSQL result column name"
+    sql: "SELECT COUNT(DISTINCT name) FROM psql_data"
+    expect:
+      rows: 1
+      data:
+        - { count: 3 }
+
+  - name: "Explicit aggregate alias overrides PostgreSQL default name"
+    sql: "SELECT SUM(val) AS explicit_total FROM psql_data"
+    expect:
+      rows: 1
+      data:
+        - { explicit_total: 110 }
+
   - name: "Empty SUM and AVG use NULL rather than the COUNT identity"
     sql: "SELECT COUNT(val) AS row_count, SUM(val) AS total, AVG(val) AS average FROM psql_data WHERE id < 0"
     expect:
