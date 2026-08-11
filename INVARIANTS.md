@@ -96,16 +96,20 @@ costs and semantics.
 ## Join Order Has A Single Owner
 
 Join ordering is a logical optimization. Once `join_reorder` has selected the
-driver and ordered the dependent sources in a join cloud, physical lowering
-must preserve that order when it emits nested scans. It must not choose another
-driver, split the sources into a different execution order, or otherwise make
-a second join-order decision.
+driver and produced a join tree for a join cloud, physical lowering must
+preserve the leaf traversal encoded by that tree when it emits nested scans.
+The query-block source list remains the semantic source catalog; it must not be
+reordered into a second, flat representation of the chosen plan. Physical
+preparation may derive the scan traversal required by existing operators from
+the tree, but it must not choose another driver, reorder that traversal, or
+otherwise make a second join-order decision. A recursive lowerer that consumes
+join nodes directly must also preserve their tree boundaries.
 
-Physical lowering still chooses the operator and scan source for each source in
-that fixed order. Depending on the cost and semantics, a source may become a
+Physical lowering still chooses the operator and scan source for each tree node.
+Depending on the cost and semantics, a source may become a
 direct subscan, group keytable, computed-column-filtered slice of a source
 keytable, RecSet, ORC column, or another storage-engine scan source. Operator choice
-must not change source order.
+must not change the logical join tree's leaf order.
 
 ## Relational Results Stay In The Storage Engine
 

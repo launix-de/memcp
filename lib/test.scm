@@ -232,6 +232,35 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (qassoc_get graph_plan 'strategy nil) 'dphyp) true "small join graphs use DPHyp")
 	(assert (equal? (count (qassoc_get graph_plan 'order '())) 3) true "DPHyp covers every logical join source")
 	(assert (equal? (car (qassoc_get graph_plan 'tree '())) 'join-node) true "DPHyp records a bushy logical join tree")
+	(define graph_reordered_block (hybrid_reorder_query_block graph_block))
+	(define graph_reordered_tree (qassoc_get (qb_facts graph_reordered_block) 'join_plan nil))
+	(assert (equal?
+		(map (qb_sources graph_reordered_block) source_alias)
+		(map graph_sources source_alias)) true
+		"join_reorder keeps the query-block source catalog in semantic order")
+	(assert (equal?
+		(map (qb_sources (apply_join_optimizer_plan graph_reordered_block)) source_alias)
+		(join_optimizer_tree_aliases graph_reordered_tree)) true
+		"physical preparation derives scan traversal from the logical join tree")
+	(define tree_group_stage (make_group_stage
+		"tree-group-stage" graph_reordered_block '() '() '() nil '() '() nil nil '()))
+	(assert (equal?
+		(map (qb_sources (gs_input (apply_join_optimizer_plan_stage tree_group_stage))) source_alias)
+		(join_optimizer_tree_aliases graph_reordered_tree)) true
+		"physical preparation applies logical join trees inside group stages")
+	(define tree_union (make_union_block
+		(quote all) (list graph_reordered_block graph_reordered_block) '() nil nil '()))
+	(assert (equal?
+		(map (qb_sources (car (union_branches (apply_join_optimizer_plan_node tree_union)))) source_alias)
+		(join_optimizer_tree_aliases graph_reordered_tree)) true
+		"physical preparation applies logical join trees inside UNION branches")
+	(define malformed_join_plan_block (make_query_block
+		"memcp-tests" graph_sources '() graph_where nil nil nil nil nil '() '()
+		(list (list 'join_plan (list 'join-leaf "missing")))))
+	(assert (try
+		(lambda () (begin (apply_join_optimizer_plan malformed_join_plan_block) false))
+		(lambda (_e) true)) true
+		"physical preparation rejects a join tree that does not cover its source catalog")
 	(define probe_outer_column (list (quote get_column) "outer_row" true "id" true))
 	(define probe_param (symbol "__probe_key_0"))
 	(define probe_param_index (scalar_query_probe_param_index (list probe_outer_column) (list probe_param)))
