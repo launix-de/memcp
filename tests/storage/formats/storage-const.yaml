@@ -51,7 +51,7 @@ test_cases:
       data:
         - val: 42
 
-  - name: "Int-const: table-local rebuild to trigger StorageConst"
+  - name: "Int-const: rebuild to trigger StorageConst"
     scm: '(rebuild (table "memcp-tests" "sc_int") true false)'
 
   - name: "Int-const: verify val column is const[42] after rebuild"

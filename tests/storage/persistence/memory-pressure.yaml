@@ -125,7 +125,7 @@ test_cases:
     scm: (sleep 1.1)
     expect: {}
 
-  - name: "MP: force eviction of temp keytables and columns"
+  - name: "MP: set MaxRamBytes to 1MB (evict temp keytables + columns)"
     scm: (settings "MaxRamBytes" 1)
     expect: {}
 
