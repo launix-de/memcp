@@ -28,6 +28,9 @@ test_cases:
   - name: "Create customers table"
     sql: "CREATE TABLE gs_customers (id INT PRIMARY KEY, name VARCHAR(50))"
 
+  - name: "Create grouped membership candidate table"
+    sql: "CREATE TABLE gs_candidates (id INT PRIMARY KEY, order_id INT, qty INT)"
+
   - name: "Insert orders"
     sql: |
       INSERT INTO gs_orders (id, customer, amount, priority) VALUES
@@ -58,6 +61,11 @@ test_cases:
         (2, 'Bob'),
         (3, 'Charlie'),
         (4, 'Dana')
+
+  - name: "Insert grouped membership candidates"
+    sql: |
+      INSERT INTO gs_candidates (id, order_id, qty) VALUES
+        (1, 1, 1), (2, 1, 2), (3, 3, 1), (4, 6, 4)
 
   - name: "Create unordered group lookup tables"
     sql: "CREATE TABLE gs_parts (id INT, category VARCHAR(20))"
@@ -427,10 +435,47 @@ test_cases:
       data:
         - total: 0
 
+  # =================================================================
+  # 16. Nested stages are prepared once by their consuming main group
+  # =================================================================
+  - name: "Grouped membership feeding an outer group prepares once"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'gs_candidates'"
+    sql: |
+      SELECT o.customer, SUM(i.qty) AS total_qty
+      FROM gs_orders o
+      JOIN gs_items i ON i.order_id = o.id
+      WHERE o.id IN (
+        SELECT c.order_id
+        FROM gs_candidates c
+        GROUP BY c.order_id
+        HAVING SUM(c.qty) > 2
+      )
+      GROUP BY o.customer
+    expect:
+      rows: 1
+      data:
+        - customer: "Alice"
+          total_qty: 8
+
+  - name: "Nested grouped membership scanned its input once"
+    sql: |
+      SELECT COUNT(*) AS scans
+      FROM `system_statistic`.`scans`
+      WHERE `schema` = 'memcp-tests' AND `table` = 'gs_candidates'
+    expect:
+      rows: 1
+      data:
+        - scans: 1
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS gs_blocked_sources"
   - sql: "DROP TABLE IF EXISTS gs_sources"
   - sql: "DROP TABLE IF EXISTS gs_parts"
   - sql: "DROP TABLE IF EXISTS gs_customers"
+  - sql: "DROP TABLE IF EXISTS gs_candidates"
   - sql: "DROP TABLE IF EXISTS gs_items"
   - sql: "DROP TABLE IF EXISTS gs_orders"
