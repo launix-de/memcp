@@ -722,6 +722,16 @@ func (t *storageShard) hasWriteOwner() bool {
 	return t.writeOwners[goid] > 0
 }
 
+// hasWriteOwnerForTx uses the explicit transaction lock state on SQL paths.
+// The goroutine owner fallback remains necessary for internal callers that do
+// not carry a transaction context.
+func (t *storageShard) hasWriteOwnerForTx(currentTx *TxContext) bool {
+	if currentTx != nil {
+		return currentTx.HasShardWrite(t)
+	}
+	return t.hasWriteOwner()
+}
+
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
 func (t *storageShard) rowValueByRecidLocked(recid uint32, col string) scm.Scmer {
 	if recid < t.main_count {

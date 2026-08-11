@@ -245,7 +245,7 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) recSetShard {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwner()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	var recsetPart *recSetShard
 	if recsetFilter != nil {
@@ -413,7 +413,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 
 func (t *storageShard) collectProjectJoinKeys(recids []uint32, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState) [][]scm.Scmer {
 	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwner()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 
 	cols := make([]ColumnStorage, len(sourceKeyCols))
@@ -551,7 +551,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 
 func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys [][]scm.Scmer, ss *scm.SessionState) recSetShard {
 	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwner()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	targetReaders := make([]ColumnReader, len(targetKeyCols))
@@ -826,7 +826,7 @@ func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condit
 
 func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
 	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwner()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -910,7 +910,7 @@ func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string,
 func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwner()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -1089,7 +1089,7 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 	}
 
 	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))

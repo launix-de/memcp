@@ -144,7 +144,7 @@ func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 	}
 }
 
-func benchmarkUniquePointScan(b *testing.B, name string) {
+func benchmarkUniquePointScan(b *testing.B, name string, currentTx *TxContext) {
 	dbName := "bench_scan_point_" + name
 	databases.Remove(dbName)
 	CreateDatabase(dbName, true)
@@ -162,19 +162,25 @@ func benchmarkUniquePointScan(b *testing.B, name string) {
 	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 	nilFn := scm.NewNil()
 	// Warm the lazily built index before measuring regular probe overhead.
-	tbl.scan(nil, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
+	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scan(nil, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
+		tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
 	}
 }
 
 // BenchmarkScanUniquePoint measures the repeated dimension-table lookup used
 // by nested joins after logical decorrelation and join reordering.
 func BenchmarkScanUniquePoint(b *testing.B) {
-	benchmarkUniquePointScan(b, "read")
+	benchmarkUniquePointScan(b, "read", nil)
+}
+
+// BenchmarkScanUniquePointWithTx measures the normal SQL nested-probe path,
+// where the transaction already tracks shard write ownership explicitly.
+func BenchmarkScanUniquePointWithTx(b *testing.B) {
+	benchmarkUniquePointScan(b, "read_tx", NewTxContext(TxCursorStability))
 }
 
 func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {

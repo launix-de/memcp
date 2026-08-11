@@ -942,10 +942,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	if foundShard == nil {
 		return notFoundValue
 	}
-	mapperAlreadyLocked := currentTx != nil && currentTx.HasShardWrite(foundShard)
-	if currentTx == nil {
-		mapperAlreadyLocked = foundShard.hasWriteOwner()
-	}
+	mapperAlreadyLocked := foundShard.hasWriteOwnerForTx(currentTx)
 	mapper := foundShard.OpenMapReducer(callbackCols, callback, aggregate, mapperAlreadyLocked, 0, nil, currentTx)
 	result := mapper.Stream(neutral, []uint32{foundID}, nil)
 	mapper.FlushSideEffects()
@@ -1129,7 +1126,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		adjustedSortdirs[i] = cmpFn
 	}
 
-	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	if t.t.tableLockOwner.Load() != nil {
 		t.t.waitTableLock(ss, false)
 	}
