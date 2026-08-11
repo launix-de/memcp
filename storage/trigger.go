@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "errors"
+import "sync/atomic"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
@@ -147,6 +148,61 @@ type TriggerDescription struct {
 	Priority   int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
 	Async      bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
 	VectorFunc scm.Scmer     `json:"-"`                    // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
+	Acquire    func() bool   `json:"-"`                    // Optional lock-free pin for an ephemeral trigger target
+	Release    func()        `json:"-"`                    // Releases a successful Acquire
+}
+
+func acquireCacheUse(users *int64) bool {
+	for {
+		current := atomic.LoadInt64(users)
+		if current < 0 {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(users, current, current+1) {
+			return true
+		}
+	}
+}
+
+func beginCacheEviction(users *int64) bool {
+	return atomic.CompareAndSwapInt64(users, 0, -1)
+}
+
+func (t *table) acquireCacheUse() bool { return acquireCacheUse(&t.cacheUsers) }
+func (t *table) releaseCacheUse()      { atomic.AddInt64(&t.cacheUsers, -1) }
+func (t *table) beginCacheEviction() bool {
+	return beginCacheEviction(&t.cacheUsers)
+}
+func (c *column) acquireCacheUse() bool { return acquireCacheUse(&c.cacheUsers) }
+func (c *column) releaseCacheUse()      { atomic.AddInt64(&c.cacheUsers, -1) }
+func (c *column) beginCacheEviction() bool {
+	return beginCacheEviction(&c.cacheUsers)
+}
+
+func (t *table) acquireColumnCacheUse(c *column) bool {
+	if !t.acquireCacheUse() {
+		return false
+	}
+	if !c.acquireCacheUse() {
+		t.releaseCacheUse()
+		return false
+	}
+	return true
+}
+
+func (t *table) releaseColumnCacheUse(c *column) {
+	c.releaseCacheUse()
+	t.releaseCacheUse()
+}
+
+func (tr TriggerDescription) acquireTarget() bool {
+	return tr.Acquire == nil || tr.Acquire()
+}
+
+func (tr TriggerDescription) releaseTarget() {
+	if tr.Release != nil {
+		tr.Release()
+	}
 }
 
 type persistedTriggerDescription struct {
@@ -325,6 +381,21 @@ func (t *table) RemoveTrigger(name string) bool {
 	return false
 }
 
+// SetTriggerTarget refreshes the runtime-only cache target pin on an
+// idempotently reused system trigger, including triggers restored from JSON.
+func (t *table) SetTriggerTarget(name string, acquire func() bool, release func()) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.Triggers {
+		if t.Triggers[i].Name == name {
+			t.Triggers[i].Acquire = acquire
+			t.Triggers[i].Release = release
+			return true
+		}
+	}
+	return false
+}
+
 // rowToDict converts a dataset to a dict with column names
 func (t *table) rowToDict(row dataset) scm.Scmer {
 	if row == nil {
@@ -428,12 +499,20 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 					_ = trName
 					_ = tName
 				}()
+				if !tr.acquireTarget() {
+					return
+				}
+				defer tr.releaseTarget()
 				scm.Apply(trFunc, oldDict, newDict, session)
 			}()
 			continue
 		}
+		if !tr.acquireTarget() {
+			continue
+		}
 		// Execute trigger with savepoint for proper rollback
 		func() {
+			defer tr.releaseTarget()
 			tx := CurrentTx()
 			var sp Savepoint
 			hasSavepoint := false
@@ -477,7 +556,8 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 			continue
 		}
 		if tr.Async {
-			// Async: fire per-row (no batching for fire-and-forget)
+			// Each queued invocation acquires its own target pin. Holding one only
+			// while launching goroutines would let eviction race their execution.
 			for _, row := range rows {
 				var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
 				if isOld {
@@ -485,78 +565,88 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 				} else {
 					newDict = t.rowToDict(row)
 				}
-				trFunc := tr.Func
+				tr := tr
 				go func() {
 					defer func() { recover() }()
-					scm.Apply(trFunc, oldDict, newDict, session)
+					if !tr.acquireTarget() {
+						return
+					}
+					defer tr.releaseTarget()
+					scm.Apply(tr.Func, oldDict, newDict, session)
 				}()
 			}
 			continue
 		}
-		// Check for vectorized trigger (VectorFunc set)
-		if !tr.VectorFunc.IsNil() {
-			// Build columnar dict-of-lists: {"col1": [v1,v2,...], "col2": [v1,v2,...]}
-			colBatch := t.rowsToColumnar(rows)
-			func() {
-				tx := CurrentTx()
-				var sp Savepoint
-				hasSavepoint := false
-				if tx != nil {
-					sp = tx.CreateSavepoint()
-					hasSavepoint = true
-				}
-				defer func() {
-					if r := recover(); r != nil {
-						if hasSavepoint {
-							tx.RollbackToSavepoint(sp)
-						}
-						// Vectorization failed: fall back to per-row
-						for _, row := range rows {
-							var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
-							if isOld {
-								oldDict = t.rowToDict(row)
-							} else {
-								newDict = t.rowToDict(row)
+		if !tr.acquireTarget() {
+			continue
+		}
+		func() {
+			defer tr.releaseTarget()
+			// Check for vectorized trigger (VectorFunc set)
+			if !tr.VectorFunc.IsNil() {
+				// Build columnar dict-of-lists: {"col1": [v1,v2,...], "col2": [v1,v2,...]}
+				colBatch := t.rowsToColumnar(rows)
+				func() {
+					tx := CurrentTx()
+					var sp Savepoint
+					hasSavepoint := false
+					if tx != nil {
+						sp = tx.CreateSavepoint()
+						hasSavepoint = true
+					}
+					defer func() {
+						if r := recover(); r != nil {
+							if hasSavepoint {
+								tx.RollbackToSavepoint(sp)
 							}
-							scm.Apply(tr.Func, oldDict, newDict, session)
+							// Vectorization failed: fall back to per-row
+							for _, row := range rows {
+								var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+								if isOld {
+									oldDict = t.rowToDict(row)
+								} else {
+									newDict = t.rowToDict(row)
+								}
+								scm.Apply(tr.Func, oldDict, newDict, session)
+							}
 						}
+					}()
+					if isOld {
+						scm.Apply(tr.VectorFunc, colBatch, scm.NewNil(), session)
+					} else {
+						scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch, session)
 					}
 				}()
-				if isOld {
-					scm.Apply(tr.VectorFunc, colBatch, scm.NewNil(), session)
-				} else {
-					scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch, session)
-				}
-			}()
-			continue
-		}
-		// Fallback: per-row execution
-		for _, row := range rows {
-			var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
-			if isOld {
-				oldDict = t.rowToDict(row)
-			} else {
-				newDict = t.rowToDict(row)
+				return
 			}
-			func() {
-				tx := CurrentTx()
-				var sp Savepoint
-				hasSavepoint := false
-				if tx != nil {
-					sp = tx.CreateSavepoint()
-					hasSavepoint = true
+			// Fallback: per-row execution
+			for _, row := range rows {
+				var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
+				if isOld {
+					oldDict = t.rowToDict(row)
+				} else {
+					newDict = t.rowToDict(row)
 				}
-				defer func() {
-					if r := recover(); r != nil {
-						if hasSavepoint {
-							tx.RollbackToSavepoint(sp)
-						}
-						panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
+				func() {
+					tx := CurrentTx()
+					var sp Savepoint
+					hasSavepoint := false
+					if tx != nil {
+						sp = tx.CreateSavepoint()
+						hasSavepoint = true
 					}
+					defer func() {
+						if r := recover(); r != nil {
+							if hasSavepoint {
+								tx.RollbackToSavepoint(sp)
+							}
+							panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
+						}
+					}()
+					scm.Apply(tr.Func, oldDict, newDict, session)
 				}()
-				scm.Apply(tr.Func, oldDict, newDict, session)
-			}()
-		}
+			}
+		}()
 	}
 }
 

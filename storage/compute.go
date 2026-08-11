@@ -1621,6 +1621,18 @@ func buildSelectiveORCInvalidationBody(targetSchema, targetTable, colName string
 func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 	refs := extractScanJoinInfo(computor)
 	targetSchema := t.schema.Name
+	var targetColumn *column
+	for _, col := range t.Columns {
+		if col.Name == name {
+			targetColumn = col
+			break
+		}
+	}
+	if targetColumn == nil {
+		panic("computed trigger target column does not exist: " + t.Name + "." + name)
+	}
+	acquireTarget := func() bool { return t.acquireColumnCacheUse(targetColumn) }
+	releaseTarget := func() { t.releaseColumnCacheUse(targetColumn) }
 	// Collect trigger names placed on source tables for self-cleanup
 	type triggerRef struct{ schema, name string }
 	var registeredNames []triggerRef
@@ -1695,7 +1707,11 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					IsSystem: true,
 					Priority: 100,
 					Func:     buildFKProc(body),
+					Acquire:  acquireTarget,
+					Release:  releaseTarget,
 				})
+			} else {
+				srcTable.SetTriggerTarget(triggerName, acquireTarget, releaseTarget)
 			}
 			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
 		}
@@ -1722,7 +1738,11 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 						scm.NewString(t.Name),
 						scm.NewBool(true),
 					})),
+					Acquire: acquireTarget,
+					Release: releaseTarget,
 				})
+			} else {
+				srcTable.SetTriggerTarget(dropTriggerName, acquireTarget, releaseTarget)
 			}
 			registeredNames = append(registeredNames, triggerRef{ref.schema, dropTriggerName})
 		}
@@ -1764,6 +1784,8 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		return
 	}
 	targetSchema := t.schema.Name
+	acquireTarget := func() bool { return t.acquireColumnCacheUse(col) }
+	releaseTarget := func() { t.releaseColumnCacheUse(col) }
 	type triggerRef struct{ schema, name string }
 	var registeredNames []triggerRef
 	for refIdx, ref := range refs {
@@ -1787,6 +1809,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 				}
 			}
 			if exists {
+				srcTable.SetTriggerTarget(triggerName, acquireTarget, releaseTarget)
 				continue
 			}
 			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
@@ -1807,6 +1830,8 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 				IsSystem: true,
 				Priority: 100,
 				Func:     buildFKProc(body),
+				Acquire:  acquireTarget,
+				Release:  releaseTarget,
 			})
 			if srcTable != t {
 				registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})

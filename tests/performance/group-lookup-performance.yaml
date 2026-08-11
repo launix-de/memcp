@@ -97,7 +97,7 @@ setup:
         (insert (table "memcp-tests" "lookup_group_items") '("id" "code" "bucket" "label")
           (map (produceN 20000) (lambda (i)
             (list i (concat "c" i) (concat "b" (mod i 4)) (concat "label " i)))))
-        (rebuild true)
+        (rebuild (table "memcp-tests" "lookup_group_items") true false)
         20000)
 
 cleanup:
@@ -229,6 +229,32 @@ test_cases:
       GROUP BY bucket
     expect:
       rows: 4
+
+  - name: "warm maintained group cache averages below one millisecond"
+    scm: |
+      (begin
+        (define iterations 200)
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (define resultrow (lambda (_row) true))
+        (define formula
+          (cached_parse (newcachemap) parse_sql "memcp-tests"
+            "SELECT bucket AS value, COUNT(*) AS amount FROM lookup_group_items WHERE TRUE GROUP BY bucket"
+            (lambda (_schema _table _write) true) "root" session true))
+        (define elapsed
+          (with_session session (lambda ()
+            (with_autocommit session (lambda () (begin
+              (eval formula)
+              (define started (nanotime))
+              (reduce (produceN iterations)
+                (lambda (count _index) (begin (eval formula) (+ count 1))) 0)
+              (- (nanotime) started)))))))
+        (define average_ns (/ elapsed iterations))
+        (if (< average_ns 1000000)
+          "ok"
+          (error (concat "warm group cache average: " average_ns "ns"))))
+    expect: {}
 
   - name: "low-cardinality group keeps a reusable keytable"
     sql: |

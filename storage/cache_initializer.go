@@ -16,6 +16,7 @@ Copyright (C) 2026  Carl-Philip Haensch
 */
 package storage
 
+import "strings"
 import "github.com/launix-de/memcp/scm"
 
 type cacheInitializerRun struct {
@@ -27,7 +28,7 @@ type cacheInitializerRun struct {
 // planner cache. Concurrent callers share both completion and failure. A later
 // call retries after a failed run.
 func (t *table) initializeCache(initialize func()) (initialized bool) {
-	if !t.isEphemeralQueryTable() {
+	if !strings.HasPrefix(t.Name, ".") {
 		panic("cache initialization requires a dot-prefixed cache table")
 	}
 

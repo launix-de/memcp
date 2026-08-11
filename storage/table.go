@@ -75,6 +75,7 @@ type column struct {
 	Comment            string
 	sanitizer          func(scm.Scmer) scm.Scmer
 	lastAccessed       int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+	cacheUsers         int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 
 	// Statistics — updated at rebuild time, O(1) access for query planning.
 	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
@@ -275,6 +276,7 @@ type table struct {
 	Foreign         []foreignKey         // foreign keys
 	Triggers        []TriggerDescription // triggers on this table
 	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	cacheUsers      int64                // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 	// LOCK ORDER CONTRACT:
 	//   1. db.schemalock
 	//   2. t.ddlMu
@@ -1368,6 +1370,14 @@ func (t *table) registerTempColumn(cp *column) {
 		}
 		for i, col := range tbl.Columns {
 			if col.Name == colName {
+				// A trigger that already snapshotted this column pins it without a
+				// mutex. Retry eviction instead of deleting its target underneath it.
+				if !col.beginCacheEviction() {
+					tbl.schema.schemalock.Unlock()
+					return false
+				}
+				tbl.removeComputeTriggers(colName)
+				tbl.removeORCDependencyTriggers(colName)
 				tbl.Columns = append(tbl.Columns[:i], tbl.Columns[i+1:]...)
 				for _, s := range tbl.Shards {
 					s.mu.Lock()
