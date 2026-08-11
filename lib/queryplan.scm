@@ -4132,13 +4132,81 @@ ON terms remain owned by the query-block until physical lowering. */
 			(join_optimizer_tree_aliases right)))
 		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
 
-(define require_join_optimizer_order (lambda (block)
+/* The logical tree is the sole owner of join order. The current scan emitters
+still accept a source traversal, so physical preparation derives that traversal
+here without changing the logical query-block source catalog or choosing a
+second order. */
+(define apply_join_optimizer_plan (lambda (block)
 	(begin
 		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
-		(if (or (nil? tree)
-			(equal? (join_optimizer_tree_aliases tree) (map (qb_sources block) source_alias)))
+		(if (nil? tree)
 			block
-			(neumann_fail "build_queryplan" "physical source order differs from the logical join plan")))))
+			(begin
+				(define aliases (join_optimizer_tree_aliases tree))
+				(define source_alias_list (map (qb_sources block) source_alias))
+				(if (and
+					(equal? (count aliases) (count source_alias_list))
+					(and
+						(join_optimizer_alias_subset? aliases source_alias_list)
+						(join_optimizer_alias_subset? source_alias_list aliases)))
+					true
+					(neumann_fail "build_queryplan" "logical join plan does not cover the query-block sources exactly once"))
+				(make_query_block
+					(qb_schema block)
+					(join_optimizer_sources_for_order (qb_sources block) aliases)
+					(qb_fields block)
+					(qb_where block)
+					(qb_group block)
+					(qb_having block)
+					(qb_order block)
+					(qb_limit block)
+					(qb_offset block)
+					(qb_hidden block)
+					(qb_stages block)
+					(qb_facts block)))))))
+
+(define apply_join_optimizer_plan_node (lambda (node)
+	(if (query_block? node)
+		(begin
+			(define planned (apply_join_optimizer_plan node))
+			(make_query_block
+				(qb_schema planned)
+				(qb_sources planned)
+				(qb_fields planned)
+				(qb_where planned)
+				(qb_group planned)
+				(qb_having planned)
+				(qb_order planned)
+				(qb_limit planned)
+				(qb_offset planned)
+				(qb_hidden planned)
+				(map (qb_stages planned) apply_join_optimizer_plan_stage)
+				(qb_facts planned)))
+		(if (union_block? node)
+			(make_union_block
+				(union_mode node)
+				(map (union_branches node) apply_join_optimizer_plan_node)
+				(union_order node)
+				(union_limit node)
+				(union_offset node)
+				(union_facts node))
+			node))))
+
+(define apply_join_optimizer_plan_stage (lambda (stage)
+	(if (group_stage? stage)
+		(make_group_stage
+			(gs_id stage)
+			(apply_join_optimizer_plan_node (gs_input stage))
+			(gs_domain stage)
+			(gs_keys stage)
+			(gs_aggregates stage)
+			(gs_having stage)
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			(gs_facts stage))
+		stage)))
 
 (define join_optimizer_plan_segment (lambda (all_sources segment default_alias graph)
 	(begin
@@ -4147,8 +4215,8 @@ ON terms remain owned by the query-block until physical lowering. */
 			(join_optimizer_metadata_nodes segment default_alias graph)
 			(join_optimizer_metadata_predicates all_sources default_alias graph aliases)))))
 
-(define join_optimizer_reorder_result (lambda (sources tree strategy dp_entries)
-	(list sources tree strategy dp_entries)))
+(define join_optimizer_reorder_result (lambda (tree strategy dp_entries)
+	(list tree strategy dp_entries)))
 
 (define join_optimizer_reorder_sources (lambda (block graph)
 	(begin
@@ -4166,17 +4234,13 @@ ON terms remain owned by the query-block until physical lowering. */
 				(source_row_number_limit_driver? (qb_stages block) (car segment)))))
 		(if (or (< (count segment) 2) preserve_order_driver)
 			(join_optimizer_reorder_result
-				sources
 				(join_optimizer_left_deep_tree (map sources source_alias))
 				(if preserve_order_driver (quote preserve-order-limit) (quote fixed))
 				0)
 			(begin
 				(define planned (join_optimizer_plan_segment sources segment default_alias graph))
-				(define ordered_segment (join_optimizer_sources_for_order segment
-					(qassoc_get planned (quote order) '())))
 				(define remaining (join_optimizer_drop_sources sources (count segment)))
 				(join_optimizer_reorder_result
-					(merge (list ordered_segment remaining))
 					(join_optimizer_append_sources_tree
 						(qassoc_get planned (quote tree) nil) remaining)
 					(qassoc_get planned (quote strategy) (quote fixed))
@@ -4189,9 +4253,10 @@ ON terms remain owned by the query-block until physical lowering. */
 
 (define join_optimizer_telemetry (lambda (graph reordered)
 	(list
-		(list (quote join_reorder_strategy) (nth reordered 2))
-		(list (quote join_plan) (nth reordered 1))
-		(list (quote join_dp_entries) (nth reordered 3))
+		(list (quote join_reorder_strategy) (nth reordered 1))
+		(list (quote join_plan) (nth reordered 0))
+		(list (quote join_driver) (car (join_optimizer_tree_aliases (nth reordered 0))))
+		(list (quote join_dp_entries) (nth reordered 2))
 		(list (quote join_graph_nodes) (count (qassoc_get graph (quote nodes) '())))
 		(list (quote join_graph_edges) (count (qassoc_get graph (quote edges) '())))
 		(list (quote join_graph_hyperedges) (count (qassoc_get graph (quote hyperedges) '())))
@@ -4219,7 +4284,7 @@ ON terms remain owned by the query-block until physical lowering. */
 			(query_block_with_reorder_facts
 				(make_query_block
 					(qb_schema normalized)
-					(nth reordered 0)
+					(qb_sources normalized)
 					(qb_fields normalized)
 					(qb_where normalized)
 					(qb_group normalized)
@@ -4393,19 +4458,13 @@ ON terms remain owned by the query-block until physical lowering. */
 		(list (quote outer_join) (source_outer? src))
 		(list (quote join_filter) (source_join_present? src)))))
 
-/* Promote a small, locally filtered base relation within the leading inner
-join segment. This keeps outer/stage relations and explicit JOIN dependencies
-in place while giving comma joins a selective physical driver. */
+/* Identify the leading inner-join cloud that the logical optimizer may
+reorder. Outer and stage-backed sources remain barriers and are appended to the
+resulting tree in semantic order. */
 (define reorderable_inner_driver_source? (lambda (src)
 	(and (source_is_base_table? src)
 		(not (source_outer? src))
 		(or (nil? (source_join_expr src)) (equal? (source_join_expr src) true)))))
-
-(define multiple_reorderable_inner_sources? (lambda (sources)
-	(and (not (empty_list? sources))
-		(not (empty_list? (cdr sources)))
-		(reorderable_inner_driver_source? (car sources))
-		(reorderable_inner_driver_source? (car (cdr sources))))))
 
 (define leading_reorderable_inner_sources (lambda (sources)
 	(match (coalesceNil sources '())
@@ -4413,54 +4472,6 @@ in place while giving comma joins a selective physical driver. */
 			(cons src (leading_reorderable_inner_sources rest))
 			'())
 		_ '())))
-
-(define source_has_local_filter? (lambda (src default_alias condition)
-	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
-		(or found
-			(and (expr_refs_alias? default_alias (source_alias src) term)
-				(expr_only_refs_alias? default_alias (source_alias src) term))))
-		false)))
-
-(define sources_share_condition? (lambda (left right default_alias condition)
-	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
-		(or found
-			(and (expr_refs_alias? default_alias (source_alias left) term)
-				(expr_refs_alias? default_alias (source_alias right) term))))
-		false)))
-
-(define prefer_smaller_filtered_source (lambda (current candidate)
-	(if (nil? current)
-		candidate
-		(begin
-			(define current_rows (planner_source_row_count current))
-			(define candidate_rows (planner_source_row_count candidate))
-			(if (and (not (nil? candidate_rows))
-				(or (nil? current_rows) (< candidate_rows current_rows)))
-				candidate
-				current)))))
-
-(define selective_inner_driver (lambda (sources default_alias condition)
-	(reduce (leading_reorderable_inner_sources sources) (lambda (selected src)
-		(if (source_has_local_filter? src default_alias condition)
-			(prefer_smaller_filtered_source selected src)
-			selected))
-		nil)))
-
-(define promote_source_to_front (lambda (sources selected)
-	(cons selected
-		(filter sources (lambda (src) (not (equal? (source_alias src) (source_alias selected))))))))
-
-(define reorder_selective_inner_sources (lambda (sources default_alias condition stages order_items limit_value preserve_order_driver)
-	(if (or (and preserve_order_driver (source_order_limit_driver? (car sources) order_items limit_value))
-		(source_row_number_limit_driver? stages (car sources)))
-		sources
-		(begin
-			(define driver (selective_inner_driver sources default_alias condition))
-			(if (or (nil? driver)
-				(equal? (source_alias driver) (source_alias (car sources)))
-				(not (sources_share_condition? driver (car sources) default_alias condition)))
-				sources
-				(promote_source_to_front sources driver))))))
 
 (define left_join_strategy_options (lambda (src)
 	(if (not (source_outer? src))
@@ -4914,17 +4925,10 @@ in place while giving comma joins a selective physical driver. */
 									stage
 									probe
 									(qb_where block)))
-								(define reordered_driver_sources (if (not (multiple_reorderable_inner_sources? driver_sources))
-									driver_sources
-									(reorder_selective_inner_sources
-										driver_sources default_alias base_where (qb_stages block) (qb_order block) (qb_limit block)
-										(and (query_limit_active? (qb_offset block) (qb_limit block))
-											(empty_list? (qb_group block))
-											(not (query_block_has_aggregates? block))))))
-								(query_block_with_reorder_facts
+								(hybrid_reorder_query_block
 									(make_query_block
 										(qb_schema block)
-										reordered_driver_sources
+										driver_sources
 										(rewrite_consumer (qb_fields block))
 										base_where
 										(rewrite_consumer (qb_group block))
@@ -4933,11 +4937,11 @@ in place while giving comma joins a selective physical driver. */
 										(qb_limit block)
 										(qb_offset block)
 										(rewrite_consumer (qb_hidden block))
-										(map (candidate_stage_without_source (qb_stages block) stage_id) join_reorder_stage)
-										(qb_facts block))
-									(merge (list
-										(query_block_reorder_telemetry block)
-										(list (list (quote exists_reorder_strategy) (quote project_driver)))))))))
+										(candidate_stage_without_source (qb_stages block) stage_id)
+										(merge (list
+											(query_block_reorder_telemetry block)
+											(list (list (quote exists_reorder_strategy) (quote project_driver)))
+											(qb_facts block))))))))
 					(begin
 						(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
 						(define candidate_telemetry (candidate_reorder_telemetry stage sources block))
@@ -13126,15 +13130,15 @@ build_queryplan contract. */
 (define prepare_physical_queryplan (lambda (ir)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
-		(define root (ir_root ir))
-		(if (query_block? root)
-			(make_ir
-				(ir_kind ir)
-				(query_block_with_full_stage_catalog (require_join_optimizer_order root))
-				(ir_stages ir)
-				(ir_context_of ir)
-				(ir_return ir))
-			ir))))
+		(define planned_root (apply_join_optimizer_plan_node (ir_root ir)))
+		(make_ir
+			(ir_kind ir)
+			(if (query_block? planned_root)
+				(query_block_with_full_stage_catalog planned_root)
+				planned_root)
+			(map (ir_stages ir) apply_join_optimizer_plan_stage)
+			(ir_context_of ir)
+			(ir_return ir)))))
 
 (define emit_physical_queryplan (lambda (ir)
 	(begin

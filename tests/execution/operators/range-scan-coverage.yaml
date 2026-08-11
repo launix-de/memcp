@@ -391,9 +391,10 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - '((\"d\" \"memcp-tests\" \"perf_dim\" false nil)'
+        - '(join_driver \"d\")'
+        - 'join_plan'
       result_not_contains:
-        - '((\"m\" \"memcp-tests\" \"perf_main\" false nil)'
+        - '(join_driver \"m\")'
 
   - name: "Selective comma-join dimension preserves results"
     sql: "SELECT d.label, m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one' ORDER BY m.id"
@@ -410,27 +411,27 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - '((\"m\" \"memcp-tests\" \"perf_main\" false nil)'
+        - '(join_driver \"m\")'
       result_not_contains:
-        - '((\"d\" \"memcp-tests\" \"perf_dim\" false nil)'
+        - '(join_driver \"d\")'
 
   - name: "EXPLAIN REORDER promotes through grouped ORDER LIMIT"
     sql: "EXPLAIN REORDER SELECT d.label, COUNT(*) AS matches FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one' GROUP BY d.label ORDER BY matches DESC LIMIT 1"
     expect:
       rows: 1
       result_contains:
-        - '((\"d\" \"memcp-tests\" \"perf_dim\" false nil)'
+        - '(join_driver \"d\")'
       result_not_contains:
-        - '((\"m\" \"memcp-tests\" \"perf_main\" false nil)'
+        - '(join_driver \"m\")'
 
   - name: "EXPLAIN REORDER avoids a disconnected selective driver"
     sql: "EXPLAIN REORDER SELECT m.id FROM perf_main m, perf_dim d, perf_tiny x WHERE m.category = d.cat_id AND d.label = 'one' AND x.flag = 1"
     expect:
       rows: 1
       result_contains:
-        - '((\"d\" \"memcp-tests\" \"perf_dim\" false nil)'
+        - '(join_driver \"d\")'
       result_not_contains:
-        - '((\"x\" \"memcp-tests\" \"perf_tiny\" false nil)'
+        - '(join_driver \"x\")'
 
   - name: "EXPLAIN REORDER uses DPHyp for a small join graph"
     sql: "EXPLAIN REORDER SELECT m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one'"
