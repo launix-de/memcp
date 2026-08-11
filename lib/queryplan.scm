@@ -7137,16 +7137,23 @@ working on the original values. */
 				(list (quote lookup-keys) session_keys)
 				(list (quote stage_catalog) (query_block_stage_catalog block)))))))
 
-(define group_key_index (lambda (alias keys expr)
-	(if (or (nil? expr) (or (equal? expr true) (equal? expr false)))
+/* Group rewriters walk original and canonical trees in lockstep. Prehash every
+canonical root once so descendant lookup does not rescan keys or recanonicalize
+ever-larger subtrees. */
+(define make_group_key_index (lambda (keys roots)
+	(make_structural_index keys roots)))
+
+(define lookup_group_key_index (lambda (index resolved)
+	(if (or (nil? resolved) (or (equal? resolved true) (equal? resolved false)))
 		nil
-		(begin
-			(define resolved (canonical_column_expr_for_alias alias expr))
-			(reduce (produceN (count keys)) (lambda (found i)
-				(if (not (nil? found))
-					found
-					(if (equal? resolved (nth keys i)) i nil)))
-				nil)))))
+		(index resolved))))
+
+(define group_key_index (lambda (alias keys expr)
+	(begin
+		(define resolved (canonical_column_expr_for_alias alias expr))
+		(lookup_group_key_index
+			(make_group_key_index keys (list resolved))
+			resolved))))
 
 (define aggregate_count_like? (lambda (ag)
 	(match ag
@@ -7208,7 +7215,7 @@ working on the original values. */
 			(list (quote count) read_expr)
 			(list (quote coalesceNil) read_expr 0)))))
 
-(define replace_group_probe_stage_lookup_keys (lambda (alias grouptbl keys key_names ags stage)
+(define replace_group_probe_stage_lookup_keys (lambda (alias grouptbl keys key_names ags key_index stage)
 	(if (not (group_stage? stage))
 		stage
 		(begin
@@ -7227,35 +7234,46 @@ working on the original values. */
 				(gs_offset stage)
 				(qassoc_set facts (quote lookup-keys)
 					(map lookup_keys (lambda (expr)
-						(replace_group_expr alias grouptbl keys key_names ags expr)))))))))
+						(begin
+							(define resolved (canonical_column_expr_for_alias alias expr))
+							(replace_group_expr_indexed alias grouptbl keys key_names ags
+								(make_group_key_index keys (list resolved)) expr resolved))))))))))
 
-(define replace_group_probe_stages_lookup_keys (lambda (alias grouptbl keys key_names ags stages)
+(define replace_group_probe_stages_lookup_keys (lambda (alias grouptbl keys key_names ags key_index stages)
 	(map (coalesceNil stages '()) (lambda (stage)
-		(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)))))
+		(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)))))
 
-(define replace_group_expr (lambda (alias grouptbl keys key_names ags expr)
+(define replace_group_expr_tail_indexed (lambda (alias grouptbl keys key_names ags key_index items resolved_items)
+	(match items
+		(cons item rest)
+		(cons
+			(replace_group_expr_indexed alias grouptbl keys key_names ags key_index item (car resolved_items))
+			(replace_group_expr_tail_indexed alias grouptbl keys key_names ags key_index rest (cdr resolved_items)))
+		_ '())))
+
+(define replace_group_expr_indexed (lambda (alias grouptbl keys key_names ags key_index expr resolved)
 	(begin
-		(define key_idx (group_key_index alias keys expr))
+		(define key_idx (lookup_group_key_index key_index resolved))
 		(if (not (nil? key_idx))
 			(list (quote get_column) grouptbl false (nth key_names key_idx) false)
 			(match expr
 				((symbol scalar_first_probe) stage requested_col stages)
 				(list (quote scalar_first_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)
+					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
 					requested_col
-					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags stages))
+					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags key_index stages))
 				((quote scalar_first_probe) stage requested_col stages)
 				(list (quote scalar_first_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)
+					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
 					requested_col
-					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags stages))
+					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags key_index stages))
 				((symbol scalar_aggregate_probe) stage requested_col)
 				(list (quote scalar_aggregate_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)
+					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
 					requested_col)
 				((quote scalar_aggregate_probe) stage requested_col)
 				(list (quote scalar_aggregate_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags stage)
+					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
 					requested_col)
 				((symbol count_distinct) agg_expr)
 				(count_distinct_read_expr grouptbl agg_expr)
@@ -7273,12 +7291,36 @@ working on the original values. */
 				(if (equal?? (resolve_column_alias _tblvar alias) alias)
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
 					expr)
-				(cons head tail) (cons head (map tail (lambda (item) (replace_group_expr alias grouptbl keys key_names ags item))))
+				(cons head tail) (cons head
+					(replace_group_expr_tail_indexed alias grouptbl keys key_names ags key_index tail (cdr resolved)))
 				_ expr)))))
 
-(define replace_group_order_expr (lambda (alias grouptbl keys key_names ags expr)
+(define replace_group_expr (lambda (alias grouptbl keys key_names ags expr)
 	(begin
-		(define key_idx (group_key_index alias keys expr))
+		(define resolved (canonical_column_expr_for_alias alias expr))
+		(replace_group_expr_indexed
+			alias grouptbl keys key_names ags (make_group_key_index keys (list resolved))
+			expr resolved))))
+
+(define replace_group_fields_indexed (lambda (alias grouptbl keys key_names ags key_index fields resolved_fields)
+	(match fields
+		(cons title (cons expr rest))
+		(cons title (cons
+			(replace_group_expr_indexed alias grouptbl keys key_names ags key_index expr (cadr resolved_fields))
+			(replace_group_fields_indexed alias grouptbl keys key_names ags key_index rest (cdr (cdr resolved_fields)))))
+		_ '())))
+
+(define replace_group_order_expr_tail_indexed (lambda (alias grouptbl keys key_names ags key_index items resolved_items)
+	(match items
+		(cons item rest)
+		(cons
+			(replace_group_order_expr_indexed alias grouptbl keys key_names ags key_index item (car resolved_items))
+			(replace_group_order_expr_tail_indexed alias grouptbl keys key_names ags key_index rest (cdr resolved_items)))
+		_ '())))
+
+(define replace_group_order_expr_indexed (lambda (alias grouptbl keys key_names ags key_index expr resolved)
+	(begin
+		(define key_idx (lookup_group_key_index key_index resolved))
 		(if (not (nil? key_idx))
 			(list (quote get_column) grouptbl false (nth key_names key_idx) false)
 			(match expr
@@ -7290,8 +7332,16 @@ working on the original values. */
 				(group_aggregate_order_read_expr grouptbl (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
 				(group_aggregate_order_read_expr grouptbl (list agg_expr agg_reduce agg_neutral))
-				(cons head tail) (cons head (map tail (lambda (item) (replace_group_order_expr alias grouptbl keys key_names ags item))))
+				(cons head tail) (cons head
+					(replace_group_order_expr_tail_indexed alias grouptbl keys key_names ags key_index tail (cdr resolved)))
 				_ expr)))))
+
+(define replace_group_order_expr (lambda (alias grouptbl keys key_names ags expr)
+	(begin
+		(define resolved (canonical_column_expr_for_alias alias expr))
+		(replace_group_order_expr_indexed
+			alias grouptbl keys key_names ags (make_group_key_index keys (list resolved))
+			expr resolved))))
 
 (define direct_group_order_expr? (lambda (expr)
 	(match expr
@@ -7615,9 +7665,17 @@ working on the original values. */
 			(list (quote coalesceNil) read_expr 0)
 			read_expr))))
 
-(define replace_direct_group_expr (lambda (alias keys key_names ags expr)
+(define replace_direct_group_expr_tail_indexed (lambda (alias keys key_names ags key_index items resolved_items)
+	(match items
+		(cons item rest)
+		(cons
+			(replace_direct_group_expr_indexed alias keys key_names ags key_index item (car resolved_items))
+			(replace_direct_group_expr_tail_indexed alias keys key_names ags key_index rest (cdr resolved_items)))
+		_ '())))
+
+(define replace_direct_group_expr_indexed (lambda (alias keys key_names ags key_index expr resolved)
 	(begin
-		(define key_idx (group_key_index alias keys expr))
+		(define key_idx (lookup_group_key_index key_index resolved))
 		(if (not (nil? key_idx))
 			(list (quote get_assoc) (quote rowassoc) (nth key_names key_idx))
 			(match expr
@@ -7637,18 +7695,36 @@ working on the original values. */
 				(if (equal?? (resolve_column_alias _tblvar alias) alias)
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
 					expr)
-				(cons head tail) (cons head (map tail (lambda (item) (replace_direct_group_expr alias keys key_names ags item))))
+				(cons head tail) (cons head
+					(replace_direct_group_expr_tail_indexed alias keys key_names ags key_index tail (cdr resolved)))
 				_ expr))))))
 
-(define direct_group_result_assoc_expr (lambda (alias keys key_names ags fields)
+(define replace_direct_group_expr (lambda (alias keys key_names ags expr)
+	(begin
+		(define resolved (canonical_column_expr_for_alias alias expr))
+		(replace_direct_group_expr_indexed
+			alias keys key_names ags (make_group_key_index keys (list resolved))
+			expr resolved))))
+
+(define direct_group_result_assoc_expr_indexed (lambda (alias keys key_names ags key_index fields resolved_fields)
 	(match (coalesceNil fields '())
 		(cons title (cons expr rest))
 		(list (quote cons)
 			(string title)
 			(list (quote cons)
-				(replace_direct_group_expr alias keys key_names ags expr)
-				(direct_group_result_assoc_expr alias keys key_names ags rest)))
+				(replace_direct_group_expr_indexed alias keys key_names ags key_index expr (cadr resolved_fields))
+				(direct_group_result_assoc_expr_indexed alias keys key_names ags key_index rest
+					(cdr (cdr resolved_fields)))))
 		_ (list (quote list)))))
+
+(define direct_group_result_assoc_expr (lambda (alias keys key_names ags fields)
+	(begin
+		(define items (coalesceNil fields '()))
+		(define resolved_fields (map_assoc items (lambda (_title expr)
+			(canonical_column_expr_for_alias alias expr))))
+		(define key_index (make_group_key_index keys
+			(extract_assoc resolved_fields (lambda (_title expr) expr))))
+		(direct_group_result_assoc_expr_indexed alias keys key_names ags key_index items resolved_fields))))
 
 (define direct_group_agg_index (lambda (ags expr)
 	(reduce (produceN (count ags)) (lambda (found i)
@@ -7657,9 +7733,9 @@ working on the original values. */
 			(if (equal? expr (nth ags i)) i nil)))
 		nil)))
 
-(define direct_group_order_column (lambda (alias keys key_names ags expr)
+(define direct_group_order_column_indexed (lambda (alias keys key_names ags key_index expr resolved)
 	(begin
-		(define key_idx (group_key_index alias keys expr))
+		(define key_idx (lookup_group_key_index key_index resolved))
 		(if (not (nil? key_idx))
 			(nth key_names key_idx)
 			(match expr
@@ -7668,26 +7744,46 @@ working on the original values. */
 					(define agg_idx (direct_group_agg_index ags (list agg_expr agg_reduce agg_neutral)))
 					(if (nil? agg_idx) nil (aggregate_col_name (nth ags agg_idx))))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
-				(direct_group_order_column alias keys key_names ags (list (quote aggregate) agg_expr agg_reduce agg_neutral))
+				(begin
+					(define agg_idx (direct_group_agg_index ags (list agg_expr agg_reduce agg_neutral)))
+					(if (nil? agg_idx) nil (aggregate_col_name (nth ags agg_idx))))
 				_ nil)))))
 
+(define direct_group_order_column (lambda (alias keys key_names ags expr)
+	(begin
+		(define resolved (canonical_column_expr_for_alias alias expr))
+		(direct_group_order_column_indexed alias keys key_names ags
+			(make_group_key_index keys (list resolved)) expr resolved))))
+
 (define direct_group_order_columns (lambda (alias keys key_names ags order_items)
-	(map (coalesceNil order_items '()) (lambda (item)
-		(match item
-			'(expr _dir)
-			(begin
-				(define col (direct_group_order_column alias keys key_names ags expr))
-				(if (nil? col)
-					(neumann_fail "build_queryplan" (concat "direct GROUP BY cannot order by " (serialize expr)))
-					col))
-			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
+	(begin
+		(define items (coalesceNil order_items '()))
+		(define resolved_items (map items (lambda (item)
+			(match item '(expr dir) (list (canonical_column_expr_for_alias alias expr) dir)))))
+		(define key_index (make_group_key_index keys (map resolved_items car)))
+		(map (produceN (count items)) (lambda (i)
+			(match (nth items i)
+				'(expr _dir)
+				(begin
+					(define col (direct_group_order_column_indexed alias keys key_names ags key_index expr
+						(car (nth resolved_items i))))
+					(if (nil? col)
+						(neumann_fail "build_queryplan" (concat "direct GROUP BY cannot order by " (serialize expr)))
+						col))
+				_ (neumann_fail "build_queryplan" "malformed ORDER BY item")))))))
 
 (define direct_group_order_supported? (lambda (alias keys key_names ags order_items)
-	(reduce (coalesceNil order_items '()) (lambda (ok item)
-		(and ok (match item
-			'(expr _dir) (not (nil? (direct_group_order_column alias keys key_names ags expr)))
-			_ false)))
-		true)))
+	(begin
+		(define items (coalesceNil order_items '()))
+		(define resolved_items (map items (lambda (item)
+			(match item '(expr dir) (list (canonical_column_expr_for_alias alias expr) dir)))))
+		(define key_index (make_group_key_index keys (map resolved_items car)))
+		(reduce (produceN (count items)) (lambda (ok i)
+			(and ok (match (nth items i)
+				'(expr _dir) (not (nil? (direct_group_order_column_indexed
+					alias keys key_names ags key_index expr (car (nth resolved_items i)))))
+				_ false)))
+			true))))
 
 (define build_base_group_scan_assoc_plan (lambda (schema tbl alias table_expr keys condition ags)
 	(begin
@@ -8121,25 +8217,43 @@ working on the original values. */
 				(cons (quote list) (map pairs (lambda (p) (cons (quote list) p)))))))))
 
 (define group_stage_keytable_block (lambda (stage grouptbl key_names ags having_expr)
-	(make_query_block
-		(group_stage_schema stage)
-		(list (list grouptbl (group_stage_schema stage) grouptbl false nil))
-		(gs_output stage)
-		having_expr
-		nil nil
-		(map (coalesceNil (gs_order stage) '()) (lambda (item)
-			(match item '(expr dir) (list (replace_group_expr (group_stage_input_alias stage) grouptbl (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)) key_names ags expr) dir))))
-		(gs_limit stage)
-		(gs_offset stage)
-		'() '() '())))
+	(begin
+		(define alias (group_stage_input_alias stage))
+		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define order_items (coalesceNil (gs_order stage) '()))
+		(define resolved_order_exprs (map order_items (lambda (item)
+			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
+		(define key_index (make_group_key_index keys resolved_order_exprs))
+		(make_query_block
+			(group_stage_schema stage)
+			(list (list grouptbl (group_stage_schema stage) grouptbl false nil))
+			(gs_output stage)
+			having_expr
+			nil nil
+			(map (produceN (count order_items)) (lambda (i)
+				(match (nth order_items i) '(expr dir) (list
+					(replace_group_expr_indexed alias grouptbl keys key_names ags key_index expr
+						(nth resolved_order_exprs i))
+					dir))))
+			(gs_limit stage)
+			(gs_offset stage)
+			'() '() '()))))
 
 (define rewrite_source_for_group_domain (lambda (alias grouptbl keys key_names ags src)
+	(begin
+		(define resolved (canonical_column_expr_for_alias alias (source_join_expr src)))
+		(rewrite_source_for_group_domain_indexed alias grouptbl keys key_names ags
+			(make_group_key_index keys (list resolved)) src resolved))))
+
+(define rewrite_source_for_group_domain_indexed (lambda (alias grouptbl keys key_names ags key_index src resolved_join)
 	(list
 		(source_alias src)
 		(source_schema src)
 		(source_relation src)
 		(source_outer? src)
-		(replace_group_expr alias grouptbl keys key_names ags (source_join_expr src)))))
+		(replace_group_expr_indexed alias grouptbl keys key_names ags key_index
+			(source_join_expr src)
+			resolved_join))))
 
 (define lowering_catalog? (lambda (catalog)
 	(match catalog
@@ -9339,9 +9453,26 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 		(define carrier (group_stage_carrier stage))
 		(define schema (group_carrier_schema carrier))
 		(define grouptbl (group_carrier_relation carrier))
-		(define output_fields (map_assoc (gs_output stage) (lambda (_title expr)
-			(replace_group_expr alias grouptbl keys key_names ags expr))))
-		(define replaced_having (replace_group_expr alias grouptbl keys key_names ags (coalesceNil (gs_having stage) true)))
+		(define original_output (gs_output stage))
+		(define resolved_output (map_assoc original_output (lambda (_title expr)
+			(canonical_column_expr_for_alias alias expr))))
+		(define original_having (coalesceNil (gs_having stage) true))
+		(define resolved_having (canonical_column_expr_for_alias alias original_having))
+		(define order_items (coalesceNil (gs_order stage) '()))
+		(define resolved_order_exprs (map order_items (lambda (item)
+			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
+		(define extras (coalesceNil extra_sources '()))
+		(define resolved_extra_joins (map extras (lambda (extra)
+			(canonical_column_expr_for_alias alias (source_join_expr extra)))))
+		(define key_index (make_group_key_index keys (merge (list
+			(extract_assoc resolved_output (lambda (_title expr) expr))
+			(list resolved_having)
+			resolved_order_exprs
+			resolved_extra_joins))))
+		(define output_fields (replace_group_fields_indexed
+			alias grouptbl keys key_names ags key_index original_output resolved_output))
+		(define replaced_having (replace_group_expr_indexed alias grouptbl keys key_names ags key_index
+			original_having resolved_having))
 		(define count_col_name (aggregate_col_name aggregate_count_descriptor))
 		(define count_check (list (quote >) (list (quote get_column) grouptbl false count_col_name false) 0))
 		(define needs_count_filter (and (not (equal? keys '(1))) (not (equal? condition true))))
@@ -9356,14 +9487,17 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 			schema
 			(cons
 				(list grouptbl schema grouptbl false nil)
-				(map (coalesceNil extra_sources '()) (lambda (extra)
-					(rewrite_source_for_group_domain alias grouptbl keys key_names ags extra))))
+				(map (produceN (count extras)) (lambda (i)
+					(rewrite_source_for_group_domain_indexed alias grouptbl keys key_names ags key_index
+						(nth extras i) (nth resolved_extra_joins i)))))
 			output_fields
 			having_expr
 			nil nil
-			(map (coalesceNil (gs_order stage) '()) (lambda (item)
-				(match item '(expr dir) (begin
-					(define replaced_order_expr (replace_group_order_expr alias grouptbl keys key_names ags expr))
+			(map (produceN (count order_items)) (lambda (i)
+				(match (nth order_items i) '(expr dir) (begin
+					(define replaced_order_expr (replace_group_order_expr_indexed
+						alias grouptbl keys key_names ags key_index expr
+						(nth resolved_order_exprs i)))
 					(list (group_order_physical_expr grouptbl replaced_order_expr) dir)))))
 			(gs_limit stage)
 			(gs_offset stage)
@@ -9475,6 +9609,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(map (gs_keys stage) (lambda (key)
 					(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias key)))
 				(gs_keys stage))))
+		(define prepare_order_items (coalesceNil (gs_order stage) '()))
+		(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
+			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
+		(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
 		(define ags (gs_aggregates stage))
 		(define lowering_ags (if (query_block? src)
 			(rewrite_scalar_first_probe_aggregates stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias ags)
@@ -9584,9 +9722,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 					(list (build_group_session_key_insert_plan schema grouptbl key_names keys))
 					'()))
 			'()))
-		(define computed_order_exprs (merge_unique (map (coalesceNil (gs_order stage) '()) (lambda (item)
-			(match item '(expr _dir) (begin
-				(define replaced_order_expr (replace_group_order_expr alias grouptbl keys key_names ags expr))
+		(define computed_order_exprs (merge_unique (map (produceN (count prepare_order_items)) (lambda (i)
+			(match (nth prepare_order_items i) '(expr _dir) (begin
+				(define replaced_order_expr (replace_group_order_expr_indexed
+					alias grouptbl keys key_names ags key_index expr
+					(nth prepare_resolved_order_exprs i)))
 				(if (direct_group_order_expr? replaced_order_expr) '() (list replaced_order_expr))))))))
 		(define computed_order_plans (map computed_order_exprs (lambda (expr)
 			(build_group_computed_order_column schema grouptbl expr))))

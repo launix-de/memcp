@@ -1717,6 +1717,24 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "make_structural_index",
+		Desc: "Builds an immutable structural-expression index. It eagerly hashes every key and every node under roots, then returns a parallel-safe lookup function that maps an equal expression to its zero-based key position or nil.",
+		Fn:   NewStructuralIndex,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "keys", ParamDesc: "immutable structural expressions to index"},
+				{Kind: "list", ParamName: "roots", ParamDesc: "immutable expression roots whose descendant hashes are precomputed"},
+			},
+			Return: &TypeDescriptor{
+				Kind: "func",
+				Params: []*TypeDescriptor{
+					{Kind: "any", ParamName: "expression", ParamDesc: "a key, root, descendant of a declared root, or scalar expression"},
+				},
+				Return: &TypeDescriptor{Kind: "int|nil"},
+			},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "has_assoc?",
 		Desc: "checks if a dictionary has a key present",
 		Fn: func(a ...Scmer) Scmer {
