@@ -325,6 +325,11 @@ type table struct {
 
 	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
 
+	// creationMu is held while a newly published table runs its synchronous
+	// oninit hook. Concurrent if-not-exists calls wait on the same barrier.
+	creationMu    sync.Mutex
+	creationPanic any
+
 	// cacheInitMu guards the one-time initializer for canonical planner caches.
 	// The table object is removed on cache eviction, so initialization state has
 	// exactly the same lifetime as the cached relation itself.

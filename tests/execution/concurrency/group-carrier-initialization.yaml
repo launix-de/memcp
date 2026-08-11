@@ -1,0 +1,136 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Concurrent callers wait for cold canonical group-carrier initialization"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS `.creation_barrier`"
+  - sql: "DROP TABLE IF EXISTS aggregate_source"
+  - sql: |
+      CREATE TABLE aggregate_source (
+        id INT PRIMARY KEY,
+        nullable_key INT,
+        value DECIMAL(12,2)
+      )
+
+test_cases:
+  - name: "Creator waits for existing table initialization 1/2"
+    parallel: existing_creation_barrier
+    scm: &create_with_initializer |
+      (begin
+        (createtable
+          "memcp-tests"
+          ".creation_barrier"
+          (list (list "column" "id" "int" (list) (list)))
+          (list "engine" "memory" "oninit"
+            (lambda ()
+              (begin
+                (sleep 0.2)
+                (insert
+                  (table "memcp-tests" ".creation_barrier")
+                  (list "id")
+                  (list (list 1))
+                  (list)
+                  (lambda () true)
+                  false))))
+          true)
+        (if (table_empty? (table "memcp-tests" ".creation_barrier"))
+          (error "createtable returned before oninit completed")
+          true))
+
+  - name: "Creator waits for existing table initialization 2/2"
+    parallel: existing_creation_barrier
+    scm: *create_with_initializer
+
+  - name: "Initializer ran exactly once"
+    sql: "SELECT COUNT(*) AS marker_count FROM `.creation_barrier`"
+    expect:
+      rows: 1
+      data:
+        - marker_count: 1
+
+  - name: "Cold aggregate caller 1/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: &empty_sum
+      rows: 1
+      data:
+        - total: null
+
+  - name: "Cold aggregate caller 2/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 3/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 4/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 5/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 6/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 7/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 8/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 9/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 10/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 11/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Cold aggregate caller 12/12"
+    parallel: cold_group_carrier
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+  - name: "Warm aggregate remains usable"
+    sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
+    expect: *empty_sum
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS `.creation_barrier`"
+  - sql: "DROP TABLE IF EXISTS aggregate_source"

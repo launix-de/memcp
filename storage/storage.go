@@ -1157,7 +1157,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createtable",
-		Desc: "creates a new database",
+		Desc: "creates a table, runs its oninit option and registered after-create-table lifecycle triggers synchronously, and returns only after initialization completes; concurrent if-not-exists callers wait for that same completion",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
 			db := GetDatabase(scm.String(a[0]))
@@ -1179,6 +1179,15 @@ func Init(en scm.Env) {
 			// result stays race-free under concurrent creators.
 			if ifnotexists {
 				if existing := db.tables.Get(tblName); existing != nil {
+					// A table is published before oninit so the initializer can access it.
+					// Do not let another creator return while that initializer is running.
+					if !existing.creationMu.TryLock() {
+						existing.creationMu.Lock()
+					}
+					existing.creationMu.Unlock()
+					if existing.creationPanic != nil {
+						panic(existing.creationPanic)
+					}
 					atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
 					return scm.NewBool(false)
 				}
@@ -1191,6 +1200,7 @@ func Init(en scm.Env) {
 			collation := ""
 			charset := ""
 			comment := ""
+			oninit := scm.NewNil()
 			for i := 0; i+1 < len(options); i += 2 {
 				key := scm.String(options[i])
 				val := options[i+1]
@@ -1205,6 +1215,8 @@ func Init(en scm.Env) {
 					comment = scm.String(val)
 				case "auto_increment":
 					autoIncrement, _ = strconv.ParseUint(scm.String(val), 0, 64)
+				case "oninit":
+					oninit = val
 				default:
 					panic("unknown option: " + key)
 				}
@@ -1276,20 +1288,32 @@ func Init(en scm.Env) {
 			db.schemalock.Lock()
 			existing := db.tables.Get(tblName)
 			if existing != nil {
-				if !ifnotexists {
-					db.schemalock.Unlock()
-					panic("Table " + tblName + " already exists")
-				}
 				// Keep the hot ifnotexists path free of schema saves. Planner-created
 				// helper tables deliberately re-issue createtable on every query; if
 				// the table already exists, "created=false" is the only signal the
 				// caller needs to skip collect/materialization work.
 				atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
 				db.schemalock.Unlock()
+				// The competing creator may have published the table after our
+				// optimistic probe. It owns creationMu until all initializers finish.
+				if !existing.creationMu.TryLock() {
+					existing.creationMu.Lock()
+				}
+				existing.creationMu.Unlock()
+				if existing.creationPanic != nil {
+					panic(existing.creationPanic)
+				}
+				if !ifnotexists {
+					panic("Table " + tblName + " already exists")
+				}
 				return scm.NewBool(false)
 			}
 
+			// Lock before publication. Every if-not-exists observer therefore waits
+			// until oninit and registered create-table triggers have both completed.
+			newTable.creationMu.Lock()
 			if prev := db.tables.Set(newTable); prev != nil {
+				newTable.creationMu.Unlock()
 				db.schemalock.Unlock()
 				panic("Table " + tblName + " already exists")
 			}
@@ -1313,18 +1337,31 @@ func Init(en scm.Env) {
 			}
 			db.saveLockedWithDurabilityAndUnlock(newTable.PersistencyMode == Safe)
 			registerCreatedTable(newTable)
-			executeRegisteredCreateTableTriggers(newTable)
+			func() {
+				defer func() {
+					// Publish the shared outcome before releasing concurrent creators.
+					newTable.creationPanic = recover()
+					newTable.creationMu.Unlock()
+				}()
+				if !oninit.IsNil() {
+					scm.Apply(oninit)
+				}
+				executeRegisteredCreateTableTriggers(newTable)
+			}()
+			if newTable.creationPanic != nil {
+				panic(newTable.creationPanic)
+			}
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"},
-				{Kind: "list", ParamName: "cols", ParamDesc: "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2 updatemode deletemode of 'restrict'|'cascade'|'set null')"},
-				{Kind: "list", ParamName: "options", ParamDesc: "further options like engine=safe|sloppy|memory"},
-				{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "don't throw an error if table already exists", Optional: true},
+				{Kind: "string", ParamName: "schema", ParamDesc: "name of the existing database that will contain the table"},
+				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to create"},
+				{Kind: "list", ParamName: "cols", ParamDesc: "column and constraint definitions: (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). dimensions is a list of integer type dimensions. typeparams is an alternating key/value list supporting primary (bool), unique (bool), auto_increment (bool), null (bool), default (any), update (expression), comment (string), collate (string), temp (bool), filtercols (string list), filter (function), sortcols (string list), sortdirs (bool list), partitioncount (integer), mapcols (string list), mapfn (function), reducefn (function), and reduceinit (any). Column lists are string lists; foreign-key modes are restrict, cascade, or set null"},
+				{Kind: "list", ParamName: "options", ParamDesc: "alternating key/value list; supported keys are engine (safe, logged, sloppy, or memory), collation (string), charset (string), comment (string), auto_increment (non-negative integer), and oninit (zero-argument function run exactly once and synchronously after first creation; concurrent if-not-exists callers wait for it and do not run it again)"},
+				{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "when true, return false instead of failing if the table exists; if another caller is still creating it, wait for that caller's after-create-table initialization before returning false", Optional: true},
 			},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
+			Return: &scm.TypeDescriptor{Kind: "bool", ParamDesc: "true when this call created and initialized the table, false when ifnotexists reused an initialized table"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

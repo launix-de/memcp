@@ -9411,15 +9411,6 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 					(quoted_runtime_list '())
 					(quoted_runtime_list '()))))
 			'()))
-		(define keytable_init (cons (quote !begin)
-			(merge (list
-				(list
-					(list (quote if)
-						(list (quote createtable) schema grouptbl create_cols (quoted_runtime_list '("engine" "memory")) true)
-						nil
-						nil)
-					(list (quote touch_keytable) (list (quote table) schema grouptbl)))
-				(list (group_stage_session_binding_missing_expr stage schema grouptbl keys key_names))))))
 		(define collect_plan (if (not query_input_carrier)
 			nil
 			(if (union_block? src)
@@ -9464,7 +9455,24 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 		(define aggregate_prepare_expr (cons
 			(quote !begin)
 			(merge (list ensure_agg_columns agg_plans computed_order_plans))))
-		(if scalar_query_stage
+		(define base_group_fill (symbol "__group_base_fill"))
+		(define base_group_fill_call (list base_group_fill))
+		(define initial_fill_expr (if (nil? base_group_into_plan)
+			nil
+			(cons (quote !begin) (filter (list aggregate_prepare_expr base_group_fill_call cleanup_plan) (lambda (expr) (not (nil? expr)))))))
+		(define create_options (if (nil? initial_fill_expr)
+			(quoted_runtime_list '("engine" "memory"))
+			(list (quote list)
+				"engine" "memory"
+				"oninit" (list (quote lambda) '() initial_fill_expr))))
+		(define carrier_created (symbol "__group_carrier_created"))
+		(define keytable_init (list
+			(list (quote lambda) (list carrier_created)
+				(list (quote !begin)
+					(list (quote touch_keytable) (list (quote table) schema grouptbl))
+					carrier_created))
+			(list (quote createtable) schema grouptbl create_cols create_options true)))
+		(define lowered_plan (if scalar_query_stage
 			(list (quote !begin)
 				nested_prepare_expr
 				(if initializer_owner keytable_init nil)
@@ -9489,13 +9497,22 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 					(list (quote !begin)
 						nested_prepare_expr
 						(if initializer_owner
-							(list (quote if) keytable_init
-								(list (quote !begin)
-									aggregate_prepare_expr
-									base_group_into_plan
-									cleanup_plan)
-								aggregate_prepare_expr)
-							aggregate_prepare_expr))))))))
+							(list
+								(list (quote lambda) (list carrier_created)
+									(list (quote if) carrier_created
+										nil
+										(list (quote if) (group_stage_session_binding_missing_expr stage schema grouptbl keys key_names)
+											(list (quote !begin)
+												aggregate_prepare_expr
+												base_group_fill_call)
+											aggregate_prepare_expr)))
+								keytable_init)
+							aggregate_prepare_expr))))))
+		(if (nil? base_group_into_plan)
+			lowered_plan
+			(list
+				(list (quote lambda) (list base_group_fill) lowered_plan)
+				(list (quote lambda) '() base_group_into_plan))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
 	(begin
