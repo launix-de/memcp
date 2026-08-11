@@ -10086,6 +10086,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 				(define sources (qb_sources probe_rewritten))
 				(define stage_catalog (query_block_stage_catalog rewritten))
 				(define dependency_graph (stage_dependency_graph stage_lookup))
+				(define outer_prepare_stages (filter (qb_stages rewritten) (lambda (stage)
+					(not (group_stage? stage)))))
 				(define physical_sources (physicalize_stage_output_sources stage_lookup sources))
 				(define driver_src (car physical_sources))
 				(if (not (source_is_base_table? driver_src))
@@ -10119,8 +10121,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared carrier. */
 					(lower_query_block_core grouped_input_block)
 					(cons (quote !begin)
 						(merge (list
-							(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages rewritten))
-							(lower_stage_materialize_all (qb_stages rewritten))
+							/* The main group prepare owns nested group stages used by its input.
+							Window and ORC stages still require their explicit materialization. */
+							(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup outer_prepare_stages)
+							(lower_stage_materialize_all outer_prepare_stages)
 							(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage))
 							(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources))))))))))))
 
