@@ -1586,18 +1586,140 @@ instead of capturing whichever session populated the cache first. */
 				(merge (list (nth item 2) (nth tail 2)))))
 		_ (list false '() '()))))
 
+(define exists_union_branch_stage (lambda (result)
+	(match (nth result 1)
+		'(stage) (if (and (group_stage? stage)
+			(equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists)))
+			stage
+			nil)
+		_ nil)))
+
+(define exists_union_stage_contract (lambda (stage)
+	(if (nil? stage)
+		nil
+		(begin
+			(define keys (gs_keys stage))
+			(define input (gs_input stage))
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(if (or (not (equal? (count keys) 1))
+				(or (not (equal? (count lookup_keys) 1))
+					(or (not (if (query_block? input)
+						(scalar_source_shape_supported? (qb_sources input))
+						(source_is_base_table? input)))
+						(or (stage_has_residual_outer_refs? stage)
+							(not (stage_keys_are_input_local? stage))))))
+				nil
+				(list
+					1
+					(gs_domain stage)
+					lookup_keys
+					(qassoc_get (gs_facts stage) (quote null_semantics) nil)
+					(qassoc_get (gs_facts stage) (quote cardinality_mode) nil)))))))
+
+(define exists_union_results_compatible? (lambda (results)
+	(match (coalesceNil results '())
+		(cons first rest) (begin
+			(define first_contract (exists_union_stage_contract (exists_union_branch_stage first)))
+			(and (not (nil? first_contract))
+				(reduce rest (lambda (compatible result)
+					(and compatible
+						(equal? first_contract
+							(exists_union_stage_contract (exists_union_branch_stage result)))))
+					true)))
+		_ false)))
+
+(define exists_union_candidate_fields (lambda (keys)
+	(merge (mapIndex keys (lambda (i key)
+		(list (concat "k" (string i)) key))))))
+
+(define exists_union_candidate_branch (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define fields (exists_union_candidate_fields (gs_keys stage)))
+		(if (query_block? input)
+			(make_query_block
+				(qb_schema input)
+				(qb_sources input)
+				fields
+				(combine_where (qb_where input) condition)
+				'() nil '() nil nil '()
+				(qb_stages input)
+				(qb_facts input))
+			(make_query_block
+				(source_schema input)
+				(list input)
+				fields
+				condition
+				'() nil '() nil nil '() '() '())))))
+
+(define make_combined_exists_union_stage_rewrite (lambda (inner results args)
+	(begin
+		(define first_stage (exists_union_branch_stage (car results)))
+		(define outer_sources (nth args 0))
+		(define lookup_keys (qassoc_get (gs_facts first_stage) (quote lookup-keys) '()))
+		(define outer_domain (gs_domain first_stage))
+		(define candidate_alias (concat "__exists_union_" (fnv_hash (serialize inner))))
+		(define union_input (make_union_block
+			(union_mode inner)
+			(map results (lambda (result)
+				(exists_union_candidate_branch (exists_union_branch_stage result))))
+			'() nil nil
+			(list
+				(list (quote purpose) (quote exists_candidate_union))
+				(list (quote alias) candidate_alias))))
+		(define keys (mapIndex (gs_keys first_stage) (lambda (i _key)
+			(list (quote get_column) candidate_alias false (concat "k" (string i)) false))))
+		(define stage_id (concat "exists-union:" (fnv_hash (serialize (list inner outer_domain lookup_keys)))))
+		(define stage (make_group_stage
+			stage_id
+			union_input
+			outer_domain
+			keys
+			(list aggregate_count_descriptor)
+			nil '() '() nil nil
+			(list
+				(list (quote condition) true)
+				(list (quote purpose) (quote exists))
+				(list (quote presence_only) true)
+				(list (quote max_needed_per_domain) 1)
+				(list (quote domain) outer_domain)
+				(list (quote lookup-keys) lookup_keys)
+				(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
+				(list (quote null_semantics) (quote exists))
+				(list (quote cardinality_mode) (quote many)))))
+		(define stage_alias (exists_stage_alias stage_id))
+		(define source (list
+			stage_alias
+			(group_stage_schema stage)
+			(make_stage_output_relation stage_id)
+			(stage_source_outer? outer_sources)
+			(make_exists_stage_join_condition stage_alias (group_key_cols keys) lookup_keys)))
+		(list
+			(list (quote >)
+				(list (quote coalesceNil)
+					(list (quote get_column) stage_alias false
+						(aggregate_col_name aggregate_count_descriptor) false)
+					0)
+				0)
+			(list stage)
+			(list source)))))
+
 (define make_exists_union_stage_rewrite (lambda (inner args)
 	(if (not (union_block? inner))
 		(neumann_fail "untangle_query" "EXISTS UNION lowering expects union-block")
 		(if (or (not (empty_list? (union_order inner)))
 			(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner)))))
 			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain unordered branches")
-			(combine_exists_union_results
-				(map (union_branches inner) (lambda (branch)
+			(begin
+				(define results (map (union_branches inner) (lambda (branch)
 					(make_exists_stage_rewrite branch (list
 						(nth args 0)
 						branch
-						(if (>= (count args) 3) (nth args 2) nil))))))))))
+						(if (>= (count args) 3) (nth args 2) nil))))))
+				(if (exists_union_results_compatible? results)
+					(make_combined_exists_union_stage_rewrite inner results args)
+					(combine_exists_union_results results)))))))
 
 (define combine_in_union_results (lambda (results negate)
 	(match (coalesceNil results '())
@@ -6284,6 +6406,41 @@ dependency preparation does not emit free outer-row symbols. */
 			(lower_unique_stage_prepares_using stages stages stages)
 			(lower_stage_materialize_all stages))))))
 
+(define lower_exists_union_probe_branches (lambda (sources default_alias branches probe all_stages)
+	(match (coalesceNil branches '())
+		(cons branch rest) (list (quote or)
+			(lower_exists_union_probe_branch sources default_alias branch probe all_stages)
+			(lower_exists_union_probe_branches sources default_alias rest probe all_stages))
+		_ false)))
+
+(define lower_exists_union_probe_branch (lambda (sources default_alias branch probe all_stages)
+	(begin
+		(define prepared (query_block_with_prepared_sources_using all_stages branch))
+		(if (not (and (query_block? prepared) (single_source? (qb_sources prepared))))
+			(neumann_fail "build_queryplan" "EXISTS UNION point probe requires one prepared branch source")
+			true)
+		(define src (car (qb_sources prepared)))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "EXISTS UNION point probe requires base-table branches")
+			true)
+		(define key_expr (query_block_first_expr prepared))
+		(define condition (combine_where (qb_where prepared) (source_join_expr src)))
+		(define filtercols (merge_unique (list
+			(extract_columns_for_alias src condition)
+			(extract_columns_for_alias src key_expr))))
+		(list (quote scan_exists)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(list (quote optimize)
+					(list (quote and)
+						(lower_column_expr_for_alias src condition)
+						(list (quote equal??)
+							(lower_column_expr_for_alias src key_expr)
+							(lower_column_expr_for_join sources default_alias probe)))))))))
+
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages)
 	(begin
 		(if (not (scalar_or_presence_probe_stage? stage))
@@ -6305,44 +6462,51 @@ dependency preparation does not emit free outer-row symbols. */
 		(define order_exprs (nth parts 1))
 		(define dirs (nth parts 2))
 		(define offset_value (nth parts 3))
-		(if (query_block? src)
-			(lower_scalar_first_query_probe_expr
-				all_stages
-				stage
-				value_expr
-				keys
-				(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key))))
-			(begin
-				(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-				(define condition_cols (extract_columns_for_alias src condition))
-				(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-				(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
-				(define value_cols (extract_columns_for_alias src value_expr))
-				(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
-				(define mapcols (merge_unique (list value_cols)))
-				(list (quote scan_order)
-					'(session "__memcp_tx")
-					(source_table_expr src)
-					(cons (quote list) filtercols)
-					(list (quote lambda)
-						(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-						(list (quote optimize)
-							(cons (quote and)
-								(cons
-									(lower_column_expr_for_alias src condition)
-									(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
-					(cons (quote list) order_cols)
-					(cons (quote list) dirs)
-					0
-					(coalesceNil offset_value 0)
-					1
-					(cons (quote list) mapcols)
-					(list (quote lambda)
-						(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
-						(lower_column_expr_for_alias src value_expr))
-					(scalar_once_reduce_first)
-					nil
-					false)))))
+		(if (union_block? src)
+			(list (quote if)
+				(lower_exists_union_probe_branches
+					sources default_alias (union_branches src)
+					(car lookup_keys) all_stages)
+				1
+				nil)
+			(if (query_block? src)
+				(lower_scalar_first_query_probe_expr
+					all_stages
+					stage
+					value_expr
+					keys
+					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key))))
+				(begin
+					(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+					(define condition_cols (extract_columns_for_alias src condition))
+					(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+					(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
+					(define value_cols (extract_columns_for_alias src value_expr))
+					(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
+					(define mapcols (merge_unique (list value_cols)))
+					(list (quote scan_order)
+						'(session "__memcp_tx")
+						(source_table_expr src)
+						(cons (quote list) filtercols)
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+							(list (quote optimize)
+								(cons (quote and)
+									(cons
+										(lower_column_expr_for_alias src condition)
+										(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+						(cons (quote list) order_cols)
+						(cons (quote list) dirs)
+						0
+						(coalesceNil offset_value 0)
+						1
+						(cons (quote list) mapcols)
+						(list (quote lambda)
+							(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+							(lower_column_expr_for_alias src value_expr))
+						(scalar_once_reduce_first)
+						nil
+						false))))))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
