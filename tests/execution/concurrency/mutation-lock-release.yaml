@@ -1,0 +1,70 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Mutation scans release shard locks when row projection fails"
+  isolated: true
+
+test_cases:
+  - name: "MLR: create source table"
+    sql: |
+      CREATE TABLE mutation_lock_rows (
+        id INT PRIMARY KEY,
+        value INT
+      )
+
+  - name: "MLR: insert source row"
+    sql: "INSERT INTO mutation_lock_rows VALUES (1, 10)"
+
+  - name: "MLR: create failing computed projection"
+    scm: |
+      (createcolumn
+        (table "memcp-tests" "mutation_lock_rows")
+        "failing_value" "INT" '() '("temp" true)
+        '("value")
+        (lambda (value) (error "expected projection failure")))
+    expect:
+      error: true
+
+  - name: "MLR: projection failure aborts update"
+    sql: "UPDATE mutation_lock_rows SET value = failing_value WHERE id = 1"
+    expect:
+      error: true
+
+  - name: "MLR: shard remains readable after projection failure"
+    sql: "SELECT id, value FROM mutation_lock_rows WHERE id = 1"
+    timeout: 2
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          value: 10
+
+  - name: "MLR: rebuild completes after projection failure"
+    scm: "(rebuild)"
+    timeout: 2
+
+  - name: "MLR: rebuild preserves the source row"
+    sql: "SELECT id, value FROM mutation_lock_rows WHERE id = 1"
+    timeout: 2
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          value: 10
+
+  - name: "MLR: cleanup"
+    sql: "DROP TABLE IF EXISTS mutation_lock_rows"
