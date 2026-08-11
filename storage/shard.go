@@ -173,6 +173,37 @@ func (s *storageShard) ComputeSize() uint {
 	return result
 }
 
+type shardStatsSnapshot struct {
+	mainCount uint32
+	delta     int
+	deletions uint
+	state     SharedState
+	size      uint
+}
+
+// statsSnapshotRLocked reads one consistent shard-local statistics snapshot.
+// The caller must already hold s.mu.RLock().
+func (s *storageShard) statsSnapshotRLocked() shardStatsSnapshot {
+	return shardStatsSnapshot{
+		mainCount: s.main_count,
+		delta:     len(s.inserts),
+		deletions: s.deletions.Count(),
+		state:     s.srState,
+		size:      s.computeSizeLocked(),
+	}
+}
+
+func (s *storageShard) statsSnapshot() shardStatsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stats := s.statsSnapshotRLocked()
+	return stats
+}
+
+func (s shardStatsSnapshot) rowCount() int64 {
+	return int64(s.mainCount) + int64(s.delta) - int64(s.deletions)
+}
+
 func (u *storageShard) MarshalJSON() ([]byte, error) {
 	return json.Marshal(u.uuid.String())
 }
@@ -1668,20 +1699,24 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	for _, id := range recids {
 		func() {
 			effectiveID := id
+			rowLocked := false
 			// Acquire write lock per-row for mutation scans
 			if needsPerRowLock {
 				m.shard.mu.Lock()
 				m.shard.enterWriteOwner()
+				rowLocked = true
+				defer func() {
+					if rowLocked {
+						m.shard.exitWriteOwner()
+						m.shard.mu.Unlock()
+					}
+				}()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
-							if needsPerRowLock {
-								m.shard.exitWriteOwner()
-								m.shard.mu.Unlock()
-							}
 							return
 						}
 						effectiveID = followedID
@@ -1696,6 +1731,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 			if needsPerRowLock {
 				m.shard.exitWriteOwner()
 				m.shard.mu.Unlock()
+				rowLocked = false
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
 		}()
@@ -1709,19 +1745,23 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 		func() {
 			effectiveID := id
 			batchid := batchids[rowidx]
+			rowLocked := false
 			if needsPerRowLock {
 				m.shard.mu.Lock()
 				m.shard.enterWriteOwner()
+				rowLocked = true
+				defer func() {
+					if rowLocked {
+						m.shard.exitWriteOwner()
+						m.shard.mu.Unlock()
+					}
+				}()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
-							if needsPerRowLock {
-								m.shard.exitWriteOwner()
-								m.shard.mu.Unlock()
-							}
 							return
 						}
 						effectiveID = followedID
@@ -1734,6 +1774,7 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 			if needsPerRowLock {
 				m.shard.exitWriteOwner()
 				m.shard.mu.Unlock()
+				rowLocked = false
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
 		}()
@@ -1748,19 +1789,23 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 	for _, id := range recids {
 		func() {
 			effectiveID := id
+			rowLocked := false
 			if needsPerRowLock {
 				m.shard.mu.Lock()
 				m.shard.enterWriteOwner()
+				rowLocked = true
+				defer func() {
+					if rowLocked {
+						m.shard.exitWriteOwner()
+						m.shard.mu.Unlock()
+					}
+				}()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
-							if needsPerRowLock {
-								m.shard.exitWriteOwner()
-								m.shard.mu.Unlock()
-							}
 							return
 						}
 						effectiveID = followedID
@@ -1773,6 +1818,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 			if needsPerRowLock {
 				m.shard.exitWriteOwner()
 				m.shard.mu.Unlock()
+				rowLocked = false
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
 		}()
@@ -1786,19 +1832,23 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 		func() {
 			effectiveID := id
 			batchid := batchids[rowidx]
+			rowLocked := false
 			if needsPerRowLock {
 				m.shard.mu.Lock()
 				m.shard.enterWriteOwner()
+				rowLocked = true
+				defer func() {
+					if rowLocked {
+						m.shard.exitWriteOwner()
+						m.shard.mu.Unlock()
+					}
+				}()
 			}
 			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
-							if needsPerRowLock {
-								m.shard.exitWriteOwner()
-								m.shard.mu.Unlock()
-							}
 							return
 						}
 						effectiveID = followedID
@@ -1811,6 +1861,7 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 			if needsPerRowLock {
 				m.shard.exitWriteOwner()
 				m.shard.mu.Unlock()
+				rowLocked = false
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
 		}()
