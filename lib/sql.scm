@@ -45,6 +45,28 @@ continue to occupy just their existing query-plan entry. */
 (define sql_parameterize_select_literals (lambda (query enabled)
 	(sql_parameterize_select_literals_cached sql_literal_shape_cache query enabled)))
 
+/* A parse can mention the same physical table through many aliases. Resolve
+and authorize each readable table once, then keep using show's immutable table
+snapshot through the stable handle for the rest of this compile only. */
+(define sql_compile_table_policy (lambda (policy)
+	(begin
+		(define catalog (newsession))
+		(lambda (schema tbl write)
+			(if write
+				(if policy (policy schema tbl true) true)
+				(begin
+					(define handle (table schema tbl))
+					(if (and handle (catalog handle))
+						true
+						(begin
+							(if policy (policy schema tbl false) true)
+							(if handle
+								(begin
+									(show handle)
+									(catalog handle true))
+								true)
+							true))))))))
+
 /* sql_parameterize_select_like_strings: query-plan-cache helper for ad-hoc
 fulltext-ish SELECTs. It replaces string literals directly following LIKE or
 inside MATCH...AGAINST(...) with ? placeholders and returns (normalized-query bindings). Other string
@@ -116,12 +138,17 @@ session. On parse error the result is not cached. */
 					(planning_session "schema" schema)
 					(planning_session "__memcp_tx" (session "__memcp_tx")))
 				nil)
+			(define compile_formula (lambda ()
+				(begin
+					(define compile_policy (sql_compile_table_policy policy))
+					(optimize (with_session planning_session (lambda ()
+						(parse_fn schema parse_query compile_policy)))))))
 			/* Compile diagnostics measure true misses and must not turn their own
 			previous result into a cache hit. The inspected query is never run. */
 			(define formula (if compile_diagnostic
-				(optimize (with_session planning_session (lambda () (parse_fn schema parse_query policy))))
+				(compile_formula)
 				(queryplan_cache "get_or_compute" cache_key
-					(lambda () (optimize (with_session planning_session (lambda () (parse_fn schema parse_query policy))))))))
+					compile_formula)))
 			(if (not (equal? bindings '()))
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)

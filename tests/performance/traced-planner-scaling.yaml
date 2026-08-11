@@ -384,6 +384,33 @@ test_cases:
       data:
         - value: 7
 
+  - name: "Compile policy resolves repeated table aliases once"
+    scm: |
+      (begin
+        (define calls (newsession))
+        (calls "count" 0)
+        (define policy (lambda (_schema _table _write)
+          (begin
+            (calls "count" (+ (calls "count") 1))
+            true)))
+        (cached_parse (newcachemap) parse_sql "memcp-tests"
+          "SELECT root.id, (SELECT a.id FROM tps_parent a LIMIT 1), (SELECT b.id FROM tps_parent b LIMIT 1), (SELECT c.id FROM tps_parent c LIMIT 1), (SELECT d.id FROM tps_parent d LIMIT 1) FROM tps_prop root"
+          policy "root" (newsession) false)
+        (if (equal? (calls "count") 2)
+          "ok"
+          (error (concat "compile policy calls: " (calls "count")))))
+    expect:
+      data: ["ok"]
+
+  - name: "Compile catalog does not bypass denied table access"
+    scm: |
+      (cached_parse (newcachemap) parse_sql "memcp-tests"
+        "SELECT denied.id FROM tps_parent denied"
+        (lambda (_schema _table _write) (error "access denied"))
+        "root" (newsession) false)
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS tps_prop"
   - sql: "DROP TABLE IF EXISTS tps_parent"

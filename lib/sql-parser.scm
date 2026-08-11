@@ -1297,7 +1297,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
 				(begin
 					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
@@ -1333,7 +1333,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1367,7 +1367,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
