@@ -2384,7 +2384,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "show",
-		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
+		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			// table-based overloads: (show table) / (show recset) → columns,
 			// (show table "statistics") / (show recset "statistics") → index stats, etc.
@@ -2632,9 +2632,9 @@ func Init(en scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "(optional) database name", Optional: true},
-				{Kind: "string|bool", ParamName: "table", ParamDesc: "(optional) table name, or true for full table listing", Optional: true},
-				{Kind: "int|bool", ParamName: "property", ParamDesc: "(optional) shard index (int), true for full table info, or \"statistics\"", Optional: true},
+				{Kind: "string|table|recset", ParamName: "schema_or_table", ParamDesc: "(optional) database name or resolved table/recset handle", Optional: true},
+				{Kind: "string|bool", ParamName: "table_or_property", ParamDesc: "(optional) table name, true for full info, or \"statistics\" for a handle", Optional: true},
+				{Kind: "int|bool|string", ParamName: "property", ParamDesc: "(optional) shard index (int), true for full table info, or \"statistics\"", Optional: true},
 				{Kind: "bool", ParamName: "full", ParamDesc: "(optional) true to include columns and indexes in shard detail", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any", Transfer: false},

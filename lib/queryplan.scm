@@ -71,7 +71,10 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define get_schema (lambda (schema tbl)
 	(try
-		(lambda () (show schema tbl))
+		(lambda ()
+			(begin
+				(define handle (table schema tbl))
+				(if handle (show handle) (show schema tbl))))
 		(lambda (_e) '()))))
 
 (define qassoc_get (lambda (xs key default)
@@ -3945,7 +3948,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				nil))
 			(if (and (not (nil? live_count)) (> live_count 0))
 				live_count
-				(match (show schema relation)
+				(match (get_schema schema relation)
 					(cons col _rest) (col "RowEstimate")
 					_ live_count)))
 		(lambda (_e) nil))))

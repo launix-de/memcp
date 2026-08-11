@@ -194,8 +194,9 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 /* threadsafe session storage */
 
 type session struct {
-	Mu  sync.RWMutex
-	Map map[string]Scmer
+	Mu      sync.RWMutex
+	Map     map[string]Scmer
+	Handles map[Scmer]Scmer
 }
 
 // build this function into your SCM environment to offer http server capabilities
@@ -207,11 +208,24 @@ func NewSession(a ...Scmer) Scmer {
 		case 2:
 			sess.Mu.Lock()
 			defer sess.Mu.Unlock()
-			sess.Map[a[0].String()] = a[1]
+			if a[0].GetTag() >= 100 {
+				if sess.Handles == nil {
+					sess.Handles = make(map[Scmer]Scmer)
+				}
+				sess.Handles[a[0]] = a[1]
+			} else {
+				sess.Map[a[0].String()] = a[1]
+			}
 			return a[1]
 		case 1:
 			sess.Mu.RLock()
 			defer sess.Mu.RUnlock()
+			if a[0].GetTag() >= 100 {
+				if v, ok := sess.Handles[a[0]]; ok {
+					return v
+				}
+				return NewNil()
+			}
 			if v, ok := sess.Map[a[0].String()]; ok {
 				return v
 			}
@@ -219,9 +233,12 @@ func NewSession(a ...Scmer) Scmer {
 		case 0:
 			sess.Mu.RLock()
 			defer sess.Mu.RUnlock()
-			keys := make([]Scmer, 0, len(sess.Map))
+			keys := make([]Scmer, 0, len(sess.Map)+len(sess.Handles))
 			for k := range sess.Map {
 				keys = append(keys, NewString(k))
+			}
+			for k := range sess.Handles {
+				keys = append(keys, k)
 			}
 			return NewSlice(keys)
 		default:
@@ -363,7 +380,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "newpromise",
 		Desc: "Creates a single-value promise cell (thread-safe via CAS spin-lock). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
-		Fn: NewPromise,
+		Fn:   NewPromise,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "list", ParamDesc: "optional: ≥2-element slice to use as backing", Optional: true},
@@ -380,12 +397,12 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "newsession",
-		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
-		Fn: NewSession,
+		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session). String-like keys use value semantics; custom handles use pointer identity without serialization.",
+		Fn:   NewSession,
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
 				Params: []*TypeDescriptor{
-					{Kind: "string", ParamName: "key", ParamDesc: "key to get or set", Optional: true},
+					{Kind: "any", ParamName: "key", ParamDesc: "key to get or set; custom handles retain identity", Optional: true},
 					{Kind: "any", ParamName: "value", ParamDesc: "value to store", Optional: true},
 				},
 				Return: &TypeDescriptor{Kind: "any"},
@@ -400,7 +417,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "session", ParamDesc: "the session to install", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "session", ParamDesc: "the session to install", Params: []*TypeDescriptor{{Kind: "any", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "func", ParamName: "fn", ParamDesc: "the function to execute", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
@@ -409,7 +426,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		Name: "context",
 		Desc: "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
-		Fn: Context,
+		Fn:   Context,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "args...", ParamDesc: "depends on the usage", Variadic: true},
@@ -499,7 +516,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "number"},
-			Const: true,
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -517,7 +534,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "dict"},
-			Const: true,
+			Const:  true,
 		},
 	})
 }
