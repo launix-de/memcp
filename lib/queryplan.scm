@@ -3971,6 +3971,268 @@ ON terms remain owned by the query-block until physical lowering. */
 			(list (quote barriers)
 				(join_hypergraph_outer_barriers_acc sources '() default_alias aliases))))))
 
+(define join_optimizer_inner_source? (lambda (src)
+	(and
+		(source_is_base_table? src)
+		(not (source_outer? src)))))
+
+(define join_optimizer_normalize_inner_joins (lambda (block)
+	(begin
+		(define inner_join_terms (merge (map (qb_sources block) (lambda (src)
+			(if (and
+				(join_optimizer_inner_source? src)
+				(not (or (nil? (source_join_expr src)) (equal? (source_join_expr src) true))))
+				(split_and_terms (source_join_expr src))
+				'())))))
+		(make_query_block
+			(qb_schema block)
+			(map (qb_sources block) (lambda (src)
+				(if (join_optimizer_inner_source? src) (source_with_join_expr src nil) src)))
+			(qb_fields block)
+			(combine_where_terms (merge (list
+				(split_and_terms (coalesceNil (qb_where block) true))
+				inner_join_terms)) true)
+			(qb_group block)
+			(qb_having block)
+			(qb_order block)
+			(qb_limit block)
+			(qb_offset block)
+			(qb_hidden block)
+			(qb_stages block)
+			(qb_facts block)))))
+
+(define join_optimizer_predicates (lambda (graph)
+	(merge (list
+		(qassoc_get graph (quote edges) '())
+		(qassoc_get graph (quote hyperedges) '())))))
+
+(define join_optimizer_local_predicates (lambda (graph alias)
+	(filter (qassoc_get graph (quote locals) '()) (lambda (entry)
+		(equal? (qassoc_get entry (quote aliases) '()) (list alias))))))
+
+(define join_optimizer_column_ref (lambda (sources default_alias expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(begin
+			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(if (nil? src) nil (list src (resolve_physical_column_name src col col_ignorecase))))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(join_optimizer_column_ref sources default_alias
+			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
+		_ nil)))
+
+(define join_optimizer_column_selectivity (lambda (column_ref)
+	(if (nil? column_ref)
+		0.1
+		(begin
+			(define distinct (planner_column_distinct_estimate (car column_ref) (cadr column_ref)))
+			(if (or (nil? distinct) (<= distinct 0)) 0.1 (/ 1 (max 1 distinct)))))))
+
+(define join_optimizer_equality_selectivity (lambda (sources default_alias left right)
+	(begin
+		(define left_ref (join_optimizer_column_ref sources default_alias left))
+		(define right_ref (join_optimizer_column_ref sources default_alias right))
+		(if (and (not (nil? left_ref)) (not (nil? right_ref)))
+			(begin
+				(define left_distinct (planner_column_distinct_estimate (car left_ref) (cadr left_ref)))
+				(define right_distinct (planner_column_distinct_estimate (car right_ref) (cadr right_ref)))
+				(if (or (nil? left_distinct) (nil? right_distinct))
+					0.1
+					(/ 1 (max 1 (max left_distinct right_distinct)))))
+			(if (not (nil? left_ref))
+				(join_optimizer_column_selectivity left_ref)
+				(if (not (nil? right_ref)) (join_optimizer_column_selectivity right_ref) 0.1))))))
+
+(define join_optimizer_expr_selectivity (lambda (sources default_alias expr)
+	(match expr
+		((symbol equal?) left right) (join_optimizer_equality_selectivity sources default_alias left right)
+		((quote equal?) left right) (join_optimizer_equality_selectivity sources default_alias left right)
+		((symbol equal??) left right) (join_optimizer_equality_selectivity sources default_alias left right)
+		((quote equal??) left right) (join_optimizer_equality_selectivity sources default_alias left right)
+		((symbol =) left right) (join_optimizer_equality_selectivity sources default_alias left right)
+		((quote =) left right) (join_optimizer_equality_selectivity sources default_alias left right)
+		((symbol <) _left _right) 0.3333333333333333
+		((quote <) _left _right) 0.3333333333333333
+		((symbol <=) _left _right) 0.3333333333333333
+		((quote <=) _left _right) 0.3333333333333333
+		((symbol >) _left _right) 0.3333333333333333
+		((quote >) _left _right) 0.3333333333333333
+		((symbol >=) _left _right) 0.3333333333333333
+		((quote >=) _left _right) 0.3333333333333333
+		_ 0.1)))
+
+(define join_optimizer_product (lambda (values)
+	(reduce (coalesceNil values '()) (lambda (product value) (* product value)) 1)))
+
+(define join_optimizer_source_rows (lambda (sources default_alias graph src)
+	(begin
+		(define base_rows (coalesceNil (planner_source_row_count src) 1000000))
+		(define local_selectivity (join_optimizer_product
+			(map (join_optimizer_local_predicates graph (source_alias src)) (lambda (entry)
+				(join_optimizer_expr_selectivity sources default_alias
+					(qassoc_get entry (quote predicate) true))))))
+		(max 1 (* base_rows local_selectivity)))))
+
+(define join_optimizer_alias_subset? (lambda (required available)
+	(reduce (coalesceNil required '()) (lambda (ok alias)
+		(and ok (contains? available alias))) true)))
+
+(define join_optimizer_metadata_nodes (lambda (sources default_alias graph)
+	(map sources (lambda (src)
+		(list (source_alias src) (join_optimizer_source_rows sources default_alias graph src))))))
+
+(define join_optimizer_metadata_predicates (lambda (sources default_alias graph aliases)
+	(map (filter (join_optimizer_predicates graph) (lambda (entry)
+		(join_optimizer_alias_subset? (qassoc_get entry (quote aliases) '()) aliases)))
+		(lambda (entry)
+			(list
+				(qassoc_get entry (quote aliases) '())
+				(join_optimizer_expr_selectivity sources default_alias
+					(qassoc_get entry (quote predicate) true)))))))
+
+(define join_optimizer_source_by_alias (lambda (sources alias)
+	(reduce sources (lambda (found src)
+		(if (not (nil? found)) found
+			(if (equal? (source_alias src) alias) src nil))) nil)))
+
+(define join_optimizer_sources_for_order (lambda (sources aliases)
+	(map aliases (lambda (alias)
+		(begin
+			(define src (join_optimizer_source_by_alias sources alias))
+			(if (nil? src)
+				(neumann_fail "join_reorder" (concat "join plan references unknown alias " alias))
+				src))))))
+
+(define join_optimizer_left_deep_tree (lambda (aliases)
+	(match aliases
+		(cons alias rest)
+		(reduce rest (lambda (tree next_alias)
+			(list (quote join-node) tree (list (quote join-leaf) next_alias)))
+			(list (quote join-leaf) alias))
+		_ nil)))
+
+(define join_optimizer_append_tree (lambda (tree alias)
+	(if (nil? tree)
+		(list (quote join-leaf) alias)
+		(list (quote join-node) tree (list (quote join-leaf) alias)))))
+
+(define join_optimizer_append_sources_tree (lambda (tree sources)
+	(reduce sources (lambda (current src)
+		(join_optimizer_append_tree current (source_alias src))) tree)))
+
+(define join_optimizer_tree_aliases (lambda (tree)
+	(match tree
+		((symbol join-leaf) alias) (list alias)
+		((quote join-leaf) alias) (list alias)
+		((symbol join-node) left right) (merge (list
+			(join_optimizer_tree_aliases left)
+			(join_optimizer_tree_aliases right)))
+		((quote join-node) left right) (merge (list
+			(join_optimizer_tree_aliases left)
+			(join_optimizer_tree_aliases right)))
+		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
+
+(define require_join_optimizer_order (lambda (block)
+	(begin
+		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
+		(if (or (nil? tree)
+			(equal? (join_optimizer_tree_aliases tree) (map (qb_sources block) source_alias)))
+			block
+			(neumann_fail "build_queryplan" "physical source order differs from the logical join plan")))))
+
+(define join_optimizer_plan_segment (lambda (all_sources segment default_alias graph)
+	(begin
+		(define aliases (map segment source_alias))
+		(neumann_join_order
+			(join_optimizer_metadata_nodes segment default_alias graph)
+			(join_optimizer_metadata_predicates all_sources default_alias graph aliases)))))
+
+(define join_optimizer_reorder_result (lambda (sources tree strategy dp_entries)
+	(list sources tree strategy dp_entries)))
+
+(define join_optimizer_reorder_sources (lambda (block graph)
+	(begin
+		(define sources (qb_sources block))
+		(define segment (leading_reorderable_inner_sources sources))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+			(if (empty_list? sources) nil (source_alias (car sources)))))
+		(define preserve_order_driver (and
+			(not (empty_list? segment))
+			(query_limit_active? (qb_offset block) (qb_limit block))
+			(empty_list? (qb_group block))
+			(not (query_block_has_aggregates? block))
+			(or
+				(source_order_limit_driver? (car segment) (qb_order block) (qb_limit block))
+				(source_row_number_limit_driver? (qb_stages block) (car segment)))))
+		(if (or (< (count segment) 2) preserve_order_driver)
+			(join_optimizer_reorder_result
+				sources
+				(join_optimizer_left_deep_tree (map sources source_alias))
+				(if preserve_order_driver (quote preserve-order-limit) (quote fixed))
+				0)
+			(begin
+				(define planned (join_optimizer_plan_segment sources segment default_alias graph))
+				(define ordered_segment (join_optimizer_sources_for_order segment
+					(qassoc_get planned (quote order) '())))
+				(define remaining (join_optimizer_drop_sources sources (count segment)))
+				(join_optimizer_reorder_result
+					(merge (list ordered_segment remaining))
+					(join_optimizer_append_sources_tree
+						(qassoc_get planned (quote tree) nil) remaining)
+					(qassoc_get planned (quote strategy) (quote fixed))
+					(qassoc_get planned (quote dp_entries) 0)))))))
+
+(define join_optimizer_drop_sources (lambda (sources amount)
+	(if (or (<= amount 0) (empty_list? sources))
+		sources
+		(join_optimizer_drop_sources (cdr sources) (- amount 1)))))
+
+(define join_optimizer_telemetry (lambda (graph reordered)
+	(list
+		(list (quote join_reorder_strategy) (nth reordered 2))
+		(list (quote join_plan) (nth reordered 1))
+		(list (quote join_dp_entries) (nth reordered 3))
+		(list (quote join_graph_nodes) (count (qassoc_get graph (quote nodes) '())))
+		(list (quote join_graph_edges) (count (qassoc_get graph (quote edges) '())))
+		(list (quote join_graph_hyperedges) (count (qassoc_get graph (quote hyperedges) '())))
+		(list (quote join_graph_barriers) (count (qassoc_get graph (quote barriers) '()))))))
+
+(define hybrid_reorder_query_block (lambda (block)
+	(if (or (empty_list? (qb_sources block)) (single_source? (qb_sources block)))
+		(make_query_block
+			(qb_schema block)
+			(qb_sources block)
+			(qb_fields block)
+			(qb_where block)
+			(qb_group block)
+			(qb_having block)
+			(qb_order block)
+			(qb_limit block)
+			(qb_offset block)
+			(qb_hidden block)
+			(map (qb_stages block) join_reorder_stage)
+			(qb_facts block))
+		(begin
+			(define normalized (join_optimizer_normalize_inner_joins block))
+			(define graph (extract_join_hypergraph normalized))
+			(define reordered (join_optimizer_reorder_sources normalized graph))
+			(query_block_with_reorder_facts
+				(make_query_block
+					(qb_schema normalized)
+					(nth reordered 0)
+					(qb_fields normalized)
+					(qb_where normalized)
+					(qb_group normalized)
+					(qb_having normalized)
+					(qb_order normalized)
+					(qb_limit normalized)
+					(qb_offset normalized)
+					(qb_hidden normalized)
+					(map (qb_stages normalized) join_reorder_stage)
+					(qb_facts normalized))
+				(merge (list
+					(query_block_reorder_telemetry normalized)
+					(join_optimizer_telemetry graph reordered))))))))
 (define planner_literal_value (lambda (expr)
 	(match expr
 		((symbol session) key) (try
@@ -4631,33 +4893,7 @@ in place while giving comma joins a selective physical driver. */
 						(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
 						(define exists_src (first_exists_recset_source (qb_stages block) sources default_alias (qb_where block)))
 						(if (nil? exists_src)
-							(begin
-								(define reordered_sources (if (not (multiple_reorderable_inner_sources? sources))
-									sources
-									(reorder_selective_inner_sources
-										sources default_alias (qb_where block) (qb_stages block) (qb_order block) (qb_limit block)
-										(and (query_limit_active? (qb_offset block) (qb_limit block))
-											(empty_list? (qb_group block))
-											(not (query_block_has_aggregates? block))))))
-								(define reordered_block
-									(make_query_block
-										(qb_schema block)
-										reordered_sources
-										(qb_fields block)
-										(qb_where block)
-										(qb_group block)
-										(qb_having block)
-										(qb_order block)
-										(qb_limit block)
-										(qb_offset block)
-										(qb_hidden block)
-										(map (qb_stages block) join_reorder_stage)
-										(qb_facts block)))
-								(if (query_block_needs_reorder_facts? block)
-									(query_block_with_reorder_facts
-										reordered_block
-										(query_block_reorder_telemetry block))
-									reordered_block))
+							(hybrid_reorder_query_block block)
 							(begin
 								(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation exists_src))))
 								(define stage_id (gs_id stage))
@@ -11696,8 +11932,8 @@ source remain residual so they observe the null-extended row. */
 		(and (empty_list? (qb_stages block))
 			(and (> (count (qb_sources block)) 1)
 				(and (prejoin_sources_supported? (qb_sources block))
-					(and (not (equal? (prejoin_join_condition (qb_sources block)) true))
-						(not (expr_contains_session_dependency? (source_join_exprs (qb_sources block)))))))))))
+					(and (not (equal? (prejoin_join_condition block) true))
+						(not (expr_contains_session_dependency? (prejoin_join_condition block))))))))))
 
 (define prejoin_query_exprs (lambda (block fields)
 	(merge (list
@@ -11747,16 +11983,38 @@ source remain residual so they observe the null-extended row. */
 	(map_assoc fields (lambda (_title expr)
 		(prejoin_rewrite_expr sources default_alias prejoin_alias expr)))))
 
-(define prejoin_join_condition (lambda (sources)
-	(combine_where_terms (source_join_exprs sources) true)))
-
-(define prejoin_table_name (lambda (sources default_alias)
+(define prejoin_where_join_term? (lambda (block term)
 	(begin
+		(define sources (qb_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+		(> (count (join_hypergraph_expr_aliases default_alias (source_aliases sources) term)) 1))))
+
+/* Inner-join predicates remain in the logical query-block through reordering.
+The physical prejoin extracts only multi-source conjuncts; local WHERE filters
+remain query-specific and are evaluated over the cached carrier. */
+(define prejoin_where_join_terms (lambda (block)
+	(filter (split_and_terms (coalesceNil (qb_where block) true)) (lambda (term)
+		(prejoin_where_join_term? block term)))))
+
+(define prejoin_join_condition (lambda (block)
+	(combine_where_terms (merge (list
+		(source_join_exprs (qb_sources block))
+		(prejoin_where_join_terms block))) true)))
+
+(define prejoin_residual_condition (lambda (block)
+	(combine_where_terms
+		(filter (split_and_terms (coalesceNil (qb_where block) true)) (lambda (term)
+			(not (prejoin_where_join_term? block term))))
+		true)))
+
+(define prejoin_table_name (lambda (block default_alias)
+	(begin
+		(define sources (qb_sources block))
 		(define canonical_alias "__prejoin")
 		(define signature (list
 			"physical-prejoin-v2"
 			(map sources prejoin_source_table_key)
-			(prejoin_rewrite_expr sources default_alias canonical_alias (prejoin_join_condition sources))))
+			(prejoin_rewrite_expr sources default_alias canonical_alias (prejoin_join_condition block))))
 		(concat ".prejoin:" (fnv_hash (serialize signature))))))
 
 (define prejoin_primary_key_exprs (lambda (sources)
@@ -11794,7 +12052,7 @@ source remain residual so they observe the null-extended row. */
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
 		(define key_exprs (prejoin_primary_key_exprs sources))
-		(define condition (prejoin_join_condition sources))
+		(define condition (prejoin_join_condition block))
 		(define values (map key_exprs (lambda (expr)
 			(lower_column_expr_for_join sources default_alias expr))))
 		(build_join_scan_sink
@@ -11834,7 +12092,7 @@ source remain residual so they observe the null-extended row. */
 			(filter sources (lambda (src) (not (equal?? (source_alias src) trigger_alias))))))
 		(define remaining_default (source_alias (car remaining)))
 		(define condition (prejoin_replace_trigger_expr sources default_alias trigger_alias dict_symbol
-			(prejoin_join_condition sources)))
+			(prejoin_join_condition block)))
 		(define key_exprs (map (prejoin_primary_key_exprs sources) (lambda (expr)
 			(prejoin_replace_trigger_expr sources default_alias trigger_alias dict_symbol expr))))
 		(define values (map key_exprs (lambda (expr)
@@ -11942,7 +12200,7 @@ source remain residual so they observe the null-extended row. */
 			(qb_schema block)
 			(list (list alias (qb_schema block) table_name false true))
 			(prejoin_rewrite_fields sources default_alias alias fields)
-			(prejoin_rewrite_expr sources default_alias alias (qb_where block))
+			(prejoin_rewrite_expr sources default_alias alias (prejoin_residual_condition block))
 			(map (qb_group block) (lambda (expr) (prejoin_rewrite_expr sources default_alias alias expr)))
 			(if (nil? (qb_having block)) nil (prejoin_rewrite_expr sources default_alias alias (qb_having block)))
 			(map (qb_order block) (lambda (item) (match item
@@ -11962,7 +12220,7 @@ source remain residual so they observe the null-extended row. */
 		(define sources (qb_sources block))
 		(define fields (expand_query_block_fields sources (qb_fields block)))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
-		(define table_name (prejoin_table_name sources default_alias))
+		(define table_name (prejoin_table_name block default_alias))
 		(define table_expr (list (quote table) (qb_schema block) table_name))
 		(define prepare_plan (list (quote !begin)
 			(list (quote createtable) (qb_schema block) table_name
@@ -12549,7 +12807,18 @@ source remain residual so they observe the null-extended row. */
 			(list (symbol "equal??") left right))
 		_ nil)))
 
-(define union_semijoin_branch_stream_plan (lambda (branch)
+(define union_semijoin_join_entry (lambda (driver lookup branch)
+	(reduce (merge (list
+		(split_and_terms (coalesceNil (source_join_expr lookup) true))
+		(split_and_terms (coalesceNil (qb_where branch) true)))) (lambda (found term)
+			(if (not (nil? found))
+				found
+				(begin
+					(define parts (union_semijoin_equal_parts driver lookup term))
+					(if (nil? parts) nil (list parts term)))))
+		nil)))
+
+(define union_semijoin_branch_stream_plan_ordered (lambda (branch)
 	(begin
 		(define sources (qb_sources branch))
 		(if (not (equal? (count sources) 2))
@@ -12558,28 +12827,35 @@ source remain residual so they observe the null-extended row. */
 				(define driver (car sources))
 				(define lookup (cadr sources))
 				(define default_alias (qassoc_get (qb_facts branch) (quote default_alias) (source_alias driver)))
+				(define join_entry (union_semijoin_join_entry driver lookup branch))
+				(define join_parts (if (nil? join_entry) nil (nth join_entry 0)))
+				(define join_predicate (if (nil? join_entry) nil (nth join_entry 1)))
+				(define remaining_where (combine_where_terms
+					(filter (split_and_terms (coalesceNil (qb_where branch) true)) (lambda (term)
+						(not (equal? term join_predicate))))
+					true))
 				(define visible_exprs (merge (list
 					(extract_assoc (qb_fields branch) (lambda (_title expr) expr))
-					(list (qb_where branch))
+					(list remaining_where)
 					(extract_assoc (qb_hidden branch) (lambda (_title expr) expr)))))
 				(define lookup_unused (not (reduce visible_exprs (lambda (used expr)
 					(or used (expr_refs_sources? default_alias (list lookup) expr))) false)))
-				(define join_parts (union_semijoin_equal_parts driver lookup (source_join_expr lookup)))
 				(define lookup_keys (prejoin_primary_key_columns lookup))
-				(if (not (and lookup_unused
-					(and (not (source_outer? driver))
-						(and (not (source_outer? lookup))
-							(and (equal? (coalesceNil (source_join_expr driver) true) true)
-								(and (not (nil? join_parts))
-									(and (equal? (count lookup_keys) 1)
-										(equal? (car lookup_keys) (car join_parts)))))))))
+				(if (not (and
+					lookup_unused
+					(not (source_outer? driver))
+					(not (source_outer? lookup))
+					(equal? (coalesceNil (source_join_expr driver) true) true)
+					(not (nil? join_parts))
+					(equal? (count lookup_keys) 1)
+					(equal? (car lookup_keys) (car join_parts))))
 					nil
 					(begin
 						(define rewritten (make_query_block
 							(qb_schema branch)
-							(list (source_with_join_expr driver true))
+							(list (source_with_join_expr driver nil))
 							(qb_fields branch)
-							(qb_where branch)
+							remaining_where
 							(qb_group branch)
 							(qb_having branch)
 							(qb_order branch)
@@ -12602,6 +12878,34 @@ source remain residual so they observe the null-extended row. */
 						(if (union_ordered_branch_supported? rewritten)
 							(list '() rewritten driver_recset)
 							nil))))))))
+
+(define union_semijoin_branch_with_sources (lambda (branch sources)
+	(make_query_block
+		(qb_schema branch)
+		sources
+		(qb_fields branch)
+		(qb_where branch)
+		(qb_group branch)
+		(qb_having branch)
+		(qb_order branch)
+		(qb_limit branch)
+		(qb_offset branch)
+		(qb_hidden branch)
+		(qb_stages branch)
+		(qb_facts branch))))
+
+(define union_semijoin_branch_stream_plan (lambda (branch)
+	(begin
+		(define sources (qb_sources branch))
+		(if (not (equal? (count sources) 2))
+			nil
+			(begin
+				(define ordered (union_semijoin_branch_stream_plan_ordered branch))
+				(if (not (nil? ordered))
+					ordered
+					(union_semijoin_branch_stream_plan_ordered
+						(union_semijoin_branch_with_sources branch
+							(list (cadr sources) (car sources))))))))))
 
 (define prejoined_union_branch_stream_plan (lambda (branch)
 	(begin
@@ -12819,7 +13123,7 @@ build_queryplan contract. */
 		(if (query_block? root)
 			(make_ir
 				(ir_kind ir)
-				(query_block_with_full_stage_catalog root)
+				(query_block_with_full_stage_catalog (require_join_optimizer_order root))
 				(ir_stages ir)
 				(ir_context_of ir)
 				(ir_return ir))

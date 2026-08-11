@@ -371,6 +371,16 @@ test_cases:
         - "assoc_keys_as_dataset_rows"
         - "assoc_keys_values_as_dataset_rows"
 
+  - name: "Prejoin keeps a local WHERE predicate outside the shared carrier"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id WHERE e.salary >= 150 GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Engineering"
+          s: 200
+        - name: "Sales"
+          s: 150
+
   - name: "Insert new employee into existing dept"
     sql: "INSERT INTO sc_emp (id, dept_id, salary) VALUES (4, 2, 250)"
 
