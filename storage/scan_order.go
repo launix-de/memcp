@@ -620,7 +620,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				}
 			}
 		} else {
-			done := t.iterateShardsParallel(tableBounds, func(s *storageShard, solo bool) {
+			done := t.iterateShardsParallel(currentTx, tableBounds, func(s *storageShard, solo bool) {
 				defer func() {
 					if r := recover(); r != nil {
 						q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
@@ -903,7 +903,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	var foundShard *storageShard
 	var foundID uint32
 	var firstErr scanError
-	done := t.iterateShardsParallel(bounds, func(shard *storageShard, _ bool) {
+	done := t.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				mu.Lock()

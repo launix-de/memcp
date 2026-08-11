@@ -442,7 +442,7 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 
 	values := make(chan scanResult, 4)
 	var found atomic.Bool
-	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, boundaries, func(s *storageShard, solo bool) {
 		if found.Load() {
 			values <- scanResult{}
 			return
@@ -544,7 +544,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	var inputCount int64
 	var candidateCount int64
 	values := make(chan scanResult, 4)
-	done := t.iterateShardsParallel(boundaries, func(s *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, boundaries, func(s *storageShard, solo bool) {
 		defer func() {
 			if r := recover(); r != nil {
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
