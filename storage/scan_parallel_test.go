@@ -136,3 +136,21 @@ func TestIterateShardsParallelMarksPartitionMultiShardNonSolo(t *testing.T) {
 		t.Fatal("iterateShardsParallel partition multi shard incorrectly marked callback as solo")
 	}
 }
+
+func TestShardWriteOwnershipUsesExplicitTransactionState(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tscanpartxowner")
+	shard := tbl.Shards[0]
+	tx := NewTxContext(TxCursorStability)
+
+	if shard.hasWriteOwnerForTx(tx) {
+		t.Fatal("fresh transaction unexpectedly owns shard write lock")
+	}
+	tx.EnterShardWrite(shard)
+	if !shard.hasWriteOwnerForTx(tx) {
+		t.Fatal("transaction write ownership was not detected")
+	}
+	tx.ExitShardWrite(shard)
+	if shard.hasWriteOwnerForTx(tx) {
+		t.Fatal("released transaction write ownership remained visible")
+	}
+}

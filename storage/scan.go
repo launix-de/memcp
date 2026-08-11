@@ -676,10 +676,7 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	t.ensureLoaded()
-	skipShardReadLock := currentTx != nil && currentTx.HasShardWrite(t)
-	if currentTx == nil {
-		skipShardReadLock = t.hasWriteOwner()
-	}
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	var recsetPart *recSetShard
 	if recsetFilter != nil {
@@ -817,7 +814,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// shards have their column map populated by load(t) first.
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
-	ownsWrite := t.hasWriteOwner()
+	ownsWrite := t.hasWriteOwnerForTx(currentTx)
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
@@ -1074,7 +1071,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	}
 
 	t.ensureLoaded()
-	ownsWrite := t.hasWriteOwner()
+	ownsWrite := t.hasWriteOwnerForTx(currentTx)
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
