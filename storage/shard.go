@@ -173,6 +173,37 @@ func (s *storageShard) ComputeSize() uint {
 	return result
 }
 
+type shardStatsSnapshot struct {
+	mainCount uint32
+	delta     int
+	deletions uint
+	state     SharedState
+	size      uint
+}
+
+// statsSnapshotRLocked reads one consistent shard-local statistics snapshot.
+// The caller must already hold s.mu.RLock().
+func (s *storageShard) statsSnapshotRLocked() shardStatsSnapshot {
+	return shardStatsSnapshot{
+		mainCount: s.main_count,
+		delta:     len(s.inserts),
+		deletions: s.deletions.Count(),
+		state:     s.srState,
+		size:      s.computeSizeLocked(),
+	}
+}
+
+func (s *storageShard) statsSnapshot() shardStatsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stats := s.statsSnapshotRLocked()
+	return stats
+}
+
+func (s shardStatsSnapshot) rowCount() int64 {
+	return int64(s.mainCount) + int64(s.delta) - int64(s.deletions)
+}
+
 func (u *storageShard) MarshalJSON() ([]byte, error) {
 	return json.Marshal(u.uuid.String())
 }
