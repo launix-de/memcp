@@ -153,6 +153,100 @@ func HashKey(k Scmer) uint64 {
 	return h.Sum64()
 }
 
+func combineStructuralHash(hash, value uint64) uint64 {
+	value += 0x9e3779b97f4a7c15
+	value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9
+	value = (value ^ (value >> 27)) * 0x94d049bb133111eb
+	value ^= value >> 31
+	return (hash ^ value) * 0x100000001b3
+}
+
+// hashStructuralKey computes every immutable list node bottom-up once. The
+// resulting memo is frozen before it is shared with lookup closures.
+func hashStructuralKey(key Scmer, memo map[Scmer]uint64) uint64 {
+	switch key.GetTag() {
+	case tagSourceInfo:
+		return hashStructuralKey(key.SourceInfo().value, memo)
+	case tagAny:
+		if source, ok := key.Any().(SourceInfo); ok {
+			return hashStructuralKey(source.value, memo)
+		}
+		return HashKey(key)
+	case tagSlice:
+		if hash, ok := memo[key]; ok {
+			return hash
+		}
+		items := key.Slice()
+		hash := combineStructuralHash(0x6a09e667f3bcc909, uint64(len(items)))
+		for _, item := range items {
+			hash = combineStructuralHash(hash, hashStructuralKey(item, memo))
+		}
+		memo[key] = hash
+		return hash
+	case tagFastDict:
+		panic("make_structural_index requires immutable list expressions")
+	case tagInt, tagDate:
+		// Equal accepts numerically equal int/float/date values across tags.
+		return HashKey(NewFloat(float64(key.Int())))
+	case tagString, tagSymbol:
+		// Symbols and strings with the same text compare equal.
+		return HashKey(NewString(key.String()))
+	default:
+		return HashKey(key)
+	}
+}
+
+type structuralIndexEntry struct {
+	key   Scmer
+	value Scmer
+}
+
+// NewStructuralIndex eagerly indexes keys and every node below roots. The
+// returned lookup closure performs read-only map access and is therefore safe
+// for parallel planner walkers without a mutex.
+func NewStructuralIndex(a ...Scmer) Scmer {
+	if len(a) != 2 {
+		panic("make_structural_index expects keys and roots")
+	}
+	keys := asSlice(a[0], "make_structural_index keys")
+	roots := asSlice(a[1], "make_structural_index roots")
+	memo := make(map[Scmer]uint64)
+	entries := make(map[uint64][]structuralIndexEntry, len(keys))
+	for i, key := range keys {
+		hash := hashStructuralKey(key, memo)
+		entries[hash] = append(entries[hash], structuralIndexEntry{key: key, value: NewInt(int64(i))})
+	}
+	for _, root := range roots {
+		hashStructuralKey(root, memo)
+	}
+	return NewFunc(func(args ...Scmer) Scmer {
+		if len(args) != 1 {
+			panic("structural index lookup expects one expression")
+		}
+		expr := args[0]
+		if expr.IsSourceInfo() {
+			expr = expr.SourceInfo().value
+		} else if expr.GetTag() == tagAny {
+			if source, ok := expr.Any().(SourceInfo); ok {
+				expr = source.value
+			}
+		}
+		hash, ok := memo[expr]
+		if !ok {
+			if expr.GetTag() == tagSlice || expr.GetTag() == tagFastDict {
+				panic("structural index lookup received an expression outside its roots")
+			}
+			hash = hashStructuralKey(expr, memo)
+		}
+		for _, entry := range entries[hash] {
+			if Equal(entry.key, expr) {
+				return entry.value
+			}
+		}
+		return NewNil()
+	})
+}
+
 func (d *FastDict) findPos(key Scmer, h uint64) (int, bool) {
 	if d.index == nil {
 		return -1, false
