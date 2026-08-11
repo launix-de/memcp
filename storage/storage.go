@@ -2699,8 +2699,19 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "rebuild",
-		Desc: "rebuilds all main storages and returns the amount of time it took",
+		Desc: "rebuilds main storages and returns the amount of time it took; with a table handle, rebuilds only that table",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) > 0 && a[0].IsCustom(TagTable) {
+				all := len(a) > 1 && scm.ToBool(a[1])
+				repartition := true
+				if len(a) > 2 {
+					repartition = scm.ToBool(a[2])
+				}
+				return scm.NewString(RebuildTable(TableFromScmer(a[0]), all, repartition))
+			}
+			if len(a) > 2 {
+				panic("global rebuild accepts at most all and repartition")
+			}
 			all := false
 			if len(a) > 0 && scm.ToBool(a[0]) {
 				all = true
@@ -2714,8 +2725,9 @@ func Init(en scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
-				{Kind: "bool", ParamName: "all", ParamDesc: "if true, rebuild all shards, even if nothing has changed (default: false)", Optional: true},
-				{Kind: "bool", ParamName: "repartition", ParamDesc: "if true, also repartition (default: true)", Optional: true},
+				{Kind: "bool|table", ParamName: "table_or_all", ParamDesc: "table handle for a table-local rebuild; otherwise whether to rebuild unchanged shards globally (default: false)", Optional: true},
+				{Kind: "bool", ParamName: "all_or_repartition", ParamDesc: "with a table: whether to rebuild unchanged shards; globally: whether to repartition (default: true)", Optional: true},
+				{Kind: "bool", ParamName: "repartition", ParamDesc: "with a table handle, whether to repartition that table (default: true)", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string"},
 		},

@@ -151,6 +151,47 @@ func Rebuild(all bool, repartition bool) string {
 	return rebuildDatabases(all, repartition, false)
 }
 
+// RebuildTable compacts only the table referenced by tbl. It uses the same
+// publication, schema-save and deferred old-shard cleanup path as a global
+// rebuild without touching unrelated tables or databases.
+func RebuildTable(tbl *table, all bool, repartition bool) string {
+	start := time.Now()
+	if tbl == nil || tbl.schema == nil || tbl.schema.tables.Get(tbl.Name) != tbl {
+		panic("cannot rebuild a stale table handle")
+	}
+
+	result := tbl.schema.rebuild(all, repartition, true, tbl)
+	errs := append([]string(nil), result.errors...)
+	if len(errs) == 0 {
+		if err := func() (err error) {
+			defer func() { err = recoverAsError("save failed for database " + tbl.schema.Name) }()
+			tbl.schema.save()
+			return nil
+		}(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) == 0 {
+		for _, s := range result.replaced {
+			if err := func() (err error) {
+				defer func() {
+					err = recoverAsError("cleanup failed for table " + tbl.schema.Name + "." + tbl.Name + " shard " + s.uuid.String())
+				}()
+				s.RemoveFromDisk()
+				return nil
+			}(); err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
+	}
+
+	duration := fmt.Sprint(time.Since(start))
+	if len(errs) == 0 {
+		return duration
+	}
+	return duration + " errors: " + strings.Join(errs, " | ")
+}
+
 func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string {
 	start := time.Now()
 	dbs := databases.GetAll()
@@ -507,7 +548,7 @@ func (db *database) ShowTables() scm.Scmer {
 	return scm.NewSlice(result)
 }
 
-func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) rebuildDatabaseResult {
+func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
 		return rebuildDatabaseResult{}
@@ -525,6 +566,9 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 	var errMu sync.Mutex
 	var rebuildErrors []string
 	dbs := db.tables.GetAll()
+	if len(only) > 0 {
+		dbs = []*table{only[0]}
+	}
 	if !includeEphemeral {
 		onlineTables := make([]*table, 0, len(dbs))
 		for _, t := range dbs {
