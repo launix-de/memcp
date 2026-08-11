@@ -18,8 +18,11 @@ package storage
 
 import (
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
+	"time"
+	"unsafe"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -283,5 +286,151 @@ func TestShardWriteOwnershipUsesExplicitTransactionState(t *testing.T) {
 	tx.ExitShardWrite(shard)
 	if shard.hasWriteOwnerForTx(tx) {
 		t.Fatal("released transaction write ownership remained visible")
+	}
+}
+
+func TestShowStatsLockedDoesNotReenterWithQueuedWriter(t *testing.T) {
+	shard := &storageShard{
+		main_count:  1,
+		columns:     map[string]ColumnStorage{"value": &StorageConst{value: scm.NewInt(7), count: 1}},
+		writeOwners: make(map[uint64]uint32),
+	}
+	readerReady := make(chan struct{})
+	readStats := make(chan shardStatsSnapshot, 1)
+	releaseReader := make(chan struct{})
+	go func() {
+		shard.mu.RLock()
+		defer shard.mu.RUnlock()
+		close(readerReady)
+		<-releaseReader
+		readStats <- shard.statsSnapshotRLocked()
+	}()
+	<-readerReady
+
+	writerDone := make(chan struct{})
+	go func() {
+		shard.mu.Lock()
+		defer shard.mu.Unlock()
+		close(writerDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for shard.mu.TryRLock() {
+		shard.mu.RUnlock()
+		if time.Now().After(deadline) {
+			close(releaseReader)
+			t.Fatal("writer did not queue for the shard lock")
+		}
+		runtime.Gosched()
+	}
+	close(releaseReader)
+
+	select {
+	case stats := <-readStats:
+		if stats.rowCount() != 1 || stats.size == 0 {
+			t.Fatalf("locked statistics = %v, want one row and a nonzero size", stats)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("locked SHOW statistics re-entered the shard read lock")
+	}
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("queued writer did not acquire the released shard lock")
+	}
+}
+
+func TestTableStatisticsReadsPublishedSnapshotWithoutShardLock(t *testing.T) {
+	shard := &storageShard{
+		main_count:  1,
+		columns:     map[string]ColumnStorage{"value": &StorageConst{value: scm.NewInt(7), count: 1}},
+		writeOwners: make(map[uint64]uint32),
+		srState:     WRITE,
+	}
+	tbl := &table{schema: &database{Name: "table-statistics-test"}, Shards: []*storageShard{shard}}
+	shard.t = tbl
+	tbl.publishShowColumnsSnapshot()
+	if stats := tbl.statistics(); stats.rowCount != 1 || stats.sizeBytes != 0 {
+		t.Fatalf("startup statistics = %+v, want row estimate 1 before size collection", stats)
+	}
+	tbl.collectStatistics()
+
+	shard.mu.Lock()
+	shard.main_count = 2
+	readStats := make(chan tableStatisticsSnapshot, 1)
+	go func() {
+		readStats <- tbl.statistics()
+	}()
+
+	select {
+	case stats := <-readStats:
+		if stats.rowCount != 1 || stats.sizeBytes == 0 {
+			t.Fatalf("published statistics = %+v, want the previously collected one-row snapshot", stats)
+		}
+	case <-time.After(time.Second):
+		shard.mu.Unlock()
+		t.Fatal("reading published table statistics waited for the shard lock")
+	}
+	shard.mu.Unlock()
+
+	tbl.ShowColumns()
+	if stats := tbl.statistics(); stats.rowCount != 1 {
+		t.Fatalf("SHOW COLUMNS replaced collected row count with %d, want 1", stats.rowCount)
+	}
+
+	tbl.collectStatistics()
+	if stats := tbl.statistics(); stats.rowCount != 2 {
+		t.Fatalf("refreshed row count = %d, want 2", stats.rowCount)
+	}
+}
+
+var tableStatisticsBenchmarkSink tableStatisticsSnapshot
+
+func TestTableShowColumnsSnapshotFitsCacheLine(t *testing.T) {
+	if size := unsafe.Sizeof(tableShowColumnsSnapshot{}); size > 64 {
+		t.Fatalf("table metadata snapshot size = %d bytes, want at most one cache line", size)
+	}
+}
+
+func benchmarkStatisticsTable() *table {
+	tbl := &table{schema: &database{Name: "table-statistics-benchmark"}}
+	for i := 0; i < 8; i++ {
+		shard := &storageShard{
+			t:            tbl,
+			main_count:   1000,
+			columns:      make(map[string]ColumnStorage, 4),
+			writeOwners:  make(map[uint64]uint32),
+			srState:      WRITE,
+			deltaColumns: make(map[string]int),
+		}
+		for col := 0; col < 4; col++ {
+			shard.columns[string(rune('a'+col))] = &StorageConst{value: scm.NewInt(int64(col)), count: 1000}
+		}
+		tbl.Shards = append(tbl.Shards, shard)
+	}
+	tbl.collectStatistics()
+	return tbl
+}
+
+func BenchmarkTableStatisticsOnDemandShardScan(b *testing.B) {
+	tbl := benchmarkStatisticsTable()
+	b.ReportAllocs()
+	for b.Loop() {
+		stats := tableStatisticsSnapshot{}
+		for _, shard := range tbl.Shards {
+			shard.mu.RLock()
+			stats.rowCount += int64(shard.main_count) + int64(len(shard.inserts)) - int64(shard.deletions.Count())
+			stats.sizeBytes += int64(shard.ComputeSize())
+			shard.mu.RUnlock()
+		}
+		tableStatisticsBenchmarkSink = stats
+	}
+}
+
+func BenchmarkTableStatisticsPublishedRead(b *testing.B) {
+	tbl := benchmarkStatisticsTable()
+	b.ReportAllocs()
+	for b.Loop() {
+		tableStatisticsBenchmarkSink = tbl.statistics()
 	}
 }

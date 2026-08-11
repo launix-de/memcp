@@ -202,6 +202,11 @@ type pendingSourceDelete struct {
 	oldRecid uint32
 }
 
+type tableStatisticsSnapshot struct {
+	rowCount  int64
+	sizeBytes int64
+}
+
 func (m *ShardMode) MarshalJSON() ([]byte, error) {
 	if *m == ShardModePartition {
 		return []byte("\"partition\""), nil
@@ -442,6 +447,54 @@ func (t *table) ActiveShards() []*storageShard {
 		return t.PShards
 	}
 	return t.Shards
+}
+
+// collectStatistics gathers approximate table statistics without coupling
+// shard mutations to table-wide counters. It is intended for maintenance jobs.
+func (t *table) collectStatistics() {
+	t.mu.Lock()
+	shards := append([]*storageShard(nil), t.ActiveShards()...)
+	t.mu.Unlock()
+	t.collectStatisticsFromShards(shards)
+}
+
+func (t *table) collectStatisticsFromShards(shards []*storageShard) {
+	stats := &tableStatisticsSnapshot{}
+	for _, shard := range shards {
+		if shard == nil {
+			continue
+		}
+		shardStats := shard.statsSnapshot()
+		stats.rowCount += shardStats.rowCount()
+		stats.sizeBytes += int64(shardStats.size)
+	}
+	for {
+		current := t.showColumnsSnapshot.Load()
+		if current == nil {
+			replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount))
+			replacement.statistics = stats
+			if t.showColumnsSnapshot.CompareAndSwap(nil, replacement) {
+				t.columnNamesSnapshot.Store(replacement.columnNames)
+				return
+			}
+			continue
+		}
+		replacement := *current
+		replacement.statistics = stats
+		if t.showColumnsSnapshot.CompareAndSwap(current, &replacement) {
+			return
+		}
+	}
+}
+
+func (t *table) statistics() tableStatisticsSnapshot {
+	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil {
+		if snapshot.statistics != nil {
+			return *snapshot.statistics
+		}
+		return tableStatisticsSnapshot{rowCount: int64(snapshot.rowEstimate)}
+	}
+	return tableStatisticsSnapshot{}
 }
 
 // maintenanceShards returns every shard set that must observe derived-column
@@ -830,6 +883,7 @@ type tableShowColumnsSnapshot struct {
 	rowEstimate       uint
 	distinctEstimates []uint64
 	columnNames       *tableColumnNamesSnapshot
+	statistics        *tableStatisticsSnapshot
 }
 
 type tableColumnNamesSnapshot struct {
@@ -897,12 +951,16 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		distinctEstimates[i] = distinctEstimate
 		result[i] = c.show(keyType, distinctEstimate, rowEstimate)
 	}
-	return &tableShowColumnsSnapshot{
+	snapshot := &tableShowColumnsSnapshot{
 		value:             scm.NewSlice(result),
 		rowEstimate:       rowEstimate,
 		distinctEstimates: distinctEstimates,
 		columnNames:       columnNames,
 	}
+	if current := t.showColumnsSnapshot.Load(); current != nil {
+		snapshot.statistics = current.statistics
+	}
+	return snapshot
 }
 
 func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
@@ -1474,6 +1532,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					t.mu.Lock()
 					t.Shards[i] = rebuilt
 					t.mu.Unlock()
+					t.collectStatistics()
 					t.schema.save()
 				}(len(t.Shards)-1, shard)
 				shard = NewShard(t)

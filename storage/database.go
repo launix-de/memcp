@@ -732,6 +732,7 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool) r
 				atomic.StoreUint64(&t.Columns[ci].RowEstimate, rowEst)
 			}
 			t.publishShowColumnsSnapshot()
+			t.collectStatisticsFromShards(newShardList)
 
 			// Collect replaced shards for deferred cleanup (see comment above).
 			if len(replaced) > 0 {

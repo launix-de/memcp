@@ -2438,25 +2438,12 @@ func Init(en scm.Env) {
 							continue
 						}
 						engine := showEngineStr(t)
-						var rowCount int64
-						var sizeBytes int64
-						for _, s := range t.ActiveShards() {
-							if s == nil {
-								continue
-							}
-							s.mu.RLock()
-							rowCount += int64(s.main_count) + int64(len(s.inserts)) - int64(s.deletions.Count())
-							sizeBytes += int64(s.ComputeSize())
-							s.mu.RUnlock()
-						}
-						if rowCount == 0 {
-							rowCount = int64(t.CountEstimate())
-						}
+						stats := t.statistics()
 						rows = append(rows, scm.NewSlice([]scm.Scmer{
 							scm.NewString("name"), scm.NewString(t.Name),
 							scm.NewString("engine"), scm.NewString(engine),
-							scm.NewString("row_count"), scm.NewInt(rowCount),
-							scm.NewString("size_bytes"), scm.NewInt(sizeBytes),
+							scm.NewString("row_count"), scm.NewInt(stats.rowCount),
+							scm.NewString("size_bytes"), scm.NewInt(stats.sizeBytes),
 							scm.NewString("collation"), scm.NewString(t.Collation),
 							scm.NewString("comment"), scm.NewString(t.Comment),
 						}))
@@ -3562,19 +3549,13 @@ func showBuildShardRow(t *table, i int, s *storageShard) scm.Scmer {
 			scm.NewString("size_bytes"), scm.NewInt(0),
 		})
 	}
-	s.mu.RLock()
-	mainCount := s.main_count
-	delta := len(s.inserts)
-	deletions := s.deletions.Count()
-	state := sharedStateStr(s.srState)
-	size := s.ComputeSize()
-	s.mu.RUnlock()
+	stats := s.statsSnapshot()
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewString("shard"), scm.NewInt(int64(i)),
-		scm.NewString("state"), scm.NewString(state),
-		scm.NewString("main_count"), scm.NewInt(int64(mainCount)),
-		scm.NewString("delta"), scm.NewInt(int64(delta)),
-		scm.NewString("deletions"), scm.NewInt(int64(deletions)),
-		scm.NewString("size_bytes"), scm.NewInt(int64(size)),
+		scm.NewString("state"), scm.NewString(sharedStateStr(stats.state)),
+		scm.NewString("main_count"), scm.NewInt(int64(stats.mainCount)),
+		scm.NewString("delta"), scm.NewInt(int64(stats.delta)),
+		scm.NewString("deletions"), scm.NewInt(int64(stats.deletions)),
+		scm.NewString("size_bytes"), scm.NewInt(int64(stats.size)),
 	})
 }
