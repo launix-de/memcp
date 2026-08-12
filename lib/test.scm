@@ -207,6 +207,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (count (qassoc_get graph_view 'edges '())) 2) true "join hypergraph extracts binary ON edges")
 	(assert (equal? (count (qassoc_get graph_view 'hyperedges '())) 1) true "join hypergraph preserves predicates spanning three aliases")
 	(assert (equal? (count (qassoc_get graph_view 'residuals '())) 0) true "join hypergraph has no residual for referenced predicates")
+	(assert (equal? (count (filter (qassoc_get graph_view 'edges '()) (lambda (entry)
+		(equal? (qassoc_get entry 'origin nil) 'inner-on)))) 2) true "join hypergraph preserves INNER ON provenance")
 	(assert (equal? (qb_where graph_block) graph_where) true "join hypergraph extraction leaves WHERE in its query-block")
 	(assert (equal? (map (qb_sources graph_block) source_join_expr)
 		(map graph_sources source_join_expr)) true "join hypergraph extraction leaves ON predicates on their sources")
@@ -221,6 +223,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (qassoc_get outer_barrier 'owner nil) "b") true "join hypergraph identifies the nullable outer-join source")
 	(assert (equal? (qassoc_get outer_barrier 'preserved '()) '("a" "c")) true "outer-join barrier preserves the complete left input")
 	(assert (equal? (qassoc_get outer_barrier 'references '()) '("a" "b")) true "outer-join barrier records aliases referenced by ON")
+	(assert (equal? (qassoc_get (car (qassoc_get outer_graph 'edges '())) 'origin nil) 'outer-on) true
+		"join hypergraph preserves OUTER ON provenance")
 	(define normalized_graph_block (join_optimizer_normalize_inner_joins graph_block))
 	(assert (equal? (count (split_and_terms (qb_where normalized_graph_block))) 4) true "inner ON predicates join the logical query-block predicate cloud")
 	(assert (equal? (map (qb_sources normalized_graph_block) source_join_expr) '(nil nil nil)) true "normalized inner sources do not retain physical predicate ownership")
@@ -233,6 +237,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (count (qassoc_get graph_plan 'order '())) 3) true "DPHyp covers every logical join source")
 	(assert (equal? (car (qassoc_get graph_plan 'tree '())) 'join-node) true "DPHyp records a bushy logical join tree")
 	(assert (equal? (cadr (qassoc_get graph_plan 'tree '())) 'inner) true "optimizer trees distinguish inner joins semantically")
+	(define test_join_tree_predicates (lambda (tree)
+		(match tree
+			((symbol join-leaf) _alias) '()
+			((symbol join-node) _kind left right predicates) (merge (list
+				(test_join_tree_predicates left)
+				(test_join_tree_predicates right)
+				predicates))
+			_ '())))
+	(define graph_plan_predicate_origins
+		(map (test_join_tree_predicates (qassoc_get graph_plan 'tree '())) join_order_pred_origin))
+	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'inner-on)))) 2) true
+		"logical join nodes retain INNER ON provenance from the hypergraph")
+	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'where)))) 1) true
+		"logical join nodes retain WHERE provenance from the hypergraph")
 	(define dense_join_aliases (map (produceN 14) (lambda (i) (concat "dense_" i))))
 	(define dense_join_nodes (mapIndex dense_join_aliases (lambda (i alias) (list alias (+ 100 i)))))
 	(define dense_join_predicates (merge (mapIndex dense_join_aliases (lambda (left_index left)
@@ -277,32 +295,46 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"join_reorder keeps the query-block source catalog in semantic order")
 	(assert (equal?
 		(map (qb_sources (apply_join_optimizer_plan graph_reordered_block)) source_alias)
-		(join_optimizer_tree_aliases graph_reordered_tree)) true
-		"physical preparation derives scan traversal from the logical join tree")
+		(map graph_sources source_alias)) true
+		"physical preparation leaves the semantic source catalog unchanged")
+	(assert (equal? (query_block_join_plan graph_reordered_block graph_sources) graph_reordered_tree) true
+		"physical lowering reads join order directly from the logical tree")
+	(define prepared_source_order (list (nth graph_sources 2) (car graph_sources) (cadr graph_sources)))
+	(define prepared_order_block (make_query_block
+		"memcp-tests" graph_sources '() graph_where nil nil nil nil nil '() '()
+		(facts_with_physical_join_order '() prepared_source_order)))
+	(assert (equal? (map (qb_sources prepared_order_block) source_alias) (map graph_sources source_alias)) true
+		"physical preparation never reorders the semantic source catalog")
+	(assert (equal? (join_optimizer_tree_aliases (query_block_join_plan prepared_order_block graph_sources))
+		(map prepared_source_order source_alias)) true
+		"physical preparation records specialized traversal only in the join tree")
 	(define semantic_outer_tree (join_optimizer_left_deep_tree outer_graph_sources))
 	(assert (equal? (cadr semantic_outer_tree) 'left-outer) true "logical join trees preserve left-outer barriers")
+	(assert (equal? (join_order_pred_origin (car (nth semantic_outer_tree 4))) 'outer-on) true
+		"LEFT OUTER join nodes own their ON predicates")
+	(assert (equal? (join_order_pred_owner (car (nth semantic_outer_tree 4))) "b") true
+		"LEFT OUTER join predicates retain their barrier owner")
 	(define bushy_scan_tree (make_join_optimizer_node 'inner
-		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b"))
-		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d"))))
-	(assert (equal?
-		(map (list bushy_scan_tree
-			(physical_join_cursor_rest bushy_scan_tree)
-			(physical_join_cursor_rest (physical_join_cursor_rest bushy_scan_tree))
-			(physical_join_cursor_rest (physical_join_cursor_rest (physical_join_cursor_rest bushy_scan_tree))))
-			physical_join_cursor_first_alias)
-		'("a" "b" "c" "d")) true "physical lowering consumes bushy join trees structurally")
+		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b") '())
+		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '()) '()))
+	(assert (equal? (nth bushy_scan_tree 2)
+		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b") '())) true
+		"physical join plans preserve the complete left subtree")
+	(assert (equal? (nth bushy_scan_tree 3)
+		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '())) true
+		"physical join plans preserve the complete right subtree")
 	(define tree_group_stage (make_group_stage
 		"tree-group-stage" graph_reordered_block '() '() '() nil '() '() nil nil '()))
 	(assert (equal?
 		(map (qb_sources (gs_input (apply_join_optimizer_plan_stage tree_group_stage))) source_alias)
-		(join_optimizer_tree_aliases graph_reordered_tree)) true
-		"physical preparation applies logical join trees inside group stages")
+		(map graph_sources source_alias)) true
+		"physical preparation preserves semantic source catalogs inside group stages")
 	(define tree_union (make_union_block
 		(quote all) (list graph_reordered_block graph_reordered_block) '() nil nil '()))
 	(assert (equal?
 		(map (qb_sources (car (union_branches (apply_join_optimizer_plan_node tree_union)))) source_alias)
-		(join_optimizer_tree_aliases graph_reordered_tree)) true
-		"physical preparation applies logical join trees inside UNION branches")
+		(map graph_sources source_alias)) true
+		"physical preparation preserves semantic source catalogs inside UNION branches")
 	(define malformed_join_plan_block (make_query_block
 		"memcp-tests" graph_sources '() graph_where nil nil nil nil nil '() '()
 		(list (list 'join_plan (list 'join-leaf "missing")))))
