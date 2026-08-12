@@ -347,9 +347,12 @@ func isScanPseudoColName(name string) bool {
 // lockTable acquires a user-level read or write lock on the named table.
 // The session's State is updated while waiting, and the unlock callback is
 // registered with the session so that ReleaseAllLocks() can free it later.
-// Acquiring any lock requires an exclusive wait (drain other owners), then
-// drains in-flight shard readers by briefly acquiring each shard's write lock.
+// A run of FIFO-adjacent READ requests shares the lock. The first reader, or an
+// exclusive writer, drains in-flight shard readers before publishing the lock.
 func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) func() {
+	if ss == nil {
+		panic("LOCK TABLES requires a query session")
+	}
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("LOCK TABLES: unknown database: " + schema)
@@ -358,31 +361,56 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 	if t == nil {
 		panic("LOCK TABLES: unknown table: " + schema + "." + name)
 	}
-	// LOCK TABLES itself is serialized FIFO per table. This avoids a thundering
-	// herd when many sessions repeatedly lock the same hot table (e.g. cron).
 	cond := t.getTableLockCond()
-	if owner := t.tableLockOwner.Load(); owner != nil && owner == ss {
-		if write && !t.tableLockWrite.Load() {
+	ss.BeginLockWait()
+	defer ss.EndLockWait()
+	ss.SetState("Waiting for table lock")
+	t.tableLockMu.Lock()
+	if t.tableLockOwner.Load() == ss {
+		t.tableLockMu.Unlock()
+		return func() {}
+	}
+	if t.tableLockReadOwners[ss] != 0 {
+		t.tableLockMu.Unlock()
+		if write {
 			panic("LOCK TABLES: cannot upgrade an existing READ lock")
 		}
 		return func() {}
 	}
-	if ss != nil {
-		ss.BeginLockWait()
-		defer ss.EndLockWait()
-		ss.SetState("Waiting for table lock")
-	}
-	t.tableLockMu.Lock()
 	myTicket := t.tableLockNext
 	t.tableLockNext++
-	for myTicket != t.tableLockServe || t.tableLockOwner.Load() != nil {
+	for myTicket != t.tableLockServe || t.tableLockState.Load() < 0 || (write && t.tableLockState.Load() != 0) {
 		cond.Wait()
+	}
+	if !write && t.tableLockState.Load() > 0 {
+		if t.tableLockReadOwners == nil {
+			t.tableLockReadOwners = make(map[*scm.SessionState]uint32)
+		}
+		t.tableLockReadOwners[ss]++
+		t.tableLockState.Add(1)
+		t.tableLockServe++
+		cond.Broadcast()
+		t.tableLockMu.Unlock()
+		return func() {
+			t.tableLockMu.Lock()
+			if t.tableLockReadOwners[ss] == 1 {
+				delete(t.tableLockReadOwners, ss)
+			} else {
+				t.tableLockReadOwners[ss]--
+			}
+			if t.tableLockState.Add(-1) < 0 {
+				t.tableLockMu.Unlock()
+				panic("table READ lock count underflow")
+			}
+			cond.Broadcast()
+			t.tableLockMu.Unlock()
+		}
 	}
 	t.tableLockMu.Unlock()
 	// Drain in-flight shard readers by acquiring each shard's write lock.
-	// We MUST set tableLockOwner while still holding the last shard write lock
-	// so that any new scan that does RLock → tableLockOwner.Load() sees the
-	// owner set before it can proceed past its own RLock.
+	// We MUST publish the lock while still holding the last shard write lock
+	// so that any new scan that does RLock -> tableLockState.Load() sees the
+	// lock before it can proceed past its own RLock.
 	acquired := false
 	defer func() {
 		if acquired {
@@ -399,13 +427,41 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 	for _, s := range shards {
 		s.mu.Lock()
 	}
-	t.tableLockWrite.Store(write)
-	t.tableLockOwner.Store(ss)
+	if write {
+		t.tableLockOwner.Store(ss)
+		t.tableLockState.Store(-1)
+	} else {
+		t.tableLockMu.Lock()
+		if t.tableLockReadOwners == nil {
+			t.tableLockReadOwners = make(map[*scm.SessionState]uint32)
+		}
+		t.tableLockReadOwners[ss]++
+		t.tableLockState.Add(1)
+		t.tableLockServe++
+		cond.Broadcast()
+		t.tableLockMu.Unlock()
+	}
 	for _, s := range shards {
 		s.mu.Unlock()
 	}
 	acquired = true
-	return t.unlockTable
+	if write {
+		return t.unlockTableWrite
+	}
+	return func() {
+		t.tableLockMu.Lock()
+		if t.tableLockReadOwners[ss] == 1 {
+			delete(t.tableLockReadOwners, ss)
+		} else {
+			t.tableLockReadOwners[ss]--
+		}
+		if t.tableLockState.Add(-1) < 0 {
+			t.tableLockMu.Unlock()
+			panic("table READ lock count underflow")
+		}
+		cond.Broadcast()
+		t.tableLockMu.Unlock()
+	}
 }
 
 func lockTable(schema, name string, write bool, ss *scm.SessionState) {

@@ -57,6 +57,9 @@ import multiprocessing
 import re
 import random
 import tempfile
+import ctypes
+import select
+import struct
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
@@ -106,6 +109,59 @@ def measure_cpu_load(pid: int, start_cpu: float, end_cpu: float, elapsed_sec: fl
 
 # Global flag for connect-only mode
 is_connect_only_mode = False
+
+
+def observe_atomic_json(path: Path, duration_seconds: float) -> Tuple[int, Optional[str]]:
+    """Read a live JSON file repeatedly and reject missing or partial generations."""
+    deadline = time.monotonic() + duration_seconds
+    reads = 0
+    inotify_fd = -1
+    libc = None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.inotify_init1.argtypes = [ctypes.c_int]
+        libc.inotify_init1.restype = ctypes.c_int
+        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        libc.inotify_add_watch.restype = ctypes.c_int
+        inotify_fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if inotify_fd >= 0:
+            watch_mask = 0x00000100 | 0x00000200 | 0x00000040 | 0x00000080
+            if libc.inotify_add_watch(inotify_fd, os.fsencode(path.parent), watch_mask) < 0:
+                os.close(inotify_fd)
+                inotify_fd = -1
+
+        while time.monotonic() < deadline:
+            try:
+                payload = path.read_bytes()
+            except FileNotFoundError:
+                if reads == 0:
+                    time.sleep(0.001)
+                    continue
+                return reads, "file disappeared after a complete generation was observed"
+            if not payload:
+                return reads, "observed an empty generation"
+            try:
+                json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                return reads, f"observed a partial generation ({len(payload)} bytes): {exc}"
+            reads += 1
+
+            if inotify_fd >= 0 and select.select([inotify_fd], [], [], 0)[0]:
+                events = os.read(inotify_fd, 64 * 1024)
+                offset = 0
+                while offset + 16 <= len(events):
+                    _, mask, _, name_len = struct.unpack_from("iIII", events, offset)
+                    offset += 16
+                    name = events[offset:offset + name_len].split(b"\0", 1)[0]
+                    offset += name_len
+                    if name == os.fsencode(path.name) and mask & (0x00000100 | 0x00000200 | 0x00000040):
+                        return reads, f"schema target was removed before replacement (inotify mask 0x{mask:x})"
+    finally:
+        if inotify_fd >= 0:
+            os.close(inotify_fd)
+    if reads == 0:
+        return 0, "no schema generation was observed"
+    return reads, None
 
 # Performance test configuration
 PERF_TEST_ENABLED = os.environ.get("PERF_TEST", "0") == "1"
@@ -615,6 +671,10 @@ class SQLTestRunner:
         if is_noncritical:
             self.noncritical_count += 1
 
+        start_delay_ms = int(test_case.get("start_delay_ms", 0))
+        if start_delay_ms > 0:
+            time.sleep(start_delay_ms / 1000.0)
+
         # Special action test cases (restart, etc.)
         action = test_case.get("action")
         if action == "restart":
@@ -636,6 +696,20 @@ class SQLTestRunner:
                 else:
                     self._record_fail(name, "Server not reachable after crash", None, None, None, is_noncritical)
             return True
+        if action == "observe_atomic_schema":
+            try:
+                port = int(self.base_url.rsplit(':', 1)[1])
+            except (ValueError, IndexError):
+                port = 4321
+            data_dir = Path(os.environ.get("MEMCP_TEST_DATA_DIR", f"/tmp/memcp-sql-tests-{port}"))
+            duration = float(test_case.get("duration", 1.0))
+            reads, error = observe_atomic_json(data_dir / database / "schema.json", duration)
+            if error is None:
+                self._record_success(name, is_noncritical)
+            else:
+                self._record_fail(name, f"Atomic schema observation failed after {reads} reads: {error}",
+                                  None, None, None, is_noncritical)
+            return error is None
 
         # Performance test handling
         yaml_threshold_ms = test_case.get("threshold_ms")
@@ -1340,40 +1414,33 @@ class SQLTestRunner:
             else:
                 test_cases.append(tc)
 
-        if self.fail_fast:
-            for i, tc in enumerate(test_cases):
-                if '_delay_ms' in tc:
-                    time.sleep(tc['_delay_ms'] / 1000.0)
-                    continue
+        # Preserve declared concurrency in every mode. Fail-fast stops only
+        # after the complete parallel group containing the first failure.
+        i = 0
+        while i < len(test_cases):
+            tc = test_cases[i]
+            if '_delay_ms' in tc:
+                time.sleep(tc['_delay_ms'] / 1000.0)
+                i += 1
+                continue
+            group = tc.get('parallel')
+            if group:
+                group_tests = [tc]
+                j = i + 1
+                while j < len(test_cases) and test_cases[j].get('parallel') == group:
+                    group_tests.append(test_cases[j])
+                    j += 1
+                print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
+                self._run_parallel_group(group_tests, database)
+                i = j
+            else:
                 self.run_test_case(tc, database)
-                if self.failed_critical > 0:
-                    remaining_tests = sum(1 for pending in test_cases[i + 1:] if '_delay_ms' not in pending)
-                    if remaining_tests > 0:
-                        print(f"⏭️  Fail-fast skipped {remaining_tests} tests after the first failure")
-                    break
-        else:
-            # Group consecutive test cases by 'parallel' key and run groups concurrently
-            i = 0
-            while i < len(test_cases):
-                tc = test_cases[i]
-                if '_delay_ms' in tc:
-                    time.sleep(tc['_delay_ms'] / 1000.0)
-                    i += 1
-                    continue
-                group = tc.get('parallel')
-                if group:
-                    # Collect all consecutive tests with the same parallel group
-                    group_tests = [tc]
-                    j = i + 1
-                    while j < len(test_cases) and test_cases[j].get('parallel') == group:
-                        group_tests.append(test_cases[j])
-                        j += 1
-                    print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
-                    self._run_parallel_group(group_tests, database)
-                    i = j
-                else:
-                    self.run_test_case(tc, database)
-                    i += 1
+                i += 1
+            if self.fail_fast and self.failed_critical > 0:
+                remaining_tests = sum(1 for pending in test_cases[i:] if '_delay_ms' not in pending)
+                if remaining_tests > 0:
+                    print(f"⏭️  Fail-fast skipped {remaining_tests} tests after the first failure")
+                break
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
@@ -1544,7 +1611,7 @@ def suite_requires_managed_restart(spec_file: str) -> bool:
     for test_case in test_cases:
         if not isinstance(test_case, dict):
             continue
-        if test_case.get("action") == "restart":
+        if test_case.get("action") in ("restart", "observe_atomic_schema"):
             return True
         sql = test_case.get("sql")
         if isinstance(sql, str) and sql.strip().upper() == "SHUTDOWN":

@@ -80,11 +80,16 @@ func newDatabase() *database {
 }
 
 type rebuildDatabaseResult struct {
+	// replaced remains reachable until the caller has committed schema.json.
+	// On any build or publication error these shards must stay on disk because
+	// the last committed schema may still reference them.
 	replaced []*storageShard
 	errors   []string
 }
 
 type schemaWriteOptions interface {
+	// This has the same atomic-generation contract as WriteSchema. durable also
+	// requires data and namespace metadata to be stable before returning.
 	WriteSchemaWithMode(schema []byte, durable bool)
 }
 
@@ -172,6 +177,8 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 		}
 	}
 	if len(errs) == 0 {
+		// tbl.schema.save() committed all replacement UUIDs. Only this success
+		// path may remove files belonging to the previous generation.
 		for _, s := range result.replaced {
 			if err := func() (err error) {
 				defer func() {
@@ -211,6 +218,8 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 				errs = append(errs, err.Error())
 				return
 			}
+			// db.save() committed all replacement UUIDs. A save failure returns
+			// above and deliberately retains every old generation.
 			for _, s := range result.replaced {
 				if err := func() (err error) {
 					defer func() { err = recoverAsError("cleanup failed for database " + db.Name + " shard " + s.uuid.String()) }()
@@ -319,6 +328,9 @@ func (db *database) getSaveCond() *sync.Cond {
 }
 
 func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool) {
+	// Serialize publications without holding schemalock. Coalescing may skip an
+	// intermediate in-memory snapshot, but every backend call still publishes a
+	// complete generation and every waiter observes its success or panic.
 	db.saveMu.Lock()
 	cond := db.getSaveCond()
 	db.saveRequested++
@@ -848,8 +860,8 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 	// on-disk files AFTER db.save() has written the new schema.json.
 	// Deleting old column files before saving the schema creates a window
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
-	// The finalizer set in shard.rebuild() provides a safety net: if the
-	// caller never calls RemoveFromDisk (e.g. on panic), GC will clean up.
+	// Failed schema publication intentionally retains the old generation: it is
+	// still referenced by the last committed schema and must remain recoverable.
 	return rebuildDatabaseResult{replaced: allReplaced, errors: rebuildErrors}
 }
 

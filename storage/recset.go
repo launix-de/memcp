@@ -284,7 +284,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, false)
@@ -431,7 +431,7 @@ func (t *storageShard) collectProjectJoinKeys(recids []uint32, sourceKeyCols []s
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, false)
@@ -568,7 +568,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, false)
@@ -850,7 +850,7 @@ func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string,
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, false)
@@ -936,7 +936,7 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, false)
@@ -1112,7 +1112,7 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, false)

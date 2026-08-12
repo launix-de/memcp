@@ -725,7 +725,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 							if s.t.PersistencyMode != Memory {
 								f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
 								newcol.Serialize(f)
-								f.Close()
+								finishColumnWrite(f, s.t.PersistencyMode == Safe)
 							}
 						}
 					}
@@ -897,7 +897,10 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	}
 	fmt.Println("activated new partitioning schema for", t.Name, "after", time.Since(start))
 
-	// ── Phase G: Cleanup ──
+	// ── Phase G: Commit and cleanup ──
+	// New shard files are complete before this publication barrier. schema.json
+	// must atomically name the new PShards before any old shard file is released;
+	// a publication panic therefore leaves oldshards intact and recoverable.
 	t.schema.schemalock.Lock()
 	t.schema.saveLockedWithDurabilityAndUnlock(t.schemaWriteDurable())
 
@@ -913,6 +916,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	t.maintenanceMu.Unlock()
 
 	for _, s := range oldshards {
+		// Deliberately after successful schema publication. Persistent cleanup
+		// must never move into a defer, finalizer, or failure path.
 		GlobalCache.Remove(s)
 		s.RemoveFromDisk()
 	}

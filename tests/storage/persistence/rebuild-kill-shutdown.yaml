@@ -1,0 +1,163 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+
+metadata:
+  version: "1.0"
+  description: "Query cancellation, rebuild publication, and shutdown preserve one complete SAFE generation"
+  isolated: true
+
+setup:
+  - scm: (settings "ShardSize" 1000)
+  - sql: "DROP TABLE IF EXISTS rks_rows"
+  - sql: "DROP TABLE IF EXISTS rks_kill_ids"
+  - sql: "DROP TABLE IF EXISTS rks_scan"
+  - sql: "CREATE TABLE rks_rows (id INT PRIMARY KEY, payload TEXT) ENGINE=SAFE"
+  - sql: "CREATE TABLE rks_kill_ids (id BIGINT) ENGINE=MEMORY"
+  - sql: "CREATE TABLE rks_scan (id INT PRIMARY KEY) ENGINE=MEMORY"
+  - scm: |
+      (insert (table "memcp-tests" "rks_rows") '("id" "payload")
+        (map (produceN 20000) (lambda (i)
+          (list (+ i 1) (concat "payload-" (+ i 1))))))
+  - scm: |
+      (insert (table "memcp-tests" "rks_scan") '("id")
+        (map (produceN 800) (lambda (i) (list (+ i 1)))))
+
+test_cases:
+  - name: "Publish the initial SAFE generation"
+    sql: "SHUTDOWN"
+
+  - name: "Initial generation is exact after restart"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM rks_rows"
+    expect:
+      rows: 1
+      data:
+        - cnt: 20000
+          checksum: 200010000
+
+  - name: "Schema readers only observe complete generations"
+    parallel: rks_schema_publication
+    action: observe_atomic_schema
+    duration: 2.0
+
+  - name: "Publish repeated schema generations"
+    parallel: rks_schema_publication
+    start_delay_ms: 100
+    steps:
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_01 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_02 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_03 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_04 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_05 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_06 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_07 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_08 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_09 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_10 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_11 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_12 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_13 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_14 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_15 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_16 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_17 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_18 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_19 INT"
+      - sql: "ALTER TABLE rks_rows ADD COLUMN schema_probe_20 INT"
+
+  - name: "Add a WAL-backed delta generation"
+    scm: |
+      (insert (table "memcp-tests" "rks_rows") '("id" "payload")
+        (map (produceN 2000) (lambda (i)
+          (list (+ i 20001) (concat "delta-" (+ i 20001))))))
+
+  - name: "Killed scan releases all shard locks"
+    steps:
+      - session_id: "rks-victim"
+        sql: "INSERT INTO rks_kill_ids VALUES (CONNECTION_ID())"
+      - session_id: "rks-victim"
+        sql: "SELECT COUNT(*) FROM rks_scan a, rks_scan b, rks_scan c"
+        background: true
+        expect:
+          error: true
+      - session_id: "rks-killer"
+        sql: "SELECT 1"
+      - session_id: "rks-killer"
+        sql: "SELECT KILL_QUERY(id) FROM rks_kill_ids LIMIT 1"
+      - wait_for_background: true
+      - session_id: "rks-check"
+        sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM rks_rows"
+        expect:
+          rows: 1
+          data:
+            - cnt: 22000
+              checksum: 242011000
+
+  - name: "Rebuild immediately after query cancellation"
+    scm: '(rebuild (table "memcp-tests" "rks_rows") true false)'
+    timeout: 20
+
+  - name: "Rebuilt generation remains exact"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM rks_rows"
+    expect:
+      rows: 1
+      data:
+        - cnt: 22000
+          checksum: 242011000
+
+  - name: "Graceful shutdown after killed query and rebuild"
+    sql: "SHUTDOWN"
+    restart_timeout: 30
+
+  - name: "Graceful restart retains the complete generation"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM rks_rows"
+    expect:
+      rows: 1
+      data:
+        - cnt: 22000
+          checksum: 242011000
+
+  - name: "Rebuild interrupted by hard process crash"
+    parallel: rks_crash_rebuild
+    scm: '(rebuild (table "memcp-tests" "rks_rows") true false)'
+    expect:
+      interrupted_ok: true
+
+  - name: "Crash while rebuild publication is active"
+    parallel: rks_crash_rebuild
+    scm: "(begin (sleep 0.01) (crash))"
+    expect:
+      interrupted_ok: true
+
+  - name: "Restart after interrupted rebuild"
+    action: restart
+
+  - name: "Crash recovery selects one complete committed generation"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM rks_rows"
+    expect:
+      rows: 1
+      data:
+        - cnt: 22000
+          checksum: 242011000
+
+  - name: "Second rebuild succeeds after crash recovery"
+    scm: '(rebuild (table "memcp-tests" "rks_rows") true false)'
+    timeout: 20
+
+  - name: "Second graceful shutdown completes"
+    sql: "SHUTDOWN"
+    restart_timeout: 30
+
+  - name: "Final restart retains exact rows and checksum"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM rks_rows"
+    expect:
+      rows: 1
+      data:
+        - cnt: 22000
+          checksum: 242011000
+
+  - name: "Restore default shard size"
+    scm: (settings "ShardSize" 60000)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS rks_rows"
+  - sql: "DROP TABLE IF EXISTS rks_kill_ids"
+  - sql: "DROP TABLE IF EXISTS rks_scan"

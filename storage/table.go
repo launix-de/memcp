@@ -294,26 +294,31 @@ type table struct {
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
 	// Software contract:
-	//   - tableLockOwner/tableLockWrite describe the currently granted user lock.
+	//   - tableLockOwner describes the WRITE owner; tableLockState and
+	//     tableLockReadOwners describe concurrently granted READ locks.
 	//   - tableLockNext/tableLockServe serialize LOCK TABLES acquisition FIFO per table,
 	//     so many concurrent waiters (e.g. cron workers) do not stampede on unlock.
 	//   - Regular scans/writes only consult waitTableLock; they never participate in
 	//     the FIFO queue and are released together once the owner unlocks.
-	// tableLockOwner and tableLockWrite are read from every shard goroutine on
+	//   - Mutations wait for tableLockState before taking a shard lock and recheck
+	//     after taking it. They never wait for a table lock while holding a shard
+	//     lock; cache snapshots hold their table READ lock while entering shards.
+	// tableLockState is read from every shard goroutine on
 	// every scan; isolate them on their own cache line to prevent false sharing
 	// with Auto_increment (written on every INSERT).
-	tableLockMu    sync.Mutex                       // guards cond waits + acquisition
-	tableLockOnce  sync.Once                        // lazy-inits tableLockCond
-	tableLockCond  *sync.Cond                       // broadcast on unlock
-	tableLockNext  uint64                           // next FIFO ticket for LOCK TABLES acquisition
-	tableLockServe uint64                           // currently served FIFO ticket
-	tableLockOwner atomic.Pointer[scm.SessionState] // nil = no lock; points to owning *SessionState
-	tableLockWrite atomic.Bool                      // true = WRITE lock, false = READ lock
-	_              [39]byte                         // pad to cache-line boundary
-	Auto_increment uint64                           // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
-	Collation      string
-	Charset        string
-	Comment        string
+	tableLockMu         sync.Mutex                       // guards cond waits + acquisition
+	tableLockOnce       sync.Once                        // lazy-inits tableLockCond
+	tableLockCond       *sync.Cond                       // broadcast on unlock
+	tableLockNext       uint64                           // next FIFO ticket for LOCK TABLES acquisition
+	tableLockServe      uint64                           // currently served FIFO ticket
+	tableLockOwner      atomic.Pointer[scm.SessionState] // non-nil for a WRITE lock
+	tableLockState      atomic.Int64                     // 0 = unlocked, -1 = WRITE, positive = READ count
+	tableLockReadOwners map[*scm.SessionState]uint32     // guarded by tableLockMu
+	_                   [32]byte                         // separate table locks from insert traffic
+	Auto_increment      uint64                           // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
+	Collation           string
+	Charset             string
+	Comment             string
 
 	// index column frequency: used to sort equality columns by frequency
 	// so that the most-queried columns come first, maximizing prefix overlap.
@@ -734,19 +739,18 @@ func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	t.tableLockMu.Lock()
 	for {
 		owner := t.tableLockOwner.Load()
-		if owner == nil {
-			break
-		}
-		if owner == ss {
-			if !isWrite || t.tableLockWrite.Load() {
-				break // owner can always read; owner can write under WRITE lock
+		state := t.tableLockState.Load()
+		if !isWrite {
+			if state >= 0 || owner == ss {
+				break
 			}
-			// Owner trying to write while holding a READ lock: MySQL returns an error.
+		} else if owner == ss {
+			break
+		} else if t.tableLockReadOwners[ss] != 0 {
 			errMsg = "Can't write to table '" + t.Name + "' while it has a READ lock"
 			break
-		}
-		if !isWrite && !t.tableLockWrite.Load() {
-			break // READ lock doesn't block reads from other sessions
+		} else if state == 0 {
+			break
 		}
 		cond.Wait()
 	}
@@ -756,9 +760,14 @@ func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	}
 }
 
-// unlockTable releases the table lock and wakes all waiters.
-func (t *table) unlockTable() {
+func (t *table) hasTableLock() bool {
+	return t.tableLockState.Load() != 0
+}
+
+// unlockTableWrite releases the exclusive table lock and wakes all waiters.
+func (t *table) unlockTableWrite() {
 	t.tableLockOwner.Store(nil)
+	t.tableLockState.Store(0)
 	cond := t.getTableLockCond()
 	t.tableLockMu.Lock()
 	t.tableLockServe++

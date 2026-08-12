@@ -1901,11 +1901,12 @@ func (m *ShardMapReducer) FlushSideEffects() {
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) uint32 {
+	ss := scm.GetCurrentSessionState()
 	// Check table-level user lock (LOCK TABLES): writes block under any lock.
 	// Always call waitTableLock — it handles other-session blocking and
 	// owner-write-under-READ-lock error in one place.
-	if t.t.tableLockOwner.Load() != nil {
-		t.t.waitTableLock(scm.GetCurrentSessionState(), true)
+	if t.t.hasTableLock() {
+		t.t.waitTableLock(ss, true)
 	}
 	beforeInsertTriggers := t.t.GetTriggers(BeforeInsert)
 	currentTx := CurrentTx()
@@ -1928,7 +1929,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 			return 0
 		}
 		if !alreadyLocked {
-			t.mu.Lock()
+			t.lockForMutation(ss)
 			defer t.mu.Unlock()
 		}
 		firstNewRecid := uint32(0)
@@ -1952,11 +1953,31 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	}
 
 	if !alreadyLocked {
-		t.mu.Lock()
+		t.lockForMutation(ss)
 		defer t.mu.Unlock()
 	}
 	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, currentTx)
 	return firstNewRecid
+}
+
+// lockForMutation follows the table-lock-before-shard-lock order without a
+// TOCTOU window. Table-lock acquisition publishes tableLockState while holding
+// all shard write locks, so a lock that raced our first check is visible after
+// we acquire t.mu. Never wait for that owner while retaining t.mu: a cache
+// initializer holding a READ table lock may need this shard to finish its
+// snapshot before it can release the table lock.
+func (t *storageShard) lockForMutation(ss *scm.SessionState) {
+	for {
+		if t.t.hasTableLock() {
+			t.t.waitTableLock(ss, true)
+		}
+		t.mu.Lock()
+		owner := t.t.tableLockOwner.Load()
+		if t.t.tableLockState.Load() == 0 || owner == ss {
+			return
+		}
+		t.mu.Unlock()
+	}
 }
 
 func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alreadyLocked bool) uint32 {
@@ -2060,7 +2081,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	if fireTriggers && len(t.t.Triggers) > 0 {
 		func() {
 			t.mu.Unlock()
-			defer t.mu.Lock()
+			defer t.lockForMutation(scm.GetCurrentSessionState())
 			for _, row := range triggerInsertRows {
 				t.t.ExecuteTriggers(AfterInsert, nil, row)
 			}
@@ -2497,7 +2518,7 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 			}
 			f := s.t.schema.persistence.WriteColumn(s.uuid.String(), colName)
 			cs.Serialize(f)
-			f.Close()
+			finishColumnWrite(f, newMode == Safe)
 		}
 		// open logfile for Safe/Logged
 		if newMode == Safe || newMode == Logged {
@@ -2765,7 +2786,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				if t.t.PersistencyMode != Memory && t.t.PersistencyMode != Cache {
 					f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
 					newProxy.Serialize(f)
-					f.Close()
+					finishColumnWrite(f, t.t.PersistencyMode == Safe)
 				}
 				continue
 			}
@@ -2877,7 +2898,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			if t.t.PersistencyMode != Memory && t.t.PersistencyMode != Cache {
 				f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
 				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
-				f.Close()
+				finishColumnWrite(f, t.t.PersistencyMode == Safe)
 			}
 		}
 		b.WriteString(") -> ")
@@ -2929,10 +2950,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// publish can leave schema.json pointing at the old shard UUID after its
 		// WAL was already removed, losing rows that only existed in the old log.
 
-		// Only after a successful rebuild, schedule old shard files for deletion.
-		runtime.SetFinalizer(t, func(t *storageShard) {
-			t.RemoveFromDisk()
-		})
+		// The caller retains the old shard until the new schema generation is
+		// durably committed, then removes it explicitly. A finalizer must never
+		// delete files because the last committed schema may still reference them.
 	} else {
 		// otherwise: table stays the same
 		result.uuid = t.uuid // copy uuid in case nothing changes
