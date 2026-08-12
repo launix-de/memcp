@@ -154,6 +154,32 @@ Use the existing scalable physical representations instead:
 Lists remain valid for bounded scalar tuples, operator arguments, parser data,
 and final API row values. Their size must be independent of relation cardinality.
 
+## Computed Columns Are Definitions, Not Prepared Subsets
+
+A computed column, including a `StorageComputeProxy`, defines one logical value
+for every live row in its table. Its physical cache may be complete, partial,
+invalidated, or absent without changing that logical domain.
+
+`filter` / `filterCols` arguments and `CompressFiltered` are preparation hints.
+They may select values to prewarm because a physical plan expects to read them
+soon, but they must never become part of the column definition. A row omitted
+from a preparation batch is not absent, `NULL`, or an error.
+
+An ordinary computed column may repair a missing or invalidated value by
+computing that row from its current inputs and caching the result. An ordered
+reduction column (ORC) has dependencies between rows and must instead repair a
+semantically sufficient ordered dependency range. That range may be a suffix
+or the whole column. It must not pretend that an order-dependent value can be
+computed pointwise, return stale data, or expose a transient invalid-cache
+sentinel as a SQL value.
+
+Invalidation marks physical cache entries as unusable; it does not remove their
+logical values. Invalidation and repair must cover the dependency closure of
+the changed inputs. Planner setup, DDL, rebuild, persistence, and session-local
+variants must preserve this definition/cache distinction. Eager preparation,
+selective prewarming, and lazy repair may change when work happens, never the
+query-visible result.
+
 ## LIMIT Is A Scan Boundary
 
 Every physical operator that owns a SQL `LIMIT` must lower to `scan_order` or
