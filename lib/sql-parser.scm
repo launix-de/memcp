@@ -94,10 +94,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 (define sql_column (parser (or
 	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl true col true))
-	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl true col false))
+	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl true col true))
 	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl false col true))
-	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl false col false))
-	(parser (define col sql_identifier_quoted) '((quote get_column) nil true col false))
+	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl false col true))
+	(parser (define col sql_identifier_quoted) '((quote get_column) nil true col true))
 	(parser (define col sql_identifier_unquoted) '((quote get_column) nil true col true))
 )))
 
@@ -823,7 +823,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
 		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") '((quote if) cond t f))
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
-		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" sql_expression "," sql_expression "," sql_expression ")") nil) /* ignore */
 		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn '('table schema tbl) col "auto_increment" val) (error "unknown pg_catalog key: " key)))
 
