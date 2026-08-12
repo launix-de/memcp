@@ -13198,7 +13198,9 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(join_optimizer_tree_first_alias scan_plan)))
 		(define final_condition (coalesceNil (qb_where block) true))
 		(define order_items (coalesceNil (qb_order block) '()))
-		(define direct_order (order_items_belong_to_source? driver_source order_items))
+		(define direct_order (order_items_supported_by_join_driver?
+			scan_sources first_alias driver_source order_items
+			(query_block_stage_catalog block) final_condition))
 		(define direct_order_safe (and direct_order
 			(not (ordered_join_limit_requires_complete_rows?
 				scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
