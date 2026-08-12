@@ -139,7 +139,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 (define sql_comparison_expr (lambda (op a b)
 	(match op
 		"eq" '((quote equal??) a b)
-		"ne" '((quote not) '((quote equal??) a b))
+		"ne" '((quote sql_not) '((quote equal??) a b))
 		"le" '((quote <=) a b)
 		"ge" '((quote >=) a b)
 		"lt" '((quote <) a b)
@@ -663,17 +663,17 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2)) '('sql_not '('strlike a b "utf8mb4_general_ci")))
 		/* REGEXP/RLIKE operator: expr REGEXP 'pattern' -> regexp_test(expr, pattern) */
 		(parser '((define a sql_expression3) (atom "REGEXP" true) (define b sql_expression2)) '('regexp_test a b))
 		(parser '((define a sql_expression3) (atom "RLIKE" true) (define b sql_expression2)) '('regexp_test a b))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b sql_expression2)) '('not '('regexp_test a b)))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b sql_expression2)) '('not '('regexp_test a b)))
-		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote not) (cons (quote contains?) (cons (cons (quote list) b) (list a)))))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b sql_expression2)) '('sql_not '('regexp_test a b)))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b sql_expression2)) '('sql_not '('regexp_test a b)))
+		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('sql_in (cons list b) a))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote sql_not) (cons (quote sql_in) (cons (cons (quote list) b) (list a)))))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
 		(parser '((define a sql_expression3) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote sql_not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
 		sql_expression3
 	)))
 
@@ -704,7 +704,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_expression5 (parser (or
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
 		/* NOT has lower precedence than IS NULL: NOT expr IS NULL == NOT (expr IS NULL) */
-		(parser '((atom "NOT" true) (define expr sql_expression5)) '('not expr))
+		(parser '((atom "NOT" true) (define expr sql_expression5)) '('sql_not expr))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr sql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))

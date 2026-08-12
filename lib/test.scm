@@ -98,10 +98,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal?? false (count '(1))) false "equal?? bool cross-type falsy")
 	(assert (equal?? '() false) true "equal?? empty list vs false")
 	(assert (equal?? + (count '(1))) false "equal?? func vs non-func")
-	/* Less cross-type coverage (compare.go:Less) */
-	(assert (< nil nil) false "less nil nil")
-	(assert (< nil 5) true "less nil vs value")
-	(assert (< 5 nil) false "less value vs nil")
+	/* Public comparisons preserve SQL UNKNOWN. Internal storage ordering calls
+	Less directly and retains a total order including nil. */
+	(assert (nil? (< nil nil)) true "less nil nil is unknown")
+	(assert (nil? (< nil 5)) true "less nil vs value is unknown")
+	(assert (nil? (< 5 nil)) true "less value vs nil is unknown")
 	(assert (< 1.5 2.5) true "less float vs float")
 	(assert (< 2.5 1.5) false "less float vs float reverse")
 	(assert (< "apple" "banana") true "less string vs string")

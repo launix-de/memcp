@@ -1784,10 +1784,11 @@ instead of capturing whichever session populated the cache first. */
 		(define domain_lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define lookup_keys (cons probe domain_lookup_keys))
 		(define condition (combine_where_terms local_terms true))
-		(define stage_input (if (and (source_is_base_table? inner_src)
-			(and (empty_list? (qb_stages membership_inner))
-				(and (empty_list? (qb_order membership_inner))
-					(nil? (qb_limit membership_inner)))))
+		(define stage_input (if (and (equal? (count inner_sources) 1)
+			(and (source_is_base_table? inner_src)
+				(and (empty_list? (qb_stages membership_inner))
+					(and (empty_list? (qb_order membership_inner))
+						(nil? (qb_limit membership_inner))))))
 			inner_src
 			(make_query_block
 				(qb_schema membership_inner)
