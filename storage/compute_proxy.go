@@ -82,7 +82,7 @@ func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 //     result, and return it. A row omitted by prewarming is neither NULL nor an
 //     error and must never require rebuilding the whole column.
 //   - Invalidation discards only affected cached values where possible; later
-//     reads repair those values pointwise through the same JIT path.
+//     reads repair those values through the same pointwise on-demand path.
 //
 // Keep this distinction intact when changing planner setup, DDL, rebuild, or
 // scan code: selective preparation may change work scheduling, never which
@@ -386,8 +386,8 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 }
 
 // GetValue returns the logical value at idx. A cache miss or invalidated value
-// is the normal JIT path: compute only this row from the current input values,
-// cache it, and return it. Do not turn a miss into eager whole-column
+// is the normal on-demand path: compute only this row from the current input
+// values, cache it, and return it. Do not turn a miss into eager whole-column
 // materialization and do not treat an unprepared row as absent.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
@@ -544,7 +544,7 @@ func (p *StorageComputeProxy) Compress() {
 // signalled that those values will likely be read immediately. The filter does
 // not narrow the logical column and is not a read-time predicate: unmatched
 // rows remain valid lazy values and GetValue materializes each one pointwise on
-// first read. Invalidated rows follow the same JIT repair path.
+// first read. Invalidated rows follow the same pointwise on-demand repair path.
 func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
 	tx := CurrentTx()
 	if variant := p.currentVariant(tx, true); variant != nil {
