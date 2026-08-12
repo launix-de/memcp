@@ -3,6 +3,7 @@
  * xelabs.org
  *
  * Copyright (c) XeLabs
+ * Copyright (C) 2026 Carl-Philip Haensch
  * GPL License
  *
  */
@@ -209,10 +210,6 @@ func UnPackStatementExecute(data []byte, prepare *Statement, parseValueFn func(*
 
 		for i := uint16(0); i < prepare.ParamCount; i++ {
 			var val interface{}
-			if prepare.ParamsType[i] == int32(sqltypes.Text) || prepare.ParamsType[i] == int32(sqltypes.Blob) {
-				continue
-			}
-
 			if (bitMap[i/8] & (1 << uint(i%8))) > 0 {
 				val, err = parseValueFn(buf, sqltypes.Null)
 			} else {
