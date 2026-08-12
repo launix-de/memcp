@@ -54,6 +54,10 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 }
 
 func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnboundaries, callback_old func(*storageShard, bool)) <-chan struct{} {
+	// Keep shard acquisition outside physical scan callbacks. In clustered mode
+	// this is the orchestration point that can choose a local SHARED copy or send
+	// the whole shard-local scan pipeline to a remote holder; row readers must not
+	// perform another resource acquisition from inside the callback.
 	callback := callback_old
 	if scm.Trace != nil {
 		// hook on tracing
