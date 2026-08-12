@@ -206,6 +206,17 @@ the point where its referenced bindings and its required outer-join semantics
 are available. This is not simply an "innermost possible" rule: the correct
 scan is determined by the bindings and null-extension boundary of that term.
 
+Reordering may annotate an inner join leaf with a single-alias predicate that
+it has already classified and costed. This records semantic alias ownership so
+the physical lowerer does not have to rediscover it. A `WHERE` predicate on a
+nullable outer-join side instead belongs to the barrier node, because its NULL
+semantics are available only after null extension. The predicate remains in the
+query-block condition as the authoritative logical expression; the annotation
+must neither remove it nor introduce a physical `scan`. Physical lowering
+consumes the annotation exactly once when it chooses the scan operator and
+access path. Outer-join `ON` predicates also stay on their barrier-owning join
+node and must never be converted into leaf annotations.
+
 Every conjunct must appear exactly once at a semantically valid scan or remain
 as an explicit residual predicate. Predicate placement must never weaken or
 drop a join condition, turn an equijoin into a cross product, or evaluate a

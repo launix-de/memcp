@@ -386,7 +386,7 @@ test_cases:
         - "inner_select"
         - "dependent-subquery"
 
-  - name: "EXPLAIN REORDER promotes a selective comma-join dimension"
+  - name: "EXPLAIN REORDER binds a selective predicate to its driver leaf"
     sql: "EXPLAIN REORDER SELECT d.label, m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one'"
     expect:
       rows: 1
@@ -395,6 +395,9 @@ test_cases:
         - 'join_plan'
       result_not_contains:
         - '(join_driver \"m\")'
+      result_occurrences:
+        - text: ' where nil '
+          count: 2
 
   - name: "Selective comma-join dimension preserves results"
     sql: "SELECT d.label, m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one' ORDER BY m.id"
