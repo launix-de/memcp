@@ -4103,34 +4103,648 @@ ON terms remain owned by the query-block until physical lowering. */
 				(neumann_fail "join_reorder" (concat "join plan references unknown alias " alias))
 				src))))))
 
-(define join_optimizer_left_deep_tree (lambda (aliases)
-	(match aliases
-		(cons alias rest)
-		(reduce rest (lambda (tree next_alias)
-			(list (quote join-node) tree (list (quote join-leaf) next_alias)))
-			(list (quote join-leaf) alias))
+/* Neumann/Radke join ordering lives in the SQL planner. None of these values
+are runtime relations: they are compile-time graph sets, cost records and
+logical trees consumed before physical scan lowering. */
+(define join_order_set_subset? (lambda (required available)
+	(reduce (coalesceNil required '()) (lambda (ok alias)
+		(and ok (contains? available alias))) true)))
+
+(define join_order_set_intersects? (lambda (left right)
+	(reduce (coalesceNil left '()) (lambda (found alias)
+		(or found (contains? right alias))) false)))
+
+(define join_order_set_union (lambda (universe left right)
+	(filter universe (lambda (alias)
+		(or (contains? left alias) (contains? right alias))))))
+
+(define join_order_set_difference (lambda (universe left right)
+	(filter universe (lambda (alias)
+		(and (contains? left alias) (not (contains? right alias)))))))
+
+(define join_order_set_key (lambda (aliases) (string aliases)))
+
+(define join_order_pred_aliases (lambda (predicate) (car predicate)))
+(define join_order_pred_selectivity (lambda (predicate) (cadr predicate)))
+
+(define join_order_predicate_crosses? (lambda (predicate left right)
+	(begin
+		(define refs (join_order_pred_aliases predicate))
+		(and (join_order_set_subset? refs (merge_unique (list left right)))
+			(and (join_order_set_intersects? refs left)
+				(join_order_set_intersects? refs right))))))
+
+(define join_order_predicate_crosses_in? (lambda (predicate left right combined)
+	(begin
+		(define refs (join_order_pred_aliases predicate))
+		(and (join_order_set_subset? refs combined)
+			(and (join_order_set_intersects? refs left)
+				(join_order_set_intersects? refs right))))))
+
+(define join_order_connected? (lambda (predicates left right)
+	(begin
+		(define combined (merge_unique (list left right)))
+		(reduce predicates (lambda (connected predicate)
+			(or connected (join_order_predicate_crosses_in? predicate left right combined))) false))))
+
+/* plan = (tree aliases cardinality cost size atomic driver-cardinality left right) */
+(define join_order_plan_tree (lambda (plan) (nth plan 0)))
+(define join_order_plan_aliases (lambda (plan) (nth plan 1)))
+(define join_order_plan_cardinality (lambda (plan) (nth plan 2)))
+(define join_order_plan_cost (lambda (plan) (nth plan 3)))
+(define join_order_plan_size (lambda (plan) (nth plan 4)))
+(define join_order_plan_atomic? (lambda (plan) (nth plan 5)))
+(define join_order_driver_cardinality (lambda (plan) (nth plan 6)))
+(define join_order_plan_left (lambda (plan) (nth plan 7)))
+(define join_order_plan_right (lambda (plan) (nth plan 8)))
+
+(define join_order_leaf_plan (lambda (node)
+	(list
+		(list (quote join-leaf) (car node))
+		(list (car node))
+		(max 1 (cadr node))
+		0
+		1
+		false
+		(max 1 (cadr node))
+		nil nil)))
+
+(define join_order_join_cardinality (lambda (predicates left right)
+	(begin
+		(define combined (merge_unique (list
+			(join_order_plan_aliases left) (join_order_plan_aliases right))))
+		(define selectivity (reduce predicates (lambda (value predicate)
+			(if (join_order_predicate_crosses_in? predicate
+				(join_order_plan_aliases left) (join_order_plan_aliases right) combined)
+				(* value (join_order_pred_selectivity predicate))
+				value)) 1))
+		(max 1 (min 1e300 (*
+			(join_order_plan_cardinality left)
+			(join_order_plan_cardinality right)
+			selectivity))))))
+
+(define join_order_join_plan (lambda (universe predicates left right)
+	(begin
+		(define cardinality (join_order_join_cardinality predicates left right))
+		(list
+			(list (quote join-node) (quote inner) (join_order_plan_tree left) (join_order_plan_tree right))
+			(join_order_set_union universe (join_order_plan_aliases left) (join_order_plan_aliases right))
+			cardinality
+			(+ (join_order_plan_cost left) (join_order_plan_cost right) cardinality)
+			(+ (join_order_plan_size left) (join_order_plan_size right))
+			false
+			(join_order_driver_cardinality left)
+			left right))))
+
+(define join_order_better_plan (lambda (current candidate)
+	(if (nil? current)
+		candidate
+		(if (< (join_order_plan_cost candidate) (join_order_plan_cost current))
+			candidate
+			(if (and (equal? (join_order_plan_cost candidate) (join_order_plan_cost current))
+				(< (join_order_driver_cardinality candidate) (join_order_driver_cardinality current)))
+				candidate current)))))
+
+(define join_order_best_orientation (lambda (universe predicates left right)
+	(join_order_better_plan
+		(join_order_join_plan universe predicates left right)
+		(join_order_join_plan universe predicates right left))))
+
+(define join_order_hypergraph? (lambda (predicates)
+	(reduce predicates (lambda (found predicate)
+		(or found (> (count (join_order_pred_aliases predicate)) 2))) false)))
+
+(define join_order_hyperedge_support (lambda (predicates)
+	(merge (map predicates (lambda (predicate)
+		(begin
+			(define refs (join_order_pred_aliases predicate))
+			(if (> (count refs) 2)
+				(map (produceN (- (count refs) 1)) (lambda (i)
+					(list (list (nth refs i) (nth refs (+ i 1))) 1)))
+				'())))))))
+
+(define join_order_component_expand (lambda (current predicates)
+	(begin
+		(define expanded (reduce predicates (lambda (aliases predicate)
+			(if (join_order_set_intersects? aliases (join_order_pred_aliases predicate))
+				(merge_unique (list aliases (join_order_pred_aliases predicate)))
+				aliases)) current))
+		(if (equal? expanded current) current
+			(join_order_component_expand expanded predicates)))))
+
+(define join_order_components (lambda (remaining predicates)
+	(if (empty_list? remaining)
+		'()
+		(begin
+			(define component (join_order_component_expand (list (car remaining)) predicates))
+			(cons component (join_order_components
+				(filter remaining (lambda (alias) (not (contains? component alias))))
+				predicates))))))
+
+(define join_order_cross_product_support (lambda (aliases predicates)
+	(begin
+		(define components (join_order_components aliases predicates))
+		(if (< (count components) 2)
+			'()
+			(map (produceN (- (count components) 1)) (lambda (i)
+				(list (list (car (nth components i)) (car (nth components (+ i 1)))) 1)))))))
+
+(define join_order_prepare_predicates (lambda (aliases predicates)
+	(begin
+		(define with_hyper_support (merge (list predicates (join_order_hyperedge_support predicates))))
+		(merge (list with_hyper_support
+			(join_order_cross_product_support aliases with_hyper_support))))))
+
+(define join_order_connected_expand (lambda (universe predicates current)
+	(filter (map predicates (lambda (predicate)
+		(begin
+			(define refs (join_order_pred_aliases predicate))
+			(if (and (join_order_set_intersects? current refs)
+				(not (join_order_set_subset? refs current)))
+				(join_order_set_union universe current refs)
+				nil)))) (lambda (candidate) (not (nil? candidate))))))
+
+(define join_order_new_connected_candidates (lambda (candidates seen added)
+	(if (empty_list? candidates)
+		(list seen (reverse added))
+		(begin
+			(define candidate (car candidates))
+			(define key (join_order_set_key candidate))
+			(if (nil? (get_assoc seen key nil))
+				(join_order_new_connected_candidates (cdr candidates)
+					(set_assoc seen key true) (cons candidate added))
+				(join_order_new_connected_candidates (cdr candidates) seen added))))))
+
+(define join_order_enumerate_connected_loop (lambda (universe predicates frontier seen sets set_count budget)
+	(if (empty_list? frontier)
+		(list sets false)
+		(begin
+			(define current (car frontier))
+			(define candidates (join_order_connected_expand universe predicates current))
+			(define new_candidates (join_order_new_connected_candidates candidates seen '()))
+			(define next_seen (car new_candidates))
+			(define added (cadr new_candidates))
+			(define next_sets (merge (list sets added)))
+			(define next_count (+ set_count (count added)))
+			(if (and (> budget 0) (> next_count budget))
+				(list next_sets true)
+				(join_order_enumerate_connected_loop universe predicates
+					(merge (list (cdr frontier) added)) next_seen next_sets next_count budget))))))
+
+(define join_order_enumerate_connected (lambda (universe predicates budget)
+	(begin
+		(define singletons (map universe list))
+		(define seen (reduce singletons (lambda (dict singleton)
+			(set_assoc dict (join_order_set_key singleton) true)) '()))
+		(join_order_enumerate_connected_loop universe predicates singletons seen singletons (count singletons) budget))))
+
+(define join_order_find_node (lambda (nodes alias)
+	(find nodes (lambda (node) (equal? (car node) alias)) nil)))
+
+(define join_order_sort_sets (lambda (sets)
+	(sort sets (lambda (left right)
+		(< (count left) (count right))))))
+
+(define join_order_dphyp_set_plan (lambda (universe predicates connected_by_first plans aliases)
+	(reduce (get_assoc connected_by_first (car aliases) '()) (lambda (best left_aliases)
+		(if (and (< (count left_aliases) (count aliases))
+			(and (equal? (car aliases) (car left_aliases))
+				(join_order_set_subset? left_aliases aliases)))
+			(begin
+				(define right_aliases (join_order_set_difference universe aliases left_aliases))
+				(define left (get_assoc plans (join_order_set_key left_aliases) nil))
+				(define right (get_assoc plans (join_order_set_key right_aliases) nil))
+				(if (and (not (nil? left)) (not (nil? right))
+					(join_order_connected? predicates left_aliases right_aliases))
+					(join_order_better_plan best
+						(join_order_best_orientation universe predicates left right))
+					best))
+			best)) nil)))
+
+(define join_order_dphyp_fill (lambda (nodes universe predicates connected_by_first remaining plans entries)
+	(if (empty_list? remaining)
+		(list (get_assoc plans (join_order_set_key universe) nil) entries)
+		(begin
+			(define aliases (car remaining))
+			(define plan (if (single_source? aliases)
+				(join_order_leaf_plan (join_order_find_node nodes (car aliases)))
+				(join_order_dphyp_set_plan universe predicates connected_by_first plans aliases)))
+			(join_order_dphyp_fill nodes universe predicates connected_by_first (cdr remaining)
+				(if (nil? plan) plans (set_assoc plans (join_order_set_key aliases) plan))
+				(if (nil? plan) entries (+ entries 1)))))))
+
+(define join_order_dphyp (lambda (nodes aliases predicates)
+	(begin
+		(define connected (join_order_sort_sets (car (join_order_enumerate_connected aliases predicates 0))))
+		(define connected_by_first (reduce connected (lambda (dict subset)
+			(begin
+				(define first (car subset))
+				(set_assoc dict first (append (get_assoc dict first '()) subset)))) '()))
+		(join_order_dphyp_fill nodes aliases predicates connected_by_first connected '() 0))))
+
+(define join_order_alias_position (lambda (aliases alias)
+	(reduce (produceN (count aliases)) (lambda (found i)
+		(if (not (nil? found)) found
+			(if (equal? (nth aliases i) alias) i nil))) nil)))
+
+(define join_order_regular_edges (lambda (aliases predicates)
+	(begin
+		(define edge_dict (reduce predicates (lambda (dict predicate)
+			(begin
+				(define refs (join_order_pred_aliases predicate))
+				(if (not (equal? (count refs) 2))
+					dict
+					(begin
+						(define left (car refs))
+						(define right (cadr refs))
+						(define ordered (if (< (join_order_alias_position aliases left)
+							(join_order_alias_position aliases right))
+							(list left right) (list right left)))
+						(define key (string ordered))
+						(define old (get_assoc dict key nil))
+						(set_assoc dict key (list (car ordered) (cadr ordered)
+							(* (if (nil? old) 1 (nth old 2))
+								(join_order_pred_selectivity predicate)))))))) '()))
+		(extract_assoc edge_dict (lambda (_key edge) edge)))))
+
+(define join_order_component_for_alias (lambda (forest alias)
+	(find forest (lambda (component) (contains? component alias)) nil)))
+
+(define join_order_mst_fold (lambda (state edge)
+	(begin
+		(define forest (car state))
+		(define selected (cadr state))
+		(define left_component (join_order_component_for_alias forest (nth edge 0)))
+		(define right_component (join_order_component_for_alias forest (nth edge 1)))
+		(if (equal? left_component right_component)
+			state
+			(list
+				(cons (merge_unique (list left_component right_component))
+					(filter forest (lambda (component)
+						(and (not (equal? component left_component))
+							(not (equal? component right_component))))))
+				(append selected edge))))))
+
+(define join_order_minimum_spanning_tree (lambda (aliases predicates)
+	(begin
+		(define edges (sort (join_order_regular_edges aliases predicates)
+			(lambda (left right) (< (nth left 2) (nth right 2)))))
+		(cadr (reduce edges join_order_mst_fold
+			(list (map aliases list) '()))))))
+
+/* IKKBZ item = (node-aliases factor cost). */
+(define join_order_ikkbz_rank (lambda (item)
+	(if (equal? (nth item 2) 0) 1e300
+		(/ (- (nth item 1) 1) (nth item 2)))))
+
+(define join_order_ikkbz_merge_items (lambda (left right)
+	(list
+		(merge (list (nth left 0) (nth right 0)))
+		(* (nth left 1) (nth right 1))
+		(+ (nth left 2) (* (nth left 1) (nth right 2))))))
+
+(define join_order_ikkbz_normalize_once (lambda (chain prefix)
+	(match chain
+		(cons left (cons right rest))
+		(if (> (join_order_ikkbz_rank left) (join_order_ikkbz_rank right))
+			(list true (merge (list (reverse prefix)
+				(list (join_order_ikkbz_merge_items left right)) rest)))
+			(join_order_ikkbz_normalize_once (cons right rest) (cons left prefix)))
+		_ (list false chain))))
+
+(define join_order_ikkbz_normalize (lambda (chain)
+	(begin
+		(define normalized (join_order_ikkbz_normalize_once chain '()))
+		(if (car normalized)
+			(join_order_ikkbz_normalize (cadr normalized))
+			chain))))
+
+(define join_order_ikkbz_merge_chains (lambda (chains result)
+	(begin
+		(define available (filter chains (lambda (chain) (not (empty_list? chain)))))
+		(if (empty_list? available)
+			result
+			(begin
+				(define best (reduce available (lambda (current chain)
+					(if (or (nil? current)
+						(< (join_order_ikkbz_rank (car chain))
+							(join_order_ikkbz_rank (car current))))
+						chain current)) nil))
+				(join_order_ikkbz_merge_chains
+					(cons (cdr best) (filter available (lambda (chain) (not (equal? chain best)))))
+					(append result (car best))))))))
+
+(define join_order_mst_edges_for_alias (lambda (edges alias parent)
+	(filter edges (lambda (edge)
+		(and (or (equal? (nth edge 0) alias) (equal? (nth edge 1) alias))
+			(not (or (equal? (nth edge 0) parent) (equal? (nth edge 1) parent))))))))
+
+(define join_order_edge_other_alias (lambda (edge alias)
+	(if (equal? (nth edge 0) alias) (nth edge 1) (nth edge 0))))
+
+(define join_order_ikkbz_chain (lambda (nodes edges alias parent parent_selectivity)
+	(begin
+		(define child_chains (map (join_order_mst_edges_for_alias edges alias parent) (lambda (edge)
+			(join_order_ikkbz_normalize
+				(join_order_ikkbz_chain nodes edges
+					(join_order_edge_other_alias edge alias) alias (nth edge 2))))))
+		(define node (join_order_find_node nodes alias))
+		(cons (list (list alias)
+			(if (nil? parent) 1 (* (cadr node) parent_selectivity))
+			(if (nil? parent) 0 (cadr node)))
+			(join_order_ikkbz_merge_chains child_chains '())))))
+
+(define join_order_ikkbz_order (lambda (nodes aliases predicates)
+	(begin
+		(define edges (join_order_minimum_spanning_tree aliases predicates))
+		(define best (reduce aliases (lambda (current root)
+			(begin
+				(define chain (join_order_ikkbz_chain nodes edges root nil 1))
+				(define sequence (reduce (cdr chain) join_order_ikkbz_merge_items (car chain)))
+				(if (or (nil? current) (< (nth sequence 2) (cadr current)))
+					(list (merge (map chain (lambda (item) (nth item 0)))) (nth sequence 2))
+					current))) nil))
+		(car best))))
+
+(define join_order_interval_key (lambda (start end) (concat start ":" end)))
+
+(define join_order_linearized_splits (lambda (universe predicates table start end split best)
+	(if (>= split end)
+		best
+		(begin
+			(define left (get_assoc table (join_order_interval_key start split) nil))
+			(define right (get_assoc table (join_order_interval_key (+ split 1) end) nil))
+			(join_order_linearized_splits universe predicates table start end (+ split 1)
+				(if (and (not (nil? left)) (not (nil? right))
+					(join_order_connected? predicates
+						(join_order_plan_aliases left) (join_order_plan_aliases right)))
+					(join_order_better_plan best
+						(join_order_join_plan universe predicates left right))
+					best))))))
+
+(define join_order_linearized_starts (lambda (universe predicates table length start entries)
+	(if (> (+ start length) (count universe))
+		(list table entries)
+		(begin
+			(define end (- (+ start length) 1))
+			(define best (join_order_linearized_splits universe predicates table start end start nil))
+			(join_order_linearized_starts universe predicates
+				(if (nil? best) table (set_assoc table (join_order_interval_key start end) best))
+				length (+ start 1) (if (nil? best) entries (+ entries 1)))))))
+
+(define join_order_linearized_lengths (lambda (universe predicates table length entries)
+	(if (> length (count universe))
+		(list (get_assoc table (join_order_interval_key 0 (- (count universe) 1)) nil) entries)
+		(begin
+			(define filled (join_order_linearized_starts universe predicates table length 0 entries))
+			(join_order_linearized_lengths universe predicates (car filled) (+ length 1) (cadr filled))))))
+
+(define join_order_linearized_dp (lambda (nodes aliases predicates)
+	(begin
+		(define order (join_order_ikkbz_order nodes aliases predicates))
+		(define table (reduce (produceN (count order)) (lambda (dict i)
+			(set_assoc dict (join_order_interval_key i i)
+				(join_order_leaf_plan (join_order_find_node nodes (nth order i))))) '()))
+		(join_order_linearized_lengths aliases predicates table 2 (count order)))))
+
+(define join_order_goo_pairs (lambda (plans predicates require_connection)
+	(merge (mapIndex plans (lambda (left_index left)
+		(mapIndex plans (lambda (right_index right)
+			(if (and (< left_index right_index)
+				(or (not require_connection)
+					(join_order_connected? predicates
+						(join_order_plan_aliases left) (join_order_plan_aliases right))))
+				(list left_index right_index
+					(join_order_join_cardinality predicates left right))
+				nil))))))))
+
+(define join_order_goo_best_pair (lambda (plans predicates)
+	(begin
+		(define connected (filter (join_order_goo_pairs plans predicates true)
+			(lambda (pair) (not (nil? pair)))))
+		(define candidates (if (empty_list? connected)
+			(filter (join_order_goo_pairs plans predicates false) (lambda (pair) (not (nil? pair))))
+			connected))
+		(reduce candidates (lambda (best pair)
+			(if (or (nil? best) (< (nth pair 2) (nth best 2))) pair best)) nil))))
+
+(define join_order_goo_loop (lambda (universe predicates plans)
+	(if (single_source? plans)
+		(car plans)
+		(begin
+			(define pair (join_order_goo_best_pair plans predicates))
+			(define left_index (nth pair 0))
+			(define right_index (nth pair 1))
+			(define joined (join_order_best_orientation universe predicates
+				(nth plans left_index) (nth plans right_index)))
+			(join_order_goo_loop universe predicates
+				(append (filter (mapIndex plans (lambda (i plan)
+					(if (or (equal? i left_index) (equal? i right_index)) nil plan)))
+					(lambda (plan) (not (nil? plan)))) joined))))))
+
+(define join_order_goo (lambda (nodes aliases predicates)
+	(join_order_goo_loop aliases predicates
+		(map aliases (lambda (alias)
+			(join_order_leaf_plan (join_order_find_node nodes alias)))))))
+
+(define join_order_plan_with_atomic (lambda (plan atomic)
+	(list
+		(join_order_plan_tree plan)
+		(join_order_plan_aliases plan)
+		(join_order_plan_cardinality plan)
+		(join_order_plan_cost plan)
+		(join_order_plan_size plan)
+		atomic
+		(join_order_driver_cardinality plan)
+		(join_order_plan_left plan)
+		(join_order_plan_right plan))))
+
+(define join_order_expensive_subtree (lambda (plan parent_size limit)
+	(if (or (nil? plan) (join_order_plan_atomic? plan)
+		(equal? (join_order_plan_size plan) 1))
+		nil
+		(begin
+			(define own (if (and (<= (join_order_plan_size plan) limit) (> parent_size limit)) plan nil))
+			(define left (join_order_expensive_subtree
+				(join_order_plan_left plan) (join_order_plan_size plan) limit))
+			(define right (join_order_expensive_subtree
+				(join_order_plan_right plan) (join_order_plan_size plan) limit))
+			(reduce (list own left right) (lambda (best candidate)
+				(if (and (not (nil? candidate))
+					(or (nil? best) (> (join_order_plan_cost candidate) (join_order_plan_cost best))))
+					candidate best)) nil)))))
+
+(define join_order_replace_subtree (lambda (universe predicates plan target replacement)
+	(if (equal? plan target)
+		replacement
+		(if (nil? (join_order_plan_left plan))
+			plan
+			(join_order_join_plan universe predicates
+				(join_order_replace_subtree universe predicates (join_order_plan_left plan) target replacement)
+				(join_order_replace_subtree universe predicates (join_order_plan_right plan) target replacement))))))
+
+(define join_order_goo_dp_loop (lambda (nodes aliases predicates hypergraph plan budget used)
+	(if (<= budget 0)
+		(list plan used)
+		(begin
+			(define limit (if hypergraph 10 100))
+			(define target (join_order_expensive_subtree plan (+ (join_order_plan_size plan) 1) limit))
+			(if (nil? target)
+				(list plan used)
+				(begin
+					(define optimized (if hypergraph
+						(join_order_dphyp nodes (join_order_plan_aliases target) predicates)
+						(join_order_linearized_dp nodes (join_order_plan_aliases target) predicates)))
+					(define replacement (car optimized))
+					(define entries (cadr optimized))
+					(define accepted (and (not (nil? replacement))
+						(< (join_order_plan_cost replacement) (join_order_plan_cost target))))
+					(define final_replacement (join_order_plan_with_atomic
+						(if accepted replacement target) true))
+					(join_order_goo_dp_loop nodes aliases predicates hypergraph
+						(join_order_replace_subtree aliases predicates plan target final_replacement)
+						(- budget entries) (+ used entries))))))))
+
+(define join_order_goo_dp (lambda (nodes aliases predicates hypergraph)
+	(join_order_goo_dp_loop nodes aliases predicates hypergraph
+		(join_order_goo nodes aliases predicates) 10000 0)))
+
+(define join_order_result (lambda (strategy plan entries)
+	(list
+		(list (quote strategy) strategy)
+		(list (quote tree) (join_order_plan_tree plan))
+		(list (quote order) (join_order_plan_aliases plan))
+		(list (quote cost) (join_order_plan_cost plan))
+		(list (quote cardinality) (join_order_plan_cardinality plan))
+		(list (quote dp_entries) entries))))
+
+(define join_order_choose_strategy (lambda (alias_count hypergraph connected_over_budget)
+	(if (or (< alias_count 14)
+		(and (<= alias_count 100) (not connected_over_budget)))
+		(quote dphyp)
+		(if hypergraph
+			(quote goo-dphyp)
+			(if (<= alias_count 100)
+				(quote linearized-dp)
+				(quote goo-linearized-dp))))))
+
+(define join_order_adaptive (lambda (nodes raw_predicates)
+	(begin
+		(define aliases (map nodes car))
+		(define hypergraph (join_order_hypergraph? raw_predicates))
+		(define predicates (join_order_prepare_predicates aliases raw_predicates))
+		(define regular_edge_count (count (join_order_regular_edges aliases predicates)))
+		(define complete_regular_graph (equal? regular_edge_count
+			(/ (* (count aliases) (- (count aliases) 1)) 2)))
+		(define connected_count (if (and (>= (count aliases) 14) (<= (count aliases) 100))
+			(if complete_regular_graph
+				(list '() true)
+				(join_order_enumerate_connected aliases predicates 10000))
+			(list '() true)))
+		(define strategy (join_order_choose_strategy
+			(count aliases) hypergraph (cadr connected_count)))
+		(define exact (equal? strategy (quote dphyp)))
+		(define result (if exact
+			(join_order_dphyp nodes aliases predicates)
+			(if (equal? strategy (quote linearized-dp))
+				(join_order_linearized_dp nodes aliases predicates)
+				(join_order_goo_dp nodes aliases predicates hypergraph))))
+		(if (nil? (car result))
+			(neumann_fail "join_reorder" (concat "SCM join ordering could not construct a connected plan: " (string (list nodes predicates result))))
+			(join_order_result strategy (car result) (cadr result))))))
+
+(define make_join_optimizer_leaf (lambda (alias)
+	(list (quote join-leaf) alias)))
+
+(define make_join_optimizer_node (lambda (kind left right)
+	(list (quote join-node) kind left right)))
+
+(define join_optimizer_source_join_kind (lambda (src)
+	(if (source_outer? src) (quote left-outer) (quote inner))))
+
+(define join_optimizer_left_deep_tree (lambda (sources)
+	(match sources
+		(cons src rest)
+		(reduce rest (lambda (tree next_src)
+			(make_join_optimizer_node (join_optimizer_source_join_kind next_src)
+				tree (make_join_optimizer_leaf (source_alias next_src))))
+			(make_join_optimizer_leaf (source_alias src)))
 		_ nil)))
 
-(define join_optimizer_append_tree (lambda (tree alias)
+(define join_optimizer_append_tree (lambda (tree src)
 	(if (nil? tree)
-		(list (quote join-leaf) alias)
-		(list (quote join-node) tree (list (quote join-leaf) alias)))))
+		(make_join_optimizer_leaf (source_alias src))
+		(make_join_optimizer_node (join_optimizer_source_join_kind src)
+			tree (make_join_optimizer_leaf (source_alias src))))))
 
 (define join_optimizer_append_sources_tree (lambda (tree sources)
 	(reduce sources (lambda (current src)
-		(join_optimizer_append_tree current (source_alias src))) tree)))
+		(join_optimizer_append_tree current src)) tree)))
 
 (define join_optimizer_tree_aliases (lambda (tree)
 	(match tree
 		((symbol join-leaf) alias) (list alias)
 		((quote join-leaf) alias) (list alias)
-		((symbol join-node) left right) (merge (list
+		((symbol join-node) _kind left right) (merge (list
 			(join_optimizer_tree_aliases left)
 			(join_optimizer_tree_aliases right)))
-		((quote join-node) left right) (merge (list
+		((quote join-node) _kind left right) (merge (list
 			(join_optimizer_tree_aliases left)
 			(join_optimizer_tree_aliases right)))
 		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
+
+/* Physical lowering consumes the logical tree structurally. Specialized
+subplans can still supply an explicit source slice, but a complete query-block
+plan is never flattened into a separately owned join order. */
+(define physical_join_tree? (lambda (tree)
+	(match tree
+		((symbol join-leaf) _alias) true
+		((quote join-leaf) _alias) true
+		((symbol join-node) _kind _left _right) true
+		((quote join-node) _kind _left _right) true
+		_ false)))
+
+(define physical_join_cursor_empty? (lambda (cursor)
+	(if (physical_join_tree? cursor) false (empty_list? cursor))))
+
+(define physical_join_cursor_first_alias (lambda (cursor)
+	(match cursor
+		((symbol join-leaf) alias) alias
+		((quote join-leaf) alias) alias
+		((symbol join-node) _kind left _right) (physical_join_cursor_first_alias left)
+		((quote join-node) _kind left _right) (physical_join_cursor_first_alias left)
+		_ (source_alias (car cursor)))))
+
+(define physical_join_cursor_rest (lambda (cursor)
+	(match cursor
+		((symbol join-leaf) _alias) nil
+		((quote join-leaf) _alias) nil
+		((symbol join-node) kind left right)
+		(begin
+			(define left_rest (physical_join_cursor_rest left))
+			(if (nil? left_rest) right (make_join_optimizer_node kind left_rest right)))
+		((quote join-node) kind left right)
+		(physical_join_cursor_rest (make_join_optimizer_node kind left right))
+		_ (cdr cursor))))
+
+(define physical_join_cursor_sources (lambda (catalog cursor)
+	(if (physical_join_tree? cursor)
+		(join_optimizer_sources_for_order catalog (join_optimizer_tree_aliases cursor))
+		cursor)))
+
+(define physical_join_cursor_source (lambda (catalog cursor)
+	(begin
+		(define src (join_optimizer_source_by_alias catalog (physical_join_cursor_first_alias cursor)))
+		(if (nil? src)
+			(neumann_fail "build_queryplan" "join tree scan cursor references an unknown source")
+			src))))
+
+(define query_block_join_cursor (lambda (block sources)
+	(begin
+		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
+		(if (and (not (nil? tree))
+			(equal? (join_optimizer_tree_aliases tree) (map sources source_alias)))
+			tree sources))))
 
 /* The logical tree is the sole owner of join order. The current scan emitters
 still accept a source traversal, so physical preparation derives that traversal
@@ -4211,7 +4825,7 @@ second order. */
 (define join_optimizer_plan_segment (lambda (all_sources segment default_alias graph)
 	(begin
 		(define aliases (map segment source_alias))
-		(neumann_join_order
+		(join_order_adaptive
 			(join_optimizer_metadata_nodes segment default_alias graph)
 			(join_optimizer_metadata_predicates all_sources default_alias graph aliases)))))
 
@@ -4234,7 +4848,7 @@ second order. */
 				(source_row_number_limit_driver? (qb_stages block) (car segment)))))
 		(if (or (< (count segment) 2) preserve_order_driver)
 			(join_optimizer_reorder_result
-				(join_optimizer_left_deep_tree (map sources source_alias))
+				(join_optimizer_left_deep_tree sources)
 				(if preserve_order_driver (quote preserve-order-limit) (quote fixed))
 				0)
 			(begin
@@ -11573,11 +12187,13 @@ source remain residual so they observe the null-extended row. */
 			recset_contains_callback_symbol
 			expr))))
 
-(define join_ordered_filtered_stream_plan (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
+(define join_ordered_filtered_stream_plan (lambda (schema sources cursor default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(begin
-		(define src (car sources))
+		(define src (physical_join_cursor_source sources cursor))
+		(define remaining_sources (physical_join_cursor_rest cursor))
+		(define remaining_source_catalog (physical_join_cursor_sources sources remaining_sources))
 		(define alias (source_alias src))
-		(define condition_parts (physical_partition_condition default_alias sources (cdr sources) final_condition))
+		(define condition_parts (physical_partition_condition default_alias sources remaining_source_catalog final_condition))
 		(define local_condition (nth condition_parts 0))
 		(define remaining_condition (nth condition_parts 1))
 		(define condition (combine_where (source_join_expr src) local_condition))
@@ -11611,7 +12227,7 @@ source remain residual so they observe the null-extended row. */
 			(build_join_scan_rows_with_mapper
 				schema
 				sources
-				(cdr sources)
+				remaining_sources
 				default_alias
 				match_needed_exprs
 				remaining_condition
@@ -11624,7 +12240,7 @@ source remain residual so they observe the null-extended row. */
 		(define rest_rows_expr (build_join_scan_rows_with_mapper
 			schema
 			sources
-			(cdr sources)
+			remaining_sources
 			default_alias
 			needed_exprs
 			remaining_condition
@@ -11715,7 +12331,8 @@ source remain residual so they observe the null-extended row. */
 
 (define build_join_row_number_scan_rows (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr stage_filter membership_var membership_filter column_recipe)
 	(begin
-		(define src (car sources))
+		(define src (physical_join_cursor_source all_sources sources))
+		(define remaining_sources (physical_join_cursor_rest sources))
 		(define alias (source_alias src))
 		(define stage (nth stage_filter 0))
 		(define filter (nth stage_filter 1))
@@ -11742,7 +12359,7 @@ source remain residual so they observe the null-extended row. */
 					(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias alias filter_col)))
 					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias filter_condition))))
 				(define continuation_expr (list (quote lambda) (list (quote __row_number))
-					(build_join_scan_rows_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 true column_recipe stages)))
+					(build_join_scan_rows_with_mapper_using_recipe schema all_sources remaining_sources default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 true column_recipe stages)))
 				(define map_expr (list (quote lambda)
 					(map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))
 					(list (quote list)
@@ -11783,7 +12400,7 @@ source remain residual so they observe the null-extended row. */
 			_ (neumann_fail "build_queryplan" "malformed ROW_NUMBER stage")))))
 
 (define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages collect_rows)
-	(if (empty_list? sources)
+	(if (physical_join_cursor_empty? sources)
 		(if (equal? (coalesceNil final_condition true) true)
 			(if collect_rows (runtime_cons_list_expr (list row_expr)) row_expr)
 			(list (quote if)
@@ -11791,21 +12408,25 @@ source remain residual so they observe the null-extended row. */
 				(if collect_rows (runtime_cons_list_expr (list row_expr)) row_expr)
 				(if collect_rows (list (quote list)) nil)))
 		(begin
-			(define src (car sources))
+			(define src (physical_join_cursor_source all_sources sources))
+			(define remaining_sources (physical_join_cursor_rest sources))
+			(define remaining_source_catalog (physical_join_cursor_sources all_sources remaining_sources))
 			(if (not (source_is_base_table? src))
 				(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
 				true)
 			(define alias (source_alias src))
-			(define condition_parts (physical_partition_condition default_alias all_sources (cdr sources) final_condition))
+			(define condition_parts (physical_partition_condition default_alias all_sources remaining_source_catalog final_condition))
 			(define local_condition (nth condition_parts 0))
 			(define remaining_condition (nth condition_parts 1))
 			(define condition (combine_where (source_join_expr src) local_condition))
 			(define membership (driver_membership_for_source src condition))
-			(define delay_limit_after_join (ordered_join_limit_requires_complete_rows? sources default_alias final_condition offset_value limit_value))
+			(define delay_limit_after_join (ordered_join_limit_requires_complete_rows?
+				(physical_join_cursor_sources all_sources sources)
+				default_alias final_condition offset_value limit_value))
 			(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
 				nil
 				(recset_project_join_expr_for_membership src membership)))
-			(define membership_driver (and (not (nil? membership_table_expr)) (empty_list? (cdr sources))))
+			(define membership_driver (and (not (nil? membership_table_expr)) (physical_join_cursor_empty? remaining_sources)))
 			(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
 			(define effective_membership (if (nil? membership_table_expr) nil membership))
 			(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
@@ -11832,7 +12453,7 @@ source remain residual so they observe the null-extended row. */
 				(list (quote optimize) lowered_filter_condition)))
 			(define map_expr (list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_with_mapper_using_recipe schema all_sources (cdr sources) default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_recset column_recipe stages collect_rows)))
+				(build_join_scan_with_mapper_using_recipe schema all_sources remaining_sources default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_recset column_recipe stages collect_rows)))
 			(define reduce_expr (if collect_rows
 				(list (quote lambda) (list (quote acc) (quote subrows))
 					(list (quote if)
@@ -12252,16 +12873,16 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(nth prejoin 0)
 			(lower_single_source_query_block (nth prejoin 1))))))
 
-(define build_join_scan_rows (lambda (schema sources default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
+(define build_join_scan_rows (lambda (schema sources cursor default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(begin
 		(define row_expr (list (quote resultrow)
 			(cons (quote list) (lower_join_result_fields sources default_alias fields))))
 		(if (empty_list? (filter (lowering_catalog_stages stages) row_number_stage?))
 			(build_join_scan_pipeline_using_recipe
-				schema sources sources default_alias needed_exprs final_condition row_expr
+				schema sources cursor default_alias needed_exprs final_condition row_expr
 				order_items offset_value limit_value true nil stages)
 			(build_join_scan_rows_with_mapper
-				schema sources sources default_alias needed_exprs final_condition row_expr
+				schema sources cursor default_alias needed_exprs final_condition row_expr
 				order_items offset_value limit_value true stages)))))
 
 (define lower_query_block_as_dataset_rows (lambda (block fields)
@@ -12282,6 +12903,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define scan_sources (if push_first_where
 			(cons (source_with_join_expr (car sources) (combine_where (source_join_expr (car sources)) where_expr)) (cdr sources))
 			sources))
+		(define scan_cursor (query_block_join_cursor block scan_sources))
 		(define final_condition (if push_first_where true where_expr))
 		(define order_items (coalesceNil (qb_order block) '()))
 		(define direct_order (order_items_belong_to_source? (car scan_sources) order_items))
@@ -12297,7 +12919,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(build_join_scan_rows_with_mapper
 				(qb_schema block)
 				scan_sources
-				scan_sources
+				scan_cursor
 				first_alias
 				needed_exprs
 				final_condition
@@ -12311,7 +12933,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(build_join_scan_rows_with_mapper
 					(qb_schema block)
 					scan_sources
-					scan_sources
+					scan_cursor
 					first_alias
 					needed_exprs
 					final_condition
@@ -12417,6 +13039,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(define final_condition (if push_first_where true where_expr))
 				(define stage_catalog (query_block_stage_catalog block))
 				(define scan_sources raw_scan_sources)
+				(define scan_cursor (query_block_join_cursor block scan_sources))
 				(define order_items (coalesceNil (qb_order block) '()))
 				(define direct_order (and (equal? first_alias (source_alias (car scan_sources)))
 					(order_items_belong_to_source? (car scan_sources) order_items)))
@@ -12463,7 +13086,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 							(build_join_scan_rows_with_mapper_using_recipe
 								(qb_schema block)
 								scan_sources
-								(cdr scan_sources)
+								(physical_join_cursor_rest scan_cursor)
 								first_alias
 								project_needed_exprs
 								true
@@ -12497,11 +13120,12 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 							(qb_offset block)
 							(qb_limit block)))
 					(if direct_order_safe
-						(build_join_scan_rows (qb_schema block) scan_sources first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
+						(build_join_scan_rows (qb_schema block) scan_sources scan_cursor first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
 						(if direct_order
 							(join_ordered_filtered_stream_plan
 								(qb_schema block)
 								scan_sources
+								scan_cursor
 								first_alias
 								needed_exprs
 								final_condition
@@ -12516,7 +13140,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 									(build_join_scan_rows_with_mapper
 										(qb_schema block)
 										scan_sources
-										scan_sources
+										scan_cursor
 										first_alias
 										needed_exprs
 										final_condition
@@ -12568,6 +13192,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(neumann_fail "build_queryplan" "multi-source DML with ORDER/LIMIT is not implemented yet")
 			true)
 		(define sources (qb_sources block))
+		(define scan_cursor (query_block_join_cursor block sources))
 		(define first_alias (source_alias (car sources)))
 		(define target_src (dml_target_source sources target_schema target_tbl))
 		(if (nil? target_src)
@@ -12595,7 +13220,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(build_join_scan_rows_with_mapper
 				(qb_schema block)
 				sources
-				sources
+				scan_cursor
 				first_alias
 				needed_exprs
 				cond
