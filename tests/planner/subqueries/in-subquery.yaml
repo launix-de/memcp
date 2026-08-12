@@ -1513,8 +1513,8 @@ test_cases:
         - ".grp:"
         - "touch_keytable"
 
-  - name: "IN UNION with nested reference EXISTS prepares query carriers"
-    fail_comment: "nested reference-style EXISTS intermediate relations must be prepared before physical scans reference them"
+  - name: "IN UNION with nested reference EXISTS keeps bounded projections in scans"
+    fail_comment: "bounded reference-style EXISTS projections must stay behind the ordered membership scan"
     setup:
       - sql: "DROP TABLE IF EXISTS in_ref_doc"
       - sql: "DROP TABLE IF EXISTS in_ref_file"
@@ -1635,11 +1635,15 @@ test_cases:
           LIMIT 10
         expect:
           contains:
+            - "recset_project_join"
+            - "scan_order"
+          not_contains:
             - "createtable"
             - ".grp:"
-          not_contains:
             - "inner_select"
             - "dependent-subquery"
+            - "joined_matches"
+            - "collect_rows"
 
   - name: "IN UNION with nested reference scalar prepares query carriers"
     fail_comment: "nested stage-output intermediate relations must be prepared before physical reads"

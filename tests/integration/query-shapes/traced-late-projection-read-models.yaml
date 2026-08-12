@@ -370,7 +370,6 @@ test_cases:
       plan_nodes: 6000
       scans: 64
       group_carriers: 8
-      group_caches: 8
     max_plan_size: 100000
     sql: |
       SELECT projected.*
@@ -450,6 +449,34 @@ test_cases:
           access_30: true
           access_31: true
           access_32: true
+  - name: "Bounded presence projection stays behind root braking"
+    sql: |
+      EXPLAIN
+      SELECT item.id,
+        COALESCE((
+          SELECT (parent.owner_id = 7 OR EXISTS (
+            SELECT TRUE
+            FROM trace_wide_assignment member
+            WHERE member.team_id = parent.team_id
+              AND member.member_id = 7
+            LIMIT 1
+          ))
+          FROM trace_wide_parent parent
+          WHERE parent.id = item.parent_id
+          LIMIT 1
+        ), FALSE) AS can_view
+      FROM trace_wide_prop item
+      WHERE item.id = 1
+      LIMIT 72
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "touch_keytable"
+        - ".grp:"
+        - "joined_matches"
+        - "collect_rows"
   - name: "Shared scalar probe recipes preserve correlation keys"
     sql: |
       SELECT item.id,
@@ -467,6 +494,53 @@ test_cases:
         - id: 2
           access_a: false
           access_b: false
+  - name: "Prelimit presence predicate retains shared group cache"
+    sql: |
+      EXPLAIN
+      SELECT item.id
+      FROM trace_wide_prop item
+      WHERE COALESCE((
+        SELECT (parent.owner_id = 7 OR EXISTS (
+          SELECT TRUE
+          FROM trace_wide_assignment member
+          WHERE member.team_id = parent.team_id
+            AND member.member_id = 7
+          LIMIT 1
+        ))
+        FROM trace_wide_parent parent
+        WHERE parent.id = item.parent_id
+        LIMIT 1
+      ), FALSE) = TRUE
+      ORDER BY item.id
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "touch_keytable"
+        - ".grp:"
+  - name: "Presence predicates remain before root limit"
+    sql: |
+      SELECT item.id
+      FROM trace_wide_prop item
+      WHERE COALESCE((
+        SELECT (parent.owner_id = 7 OR EXISTS (
+          SELECT TRUE
+          FROM trace_wide_assignment member
+          WHERE member.team_id = parent.team_id
+            AND member.member_id = 7
+          LIMIT 1
+        ))
+        FROM trace_wide_parent parent
+        WHERE parent.id = item.parent_id
+        LIMIT 1
+      ), FALSE) = TRUE
+      ORDER BY item.id
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 4
   - name: "Repeated nested access predicates reuse decorrelated stages"
     max_time: 1.0
     max_planner_time_ms: 500
