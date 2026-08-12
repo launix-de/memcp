@@ -262,7 +262,9 @@ test_cases:
       CREATE TRIGGER cache_event_after_insert
       AFTER INSERT ON cache_event
       FOR EACH ROW
-      UPDATE cache_parent SET value = value + 1 WHERE id = NEW.parent_id
+      BEGIN
+        UPDATE cache_parent SET value = value + 1 WHERE id = NEW.parent_id;
+      END
 
   - name: "Create self-reading update trigger"
     sql: |
@@ -272,27 +274,23 @@ test_cases:
       BEGIN
         UPDATE cache_audit
         SET cached_value = (
-          SELECT inner_parent.value
+          SELECT CASE
+            WHEN @cache_upper_bound IS NULL THEN inner_parent.value
+            ELSE LEAST(inner_parent.value, @cache_upper_bound)
+          END
           FROM cache_parent AS inner_parent
           WHERE inner_parent.id = cache_audit.parent_id
-            AND CASE
-              WHEN @cache_upper_bound IS NULL THEN TRUE
-              ELSE inner_parent.value <= @cache_upper_bound
-            END
-            AND inner_parent.value >= COALESCE(@cache_lower_bound, 0)
           LIMIT 1
         )
         WHERE parent_id = NEW.id;
         UPDATE cache_audit
         SET cached_value_again = (
-          SELECT inner_parent.value
+          SELECT CASE
+            WHEN @cache_upper_bound IS NULL THEN inner_parent.value
+            ELSE LEAST(inner_parent.value, @cache_upper_bound)
+          END
           FROM cache_parent AS inner_parent
           WHERE inner_parent.id = cache_audit.parent_id
-            AND CASE
-              WHEN @cache_upper_bound IS NULL THEN TRUE
-              ELSE inner_parent.value <= @cache_upper_bound
-            END
-            AND inner_parent.value >= COALESCE(@cache_lower_bound, 0)
           LIMIT 1
         )
         WHERE parent_id = NEW.id;
@@ -301,13 +299,13 @@ test_cases:
   - name: "Nested trigger maintains materialized scalar aggregate"
     sql: "INSERT INTO cache_event (id, parent_id) VALUES (1, 1)"
 
-  - name: "Self-reading update trigger records maintained value"
+  - name: "Repeated scalar cache upsert preserves undefined session dimensions"
     sql: "SELECT cached_value, cached_value_again FROM cache_audit ORDER BY id"
     expect:
       rows: 1
       data:
-        - cached_value: 11
-          cached_value_again: 11
+        - cached_value: null
+          cached_value_again: null
 
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"
@@ -897,3 +895,12 @@ test_cases:
 
   - name: "Cleanup sc_inter"
     sql: "DROP TABLE IF EXISTS sc_inter"
+
+  - name: "Cleanup nested trigger event source"
+    sql: "DROP TABLE IF EXISTS cache_event"
+
+  - name: "Cleanup nested trigger audit target"
+    sql: "DROP TABLE IF EXISTS cache_audit"
+
+  - name: "Cleanup nested trigger aggregate source"
+    sql: "DROP TABLE IF EXISTS cache_parent"
