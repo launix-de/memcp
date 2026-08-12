@@ -7681,7 +7681,9 @@ dependency preparation does not emit free outer-row symbols. */
 					sources default_alias (car sources) order_items stages condition '()))
 				(define current (nth parts 0))
 				(define remaining (nth parts 1))
-				(and (not (empty_list? current))
+				(if (empty_list? current)
+					(and (constant_scalar_or_presence_stage_output_source? stages (car sources))
+						(order_items_follow_join_tree? (cdr sources) default_alias order_items stages condition))
 					(order_items_follow_join_tree? (cdr sources) default_alias remaining stages condition)))))))
 
 (define order_dirs (lambda (order_items)
