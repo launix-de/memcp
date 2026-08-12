@@ -2021,6 +2021,24 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					for i, p := range onCollisionCols {
 						if p == "$update" {
 							params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false, currentTx))
+						} else if len(p) > 5 && p[:5] == "$set:" {
+							// Match the physical scan mapper's $set pseudo-column. Compute
+							// proxies need a point write because they are not row payload;
+							// ordinary cache columns retain normal UPDATE semantics.
+							cacheColName := p[5:]
+							column := s.getColumnStorageOrPanic(cacheColName)
+							proxy, computed := column.(*StorageComputeProxy)
+							update := s.UpdateFunction(uid, true, false, currentTx)
+							params[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+								if len(args) > 0 {
+									if computed {
+										proxy.SetValue(uid, args[0])
+									} else {
+										update(scm.NewSlice([]scm.Scmer{scm.NewString(cacheColName), args[0]}))
+									}
+								}
+								return scm.NewBool(true)
+							})
 						} else if len(p) >= 4 && p[:4] == "NEW." {
 							for j, c := range columns {
 								if p[4:] == c {
