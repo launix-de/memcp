@@ -247,6 +247,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			_ '())))
 	(define graph_plan_predicate_origins
 		(map (test_join_tree_predicates (qassoc_get graph_plan 'tree '())) join_order_pred_origin))
+	(define test_join_tree_predicates_placed? (lambda (tree)
+		(match tree
+			((symbol join-leaf) _alias) true
+			((symbol join-node) _kind left right predicates)
+			(begin
+				(define left_aliases (join_optimizer_tree_aliases left))
+				(define right_aliases (join_optimizer_tree_aliases right))
+				(define combined (merge_unique (list left_aliases right_aliases)))
+				(and
+					(reduce predicates (lambda (valid predicate)
+						(and valid (join_order_predicate_crosses_in? predicate
+							left_aliases right_aliases combined))) true)
+					(and (test_join_tree_predicates_placed? left)
+						(test_join_tree_predicates_placed? right))))
+			_ false)))
+	(assert (equal? (count (test_join_tree_predicates (qassoc_get graph_plan 'tree '()))) 3) true
+		"logical join tree owns every reorderable predicate exactly once")
+	(assert (test_join_tree_predicates_placed? (qassoc_get graph_plan 'tree '())) true
+		"logical join predicates sit on the lowest join node crossing their aliases")
 	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'inner-on)))) 2) true
 		"logical join nodes retain INNER ON provenance from the hypergraph")
 	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'where)))) 1) true
@@ -316,13 +335,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"LEFT OUTER join predicates retain their barrier owner")
 	(define bushy_scan_tree (make_join_optimizer_node 'inner
 		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b") '())
-		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '()) '()))
-	(assert (equal? (nth bushy_scan_tree 2)
-		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b") '())) true
-		"physical join plans preserve the complete left subtree")
-	(assert (equal? (nth bushy_scan_tree 3)
-		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '())) true
-		"physical join plans preserve the complete right subtree")
+		(make_join_optimizer_node 'left-outer (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '()) '()))
+	(define bushy_scan_sources (list
+		(list "a" "memcp-tests" "graph_a" false nil)
+		(list "b" "memcp-tests" "graph_b" false nil)
+		(list "c" "memcp-tests" "graph_c" false nil)
+		(list "d" "memcp-tests" "graph_d" false nil)))
+	(define test_physical_scan_signature (lambda (expr)
+		(match expr
+			((symbol scan) _tx ((symbol table) _schema relation) _filtercols _filterfn _mapcols mapfn _reducefn _init _limit outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapfn))
+			((symbol scan_order) _tx ((symbol table) _schema relation) _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapfn _reducefn _init outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapfn))
+			(cons head tail) (concat (test_physical_scan_signature head) (test_physical_scan_signature tail))
+			_ "")))
+	(define bushy_scan_expr (build_join_scan_rows_with_mapper_using_recipe
+		"memcp-tests" bushy_scan_sources bushy_scan_tree "a" '() true true '() 0 -1 false nil '()))
+	(assert (equal? (test_physical_scan_signature bushy_scan_expr)
+		"graph_a:false>graph_b:false>graph_c:false>graph_d:true>") true
+		"physical lowering consumes bushy subtree order and its nested LEFT OUTER boundary")
 	(define tree_group_stage (make_group_stage
 		"tree-group-stage" graph_reordered_block '() '() '() nil '() '() nil nil '()))
 	(assert (equal?

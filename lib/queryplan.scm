@@ -4229,12 +4229,8 @@ logical trees consumed before physical scan lowering. */
 		(define cardinality (join_order_join_cardinality predicates left right))
 		(define combined (join_order_set_union universe
 			(join_order_plan_aliases left) (join_order_plan_aliases right)))
-		(define node_predicates (filter predicates (lambda (predicate)
-			(and (not (nil? (join_order_pred_origin predicate)))
-				(join_order_predicate_crosses_in? predicate
-					(join_order_plan_aliases left) (join_order_plan_aliases right) combined)))))
 		(list
-			(list (quote join-node) (quote inner) (join_order_plan_tree left) (join_order_plan_tree right) node_predicates)
+			(list (quote join-node) (quote inner) (join_order_plan_tree left) (join_order_plan_tree right) '())
 			combined
 			cardinality
 			(+ (join_order_plan_cost left) (join_order_plan_cost right) cardinality)
@@ -4656,10 +4652,31 @@ logical trees consumed before physical scan lowering. */
 	(join_order_goo_dp_loop nodes aliases predicates hypergraph
 		(join_order_goo nodes aliases predicates) 10000 0)))
 
-(define join_order_result (lambda (strategy plan entries)
+(define join_order_tree_with_predicates (lambda (tree predicates)
+	(match tree
+		((symbol join-leaf) _alias) tree
+		((quote join-leaf) _alias) tree
+		((symbol join-node) kind left right _predicates)
+		(begin
+			(define left_aliases (join_optimizer_tree_aliases left))
+			(define right_aliases (join_optimizer_tree_aliases right))
+			(define combined (merge_unique (list left_aliases right_aliases)))
+			(list (quote join-node) kind
+				(join_order_tree_with_predicates left predicates)
+				(join_order_tree_with_predicates right predicates)
+				(filter predicates (lambda (predicate)
+					(and (not (nil? (join_order_pred_origin predicate)))
+						(join_order_predicate_crosses_in? predicate
+							left_aliases right_aliases combined))))))
+		((quote join-node) kind left right _predicates)
+		(join_order_tree_with_predicates
+			(list (quote join-node) kind left right '()) predicates)
+		_ (neumann_fail "join_reorder" "malformed optimized join tree"))))
+
+(define join_order_result (lambda (strategy plan entries predicates)
 	(list
 		(list (quote strategy) strategy)
-		(list (quote tree) (join_order_plan_tree plan))
+		(list (quote tree) (join_order_tree_with_predicates (join_order_plan_tree plan) predicates))
 		(list (quote order) (join_order_plan_aliases plan))
 		(list (quote cost) (join_order_plan_cost plan))
 		(list (quote cardinality) (join_order_plan_cardinality plan))
@@ -4698,7 +4715,7 @@ logical trees consumed before physical scan lowering. */
 				(join_order_goo_dp nodes aliases predicates hypergraph))))
 		(if (nil? (car result))
 			(neumann_fail "join_reorder" (concat "SCM join ordering could not construct a connected plan: " (string (list nodes predicates result))))
-			(join_order_result strategy (car result) (cadr result))))))
+			(join_order_result strategy (car result) (cadr result) predicates))))))
 
 (define make_join_optimizer_leaf (lambda (alias)
 	(list (quote join-leaf) alias)))
