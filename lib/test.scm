@@ -232,7 +232,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"memcp-tests" outer_graph_sources '() true nil nil nil nil nil '() '() '())))
 	(assert (equal? (source_join_expr (nth (qb_sources normalized_outer_graph) 2))
 		(source_join_expr (nth outer_graph_sources 2))) true "outer ON predicate remains attached to its semantic barrier")
-	(define graph_plan (join_optimizer_plan_segment graph_sources graph_sources "a" graph_view))
+	(define graph_plan (join_optimizer_plan_segment '() graph_sources graph_sources "a" graph_view))
 	(assert (equal? (qassoc_get graph_plan 'strategy nil) 'dphyp) true "small join graphs use DPHyp")
 	(assert (equal? (count (qassoc_get graph_plan 'order '())) 3) true "DPHyp covers every logical join source")
 	(assert (equal? (car (qassoc_get graph_plan 'tree '())) 'join-node) true "DPHyp records a bushy logical join tree")
@@ -270,6 +270,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"logical join nodes retain INNER ON provenance from the hypergraph")
 	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'where)))) 1) true
 		"logical join nodes retain WHERE provenance from the hypergraph")
+	(define singleton_stage (make_group_stage
+		"logical-singleton" (car graph_sources) '() '(1) '() nil '() '() nil nil
+		(list
+			(list 'purpose 'scalar_single)
+			(list 'preserve_empty_domain true)
+			(list 'lookup-keys '()))))
+	(define singleton_source (list "scalar" "memcp-tests"
+		(list 'stage-output "logical-singleton") true true))
+	(define singleton_block (make_query_block
+		"memcp-tests" (list (car graph_sources) singleton_source) '()
+		(list 'equal?? (graph_col "a" "id") (graph_col "scalar" "value"))
+		nil nil nil nil nil '() '() '()))
+	(define singleton_reordered
+		(hybrid_reorder_query_block_using (list singleton_stage) singleton_block))
+	(assert (equal? (qassoc_get (qb_facts singleton_reordered) 'join_driver nil) "scalar") true
+		"logical reorder drives a guaranteed singleton stage before a larger base source")
 	(define dense_join_aliases (map (produceN 14) (lambda (i) (concat "dense_" i))))
 	(define dense_join_nodes (mapIndex dense_join_aliases (lambda (i alias) (list alias (+ 100 i)))))
 	(define dense_join_predicates (merge (mapIndex dense_join_aliases (lambda (left_index left)
@@ -325,7 +341,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define prepared_source_order (list (nth graph_sources 2) (car graph_sources) (cadr graph_sources)))
 	(define prepared_order_block (make_query_block
 		"memcp-tests" graph_sources '() graph_where nil nil nil nil nil '() '()
-		(facts_with_physical_join_order '() prepared_source_order)))
+		(list (list 'join_plan (join_optimizer_left_deep_tree prepared_source_order)))))
 	(assert (equal? (map (qb_sources prepared_order_block) source_alias) (map graph_sources source_alias)) true
 		"physical preparation never reorders the semantic source catalog")
 	(assert (equal? (join_optimizer_tree_aliases (query_block_join_plan prepared_order_block graph_sources))
@@ -679,6 +695,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (number? 42) true "42 should be a number")
 	(assert (number? "42") false "\"42\" should not be a number")
 	(assert (number? `symbol) false "'symbol' should not be a number")
+	(assert (symbol? (symbol "symbol")) true "constructed symbol should be a symbol")
+	(assert (symbol? 0) false "integer should not be a symbol")
+	(assert (symbol? false) false "boolean should not be a symbol")
 
 	/* Test for int? (requires int64-producing builtin like size/now) */
 	(assert (int? (size "abc")) true "size returns an int")

@@ -116,6 +116,20 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "symbol?",
+		Desc: "tells if the value is a symbol",
+		Fn: func(a ...Scmer) Scmer {
+			return NewBool(a[0].GetTag() == tagSymbol)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "value", ParamDesc: "value"},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "+",
 		Desc: "adds two or more numbers",
 		Fn: func(a ...Scmer) Scmer {

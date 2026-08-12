@@ -332,6 +332,7 @@ func (s *scanOrderTableSpec) backingTable() *table {
 // index-order compatible (ASC). This lets the shard return rows already sorted
 // by ORDER BY, reducing the cross-shard merge to merging pre-sorted runs.
 func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (boundaries, bool) {
+	original := b
 	allEq := true
 	for _, bi := range b {
 		if !boundaryIsPoint(bi) {
@@ -365,7 +366,6 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	if !allEq || !canAppendSortPrefix {
 		return b, false
 	}
-	addedSortCols := 0
 	for _, scol := range sortcols {
 		if scol.IsString() {
 			col := scol.String()
@@ -378,7 +378,6 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			}
 			if !already {
 				b = append(b, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil()})
-				addedSortCols++
 			}
 			continue
 		}
@@ -388,14 +387,14 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			ok = true
 		}
 		if !ok {
-			continue
+			return original, false
 		}
 		var procParams []scm.Scmer
 		if proc.Params.IsSlice() {
 			procParams = proc.Params.Slice()
 		}
 		if len(procParams) == 0 {
-			continue
+			return original, false
 		}
 		sortCondCols := make([]string, len(procParams))
 		for j, param := range procParams {
@@ -406,12 +405,12 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			}
 		}
 		if !isRawDataset(procParams, proc.Body) {
-			continue
+			return original, false
 		}
 		canon := canonicalColName(proc.Body, procParams, sortCondCols)
 		mc, mf := buildComputedFn(proc.Body, proc.Params, proc.En, sortCondCols)
 		if mf.IsNil() || mc == nil {
-			continue
+			return original, false
 		}
 		already := false
 		for _, bi := range b {
@@ -422,10 +421,9 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 		}
 		if !already {
 			b = append(b, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
-			addedSortCols++
 		}
 	}
-	return b, addedSortCols > 0
+	return b, len(sortcols) > 0
 }
 
 func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
