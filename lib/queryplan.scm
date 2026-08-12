@@ -5081,6 +5081,41 @@ source catalog. join_plan remains the single owner of physical join order. */
 	(cons driver (filter sources (lambda (src)
 		(not (equal? (source_alias src) (source_alias driver))))))))
 
+(define join_optimizer_order_alias_prefix_loop (lambda (sources segment_aliases default_alias exprs prefix)
+	(match exprs
+		(cons expr rest)
+		(begin
+			(define aliases (join_hypergraph_expr_aliases default_alias (source_aliases sources) expr))
+			(if (empty_list? aliases)
+				(join_optimizer_order_alias_prefix_loop sources segment_aliases default_alias rest prefix)
+				(if (and (single_source? aliases) (contains? segment_aliases (car aliases)))
+					(join_optimizer_order_alias_prefix_loop sources segment_aliases default_alias rest
+						(append_unique prefix (car aliases)))
+					(list false '()))))
+		_ (list true prefix))))
+
+(define join_optimizer_order_alias_prefix (lambda (sources segment default_alias order_items)
+	(join_optimizer_order_alias_prefix_loop
+		sources (map segment source_alias) default_alias (order_exprs order_items) '())))
+
+(define join_optimizer_apply_order_prefix (lambda (planned all_sources segment default_alias graph prefix)
+	(if (empty_list? prefix)
+		planned
+		(begin
+			(define planned_aliases (qassoc_get planned (quote order) '()))
+			(define ordered_aliases (merge (list prefix
+				(filter planned_aliases (lambda (alias) (not (contains? prefix alias)))))))
+			(define ordered_sources (join_optimizer_sources_for_order segment ordered_aliases))
+			(define predicates (join_optimizer_metadata_predicates
+				all_sources default_alias graph ordered_aliases))
+			(qassoc_set
+				(qassoc_set
+					(qassoc_set planned (quote tree)
+						(join_order_tree_with_predicates
+							(join_optimizer_left_deep_tree ordered_sources) predicates))
+					(quote order) ordered_aliases)
+				(quote strategy) (quote order-prefix))))))
+
 (define join_optimizer_reorder_result (lambda (tree strategy dp_entries)
 	(list tree strategy dp_entries)))
 
@@ -5098,13 +5133,20 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(or
 				(source_order_limit_driver? (car segment) (qb_order block) (qb_limit block))
 				(source_row_number_limit_driver? (qb_stages block) (car segment)))))
+		(define order_prefix_result (if (query_limit_active? (qb_offset block) (qb_limit block))
+			(list false '())
+			(join_optimizer_order_alias_prefix sources segment default_alias (qb_order block))))
 		(if (or (< (count segment) 2) preserve_order_driver)
 			(join_optimizer_reorder_result
 				(join_optimizer_left_deep_tree sources)
 				(if preserve_order_driver (quote preserve-order-limit) (quote fixed))
 				0)
 			(begin
-				(define planned (join_optimizer_plan_segment stage_catalog sources segment default_alias graph))
+				(define cost_planned (join_optimizer_plan_segment
+					stage_catalog sources segment default_alias graph))
+				(define planned (if (car order_prefix_result)
+					(join_optimizer_apply_order_prefix cost_planned sources segment default_alias graph (cadr order_prefix_result))
+					cost_planned))
 				(define remaining (join_optimizer_drop_sources sources (count segment)))
 				(join_optimizer_reorder_result
 					(join_optimizer_append_sources_tree
