@@ -1134,7 +1134,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsTxReader := make([]bool, len(conditionCols))
+	cNeedsCachedReader := make([]bool, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	for i, k := range conditionCols { // iterate over columns
 		if k == "$recset_contains" {
@@ -1150,8 +1150,8 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		}
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
-			cNeedsTxReader[i] = true
+		if _, ok := ccols[i].(*StorageComputeProxy); ok {
+			cNeedsCachedReader[i] = true
 		}
 	}
 	// initialize main_count lazily if needed
@@ -1214,7 +1214,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					for i, k := range ccols { // iterate over columns
 						if conditionGetters[i] != nil {
 							cdataset[i] = conditionGetters[i](idx, 0)
-						} else if cNeedsTxReader[i] {
+						} else if cNeedsCachedReader[i] {
 							cdataset[i] = cReaders[i].GetValue(idx)
 						} else {
 							cdataset[i] = k.GetValue(idx)
@@ -1226,7 +1226,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					for i, k := range conditionCols { // iterate over columns
 						if conditionGetters[i] != nil {
 							cdataset[i] = conditionGetters[i](idx, 0)
-						} else if cNeedsTxReader[i] {
+						} else if cNeedsCachedReader[i] {
 							cdataset[i] = cReaders[i].GetValue(idx)
 						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 							cdataset[i] = ccols[i].GetValue(idx)

@@ -240,9 +240,12 @@ func ensureSystemStatistic() {
 // TODO: measurements are temporary; remove later (nanoseconds)
 func safeLogScan(schema, table string, ordered bool, filter, order, indexCols string, inputCount, candidateCount, outputCount, analyzeNs, execNs int64) {
 	defer func() { _ = recover() }()
-	// The telemetry sink must not observe itself: querying scan statistics would
-	// otherwise append more scan rows while that same relation is being read.
-	if schema == "system_statistic" && table == "scans" {
+	// The telemetry sink and its physical cache relations must not observe
+	// themselves. Group-cache reads are still reads of the scan sink; logging
+	// them would recursively schedule incremental writes while the cache shard is
+	// held for reading and would leave telemetry work in flight at shutdown.
+	if schema == "system_statistic" &&
+		(table == "scans" || strings.HasPrefix(table, ".")) {
 		return
 	}
 	db := GetDatabase("system_statistic")
