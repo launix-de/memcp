@@ -54,6 +54,13 @@ type computeVariantReader struct {
 	tx      *TxContext
 }
 
+type computeProxyReader struct {
+	proxy   *StorageComputeProxy
+	readers []ColumnReader
+	tx      *TxContext
+	values  []scm.Scmer
+}
+
 func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 	if fn.IsProc() {
 		proc := *fn.Proc()
@@ -247,14 +254,55 @@ func (r *computeVariantReader) GetValue(idx uint32) scm.Scmer {
 	return val
 }
 
+func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
+	p := r.proxy
+
+	p.mu.RLock()
+	if val, ok := p.delta[idx]; ok {
+		p.mu.RUnlock()
+		return val
+	}
+	p.mu.RUnlock()
+
+	if p.compressed && idx < p.count && p.main != nil {
+		return p.main.GetValue(idx)
+	}
+	if p.validMask.Get(uint(idx)) && idx < p.count && p.main != nil {
+		return p.main.GetValue(idx)
+	}
+
+	for i := range r.readers {
+		r.values[i] = r.readers[i].GetValue(idx)
+	}
+	val := applyWithTx(r.tx, p.computor, r.values...)
+
+	p.mu.Lock()
+	p.delta[idx] = val
+	p.mu.Unlock()
+	p.validMask.Set(uint(idx), true)
+	return val
+}
+
 func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
-	if !p.hasSessionVariants() {
+	if p.isOrdered {
 		return p
 	}
-	variant := p.currentVariant(tx, true)
+	// Bind input readers before the physical scan acquires the shard read lock.
+	// A cache miss may compute a value, but it must stay within the already
+	// acquired shard capability instead of re-entering GetRead/ColumnReaderTx.
+	// This also keeps the reader executable on a future remote shard owner.
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
 		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
+	}
+	variant := p.currentVariant(tx, true)
+	if variant == nil {
+		return &computeProxyReader{
+			proxy:   p,
+			readers: readers,
+			tx:      tx,
+			values:  make([]scm.Scmer, len(readers)),
+		}
 	}
 	return &computeVariantReader{
 		proxy:   p,

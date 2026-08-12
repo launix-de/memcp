@@ -116,6 +116,20 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "symbol?",
+		Desc: "tells if the value is a symbol",
+		Fn: func(a ...Scmer) Scmer {
+			return NewBool(a[0].GetTag() == tagSymbol)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "value", ParamDesc: "value"},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "+",
 		Desc: "adds two or more numbers",
 		Fn: func(a ...Scmer) Scmer {
@@ -352,8 +366,11 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "<=",
-		Desc: "compares two numbers or strings",
+		Desc: "compares two numbers or strings; returns nil if either value is nil",
 		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
 			return NewBool(!Less(a[1], a[0]))
 		},
 		Type: &TypeDescriptor{
@@ -367,8 +384,11 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "<",
-		Desc: "compares two numbers or strings",
+		Desc: "compares two numbers or strings; returns nil if either value is nil",
 		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
 			return NewBool(Less(a[0], a[1]))
 		},
 		Type: &TypeDescriptor{
@@ -382,8 +402,11 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: ">",
-		Desc: "compares two numbers or strings",
+		Desc: "compares two numbers or strings; returns nil if either value is nil",
 		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
 			return NewBool(Less(a[1], a[0]))
 		},
 		Type: &TypeDescriptor{
@@ -397,8 +420,11 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: ">=",
-		Desc: "compares two numbers or strings",
+		Desc: "compares two numbers or strings; returns nil if either value is nil",
 		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
 			return NewBool(!Less(a[0], a[1]))
 		},
 		Type: &TypeDescriptor{
@@ -436,6 +462,21 @@ func init_alu() {
 				{Kind: "any", ParamName: "a", ParamDesc: "first value"},
 				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
 			},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sql_not",
+		Desc: "negates a SQL predicate while preserving nil as UNKNOWN",
+		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			return NewBool(!a[0].Bool())
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{{Kind: "any", ParamName: "value", ParamDesc: "SQL predicate value"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 		},

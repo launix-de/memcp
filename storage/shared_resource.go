@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025  Carl-Philip Hänsch
+Copyright (C) 2025-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -26,10 +26,12 @@ const (
 	WRITE  SharedState = 2
 )
 
-// SharedResource marks a lazily loaded resource controllable by a process monitor.
-// In the current single-process implementation, these methods primarily coordinate
-// lazy load/unload. The returned release() functions are placeholders and can
-// evolve into reference counting once a multi-node monitor is added.
+// SharedResource is the access boundary for a lazily loaded local or clustered
+// resource. GetRead/GetExclusive must not be bypassed by callers that happen to
+// know today's in-process representation: a cluster implementation may satisfy a
+// read by loading a local SHARED copy or by routing work to a current shard owner.
+// The returned release function delimits that acquired capability and can evolve
+// from the current local lifetime tracking into a cluster reference release.
 type SharedResource interface {
 	GetState() SharedState
 	GetRead() func()      // acquire read access; returns release()

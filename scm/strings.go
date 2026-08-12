@@ -256,8 +256,11 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strlike",
-		Desc: "matches the string against a wildcard pattern (SQL compliant)",
+		Desc: "matches the string against a wildcard pattern using SQL NULL semantics",
 		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
 			value := String(a[0])
 			pattern := String(a[1])
 			collation := "utf8mb4_general_ci"
@@ -278,8 +281,11 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strlike_cs",
-		Desc: "matches the string against a wildcard pattern (case-sensitive)",
+		Desc: "matches the string against a wildcard pattern case-sensitively using SQL NULL semantics",
 		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
 			return NewBool(StrLike(String(a[0]), String(a[1])))
 		},
 		Type: &TypeDescriptor{

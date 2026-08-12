@@ -24,14 +24,29 @@ setup:
   - sql: "DROP TABLE IF EXISTS ord_t"
   - sql: "DROP TABLE IF EXISTS ord_join_left"
   - sql: "DROP TABLE IF EXISTS ord_join_right"
+  - sql: "DROP TABLE IF EXISTS ord_member_doc"
+  - sql: "DROP TABLE IF EXISTS ord_member_file"
+  - sql: "DROP TABLE IF EXISTS ord_member_label"
+  - sql: "DROP TABLE IF EXISTS ord_derived_item"
+  - sql: "DROP TABLE IF EXISTS ord_derived_parent"
   - sql: "CREATE TABLE ord_t (a INT, b INT)"
   - sql: "CREATE TABLE ord_join_left (id INT PRIMARY KEY, ref_id INT)"
   - sql: "CREATE TABLE ord_join_right (id INT PRIMARY KEY, rank_value INT)"
+  - sql: "CREATE TABLE ord_member_doc (id INT PRIMARY KEY, file_id INT, label_id INT, rank_value INT)"
+  - sql: "CREATE TABLE ord_member_file (id INT PRIMARY KEY, filename TEXT)"
+  - sql: "CREATE TABLE ord_member_label (id INT PRIMARY KEY, name TEXT, visible INT)"
+  - sql: "CREATE TABLE ord_derived_parent (id INT PRIMARY KEY, label TEXT)"
+  - sql: "CREATE TABLE ord_derived_item (id INT PRIMARY KEY, parent_id INT, created INT)"
   - sql: |
       INSERT INTO ord_t (a,b) VALUES
       (1,2),(1,1),(2,2),(2,0),(3,1)
   - sql: "INSERT INTO ord_join_left VALUES (1,10),(2,20),(3,30)"
   - sql: "INSERT INTO ord_join_right VALUES (10,3),(20,1),(30,2)"
+  - sql: "INSERT INTO ord_member_doc VALUES (1,1,10,40),(2,2,20,30),(3,3,10,20),(4,4,30,10)"
+  - sql: "INSERT INTO ord_member_file VALUES (1,'other'),(2,'needle one'),(3,'needle two'),(4,'other')"
+  - sql: "INSERT INTO ord_member_label VALUES (10,'alpha',1),(20,'beta',0)"
+  - sql: "INSERT INTO ord_derived_parent VALUES (1,'one'),(2,'two')"
+  - sql: "INSERT INTO ord_derived_item VALUES (10,1,100),(20,2,200)"
 
 test_cases:
   - name: "Top-1 by a DESC"
@@ -196,12 +211,230 @@ test_cases:
     expect:
       rows: 1
       result_contains:
+        - "scan_order"
+        - "ord_join_left"
+        - "ord_join_right"
+      result_not_contains:
         - ".prejoin:"
         - "initialize_cache_table"
-        - "scan_order"
-      result_not_contains:
         - "(sort rows"
         - "(slice sorted"
+
+  - name: "RecSet membership with lookup order never materializes Scheme rows"
+    sql: |
+      EXPLAIN SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE d.file_id IN (
+        SELECT id FROM ord_member_file WHERE filename LIKE '%needle%'
+        UNION
+        SELECT id FROM ord_member_file WHERE MATCH(filename) AGAINST ('needle')
+      )
+      ORDER BY l.name, d.id
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "(lambda (rows)"
+        - "(sort (var 0)"
+        - "(slice (var 0)"
+        - "(merge (var 0) (var 1))"
+
+  - name: "RecSet membership with lookup order remains correct"
+    sql: |
+      SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE d.file_id IN (
+        SELECT id FROM ord_member_file WHERE filename LIKE '%needle%'
+        UNION
+        SELECT id FROM ord_member_file WHERE MATCH(filename) AGAINST ('needle')
+      )
+      ORDER BY l.name, d.id
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - { id: 3, name: "alpha" }
+        - { id: 2, name: "beta" }
+
+  - name: "Driver ordered RecSet lookup streams without joined row lists"
+    sql: |
+      EXPLAIN SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE d.file_id IN (
+        SELECT id FROM ord_member_file WHERE filename LIKE '%needle%'
+        UNION
+        SELECT id FROM ord_member_file WHERE MATCH(filename) AGAINST ('needle')
+      )
+      ORDER BY d.rank_value DESC
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "joined_matches"
+        - "(merge (var 0) (var 1))"
+
+  - name: "Driver ordered RecSet lookup remains correct"
+    sql: |
+      SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE d.file_id IN (
+        SELECT id FROM ord_member_file WHERE filename LIKE '%needle%'
+        UNION
+        SELECT id FROM ord_member_file WHERE MATCH(filename) AGAINST ('needle')
+      )
+      ORDER BY d.rank_value DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - { id: 2, name: "beta" }
+        - { id: 3, name: "alpha" }
+
+  - name: "Nullable-side WHERE remains after LEFT JOIN null extension"
+    sql: |
+      SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE l.visible = 1 OR l.id IS NULL
+      ORDER BY d.id
+    expect:
+      rows: 3
+      data:
+        - { id: 1, name: "alpha" }
+        - { id: 3, name: "alpha" }
+        - { id: 4, name: null }
+
+  - name: "Failed nullable-side WHERE match does not synthesize NULL"
+    sql: |
+      SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE d.id = 2 AND l.visible = 1
+    expect:
+      rows: 0
+
+  - name: "Nullable WHERE is scheduled before unrelated later lookup"
+    sql: |
+      EXPLAIN SELECT d.id, l.name, f.filename
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      LEFT JOIN ord_member_file f ON f.id = d.file_id
+      WHERE l.visible = 1
+      ORDER BY d.id
+    expect:
+      rows: 1
+      result_contains:
+        - "ord_member_label"
+        - "ord_member_file"
+      result_not_contains:
+        - "joined_matches"
+        - "(merge (var 0) (var 1))"
+
+  - name: "Rejected nullable lookup does not execute later projection lookup"
+    sql: |
+      SELECT d.id, l.name, f.filename
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      LEFT JOIN ord_member_file f ON f.id = d.file_id
+      WHERE l.visible = 99
+      ORDER BY d.id
+      LIMIT 2
+    expect:
+      rows: 0
+
+  - name: "Grouped nullable lookup WHERE stays at its null-extension boundary"
+    sql: |
+      SELECT t.id, t.score
+      FROM (
+        SELECT d.id,
+          (SELECT SUM(x.rank_value)
+           FROM ord_member_doc x
+           WHERE x.label_id = d.label_id AND x.rank_value > 15) AS score
+        FROM ord_member_doc d
+      ) t
+      WHERE t.score = 60 OR t.score IS NULL
+      ORDER BY t.id
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - { id: 1, score: 60 }
+        - { id: 3, score: 60 }
+        - { id: 4, score: null }
+
+  - name: "Grouped nullable lookup uses scans without relational collectors"
+    sql: |
+      EXPLAIN SELECT t.id, t.score
+      FROM (
+        SELECT d.id,
+          (SELECT SUM(x.rank_value)
+           FROM ord_member_doc x
+           WHERE x.label_id = d.label_id AND x.rank_value > 15) AS score
+        FROM ord_member_doc d
+      ) t
+      WHERE t.score = 60 OR t.score IS NULL
+      ORDER BY t.id
+      LIMIT 3
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "joined_matches"
+        - "(lambda (rows)"
+        - "(sort (var 0)"
+        - "(slice (var 0)"
+
+  - name: "Quoted derived aliases resolve case-insensitively across joined order keys"
+    sql: |
+      SELECT d.*
+      FROM (
+        SELECT i.id AS `ID`, i.created AS `Created`, i.parent_id,
+          p.id AS `parent:ID`, p.label AS `parent:label`
+        FROM ord_derived_item i
+        LEFT JOIN (
+          SELECT id AS `parent:ID`, label AS `parent:label`
+          FROM ord_derived_parent
+        ) p ON p.`parent:ID` = i.parent_id
+      ) d
+      LEFT JOIN ord_derived_parent sorter ON sorter.id = d.parent_id
+      ORDER BY `d`.`Created` DESC, `d`.`id` DESC
+    expect:
+      rows: 2
+      data:
+        - { ID: 20, Created: 200, parent_id: 2, "parent:ID": 2, "parent:label": "two" }
+        - { ID: 10, Created: 100, parent_id: 1, "parent:ID": 1, "parent:label": "one" }
+
+  - name: "Joined derived alias order remains a physical ordered scan"
+    sql: |
+      EXPLAIN SELECT d.*
+      FROM (
+        SELECT i.id AS `ID`, i.created AS `Created`, i.parent_id,
+          p.id AS `parent:ID`, p.label AS `parent:label`
+        FROM ord_derived_item i
+        LEFT JOIN (
+          SELECT id AS `parent:ID`, label AS `parent:label`
+          FROM ord_derived_parent
+        ) p ON p.`parent:ID` = i.parent_id
+      ) d
+      LEFT JOIN ord_derived_parent sorter ON sorter.id = d.parent_id
+      ORDER BY `d`.`Created` DESC, `d`.`id` DESC
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "(lambda (rows)"
+        - "(sort (var 0)"
+        - "(slice (var 0)"
 
   - name: "ORDER BY DESC OFFSET beyond rows returns empty"
     sql: "SELECT a FROM ord_t ORDER BY a DESC LIMIT 2 OFFSET 10"
@@ -275,6 +508,22 @@ test_cases:
           val: 1399951
         - grp: 0
           val: 1399937
+  - name: "Multi-shard lookup ORDER keeps the complete sort prefix before LIMIT"
+    setup:
+      - sql: "INSERT INTO ord_member_label VALUES (0,'echo',1),(1,'delta',1),(2,'charlie',1),(3,'bravo',1),(4,'alpha',1)"
+    sql: |
+      SELECT s.id, l.name
+      FROM ord_stress s
+      LEFT JOIN ord_member_label l ON l.id = s.grp
+      WHERE s.id % 200 = 0
+      ORDER BY l.name, s.id
+      LIMIT 1 OFFSET 100
+    timeout: 60
+    expect:
+      rows: 1
+      data:
+        - id: 180000
+          name: "alpha"
 
   - name: "Multi-shard ORDER BY with OFFSET across shards"
     sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 3 OFFSET 49999"
@@ -291,3 +540,8 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ord_t"
   - sql: "DROP TABLE IF EXISTS ord_join_left"
   - sql: "DROP TABLE IF EXISTS ord_join_right"
+  - sql: "DROP TABLE IF EXISTS ord_member_doc"
+  - sql: "DROP TABLE IF EXISTS ord_member_file"
+  - sql: "DROP TABLE IF EXISTS ord_member_label"
+  - sql: "DROP TABLE IF EXISTS ord_derived_item"
+  - sql: "DROP TABLE IF EXISTS ord_derived_parent"

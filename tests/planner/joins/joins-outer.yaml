@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Outer Join Semantics Test Suite
 
 metadata:
@@ -7,31 +22,72 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS parent"
   - sql: "DROP TABLE IF EXISTS child"
+  - sql: "DROP TABLE IF EXISTS outer_label"
   - sql: "CREATE TABLE parent (id INT, label VARCHAR(20))"
-  - sql: "CREATE TABLE child (pid INT, note VARCHAR(20))"
-  - sql: "INSERT INTO parent (id, label) VALUES (1, 'p1'), (2, 'p2')"
-  - sql: "INSERT INTO child (pid, note) VALUES (2, 'c2')"
+  - sql: "CREATE TABLE child (pid INT, note VARCHAR(20), visible INT)"
+  - sql: "CREATE TABLE outer_label (id INT PRIMARY KEY, name VARCHAR(20))"
+  - sql: "INSERT INTO parent (id, label) VALUES (1, 'p1'), (2, 'p2'), (3, 'p3')"
+  - sql: "INSERT INTO child (pid, note, visible) VALUES (2, 'c2', 1), (3, 'hidden', 0)"
+  - sql: "INSERT INTO outer_label VALUES (1, 'one'), (2, 'two'), (3, 'three')"
 
 test_cases:
-  # TODO(memcp): LEFT JOIN with unmatched row returns repeated NULLs (note: [null,null]).
-  # - name: "LEFT JOIN preserves left rows"
-  #   sql: "SELECT p.id, c.note AS note FROM parent p LEFT JOIN child c ON p.id = c.pid ORDER BY p.id"
-  #   expect:
-  #     rows: 2
-  #     data:
-  #       - id: 1
-  #         note: null
-  #       - id: 2
-  #         note: "c2"
+  - name: "LEFT JOIN preserves left rows"
+    sql: "SELECT p.id, c.note AS note FROM parent p LEFT JOIN child c ON p.id = c.pid ORDER BY p.id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          note: null
+        - id: 2
+          note: "c2"
+        - id: 3
+          note: "hidden"
+
+  - name: "LEFT JOIN ON filters before null extension"
+    sql: |
+      SELECT p.id, c.note AS note
+      FROM parent p
+      LEFT JOIN child c ON c.pid = p.id AND c.visible = 1
+      ORDER BY p.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          note: null
+        - id: 2
+          note: "c2"
+        - id: 3
+          note: null
+
+  - name: "nullable WHERE observes null extension before later lookup"
+    sql: |
+      SELECT p.id, c.note AS note, l.name AS label_name
+      FROM parent p
+      LEFT JOIN child c ON c.pid = p.id
+      LEFT JOIN outer_label l ON l.id = p.id
+      WHERE c.visible = 1 OR c.pid IS NULL
+      ORDER BY p.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          note: null
+          label_name: "one"
+        - id: 2
+          note: "c2"
+          label_name: "two"
 
   - name: "RIGHT JOIN mirrors behavior"
     sql: "SELECT p.id, c.note AS note FROM parent p RIGHT JOIN child c ON p.id = c.pid ORDER BY p.id"
     expect:
-      rows: 1
+      rows: 2
       data:
         - id: 2
           note: "c2"
+        - id: 3
+          note: "hidden"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS outer_label"
   - sql: "DROP TABLE IF EXISTS child"
   - sql: "DROP TABLE IF EXISTS parent"

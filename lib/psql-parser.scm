@@ -110,7 +110,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 (define psql_comparison_expr (lambda (op a b)
 	(match op
 		"eq" '((quote equal??) a b)
-		"ne" '((quote not) '((quote equal?) a b))
+		"ne" '((quote sql_not) '((quote equal??) a b))
 		"le" '((quote <=) a b)
 		"ge" '((quote >=) a b)
 		"lt" '((quote <) a b)
@@ -207,23 +207,23 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser ">" "gt")
 		)) (define b psql_expression2)) (psql_comparison_expr op a b))
 		/* ILIKE is Postgres case-insensitive LIKE. */
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "ILIKE" true) (define b psql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "ILIKE" true) (define b psql_expression2)) '('sql_not '('strlike a b "utf8mb4_general_ci")))
 		(parser '((define a psql_expression3) (atom "ILIKE" true) (define b psql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a psql_expression3) (atom "COLLATE" true) (define collation psql_identifier) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b collation))
 		/* Postgres LIKE is case-sensitive by default. */
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b psql_expression2)) '('not '('strlike_cs a b)))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b psql_expression2)) '('sql_not '('strlike_cs a b)))
 		(parser '((define a psql_expression3) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b))
 		/* REGEXP/RLIKE/~ operator: expr ~ 'pattern' -> regexp_test(expr, pattern) */
 		(parser '((define a psql_expression3) "~" (define b psql_expression2)) '('regexp_test a b))
 		(parser '((define a psql_expression3) (atom "REGEXP" true) (define b psql_expression2)) '('regexp_test a b))
 		(parser '((define a psql_expression3) (atom "RLIKE" true) (define b psql_expression2)) '('regexp_test a b))
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b psql_expression2)) '('not '('regexp_test a b)))
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b psql_expression2)) '('not '('regexp_test a b)))
-		(parser '((define a psql_expression3) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('contains? (cons list b) a))
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('not (contains? (cons list b) a)))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b psql_expression2)) '('sql_not '('regexp_test a b)))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b psql_expression2)) '('sql_not '('regexp_test a b)))
+		(parser '((define a psql_expression3) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('sql_in (cons list b) a))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('sql_not '('sql_in (cons list b) a)))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
 		(parser '((define a psql_expression3) (atom "BETWEEN" true) (define low psql_expression3) (atom "AND" true) (define high psql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low psql_expression3) (atom "AND" true) (define high psql_expression3)) (list (quote not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low psql_expression3) (atom "AND" true) (define high psql_expression3)) (list (quote sql_not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
 		psql_expression3
 	)))
 
@@ -253,7 +253,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 	(define psql_expression5 (parser (or
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
-		(parser '((atom "NOT" true) (define expr psql_expression6)) '('not expr))
+		(parser '((atom "NOT" true) (define expr psql_expression6)) '('sql_not expr))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr psql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr psql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))

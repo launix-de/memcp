@@ -153,5 +153,126 @@ test_cases:
     expect:
       rows: 2
 
+  # SQL predicates use three-valued logic. UNKNOWN must remain NULL while a
+  # predicate is composed or projected; only the final WHERE boundary drops it.
+  - name: "NOT preserves UNKNOWN"
+    sql: "SELECT NOT NULL AS value"
+    expect:
+      rows: 1
+      data:
+        - value: null
+
+  - name: "AND follows SQL three-valued logic"
+    sql: "SELECT NULL AND 0 AS false_value, NULL AND 1 AS unknown_value"
+    expect:
+      rows: 1
+      data:
+        - false_value: false
+          unknown_value: null
+
+  - name: "OR follows SQL three-valued logic"
+    sql: "SELECT NULL OR 1 AS true_value, NULL OR 0 AS unknown_value"
+    expect:
+      rows: 1
+      data:
+        - true_value: true
+          unknown_value: null
+
+  - name: "AND does not evaluate an unreachable operand"
+    sql: "SELECT 0 AND ('value' REGEXP '[') AS value"
+    expect:
+      rows: 1
+      data:
+        - value: false
+
+  - name: "OR does not evaluate an unreachable operand"
+    sql: "SELECT 1 OR ('value' REGEXP '[') AS value"
+    expect:
+      rows: 1
+      data:
+        - value: true
+
+  - name: "Nested AND keeps lazy evaluation after optimization"
+    sql: "SELECT 1 AND (0 AND ('value' REGEXP '[')) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: false
+
+  - name: "Nested OR keeps lazy evaluation after optimization"
+    sql: "SELECT 0 OR (1 OR ('value' REGEXP '[')) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: true
+
+  - name: "Nested AND terminal stops the outer optimizer"
+    sql: "SELECT id FROM null_test WHERE id = 1 AND (id = 1 AND 0) AND ('value' REGEXP '[')"
+    expect:
+      rows: 0
+
+  - name: "Nested OR terminal stops the outer optimizer"
+    sql: "SELECT id FROM null_test WHERE id = 99 OR (id = 1 OR 1) OR ('value' REGEXP '[') ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+
+  - name: "AND evaluates operands before a later false"
+    sql: "SELECT ('value' REGEXP '[') AND 0 AS value"
+    expect:
+      error: true
+
+  - name: "OR evaluates operands before a later true"
+    sql: "SELECT ('value' REGEXP '[') OR 1 AS value"
+    expect:
+      error: true
+
+  - name: "Comparisons preserve UNKNOWN"
+    sql: "SELECT NULL <> 0 AS ne_value, NULL < 0 AS lt_value, NULL >= 0 AS ge_value"
+    expect:
+      rows: 1
+      data:
+        - ne_value: null
+          lt_value: null
+          ge_value: null
+
+  - name: "Pattern and range predicates preserve UNKNOWN"
+    sql: "SELECT NULL LIKE '%' AS like_value, NULL BETWEEN 0 AND 1 AS between_value"
+    expect:
+      rows: 1
+      data:
+        - like_value: null
+          between_value: null
+
+  - name: "IN list preserves UNKNOWN"
+    sql: "SELECT NULL IN (0, 1) AS null_lhs, 0 IN (NULL, 1) AS null_rhs, 0 NOT IN (NULL, 1) AS negated"
+    expect:
+      rows: 1
+      data:
+        - null_lhs: null
+          null_rhs: null
+          negated: null
+
+  - name: "UNKNOWN cannot become an authorization grant through NOT"
+    sql: "SELECT id FROM null_test WHERE NOT (name = 'blocked') ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  - name: "Scalar subquery COALESCE distinguishes zero from no row"
+    sql: |
+      SELECT
+        COALESCE((SELECT 0 FROM null_test WHERE id = 1), 9) AS zero_value,
+        COALESCE((SELECT 0 FROM null_test WHERE id = 99), 9) AS empty_value
+    expect:
+      rows: 1
+      data:
+        - zero_value: 0
+          empty_value: 9
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS null_test"

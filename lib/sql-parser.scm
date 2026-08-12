@@ -94,10 +94,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 (define sql_column (parser (or
 	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl true col true))
-	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl true col false))
+	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl true col true))
 	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl false col true))
-	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl false col false))
-	(parser (define col sql_identifier_quoted) '((quote get_column) nil true col false))
+	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl false col true))
+	(parser (define col sql_identifier_quoted) '((quote get_column) nil true col true))
 	(parser (define col sql_identifier_unquoted) '((quote get_column) nil true col true))
 )))
 
@@ -139,7 +139,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 (define sql_comparison_expr (lambda (op a b)
 	(match op
 		"eq" '((quote equal??) a b)
-		"ne" '((quote not) '((quote equal??) a b))
+		"ne" '((quote sql_not) '((quote equal??) a b))
 		"le" '((quote <=) a b)
 		"ge" '((quote >=) a b)
 		"lt" '((quote <) a b)
@@ -663,17 +663,17 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2)) '('sql_not '('strlike a b "utf8mb4_general_ci")))
 		/* REGEXP/RLIKE operator: expr REGEXP 'pattern' -> regexp_test(expr, pattern) */
 		(parser '((define a sql_expression3) (atom "REGEXP" true) (define b sql_expression2)) '('regexp_test a b))
 		(parser '((define a sql_expression3) (atom "RLIKE" true) (define b sql_expression2)) '('regexp_test a b))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b sql_expression2)) '('not '('regexp_test a b)))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b sql_expression2)) '('not '('regexp_test a b)))
-		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote not) (cons (quote contains?) (cons (cons (quote list) b) (list a)))))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b sql_expression2)) '('sql_not '('regexp_test a b)))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b sql_expression2)) '('sql_not '('regexp_test a b)))
+		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('sql_in (cons list b) a))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote sql_not) (cons (quote sql_in) (cons (cons (quote list) b) (list a)))))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
 		(parser '((define a sql_expression3) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote sql_not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
 		sql_expression3
 	)))
 
@@ -704,7 +704,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_expression5 (parser (or
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
 		/* NOT has lower precedence than IS NULL: NOT expr IS NULL == NOT (expr IS NULL) */
-		(parser '((atom "NOT" true) (define expr sql_expression5)) '('not expr))
+		(parser '((atom "NOT" true) (define expr sql_expression5)) '('sql_not expr))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr sql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
@@ -823,7 +823,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
 		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") '((quote if) cond t f))
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
-		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" sql_expression "," sql_expression "," sql_expression ")") nil) /* ignore */
 		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn '('table schema tbl) col "auto_increment" val) (error "unknown pg_catalog key: " key)))
 

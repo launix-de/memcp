@@ -2013,62 +2013,99 @@ func optimizeIf(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDe
 	return NewSlice(out), nil
 }
 
-// optimizeAnd is the Optimize hook for the (and ...) special form.
-// It short-circuits on constant-false and removes constant-true arguments.
-func appendFlattenedAndArgs(out []Scmer, arg Scmer) ([]Scmer, bool) {
+// optimizeAnd is the Optimize hook for the lazy (and ...) special form.
+// Nil is SQL UNKNOWN, so it cannot short-circuit: a later false still wins.
+func appendFlattenedLazyArgs(out []Scmer, arg Scmer, operator string) ([]Scmer, bool) {
 	inner, ok := scmerSlice(arg)
-	if !ok || len(inner) <= 1 || !scmerIsSymbol(inner[0], "and") {
+	if !ok || len(inner) <= 1 || !scmerIsSymbol(inner[0], operator) {
 		return append(out, arg), false
 	}
 	changed := true
 	for i := 1; i < len(inner); i++ {
 		var nested bool
-		out, nested = appendFlattenedAndArgs(out, inner[i])
+		out, nested = appendFlattenedLazyArgs(out, inner[i], operator)
 		changed = changed || nested
 	}
 	return out, changed
 }
 
 func optimizeAnd(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	// Optimize all args
+	// Optimize left-to-right. Do not touch operands after a known false: doing
+	// so would violate the special form's lazy evaluation contract. Flatten
+	// each optimized result so child rewrites cannot reintroduce nested ANDs.
+	out := make([]Scmer, 1, len(v))
+	out[0] = v[0]
+	var onlyType *TypeDescriptor
 	for i := 1; i < len(v); i++ {
-		v[i], _ = oc.OptimizeSub(v[i], true)
-	}
-	// Flatten nested AND calls so downstream pattern matchers can inspect one
-	// top-level list of conjunctive terms.
-	flattened := make([]Scmer, 0, len(v))
-	flattened = append(flattened, v[0])
-	changed := false
-	for i := 1; i < len(v); i++ {
-		var argChanged bool
-		flattened, argChanged = appendFlattenedAndArgs(flattened, v[i])
-		changed = changed || argChanged
-	}
-	if changed {
-		v = flattened
-	}
-	// Single arg: unwrap
-	if len(v) == 2 {
-		return oc.OptimizeSub(v[1], useResult)
-	}
-	// Short-circuit: remove constant-true, early-exit on constant-false
-	for i := 1; i < len(v); i++ {
-		switch v[i].GetTag() {
-		case tagNil, tagBool, tagInt, tagFloat, tagString:
-			if !ToBool(v[i]) {
-				return NewBool(false), &TypeDescriptor{Transfer: true, Const: true}
+		arg, td := oc.OptimizeSub(v[i], true)
+		flattened, _ := appendFlattenedLazyArgs(nil, arg, "and")
+		before := len(out)
+		for _, item := range flattened {
+			switch item.GetTag() {
+			case tagBool, tagInt, tagFloat, tagString:
+				if ToBool(item) {
+					continue
+				}
+				if len(out) == 1 {
+					return NewBool(false), &TypeDescriptor{Transfer: true, Const: true}
+				}
+				return NewSlice(append(out, NewBool(false))), nil
+			default:
+				out = append(out, item)
 			}
-			v = append(v[:i], v[i+1:]...)
-			i--
+		}
+		if len(out) == before+1 && len(flattened) == 1 {
+			onlyType = td
+		} else if len(out) > before {
+			onlyType = nil
 		}
 	}
-	if len(v) == 1 {
+	if len(out) == 1 {
 		return NewBool(true), &TypeDescriptor{Transfer: true, Const: true}
 	}
-	if len(v) == 2 {
-		return oc.OptimizeSub(v[1], useResult)
+	if len(out) == 2 {
+		return out[1], onlyType
 	}
-	return NewSlice(v), nil
+	return NewSlice(out), nil
+}
+
+// optimizeOr mirrors the lazy SQL three-valued OR evaluator. Nil must remain
+// until runtime because a later true wins over UNKNOWN.
+func optimizeOr(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	out := make([]Scmer, 1, len(v))
+	out[0] = v[0]
+	var onlyType *TypeDescriptor
+	for i := 1; i < len(v); i++ {
+		arg, td := oc.OptimizeSub(v[i], true)
+		flattened, _ := appendFlattenedLazyArgs(nil, arg, "or")
+		before := len(out)
+		for _, item := range flattened {
+			switch item.GetTag() {
+			case tagBool, tagInt, tagFloat, tagString:
+				if !ToBool(item) {
+					continue
+				}
+				if len(out) == 1 {
+					return NewBool(true), &TypeDescriptor{Transfer: true, Const: true}
+				}
+				return NewSlice(append(out, NewBool(true))), nil
+			default:
+				out = append(out, item)
+			}
+		}
+		if len(out) == before+1 && len(flattened) == 1 {
+			onlyType = td
+		} else if len(out) > before {
+			onlyType = nil
+		}
+	}
+	if len(out) == 1 {
+		return NewBool(false), &TypeDescriptor{Transfer: true, Const: true}
+	}
+	if len(out) == 2 {
+		return out[1], onlyType
+	}
+	return NewSlice(out), nil
 }
 
 // optimizeAssociative is the Optimize hook for associative operators (+ and *).
