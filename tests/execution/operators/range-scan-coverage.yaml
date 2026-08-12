@@ -395,6 +395,9 @@ test_cases:
         - 'join_plan'
       result_not_contains:
         - '(join_driver \"m\")'
+      result_occurrences:
+        - text: ' where nil '
+          count: 2
 
   - name: "Selective comma-join dimension preserves results"
     sql: "SELECT d.label, m.id FROM perf_main m, perf_dim d WHERE m.category = d.cat_id AND d.label = 'one' ORDER BY m.id"
@@ -531,6 +534,7 @@ test_cases:
   - name: "Nested point selection schedules filters before maps"
     setup:
       - scm: '(sleep 0.5)'
+    timeout: 2
     sql: |
       SELECT `table`, SUM(candidateCount) AS candidates, SUM(outputCount) AS outputs
       FROM `system_statistic`.`scans`

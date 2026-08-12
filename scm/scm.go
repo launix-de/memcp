@@ -195,17 +195,35 @@ restart:
 				}
 				return NewNil()
 			case "and":
+				unknown := false
 				for idx, x := range list {
-					if idx > 0 && !Eval(x, en).Bool() {
-						return NewBool(false)
+					if idx > 0 {
+						value := Eval(x, en)
+						if value.IsNil() {
+							unknown = true
+						} else if !value.Bool() {
+							return NewBool(false)
+						}
 					}
+				}
+				if unknown {
+					return NewNil()
 				}
 				return NewBool(true)
 			case "or":
+				unknown := false
 				for idx, x := range list {
-					if idx > 0 && Eval(x, en).Bool() {
-						return NewBool(true)
+					if idx > 0 {
+						value := Eval(x, en)
+						if value.IsNil() {
+							unknown = true
+						} else if value.Bool() {
+							return NewBool(true)
+						}
 					}
+				}
+				if unknown {
+					return NewNil()
 				}
 				return NewBool(false)
 			case "coalesce":
@@ -971,7 +989,7 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "and",
-		Desc: "returns true if all conditions evaluate to true",
+		Desc: "lazily combines conditions using SQL three-valued logic; returns false on the first false value, nil for UNKNOWN, otherwise true",
 		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
@@ -984,14 +1002,15 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "or",
-		Desc: "returns true if at least one condition evaluates to true",
+		Desc: "lazily combines conditions using SQL three-valued logic; returns true on the first true value, nil for UNKNOWN, otherwise false",
 		Fn:   nil,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "bool"},
-			Const:  true,
+			Return:   &TypeDescriptor{Kind: "bool"},
+			Const:    true,
+			Optimize: optimizeOr,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

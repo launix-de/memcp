@@ -158,6 +158,32 @@ Use the existing scalable physical representations instead:
 Lists remain valid for bounded scalar tuples, operator arguments, parser data,
 and final API row values. Their size must be independent of relation cardinality.
 
+## Computed Columns Are Definitions, Not Prepared Subsets
+
+A computed column, including a `StorageComputeProxy`, defines one logical value
+for every live row in its table. Its physical cache may be complete, partial,
+invalidated, or absent without changing that logical domain.
+
+`filter` / `filterCols` arguments and `CompressFiltered` are preparation hints.
+They may select values to prewarm because a physical plan expects to read them
+soon, but they must never become part of the column definition. A row omitted
+from a preparation batch is not absent, `NULL`, or an error.
+
+An ordinary computed column may repair a missing or invalidated value by
+computing that row from its current inputs and caching the result. An ordered
+reduction column (ORC) has dependencies between rows and must instead repair a
+semantically sufficient ordered dependency range. That range may be a suffix
+or the whole column. It must not pretend that an order-dependent value can be
+computed pointwise, return stale data, or expose a transient invalid-cache
+sentinel as a SQL value.
+
+Invalidation marks physical cache entries as unusable; it does not remove their
+logical values. Invalidation and repair must cover the dependency closure of
+the changed inputs. Planner setup, DDL, rebuild, persistence, and session-local
+variants must preserve this definition/cache distinction. Eager preparation,
+selective prewarming, and lazy repair may change when work happens, never the
+query-visible result.
+
 ## LIMIT Is A Scan Boundary
 
 Every physical operator that owns a SQL `LIMIT` must lower to `scan_order` or
@@ -183,6 +209,17 @@ of the already ordered join cloud. Each conjunct belongs in the scan filter at
 the point where its referenced bindings and its required outer-join semantics
 are available. This is not simply an "innermost possible" rule: the correct
 scan is determined by the bindings and null-extension boundary of that term.
+
+Reordering may annotate an inner join leaf with a single-alias predicate that
+it has already classified and costed. This records semantic alias ownership so
+the physical lowerer does not have to rediscover it. A `WHERE` predicate on a
+nullable outer-join side instead belongs to the barrier node, because its NULL
+semantics are available only after null extension. The predicate remains in the
+query-block condition as the authoritative logical expression; the annotation
+must neither remove it nor introduce a physical `scan`. Physical lowering
+consumes the annotation exactly once when it chooses the scan operator and
+access path. Outer-join `ON` predicates also stay on their barrier-owning join
+node and must never be converted into leaf annotations.
 
 Every conjunct must appear exactly once at a semantically valid scan or remain
 as an explicit residual predicate. Predicate placement must never weaken or

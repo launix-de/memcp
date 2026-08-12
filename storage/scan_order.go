@@ -26,6 +26,41 @@ import "runtime/debug"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
+// wrapScanOrderComparator adds SQL NULL positioning around the comparator
+// supplied to scan_order. The comparator itself only sees non-NULL values:
+// ascending order puts NULL first, descending order puts NULL last.
+func wrapScanOrderComparator(compare func(...scm.Scmer) scm.Scmer) func(...scm.Scmer) scm.Scmer {
+	descending := false
+	if decl := scm.DeclarationForValue(scm.NewFunc(compare)); decl != nil && (decl.Name == "<" || decl.Name == ">") {
+		descending = decl.Name == ">"
+	} else if _, reverse, ok := scm.LookupCollate(compare); ok {
+		descending = reverse
+	} else {
+		// User callbacks can be type-specific. Direction probing must not make a
+		// valid string/date comparator fail before it sees actual input values.
+		func() {
+			defer func() { _ = recover() }()
+			ascendingProbe := scm.ToBool(compare(scm.NewInt(1), scm.NewInt(2)))
+			descendingProbe := scm.ToBool(compare(scm.NewInt(2), scm.NewInt(1)))
+			descending = !ascendingProbe && descendingProbe
+		}()
+	}
+	return func(args ...scm.Scmer) scm.Scmer {
+		if len(args) < 2 {
+			return scm.NewBool(false)
+		}
+		leftNil := args[0].IsNil()
+		rightNil := args[1].IsNil()
+		if leftNil || rightNil {
+			if leftNil && rightNil {
+				return scm.NewBool(false)
+			}
+			return scm.NewBool(leftNil != descending)
+		}
+		return compare(args...)
+	}
+}
+
 func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
 	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=filterCols, 4=filterFns,
 	// 5=sortcols, 6=sortdirs, 7=perTableOffset, 8=perTableLimit,
@@ -332,6 +367,7 @@ func (s *scanOrderTableSpec) backingTable() *table {
 // index-order compatible (ASC). This lets the shard return rows already sorted
 // by ORDER BY, reducing the cross-shard merge to merging pre-sorted runs.
 func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (boundaries, bool) {
+	original := b
 	allEq := true
 	for _, bi := range b {
 		if !boundaryIsPoint(bi) {
@@ -365,7 +401,6 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	if !allEq || !canAppendSortPrefix {
 		return b, false
 	}
-	addedSortCols := 0
 	for _, scol := range sortcols {
 		if scol.IsString() {
 			col := scol.String()
@@ -378,7 +413,6 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			}
 			if !already {
 				b = append(b, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil()})
-				addedSortCols++
 			}
 			continue
 		}
@@ -388,14 +422,14 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			ok = true
 		}
 		if !ok {
-			continue
+			return original, false
 		}
 		var procParams []scm.Scmer
 		if proc.Params.IsSlice() {
 			procParams = proc.Params.Slice()
 		}
 		if len(procParams) == 0 {
-			continue
+			return original, false
 		}
 		sortCondCols := make([]string, len(procParams))
 		for j, param := range procParams {
@@ -406,12 +440,12 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			}
 		}
 		if !isRawDataset(procParams, proc.Body) {
-			continue
+			return original, false
 		}
 		canon := canonicalColName(proc.Body, procParams, sortCondCols)
 		mc, mf := buildComputedFn(proc.Body, proc.Params, proc.En, sortCondCols)
 		if mf.IsNil() || mc == nil {
-			continue
+			return original, false
 		}
 		already := false
 		for _, bi := range b {
@@ -422,10 +456,9 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 		}
 		if !already {
 			b = append(b, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
-			addedSortCols++
 		}
 	}
-	return b, addedSortCols > 0
+	return b, len(sortcols) > 0
 }
 
 func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
@@ -1125,6 +1158,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		cmpFn := scm.OptimizeProcToSerialFunction(cmpScm)
 		adjustedSortdirs[i] = cmpFn
 	}
+	for i := range adjustedSortdirs {
+		adjustedSortdirs[i] = wrapScanOrderComparator(adjustedSortdirs[i])
+	}
 
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	if t.t.tableLockOwner.Load() != nil {
@@ -1134,7 +1170,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsTxReader := make([]bool, len(conditionCols))
+	cNeedsCachedReader := make([]bool, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	for i, k := range conditionCols { // iterate over columns
 		if k == "$recset_contains" {
@@ -1150,8 +1186,8 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		}
 		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
-			cNeedsTxReader[i] = true
+		if _, ok := ccols[i].(*StorageComputeProxy); ok {
+			cNeedsCachedReader[i] = true
 		}
 	}
 	// initialize main_count lazily if needed
@@ -1214,7 +1250,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					for i, k := range ccols { // iterate over columns
 						if conditionGetters[i] != nil {
 							cdataset[i] = conditionGetters[i](idx, 0)
-						} else if cNeedsTxReader[i] {
+						} else if cNeedsCachedReader[i] {
 							cdataset[i] = cReaders[i].GetValue(idx)
 						} else {
 							cdataset[i] = k.GetValue(idx)
@@ -1226,7 +1262,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					for i, k := range conditionCols { // iterate over columns
 						if conditionGetters[i] != nil {
 							cdataset[i] = conditionGetters[i](idx, 0)
-						} else if cNeedsTxReader[i] {
+						} else if cNeedsCachedReader[i] {
 							cdataset[i] = cReaders[i].GetValue(idx)
 						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 							cdataset[i] = ccols[i].GetValue(idx)

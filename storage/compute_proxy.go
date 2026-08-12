@@ -54,6 +54,13 @@ type computeVariantReader struct {
 	tx      *TxContext
 }
 
+type computeProxyReader struct {
+	proxy   *StorageComputeProxy
+	readers []ColumnReader
+	tx      *TxContext
+	values  []scm.Scmer
+}
+
 func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 	if fn.IsProc() {
 		proc := *fn.Proc()
@@ -68,9 +75,27 @@ func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 	}))
 }
 
-// StorageComputeProxy wraps a main storage with lazy-evaluation support.
-// Values are computed on demand via a computor lambda and cached in a delta map
-// until Compress() materializes them into a compressed main storage.
+// StorageComputeProxy is a complete logical column with lazy physical values.
+// Creating the proxy installs the column definition first; it does not require
+// every row value to be materialized before the column can be read.
+//
+// Materialization contract:
+//   - Compress eagerly prepares every row when all values are expected to be
+//     consumed.
+//   - CompressFiltered only prewarms rows selected by its filter because the
+//     caller expects to consume those rows soon. The filter is a preparation
+//     hint, not part of the column definition or its value semantics.
+//   - GetValue repairs an ordinary missing or invalidated value pointwise and
+//     caches it. A row omitted by prewarming is neither NULL nor an error.
+//   - An ordered reduction column cannot be repaired pointwise. Its GetValue
+//     path recomputes the ordered dependency range required for the requested
+//     value, which may include a suffix or the whole column.
+//   - Invalidation marks cached values unusable; later reads repair the affected
+//     dependency closure without changing the column's logical domain.
+//
+// Keep this distinction intact when changing planner setup, DDL, rebuild, or
+// scan code: selective preparation may change work scheduling, never which
+// values the StorageComputeProxy represents.
 type StorageComputeProxy struct {
 	main       ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
 	delta      map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
@@ -231,14 +256,55 @@ func (r *computeVariantReader) GetValue(idx uint32) scm.Scmer {
 	return val
 }
 
+func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
+	p := r.proxy
+
+	p.mu.RLock()
+	if val, ok := p.delta[idx]; ok {
+		p.mu.RUnlock()
+		return val
+	}
+	p.mu.RUnlock()
+
+	if p.compressed && idx < p.count && p.main != nil {
+		return p.main.GetValue(idx)
+	}
+	if p.validMask.Get(uint(idx)) && idx < p.count && p.main != nil {
+		return p.main.GetValue(idx)
+	}
+
+	for i := range r.readers {
+		r.values[i] = r.readers[i].GetValue(idx)
+	}
+	val := applyWithTx(r.tx, p.computor, r.values...)
+
+	p.mu.Lock()
+	p.delta[idx] = val
+	p.mu.Unlock()
+	p.validMask.Set(uint(idx), true)
+	return val
+}
+
 func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
-	if !p.hasSessionVariants() {
+	if p.isOrdered {
 		return p
 	}
-	variant := p.currentVariant(tx, true)
+	// Bind input readers before the physical scan acquires the shard read lock.
+	// A cache miss may compute a value, but it must stay within the already
+	// acquired shard capability instead of re-entering GetRead/ColumnReaderTx.
+	// This also keeps the reader executable on a future remote shard owner.
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
 		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
+	}
+	variant := p.currentVariant(tx, true)
+	if variant == nil {
+		return &computeProxyReader{
+			proxy:   p,
+			readers: readers,
+			tx:      tx,
+			values:  make([]scm.Scmer, len(readers)),
+		}
 	}
 	return &computeVariantReader{
 		proxy:   p,
@@ -369,7 +435,11 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 	return sz
 }
 
-// GetValue returns the value at idx, computing on demand if necessary.
+// GetValue returns the logical value at idx. For an ordinary proxy, a cache miss
+// or invalidated value computes only this row from the current inputs and caches
+// it. For an ordered reduction column, the branch below repairs the required
+// ordered dependency range instead. Neither kind may treat an unprepared row as
+// absent or expose a transient invalid-cache sentinel as its logical value.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
@@ -521,8 +591,12 @@ func (p *StorageComputeProxy) Compress() {
 	p.compressed = true
 }
 
-// CompressFiltered eagerly computes only rows matching the filter predicate.
-// Unmatched rows stay lazy and are computed on demand via GetValue.
+// CompressFiltered prewarms an ordinary computed column only for rows matching
+// filter because the caller has signalled that those values will likely be read
+// immediately. The filter does not narrow the logical column and is not a
+// read-time predicate: unmatched rows remain valid lazy values and GetValue
+// materializes each one pointwise on first read. Ordered reduction columns have
+// dependency-aware preparation and repair paths instead.
 func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
 	tx := CurrentTx()
 	if variant := p.currentVariant(tx, true); variant != nil {

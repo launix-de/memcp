@@ -70,6 +70,12 @@ func runWithTxSession(tx *TxContext, fn func()) {
 }
 
 func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+	// Ordinary computed-column DDL installs one complete logical column.
+	// filter/filterCols only select the initial prewarm batch for values the caller
+	// expects to read; they never restrict the column's domain. Rows outside that
+	// batch stay lazy and StorageComputeProxy.GetValue materializes them
+	// individually on demand. Ordered reduction columns use dependency-aware
+	// preparation and repair instead.
 	t.schema.schemalock.Lock()
 	metadataLocked := true
 	defer func() {
@@ -217,7 +223,9 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		return true
 	}
 
-	// Create new proxy
+	// Publish the definition before preparing values. Readers may immediately use
+	// the proxy: prewarmed rows hit its cache, while every other row is computed
+	// pointwise by GetValue and then cached.
 	proxy := &StorageComputeProxy{
 		delta:       make(map[uint32]scm.Scmer),
 		computor:    computor,

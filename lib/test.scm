@@ -98,10 +98,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal?? false (count '(1))) false "equal?? bool cross-type falsy")
 	(assert (equal?? '() false) true "equal?? empty list vs false")
 	(assert (equal?? + (count '(1))) false "equal?? func vs non-func")
-	/* Less cross-type coverage (compare.go:Less) */
-	(assert (< nil nil) false "less nil nil")
-	(assert (< nil 5) true "less nil vs value")
-	(assert (< 5 nil) false "less value vs nil")
+	/* Public comparisons preserve SQL UNKNOWN. Internal storage ordering calls
+	Less directly and retains a total order including nil. */
+	(assert (nil? (< nil nil)) true "less nil nil is unknown")
+	(assert (nil? (< nil 5)) true "less nil vs value is unknown")
+	(assert (nil? (< 5 nil)) true "less value vs nil is unknown")
 	(assert (< 1.5 2.5) true "less float vs float")
 	(assert (< 2.5 1.5) false "less float vs float reverse")
 	(assert (< "apple" "banana") true "less string vs string")
@@ -180,6 +181,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (ir_context_get (ir_context_of simple_ir) 'compile-budget-ms nil) 1000) true "untangle_query carries compile budget in context")
 	(assert (equal? (join_reorder simple_ir) simple_ir) true "join_reorder is an IR-only phase")
 	(assert (equal? (logical_op (build_queryplan_term simple_select_ast)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
+	(assert (physical_relational_list_collector?
+		(list 'sort 'arbitrarily_renamed_rows (list 'lambda '(a b) true)))
+		true "physical plan guard rejects structurally sorted Scheme relations")
+	(assert (physical_relational_list_collector?
+		(list 'slice 'another_renamed_relation 0 10))
+		true "physical plan guard rejects structurally sliced Scheme relations")
+	(assert (physical_relational_list_collector?
+		(list 'merge (list 'map 'renamed_input (list 'lambda '(row) 'row))))
+		true "physical plan guard rejects structurally flattened mapped relations")
 	(assert (equal? (split_and_terms (combine_where_terms
 		(list
 			(list (quote and) "a" "b")
@@ -207,6 +217,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (count (qassoc_get graph_view 'edges '())) 2) true "join hypergraph extracts binary ON edges")
 	(assert (equal? (count (qassoc_get graph_view 'hyperedges '())) 1) true "join hypergraph preserves predicates spanning three aliases")
 	(assert (equal? (count (qassoc_get graph_view 'residuals '())) 0) true "join hypergraph has no residual for referenced predicates")
+	(assert (equal? (count (filter (qassoc_get graph_view 'edges '()) (lambda (entry)
+		(equal? (qassoc_get entry 'origin nil) 'inner-on)))) 2) true "join hypergraph preserves INNER ON provenance")
 	(assert (equal? (qb_where graph_block) graph_where) true "join hypergraph extraction leaves WHERE in its query-block")
 	(assert (equal? (map (qb_sources graph_block) source_join_expr)
 		(map graph_sources source_join_expr)) true "join hypergraph extraction leaves ON predicates on their sources")
@@ -221,6 +233,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (qassoc_get outer_barrier 'owner nil) "b") true "join hypergraph identifies the nullable outer-join source")
 	(assert (equal? (qassoc_get outer_barrier 'preserved '()) '("a" "c")) true "outer-join barrier preserves the complete left input")
 	(assert (equal? (qassoc_get outer_barrier 'references '()) '("a" "b")) true "outer-join barrier records aliases referenced by ON")
+	(assert (equal? (qassoc_get (car (qassoc_get outer_graph 'edges '())) 'origin nil) 'outer-on) true
+		"join hypergraph preserves OUTER ON provenance")
+	(assert (empty_list? (join_order_local_predicates_for_alias
+		(list (list (list "b") 0.1 'outer-on "b" (source_join_expr (nth outer_graph_sources 2))))
+		"b")) true "reorder never converts an OUTER ON predicate into leaf ownership")
 	(define normalized_graph_block (join_optimizer_normalize_inner_joins graph_block))
 	(assert (equal? (count (split_and_terms (qb_where normalized_graph_block))) 4) true "inner ON predicates join the logical query-block predicate cloud")
 	(assert (equal? (map (qb_sources normalized_graph_block) source_join_expr) '(nil nil nil)) true "normalized inner sources do not retain physical predicate ownership")
@@ -228,11 +245,96 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"memcp-tests" outer_graph_sources '() true nil nil nil nil nil '() '() '())))
 	(assert (equal? (source_join_expr (nth (qb_sources normalized_outer_graph) 2))
 		(source_join_expr (nth outer_graph_sources 2))) true "outer ON predicate remains attached to its semantic barrier")
-	(define graph_plan (join_optimizer_plan_segment graph_sources graph_sources "a" graph_view))
+	(define graph_plan (join_optimizer_plan_segment '() graph_sources graph_sources "a" graph_view))
 	(assert (equal? (qassoc_get graph_plan 'strategy nil) 'dphyp) true "small join graphs use DPHyp")
 	(assert (equal? (count (qassoc_get graph_plan 'order '())) 3) true "DPHyp covers every logical join source")
 	(assert (equal? (car (qassoc_get graph_plan 'tree '())) 'join-node) true "DPHyp records a bushy logical join tree")
 	(assert (equal? (cadr (qassoc_get graph_plan 'tree '())) 'inner) true "optimizer trees distinguish inner joins semantically")
+	(define test_join_tree_predicates (lambda (tree)
+		(match tree
+			((symbol join-leaf) _alias) '()
+			((symbol join-leaf) _alias predicates) predicates
+			((symbol join-node) _kind left right predicates) (merge (list
+				(test_join_tree_predicates left)
+				(test_join_tree_predicates right)
+				predicates))
+			_ '())))
+	(define graph_plan_predicate_origins
+		(map (test_join_tree_predicates (qassoc_get graph_plan 'tree '())) join_order_pred_origin))
+	(define test_join_tree_predicates_placed? (lambda (tree)
+		(match tree
+			((symbol join-leaf) _alias) true
+			((symbol join-leaf) alias predicates)
+			(reduce predicates (lambda (valid predicate)
+				(and valid (equal? (join_order_pred_aliases predicate) (list alias)))) true)
+			((symbol join-node) kind left right predicates)
+			(begin
+				(define left_aliases (join_optimizer_tree_aliases left))
+				(define right_aliases (join_optimizer_tree_aliases right))
+				(define combined (merge_unique (list left_aliases right_aliases)))
+				(and
+					(reduce predicates (lambda (valid predicate)
+						(and valid (or
+							(join_order_predicate_crosses_in? predicate
+								left_aliases right_aliases combined)
+							(join_order_predicate_owned_by_barrier? predicate kind right)))) true)
+					(and (test_join_tree_predicates_placed? left)
+						(test_join_tree_predicates_placed? right))))
+			_ false)))
+	(assert (equal? (count (test_join_tree_predicates (qassoc_get graph_plan 'tree '()))) 4) true
+		"logical join tree owns every reorderable predicate exactly once")
+	(assert (test_join_tree_predicates_placed? (qassoc_get graph_plan 'tree '())) true
+		"logical join predicates sit on the lowest join node crossing their aliases")
+	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'inner-on)))) 2) true
+		"logical join nodes retain INNER ON provenance from the hypergraph")
+	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'where)))) 2) true
+		"logical join nodes and leaves retain WHERE provenance from the hypergraph")
+	(define test_join_tree_leaf_predicates (lambda (tree alias)
+		(match tree
+			((symbol join-leaf) leaf_alias predicates) (if (equal? leaf_alias alias) predicates '())
+			((symbol join-node) _kind left right _predicates) (merge (list
+				(test_join_tree_leaf_predicates left alias)
+				(test_join_tree_leaf_predicates right alias)))
+			_ '())))
+	(define graph_a_leaf_predicates (test_join_tree_leaf_predicates
+		(qassoc_get graph_plan 'tree '()) "a"))
+	(assert (equal? (count graph_a_leaf_predicates) 1) true
+		"reorder binds a costed single-alias predicate to its logical join leaf")
+	(assert (equal? (join_order_pred_expr (car graph_a_leaf_predicates))
+		(list (quote >) (graph_col "a" "score") 10)) true
+		"logical leaf ownership preserves the complete local predicate expression")
+	(define graph_constant_residual (list (quote equal?) 1 1))
+	(define graph_residual_block (make_query_block "memcp-tests" graph_sources '()
+		(combine_where graph_where graph_constant_residual)
+		nil nil nil nil nil '() '() '()))
+	(define graph_residual_view (extract_join_hypergraph graph_residual_block))
+	(define graph_residual_plan (join_optimizer_plan_segment
+		'() graph_sources graph_sources "a" graph_residual_view))
+	(assert (equal? (count (qassoc_get graph_residual_view 'residuals '())) 1) true
+		"zero-alias conjunct remains a query-block residual")
+	(assert (equal? (count (test_join_tree_predicates
+		(qassoc_get graph_residual_plan 'tree '()))) 4) true
+		"zero-alias residual is not attached to a leaf or join node")
+	(assert (contains? (split_and_terms (condition_without_join_tree_predicates
+		(qb_where graph_residual_block) (qassoc_get graph_residual_plan 'tree '())))
+		graph_constant_residual) true
+		"physical residual retains a zero-alias conjunct after consuming tree ownership")
+	(define singleton_stage (make_group_stage
+		"logical-singleton" (car graph_sources) '() '(1) '() nil '() '() nil nil
+		(list
+			(list 'purpose 'scalar_single)
+			(list 'preserve_empty_domain true)
+			(list 'lookup-keys '()))))
+	(define singleton_source (list "scalar" "memcp-tests"
+		(list 'stage-output "logical-singleton") true true))
+	(define singleton_block (make_query_block
+		"memcp-tests" (list (car graph_sources) singleton_source) '()
+		(list 'equal?? (graph_col "a" "id") (graph_col "scalar" "value"))
+		nil nil nil nil nil '() '() '()))
+	(define singleton_reordered
+		(hybrid_reorder_query_block_using (list singleton_stage) singleton_block))
+	(assert (equal? (qassoc_get (qb_facts singleton_reordered) 'join_driver nil) "scalar") true
+		"logical reorder drives a guaranteed singleton stage before a larger base source")
 	(define dense_join_aliases (map (produceN 14) (lambda (i) (concat "dense_" i))))
 	(define dense_join_nodes (mapIndex dense_join_aliases (lambda (i alias) (list alias (+ 100 i)))))
 	(define dense_join_predicates (merge (mapIndex dense_join_aliases (lambda (left_index left)
@@ -244,6 +346,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"dense hypergraphs select GOO with DPHyp subtree optimization in SCM")
 	(assert (equal? (join_order_choose_strategy 101 false true) 'goo-linearized-dp) true
 		"very large regular graphs select GOO with linearized-DP subtree optimization in SCM")
+	(assert (join_order_degree_exceeds_budget? 13 10000) false
+		"degree 13 does not prove that the connected-subgraph budget is exceeded")
+	(assert (join_order_degree_exceeds_budget? 14 10000) true
+		"degree 14 proves that the connected-subgraph budget is exceeded")
 	(define small_linearized (join_order_linearized_dp
 		(slice dense_join_nodes 0 4)
 		(slice dense_join_aliases 0 4)
@@ -277,32 +383,73 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"join_reorder keeps the query-block source catalog in semantic order")
 	(assert (equal?
 		(map (qb_sources (apply_join_optimizer_plan graph_reordered_block)) source_alias)
-		(join_optimizer_tree_aliases graph_reordered_tree)) true
-		"physical preparation derives scan traversal from the logical join tree")
+		(map graph_sources source_alias)) true
+		"physical preparation leaves the semantic source catalog unchanged")
+	(assert (equal? (query_block_join_plan graph_reordered_block graph_sources) graph_reordered_tree) true
+		"physical lowering reads join order directly from the logical tree")
+	(define prepared_source_order (list (nth graph_sources 2) (car graph_sources) (cadr graph_sources)))
+	(define prepared_order_block (make_query_block
+		"memcp-tests" graph_sources '() graph_where nil nil nil nil nil '() '()
+		(list (list 'join_plan (join_optimizer_left_deep_tree prepared_source_order)))))
+	(assert (equal? (map (qb_sources prepared_order_block) source_alias) (map graph_sources source_alias)) true
+		"physical preparation never reorders the semantic source catalog")
+	(assert (equal? (join_optimizer_tree_aliases (query_block_join_plan prepared_order_block graph_sources))
+		(map prepared_source_order source_alias)) true
+		"physical preparation records specialized traversal only in the join tree")
 	(define semantic_outer_tree (join_optimizer_left_deep_tree outer_graph_sources))
 	(assert (equal? (cadr semantic_outer_tree) 'left-outer) true "logical join trees preserve left-outer barriers")
+	(assert (equal? (join_order_pred_origin (car (nth semantic_outer_tree 4))) 'outer-on) true
+		"LEFT OUTER join nodes own their ON predicates")
+	(assert (equal? (join_order_pred_owner (car (nth semantic_outer_tree 4))) "b") true
+		"LEFT OUTER join predicates retain their barrier owner")
+	(define outer_where_expr (list (quote >) (graph_col "b" "score") 0))
+	(define outer_where_block (make_query_block "memcp-tests" outer_graph_sources '()
+		outer_where_expr nil nil nil nil nil '() '() '()))
+	(define outer_where_graph (extract_join_hypergraph outer_where_block))
+	(define outer_where_tree (join_order_tree_with_predicates semantic_outer_tree
+		(join_optimizer_metadata_costed_predicates outer_graph_sources "a" outer_where_graph
+			(source_aliases outer_graph_sources))))
+	(define outer_where_node_predicates (nth outer_where_tree 4))
+	(assert (empty_list? (test_join_tree_leaf_predicates outer_where_tree "b")) true
+		"nullable-side WHERE is not bound to the pre-null-extension scan leaf")
+	(assert (equal? (count (filter outer_where_node_predicates (lambda (predicate)
+		(equal? (join_order_pred_expr predicate) outer_where_expr)))) 1) true
+		"nullable-side WHERE is bound exactly once to its null-extension barrier")
+	(assert (test_join_tree_predicates_placed? outer_where_tree) true
+		"join predicates use the earliest node with dependencies and null semantics available")
 	(define bushy_scan_tree (make_join_optimizer_node 'inner
-		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b"))
-		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d"))))
-	(assert (equal?
-		(map (list bushy_scan_tree
-			(physical_join_cursor_rest bushy_scan_tree)
-			(physical_join_cursor_rest (physical_join_cursor_rest bushy_scan_tree))
-			(physical_join_cursor_rest (physical_join_cursor_rest (physical_join_cursor_rest bushy_scan_tree))))
-			physical_join_cursor_first_alias)
-		'("a" "b" "c" "d")) true "physical lowering consumes bushy join trees structurally")
+		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b") '())
+		(make_join_optimizer_node 'left-outer (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '()) '()))
+	(define bushy_scan_sources (list
+		(list "a" "memcp-tests" "graph_a" false nil)
+		(list "b" "memcp-tests" "graph_b" false nil)
+		(list "c" "memcp-tests" "graph_c" false nil)
+		(list "d" "memcp-tests" "graph_d" false nil)))
+	(define test_physical_scan_signature (lambda (expr)
+		(match expr
+			((symbol scan) _tx ((symbol table) _schema relation) _filtercols _filterfn _mapcols mapfn _reducefn _init _limit outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapfn))
+			((symbol scan_order) _tx ((symbol table) _schema relation) _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapfn _reducefn _init outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapfn))
+			(cons head tail) (concat (test_physical_scan_signature head) (test_physical_scan_signature tail))
+			_ "")))
+	(define bushy_scan_expr (build_join_scan_with_mapper_using_recipe
+		"memcp-tests" bushy_scan_sources bushy_scan_tree "a" '() true true '() 0 -1 false nil '() 'pipeline))
+	(assert (equal? (test_physical_scan_signature bushy_scan_expr)
+		"graph_a:false>graph_b:false>graph_c:false>graph_d:true>") true
+		"physical lowering consumes bushy subtree order and its nested LEFT OUTER boundary")
 	(define tree_group_stage (make_group_stage
 		"tree-group-stage" graph_reordered_block '() '() '() nil '() '() nil nil '()))
 	(assert (equal?
 		(map (qb_sources (gs_input (apply_join_optimizer_plan_stage tree_group_stage))) source_alias)
-		(join_optimizer_tree_aliases graph_reordered_tree)) true
-		"physical preparation applies logical join trees inside group stages")
+		(map graph_sources source_alias)) true
+		"physical preparation preserves semantic source catalogs inside group stages")
 	(define tree_union (make_union_block
 		(quote all) (list graph_reordered_block graph_reordered_block) '() nil nil '()))
 	(assert (equal?
 		(map (qb_sources (car (union_branches (apply_join_optimizer_plan_node tree_union)))) source_alias)
-		(join_optimizer_tree_aliases graph_reordered_tree)) true
-		"physical preparation applies logical join trees inside UNION branches")
+		(map graph_sources source_alias)) true
+		"physical preparation preserves semantic source catalogs inside UNION branches")
 	(define malformed_join_plan_block (make_query_block
 		"memcp-tests" graph_sources '() graph_where nil nil nil nil nil '() '()
 		(list (list 'join_plan (list 'join-leaf "missing")))))
@@ -612,6 +759,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (number? 42) true "42 should be a number")
 	(assert (number? "42") false "\"42\" should not be a number")
 	(assert (number? `symbol) false "'symbol' should not be a number")
+	(assert (symbol? (symbol "symbol")) true "constructed symbol should be a symbol")
+	(assert (symbol? 0) false "integer should not be a symbol")
+	(assert (symbol? false) false "boolean should not be a symbol")
 
 	/* Test for int? (requires int64-producing builtin like size/now) */
 	(assert (int? (size "abc")) true "size returns an int")

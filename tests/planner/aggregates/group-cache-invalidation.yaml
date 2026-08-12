@@ -230,6 +230,83 @@ test_cases:
         - "createcolumn"
         - ".grp:sc_base:"
 
+  # A source mutation may be reached through another table's trigger. The
+  # already materialized ordered-scalar column must remain writable through
+  # its computed-column maintenance API rather than a regular row UPDATE.
+  - name: "Drop nested trigger aggregate tables"
+    sql: "DROP TABLE IF EXISTS cache_event"
+
+  - name: "Drop nested trigger audit table"
+    sql: "DROP TABLE IF EXISTS cache_audit"
+
+  - name: "Drop nested trigger aggregate source"
+    sql: "DROP TABLE IF EXISTS cache_parent"
+
+  - name: "Create nested trigger aggregate source"
+    sql: "CREATE TABLE cache_parent (id INT PRIMARY KEY, value INT)"
+
+  - name: "Create nested trigger event source"
+    sql: "CREATE TABLE cache_event (id INT PRIMARY KEY, parent_id INT)"
+
+  - name: "Create nested trigger audit target"
+    sql: "CREATE TABLE cache_audit (id INT PRIMARY KEY, parent_id INT, cached_value INT, cached_value_again INT)"
+
+  - name: "Seed nested trigger aggregate source"
+    sql: "INSERT INTO cache_parent (id, value) VALUES (1, 10)"
+
+  - name: "Seed nested trigger audit target"
+    sql: "INSERT INTO cache_audit (id, parent_id, cached_value, cached_value_again) VALUES (1, 1, NULL, NULL)"
+
+  - name: "Create nested source update trigger"
+    sql: |
+      CREATE TRIGGER cache_event_after_insert
+      AFTER INSERT ON cache_event
+      FOR EACH ROW
+      BEGIN
+        UPDATE cache_parent SET value = value + 1 WHERE id = NEW.parent_id;
+      END
+
+  - name: "Create self-reading update trigger"
+    sql: |
+      CREATE TRIGGER cache_parent_after_update
+      AFTER UPDATE ON cache_parent
+      FOR EACH ROW
+      BEGIN
+        UPDATE cache_audit
+        SET cached_value = (
+          SELECT CASE
+            WHEN @cache_upper_bound IS NULL THEN inner_parent.value
+            ELSE LEAST(inner_parent.value, @cache_upper_bound)
+          END
+          FROM cache_parent AS inner_parent
+          WHERE inner_parent.id = cache_audit.parent_id
+          LIMIT 1
+        )
+        WHERE parent_id = NEW.id;
+        UPDATE cache_audit
+        SET cached_value_again = (
+          SELECT CASE
+            WHEN @cache_upper_bound IS NULL THEN inner_parent.value
+            ELSE LEAST(inner_parent.value, @cache_upper_bound)
+          END
+          FROM cache_parent AS inner_parent
+          WHERE inner_parent.id = cache_audit.parent_id
+          LIMIT 1
+        )
+        WHERE parent_id = NEW.id;
+      END
+
+  - name: "Nested trigger maintains materialized scalar aggregate"
+    sql: "INSERT INTO cache_event (id, parent_id) VALUES (1, 1)"
+
+  - name: "Repeated scalar cache upsert preserves undefined session dimensions"
+    sql: "SELECT cached_value, cached_value_again FROM cache_audit ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - cached_value: null
+          cached_value_again: null
+
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"
 
@@ -818,3 +895,12 @@ test_cases:
 
   - name: "Cleanup sc_inter"
     sql: "DROP TABLE IF EXISTS sc_inter"
+
+  - name: "Cleanup nested trigger event source"
+    sql: "DROP TABLE IF EXISTS cache_event"
+
+  - name: "Cleanup nested trigger audit target"
+    sql: "DROP TABLE IF EXISTS cache_audit"
+
+  - name: "Cleanup nested trigger aggregate source"
+    sql: "DROP TABLE IF EXISTS cache_parent"
