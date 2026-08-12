@@ -281,6 +281,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"dense hypergraphs select GOO with DPHyp subtree optimization in SCM")
 	(assert (equal? (join_order_choose_strategy 101 false true) 'goo-linearized-dp) true
 		"very large regular graphs select GOO with linearized-DP subtree optimization in SCM")
+	(assert (join_order_degree_exceeds_budget? 13 10000) false
+		"degree 13 does not prove that the connected-subgraph budget is exceeded")
+	(assert (join_order_degree_exceeds_budget? 14 10000) true
+		"degree 14 proves that the connected-subgraph budget is exceeded")
 	(define small_linearized (join_order_linearized_dp
 		(slice dense_join_nodes 0 4)
 		(slice dense_join_aliases 0 4)

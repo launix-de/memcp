@@ -4692,16 +4692,40 @@ logical trees consumed before physical scan lowering. */
 				(quote linearized-dp)
 				(quote goo-linearized-dp))))))
 
+/* Every subset containing one vertex and any selection of its regular-edge
+neighbors is connected. A degree d therefore proves at least 2^d connected
+subsets without materializing them. */
+(define join_order_degree_exceeds_budget? (lambda (degree budget)
+	(if (<= degree 0)
+		false
+		(if (< budget 2)
+			true
+			(join_order_degree_exceeds_budget? (- degree 1) (/ budget 2))))))
+
+(define join_order_regular_neighbors (lambda (edges alias)
+	(map
+		(filter edges (lambda (edge)
+			(or (equal? (nth edge 0) alias) (equal? (nth edge 1) alias))))
+		(lambda (edge)
+			(if (equal? (nth edge 0) alias) (nth edge 1) (nth edge 0))))))
+
+(define join_order_degree_proves_budget_overflow? (lambda (aliases edges budget)
+	(reduce aliases (lambda (proven alias)
+		(or proven (join_order_degree_exceeds_budget?
+			(count (join_order_regular_neighbors edges alias)) budget))) false)))
+
 (define join_order_adaptive (lambda (nodes raw_predicates)
 	(begin
 		(define aliases (map nodes car))
 		(define hypergraph (join_order_hypergraph? raw_predicates))
 		(define predicates (join_order_prepare_predicates aliases raw_predicates))
-		(define regular_edge_count (count (join_order_regular_edges aliases predicates)))
+		(define regular_edges (join_order_regular_edges aliases predicates))
+		(define regular_edge_count (count regular_edges))
 		(define complete_regular_graph (equal? regular_edge_count
 			(/ (* (count aliases) (- (count aliases) 1)) 2)))
 		(define connected_count (if (and (>= (count aliases) 14) (<= (count aliases) 100))
-			(if complete_regular_graph
+			(if (or complete_regular_graph
+				(join_order_degree_proves_budget_overflow? aliases regular_edges 10000))
 				(list '() true)
 				(join_order_enumerate_connected aliases predicates 10000))
 			(list '() true)))
