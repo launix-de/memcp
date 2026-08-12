@@ -109,6 +109,12 @@ and right subtrees, join kind, bound-alias set, and null-extension boundary.
 Helpers may derive local facts from a subtree, but they must not discard its
 boundaries or make another driver/order decision.
 
+The tree also preserves execution independence. Physical lowering decides per
+node whether independent child subtrees run through `(parallel)`, serial
+`(list)`, or dependency-driven nested scans. That physical choice may use cost
+and batch-size information, but it must not serialize independent branches by
+first reducing the tree to one global leaf order.
+
 Physical lowering still chooses the operator and scan source for each tree node.
 Depending on the cost and semantics, a source may become a
 direct subscan, group keytable, computed-column-filtered slice of a source
