@@ -848,8 +848,8 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 	// on-disk files AFTER db.save() has written the new schema.json.
 	// Deleting old column files before saving the schema creates a window
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
-	// The finalizer set in shard.rebuild() provides a safety net: if the
-	// caller never calls RemoveFromDisk (e.g. on panic), GC will clean up.
+	// Failed schema publication intentionally retains the old generation: it is
+	// still referenced by the last committed schema and must remain recoverable.
 	return rebuildDatabaseResult{replaced: allReplaced, errors: rebuildErrors}
 }
 

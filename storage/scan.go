@@ -512,7 +512,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 		t.enterMutationOwner()
 		defer t.exitMutationOwner()
 	}
-	if t.tableLockOwner.Load() != nil {
+	if t.hasTableLock() {
 		t.waitTableLock(ss, hasMutationCallback)
 	}
 	// touch temp columns so CacheManager knows they're still in use
@@ -714,7 +714,7 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, false)
@@ -818,7 +818,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
-		t.mu.Lock()
+		t.lockForMutation(ss)
 		writeLocked = true
 		defer func() {
 			if writeLocked {
@@ -834,12 +834,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		if currentTx != nil {
 			currentTx.EnterShardWrite(t)
 			defer currentTx.ExitShardWrite(t)
-		}
-		// Table lock check for mutation path: lockTable() stores owner while holding
-		// all shard write locks, so checking after our own t.mu.Lock() is TOCTOU-safe.
-		// waitTableLock only uses tableLockMu (not t.mu), so no deadlock.
-		if t.t.tableLockOwner.Load() != nil {
-			t.t.waitTableLock(ss, true)
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
@@ -887,10 +881,10 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		t.mu.RLock()
 		locked = true
 		// Table lock check must happen AFTER shard RLock to close the TOCTOU window:
-		// lockTable() sets tableLockOwner while holding shard write locks, so any
-		// scan that gets past RLock is guaranteed to see a non-nil owner if a
-		// LOCK TABLES was issued before this scan acquired the shard read lock.
-		if t.t.tableLockOwner.Load() != nil {
+		// lockTable() publishes tableLockState while holding shard write locks, so
+		// any scan that gets past RLock sees a lock issued before it acquired the
+		// shard read lock.
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, hasMutationCallback)
@@ -1075,7 +1069,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
-		t.mu.Lock()
+		t.lockForMutation(ss)
 		writeLocked = true
 		defer func() {
 			if writeLocked {
@@ -1091,9 +1085,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		if currentTx != nil {
 			currentTx.EnterShardWrite(t)
 			defer currentTx.ExitShardWrite(t)
-		}
-		if t.t.tableLockOwner.Load() != nil {
-			t.t.waitTableLock(ss, true)
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
@@ -1142,7 +1133,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
-		if t.t.tableLockOwner.Load() != nil {
+		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, hasMutationCallback)

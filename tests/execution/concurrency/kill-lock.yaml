@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # KILL QUERY and LOCK TABLES functional tests
 
 metadata:
@@ -168,6 +169,36 @@ test_cases:
           rows: 1
       - session_id: "lock-conc-r3"
         sql: "UNLOCK TABLES"
+
+  - name: "concurrent READ locks share ownership while writers remain blocked"
+    steps:
+      - session_id: "lock-shared-r1"
+        sql: "LOCK TABLES lock_test READ"
+      - session_id: "lock-shared-r2"
+        sql: "LOCK TABLES lock_test READ"
+      - session_id: "lock-shared-writer"
+        sql: "INSERT INTO lock_test VALUES (52, 'after-readers')"
+        background: true
+        expect:
+          rows: 1
+      - session_id: "lock-shared-r1"
+        sql: "SELECT 1"
+      - session_id: "lock-shared-r1"
+        sql: "SELECT 1"
+      - session_id: "lock-shared-r1"
+        sql: "UNLOCK TABLES"
+      - session_id: "lock-shared-r1"
+        sql: "SHOW PROCESSLIST"
+        expect:
+          contains: "Waiting for table lock"
+      - session_id: "lock-shared-r2"
+        sql: "UNLOCK TABLES"
+      - wait_for_background: true
+      - session_id: "lock-shared-r1"
+        sql: "SELECT val FROM lock_test WHERE id = 52"
+        expect:
+          rows: 1
+          contains: "after-readers"
 
   # ── data integrity after concurrent lock cycle ────────────────────────────
 

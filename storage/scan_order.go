@@ -1163,7 +1163,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	}
 
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	if t.t.tableLockOwner.Load() != nil {
+	if t.t.hasTableLock() {
 		t.t.waitTableLock(ss, false)
 	}
 
@@ -1202,7 +1202,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			shardLocked = true
 			// Table lock check must happen AFTER shard RLock — race-safe synchronization
 			// point (mirrors storageShard.scan logic for the TOCTOU fix).
-			if t.t.tableLockOwner.Load() != nil {
+			if t.t.hasTableLock() {
 				t.mu.RUnlock()
 				shardLocked = false
 				t.t.waitTableLock(ss, false)

@@ -64,28 +64,55 @@ func (s *FileStorage) WriteSchema(jsonbytes []byte) {
 }
 
 func (s *FileStorage) WriteSchemaWithMode(jsonbytes []byte, durable bool) {
-	os.MkdirAll(s.path, 0750)
-	if stat, err := os.Stat(s.path + "schema.json"); err == nil && stat.Size() > 0 {
-		// rescue a copy of schema.json in case the schema is not serializable
-		os.Rename(s.path+"schema.json", s.path+"schema.json.old")
+	if err := os.MkdirAll(s.path, 0750); err != nil {
+		panic(err)
 	}
-	f, err := os.Create(s.path + "schema.json")
+	tmp, err := os.CreateTemp(s.path, ".schema.json.tmp-")
 	if err != nil {
 		panic(err)
 	}
-	defer f.Close()
-	if _, err := f.Write(jsonbytes); err != nil {
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(jsonbytes); err != nil {
+		tmp.Close()
 		panic(err)
 	}
 	if durable {
-		if err := f.Sync(); err != nil {
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
 			panic(err)
 		}
-		if dir, err := os.Open(s.path); err == nil {
-			defer dir.Close()
-			if err := dir.Sync(); err != nil {
+	}
+	if err := tmp.Close(); err != nil {
+		panic(err)
+	}
+
+	current := s.path + "schema.json"
+	backup := s.path + "schema.json.old"
+	if stat, err := os.Stat(current); err == nil && stat.Size() > 0 {
+		backupTmp := s.path + ".schema.json.old.tmp"
+		_ = os.Remove(backupTmp)
+		if err := os.Link(current, backupTmp); err == nil {
+			if err := os.Rename(backupTmp, backup); err != nil {
+				_ = os.Remove(backupTmp)
 				panic(err)
 			}
+		}
+	}
+	if err := os.Rename(tmpName, current); err != nil {
+		panic(err)
+	}
+	if durable {
+		dir, err := os.Open(s.path)
+		if err != nil {
+			panic(err)
+		}
+		if err := dir.Sync(); err != nil {
+			dir.Close()
+			panic(err)
+		}
+		if err := dir.Close(); err != nil {
+			panic(err)
 		}
 	}
 }

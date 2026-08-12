@@ -725,7 +725,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 							if s.t.PersistencyMode != Memory {
 								f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
 								newcol.Serialize(f)
-								f.Close()
+								finishColumnWrite(f, s.t.PersistencyMode == Safe)
 							}
 						}
 					}

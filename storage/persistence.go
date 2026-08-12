@@ -69,6 +69,21 @@ type PersistenceLogfile interface {
 	Sync()
 	Close()
 }
+
+func finishColumnWrite(w io.WriteCloser, durable bool) {
+	if durable {
+		if syncer, ok := w.(interface{ Sync() error }); ok {
+			if err := syncer.Sync(); err != nil {
+				_ = w.Close()
+				panic(err)
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+}
+
 type LogEntryDelete struct {
 	idx uint32
 }
