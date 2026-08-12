@@ -3314,11 +3314,11 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 
 (define rewrite_derived_ref (lambda (alias projection expr)
 	(match expr
-		((symbol get_column) tblvar ignorecase col _json_path) (if (or (equal? tblvar alias) (nil? tblvar))
-			(coalesceNil (field_expr_by_title projection col ignorecase) expr)
+		((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias) (nil? tblvar))
+			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 			expr)
-		((quote get_column) tblvar ignorecase col _json_path) (if (or (equal? tblvar alias) (nil? tblvar))
-			(coalesceNil (field_expr_by_title projection col ignorecase) expr)
+		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias) (nil? tblvar))
+			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 			expr)
 		(cons head tail) (cons head (map tail (lambda (item) (rewrite_derived_ref alias projection item))))
 		_ expr)))
@@ -3338,10 +3338,10 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 
 (define rewrite_order_output_alias (lambda (fields expr)
 	(match expr
-		((symbol get_column) nil ignorecase col _json_path)
-		(coalesceNil (field_expr_by_title fields col ignorecase) expr)
-		((quote get_column) nil ignorecase col _json_path)
-		(coalesceNil (field_expr_by_title fields col ignorecase) expr)
+		((symbol get_column) nil _tbl_ignorecase col col_ignorecase)
+		(coalesceNil (field_expr_by_title fields col col_ignorecase) expr)
+		((quote get_column) nil _tbl_ignorecase col col_ignorecase)
+		(coalesceNil (field_expr_by_title fields col col_ignorecase) expr)
 		_ expr)))
 
 (define rewrite_order_output_aliases (lambda (fields order_items)
