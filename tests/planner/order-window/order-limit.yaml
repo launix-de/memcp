@@ -195,7 +195,7 @@ test_cases:
         - "(sort rows"
         - "(slice sorted"
 
-  - name: "Cross-source computed order uses a nested unique lookup"
+  - name: "Cross-source computed order uses a physical carrier"
     sql: |
       EXPLAIN SELECT l.id
       FROM ord_join_left l
