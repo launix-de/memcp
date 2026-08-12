@@ -1,0 +1,34 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+metadata:
+  version: "1.0"
+  description: "MySQL prepared statements preserve binary parameters byte-for-byte"
+  requires_mysql: true
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS prepared_binary_values"
+  - sql: "CREATE TABLE prepared_binary_values (id INT PRIMARY KEY, label TEXT, payload LONGBLOB)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS prepared_binary_values"
+
+test_cases:
+  - name: "Prepared binary parameter preserves arbitrary bytes"
+    mysql:
+      statements:
+        - sql: "INSERT INTO prepared_binary_values (id, label, payload) VALUES (1, ?, ?)"
+          parameters:
+            - base64: "cHJlcGFyZWQgdGV4dA=="
+              mysql_type: "text"
+            - base64: "AP8BgD8="
+              mysql_type: "blob"
+          expect:
+            {}
+        - sql: "SELECT label, LENGTH(payload) AS byte_count, TO_BASE64(payload) AS encoded FROM prepared_binary_values WHERE id = 1"
+          expect:
+            rows: 1
+            data:
+              - byte_count: 5
+                label: "prepared text"
+                encoded: "AP8BgD8="
