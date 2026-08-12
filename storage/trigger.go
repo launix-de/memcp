@@ -381,6 +381,33 @@ func (t *table) RemoveTrigger(name string) bool {
 	return false
 }
 
+// dropTrigger follows the same table-DDL-before-schema lock order as trigger
+// creation. Tables may disappear between the catalog snapshot and locking, so
+// each candidate is revalidated under schemalock before it is modified.
+func (db *database) dropTrigger(name string) bool {
+	db.schemalock.RLock()
+	tables := db.tables.GetAll()
+	db.schemalock.RUnlock()
+
+	for _, t := range tables {
+		t.ddlMu.Lock()
+		db.schemalock.Lock()
+		if db.tables.Get(t.Name) != t {
+			db.schemalock.Unlock()
+			t.ddlMu.Unlock()
+			continue
+		}
+		if t.RemoveTrigger(name) {
+			db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+			t.ddlMu.Unlock()
+			return true
+		}
+		db.schemalock.Unlock()
+		t.ddlMu.Unlock()
+	}
+	return false
+}
+
 // SetTriggerTarget refreshes the runtime-only cache target pin on an
 // idempotently reused system trigger, including triggers restored from JSON.
 func (t *table) SetTriggerTarget(name string, acquire func() bool, release func()) bool {
