@@ -1575,6 +1575,34 @@ func init_list() {
 			Const:  true,
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sql_in",
+		Desc: "tests SQL IN-list membership and returns nil when NULL makes the result UNKNOWN",
+		Fn: func(a ...Scmer) Scmer {
+			values := asSlice(a[0], "sql_in")
+			if a[1].IsNil() {
+				return NewNil()
+			}
+			unknown := false
+			for _, value := range values {
+				equal := EqualSQL(value, a[1])
+				if equal.IsNil() {
+					unknown = true
+				} else if equal.Bool() {
+					return NewBool(true)
+				}
+			}
+			if unknown {
+				return NewNil()
+			}
+			return NewBool(false)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{{Kind: "list", ParamName: "values", ParamDesc: "SQL IN-list values", NoEscape: true}, {Kind: "any", ParamName: "value", ParamDesc: "value to find"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
 
 	// dictionary functions
 	DeclareTitle("Associative Lists / Dictionaries")

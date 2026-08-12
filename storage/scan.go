@@ -180,7 +180,7 @@ func scanExprSafeToHoist(expr scm.Scmer, belowOuter bool) bool {
 		return false
 	}
 	switch name {
-	case "session", "equal?", "equal??", "nil?", "not", "and", "or", "coalesceNil", "bool?", "int?", "float?", "string?", "<", "<=", ">", ">=":
+	case "session", "equal?", "equal??", "nil?", "not", "sql_not", "and", "or", "coalesceNil", "bool?", "int?", "float?", "string?", "<", "<=", ">", ">=":
 	default:
 		return false
 	}

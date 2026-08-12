@@ -26,6 +26,41 @@ import "runtime/debug"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
+// wrapScanOrderComparator adds SQL NULL positioning around the comparator
+// supplied to scan_order. The comparator itself only sees non-NULL values:
+// ascending order puts NULL first, descending order puts NULL last.
+func wrapScanOrderComparator(compare func(...scm.Scmer) scm.Scmer) func(...scm.Scmer) scm.Scmer {
+	descending := false
+	if decl := scm.DeclarationForValue(scm.NewFunc(compare)); decl != nil && (decl.Name == "<" || decl.Name == ">") {
+		descending = decl.Name == ">"
+	} else if _, reverse, ok := scm.LookupCollate(compare); ok {
+		descending = reverse
+	} else {
+		// User callbacks can be type-specific. Direction probing must not make a
+		// valid string/date comparator fail before it sees actual input values.
+		func() {
+			defer func() { _ = recover() }()
+			ascendingProbe := scm.ToBool(compare(scm.NewInt(1), scm.NewInt(2)))
+			descendingProbe := scm.ToBool(compare(scm.NewInt(2), scm.NewInt(1)))
+			descending = !ascendingProbe && descendingProbe
+		}()
+	}
+	return func(args ...scm.Scmer) scm.Scmer {
+		if len(args) < 2 {
+			return scm.NewBool(false)
+		}
+		leftNil := args[0].IsNil()
+		rightNil := args[1].IsNil()
+		if leftNil || rightNil {
+			if leftNil && rightNil {
+				return scm.NewBool(false)
+			}
+			return scm.NewBool(leftNil != descending)
+		}
+		return compare(args...)
+	}
+}
+
 func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
 	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=filterCols, 4=filterFns,
 	// 5=sortcols, 6=sortdirs, 7=perTableOffset, 8=perTableLimit,
@@ -1122,6 +1157,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		cmpScm := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(coll), scm.NewBool(reverse))
 		cmpFn := scm.OptimizeProcToSerialFunction(cmpScm)
 		adjustedSortdirs[i] = cmpFn
+	}
+	for i := range adjustedSortdirs {
+		adjustedSortdirs[i] = wrapScanOrderComparator(adjustedSortdirs[i])
 	}
 
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)

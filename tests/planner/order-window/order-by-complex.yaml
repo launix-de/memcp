@@ -61,11 +61,60 @@ test_cases:
     sql: "SELECT id, name FROM obc_data ORDER BY name ASC LIMIT 10"
     expect:
       rows: 10
+      data:
+        - id: 9
+          name: null
+        - id: 1
+          name: "alice"
+        - id: 2
+          name: "bob"
+        - id: 3
+          name: "carol"
+        - id: 4
+          name: "dave"
+        - id: 5
+          name: "eve"
+        - id: 6
+          name: "frank"
+        - id: 7
+          name: "grace"
+        - id: 8
+          name: "henry"
+        - id: 10
+          name: "ivy"
 
   - name: "ORDER BY with NULLs (DESC puts NULL last)"
     sql: "SELECT id, name FROM obc_data ORDER BY name DESC LIMIT 10"
     expect:
       rows: 10
+      data:
+        - id: 10
+          name: "ivy"
+        - id: 8
+          name: "henry"
+        - id: 7
+          name: "grace"
+        - id: 6
+          name: "frank"
+        - id: 5
+          name: "eve"
+        - id: 4
+          name: "dave"
+        - id: 3
+          name: "carol"
+        - id: 2
+          name: "bob"
+        - id: 1
+          name: "alice"
+        - id: 9
+          name: null
+
+  - name: "ORDER BY NULL positioning is applied before LIMIT"
+    sql: "SELECT id FROM obc_data ORDER BY name ASC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - id: 9
 
   # === LIMIT / OFFSET ===
 

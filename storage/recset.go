@@ -1082,9 +1082,9 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 	result.sortdirs = make([]func(...scm.Scmer) scm.Scmer, len(sortcols))
 	for i := range sortcols {
 		if i < len(sortdirs) && sortdirs[i] != nil {
-			result.sortdirs[i] = sortdirs[i]
+			result.sortdirs[i] = wrapScanOrderComparator(sortdirs[i])
 		} else {
-			result.sortdirs[i] = defaultSortDir
+			result.sortdirs[i] = wrapScanOrderComparator(defaultSortDir)
 		}
 	}
 
