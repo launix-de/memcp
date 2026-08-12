@@ -9011,18 +9011,24 @@ ever-larger subtrees. */
 			_ (neumann_fail "build_queryplan" "aggregate payload merge expects aggregate descriptor")))))
 
 (define group_upsert_collision_cols (lambda (value_cols)
-	(cons (quote list)
-		(cons "$update"
-			(map value_cols (lambda (col) (concat "NEW." col)))))))
+	(if (empty_list? value_cols)
+		'(list "$update")
+		(cons (quote list) (merge (list
+			(map value_cols (lambda (col) (concat "$set:" col)))
+			(map value_cols (lambda (col) (concat "NEW." col)))))))))
 
 (define group_upsert_collision_lambda (lambda (value_cols)
-	(begin
-		(define new_params (map (produceN (count value_cols)) (lambda (i) (symbol (concat "__new_group_value_" i)))))
-		(define update_pairs (merge (map (produceN (count value_cols)) (lambda (i)
-			(list (nth value_cols i) (nth new_params i))))))
+	(if (empty_list? value_cols)
 		(list (quote lambda)
-			(cons (quote $update) new_params)
-			(list (quote $update) (cons (quote list) update_pairs))))))
+			(list (quote $update))
+			(list (quote $update) (cons (quote list) '())))
+		(begin
+			(define setter_params (map (produceN (count value_cols)) (lambda (i) (symbol (concat "__set_group_value_" i)))))
+			(define new_params (map (produceN (count value_cols)) (lambda (i) (symbol (concat "__new_group_value_" i)))))
+			(list (quote lambda)
+				(merge (list setter_params new_params))
+				(cons (quote begin) (map (produceN (count value_cols)) (lambda (i)
+					(list (nth setter_params i) (nth new_params i))))))))))
 
 (define group_cleanup_missing_keys_plan (lambda (schema grouptbl key_names)
 	(begin
