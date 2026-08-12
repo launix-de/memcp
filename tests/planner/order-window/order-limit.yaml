@@ -27,12 +27,16 @@ setup:
   - sql: "DROP TABLE IF EXISTS ord_member_doc"
   - sql: "DROP TABLE IF EXISTS ord_member_file"
   - sql: "DROP TABLE IF EXISTS ord_member_label"
+  - sql: "DROP TABLE IF EXISTS ord_derived_item"
+  - sql: "DROP TABLE IF EXISTS ord_derived_parent"
   - sql: "CREATE TABLE ord_t (a INT, b INT)"
   - sql: "CREATE TABLE ord_join_left (id INT PRIMARY KEY, ref_id INT)"
   - sql: "CREATE TABLE ord_join_right (id INT PRIMARY KEY, rank_value INT)"
   - sql: "CREATE TABLE ord_member_doc (id INT PRIMARY KEY, file_id INT, label_id INT, rank_value INT)"
   - sql: "CREATE TABLE ord_member_file (id INT PRIMARY KEY, filename TEXT)"
   - sql: "CREATE TABLE ord_member_label (id INT PRIMARY KEY, name TEXT, visible INT)"
+  - sql: "CREATE TABLE ord_derived_parent (id INT PRIMARY KEY, label TEXT)"
+  - sql: "CREATE TABLE ord_derived_item (id INT PRIMARY KEY, parent_id INT, created INT)"
   - sql: |
       INSERT INTO ord_t (a,b) VALUES
       (1,2),(1,1),(2,2),(2,0),(3,1)
@@ -41,6 +45,8 @@ setup:
   - sql: "INSERT INTO ord_member_doc VALUES (1,1,10,40),(2,2,20,30),(3,3,10,20),(4,4,30,10)"
   - sql: "INSERT INTO ord_member_file VALUES (1,'other'),(2,'needle one'),(3,'needle two'),(4,'other')"
   - sql: "INSERT INTO ord_member_label VALUES (10,'alpha',1),(20,'beta',0)"
+  - sql: "INSERT INTO ord_derived_parent VALUES (1,'one'),(2,'two')"
+  - sql: "INSERT INTO ord_derived_item VALUES (10,1,100),(20,2,200)"
 
 test_cases:
   - name: "Top-1 by a DESC"
@@ -387,6 +393,49 @@ test_cases:
         - "(sort (var 0)"
         - "(slice (var 0)"
 
+  - name: "Quoted derived aliases resolve case-insensitively across joined order keys"
+    sql: |
+      SELECT d.*
+      FROM (
+        SELECT i.id AS `ID`, i.created AS `Created`, i.parent_id,
+          p.id AS `parent:ID`, p.label AS `parent:label`
+        FROM ord_derived_item i
+        LEFT JOIN (
+          SELECT id AS `parent:ID`, label AS `parent:label`
+          FROM ord_derived_parent
+        ) p ON p.`parent:ID` = i.parent_id
+      ) d
+      LEFT JOIN ord_derived_parent sorter ON sorter.id = d.parent_id
+      ORDER BY `d`.`Created` DESC, `d`.`id` DESC
+    expect:
+      rows: 2
+      data:
+        - { ID: 20, Created: 200, parent_id: 2, "parent:ID": 2, "parent:label": "two" }
+        - { ID: 10, Created: 100, parent_id: 1, "parent:ID": 1, "parent:label": "one" }
+
+  - name: "Joined derived alias order remains a physical ordered scan"
+    sql: |
+      EXPLAIN SELECT d.*
+      FROM (
+        SELECT i.id AS `ID`, i.created AS `Created`, i.parent_id,
+          p.id AS `parent:ID`, p.label AS `parent:label`
+        FROM ord_derived_item i
+        LEFT JOIN (
+          SELECT id AS `parent:ID`, label AS `parent:label`
+          FROM ord_derived_parent
+        ) p ON p.`parent:ID` = i.parent_id
+      ) d
+      LEFT JOIN ord_derived_parent sorter ON sorter.id = d.parent_id
+      ORDER BY `d`.`Created` DESC, `d`.`id` DESC
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "(lambda (rows)"
+        - "(sort (var 0)"
+        - "(slice (var 0)"
+
   - name: "ORDER BY DESC OFFSET beyond rows returns empty"
     sql: "SELECT a FROM ord_t ORDER BY a DESC LIMIT 2 OFFSET 10"
     expect:
@@ -494,3 +543,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ord_member_doc"
   - sql: "DROP TABLE IF EXISTS ord_member_file"
   - sql: "DROP TABLE IF EXISTS ord_member_label"
+  - sql: "DROP TABLE IF EXISTS ord_derived_item"
+  - sql: "DROP TABLE IF EXISTS ord_derived_parent"
