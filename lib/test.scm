@@ -235,6 +235,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (qassoc_get outer_barrier 'references '()) '("a" "b")) true "outer-join barrier records aliases referenced by ON")
 	(assert (equal? (qassoc_get (car (qassoc_get outer_graph 'edges '())) 'origin nil) 'outer-on) true
 		"join hypergraph preserves OUTER ON provenance")
+	(assert (empty_list? (join_order_local_predicates_for_alias
+		(list (list (list "b") 0.1 'outer-on "b" (source_join_expr (nth outer_graph_sources 2))))
+		"b")) true "reorder never converts an OUTER ON predicate into leaf ownership")
 	(define normalized_graph_block (join_optimizer_normalize_inner_joins graph_block))
 	(assert (equal? (count (split_and_terms (qb_where normalized_graph_block))) 4) true "inner ON predicates join the logical query-block predicate cloud")
 	(assert (equal? (map (qb_sources normalized_graph_block) source_join_expr) '(nil nil nil)) true "normalized inner sources do not retain physical predicate ownership")
@@ -250,6 +253,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define test_join_tree_predicates (lambda (tree)
 		(match tree
 			((symbol join-leaf) _alias) '()
+			((symbol join-leaf) _alias predicates) predicates
 			((symbol join-node) _kind left right predicates) (merge (list
 				(test_join_tree_predicates left)
 				(test_join_tree_predicates right)
@@ -260,26 +264,61 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define test_join_tree_predicates_placed? (lambda (tree)
 		(match tree
 			((symbol join-leaf) _alias) true
-			((symbol join-node) _kind left right predicates)
+			((symbol join-leaf) alias predicates)
+			(reduce predicates (lambda (valid predicate)
+				(and valid (equal? (join_order_pred_aliases predicate) (list alias)))) true)
+			((symbol join-node) kind left right predicates)
 			(begin
 				(define left_aliases (join_optimizer_tree_aliases left))
 				(define right_aliases (join_optimizer_tree_aliases right))
 				(define combined (merge_unique (list left_aliases right_aliases)))
 				(and
 					(reduce predicates (lambda (valid predicate)
-						(and valid (join_order_predicate_crosses_in? predicate
-							left_aliases right_aliases combined))) true)
+						(and valid (or
+							(join_order_predicate_crosses_in? predicate
+								left_aliases right_aliases combined)
+							(join_order_predicate_owned_by_barrier? predicate kind right)))) true)
 					(and (test_join_tree_predicates_placed? left)
 						(test_join_tree_predicates_placed? right))))
 			_ false)))
-	(assert (equal? (count (test_join_tree_predicates (qassoc_get graph_plan 'tree '()))) 3) true
+	(assert (equal? (count (test_join_tree_predicates (qassoc_get graph_plan 'tree '()))) 4) true
 		"logical join tree owns every reorderable predicate exactly once")
 	(assert (test_join_tree_predicates_placed? (qassoc_get graph_plan 'tree '())) true
 		"logical join predicates sit on the lowest join node crossing their aliases")
 	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'inner-on)))) 2) true
 		"logical join nodes retain INNER ON provenance from the hypergraph")
-	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'where)))) 1) true
-		"logical join nodes retain WHERE provenance from the hypergraph")
+	(assert (equal? (count (filter graph_plan_predicate_origins (lambda (origin) (equal? origin 'where)))) 2) true
+		"logical join nodes and leaves retain WHERE provenance from the hypergraph")
+	(define test_join_tree_leaf_predicates (lambda (tree alias)
+		(match tree
+			((symbol join-leaf) leaf_alias predicates) (if (equal? leaf_alias alias) predicates '())
+			((symbol join-node) _kind left right _predicates) (merge (list
+				(test_join_tree_leaf_predicates left alias)
+				(test_join_tree_leaf_predicates right alias)))
+			_ '())))
+	(define graph_a_leaf_predicates (test_join_tree_leaf_predicates
+		(qassoc_get graph_plan 'tree '()) "a"))
+	(assert (equal? (count graph_a_leaf_predicates) 1) true
+		"reorder binds a costed single-alias predicate to its logical join leaf")
+	(assert (equal? (join_order_pred_expr (car graph_a_leaf_predicates))
+		(list (quote >) (graph_col "a" "score") 10)) true
+		"logical leaf ownership preserves the complete local predicate expression")
+	(define graph_constant_residual (list (quote equal?) 1 1))
+	(define graph_residual_block (make_query_block "memcp-tests" graph_sources '()
+		(combine_where graph_where graph_constant_residual)
+		nil nil nil nil nil '() '() '()))
+	(define graph_residual_view (extract_join_hypergraph graph_residual_block))
+	(define graph_residual_plan (join_optimizer_plan_segment
+		'() graph_sources graph_sources "a" graph_residual_view))
+	(assert (equal? (count (qassoc_get graph_residual_view 'residuals '())) 1) true
+		"zero-alias conjunct remains a query-block residual")
+	(assert (equal? (count (test_join_tree_predicates
+		(qassoc_get graph_residual_plan 'tree '()))) 4) true
+		"zero-alias residual is not attached to a leaf or join node")
+	(assert (contains? (split_and_terms (condition_without_join_tree_predicates
+		(qb_where graph_residual_block) (qassoc_get graph_residual_plan 'tree '())))
+		graph_constant_residual) true
+		"physical residual retains a zero-alias conjunct after consuming tree ownership")
 	(define singleton_stage (make_group_stage
 		"logical-singleton" (car graph_sources) '() '(1) '() nil '() '() nil nil
 		(list
@@ -363,6 +402,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"LEFT OUTER join nodes own their ON predicates")
 	(assert (equal? (join_order_pred_owner (car (nth semantic_outer_tree 4))) "b") true
 		"LEFT OUTER join predicates retain their barrier owner")
+	(define outer_where_expr (list (quote >) (graph_col "b" "score") 0))
+	(define outer_where_block (make_query_block "memcp-tests" outer_graph_sources '()
+		outer_where_expr nil nil nil nil nil '() '() '()))
+	(define outer_where_graph (extract_join_hypergraph outer_where_block))
+	(define outer_where_tree (join_order_tree_with_predicates semantic_outer_tree
+		(join_optimizer_metadata_costed_predicates outer_graph_sources "a" outer_where_graph
+			(source_aliases outer_graph_sources))))
+	(define outer_where_node_predicates (nth outer_where_tree 4))
+	(assert (empty_list? (test_join_tree_leaf_predicates outer_where_tree "b")) true
+		"nullable-side WHERE is not bound to the pre-null-extension scan leaf")
+	(assert (equal? (count (filter outer_where_node_predicates (lambda (predicate)
+		(equal? (join_order_pred_expr predicate) outer_where_expr)))) 1) true
+		"nullable-side WHERE is bound exactly once to its null-extension barrier")
+	(assert (test_join_tree_predicates_placed? outer_where_tree) true
+		"join predicates use the earliest node with dependencies and null semantics available")
 	(define bushy_scan_tree (make_join_optimizer_node 'inner
 		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b") '())
 		(make_join_optimizer_node 'left-outer (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '()) '()))

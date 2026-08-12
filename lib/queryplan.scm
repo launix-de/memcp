@@ -4018,6 +4018,11 @@ ON terms remain owned by the query-block until physical lowering. */
 		(qassoc_get graph (quote edges) '())
 		(qassoc_get graph (quote hyperedges) '())))))
 
+(define join_optimizer_costed_predicates (lambda (graph)
+	(merge (list
+		(qassoc_get graph (quote locals) '())
+		(join_optimizer_predicates graph)))))
+
 (define join_hypergraph_all_predicates (lambda (graph)
 	(merge (list
 		(qassoc_get graph (quote locals) '())
@@ -4142,17 +4147,34 @@ and barrier ownership come from the pre-normalization query block. */
 	(map sources (lambda (src)
 		(list (source_alias src) (join_optimizer_source_rows stages sources default_alias graph src))))))
 
-(define join_optimizer_metadata_predicates (lambda (sources default_alias graph aliases)
-	(map (filter (join_optimizer_predicates graph) (lambda (entry)
+(define join_optimizer_metadata_predicates_from (lambda (sources default_alias entries aliases)
+	(map (filter entries (lambda (entry)
 		(join_optimizer_alias_subset? (qassoc_get entry (quote aliases) '()) aliases)))
 		(lambda (entry)
-			(list
-				(qassoc_get entry (quote aliases) '())
-				(join_optimizer_expr_selectivity sources default_alias
-					(qassoc_get entry (quote predicate) true))
-				(qassoc_get entry (quote origin) nil)
-				(qassoc_get entry (quote owner) nil)
-				(qassoc_get entry (quote predicate) true))))))
+			(begin
+				(define predicate_aliases (qassoc_get entry (quote aliases) '()))
+				(define origin (qassoc_get entry (quote origin) nil))
+				(define local_source (if (single_source? predicate_aliases)
+					(join_optimizer_source_by_alias sources (car predicate_aliases)) nil))
+				(define barrier_owner (if (and (equal? origin (quote where))
+					(and (not (nil? local_source)) (source_outer? local_source)))
+					(source_alias local_source) nil))
+				(define metadata (list
+					predicate_aliases
+					(join_optimizer_expr_selectivity sources default_alias
+						(qassoc_get entry (quote predicate) true))
+					origin
+					(qassoc_get entry (quote owner) nil)
+					(qassoc_get entry (quote predicate) true)))
+				(if (nil? barrier_owner) metadata (append metadata barrier_owner)))))))
+
+(define join_optimizer_metadata_predicates (lambda (sources default_alias graph aliases)
+	(join_optimizer_metadata_predicates_from
+		sources default_alias (join_optimizer_predicates graph) aliases)))
+
+(define join_optimizer_metadata_costed_predicates (lambda (sources default_alias graph aliases)
+	(join_optimizer_metadata_predicates_from
+		sources default_alias (join_optimizer_costed_predicates graph) aliases)))
 
 (define join_optimizer_source_by_alias (lambda (sources alias)
 	(reduce sources (lambda (found src)
@@ -4196,6 +4218,8 @@ logical trees consumed before physical scan lowering. */
 	(if (> (count predicate) 3) (nth predicate 3) nil)))
 (define join_order_pred_expr (lambda (predicate)
 	(if (> (count predicate) 4) (nth predicate 4) true)))
+(define join_order_pred_barrier_owner (lambda (predicate)
+	(if (> (count predicate) 5) (nth predicate 5) nil)))
 
 (define join_order_predicate_crosses? (lambda (predicate left right)
 	(begin
@@ -4230,7 +4254,7 @@ logical trees consumed before physical scan lowering. */
 
 (define join_order_leaf_plan (lambda (node)
 	(list
-		(list (quote join-leaf) (car node))
+		(list (quote join-leaf) (car node) '())
 		(list (car node))
 		(max 1 (cadr node))
 		0
@@ -4681,10 +4705,30 @@ logical trees consumed before physical scan lowering. */
 	(join_order_goo_dp_loop nodes aliases predicates hypergraph
 		(join_order_goo nodes aliases predicates) 10000 0)))
 
+(define join_order_local_predicates_for_alias (lambda (predicates alias)
+	(filter predicates (lambda (predicate)
+		(and (not (nil? (join_order_pred_origin predicate)))
+			(and (not (equal? (join_order_pred_origin predicate) (quote outer-on)))
+				(and (nil? (join_order_pred_barrier_owner predicate))
+					(equal? (join_order_pred_aliases predicate) (list alias)))))))))
+
+(define join_order_predicate_owned_by_barrier? (lambda (predicate kind right)
+	(begin
+		(define owner (join_order_pred_barrier_owner predicate))
+		(and (not (nil? owner))
+			(and (equal? kind (quote left-outer))
+				(equal? owner (join_optimizer_tree_first_alias right)))))))
+
 (define join_order_tree_with_predicates (lambda (tree predicates)
 	(match tree
-		((symbol join-leaf) _alias) tree
-		((quote join-leaf) _alias) tree
+		((symbol join-leaf) alias) (list (quote join-leaf) alias
+			(join_order_local_predicates_for_alias predicates alias))
+		((quote join-leaf) alias) (list (quote join-leaf) alias
+			(join_order_local_predicates_for_alias predicates alias))
+		((symbol join-leaf) alias _predicates) (list (quote join-leaf) alias
+			(join_order_local_predicates_for_alias predicates alias))
+		((quote join-leaf) alias _predicates) (list (quote join-leaf) alias
+			(join_order_local_predicates_for_alias predicates alias))
 		((symbol join-node) kind left right _predicates)
 		(begin
 			(define left_aliases (join_optimizer_tree_aliases left))
@@ -4695,8 +4739,9 @@ logical trees consumed before physical scan lowering. */
 				(join_order_tree_with_predicates right predicates)
 				(filter predicates (lambda (predicate)
 					(and (not (nil? (join_order_pred_origin predicate)))
-						(join_order_predicate_crosses_in? predicate
-							left_aliases right_aliases combined))))))
+						(or (join_order_predicate_crosses_in? predicate
+							left_aliases right_aliases combined)
+							(join_order_predicate_owned_by_barrier? predicate kind right)))))))
 		((quote join-node) kind left right _predicates)
 		(join_order_tree_with_predicates
 			(list (quote join-node) kind left right '()) predicates)
@@ -4771,7 +4816,7 @@ subsets without materializing them. */
 			(join_order_result strategy (car result) (cadr result) predicates))))))
 
 (define make_join_optimizer_leaf (lambda (alias)
-	(list (quote join-leaf) alias)))
+	(list (quote join-leaf) alias '())))
 
 (define make_join_optimizer_node (lambda (kind left right predicates)
 	(list (quote join-node) kind left right (coalesceNil predicates '()))))
@@ -4821,6 +4866,8 @@ subsets without materializing them. */
 	(match tree
 		((symbol join-leaf) alias) (list alias)
 		((quote join-leaf) alias) (list alias)
+		((symbol join-leaf) alias _predicates) (list alias)
+		((quote join-leaf) alias _predicates) (list alias)
 		((symbol join-node) _kind left right _predicates) (merge (list
 			(join_optimizer_tree_aliases left)
 			(join_optimizer_tree_aliases right)))
@@ -4833,6 +4880,8 @@ subsets without materializing them. */
 	(match tree
 		((symbol join-leaf) alias) alias
 		((quote join-leaf) alias) alias
+		((symbol join-leaf) alias _predicates) alias
+		((quote join-leaf) alias _predicates) alias
 		((symbol join-node) _kind left _right _predicates) (join_optimizer_tree_first_alias left)
 		((quote join-node) _kind left _right _predicates) (join_optimizer_tree_first_alias left)
 		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
@@ -4841,6 +4890,8 @@ subsets without materializing them. */
 	(match tree
 		((symbol join-leaf) _alias) '()
 		((quote join-leaf) _alias) '()
+		((symbol join-leaf) _alias predicates) predicates
+		((quote join-leaf) _alias predicates) predicates
 		((symbol join-node) _kind left right predicates) (merge (list
 			(join_optimizer_tree_predicates left)
 			(join_optimizer_tree_predicates right)
@@ -4849,6 +4900,14 @@ subsets without materializing them. */
 		(join_optimizer_tree_predicates
 			(make_join_optimizer_node kind left right predicates))
 		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
+
+(define join_optimizer_leaf_predicates (lambda (leaf)
+	(match leaf
+		((symbol join-leaf) _alias) '()
+		((quote join-leaf) _alias) '()
+		((symbol join-leaf) _alias predicates) predicates
+		((quote join-leaf) _alias predicates) predicates
+		_ (neumann_fail "build_queryplan" "expected a logical join leaf"))))
 
 (define join_optimizer_node_condition (lambda (predicates)
 	(combine_where_terms
@@ -4872,6 +4931,8 @@ subsets without materializing them. */
 	(match tree
 		((symbol join-leaf) alias) (if (contains? removed_aliases alias) nil tree)
 		((quote join-leaf) alias) (if (contains? removed_aliases alias) nil tree)
+		((symbol join-leaf) alias _predicates) (if (contains? removed_aliases alias) nil tree)
+		((quote join-leaf) alias _predicates) (if (contains? removed_aliases alias) nil tree)
 		((symbol join-node) kind left right predicates)
 		(begin
 			(define kept_left (join_optimizer_tree_without_aliases left removed_aliases))
@@ -4905,6 +4966,8 @@ source list remains the semantic catalog and is used only for alias resolution. 
 	(match tree
 		((symbol join-leaf) _alias) true
 		((quote join-leaf) _alias) true
+		((symbol join-leaf) _alias _predicates) true
+		((quote join-leaf) _alias _predicates) true
 		((symbol join-node) _kind _left _right _predicates) true
 		((quote join-node) _kind _left _right _predicates) true
 		_ false)))
@@ -4914,6 +4977,8 @@ source list remains the semantic catalog and is used only for alias resolution. 
 		(define alias (match leaf
 			((symbol join-leaf) value) value
 			((quote join-leaf) value) value
+			((symbol join-leaf) value _predicates) value
+			((quote join-leaf) value _predicates) value
 			_ (neumann_fail "build_queryplan" "expected a logical join leaf")))
 		(define src (join_optimizer_source_by_alias catalog alias))
 		(if (nil? src)
@@ -4996,9 +5061,14 @@ source catalog. join_plan remains the single owner of physical join order. */
 (define join_optimizer_plan_segment (lambda (stages all_sources segment default_alias graph)
 	(begin
 		(define aliases (map segment source_alias))
-		(join_order_adaptive
+		(define planned (join_order_adaptive
 			(join_optimizer_metadata_nodes stages segment default_alias graph)
-			(join_optimizer_metadata_predicates all_sources default_alias graph aliases)))))
+			(join_optimizer_metadata_predicates all_sources default_alias graph aliases)))
+		(qassoc_set planned (quote tree)
+			(join_order_tree_with_predicates
+				(qassoc_get planned (quote tree) nil)
+				(join_optimizer_metadata_costed_predicates
+					all_sources default_alias graph aliases))))))
 
 (define join_optimizer_primary_key_columns (lambda (src)
 	(if (source_is_base_table? src)
@@ -5107,7 +5177,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(define ordered_aliases (merge (list prefix
 				(filter planned_aliases (lambda (alias) (not (contains? prefix alias)))))))
 			(define ordered_sources (join_optimizer_sources_for_order segment ordered_aliases))
-			(define predicates (join_optimizer_metadata_predicates
+			(define predicates (join_optimizer_metadata_costed_predicates
 				all_sources default_alias graph ordered_aliases))
 			(qassoc_set
 				(qassoc_set
@@ -12660,7 +12730,11 @@ either bound a real row or supplied the synthetic NULL row. */
 		(define local_condition (nth condition_parts 0))
 		(define post_outer_condition (nth condition_parts 1))
 		(define remaining_condition (nth condition_parts 2))
-		(define condition (combine_where (source_join_expr src) local_condition))
+		(define owned_condition (join_optimizer_node_condition
+			(join_optimizer_leaf_predicates leaf)))
+		(define condition (combine_where
+			(source_join_expr src)
+			(combine_where owned_condition local_condition)))
 		(define ordered_sources (cons src future_sources))
 		(define order_parts (split_order_items_for_join_driver
 			ordered_sources default_alias src order_items stages final_condition '()))
@@ -12757,6 +12831,13 @@ ownership remain available until the physical scans are emitted. */
 		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
 		((quote join-leaf) alias)
 		(build_join_tree_scan_using_recipe schema all_sources (make_join_optimizer_leaf alias) future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+		((symbol join-leaf) _alias _predicates)
+		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+		((quote join-leaf) alias predicates)
+		(build_join_tree_scan_using_recipe schema all_sources
+			(list (quote join-leaf) alias predicates) future_aliases default_alias needed_exprs
+			final_condition row_expr order_items offset_value limit_value allow_membership_recset
+			column_recipe stages result_mode continuation outer_scan)
 		((symbol join-node) kind left right predicates)
 		(begin
 			(if (and (equal? kind (quote left-outer))
