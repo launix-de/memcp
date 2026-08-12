@@ -446,26 +446,26 @@ func EqualSQL(a, b Scmer) Scmer {
 		if tb == tagFloat {
 			return NewBool(float64(a.Int()) == b.Float())
 		}
-		if tb == tagString || tb == tagSymbol {
-			return NewBool(a.Int() == b.Int())
+		if tb == tagString || tb == tagSymbol || tb == tagCString || tb == tagBString {
+			return NewBool(numericStringEqualsInt(b.String(), a.Int()))
 		}
 		return NewBool(a.Int() == b.Int())
 	case tagFloat:
 		if tb == tagInt {
 			return NewBool(a.Float() == float64(b.Int()))
 		}
-		if tb == tagString || tb == tagSymbol {
+		if tb == tagString || tb == tagSymbol || tb == tagCString || tb == tagBString {
 			return NewBool(a.Float() == b.Float())
 		}
 		return NewBool(a.Float() == b.Float())
-	case tagString, tagSymbol:
+	case tagString, tagSymbol, tagCString:
 		if tb == tagDate {
 			if ts, ok := ParseDateString(a.String()); ok {
 				return NewBool(ts == b.Int())
 			}
 		}
 		if tb == tagInt {
-			return NewBool(a.Int() == b.Int())
+			return NewBool(numericStringEqualsInt(a.String(), b.Int()))
 		}
 		if tb == tagFloat {
 			return NewBool(a.Float() == b.Float())
@@ -474,9 +474,16 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Bool() == b.Bool())
 		}
 		return NewBool(strings.EqualFold(a.String(), b.String()))
-	case tagCString:
-		return NewBool(strings.EqualFold(a.String(), b.String()))
 	case tagBString:
+		if tb == tagInt {
+			return NewBool(numericStringEqualsInt(a.String(), b.Int()))
+		}
+		if tb == tagFloat {
+			return NewBool(a.Float() == b.Float())
+		}
+		if tb == tagBool {
+			return NewBool(a.Bool() == b.Bool())
+		}
 		if tb == tagBString {
 			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
 			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
