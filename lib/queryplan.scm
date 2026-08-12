@@ -12573,7 +12573,7 @@ either bound a real row or supplied the synthetic NULL row. */
 	(if (join_scan_reduce? result_mode) (nth result_mode 2) nil)))
 
 (define join_scan_shard_reduce_expr (lambda (result_mode)
-	(if (join_scan_reduce? result_mode) (nth result_mode 3) nil)))
+	(if (join_scan_reduce? result_mode) (join_scan_reduce_expr result_mode true) nil)))
 
 (define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
 	(begin
