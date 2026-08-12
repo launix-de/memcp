@@ -232,6 +232,43 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (qassoc_get graph_plan 'strategy nil) 'dphyp) true "small join graphs use DPHyp")
 	(assert (equal? (count (qassoc_get graph_plan 'order '())) 3) true "DPHyp covers every logical join source")
 	(assert (equal? (car (qassoc_get graph_plan 'tree '())) 'join-node) true "DPHyp records a bushy logical join tree")
+	(assert (equal? (cadr (qassoc_get graph_plan 'tree '())) 'inner) true "optimizer trees distinguish inner joins semantically")
+	(define dense_join_aliases (map (produceN 14) (lambda (i) (concat "dense_" i))))
+	(define dense_join_nodes (mapIndex dense_join_aliases (lambda (i alias) (list alias (+ 100 i)))))
+	(define dense_join_predicates (merge (mapIndex dense_join_aliases (lambda (left_index left)
+		(map (filter (produceN 14) (lambda (right_index) (> right_index left_index))) (lambda (right_index)
+			(list (list left (nth dense_join_aliases right_index)) 0.1)))))))
+	(assert (equal? (join_order_choose_strategy 14 false true) 'linearized-dp) true
+		"dense medium regular graphs select IKKBZ plus linearized DP in SCM")
+	(assert (equal? (join_order_choose_strategy 14 true true) 'goo-dphyp) true
+		"dense hypergraphs select GOO with DPHyp subtree optimization in SCM")
+	(assert (equal? (join_order_choose_strategy 101 false true) 'goo-linearized-dp) true
+		"very large regular graphs select GOO with linearized-DP subtree optimization in SCM")
+	(define small_linearized (join_order_linearized_dp
+		(slice dense_join_nodes 0 4)
+		(slice dense_join_aliases 0 4)
+		(filter dense_join_predicates (lambda (predicate)
+			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))))
+	(assert (equal? (join_order_plan_size (car small_linearized)) 4) true
+		"SCM IKKBZ and linearized DP construct a complete bushy plan")
+	(define small_goo (join_order_goo
+		(slice dense_join_nodes 0 4)
+		(slice dense_join_aliases 0 4)
+		(filter dense_join_predicates (lambda (predicate)
+			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))))
+	(assert (equal? (join_order_plan_size small_goo) 4) true
+		"SCM GOO greedily constructs a complete bushy plan")
+	(define small_hyper_predicates (append
+		(filter dense_join_predicates (lambda (predicate)
+			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))
+		(list (list (nth dense_join_aliases 0) (nth dense_join_aliases 1) (nth dense_join_aliases 2)) 0.01)))
+	(define small_hyper_goo_dp (join_order_goo_dp
+		(slice dense_join_nodes 0 4)
+		(slice dense_join_aliases 0 4)
+		(join_order_prepare_predicates (slice dense_join_aliases 0 4) small_hyper_predicates)
+		true))
+	(assert (equal? (join_order_plan_size (car small_hyper_goo_dp)) 4) true
+		"SCM GOO-DP applies DPHyp to hypergraph subtrees")
 	(define graph_reordered_block (hybrid_reorder_query_block graph_block))
 	(define graph_reordered_tree (qassoc_get (qb_facts graph_reordered_block) 'join_plan nil))
 	(assert (equal?
@@ -242,6 +279,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(map (qb_sources (apply_join_optimizer_plan graph_reordered_block)) source_alias)
 		(join_optimizer_tree_aliases graph_reordered_tree)) true
 		"physical preparation derives scan traversal from the logical join tree")
+	(define semantic_outer_tree (join_optimizer_left_deep_tree outer_graph_sources))
+	(assert (equal? (cadr semantic_outer_tree) 'left-outer) true "logical join trees preserve left-outer barriers")
+	(define bushy_scan_tree (make_join_optimizer_node 'inner
+		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b"))
+		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d"))))
+	(assert (equal?
+		(map (list bushy_scan_tree
+			(physical_join_cursor_rest bushy_scan_tree)
+			(physical_join_cursor_rest (physical_join_cursor_rest bushy_scan_tree))
+			(physical_join_cursor_rest (physical_join_cursor_rest (physical_join_cursor_rest bushy_scan_tree))))
+			physical_join_cursor_first_alias)
+		'("a" "b" "c" "d")) true "physical lowering consumes bushy join trees structurally")
 	(define tree_group_stage (make_group_stage
 		"tree-group-stage" graph_reordered_block '() '() '() nil '() '() nil nil '()))
 	(assert (equal?
