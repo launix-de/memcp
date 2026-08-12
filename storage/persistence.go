@@ -41,8 +41,14 @@ A storage interface must implement the following operations:
 
 type PersistenceEngine interface {
 	ReadSchema() []byte
+	// WriteSchema must publish one complete schema generation atomically. A
+	// reader may observe either the previous or the new generation, never a
+	// missing, empty, or partial schema. Failures must panic.
 	WriteSchema(schema []byte)
 	ReadColumn(shard string, column string) io.ReadCloser
+	// WriteColumn returns a generation-private writer. Close must either publish
+	// the complete column object or report an error; partial objects must never
+	// become readable as a successfully completed rebuild generation.
 	WriteColumn(shard string, column string) io.WriteCloser
 	RemoveColumn(shard string, column string)
 	ReadBlob(hash string) io.ReadCloser
@@ -71,6 +77,10 @@ type PersistenceLogfile interface {
 }
 
 func finishColumnWrite(w io.WriteCloser, durable bool) {
+	// Rebuild publication order is column data first, schema reference second.
+	// SAFE columns must reach stable storage before schema.json can name their
+	// shard generation. Close errors are publication failures too; callers must
+	// retain the previously committed shard generation on every panic here.
 	if durable {
 		if syncer, ok := w.(interface{ Sync() error }); ok {
 			if err := syncer.Sync(); err != nil {

@@ -182,6 +182,8 @@ func (s *S3Storage) WriteSchema(schema []byte) {
 	s.ensureOpen()
 	key := s.key("schema.json")
 
+	// A completed single-object PUT atomically replaces the schema key; readers
+	// cannot observe the request body while it is still being uploaded.
 	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(key),

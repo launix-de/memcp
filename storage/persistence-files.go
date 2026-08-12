@@ -63,6 +63,11 @@ func (s *FileStorage) WriteSchema(jsonbytes []byte) {
 	s.WriteSchemaWithMode(jsonbytes, true)
 }
 
+// WriteSchemaWithMode publishes filesystem schema generations atomically. The
+// live path is never renamed away or truncated: a complete same-directory
+// temporary file replaces it with one atomic rename. Durable writes sync the
+// file before rename and the directory afterwards. The backup is a hard link
+// to the previously committed generation and cannot create a live-path gap.
 func (s *FileStorage) WriteSchemaWithMode(jsonbytes []byte, durable bool) {
 	if err := os.MkdirAll(s.path, 0750); err != nil {
 		panic(err)
@@ -90,6 +95,8 @@ func (s *FileStorage) WriteSchemaWithMode(jsonbytes []byte, durable bool) {
 	current := s.path + "schema.json"
 	backup := s.path + "schema.json.old"
 	if stat, err := os.Stat(current); err == nil && stat.Size() > 0 {
+		// Publish the rescue link under a temporary name first. Failure to make
+		// a backup must not disturb the still-live current generation.
 		backupTmp := s.path + ".schema.json.old.tmp"
 		_ = os.Remove(backupTmp)
 		if err := os.Link(current, backupTmp); err == nil {

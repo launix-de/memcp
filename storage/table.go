@@ -300,6 +300,9 @@ type table struct {
 	//     so many concurrent waiters (e.g. cron workers) do not stampede on unlock.
 	//   - Regular scans/writes only consult waitTableLock; they never participate in
 	//     the FIFO queue and are released together once the owner unlocks.
+	//   - Mutations wait for tableLockState before taking a shard lock and recheck
+	//     after taking it. They never wait for a table lock while holding a shard
+	//     lock; cache snapshots hold their table READ lock while entering shards.
 	// tableLockState is read from every shard goroutine on
 	// every scan; isolate them on their own cache line to prevent false sharing
 	// with Auto_increment (written on every INSERT).

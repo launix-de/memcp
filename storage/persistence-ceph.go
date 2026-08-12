@@ -156,7 +156,8 @@ func (s *CephStorage) ReadSchema() []byte {
 func (s *CephStorage) WriteSchema(schema []byte) {
 	s.ensureOpen()
 	obj := s.obj("schema.json")
-	// atomic overwrite
+	// RADOS full-object overwrite satisfies PersistenceEngine's atomic schema
+	// generation contract: readers see the old or complete new object.
 	if err := s.ioctx.WriteFull(obj, schema); err != nil {
 		panic(err)
 	}
