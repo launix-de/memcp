@@ -33,8 +33,152 @@ setup:
   - sql: "CREATE TABLE membership_assignment (ID INT PRIMARY KEY, result INT)"
   - sql: "INSERT INTO membership_item (ID, name) VALUES (1, 'item-1'), (2, 'item-2'), (3, 'item-3'), (4, 'item-4'), (5, 'item-5')"
   - sql: "INSERT INTO membership_assignment (ID, result) VALUES (101, 1), (102, 3), (103, 3)"
+  - sql: "DROP TABLE IF EXISTS membership_event"
+  - sql: "DROP TABLE IF EXISTS membership_narrow_key_a"
+  - sql: "DROP TABLE IF EXISTS membership_narrow_key_b"
+  - sql: "DROP TABLE IF EXISTS membership_broad_key"
+  - sql: |
+      CREATE TABLE membership_event (
+        ID INT PRIMARY KEY,
+        entity_kind VARCHAR(32),
+        entity_key VARCHAR(64),
+        event_time INT
+      )
+  - sql: "CREATE TABLE membership_narrow_key_a (ID INT PRIMARY KEY, enabled INT)"
+  - sql: "CREATE TABLE membership_narrow_key_b (ID INT PRIMARY KEY, enabled INT)"
+  - sql: "CREATE TABLE membership_broad_key (ID INT PRIMARY KEY, enabled INT)"
+  - scm: |
+      (begin
+        (define events (map (produceN 10000) (lambda (i)
+          (begin
+            (define id (+ i 1))
+            (if (>= id 9992)
+              (list id "root" "root:1" id)
+              (if (>= id 9983)
+                (list id "narrow_a" "narrow_a:1" id)
+                (if (>= id 9974)
+                  (list id "narrow_b" "narrow_b:1" id)
+                  (list id "noise" (concat "noise:" id) id))))))))
+        (insert (table "memcp-tests" "membership_event")
+          '("ID" "entity_kind" "entity_key" "event_time") events)
+        (insert (table "memcp-tests" "membership_narrow_key_a")
+          '("ID" "enabled") (list (list 1 1) (list 2 0)))
+        (insert (table "memcp-tests" "membership_narrow_key_b")
+          '("ID" "enabled") (list (list 1 1) (list 2 0)))
+        (insert (table "memcp-tests" "membership_broad_key")
+          '("ID" "enabled")
+          (map (produceN 8000) (lambda (i) (list (+ i 1) 1))))
+        true)
 
 test_cases:
+  - name: "Selective IN branches under OR use projected membership recsets"
+    noncritical: true
+    fail_comment: "multiple selective IN branches under OR still lower to per-driver group-cache probes"
+    sql: |
+      EXPLAIN
+      SELECT ID
+      FROM membership_event
+      WHERE (entity_kind = 'root' AND entity_key = 'root:1')
+        OR (entity_kind = 'narrow_a' AND entity_key IN (
+          SELECT CONCAT('narrow_a:', ID)
+          FROM membership_narrow_key_a
+          WHERE enabled = 1
+        ))
+        OR (entity_kind = 'narrow_b' AND entity_key IN (
+          SELECT CONCAT('narrow_b:', ID)
+          FROM membership_narrow_key_b
+          WHERE enabled = 1
+        ))
+      ORDER BY event_time DESC
+      LIMIT 20
+    expect:
+      result_contains:
+        - "recset_project_join"
+        - "$recset_contains"
+        - "scan_order"
+
+  - name: "Selective IN branches under OR preserve ordered results"
+    sql: |
+      SELECT ID
+      FROM membership_event
+      WHERE (entity_kind = 'root' AND entity_key = 'root:1')
+        OR (entity_kind = 'narrow_a' AND entity_key IN (
+          SELECT CONCAT('narrow_a:', ID)
+          FROM membership_narrow_key_a
+          WHERE enabled = 1
+        ))
+        OR (entity_kind = 'narrow_b' AND entity_key IN (
+          SELECT CONCAT('narrow_b:', ID)
+          FROM membership_narrow_key_b
+          WHERE enabled = 1
+        ))
+      ORDER BY event_time DESC, ID DESC
+      LIMIT 20
+    expect:
+      rows: 20
+      data:
+        - ID: 10000
+        - ID: 9999
+        - ID: 9998
+        - ID: 9997
+        - ID: 9996
+        - ID: 9995
+        - ID: 9994
+        - ID: 9993
+        - ID: 9992
+        - ID: 9991
+        - ID: 9990
+        - ID: 9989
+        - ID: 9988
+        - ID: 9987
+        - ID: 9986
+        - ID: 9985
+        - ID: 9984
+        - ID: 9983
+        - ID: 9982
+        - ID: 9981
+
+  - name: "Selective IN branches under OR meet the projected membership budget"
+    noncritical: true
+    fail_comment: "the projected RecSet plan measures in low milliseconds; per-driver group-cache probes exceed this budget"
+    max_time: 0.02
+    sql: |
+      SELECT ID
+      FROM membership_event
+      WHERE (entity_kind = 'root' AND entity_key = 'root:1')
+        OR (entity_kind = 'narrow_a' AND entity_key IN (
+          SELECT CONCAT('narrow_a:', ID)
+          FROM membership_narrow_key_a
+          WHERE enabled = 1
+        ))
+        OR (entity_kind = 'narrow_b' AND entity_key IN (
+          SELECT CONCAT('narrow_b:', ID)
+          FROM membership_narrow_key_b
+          WHERE enabled = 1
+        ))
+      ORDER BY event_time DESC, ID DESC
+      LIMIT 20
+    expect:
+      rows: 20
+
+  - name: "Broad IN branches retain driver probing"
+    sql: |
+      EXPLAIN
+      SELECT ID
+      FROM membership_event
+      WHERE entity_kind = 'noise' AND entity_key IN (
+        SELECT CONCAT('noise:', ID)
+        FROM membership_broad_key
+        WHERE enabled = 1
+      )
+      ORDER BY event_time DESC
+      LIMIT 5
+    expect:
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "recset_project_join"
+
   - name: "IN subquery - files with render results"
     sql: |
       SELECT ID, name FROM in_fop_files
@@ -1837,6 +1981,10 @@ test_cases:
           "tenant:canView": true
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS membership_broad_key"
+  - sql: "DROP TABLE IF EXISTS membership_narrow_key_b"
+  - sql: "DROP TABLE IF EXISTS membership_narrow_key_a"
+  - sql: "DROP TABLE IF EXISTS membership_event"
   - sql: "DROP TABLE IF EXISTS assignment_x"
   - sql: "DROP TABLE IF EXISTS item_x"
   - sql: "DROP TABLE IF EXISTS tenant_x"
