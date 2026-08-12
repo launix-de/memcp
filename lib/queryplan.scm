@@ -3910,7 +3910,7 @@ ON terms remain owned by the query-block until physical lowering. */
 						(merge_unique (list
 							(join_hypergraph_expr_aliases default_alias aliases predicate)
 							(list (source_alias src))))
-						(quote on)
+						(if (source_outer? src) (quote outer-on) (quote inner-on))
 						(source_alias src)
 						predicate))))))))))
 
@@ -4006,6 +4006,38 @@ ON terms remain owned by the query-block until physical lowering. */
 		(qassoc_get graph (quote edges) '())
 		(qassoc_get graph (quote hyperedges) '())))))
 
+(define join_hypergraph_all_predicates (lambda (graph)
+	(merge (list
+		(qassoc_get graph (quote locals) '())
+		(qassoc_get graph (quote edges) '())
+		(qassoc_get graph (quote hyperedges) '())
+		(qassoc_get graph (quote residuals) '())))))
+
+(define join_hypergraph_predicate_with_provenance (lambda (entry provenance_predicates)
+	(begin
+		(define predicate (qassoc_get entry (quote predicate) true))
+		(define aliases (qassoc_get entry (quote aliases) '()))
+		(define provenance (find provenance_predicates (lambda (candidate)
+			(and (equal? (qassoc_get candidate (quote predicate) true) predicate)
+				(equal? (qassoc_get candidate (quote aliases) '()) aliases))) nil))
+		(if (nil? provenance)
+			entry
+			(qassoc_set
+				(qassoc_set entry (quote origin) (qassoc_get provenance (quote origin) nil))
+				(quote owner) (qassoc_get provenance (quote owner) nil))))))
+
+/* Reordering consumes the normalized predicate cloud, while predicate origin
+and barrier ownership come from the pre-normalization query block. */
+(define join_hypergraph_with_provenance (lambda (graph provenance_graph)
+	(begin
+		(define provenance_predicates (join_hypergraph_all_predicates provenance_graph))
+		(reduce '(locals edges hyperedges residuals)
+			(lambda (enriched key)
+				(qassoc_set enriched key
+					(map (qassoc_get graph key '()) (lambda (entry)
+						(join_hypergraph_predicate_with_provenance entry provenance_predicates)))))
+			graph))))
+
 (define join_optimizer_local_predicates (lambda (graph alias)
 	(filter (qassoc_get graph (quote locals) '()) (lambda (entry)
 		(equal? (qassoc_get entry (quote aliases) '()) (list alias))))))
@@ -4088,7 +4120,10 @@ ON terms remain owned by the query-block until physical lowering. */
 			(list
 				(qassoc_get entry (quote aliases) '())
 				(join_optimizer_expr_selectivity sources default_alias
-					(qassoc_get entry (quote predicate) true)))))))
+					(qassoc_get entry (quote predicate) true))
+				(qassoc_get entry (quote origin) nil)
+				(qassoc_get entry (quote owner) nil)
+				(qassoc_get entry (quote predicate) true))))))
 
 (define join_optimizer_source_by_alias (lambda (sources alias)
 	(reduce sources (lambda (found src)
@@ -4126,6 +4161,12 @@ logical trees consumed before physical scan lowering. */
 
 (define join_order_pred_aliases (lambda (predicate) (car predicate)))
 (define join_order_pred_selectivity (lambda (predicate) (cadr predicate)))
+(define join_order_pred_origin (lambda (predicate)
+	(if (> (count predicate) 2) (nth predicate 2) nil)))
+(define join_order_pred_owner (lambda (predicate)
+	(if (> (count predicate) 3) (nth predicate 3) nil)))
+(define join_order_pred_expr (lambda (predicate)
+	(if (> (count predicate) 4) (nth predicate 4) true)))
 
 (define join_order_predicate_crosses? (lambda (predicate left right)
 	(begin
@@ -4186,9 +4227,11 @@ logical trees consumed before physical scan lowering. */
 (define join_order_join_plan (lambda (universe predicates left right)
 	(begin
 		(define cardinality (join_order_join_cardinality predicates left right))
+		(define combined (join_order_set_union universe
+			(join_order_plan_aliases left) (join_order_plan_aliases right)))
 		(list
-			(list (quote join-node) (quote inner) (join_order_plan_tree left) (join_order_plan_tree right))
-			(join_order_set_union universe (join_order_plan_aliases left) (join_order_plan_aliases right))
+			(list (quote join-node) (quote inner) (join_order_plan_tree left) (join_order_plan_tree right) '())
+			combined
 			cardinality
 			(+ (join_order_plan_cost left) (join_order_plan_cost right) cardinality)
 			(+ (join_order_plan_size left) (join_order_plan_size right))
@@ -4609,10 +4652,31 @@ logical trees consumed before physical scan lowering. */
 	(join_order_goo_dp_loop nodes aliases predicates hypergraph
 		(join_order_goo nodes aliases predicates) 10000 0)))
 
-(define join_order_result (lambda (strategy plan entries)
+(define join_order_tree_with_predicates (lambda (tree predicates)
+	(match tree
+		((symbol join-leaf) _alias) tree
+		((quote join-leaf) _alias) tree
+		((symbol join-node) kind left right _predicates)
+		(begin
+			(define left_aliases (join_optimizer_tree_aliases left))
+			(define right_aliases (join_optimizer_tree_aliases right))
+			(define combined (merge_unique (list left_aliases right_aliases)))
+			(list (quote join-node) kind
+				(join_order_tree_with_predicates left predicates)
+				(join_order_tree_with_predicates right predicates)
+				(filter predicates (lambda (predicate)
+					(and (not (nil? (join_order_pred_origin predicate)))
+						(join_order_predicate_crosses_in? predicate
+							left_aliases right_aliases combined))))))
+		((quote join-node) kind left right _predicates)
+		(join_order_tree_with_predicates
+			(list (quote join-node) kind left right '()) predicates)
+		_ (neumann_fail "join_reorder" "malformed optimized join tree"))))
+
+(define join_order_result (lambda (strategy plan entries predicates)
 	(list
 		(list (quote strategy) strategy)
-		(list (quote tree) (join_order_plan_tree plan))
+		(list (quote tree) (join_order_tree_with_predicates (join_order_plan_tree plan) predicates))
 		(list (quote order) (join_order_plan_aliases plan))
 		(list (quote cost) (join_order_plan_cost plan))
 		(list (quote cardinality) (join_order_plan_cardinality plan))
@@ -4628,16 +4692,40 @@ logical trees consumed before physical scan lowering. */
 				(quote linearized-dp)
 				(quote goo-linearized-dp))))))
 
+/* Every subset containing one vertex and any selection of its regular-edge
+neighbors is connected. A degree d therefore proves at least 2^d connected
+subsets without materializing them. */
+(define join_order_degree_exceeds_budget? (lambda (degree budget)
+	(if (<= degree 0)
+		false
+		(if (< budget 2)
+			true
+			(join_order_degree_exceeds_budget? (- degree 1) (/ budget 2))))))
+
+(define join_order_regular_neighbors (lambda (edges alias)
+	(map
+		(filter edges (lambda (edge)
+			(or (equal? (nth edge 0) alias) (equal? (nth edge 1) alias))))
+		(lambda (edge)
+			(if (equal? (nth edge 0) alias) (nth edge 1) (nth edge 0))))))
+
+(define join_order_degree_proves_budget_overflow? (lambda (aliases edges budget)
+	(reduce aliases (lambda (proven alias)
+		(or proven (join_order_degree_exceeds_budget?
+			(count (join_order_regular_neighbors edges alias)) budget))) false)))
+
 (define join_order_adaptive (lambda (nodes raw_predicates)
 	(begin
 		(define aliases (map nodes car))
 		(define hypergraph (join_order_hypergraph? raw_predicates))
 		(define predicates (join_order_prepare_predicates aliases raw_predicates))
-		(define regular_edge_count (count (join_order_regular_edges aliases predicates)))
+		(define regular_edges (join_order_regular_edges aliases predicates))
+		(define regular_edge_count (count regular_edges))
 		(define complete_regular_graph (equal? regular_edge_count
 			(/ (* (count aliases) (- (count aliases) 1)) 2)))
 		(define connected_count (if (and (>= (count aliases) 14) (<= (count aliases) 100))
-			(if complete_regular_graph
+			(if (or complete_regular_graph
+				(join_order_degree_proves_budget_overflow? aliases regular_edges 10000))
 				(list '() true)
 				(join_order_enumerate_connected aliases predicates 10000))
 			(list '() true)))
@@ -4651,13 +4739,28 @@ logical trees consumed before physical scan lowering. */
 				(join_order_goo_dp nodes aliases predicates hypergraph))))
 		(if (nil? (car result))
 			(neumann_fail "join_reorder" (concat "SCM join ordering could not construct a connected plan: " (string (list nodes predicates result))))
-			(join_order_result strategy (car result) (cadr result))))))
+			(join_order_result strategy (car result) (cadr result) predicates))))))
 
 (define make_join_optimizer_leaf (lambda (alias)
 	(list (quote join-leaf) alias)))
 
-(define make_join_optimizer_node (lambda (kind left right)
-	(list (quote join-node) kind left right)))
+(define make_join_optimizer_node (lambda (kind left right predicates)
+	(list (quote join-node) kind left right (coalesceNil predicates '()))))
+
+(define join_optimizer_source_predicates (lambda (aliases src)
+	(begin
+		(define predicate (coalesceNil (source_join_expr src) true))
+		(if (equal? predicate true)
+			'()
+			(map (split_and_terms predicate) (lambda (term)
+				(list
+					(merge_unique (list
+						(join_hypergraph_expr_aliases (car aliases) aliases term)
+						(list (source_alias src))))
+					1
+					(if (source_outer? src) (quote outer-on) (quote inner-on))
+					(source_alias src)
+					term)))))))
 
 (define join_optimizer_source_join_kind (lambda (src)
 	(if (source_outer? src) (quote left-outer) (quote inner))))
@@ -4667,89 +4770,78 @@ logical trees consumed before physical scan lowering. */
 		(cons src rest)
 		(reduce rest (lambda (tree next_src)
 			(make_join_optimizer_node (join_optimizer_source_join_kind next_src)
-				tree (make_join_optimizer_leaf (source_alias next_src))))
+				tree (make_join_optimizer_leaf (source_alias next_src))
+				(join_optimizer_source_predicates (source_aliases sources) next_src)))
 			(make_join_optimizer_leaf (source_alias src)))
 		_ nil)))
 
-(define join_optimizer_append_tree (lambda (tree src)
+(define join_optimizer_append_tree (lambda (tree all_aliases src)
 	(if (nil? tree)
 		(make_join_optimizer_leaf (source_alias src))
 		(make_join_optimizer_node (join_optimizer_source_join_kind src)
-			tree (make_join_optimizer_leaf (source_alias src))))))
+			tree (make_join_optimizer_leaf (source_alias src))
+			(join_optimizer_source_predicates all_aliases src)))))
 
 (define join_optimizer_append_sources_tree (lambda (tree sources)
-	(reduce sources (lambda (current src)
-		(join_optimizer_append_tree current src)) tree)))
+	(begin
+		(define all_aliases (merge (list (join_optimizer_tree_aliases tree) (source_aliases sources))))
+		(reduce sources (lambda (current src)
+			(join_optimizer_append_tree current all_aliases src)) tree))))
 
 (define join_optimizer_tree_aliases (lambda (tree)
 	(match tree
 		((symbol join-leaf) alias) (list alias)
 		((quote join-leaf) alias) (list alias)
-		((symbol join-node) _kind left right) (merge (list
+		((symbol join-node) _kind left right _predicates) (merge (list
 			(join_optimizer_tree_aliases left)
 			(join_optimizer_tree_aliases right)))
-		((quote join-node) _kind left right) (merge (list
+		((quote join-node) _kind left right _predicates) (merge (list
 			(join_optimizer_tree_aliases left)
 			(join_optimizer_tree_aliases right)))
 		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
 
-/* Physical lowering consumes the logical tree structurally. Specialized
-subplans can still supply an explicit source slice, but a complete query-block
-plan is never flattened into a separately owned join order. */
+(define join_optimizer_tree_first_alias (lambda (tree)
+	(match tree
+		((symbol join-leaf) alias) alias
+		((quote join-leaf) alias) alias
+		((symbol join-node) _kind left _right _predicates) (join_optimizer_tree_first_alias left)
+		((quote join-node) _kind left _right _predicates) (join_optimizer_tree_first_alias left)
+		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
+
+/* Physical lowering consumes the logical tree structurally. The query-block
+source list remains the semantic catalog and is used only for alias resolution. */
 (define physical_join_tree? (lambda (tree)
 	(match tree
 		((symbol join-leaf) _alias) true
 		((quote join-leaf) _alias) true
-		((symbol join-node) _kind _left _right) true
-		((quote join-node) _kind _left _right) true
+		((symbol join-node) _kind _left _right _predicates) true
+		((quote join-node) _kind _left _right _predicates) true
 		_ false)))
 
-(define physical_join_cursor_empty? (lambda (cursor)
-	(if (physical_join_tree? cursor) false (empty_list? cursor))))
-
-(define physical_join_cursor_first_alias (lambda (cursor)
-	(match cursor
-		((symbol join-leaf) alias) alias
-		((quote join-leaf) alias) alias
-		((symbol join-node) _kind left _right) (physical_join_cursor_first_alias left)
-		((quote join-node) _kind left _right) (physical_join_cursor_first_alias left)
-		_ (source_alias (car cursor)))))
-
-(define physical_join_cursor_rest (lambda (cursor)
-	(match cursor
-		((symbol join-leaf) _alias) nil
-		((quote join-leaf) _alias) nil
-		((symbol join-node) kind left right)
-		(begin
-			(define left_rest (physical_join_cursor_rest left))
-			(if (nil? left_rest) right (make_join_optimizer_node kind left_rest right)))
-		((quote join-node) kind left right)
-		(physical_join_cursor_rest (make_join_optimizer_node kind left right))
-		_ (cdr cursor))))
-
-(define physical_join_cursor_sources (lambda (catalog cursor)
-	(if (physical_join_tree? cursor)
-		(join_optimizer_sources_for_order catalog (join_optimizer_tree_aliases cursor))
-		cursor)))
-
-(define physical_join_cursor_source (lambda (catalog cursor)
+(define physical_join_leaf_source (lambda (catalog leaf)
 	(begin
-		(define src (join_optimizer_source_by_alias catalog (physical_join_cursor_first_alias cursor)))
+		(define alias (match leaf
+			((symbol join-leaf) value) value
+			((quote join-leaf) value) value
+			_ (neumann_fail "build_queryplan" "expected a logical join leaf")))
+		(define src (join_optimizer_source_by_alias catalog alias))
 		(if (nil? src)
-			(neumann_fail "build_queryplan" "join tree scan cursor references an unknown source")
+			(neumann_fail "build_queryplan" "join tree leaf references an unknown source")
 			src))))
 
-(define query_block_join_cursor (lambda (block sources)
+(define physical_join_plan_for_sources (lambda (sources)
+	(if (physical_join_tree? sources) sources (join_optimizer_left_deep_tree sources))))
+
+(define query_block_join_plan (lambda (block sources)
 	(begin
 		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
 		(if (and (not (nil? tree))
-			(equal? (join_optimizer_tree_aliases tree) (map sources source_alias)))
-			tree sources))))
+			(and (join_optimizer_alias_subset? (join_optimizer_tree_aliases tree) (map sources source_alias))
+				(join_optimizer_alias_subset? (map sources source_alias) (join_optimizer_tree_aliases tree))))
+			tree (physical_join_plan_for_sources sources)))))
 
-/* The logical tree is the sole owner of join order. The current scan emitters
-still accept a source traversal, so physical preparation derives that traversal
-here without changing the logical query-block source catalog or choosing a
-second order. */
+/* Physical preparation validates tree coverage but never rewrites the semantic
+source catalog. join_plan remains the single owner of physical join order. */
 (define apply_join_optimizer_plan (lambda (block)
 	(begin
 		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
@@ -4765,19 +4857,7 @@ second order. */
 						(join_optimizer_alias_subset? source_alias_list aliases)))
 					true
 					(neumann_fail "build_queryplan" "logical join plan does not cover the query-block sources exactly once"))
-				(make_query_block
-					(qb_schema block)
-					(join_optimizer_sources_for_order (qb_sources block) aliases)
-					(qb_fields block)
-					(qb_where block)
-					(qb_group block)
-					(qb_having block)
-					(qb_order block)
-					(qb_limit block)
-					(qb_offset block)
-					(qb_hidden block)
-					(qb_stages block)
-					(qb_facts block)))))))
+				block)))))
 
 (define apply_join_optimizer_plan_node (lambda (node)
 	(if (query_block? node)
@@ -4892,8 +4972,10 @@ second order. */
 			(map (qb_stages block) join_reorder_stage)
 			(qb_facts block))
 		(begin
+			(define provenance_graph (extract_join_hypergraph block))
 			(define normalized (join_optimizer_normalize_inner_joins block))
-			(define graph (extract_join_hypergraph normalized))
+			(define graph (join_hypergraph_with_provenance
+				(extract_join_hypergraph normalized) provenance_graph))
 			(define reordered (join_optimizer_reorder_sources normalized graph))
 			(query_block_with_reorder_facts
 				(make_query_block
@@ -9444,6 +9526,10 @@ ever-larger subtrees. */
 		(filter (coalesceNil sources '()) (lambda (src)
 			(not (constant_scalar_or_presence_stage_output_source? stages src))))))))
 
+(define facts_with_physical_join_order (lambda (facts ordered_sources)
+	(qassoc_set facts (quote join_plan)
+		(join_optimizer_left_deep_tree ordered_sources))))
+
 (define scalar_first_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
 		(begin
@@ -10401,10 +10487,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
 		(make_query_block
 			(qb_schema rewritten)
-			(physicalize_stage_output_sources stage_lookup
-				(if (late_projection_candidate_block? block)
-					(constant_scalar_stage_outputs_first stage_lookup (qb_sources rewritten))
-					(qb_sources rewritten)))
+			(physicalize_stage_output_sources stage_lookup (qb_sources rewritten))
 			(qb_fields rewritten)
 			(qb_where rewritten)
 			(qb_group rewritten)
@@ -10414,7 +10497,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_offset rewritten)
 			(qb_hidden rewritten)
 			'()
-			(query_block_facts_with_stage_catalog rewritten available_stages)))))
+			(if (late_projection_candidate_block? block)
+				(facts_with_physical_join_order
+					(query_block_facts_with_stage_catalog rewritten available_stages)
+					(constant_scalar_stage_outputs_first stage_lookup (qb_sources rewritten)))
+				(query_block_facts_with_stage_catalog rewritten available_stages))))))
 
 (define query_block_without_stages_after_prepare (lambda (block)
 	(query_block_without_stages_after_prepare_using (qb_stages block) block)))
@@ -10447,7 +10534,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
 		(make_query_block
 			(qb_schema block)
-			(physicalize_stage_output_sources stage_lookup (constant_scalar_stage_outputs_first stage_lookup (qb_sources block)))
+			(physicalize_stage_output_sources stage_lookup (qb_sources block))
 			(qb_fields block)
 			(qb_where block)
 			(qb_group block)
@@ -10457,7 +10544,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_offset block)
 			(qb_hidden block)
 			'()
-			(qb_facts block)))))
+			(facts_with_physical_join_order (qb_facts block)
+				(constant_scalar_stage_outputs_first stage_lookup (qb_sources block)))))))
 
 (define query_block_with_prepared_sources_using (lambda (stages block)
 	(begin
@@ -10473,10 +10561,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define rewritten (query_block_with_presence_probes_using stage_lookup membership_rewritten))
 		(make_query_block
 			(qb_schema rewritten)
-			(physicalize_stage_output_sources stage_lookup
-				(if (late_projection_candidate_block? block)
-					(constant_scalar_stage_outputs_first stage_lookup (qb_sources rewritten))
-					(qb_sources rewritten)))
+			(physicalize_stage_output_sources stage_lookup (qb_sources rewritten))
 			(qb_fields rewritten)
 			(qb_where rewritten)
 			(qb_group rewritten)
@@ -10486,7 +10571,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_offset rewritten)
 			(qb_hidden rewritten)
 			(stages_without_probe_sources (qb_stages rewritten) presence_probe_sources)
-			(query_block_facts_with_stage_catalog rewritten available_stages)))))
+			(if (late_projection_candidate_block? block)
+				(facts_with_physical_join_order
+					(query_block_facts_with_stage_catalog rewritten available_stages)
+					(constant_scalar_stage_outputs_first stage_lookup (qb_sources rewritten)))
+				(query_block_facts_with_stage_catalog rewritten available_stages))))))
 
 (define query_block_with_prepared_sources (lambda (block)
 	(query_block_with_prepared_sources_using (qb_stages block) block)))
@@ -12171,10 +12260,10 @@ source remain residual so they observe the null-extended row. */
 (define recset_contains_callback_symbol (symbol "__recset_contains"))
 
 (define scan_callback_symbol_for_alias (lambda (alias col)
-	(if (equal? col "$recset_contains")
-		recset_contains_callback_symbol
-		(if (and (string? col) (and (> (strlen col) 0) (equal? (substr col 0 1) "$")))
-			(symbol col)
+	(if (or (equal? col "$break") (equal? col "$tx"))
+		(symbol col)
+		(if (equal? col "$recset_contains")
+			recset_contains_callback_symbol
 			(symbol (concat alias "." col))))))
 
 (define recset_contains_call_expr (lambda (recset_expr)
@@ -12192,123 +12281,6 @@ source remain residual so they observe the null-extended row. */
 		_ (if (special_scan_col_expr? expr)
 			recset_contains_callback_symbol
 			expr))))
-
-(define join_ordered_filtered_stream_plan (lambda (schema sources cursor default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
-	(begin
-		(define src (physical_join_cursor_source sources cursor))
-		(define remaining_sources (physical_join_cursor_rest cursor))
-		(define remaining_source_catalog (physical_join_cursor_sources sources remaining_sources))
-		(define alias (source_alias src))
-		(define condition_parts (physical_partition_condition default_alias sources remaining_source_catalog final_condition))
-		(define local_condition (nth condition_parts 0))
-		(define remaining_condition (nth condition_parts 1))
-		(define condition (combine_where (source_join_expr src) local_condition))
-		(define membership (driver_membership_for_source src condition))
-		(define membership_table_expr (if (nil? membership)
-			nil
-			(recset_project_join_expr_for_membership src membership)))
-		(define effective_membership (if (nil? membership_table_expr) nil membership))
-		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
-		(define membership_var (symbol "__membership_recset"))
-		(define membership_filter_expr (if (nil? membership_table_expr)
-			true
-			(recset_contains_call_expr membership_var)))
-		(define filter_condition (combine_where membership_filter_expr effective_condition))
-		(define filtercols (merge_unique (list
-			(if (nil? membership_table_expr) '() (list "$recset_contains"))
-			(join_filter_cols_for_alias sources default_alias alias effective_condition))))
-		(define raw_mapcols (join_cols_for_alias sources default_alias alias needed_exprs))
-		(define mapcols (merge_unique (list raw_mapcols (list "$break"))))
-		(define table_expr (source_table_expr src))
-		(define offset_expr (coalesceNil offset_value 0))
-		(define limit_expr (coalesceNil limit_value -1))
-		(define single_pass (equal? offset_expr 0))
-		(define has_limit_expr (list (quote not) (list (quote equal?) limit_expr -1)))
-		(define end_expr (list (quote +) offset_expr limit_expr))
-		(define match_needed_exprs (merge (list
-			(list remaining_condition)
-			(source_join_exprs sources))))
-		(define match_rows_expr (if single_pass
-			nil
-			(build_join_scan_rows_with_mapper
-				schema
-				sources
-				remaining_sources
-				default_alias
-				match_needed_exprs
-				remaining_condition
-				true
-				'()
-				0
-				-1
-				true
-				stages)))
-		(define rest_rows_expr (build_join_scan_rows_with_mapper
-			schema
-			sources
-			remaining_sources
-			default_alias
-			needed_exprs
-			remaining_condition
-			(lower_join_result_row_assoc sources default_alias fields order_items)
-			'()
-			0
-			-1
-			true
-			stages))
-		(define joined_source_expr (if single_pass rest_rows_expr match_rows_expr))
-		(define joined_rows_expr (if single_pass (quote joined_matches) rest_rows_expr))
-		(define filter_expr (list (quote lambda)
-			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote optimize) (lower_column_expr_for_join sources default_alias filter_condition))))
-		(define map_expr (list (quote lambda)
-			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote if)
-				(list (quote and) has_limit_expr (list (quote >=) (quote __seen) end_expr))
-				(list (symbol "$break"))
-				(list (quote !begin)
-					(list (quote define) (quote joined_matches) joined_source_expr)
-					(list (quote define) (quote joined_count) (list (quote count) (quote joined_matches)))
-					(list (quote if)
-						(list (quote equal?) (quote joined_count) 0)
-						(list (quote list))
-						(list (quote !begin)
-							(list (quote define) (quote joined_rows) joined_rows_expr)
-							(list (quote define) (quote start_idx) (list (quote max) 0 (list (quote -) offset_expr (quote __seen))))
-							(list (quote define) (quote stop_idx) (list (quote if)
-								has_limit_expr
-								(list (quote min) (quote joined_count) (list (quote -) end_expr (quote __seen)))
-								(quote joined_count)))
-							(list (quote define) (quote emit_rows) (list (quote if)
-								(list (quote <) (quote start_idx) (quote stop_idx))
-								(list (quote slice) (quote joined_rows) (quote start_idx) (quote stop_idx))
-								(list (quote list))))
-							(list (quote set) (quote __seen) (list (quote +) (quote __seen) (quote joined_count)))
-							(emit_join_ordered_rows_expr fields)))))))
-		(define scan_expr (list (quote scan_order)
-			'(session "__memcp_tx")
-			table_expr
-			(cons (quote list) filtercols)
-			filter_expr
-			(cons (quote list) (scan_order_sort_columns_for_alias src order_items))
-			(cons (quote list) (order_dirs order_items))
-			0
-			0
-			-1
-			(cons (quote list) mapcols)
-			map_expr
-			(list (quote lambda) (list (quote acc) (quote _rows)) (quote acc))
-			(list (quote list))
-			(source_outer? src)))
-		(define prepared_scan_expr (if (nil? membership_table_expr)
-			scan_expr
-			(list
-				(list (quote lambda) (list membership_var) scan_expr)
-				membership_table_expr)))
-		(list
-			(list (quote lambda) (list (quote __seen))
-				prepared_scan_expr)
-			0))))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -12335,10 +12307,8 @@ source remain residual so they observe the null-extended row. */
 				(map tail (lambda (item) (replace_lowered_row_number_symbol alias col item))))
 			_ expr))))
 
-(define build_join_row_number_scan_rows (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr stage_filter membership_var membership_filter column_recipe)
+(define build_join_row_number_scan_rows (lambda (schema all_sources src default_alias needed_exprs remaining_condition row_expr stage_filter membership_var membership_filter column_recipe stages continuation outer_scan)
 	(begin
-		(define src (physical_join_cursor_source all_sources sources))
-		(define remaining_sources (physical_join_cursor_rest sources))
 		(define alias (source_alias src))
 		(define stage (nth stage_filter 0))
 		(define filter (nth stage_filter 1))
@@ -12365,7 +12335,7 @@ source remain residual so they observe the null-extended row. */
 					(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias alias filter_col)))
 					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias filter_condition))))
 				(define continuation_expr (list (quote lambda) (list (quote __row_number))
-					(build_join_scan_rows_with_mapper_using_recipe schema all_sources remaining_sources default_alias needed_exprs final_condition rewritten_row_expr '() 0 -1 true column_recipe stages)))
+					(continuation remaining_condition rewritten_row_expr)))
 				(define map_expr (list (quote lambda)
 					(map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))
 					(list (quote list)
@@ -12402,119 +12372,201 @@ source remain residual so they observe the null-extended row. */
 						map_expr
 						reduce_expr
 						(list (quote list) (list (quote list)) nil 0)
-						(source_outer? src))))
+						(or outer_scan (source_outer? src)))))
 			_ (neumann_fail "build_queryplan" "malformed ROW_NUMBER stage")))))
 
-(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages collect_rows)
-	(if (physical_join_cursor_empty? sources)
-		(if (equal? (coalesceNil final_condition true) true)
-			(if collect_rows (runtime_cons_list_expr (list row_expr)) row_expr)
-			(list (quote if)
-				(list (quote optimize) (lower_column_expr_for_join all_sources default_alias final_condition))
-				(if collect_rows (runtime_cons_list_expr (list row_expr)) row_expr)
-				(if collect_rows (list (quote list)) nil)))
-		(begin
-			(define src (physical_join_cursor_source all_sources sources))
-			(define remaining_sources (physical_join_cursor_rest sources))
-			(define remaining_source_catalog (physical_join_cursor_sources all_sources remaining_sources))
-			(if (not (source_is_base_table? src))
-				(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
-				true)
-			(define alias (source_alias src))
-			(define condition_parts (physical_partition_condition default_alias all_sources remaining_source_catalog final_condition))
-			(define local_condition (nth condition_parts 0))
-			(define remaining_condition (nth condition_parts 1))
-			(define condition (combine_where (source_join_expr src) local_condition))
-			(define membership (driver_membership_for_source src condition))
-			(define delay_limit_after_join (ordered_join_limit_requires_complete_rows?
-				(physical_join_cursor_sources all_sources sources)
-				default_alias final_condition offset_value limit_value))
-			(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
-				nil
-				(recset_project_join_expr_for_membership src membership)))
-			(define membership_driver (and (not (nil? membership_table_expr)) (physical_join_cursor_empty? remaining_sources)))
-			(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
-			(define effective_membership (if (nil? membership_table_expr) nil membership))
-			(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
-			(define membership_var (symbol "__membership_recset"))
-			(define membership_filter_expr (if membership_filter
-				(recset_contains_call_expr membership_var)
-				true))
-			(define filter_condition (combine_where membership_filter_expr effective_condition))
-			(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
-			(define filtercols (merge_unique (list
-				(if membership_filter (list "$recset_contains") '())
-				(join_filter_cols_for_alias all_sources default_alias alias effective_condition))))
-			(define recipe_mapcols (join_recipe_mapcols column_recipe alias))
-			(define mapcols (if (nil? column_recipe)
-				(join_cols_for_alias all_sources default_alias alias needed_exprs)
-				recipe_mapcols))
-			(define table_expr (if membership_driver membership_table_expr (source_table_expr_using stages src)))
-			(define lowered_filter_condition (mark_outer_join_symbols
-				all_sources
-				alias
-				(lower_column_expr_for_join all_sources default_alias filter_condition)))
-			(define filter_expr (list (quote lambda)
-				(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-				(list (quote optimize) lowered_filter_condition)))
-			(define map_expr (list (quote lambda)
-				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(build_join_scan_with_mapper_using_recipe schema all_sources remaining_sources default_alias needed_exprs remaining_condition row_expr '() 0 -1 allow_membership_recset column_recipe stages collect_rows)))
-			(define reduce_expr (if collect_rows
+(define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value row_wrapper allow_membership_recset column_recipe stages collect_rows continuation outer_scan)
+	(begin
+		(define src (physical_join_leaf_source all_sources leaf))
+		(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
+			true)
+		(define alias (source_alias src))
+		(define condition_parts (physical_partition_condition default_alias all_sources future_sources final_condition))
+		(define local_condition (nth condition_parts 0))
+		(define remaining_condition (nth condition_parts 1))
+		(define condition (combine_where (source_join_expr src) local_condition))
+		(define membership (driver_membership_for_source src condition))
+		(define delay_limit_after_join (ordered_join_limit_requires_complete_rows?
+			(join_optimizer_sources_for_order all_sources (cons alias future_aliases))
+			default_alias final_condition offset_value limit_value))
+		(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
+			nil
+			(recset_project_join_expr_for_membership src membership)))
+		(define membership_driver (and (not (nil? membership_table_expr)) (empty_list? future_aliases)))
+		(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
+		(define effective_membership (if (nil? membership_table_expr) nil membership))
+		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define membership_var (symbol "__membership_recset"))
+		(define membership_filter_expr (if membership_filter
+			(recset_contains_call_expr membership_var)
+			true))
+		(define filter_condition (combine_where membership_filter_expr effective_condition))
+		(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
+		(define filtercols (merge_unique (list
+			(if membership_filter (list "$recset_contains") '())
+			(join_filter_cols_for_alias all_sources default_alias alias effective_condition))))
+		(define recipe_mapcols (join_recipe_mapcols column_recipe alias))
+		(define raw_mapcols (if (nil? column_recipe)
+			(join_cols_for_alias all_sources default_alias alias needed_exprs)
+			recipe_mapcols))
+		(define mapcols (if (nil? row_wrapper)
+			raw_mapcols
+			(merge_unique (list raw_mapcols (list "$break")))))
+		(define table_expr (if membership_driver membership_table_expr (source_table_expr_using stages src)))
+		(define lowered_filter_condition (mark_outer_join_symbols
+			all_sources
+			alias
+			(lower_column_expr_for_join all_sources default_alias filter_condition)))
+		(define filter_expr (list (quote lambda)
+			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+			(list (quote optimize) lowered_filter_condition)))
+		(define continuation_expr (continuation remaining_condition row_expr))
+		(define map_expr (list (quote lambda)
+			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+			(if (nil? row_wrapper) continuation_expr (row_wrapper continuation_expr))))
+		(define reduce_expr (if (not (nil? row_wrapper))
+			(list (quote lambda) (list (quote acc) (quote _rows)) (quote acc))
+			(if collect_rows
 				(list (quote lambda) (list (quote acc) (quote subrows))
 					(list (quote if)
 						(list (quote nil?) (quote subrows))
 						(quote acc)
 						(list (quote merge) (quote acc) (quote subrows))))
-				nil))
-			(if (and (not collect_rows) (not (nil? row_number_stage_filter)))
-				(neumann_fail "build_queryplan" "streaming join scan cannot consume a ROW_NUMBER stage")
-				true)
-			(define scan_expr
-				(if (not (nil? row_number_stage_filter))
-					(build_join_row_number_scan_rows schema all_sources sources default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe)
-					(if (and (empty_list? order_items) (not (query_limit_active? offset_value limit_value)))
-						(list (quote scan)
-							'(session "__memcp_tx")
-							table_expr
-							(cons (quote list) filtercols)
-							filter_expr
-							(cons (quote list) mapcols)
-							map_expr
-							reduce_expr
-							(if collect_rows (list (quote list)) nil)
-							nil
-							(source_outer? src))
-						(list (quote scan_order)
-							'(session "__memcp_tx")
-							table_expr
-							(cons (quote list) filtercols)
-							filter_expr
-							(cons (quote list) (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
-							(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
-							0
-							(coalesceNil offset_value 0)
-							(coalesceNil limit_value -1)
-							(cons (quote list) mapcols)
-							map_expr
-							reduce_expr
-							(if collect_rows (list (quote list)) nil)
-							(source_outer? src)))))
-			(if membership_filter
-				(list
-					(list (quote lambda) (list membership_var) scan_expr)
-					membership_table_expr)
-				scan_expr)))))
+				nil)))
+		(if (and (not collect_rows) (not (nil? row_number_stage_filter)))
+			(neumann_fail "build_queryplan" "streaming join scan cannot consume a ROW_NUMBER stage")
+			true)
+		(define scan_expr
+			(if (not (nil? row_number_stage_filter))
+				(build_join_row_number_scan_rows schema all_sources src default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe stages continuation outer_scan)
+				(if (and (nil? row_wrapper) (and (empty_list? order_items) (not (query_limit_active? offset_value limit_value))))
+					(list (quote scan)
+						'(session "__memcp_tx")
+						table_expr
+						(cons (quote list) filtercols)
+						filter_expr
+						(cons (quote list) mapcols)
+						map_expr
+						reduce_expr
+						(if collect_rows (list (quote list)) nil)
+						nil
+						(or outer_scan (source_outer? src)))
+					(list (quote scan_order)
+						'(session "__memcp_tx")
+						table_expr
+						(cons (quote list) filtercols)
+						filter_expr
+						(cons (quote list) (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
+						(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
+						0
+						(coalesceNil offset_value 0)
+						(coalesceNil limit_value -1)
+						(cons (quote list) mapcols)
+						map_expr
+						reduce_expr
+						(if collect_rows (list (quote list)) nil)
+						(or outer_scan (source_outer? src))))))
+		(if membership_filter
+			(list
+				(list (quote lambda) (list membership_var) scan_expr)
+				membership_table_expr)
+			scan_expr))))
+
+/* Consume the logical join tree recursively. The right subtree is lowered as
+the continuation of the left subtree, so join-node boundaries and outer-join
+ownership remain available until the physical scans are emitted. */
+(define build_join_tree_scan_using_recipe (lambda (schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value row_wrapper allow_membership_recset column_recipe stages collect_rows continuation outer_scan)
+	(match tree
+		((symbol join-leaf) _alias)
+		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value row_wrapper allow_membership_recset column_recipe stages collect_rows continuation outer_scan)
+		((quote join-leaf) alias)
+		(build_join_tree_scan_using_recipe schema all_sources (make_join_optimizer_leaf alias) future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value row_wrapper allow_membership_recset column_recipe stages collect_rows continuation outer_scan)
+		((symbol join-node) kind left right _predicates)
+		(begin
+			(define right_aliases (join_optimizer_tree_aliases right))
+			(build_join_tree_scan_using_recipe
+				schema all_sources left (merge_unique (list right_aliases future_aliases))
+				default_alias needed_exprs final_condition row_expr
+				order_items offset_value limit_value row_wrapper allow_membership_recset column_recipe stages collect_rows
+				(lambda (left_condition left_row_expr)
+					(build_join_tree_scan_using_recipe
+						schema all_sources right future_aliases
+						default_alias needed_exprs left_condition left_row_expr
+						'() 0 -1 nil allow_membership_recset column_recipe stages collect_rows continuation
+						(equal? kind (quote left-outer))))
+				outer_scan))
+		((quote join-node) kind left right predicates)
+		(build_join_tree_scan_using_recipe schema all_sources
+			(make_join_optimizer_node kind left right predicates) future_aliases
+			default_alias needed_exprs final_condition row_expr order_items offset_value limit_value row_wrapper
+			allow_membership_recset column_recipe stages collect_rows continuation outer_scan)
+		_ (neumann_fail "build_queryplan" "malformed logical join tree"))))
+
+(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value row_wrapper allow_membership_recset column_recipe stages collect_rows)
+	(begin
+		(define tree (physical_join_plan_for_sources sources))
+		(define terminal (lambda (remaining_condition final_row_expr)
+			(if (equal? (coalesceNil remaining_condition true) true)
+				(if collect_rows (runtime_cons_list_expr (list final_row_expr)) final_row_expr)
+				(list (quote if)
+					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias remaining_condition))
+					(if collect_rows (runtime_cons_list_expr (list final_row_expr)) final_row_expr)
+					(if collect_rows (list (quote list)) nil)))))
+		(if (nil? tree)
+			(terminal final_condition row_expr)
+			(build_join_tree_scan_using_recipe
+				schema all_sources tree '() default_alias needed_exprs final_condition row_expr
+				order_items offset_value limit_value row_wrapper allow_membership_recset column_recipe stages collect_rows
+				terminal false)))))
 
 (define build_join_scan_rows_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
-		order_items offset_value limit_value allow_membership_recset column_recipe stages true)))
+		order_items offset_value limit_value nil allow_membership_recset column_recipe stages true)))
+
+(define build_join_scan_rows_with_stream_limit (lambda (schema all_sources sources default_alias needed_exprs final_condition fields order_items offset_value limit_value allow_membership_recset stages)
+	(begin
+		(define offset_expr (coalesceNil offset_value 0))
+		(define limit_expr (coalesceNil limit_value -1))
+		(define has_limit_expr (list (quote not) (list (quote equal?) limit_expr -1)))
+		(define end_expr (list (quote +) offset_expr limit_expr))
+		(define row_wrapper (lambda (joined_source_expr)
+			(list (quote if)
+				(list (quote and) has_limit_expr (list (quote >=) (quote __seen) end_expr))
+				(list (symbol "$break"))
+				(list (quote !begin)
+					(list (quote define) (quote joined_matches) joined_source_expr)
+					(list (quote define) (quote joined_count) (list (quote count) (quote joined_matches)))
+					(list (quote if)
+						(list (quote equal?) (quote joined_count) 0)
+						(list (quote list))
+						(list (quote !begin)
+							(list (quote define) (quote joined_rows) (quote joined_matches))
+							(list (quote define) (quote start_idx) (list (quote max) 0 (list (quote -) offset_expr (quote __seen))))
+							(list (quote define) (quote stop_idx) (list (quote if)
+								has_limit_expr
+								(list (quote min) (quote joined_count) (list (quote -) end_expr (quote __seen)))
+								(quote joined_count)))
+							(list (quote define) (quote emit_rows) (list (quote if)
+								(list (quote <) (quote start_idx) (quote stop_idx))
+								(list (quote slice) (quote joined_rows) (quote start_idx) (quote stop_idx))
+								(list (quote list))))
+							(list (quote set) (quote __seen) (list (quote +) (quote __seen) (quote joined_count)))
+							(emit_join_ordered_rows_expr fields)))))))
+		(list
+			(list (quote lambda) (list (quote __seen))
+				(build_join_scan_with_mapper_using_recipe
+					schema all_sources sources default_alias needed_exprs final_condition
+					(lower_join_result_row_assoc all_sources default_alias fields order_items)
+					order_items 0 -1 row_wrapper allow_membership_recset nil stages true))
+			0))))
 
 (define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
-		order_items offset_value limit_value allow_membership_recset column_recipe stages false)))
+		order_items offset_value limit_value nil allow_membership_recset column_recipe stages false)))
 
 (define build_join_scan_rows_with_mapper (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset stages)
 	(build_join_scan_rows_with_mapper_using_recipe
@@ -12879,16 +12931,16 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(nth prejoin 0)
 			(lower_single_source_query_block (nth prejoin 1))))))
 
-(define build_join_scan_rows (lambda (schema sources cursor default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
+(define build_join_scan_rows (lambda (schema sources plan default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(begin
 		(define row_expr (list (quote resultrow)
 			(cons (quote list) (lower_join_result_fields sources default_alias fields))))
 		(if (empty_list? (filter (lowering_catalog_stages stages) row_number_stage?))
 			(build_join_scan_pipeline_using_recipe
-				schema sources cursor default_alias needed_exprs final_condition row_expr
+				schema sources plan default_alias needed_exprs final_condition row_expr
 				order_items offset_value limit_value true nil stages)
 			(build_join_scan_rows_with_mapper
-				schema sources cursor default_alias needed_exprs final_condition row_expr
+				schema sources plan default_alias needed_exprs final_condition row_expr
 				order_items offset_value limit_value true stages)))))
 
 (define lower_query_block_as_dataset_rows (lambda (block fields)
@@ -12902,17 +12954,13 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define sources (qb_sources block))
 		(define first_alias (source_alias (car sources)))
 		(define where_expr (coalesceNil (qb_where block) true))
-		(define push_first_where (and (or (empty_list? (qb_stages block)) (query_block_has_only_window_stages? block))
-			(and (not (equal? where_expr true))
-				(and (not (expr_contains_orc_column? where_expr))
-					(empty_list? (external_column_refs_for_alias first_alias where_expr))))))
-		(define scan_sources (if push_first_where
-			(cons (source_with_join_expr (car sources) (combine_where (source_join_expr (car sources)) where_expr)) (cdr sources))
-			sources))
-		(define scan_cursor (query_block_join_cursor block scan_sources))
-		(define final_condition (if push_first_where true where_expr))
+		(define scan_sources sources)
+		(define scan_plan (query_block_join_plan block scan_sources))
+		(define driver_source (join_optimizer_source_by_alias scan_sources
+			(join_optimizer_tree_first_alias scan_plan)))
+		(define final_condition where_expr)
 		(define order_items (coalesceNil (qb_order block) '()))
-		(define direct_order (order_items_belong_to_source? (car scan_sources) order_items))
+		(define direct_order (order_items_belong_to_source? driver_source order_items))
 		(define direct_order_safe (and direct_order
 			(not (ordered_join_limit_requires_complete_rows?
 				scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
@@ -12925,7 +12973,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(build_join_scan_rows_with_mapper
 				(qb_schema block)
 				scan_sources
-				scan_cursor
+				scan_plan
 				first_alias
 				needed_exprs
 				final_condition
@@ -12939,7 +12987,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(build_join_scan_rows_with_mapper
 					(qb_schema block)
 					scan_sources
-					scan_cursor
+					scan_plan
 					first_alias
 					needed_exprs
 					final_condition
@@ -13034,21 +13082,14 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(define sources (qb_sources block))
 				(define first_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
 				(define where_expr (coalesceNil (qb_where block) true))
-				(define first_source_alias (source_alias (car sources)))
-				(define push_first_where (and (equal? first_alias first_source_alias)
-					(and (not (equal? where_expr true))
-						(and (not (expr_contains_orc_column? where_expr))
-							(empty_list? (external_column_refs_for_alias first_alias where_expr))))))
-				(define raw_scan_sources (if push_first_where
-					(cons (source_with_join_expr (car sources) (combine_where (source_join_expr (car sources)) where_expr)) (cdr sources))
-					sources))
-				(define final_condition (if push_first_where true where_expr))
+				(define final_condition where_expr)
 				(define stage_catalog (query_block_stage_catalog block))
-				(define scan_sources raw_scan_sources)
-				(define scan_cursor (query_block_join_cursor block scan_sources))
+				(define scan_sources sources)
+				(define scan_plan (query_block_join_plan block scan_sources))
+				(define driver_alias (join_optimizer_tree_first_alias scan_plan))
+				(define driver_source (join_optimizer_source_by_alias scan_sources driver_alias))
 				(define order_items (coalesceNil (qb_order block) '()))
-				(define direct_order (and (equal? first_alias (source_alias (car scan_sources)))
-					(order_items_belong_to_source? (car scan_sources) order_items)))
+				(define direct_order (order_items_belong_to_source? driver_source order_items))
 				(define direct_order_safe (and direct_order
 					(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
 				(define membership_candidate_sort_plan
@@ -13062,10 +13103,44 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 					(prelimit_sources_for scan_sources first_alias final_condition order_items))
 				(define late_projection_safe (late_projection_sources_preserve_rows? scan_sources prelimit_sources))
 				(define late_projection_sort_plan (and
+					(nil? (qassoc_get (qb_facts block) (quote join_plan) nil))
 					(late_projection_candidate_block? block)
 					(and (not (empty_list? order_items))
 						(and late_projection_safe
 							(< (count prelimit_sources) (count scan_sources))))))
+				(define lower_sorted_join (lambda ()
+					(join_sorted_rows_plan
+						(build_join_scan_rows_with_mapper
+							(qb_schema block)
+							scan_sources
+							scan_plan
+							first_alias
+							needed_exprs
+							final_condition
+							(lower_join_result_row_assoc sources first_alias fields order_items)
+							'()
+							0
+							-1
+							(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))
+							stage_catalog)
+						fields
+						order_items
+						(qb_offset block)
+						(qb_limit block))))
+				(define lower_stream_limit_join (lambda ()
+					(build_join_scan_rows_with_stream_limit
+						(qb_schema block)
+						scan_sources
+						scan_plan
+						first_alias
+						needed_exprs
+						final_condition
+						fields
+						order_items
+						(qb_offset block)
+						(qb_limit block)
+						true
+						stage_catalog)))
 				(define lowered_plan (if late_projection_sort_plan
 					(begin
 						(define project_needed_exprs (merge (list
@@ -13092,7 +13167,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 							(build_join_scan_rows_with_mapper_using_recipe
 								(qb_schema block)
 								scan_sources
-								(physical_join_cursor_rest scan_cursor)
+								(physical_join_plan_for_sources (cdr scan_sources))
 								first_alias
 								project_needed_exprs
 								true
@@ -13126,40 +13201,12 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 							(qb_offset block)
 							(qb_limit block)))
 					(if direct_order_safe
-						(build_join_scan_rows (qb_schema block) scan_sources scan_cursor first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
+						(build_join_scan_rows (qb_schema block) scan_sources scan_plan first_alias needed_exprs final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
 						(if direct_order
-							(join_ordered_filtered_stream_plan
-								(qb_schema block)
-								scan_sources
-								scan_cursor
-								first_alias
-								needed_exprs
-								final_condition
-								fields
-								order_items
-								(qb_offset block)
-								(qb_limit block)
-								stage_catalog)
+							(lower_stream_limit_join)
 							(if (physical_prejoin_supported? block)
 								(lower_query_block_through_prejoin block)
-								(join_sorted_rows_plan
-									(build_join_scan_rows_with_mapper
-										(qb_schema block)
-										scan_sources
-										scan_cursor
-										first_alias
-										needed_exprs
-										final_condition
-										(lower_join_result_row_assoc sources first_alias fields order_items)
-										'()
-										0
-										-1
-										(not (ordered_join_limit_requires_complete_rows? scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))
-										stage_catalog)
-									fields
-									order_items
-									(qb_offset block)
-									(qb_limit block)))))))
+								(lower_sorted_join))))))
 				lowered_plan
 )))))
 
@@ -13198,7 +13245,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(neumann_fail "build_queryplan" "multi-source DML with ORDER/LIMIT is not implemented yet")
 			true)
 		(define sources (qb_sources block))
-		(define scan_cursor (query_block_join_cursor block sources))
+		(define scan_plan (query_block_join_plan block sources))
 		(define first_alias (source_alias (car sources)))
 		(define target_src (dml_target_source sources target_schema target_tbl))
 		(if (nil? target_src)
@@ -13226,7 +13273,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(build_join_scan_rows_with_mapper
 				(qb_schema block)
 				sources
-				scan_cursor
+				scan_plan
 				first_alias
 				needed_exprs
 				cond
