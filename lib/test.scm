@@ -196,6 +196,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"c"
 			(list (quote and) "d" (list (quote and) "e" "f")))
 		true)) '("a" "b" "c" "d" "e" "f")) true "combine_where_terms flattens nested AND terms")
+	(define test_exists_union_outer_source
+		(list "outer_asset" "memcp-tests" "trace_asset" false nil))
+	(define test_exists_union_probe
+		(list (quote get_column) "outer_asset" false "id" false))
+	(define test_exists_union_branch (lambda (alias relation)
+		(begin
+			(define src (list alias "memcp-tests" relation false nil))
+			(make_query_block "memcp-tests" (list src)
+				(list "id" (list (quote get_column) alias false "asset_id" false))
+				true '() nil '() nil nil '() '() '()))))
+	(define test_exists_union_probe_plan (lower_exists_union_probe_expr
+		(list test_exists_union_outer_source)
+		"outer_asset"
+		(list
+			(test_exists_union_branch "ref_a" "trace_ref_a")
+			(test_exists_union_branch "ref_b" "trace_ref_b")
+			(test_exists_union_branch "ref_c" "trace_ref_c"))
+		test_exists_union_probe
+		'()))
+	(assert (equal? (car test_exists_union_probe_plan) 'or) true
+		"EXISTS UNION selective lowering emits one n-ary OR root")
+	(assert (equal? (count test_exists_union_probe_plan) 4) true
+		"EXISTS UNION selective lowering does not build a binary OR chain")
+	(assert (reduce (cdr test_exists_union_probe_plan) (lambda (valid branch)
+		(and valid (equal? (car branch) 'scan_exists))) true) true
+		"EXISTS UNION selective lowering emits one bounded probe per branch")
 	(define graph_col (lambda (alias column)
 		(list (quote get_column) alias false column false)))
 	(define graph_sources (list
