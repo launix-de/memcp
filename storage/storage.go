@@ -2965,41 +2965,9 @@ func Init(en scm.Env) {
 			}
 
 			name := scm.String(a[1])
-			if scm.ToBool(a[2]) {
-				db.schemalock.RLock()
-				found := false
-				for _, t := range db.tables.GetAll() {
-					t.mu.Lock()
-					for _, tr := range t.Triggers {
-						if tr.Name == name {
-							found = true
-							break
-						}
-					}
-					t.mu.Unlock()
-					if found {
-						break
-					}
-				}
-				db.schemalock.RUnlock()
-				if !found {
-					return scm.NewBool(false)
-				}
+			if db.dropTrigger(name) {
+				return scm.NewBool(true)
 			}
-
-			db.schemalock.Lock()
-			tables := db.tables.GetAll()
-			for _, t := range tables {
-				t.ddlMu.Lock()
-				if t.RemoveTrigger(name) {
-					db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
-					t.ddlMu.Unlock()
-					return scm.NewBool(true)
-				}
-				t.ddlMu.Unlock()
-			}
-			db.schemalock.Unlock()
-
 			if scm.ToBool(a[2]) {
 				return scm.NewBool(false)
 			}
