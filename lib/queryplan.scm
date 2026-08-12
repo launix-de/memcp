@@ -13946,26 +13946,12 @@ build_queryplan contract. */
 			(ir_context_of ir)
 			(ir_return ir)))))
 
-(define physical_relational_collector_symbol? (lambda (expr)
-	(or (equal? expr (symbol "rows"))
-		(or (equal? expr (symbol "sorted"))
-			(or (equal? expr (symbol "joined_matches"))
-				(equal? expr (symbol "limited_rows")))))))
-
 (define physical_relational_list_collector? (lambda (expr)
 	(match expr
-		((symbol sort) input _compare) (or
-			(physical_relational_collector_symbol? input)
-			(physical_relational_list_collector? input))
-		((quote sort) input _compare) (or
-			(physical_relational_collector_symbol? input)
-			(physical_relational_list_collector? input))
-		((symbol slice) input _start _end) (or
-			(physical_relational_collector_symbol? input)
-			(physical_relational_list_collector? input))
-		((quote slice) input _start _end) (or
-			(physical_relational_collector_symbol? input)
-			(physical_relational_list_collector? input))
+		((symbol sort) _input _compare) true
+		((quote sort) _input _compare) true
+		((symbol slice) _input _start _end) true
+		((quote slice) _input _start _end) true
 		((symbol merge) ((symbol map) _input _mapper)) true
 		((quote merge) ((quote map) _input _mapper)) true
 		(cons head tail) (or

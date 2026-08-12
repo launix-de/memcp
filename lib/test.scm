@@ -180,6 +180,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (ir_context_get (ir_context_of simple_ir) 'compile-budget-ms nil) 1000) true "untangle_query carries compile budget in context")
 	(assert (equal? (join_reorder simple_ir) simple_ir) true "join_reorder is an IR-only phase")
 	(assert (equal? (logical_op (build_queryplan_term simple_select_ast)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
+	(assert (physical_relational_list_collector?
+		(list 'sort 'arbitrarily_renamed_rows (list 'lambda '(a b) true)))
+		true "physical plan guard rejects structurally sorted Scheme relations")
+	(assert (physical_relational_list_collector?
+		(list 'slice 'another_renamed_relation 0 10))
+		true "physical plan guard rejects structurally sliced Scheme relations")
+	(assert (physical_relational_list_collector?
+		(list 'merge (list 'map 'renamed_input (list 'lambda '(row) 'row))))
+		true "physical plan guard rejects structurally flattened mapped relations")
 	(assert (equal? (split_and_terms (combine_where_terms
 		(list
 			(list (quote and) "a" "b")
