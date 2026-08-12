@@ -85,11 +85,13 @@ func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 //   - CompressFiltered only prewarms rows selected by its filter because the
 //     caller expects to consume those rows soon. The filter is a preparation
 //     hint, not part of the column definition or its value semantics.
-//   - GetValue must compute a missing or invalidated row just in time, cache the
-//     result, and return it. A row omitted by prewarming is neither NULL nor an
-//     error and must never require rebuilding the whole column.
-//   - Invalidation discards only affected cached values where possible; later
-//     reads repair those values through the same pointwise on-demand path.
+//   - GetValue repairs an ordinary missing or invalidated value pointwise and
+//     caches it. A row omitted by prewarming is neither NULL nor an error.
+//   - An ordered reduction column cannot be repaired pointwise. Its GetValue
+//     path recomputes the ordered dependency range required for the requested
+//     value, which may include a suffix or the whole column.
+//   - Invalidation marks cached values unusable; later reads repair the affected
+//     dependency closure without changing the column's logical domain.
 //
 // Keep this distinction intact when changing planner setup, DDL, rebuild, or
 // scan code: selective preparation may change work scheduling, never which
@@ -433,10 +435,11 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 	return sz
 }
 
-// GetValue returns the logical value at idx. A cache miss or invalidated value
-// is the normal on-demand path: compute only this row from the current input
-// values, cache it, and return it. Do not turn a miss into eager whole-column
-// materialization and do not treat an unprepared row as absent.
+// GetValue returns the logical value at idx. For an ordinary proxy, a cache miss
+// or invalidated value computes only this row from the current inputs and caches
+// it. For an ordered reduction column, the branch below repairs the required
+// ordered dependency range instead. Neither kind may treat an unprepared row as
+// absent or expose a transient invalid-cache sentinel as its logical value.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
@@ -588,11 +591,12 @@ func (p *StorageComputeProxy) Compress() {
 	p.compressed = true
 }
 
-// CompressFiltered prewarms only rows matching filter because the caller has
-// signalled that those values will likely be read immediately. The filter does
-// not narrow the logical column and is not a read-time predicate: unmatched
-// rows remain valid lazy values and GetValue materializes each one pointwise on
-// first read. Invalidated rows follow the same pointwise on-demand repair path.
+// CompressFiltered prewarms an ordinary computed column only for rows matching
+// filter because the caller has signalled that those values will likely be read
+// immediately. The filter does not narrow the logical column and is not a
+// read-time predicate: unmatched rows remain valid lazy values and GetValue
+// materializes each one pointwise on first read. Ordered reduction columns have
+// dependency-aware preparation and repair paths instead.
 func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
 	tx := CurrentTx()
 	if variant := p.currentVariant(tx, true); variant != nil {
