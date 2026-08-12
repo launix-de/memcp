@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
 # MySQL Compatibility v1 — Basics
 
 metadata:
@@ -42,6 +44,29 @@ test_cases:
       rows: 1
       data:
         - eq: true
+
+  - name: "Implicit numeric cast accepts a leading numeric prefix"
+    sql: |
+      SELECT
+        15 = '15,16' AS integer_prefix,
+        15.5 = '15.5 trailing' AS decimal_prefix,
+        150 = '1.5e2 trailing' AS exponent_prefix,
+        9007199254740993 = '9007199254740993 trailing' AS large_integer_prefix
+    expect:
+      rows: 1
+      data:
+        - integer_prefix: true
+          decimal_prefix: true
+          exponent_prefix: true
+          large_integer_prefix: true
+
+  - name: "Numeric-prefix coercion applies to indexed integer columns"
+    sql: |
+      SELECT `id` FROM `compat_users` WHERE `id` = '1,2'
+    expect:
+      rows: 1
+      data:
+        - id: 1
 
   - name: "Implicit boolean truthiness"
     sql: |

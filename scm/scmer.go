@@ -565,6 +565,80 @@ func (s Scmer) Bool() bool {
 	}
 }
 
+// numericPrefix returns the leading numeric token used by SQL coercions. MySQL
+// accepts trailing non-numeric bytes but only accepts an exponent when it has
+// at least one digit.
+func numericPrefix(value string) string {
+	value = strings.TrimLeft(value, " \t\n\r\f\v")
+	if value == "" {
+		return ""
+	}
+
+	i := 0
+	if value[i] == '+' || value[i] == '-' {
+		i++
+	}
+	digits := 0
+	for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+		i++
+		digits++
+	}
+	if i < len(value) && value[i] == '.' {
+		i++
+		for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			i++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return ""
+	}
+	if i < len(value) && (value[i] == 'e' || value[i] == 'E') {
+		exponent := i
+		i++
+		if i < len(value) && (value[i] == '+' || value[i] == '-') {
+			i++
+		}
+		exponentDigits := i
+		for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			i++
+		}
+		if i == exponentDigits {
+			i = exponent
+		}
+	}
+
+	return value[:i]
+}
+
+func numericPrefixFloat(value string) float64 {
+	n, err := strconv.ParseFloat(numericPrefix(value), 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func numericPrefixInt(value string) int64 {
+	token := numericPrefix(value)
+	if strings.ContainsAny(token, ".eE") {
+		return int64(numericPrefixFloat(token))
+	}
+	n, err := strconv.ParseInt(token, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func numericStringEqualsInt(value string, integer int64) bool {
+	token := numericPrefix(value)
+	if strings.ContainsAny(token, ".eE") {
+		return numericPrefixFloat(token) == float64(integer)
+	}
+	return numericPrefixInt(token) == integer
+}
+
 func (s Scmer) Int() int64 {
 	switch s.GetTag() {
 	case tagNil:
@@ -573,12 +647,8 @@ func (s Scmer) Int() int64 {
 		return int64(s.aux)
 	case tagFloat:
 		return int64(math.Float64frombits(s.aux))
-	case tagString, tagSymbol:
-		v, err := strconv.ParseInt(s.String(), 10, 64)
-		if err != nil {
-			return 0
-		}
-		return v
+	case tagString, tagSymbol, tagCString, tagBString:
+		return numericPrefixInt(s.String())
 	case tagDate:
 		return TagDateDecodeUnix(auxVal(s.aux))
 	case tagBool:
@@ -602,12 +672,8 @@ func (s Scmer) Float() float64 {
 		return math.Float64frombits(s.aux)
 	case tagInt:
 		return float64(int64(s.aux))
-	case tagString, tagSymbol:
-		v, err := strconv.ParseFloat(s.String(), 64)
-		if err != nil {
-			return 0.0
-		}
-		return v
+	case tagString, tagSymbol, tagCString, tagBString:
+		return numericPrefixFloat(s.String())
 	case tagDate:
 		return float64(TagDateDecodeUnix(auxVal(s.aux)))
 	case tagBool:
