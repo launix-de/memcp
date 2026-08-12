@@ -68,9 +68,25 @@ func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 	}))
 }
 
-// StorageComputeProxy wraps a main storage with lazy-evaluation support.
-// Values are computed on demand via a computor lambda and cached in a delta map
-// until Compress() materializes them into a compressed main storage.
+// StorageComputeProxy is a complete logical column with lazy physical values.
+// Creating the proxy installs the column definition first; it does not require
+// every row value to be materialized before the column can be read.
+//
+// Materialization contract:
+//   - Compress eagerly prepares every row when all values are expected to be
+//     consumed.
+//   - CompressFiltered only prewarms rows selected by its filter because the
+//     caller expects to consume those rows soon. The filter is a preparation
+//     hint, not part of the column definition or its value semantics.
+//   - GetValue must compute a missing or invalidated row just in time, cache the
+//     result, and return it. A row omitted by prewarming is neither NULL nor an
+//     error and must never require rebuilding the whole column.
+//   - Invalidation discards only affected cached values where possible; later
+//     reads repair those values pointwise through the same JIT path.
+//
+// Keep this distinction intact when changing planner setup, DDL, rebuild, or
+// scan code: selective preparation may change work scheduling, never which
+// values the StorageComputeProxy represents.
 type StorageComputeProxy struct {
 	main       ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
 	delta      map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
@@ -369,7 +385,10 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 	return sz
 }
 
-// GetValue returns the value at idx, computing on demand if necessary.
+// GetValue returns the logical value at idx. A cache miss or invalidated value
+// is the normal JIT path: compute only this row from the current input values,
+// cache it, and return it. Do not turn a miss into eager whole-column
+// materialization and do not treat an unprepared row as absent.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
@@ -521,8 +540,11 @@ func (p *StorageComputeProxy) Compress() {
 	p.compressed = true
 }
 
-// CompressFiltered eagerly computes only rows matching the filter predicate.
-// Unmatched rows stay lazy and are computed on demand via GetValue.
+// CompressFiltered prewarms only rows matching filter because the caller has
+// signalled that those values will likely be read immediately. The filter does
+// not narrow the logical column and is not a read-time predicate: unmatched
+// rows remain valid lazy values and GetValue materializes each one pointwise on
+// first read. Invalidated rows follow the same JIT repair path.
 func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
 	tx := CurrentTx()
 	if variant := p.currentVariant(tx, true); variant != nil {
