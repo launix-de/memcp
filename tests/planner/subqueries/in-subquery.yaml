@@ -1513,7 +1513,7 @@ test_cases:
         - ".grp:"
         - "touch_keytable"
 
-  - name: "IN UNION with nested reference EXISTS keeps bounded projections in scans"
+  - name: "IN UNION with nested reference EXISTS prepares query carriers"
     fail_comment: "bounded reference-style EXISTS projections must stay behind the ordered membership scan"
     setup:
       - sql: "DROP TABLE IF EXISTS in_ref_doc"
