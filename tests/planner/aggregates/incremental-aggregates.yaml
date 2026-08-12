@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
 # Incremental aggregate tests.
 # Validates that GROUP BY aggregate caches produce correct results after
 # INSERT, UPDATE, and DELETE on the source table.
@@ -723,6 +725,85 @@ test_cases:
   # Cleanup filter test rows
   - name: "Cleanup filter test rows"
     sql: "DELETE FROM ia_data WHERE id IN (16, 17)"
+
+  # ============================================================
+  # Section 8b: conditional SUM lowered to filtered counts
+  # ============================================================
+  - name: "Conditional zero-one SUM preserves FALSE and UNKNOWN"
+    sql: |
+      SELECT grp,
+             SUM(CASE WHEN nullable_val = 10 THEN 0 ELSE 1 END) AS rejected
+      FROM ia_data
+      GROUP BY grp
+      ORDER BY grp
+    expect:
+      rows: 3
+      data:
+        - { grp: "A", rejected: 1 }
+        - { grp: "B", rejected: 2 }
+        - { grp: "C", rejected: 1 }
+
+  - name: "Conditional zero-one SUM preserves zero and empty identities"
+    sql: |
+      SELECT
+        SUM(CASE WHEN val > 0 THEN 0 ELSE 1 END) AS no_rejections,
+        (SELECT SUM(CASE WHEN val > 0 THEN 0 ELSE 1 END)
+         FROM ia_data
+         WHERE FALSE) AS empty_sum
+      FROM ia_data
+    expect:
+      rows: 1
+      data:
+        - no_rejections: 0
+          empty_sum: null
+
+  - name: "Conditional one-zero SUM counts only TRUE"
+    sql: |
+      SELECT grp,
+             SUM(CASE WHEN nullable_val = 10 THEN 1 ELSE 0 END) AS accepted
+      FROM ia_data
+      GROUP BY grp
+      ORDER BY grp
+    expect:
+      rows: 3
+      data:
+        - { grp: "A", accepted: 1 }
+        - { grp: "B", accepted: 0 }
+        - { grp: "C", accepted: 0 }
+
+  - name: "EXPLAIN conditional zero-one SUM uses a filtered count"
+    sql: |
+      EXPLAIN SELECT grp,
+        SUM(CASE WHEN nullable_val = 10 THEN 0 ELSE 1 END) AS rejected
+      FROM ia_data
+      GROUP BY grp
+    expect:
+      rows: 1
+      result_contains:
+        - "sql_conditional_count_result"
+        - "touch_keytable"
+      result_not_contains:
+        - "sql_sum_reduce"
+
+  - name: "Conditional zero-one SUM updates after predicate change"
+    sql: "UPDATE ia_data SET nullable_val = NULL WHERE id = 1"
+
+  - name: "Conditional zero-one SUM reuses updated aggregate cache"
+    sql: |
+      SELECT grp,
+             SUM(CASE WHEN nullable_val = 10 THEN 0 ELSE 1 END) AS rejected
+      FROM ia_data
+      GROUP BY grp
+      ORDER BY grp
+    expect:
+      rows: 3
+      data:
+        - { grp: "A", rejected: 2 }
+        - { grp: "B", rejected: 2 }
+        - { grp: "C", rejected: 1 }
+
+  - name: "Restore conditional aggregate source value"
+    sql: "UPDATE ia_data SET nullable_val = 10 WHERE id = 1"
 
   # ============================================================
   # Section 9: Rapid successive DML (burst invalidation)

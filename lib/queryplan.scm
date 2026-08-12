@@ -346,6 +346,53 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(make_query_block schema sources fields where group having order limit offset '() '() '())
 		_ query)))
 
+/* SUM(CASE WHEN predicate THEN 0 ELSE 1 END) is a conditional count, but
+SQL SUM still returns NULL for an empty input. Keep that distinction explicit
+in the logical expression and lower the per-row marker to a primitive IF only
+when aggregate input is emitted. In particular, FALSE and UNKNOWN both select
+the ELSE arm; rewriting this as (not predicate) would be NULL-incorrect. */
+(define sql_conditional_count_result (lambda (row_count true_count count_when_true)
+	(if (equal? row_count 0)
+		nil
+		(if count_when_true true_count (- row_count true_count)))))
+
+(define filtered_count (lambda (predicate)
+	(if predicate 1 0)))
+
+(define conditional_count_aggregate_rewrite (lambda (agg_expr agg_reduce agg_neutral)
+	(if (and (equal? agg_reduce (quote sql_sum_reduce)) (nil? agg_neutral))
+		(match agg_expr
+			((symbol if) predicate 0 1) (list predicate false)
+			((quote if) predicate 0 1) (list predicate false)
+			((symbol if) predicate 1 0) (list predicate true)
+			((quote if) predicate 1 0) (list predicate true)
+			_ nil)
+		nil)))
+
+(define normalize_conditional_count_aggregates (lambda (expr)
+	(match expr
+		((symbol aggregate) agg_expr agg_reduce agg_neutral)
+		(begin
+			(define parts (conditional_count_aggregate_rewrite agg_expr agg_reduce agg_neutral))
+			(if (nil? parts)
+				(list (quote aggregate)
+					(normalize_conditional_count_aggregates agg_expr)
+					agg_reduce
+					agg_neutral)
+				(list (quote sql_conditional_count_result)
+					(list (quote aggregate) 1 (quote +) 0)
+					(list (quote aggregate)
+						(list (quote filtered_count)
+							(normalize_conditional_count_aggregates (car parts)))
+						(quote +)
+						0)
+					(cadr parts))))
+		((quote aggregate) agg_expr agg_reduce agg_neutral)
+		(normalize_conditional_count_aggregates
+			(list (quote aggregate) agg_expr agg_reduce agg_neutral))
+		(cons head tail) (cons head (map tail normalize_conditional_count_aggregates))
+		_ expr)))
+
 (define query_block_no_from? (lambda (node)
 	(and (query_block? node)
 		(empty_list? (qb_sources node))
@@ -8189,7 +8236,16 @@ dependency preparation does not emit free outer-row symbols. */
 (define aggregate_map_value_expr (lambda (ag expr)
 	(if (count_distinct_descriptor? ag)
 		(list (quote cons) expr (list (quote list)))
-		expr)))
+		(match expr
+			((symbol filtered_count) predicate) (list (quote if) predicate 1 0)
+			((quote filtered_count) predicate) (list (quote if) predicate 1 0)
+			_ expr))))
+
+(define filtered_count_parts (lambda (expr)
+	(match expr
+		((symbol filtered_count) predicate) (list predicate)
+		((quote filtered_count) predicate) (list predicate)
+		_ nil)))
 
 (define extract_aggregates (lambda (expr)
 	(match expr
@@ -9091,10 +9147,14 @@ ever-larger subtrees. */
 		'(agg_expr agg_reduce agg_neutral) (begin
 			(define src (list alias schema tbl false nil))
 			(define agg_col (aggregate_col_name ag))
+			(define filtered_parts (filtered_count_parts agg_expr))
+			(define aggregate_condition (if (nil? filtered_parts)
+				condition
+				(list (quote and) condition (car filtered_parts))))
 			(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-			(define condition_cols (extract_columns_for_alias src condition))
+			(define condition_cols (extract_columns_for_alias src aggregate_condition))
 			(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols)))
-			(define aggcols (extract_columns_for_alias src agg_expr))
+			(define aggcols (if (nil? filtered_parts) (extract_columns_for_alias src agg_expr) '()))
 			(list (quote createcolumn)
 				(list (quote table) schema grouptbl)
 				agg_col
@@ -9112,12 +9172,14 @@ ever-larger subtrees. */
 							(map filtercols (lambda (col) (symbol (concat alias "." col))))
 							(list (quote optimize)
 								(cons (quote and) (cons
-									(lower_column_expr_for_alias src condition)
+									(lower_column_expr_for_alias src aggregate_condition)
 									(group_key_equality_terms alias key_names keys)))))
 						(cons (quote list) aggcols)
 						(list (quote lambda)
 							(map aggcols (lambda (col) (symbol (concat alias "." col))))
-							(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr)))
+							(if (nil? filtered_parts)
+								(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr))
+								1))
 						agg_reduce
 						agg_neutral
 						(aggregate_shard_combine ag)
@@ -13988,7 +14050,11 @@ build_queryplan contract. */
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan
 		(join_reorder
-			(untangle_query_term (sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast)) nil)))))
+			(untangle_query_term
+				(sanitize_temporal_outputs
+					(sanitize_decimal_aggregate_outputs
+						(normalize_conditional_count_aggregates ast)))
+				nil)))))
 
 (define neumann_compile_ir_pipeline (lambda (ir)
 	(build_queryplan
