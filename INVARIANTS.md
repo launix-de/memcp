@@ -98,12 +98,16 @@ costs and semantics.
 Join ordering is a logical optimization. Once `join_reorder` has selected the
 driver and produced a join tree for a join cloud, physical lowering must
 preserve the leaf traversal encoded by that tree when it emits nested scans.
-The query-block source list remains the semantic source catalog; it must not be
-reordered into a second, flat representation of the chosen plan. Physical
-preparation may derive the scan traversal required by existing operators from
-the tree, but it must not choose another driver, reorder that traversal, or
-otherwise make a second join-order decision. A recursive lowerer that consumes
-join nodes directly must also preserve their tree boundaries.
+The query-block source list is an immutable semantic alias-to-source catalog
+after logical planning. Physical preparation must never reorder, replace, or
+rewrite that list into a second representation of the chosen plan.
+
+Physical lowering must consume the join tree structurally. A bushy tree must
+not be flattened into a leaf sequence for scan lowering, predicate placement,
+or null handling. Every physical step must retain the current join node's left
+and right subtrees, join kind, bound-alias set, and null-extension boundary.
+Helpers may derive local facts from a subtree, but they must not discard its
+boundaries or make another driver/order decision.
 
 Physical lowering still chooses the operator and scan source for each tree node.
 Depending on the cost and semantics, a source may become a
@@ -184,6 +188,36 @@ Every conjunct must appear exactly once at a semantically valid scan or remain
 as an explicit residual predicate. Predicate placement must never weaken or
 drop a join condition, turn an equijoin into a cross product, or evaluate a
 nullable-side WHERE term as though it were an ON term.
+
+Predicate lowering operates on individually tracked conjuncts. Every conjunct
+retains one semantic origin: either the query block's `WHERE` clause or the
+specific join barrier whose `ON` clause owns it. Normalized inner-join `ON`
+conjuncts may join the common predicate cloud; outer-join `ON` conjuncts remain
+owned by their null-extension barrier. Each conjunct is assigned exactly once
+to a semantically valid scan or join node, or remains exactly once as an
+explicit residual predicate. Lowering must be able to account for every input
+conjunct after placement.
+
+Predicate readiness is defined relative to a join-tree node, not a flat source
+suffix. An inner predicate may run as soon as all referenced bindings exist. An
+outer-join `ON` predicate filters the nullable input before null extension. A
+`WHERE` predicate observing that nullable input runs only after the owning join
+node has produced either a matching row or its synthetic NULL row.
+
+## Planner Cache And Group Cache
+
+The query-plan cache and group caches are separate concepts with different
+ownership and lifetimes.
+
+- The query-plan cache is Scheme-scoped planner state. It does not create a new
+  storage-engine catalog or persistent schema objects.
+- A group cache is a reusable storage-engine relation. It remains registered in
+  the persistent schema catalog so later queries can reuse it until cache
+  eviction removes it according to the existing lifecycle contract.
+
+Do not introduce a storage-level query cache, move group caches into transient
+planner state, or merge the two lifecycles merely to simplify physical
+lowering or lock management.
 
 ## Functional Plans, Optimizer-Owned Mutation
 
