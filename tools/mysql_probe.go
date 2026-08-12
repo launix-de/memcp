@@ -19,12 +19,16 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	mysqlstack "github.com/launix-de/go-mysqlstack/driver"
+	"github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
 )
 
 type probe struct {
@@ -37,8 +41,14 @@ type probe struct {
 }
 
 type statement struct {
-	SQL    string      `json:"sql"`
-	Expect expectation `json:"expect"`
+	SQL        string      `json:"sql"`
+	Parameters []parameter `json:"parameters"`
+	Expect     expectation `json:"expect"`
+}
+
+type parameter struct {
+	Base64    string `json:"base64"`
+	MySQLType string `json:"mysql_type"`
 }
 
 type expectation struct {
@@ -74,15 +84,36 @@ func main() {
 	}
 	defer conn.Close()
 	for i, stmt := range cfg.Statements {
-		if err := runStatement(conn, stmt); err != nil {
+		if err := runStatement(conn, cfg, stmt); err != nil {
 			fail("statement %d failed: %v\nsql: %s", i+1, err, stmt.SQL)
 		}
 	}
 	fmt.Println("mysql probe passed")
 }
 
-func runStatement(conn *sql.Conn, stmt statement) error {
-	rows, err := conn.QueryContext(context.Background(), stmt.SQL)
+func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
+	args := make([]any, len(stmt.Parameters))
+	typed := false
+	for i, param := range stmt.Parameters {
+		value, err := base64.StdEncoding.DecodeString(param.Base64)
+		if err != nil {
+			return fmt.Errorf("decode parameter %d: %w", i+1, err)
+		}
+		args[i] = value
+		typed = typed || param.MySQLType != ""
+	}
+	if typed {
+		for i, param := range stmt.Parameters {
+			if param.MySQLType == "" {
+				return fmt.Errorf("parameter %d requires mysql_type when any parameter is typed", i+1)
+			}
+		}
+		if stmt.Expect.Error || stmt.Expect.Rows != nil || len(stmt.Expect.Data) != 0 {
+			return fmt.Errorf("typed parameters currently support statements without result expectations")
+		}
+		return runTypedStatement(cfg, stmt, args)
+	}
+	rows, err := conn.QueryContext(context.Background(), stmt.SQL, args...)
 	if stmt.Expect.Error {
 		if err == nil {
 			rows.Close()
@@ -123,6 +154,33 @@ func runStatement(conn *sql.Conn, stmt statement) error {
 		}
 	}
 	return nil
+}
+
+func runTypedStatement(cfg probe, stmt statement, args []any) error {
+	client, err := mysqlstack.NewConn(cfg.Username, cfg.Password,
+		net.JoinHostPort(cfg.Host, fmt.Sprint(cfg.Port)), cfg.Database, "utf8mb4")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	prepared, err := client.ComStatementPrepare(stmt.SQL)
+	if err != nil {
+		return err
+	}
+	defer prepared.ComStatementClose()
+	values := make([]sqltypes.Value, len(args))
+	for i, arg := range args {
+		data := arg.([]byte)
+		switch strings.ToLower(stmt.Parameters[i].MySQLType) {
+		case "blob":
+			values[i] = sqltypes.MakeTrusted(sqltypes.Blob, data)
+		case "text":
+			values[i] = sqltypes.MakeTrusted(sqltypes.Text, data)
+		default:
+			return fmt.Errorf("unsupported mysql_type %q", stmt.Parameters[i].MySQLType)
+		}
+	}
+	return prepared.ComStatementExecute(values)
 }
 
 func collectRows(rows *sql.Rows) ([]map[string]any, error) {
