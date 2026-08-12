@@ -88,6 +88,30 @@ possible later, for example:
 - `preserve_empty_domain`
 - order/window/group facts
 
+Positive membership in a WHERE truth context may use the semantic
+`membership_truth` expression primitive. It references a logical group-stage
+output and is not a physical RecSet or scan. Canonicalization may flatten
+`IN (… UNION …)` to a n-ary OR of these primitives because SQL `UNKNOWN` and
+`FALSE` both reject the row in that context. This rewrite must not cross `NOT`,
+`CASE`, projection, or another value-producing context; those retain the full
+match/RHS-NULL representation required for three-valued logic.
+
+For physical optimization, the following positive-truth equivalence may be
+used in either direction:
+
+```
+RecSet(IN(UNION branches))
+  == union(RecSet(branch) ...)
+  == RecSet(OR(EXISTS branches))
+```
+
+This is an optimization axiom, not permission to special-case the original SQL
+shape in physical lowering. New syntactic corner cases should normalize to the
+existing membership primitive; the common lowerer then chooses indexed
+existence probes, projected RecSets, driver order, and braking from statistics.
+The equivalence does not apply unchanged to `NOT IN` or value-producing SQL-3VL
+contexts.
+
 `build_queryplan` chooses the physical implementation after decorrelation and
 reordering. The same logical helper may lower to a group cache, direct scan,
 `scan_exists`, RecSet, ORC, `scan_order_multi`, or temp table depending on

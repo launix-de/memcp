@@ -1023,6 +1023,22 @@ instead of capturing whichever session populated the cache first. */
 		(list (quote get_column) stage_alias false (aggregate_col_name ag) false)
 		0)))
 
+/* Canonical positive-WHERE membership primitive. Its stage-output source
+provides the lookup relation; UNKNOWN and FALSE are intentionally equivalent in
+this truth context. Reordering may later replace this semantic primitive with a
+physical membership probe. */
+(define in_membership_truth_expr (lambda (probe stage_alias match_ag)
+	(list (quote membership_truth) probe stage_alias (aggregate_col_name match_ag))))
+
+(define expand_in_membership_truth_expr (lambda (probe stage_alias count_col)
+	(list (quote and)
+		(list (quote not) (list (quote nil?) probe))
+		(list (quote >)
+			(list (quote coalesceNil)
+				(list (quote get_column) stage_alias false count_col false)
+				0)
+			0))))
+
 (define in_membership_expr (lambda (probe match_alias match_ag null_alias rhs_state_ag)
 	(begin
 		(define match_count (membership_count_expr match_alias match_ag))
@@ -1731,17 +1747,30 @@ instead of capturing whichever session populated the cache first. */
 					(make_combined_exists_union_stage_rewrite inner results args)
 					(combine_exists_union_results results)))))))
 
+/* Canonicalization is the only layer that should know IN was written over a
+UNION. In positive WHERE truth context, each branch becomes one membership
+alternative and the result is a flat n-ary OR. This deliberately gives naive
+lowering the short-circuit behavior of OR(EXISTS ...), while preserving the
+optimization axiom
+
+RecSet(IN(UNION branches)) == union(RecSet(branch) ...)
+== RecSet(OR(EXISTS branches)).
+
+Thus a later lowerer may fuse the alternatives back into RecSets without
+depending on the original SQL spelling. NOT IN and scalar/CASE consumers stay
+on the 3VL path and must not use this positive-truth equivalence. */
 (define combine_in_union_results (lambda (results negate)
-	(match (coalesceNil results '())
-		(cons item rest) (begin
-			(define tail (combine_in_union_results rest negate))
+	(begin
+		(define items (coalesceNil results '()))
+		(if (empty_list? items)
+			(list false '() '())
 			(list
-				(if (empty_list? rest)
-					(nth item 0)
-					(list (if negate (quote and) (quote or)) (nth item 0) (nth tail 0)))
-				(merge (list (nth item 1) (nth tail 1)))
-				(merge (list (nth item 2) (nth tail 2)))))
-		_ (list false '() '()))))
+				(if (single_source? items)
+					(nth (car items) 0)
+					(cons (if negate (quote and) (quote or))
+						(map items (lambda (item) (nth item 0)))))
+				(merge_unique (map items (lambda (item) (nth item 1))))
+				(merge_unique (map items (lambda (item) (nth item 2)))))))))
 
 (define make_in_union_stage_rewrite (lambda (probe inner args)
 	(if (not (union_block? inner))
@@ -1751,13 +1780,28 @@ instead of capturing whichever session populated the cache first. */
 			(neumann_fail "untangle_query" "IN over UNION currently supports plain unordered branches")
 			(if (not (in_union_single_column? inner))
 				(neumann_fail "untangle_query" "IN UNION subquery branches must expose exactly one column")
-				(if (and (not (if (>= (count args) 3) (nth args 2) false))
-					(in_union_candidate_supported? inner (nth args 0)))
-					(make_in_union_candidate_stage_rewrite probe inner args)
-					(combine_in_union_results
-						(map (union_branches inner) (lambda (branch)
-							(make_in_stage_rewrite probe branch args)))
-						(if (>= (count args) 3) (nth args 2) false))))))))
+				(begin
+					(define truth_mode (string? (if (>= (count args) 4) (nth args 3) false)))
+					(define candidate_supported (in_union_candidate_supported? inner (nth args 0)))
+					(define canonical_supported (in_union_truth_canonical_supported? inner (nth args 0)))
+					(if (and (not (if (>= (count args) 3) (nth args 2) false))
+						(and candidate_supported (or (not truth_mode) (not canonical_supported))))
+						(make_in_union_candidate_stage_rewrite probe inner
+							(if truth_mode
+								(list (nth args 0) (nth args 1) false true
+									(if (>= (count args) 5) (nth args 4) nil))
+								args))
+						(begin
+							/* Unsupported complex branches keep their semantic barrier.
+							Only simple membership relations become the OR cloud. */
+							(define branch_args (if (and truth_mode (not canonical_supported))
+								(list (nth args 0) (nth args 1) false true
+									(if (>= (count args) 5) (nth args 4) nil))
+								args))
+							(combine_in_union_results
+								(map (union_branches inner) (lambda (branch)
+									(make_in_stage_rewrite probe branch branch_args)))
+								(if (>= (count args) 3) (nth args 2) false))))))))))
 
 (define in_union_single_column? (lambda (inner)
 	(reduce (union_branches inner) (lambda (ok branch)
@@ -1776,6 +1820,15 @@ instead of capturing whichever session populated the cache first. */
 				(and (exists_inner_supported? branch)
 					(and (equal? (count (qb_fields branch)) 2)
 						(empty_list? (btw2025_query_block_accessing_aliases branch outer_sources))))))
+			true))))
+
+(define in_union_truth_canonical_supported? (lambda (inner outer_sources)
+	(and (in_union_candidate_supported? inner outer_sources)
+		(reduce (union_branches inner) (lambda (ok branch)
+			(and ok
+				(and (single_source? (qb_sources branch))
+					(and (source_is_base_table? (car (qb_sources branch)))
+						(empty_list? (qb_stages branch))))))
 			true))))
 
 (define make_in_union_candidate_branch (lambda (branch)
@@ -1875,7 +1928,9 @@ instead of capturing whichever session populated the cache first. */
 	(begin
 		(define outer_sources (nth args 0))
 		(define negate (if (>= (count args) 3) (nth args 2) false))
-		(define semijoin_where (and (not negate) (if (>= (count args) 4) (nth args 3) false)))
+		(define where_mode (if (>= (count args) 4) (nth args 3) false))
+		(define truth_membership (and (not negate) (string? where_mode)))
+		(define semijoin_where (and (not negate) (and (not (string? where_mode)) where_mode)))
 		(define pending_info (if (>= (count args) 5) (nth args 4) nil))
 		(define membership_inner (normalize_membership_query_block inner))
 		(if (not (membership_inner_supported? membership_inner))
@@ -1975,7 +2030,7 @@ instead of capturing whichever session populated the cache first. */
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
-			(not semijoin_where)
+			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition stage_alias key_names lookup_keys probe aggregate_count_descriptor)
 				(make_exists_stage_join_condition stage_alias key_names lookup_keys))))
@@ -1988,12 +2043,17 @@ instead of capturing whichever session populated the cache first. */
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(if semijoin_where
 			(list true (list stage) (list source))
-			(list
-				(if negate
-					(not_in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
-					(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
-				(list stage null_stage)
-				(list source null_source))))))
+			(if truth_membership
+				(list
+					(in_membership_truth_expr probe stage_alias aggregate_count_descriptor)
+					(list stage)
+					(list source))
+				(list
+					(if negate
+						(not_in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
+						(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
+					(list stage null_stage)
+					(list source null_source)))))))
 
 (define grouped_membership_inner_supported? (lambda (inner outer_sources)
 	(and (query_block? inner)
@@ -3072,32 +3132,77 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(list (make_dependent_subquery_marker (quote not-in) probe subquery outer_sources) '() '())
 		(resolve_not_in_subquery_with_stages probe subquery outer_sources ctx))))
 
-(define direct_positive_in_term_rewrite (lambda (expr outer_sources ctx)
+(define direct_positive_in_term_rewrite_using (lambda (expr outer_sources ctx mode)
 	(match expr
 		((symbol inner_select_in) probe subquery)
 		(if (uctx_get ctx (quote defer-subquery-rewrites) false)
-			(list (make_dependent_subquery_marker (quote in-where) probe subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker
+				(if (string? mode) (quote in-where-truth) (quote in-where))
+				probe subquery outer_sources) '() '())
 			(begin
 				(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
-				(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true)))
+				(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx mode)))
 		((quote inner_select_in) probe subquery)
 		(if (uctx_get ctx (quote defer-subquery-rewrites) false)
-			(list (make_dependent_subquery_marker (quote in-where) probe subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker
+				(if (string? mode) (quote in-where-truth) (quote in-where))
+				probe subquery outer_sources) '() '())
 			(begin
 				(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
-				(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx true)))
+				(resolve_in_subquery_with_stages rewritten_probe subquery outer_sources ctx mode)))
 		_ nil)))
+
+(define direct_positive_in_term_rewrite (lambda (expr outer_sources ctx)
+	(direct_positive_in_term_rewrite_using expr outer_sources ctx true)))
 
 (define where_conjunct_with_stages (lambda (expr outer_sources ctx)
 	(begin
 		(define direct_in (direct_positive_in_term_rewrite expr outer_sources ctx))
 		(if (nil? direct_in)
-			(untangle_expr_with_stages expr outer_sources ctx)
+			(if (and (list? expr)
+				(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or"))))
+				(positive_where_expr_with_stages expr outer_sources ctx)
+				(untangle_expr_with_stages expr outer_sources ctx))
 			direct_in))))
+
+/* AND and OR preserve positive WHERE truth context: SQL UNKNOWN rejects a row
+just like FALSE. Descending only through this boolean cloud ensures NOT, CASE,
+projection, and arbitrary scalar functions retain full IN/NOT IN null
+semantics. New syntactic membership shapes should canonicalize here and reuse
+membership_truth rather than adding another physical lowering path. */
+(define positive_where_items_with_stages (lambda (items outer_sources ctx)
+	(match items
+		(cons item rest) (begin
+			(define rewritten (positive_where_expr_with_stages item outer_sources ctx))
+			(define tail (positive_where_items_with_stages rest outer_sources ctx))
+			(list
+				(cons (nth rewritten 0) (nth tail 0))
+				(merge_unique (list (nth rewritten 1) (nth tail 1)))
+				(merge_unique (list (nth rewritten 2) (nth tail 2)))))
+		_ (list '() '() '()))))
+
+(define positive_where_expr_with_stages (lambda (expr outer_sources ctx)
+	(begin
+		(define direct_in (direct_positive_in_term_rewrite_using
+			expr outer_sources ctx "truth"))
+		(if (not (nil? direct_in))
+			direct_in
+			(if (and (list? expr)
+				(or
+					(or (equal? (car expr) (quote and)) (equal? (car expr) (symbol "and")))
+					(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or")))))
+				(begin
+					(define rewritten (positive_where_items_with_stages (cdr expr) outer_sources ctx))
+					(list
+						(cons (car expr) (nth rewritten 0))
+						(nth rewritten 1)
+						(nth rewritten 2)))
+				(untangle_expr_with_stages expr outer_sources ctx))))))
 
 (define untangle_where_with_stages (lambda (expr outer_sources ctx)
 	(begin
-		(define terms (split_and_terms (coalesceNil expr true)))
+		(define condition (coalesceNil expr true))
+		(define terms (split_and_terms condition))
 		(define rewritten_terms (map terms (lambda (term)
 			(where_conjunct_with_stages term outer_sources ctx))))
 		(list
@@ -3281,6 +3386,14 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(begin
 				(define probe_result (btw2025_decorrelate_expr_with_stages probe ctx))
 				(define in_result (resolve_in_subquery_with_stages (nth probe_result 0) subquery outer_sources resolve_ctx true))
+				(list
+					(nth in_result 0)
+					(unique_stages_by_id (merge (list (nth probe_result 1) (nth in_result 1))))
+					(merge_unique (list (nth probe_result 2) (nth in_result 2)))))
+			(symbol in-where-truth)
+			(begin
+				(define probe_result (btw2025_decorrelate_expr_with_stages probe ctx))
+				(define in_result (resolve_in_subquery_with_stages (nth probe_result 0) subquery outer_sources resolve_ctx "truth"))
 				(list
 					(nth in_result 0)
 					(unique_stages_by_id (merge (list (nth probe_result 1) (nth in_result 1))))
@@ -5750,6 +5863,133 @@ resulting tree in semantic order. */
 	(list (quote and)
 		(list (quote not) (list (quote nil?) probe))
 		(list (quote driver_membership_probe) stage probe))))
+
+(define membership_truth_parts (lambda (expr)
+	(match expr
+		((symbol membership_truth) probe stage_alias count_col)
+		(list probe stage_alias count_col)
+		((quote membership_truth) probe stage_alias count_col)
+		(list probe stage_alias count_col)
+		_ nil)))
+
+/* Physical membership selection operates only on the canonical primitive. It
+must not inspect parser expressions or table names. Extend its capability and
+cost inputs when a new physical strategy is added; keep SQL-shape recognition
+in the canonicalization functions above. */
+
+(define membership_truth_stage (lambda (stages sources stage_alias)
+	(begin
+		(define src (source_for_alias sources nil stage_alias false))
+		(if (or (nil? src) (not (stage_output_relation? (source_relation src))))
+			nil
+			(stage_by_id stages (stage_output_relation_id (source_relation src)))))))
+
+(define expr_contains_membership_truth? (lambda (expr)
+	(if (not (nil? (membership_truth_parts expr)))
+		true
+		(match expr
+			(cons _head tail) (reduce tail (lambda (found item)
+				(or found (expr_contains_membership_truth? item))) false)
+			_ false))))
+
+(define membership_truth_projection_preferred? (lambda (block stage guarded_alternative)
+	(begin
+		(define input (gs_input stage))
+		/* Projection from the canonical group cache currently guarantees a
+		direct key map only for base-table membership stages. Derived inputs keep
+		the same primitive and use indexed existence probing until their cache-key
+		lineage is represented explicitly; do not add a shape-specific fallback. */
+		(define base_sources (filter (qb_sources block) source_is_base_table?))
+		(if (or (not (source_is_base_table? input)) (not (single_source? base_sources)))
+			false
+			(begin
+				/* A branch-local membership below OR cannot become a mandatory
+				stage join or driver boundary: another branch may accept the row.
+				Project it and keep recset_contains exactly inside its original
+				boolean branch. This is a semantic feasibility rule before cost. */
+				(if guarded_alternative
+					true
+					(begin
+						/* Statistics are needed only when both plans are semantically
+						possible. Avoid sampling for guarded alternatives: their boolean
+						position has already made the decision. */
+						(define estimate (if (source_is_base_table? input)
+							(planner_source_filter_estimate input
+								(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+								512)
+							(planner_stage_filter_estimate input 512)))
+						(define estimated_rows (qassoc_get estimate (quote rows) nil))
+						(define input_rows (qassoc_get estimate (quote input) nil))
+						(define estimate_capped (qassoc_get estimate (quote capped) false))
+						(define candidate_rows (if estimate_capped input_rows estimated_rows))
+						(define driver (reduce (qb_sources block) (lambda (found src)
+							(if (not (nil? found)) found (if (source_is_base_table? src) src nil))) nil))
+						(define driver_rows (if (nil? driver) nil (planner_source_row_count driver)))
+						/* Projection pays once per RHS key; probing pays while walking the
+						driver. A capped sample represents at least the sampled rows, so use the
+						RHS input as the conservative projection cost. Unknown estimates prefer
+						the structurally safe projected plan; later adaptive costing can replace
+						this static comparison without changing the canonical primitive. */
+						(if (or (nil? candidate_rows) (nil? driver_rows))
+							true
+							(<= (* candidate_rows 4) driver_rows)))))))))
+
+(define choose_membership_truth_items (lambda (block items guarded_alternative)
+	(match items
+		(cons item rest) (begin
+			(define chosen (choose_membership_truth_expr_using block item guarded_alternative))
+			(define tail (choose_membership_truth_items block rest guarded_alternative))
+			(list
+				(cons (nth chosen 0) (nth tail 0))
+				(merge_unique (list (nth chosen 1) (nth tail 1)))))
+		_ (list '() '()))))
+
+(define choose_membership_truth_expr_using (lambda (block expr guarded_alternative)
+	(begin
+		(define parts (membership_truth_parts expr))
+		(if (not (nil? parts))
+			(begin
+				(define stage (membership_truth_stage (qb_stages block) (qb_sources block) (nth parts 1)))
+				(if (and (not (nil? stage))
+					(membership_truth_projection_preferred? block stage guarded_alternative))
+					(list (driver_membership_probe_expr stage (nth parts 0)) (list (nth parts 1)))
+					(list (expand_in_membership_truth_expr (nth parts 0) (nth parts 1) (nth parts 2)) '())))
+			(if (and (list? expr)
+				(or
+					(or (equal? (car expr) (quote and)) (equal? (car expr) (symbol "and")))
+					(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or")))))
+				(begin
+					(define below_or (or guarded_alternative
+						(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or")))))
+					(define chosen (choose_membership_truth_items block (cdr expr) below_or))
+					(list (cons (car expr) (nth chosen 0)) (nth chosen 1)))
+				(list expr '()))))))
+
+(define choose_membership_truth_expr (lambda (block expr)
+	(choose_membership_truth_expr_using block expr false)))
+
+(define query_block_with_physical_membership_choices (lambda (block)
+	(if (not (expr_contains_membership_truth? (qb_where block)))
+		/* Keep unrelated query blocks byte-for-byte unchanged. Besides making
+		this phase boundary explicit, that prevents future membership planner
+		extensions from perturbing EXISTS/scalar stage preparation. */
+		block
+		(begin
+			(define chosen (choose_membership_truth_expr block (qb_where block)))
+			(define removed_aliases (nth chosen 1))
+			(if (empty_list? removed_aliases)
+				(make_query_block
+					(qb_schema block) (qb_sources block) (qb_fields block) (nth chosen 0)
+					(qb_group block) (qb_having block) (qb_order block) (qb_limit block)
+					(qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))
+				(make_query_block
+					(qb_schema block)
+					(filter (qb_sources block) (lambda (src) (not (contains? removed_aliases (source_alias src)))))
+					(qb_fields block) (nth chosen 0) (qb_group block) (qb_having block)
+					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
+					(qb_stages block)
+					(qassoc_set (qb_facts block) (quote membership_plan_strategy)
+						(quote projected_membership_alternatives))))))))
 
 (define dml_preserve_driver_membership_probe (lambda (fallback_schema expr)
 	(match expr
@@ -8309,6 +8549,26 @@ until lowering without creating a depth-proportional binary OR chain. */
 					(source_table_expr target_src)
 					(quoted_runtime_list (nth parts 1))))))))
 
+/* The canonical membership stage has already computed arbitrary RHS key
+expressions into cache column k0. Project that compact key set to the driver;
+the auto-index chooses the concrete access path on both tables. */
+(define membership_cache_recset_project_join_expr (lambda (target_src stage target_col)
+	(if (or (not (equal? (count (gs_keys stage)) 1))
+		(not (equal? (count (qassoc_get (gs_facts stage) (quote lookup-keys) '())) 1)))
+		nil
+		(begin
+			(define cache (group_stage_cache stage))
+			(list (quote recset_project_join)
+				'(session "__memcp_tx")
+				(list (quote scan_recset)
+					'(session "__memcp_tx")
+					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+					(list (quote list))
+					(list (quote lambda) '() true))
+				(quoted_runtime_list (list "k0"))
+				(source_table_expr target_src)
+				(quoted_runtime_list (list target_col)))))))
+
 (define recset_project_join_expr_for_membership (lambda (src membership)
 	(begin
 		(define stage (nth membership 0))
@@ -8323,30 +8583,32 @@ until lowering without creating a depth-proportional binary OR chain. */
 					(if (single_source? projected)
 						(car projected)
 						(list (quote recset_union) (cons (quote list) projected)))))
-			(if (exists_recset_stage? stage)
-				(if (> (count (gs_keys stage)) 1)
-					(exists_recset_project_join_expr src stage)
-					(begin
-						(define source_col (direct_column_name_for_alias input (car (gs_keys stage))))
-						(if (nil? source_col)
-							nil
-							(begin
-								(define alias (source_alias input))
-								(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-								(define filtercols (extract_columns_for_alias input condition))
-								(list (quote recset_project_join)
-									'(session "__memcp_tx")
-									(list (quote scan_recset)
+			(if (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
+				(membership_cache_recset_project_join_expr src stage target_col)
+				(if (exists_recset_stage? stage)
+					(if (> (count (gs_keys stage)) 1)
+						(exists_recset_project_join_expr src stage)
+						(begin
+							(define source_col (direct_column_name_for_alias input (car (gs_keys stage))))
+							(if (nil? source_col)
+								nil
+								(begin
+									(define alias (source_alias input))
+									(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+									(define filtercols (extract_columns_for_alias input condition))
+									(list (quote recset_project_join)
 										'(session "__memcp_tx")
-										(source_table_expr input)
-										(cons (quote list) filtercols)
-										(list (quote lambda)
-											(map filtercols (lambda (col) (symbol (concat alias "." col))))
-											(list (quote optimize) (lower_column_expr_for_alias input condition))))
-									(quoted_runtime_list (list source_col))
-									(source_table_expr src)
-									(quoted_runtime_list (list target_col)))))))
-				nil)))))
+										(list (quote scan_recset)
+											'(session "__memcp_tx")
+											(source_table_expr input)
+											(cons (quote list) filtercols)
+											(list (quote lambda)
+												(map filtercols (lambda (col) (symbol (concat alias "." col))))
+												(list (quote optimize) (lower_column_expr_for_alias input condition))))
+										(quoted_runtime_list (list source_col))
+										(source_table_expr src)
+										(quoted_runtime_list (list target_col)))))))
+					nil))))))
 
 (define lower_scalar_marker_expr (lambda (expr)
 	(match expr
@@ -12167,7 +12429,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define query_block_stages_to_prepare (lambda (block)
 	(query_block_stages_to_prepare_using (qb_stages block) block)))
 
-(define prepare_simple_query_block_physical_core (lambda (block)
+(define prepare_simple_query_block_physical_core_chosen (lambda (block)
 	(begin
 		(define stage_lookup (query_block_stage_lookup block))
 		(if (empty_list? (qb_stages block))
@@ -12214,6 +12476,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 						(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup eager_stages)
 						(lower_stage_materialize_all eager_stages)))
 					core_block))))))
+
+(define prepare_simple_query_block_physical_core (lambda (block)
+	(prepare_simple_query_block_physical_core_chosen
+		(query_block_with_physical_membership_choices block))))
 
 (define lower_simple_query_block_with_cataloged_stages (lambda (block)
 	(begin
@@ -12431,6 +12697,150 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(and (not (empty_list? (cdr sources)))
 			(not (downstream_sources_preserve_driver_rows? sources default_alias final_condition))))))
 
+(define driver_memberships_for_source (lambda (src expr)
+	(begin
+		(define marker (driver_membership_probe_term expr))
+		(if (not (nil? marker))
+			(begin
+				(define probe_col (direct_column_name_for_alias src (nth marker 1)))
+				(if (nil? probe_col)
+					'()
+					(list (list (nth marker 0) (nth marker 1) probe_col expr))))
+			(match expr
+				(cons _head tail) (merge_unique (map tail (lambda (item)
+					(driver_memberships_for_source src item))))
+				_ '())))))
+
+/* A scan may contain several branch-local membership predicates. Each RecSet is
+bound once, but every marker remains at its original AND/OR position and calls
+the shared $recset_contains row callback with its own RecSet argument. Do not
+collapse guarded alternatives into one driver RecSet: that would discard rows
+accepted by non-membership branches. The storage analyzer may use a RecSet as a
+scan boundary only when the complete predicate implies it. */
+
+(define membership_recset_var (lambda (membership)
+	(symbol (concat "__membership_recset_" (fnv_hash (gs_id (nth membership 0)))))))
+
+(define replace_driver_membership_markers (lambda (expr memberships)
+	(begin
+		/* Match the marker structurally, but never recurse into its embedded
+		group-stage. A stage is IR data containing booleans and expressions of its
+		own; treating that payload as part of the surrounding predicate would
+		corrupt stage facts while replacing a row-level membership marker. */
+		(define marker (driver_membership_probe_term expr))
+		(define membership (if (nil? marker)
+			nil
+			(reduce memberships (lambda (found item)
+				(if (not (nil? found))
+					found
+					(if (and (equal? (gs_id (nth marker 0)) (gs_id (nth item 0)))
+						(equal? (nth marker 1) (nth item 1)))
+						item
+						nil))) nil)))
+		(if (not (nil? membership))
+			(recset_contains_call_expr (membership_recset_var membership))
+			(if (not (nil? marker))
+				expr
+				(match expr
+					(cons head tail) (cons head (map tail (lambda (item)
+						(replace_driver_membership_markers item memberships))))
+					_ expr))))))
+
+(define membership_recset_bindings (lambda (src memberships)
+	(filter (map memberships (lambda (membership)
+		(begin
+			(define expr (recset_project_join_expr_for_membership src membership))
+			(if (nil? expr) nil (list membership (membership_recset_var membership) expr)))))
+		(lambda (binding) (not (nil? binding))))))
+
+(define wrap_membership_recset_bindings (lambda (bindings body)
+	(if (empty_list? bindings)
+		body
+		/* The projections are independent. Bind them in one application instead
+		of emitting a depth-proportional lambda tower; this keeps compilation and
+		generated-plan size linear with a small constant for large OR clouds. */
+		(cons
+			(list (quote lambda)
+				(map bindings (lambda (binding) (nth binding 1)))
+				body)
+			(map bindings (lambda (binding) (nth binding 2)))))))
+
+(define expr_contains_driver_membership? (lambda (expr)
+	(if (not (nil? (driver_membership_probe_term expr)))
+		true
+		(match expr
+			(cons _head tail) (reduce tail (lambda (found item)
+				(or found (expr_contains_driver_membership? item))) false)
+			_ false))))
+
+(define membership_guard_or_expr (lambda (expr)
+	(if (not (nil? (driver_membership_probe_term expr)))
+		nil
+		(match expr
+			(cons head tail)
+			(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+				(if (reduce tail (lambda (found item)
+					(or found (expr_contains_driver_membership? item))) false)
+					expr
+					(reduce tail (lambda (found item)
+						(if (not (nil? found)) found (membership_guard_or_expr item))) nil))
+				(reduce tail (lambda (found item)
+					(if (not (nil? found)) found (membership_guard_or_expr item))) nil))
+			_ nil))))
+
+(define membership_binding_for_marker (lambda (bindings marker)
+	(reduce bindings (lambda (found binding)
+		(if (not (nil? found))
+			found
+			(begin
+				(define membership (nth binding 0))
+				(if (and (equal? (gs_id (nth marker 0)) (gs_id (nth membership 0)))
+					(equal? (nth marker 1) (nth membership 1)))
+					binding
+					nil)))) nil)))
+
+(define membership_branch_candidate_recset (lambda (src source_table branch bindings)
+	(begin
+		(define markers (driver_memberships_for_source src branch))
+		(if (empty_list? markers)
+			(begin
+				(define cols (extract_columns_for_alias src branch))
+				(list (quote scan_recset)
+					'(session "__memcp_tx")
+					source_table
+					(cons (quote list) cols)
+					(list (quote lambda)
+						(map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias src) col)))
+						(list (quote optimize) (lower_column_expr_for_alias src branch)))))
+			(begin
+				(define branch_bindings (filter (map markers (lambda (marker)
+					(membership_binding_for_marker bindings marker)))
+					(lambda (binding) (not (nil? binding)))))
+				(if (not (equal? (count branch_bindings) (count markers)))
+					nil
+					(if (single_source? branch_bindings)
+						(nth (car branch_bindings) 1)
+						(list (quote recset_union)
+							(cons (quote list) (map branch_bindings (lambda (binding) (nth binding 1))))))))))))
+
+/* When every OR alternative has a target-table candidate RecSet, their union
+is a safe scan boundary. Membership alternatives contribute projected supersets
+and ordinary alternatives contribute filtered base RecSets; the unchanged full
+predicate still runs on that much smaller union and enforces branch-local
+guards. This is the physical form of the RecSet membership equivalence. */
+(define membership_or_candidate_recset (lambda (src source_table condition bindings)
+	(begin
+		(define or_expr (membership_guard_or_expr condition))
+		(if (nil? or_expr)
+			nil
+			(begin
+				(define candidates (map (cdr or_expr) (lambda (branch)
+					(membership_branch_candidate_recset src source_table branch bindings))))
+				(if (reduce candidates (lambda (missing candidate)
+					(or missing (nil? candidate))) false)
+					nil
+					(list (quote recset_union) (cons (quote list) candidates))))))))
+
 (define lower_single_source_query_block (lambda (block)
 	(begin
 		(define src (car (qb_sources block)))
@@ -12453,31 +12863,44 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(define order_items (coalesceNil (qb_order block) '()))
 				(define scan_order_supported (order_items_belong_to_source? src order_items))
 				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
-				(define membership (driver_membership_for_source src condition))
-				(define membership_table_expr (if (nil? membership) nil (recset_project_join_expr_for_membership src membership)))
+				(define memberships (driver_memberships_for_source src condition))
+				(define membership_bindings (membership_recset_bindings src memberships))
+				(define bound_memberships (map membership_bindings (lambda (binding) (nth binding 0))))
+				/* A membership predicate which is implied by the whole WHERE clause is
+				eligible to become the scan driver. A branch-local predicate below OR is
+				not: its RecSet must remain a probe or rows accepted by sibling branches
+				would disappear. This distinction also preserves the established fast
+				single-IN path while allowing several guarded RecSets in one scan. */
+				(define direct_membership (driver_membership_for_source src condition))
+				(define prefer_membership_filter (and scan_order_supported
+					(and bounded
+						(broad_driver_order_membership_probe? (qb_facts block)))))
+				(define membership_driver (and
+					(not (nil? direct_membership))
+					(and (not prefer_membership_filter)
+						(and (not (empty_list? membership_bindings))
+							(and (empty_list? (cdr membership_bindings))
+								(equal? direct_membership (car bound_memberships)))))))
 				(define membership_filter (and
-					(not (nil? membership_table_expr))
-					(and scan_order_supported
-						(and bounded
-							(broad_driver_order_membership_probe? (qb_facts block))))))
-				(define effective_membership (if (nil? membership_table_expr) nil membership))
-				(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
-				(define membership_var (symbol "__membership_recset"))
-				(define membership_filter_expr (if membership_filter
-					(recset_contains_call_expr membership_var)
-					true))
-				(define filter_condition (combine_where membership_filter_expr effective_condition))
+					(not membership_driver)
+					(not (empty_list? membership_bindings))))
+				(define filter_condition (if membership_driver
+					(strip_driver_membership_for_source src condition direct_membership)
+					(replace_driver_membership_markers condition bound_memberships)))
 				(define filtercols (merge_unique (list
 					(if membership_filter (list "$recset_contains") '())
-					(extract_columns_for_alias src effective_condition))))
+					(extract_columns_for_alias src filter_condition))))
 				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 					(extract_columns_for_alias src expr)))))
 				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
 				(define mapcols fieldcols)
 				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
-				(define table_expr (if membership_filter
-					source_table
-					(coalesceNil membership_table_expr source_table)))
+				(define membership_candidates (if membership_filter
+					(membership_or_candidate_recset src source_table condition membership_bindings)
+					nil))
+				(define table_expr (if membership_driver
+					(nth (car membership_bindings) 2)
+					(coalesceNil membership_candidates source_table)))
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(list (quote optimize) (lower_column_expr_for_alias src filter_condition))))
@@ -12486,7 +12909,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(list (quote resultrow)
 						(cons (quote list) (map_assoc fields (lambda (title expr)
 							(lower_column_expr_for_alias src expr)))))))
-				(if (and (empty_list? order_items) (not bounded))
+				(define scan_plan (if (and (empty_list? order_items) (not bounded))
 					(list (quote scan)
 						'(session "__memcp_tx")
 						table_expr
@@ -12515,12 +12938,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 								nil
 								nil
 								(source_outer? src)))
-							(if membership_filter
-								(list
-									(list (quote lambda) (list membership_var) scan_expr)
-									membership_table_expr)
-								scan_expr))
-						(neumann_fail "build_queryplan" "single-source ORDER BY requires a storage carrier"))))))))
+							scan_expr)
+						(neumann_fail "build_queryplan" "single-source ORDER BY requires a storage carrier"))))
+				(if membership_filter
+					(wrap_membership_recset_bindings membership_bindings scan_plan)
+					scan_plan))))))
 
 (define order_exprs (lambda (order_items)
 	(map (coalesceNil order_items '()) (lambda (item)

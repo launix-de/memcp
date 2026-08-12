@@ -72,8 +72,6 @@ setup:
 
 test_cases:
   - name: "Selective IN branches under OR use projected membership recsets"
-    noncritical: true
-    fail_comment: "multiple selective IN branches under OR still lower to per-driver group-cache probes"
     sql: |
       EXPLAIN
       SELECT ID
@@ -94,6 +92,8 @@ test_cases:
     expect:
       result_contains:
         - "recset_project_join"
+        - "recset_union"
+        - "scan_recset"
         - "$recset_contains"
         - "scan_order"
 
@@ -139,8 +139,6 @@ test_cases:
         - ID: 9981
 
   - name: "Selective IN branches under OR meet the projected membership budget"
-    noncritical: true
-    fail_comment: "the projected RecSet plan measures in low milliseconds; per-driver group-cache probes exceed this budget"
     max_time: 0.02
     sql: |
       SELECT ID
@@ -178,6 +176,50 @@ test_cases:
         - "scan_order"
       result_not_contains:
         - "recset_project_join"
+
+  - name: "Nested OR membership keeps its projected probe below an outer AND"
+    sql: |
+      EXPLAIN
+      SELECT ID
+      FROM membership_event
+      WHERE event_time >= 9990
+        AND (entity_kind = 'root' OR entity_key IN (
+          SELECT CONCAT('narrow_a:', ID)
+          FROM membership_narrow_key_a
+          WHERE enabled = 1
+        ))
+      ORDER BY event_time DESC
+    expect:
+      result_contains:
+        - "recset_project_join"
+        - "$recset_contains"
+        - "scan_order"
+
+  - name: "Nested OR membership preserves sibling alternatives"
+    sql: |
+      SELECT ID
+      FROM membership_event
+      WHERE event_time >= 9990
+        AND (entity_kind = 'root' OR entity_key IN (
+          SELECT CONCAT('narrow_a:', ID)
+          FROM membership_narrow_key_a
+          WHERE enabled = 1
+        ))
+      ORDER BY event_time DESC
+    expect:
+      rows: 11
+      data:
+        - ID: 10000
+        - ID: 9999
+        - ID: 9998
+        - ID: 9997
+        - ID: 9996
+        - ID: 9995
+        - ID: 9994
+        - ID: 9993
+        - ID: 9992
+        - ID: 9991
+        - ID: 9990
 
   - name: "IN subquery - files with render results"
     sql: |
