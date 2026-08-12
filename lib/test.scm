@@ -369,8 +369,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapfn))
 			(cons head tail) (concat (test_physical_scan_signature head) (test_physical_scan_signature tail))
 			_ "")))
-	(define bushy_scan_expr (build_join_scan_rows_with_mapper_using_recipe
-		"memcp-tests" bushy_scan_sources bushy_scan_tree "a" '() true true '() 0 -1 false nil '()))
+	(define bushy_scan_expr (build_join_scan_with_mapper_using_recipe
+		"memcp-tests" bushy_scan_sources bushy_scan_tree "a" '() true true '() 0 -1 false nil '() 'pipeline))
 	(assert (equal? (test_physical_scan_signature bushy_scan_expr)
 		"graph_a:false>graph_b:false>graph_c:false>graph_d:true>") true
 		"physical lowering consumes bushy subtree order and its nested LEFT OUTER boundary")
