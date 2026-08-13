@@ -643,6 +643,36 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_key_index",
+		Desc: "builds an immutable lookup function for key columns of the rows contained in a query-local recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			source := RecSetFromScmer(a[1])
+			sourceKeyCols := scmerSliceToStrings(mustScmerSlice(a[2], "sourceKeyColumns"))
+			if len(sourceKeyCols) == 0 {
+				panic("recset_key_index requires at least one key column")
+			}
+			keys := source.collectProjectJoinKeys(currentTx, sourceKeyCols, SessionStateFromTx(currentTx))
+			return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				if len(values) != keys.width {
+					panic("recset key lookup received the wrong number of key values")
+				}
+				return scm.NewBool(keys.contains(values))
+			})
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context used while reading source keys"},
+				{Kind: "recset", ParamName: "source_recset"},
+				{Kind: "list", ParamName: "source_key_columns"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "key", Variadic: true},
+			}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_union",
 		Desc: "combines query-local recsets from the same table and removes duplicate record IDs",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
